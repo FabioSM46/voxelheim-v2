@@ -365,6 +365,14 @@ than advancing an iteration at random. A collision *above* the active one is lef
 active iteration is still unambiguous — and it fails closed later, once the collision is
 itself the lowest.
 
+**Ceremony creation has a postcondition, not merely a zero exit status.** `gh issue create
+--label ceremony` creates the issue first and applies its label afterward; on #119 the first
+write landed, the second did not, and the command still returned the new URL successfully.
+That unlabeled ceremony was invisible both to the close-event job condition and to the
+label-filtered idempotency lookup. The helper now reads the created issue back, retries a
+missing label once with an explicit edit, and verifies again. An unreadable lookup or a retry
+that does not demonstrably land makes the workflow red and names the issue that needs repair.
+
 Hidden milestone markers and workflow-level concurrency keep the transitions ordered and
 idempotent. Ceremonies remain human-in-the-loop: Actions creates the self-describing issue;
 the user runs the exact command in its body. Nothing is closed or promoted automatically —

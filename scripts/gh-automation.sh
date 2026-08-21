@@ -1038,7 +1038,7 @@ iteration_sequence() {
 
 create_iteration_ceremony() {
   local ceremony="$1" milestone_number="$2" current_sequence="$3"
-  local title body marker
+  local title body marker issue_url issue_number label_status
 
   marker=$(iteration_marker "$ceremony" "$milestone_number")
   case "$ceremony" in
@@ -1091,11 +1091,73 @@ EOF
       ;;
   esac
 
-  gh issue create \
+  issue_url=$(gh issue create \
     --title "$title" \
     --body "$body" \
     --label "ceremony" \
-    --repo "$REPO"
+    --repo "$REPO") || die "Could not create the ${ceremony} ceremony for milestone #${milestone_number}."
+
+  issue_number="${issue_url%/}"
+  issue_number="${issue_number##*/}"
+  if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    die "Created the ${ceremony} ceremony but could not read its issue number from '${issue_url}'."
+  fi
+
+  # `gh issue create --label` is a two-write operation: it creates the issue and
+  # then applies the label. The first half can land while the second disappears,
+  # and gh still exits zero. That happened live on #119: the workflow printed the
+  # new issue URL and went green, but the issue had no `ceremony` label. The next
+  # close would therefore miss the workflow's job condition, while a recovery
+  # dispatch would miss the issue in the label-filtered idempotency lookup and
+  # create a duplicate.
+  #
+  # Verify the postcondition, repair one missing write explicitly, then verify
+  # again. An unreadable lookup is not an absent label and never authorizes a
+  # blind repair. A repair that errors or silently does nothing makes the run red
+  # with the already-created issue number in the log.
+  if iteration_issue_has_label "$issue_number" ceremony; then
+    label_status=0
+  else
+    label_status=$?
+  fi
+
+  if [ "$label_status" -eq 1 ]; then
+    echo "WARNING: Ceremony issue #${issue_number} was created without label 'ceremony'; retrying the label write." >&2
+    if ! gh issue edit "$issue_number" --add-label ceremony --repo "$REPO" >/dev/null; then
+      die "Ceremony issue #${issue_number} was created, but adding label 'ceremony' failed. Apply it manually before dispatching recovery."
+    fi
+
+    if iteration_issue_has_label "$issue_number" ceremony; then
+      label_status=0
+    else
+      label_status=$?
+    fi
+  fi
+
+  if [ "$label_status" -ne 0 ]; then
+    if [ "$label_status" -eq 1 ]; then
+      die "Ceremony issue #${issue_number} was created, but label 'ceremony' is still missing after the retry. Apply it manually before dispatching recovery."
+    fi
+    die "Ceremony issue #${issue_number} was created, but its labels could not be verified. Check it manually before dispatching recovery."
+  fi
+
+  printf '%s\n' "$issue_url"
+}
+
+iteration_issue_has_label() {
+  local issue_number="$1" expected_label="$2" labels label
+
+  if ! labels=$(gh issue view "$issue_number" --repo "$REPO" --json labels --jq '.labels[].name'); then
+    echo "ERROR: could not read labels on ceremony issue #${issue_number}" >&2
+    return 2
+  fi
+
+  while IFS= read -r label; do
+    if [ "$label" = "$expected_label" ]; then
+      return 0
+    fi
+  done <<< "$labels"
+  return 1
 }
 
 ceremonies_for_marker() {
