@@ -100,11 +100,20 @@ func testPlayerID(account ticket.AccountID) identity.PlayerID {
 func helloFor(t *testing.T, account ticket.AccountID) []byte {
 	t.Helper()
 
+	return helloAsking(t, account, "Eivor")
+}
+
+// helloAsking is helloFor under a chosen display name, which is what a hello says about
+// a character until the character phase lands on the wire: an account with several
+// characters plays the one wearing that name.
+func helloAsking(t *testing.T, account ticket.AccountID, name string) []byte {
+	t.Helper()
+
 	minted, _, err := testPair.Mint(account, testWorld, time.Now())
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	return protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", minted[:])
+	return protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, name, minted[:])
 }
 
 // testTicketKey is the pair's public half in the hex the -ticket-key flag takes.
@@ -686,6 +695,41 @@ func openPlayerStore(t *testing.T, dir string) *persist.Store {
 	return store
 }
 
+// seedCharacter mints the character an account plays here and gives it a life to come
+// back to, answering the character so a test can read its record afterwards.
+//
+// The life is a *living* one, because that is the only kind this build resumes: a health
+// of zero is what persist.Record.Unplayed reads as "this character has never played", so
+// a fixture without one would be admitted with nothing and pass for the wrong reason.
+func seedCharacter(t *testing.T, store *persist.Store, account ticket.AccountID, name string) persist.Character {
+	t.Helper()
+
+	character, err := store.Create(testPlayerID(account), name)
+	if err != nil {
+		t.Fatalf("creating the seeded character: %v", err)
+	}
+	if err := store.Save(character.ID, persist.Record{
+		LastSeen: time.Unix(1, 0),
+		Pos:      [3]float64{0.5, 64, 0.5},
+		Health:   game.PlayerMaxHealth,
+	}); err != nil {
+		t.Fatalf("seeding the record: %v", err)
+	}
+	return character
+}
+
+// onlyCharacter is the one character an account holds in this world, and a fatal failure
+// when it holds none or several.
+func onlyCharacter(t *testing.T, store *persist.Store, account ticket.AccountID) persist.Character {
+	t.Helper()
+
+	held := store.Characters(testPlayerID(account))
+	if len(held) != 1 {
+		t.Fatalf("the account holds %d characters, want exactly 1", len(held))
+	}
+	return held[0]
+}
+
 // firstReply is the handshake's answer on conn.
 func firstReply(t *testing.T, conn *scriptedConn) *vnet.Envelope {
 	t.Helper()
@@ -716,18 +760,7 @@ func TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome(t *testing.T) {
 	players := openPlayerStore(t, dir)
 	account := testAccount(1)
 
-	// A living record, because that is the only kind this build resumes: a health of
-	// zero is refused as unreadable, which would set the file aside and admit both
-	// connections with nothing — a pass for the wrong reason.
-	seeded := persist.Record{
-		Name:     "Eivor",
-		LastSeen: time.Unix(1, 0),
-		Pos:      [3]float64{0.5, 64, 0.5},
-		Health:   game.PlayerMaxHealth,
-	}
-	if err := players.Save(testPlayerID(account), seeded); err != nil {
-		t.Fatalf("seeding the record: %v", err)
-	}
+	seedCharacter(t, players, account, "Eivor")
 
 	first, second := newScriptedConn("first"), newScriptedConn("second")
 	tr := newQueueTransport(first, second)
@@ -795,7 +828,7 @@ func TestTheServerKeepsItsCertificateUnderTheWorldDirectory(t *testing.T) {
 	dir := t.TempDir()
 	opts := options{listen: "127.0.0.1:0", worldDir: dir}
 
-	first, err := listen(opts, discard())
+	first, _, err := listen(opts, discard())
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -815,7 +848,7 @@ func TestTheServerKeepsItsCertificateUnderTheWorldDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
-	second, err := listen(opts, discard())
+	second, _, err := listen(opts, discard())
 	if err != nil {
 		t.Fatalf("second listen: %v", err)
 	}
@@ -840,7 +873,7 @@ func TestTheServerKeepsItsCertificateUnderTheWorldDirectory(t *testing.T) {
 func TestTheServerSpeaksNoPlaintext(t *testing.T) {
 	t.Parallel()
 
-	tr, err := listen(options{listen: "127.0.0.1:0", worldDir: t.TempDir()}, discard())
+	tr, _, err := listen(options{listen: "127.0.0.1:0", worldDir: t.TempDir()}, discard())
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -879,7 +912,7 @@ func TestAnEphemeralWorldEncryptsWithoutKeepingAKey(t *testing.T) {
 	var logged strings.Builder
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	tr, err := listen(options{listen: "127.0.0.1:0", worldDir: ""}, log)
+	tr, _, err := listen(options{listen: "127.0.0.1:0", worldDir: ""}, log)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -907,7 +940,7 @@ func TestTheStartupLogNamesTheFingerprintAndNeverTheKey(t *testing.T) {
 	var logged strings.Builder
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	tr, err := listen(options{listen: "127.0.0.1:0", worldDir: dir}, log)
+	tr, announced, err := listen(options{listen: "127.0.0.1:0", worldDir: dir}, log)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -923,6 +956,13 @@ func TestTheStartupLogNamesTheFingerprintAndNeverTheKey(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), fingerprint) {
 		t.Error("the startup log does not name the certificate fingerprint")
+	}
+
+	// The number listen *returns* is the number it logged, because the announcer sends that
+	// one to the account service and a client now takes its expectation from there rather
+	// than from a pinned file. Two sources for this string is a server nobody can join.
+	if announced != fingerprint {
+		t.Errorf("listen logged %s and returned %s; there is one certificate and one digest of it", fingerprint, announced)
 	}
 
 	keyPEM, err := os.ReadFile(filepath.Join(dir, certs.KeyFileName))

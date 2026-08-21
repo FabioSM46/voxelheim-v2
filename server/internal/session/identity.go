@@ -165,16 +165,32 @@ func NewVerifier(pub ed25519.PublicKey, world ticket.WorldID, now func() time.Ti
 func (v *Verifier) World() ticket.WorldID { return v.world }
 
 // Resolved is the player a hello settled on, and how it got there.
+//
+// **Two names, and they answer different questions.** ID is the account, and it is what
+// the simulation keys a body on, what the exclusivity claim is held under and what a log
+// line carries. Character is which of that account's characters is playing, and it is
+// what the player store writes under. One account has one live session; one session
+// plays one character; so within a session the two are interchangeable — which is
+// exactly why they must not be conflated across one, because an account has several
+// characters and only one of them stood where this record says.
 type Resolved struct {
-	// ID names the player. It is what the player store keys on and what a log line
+	// ID names the player. It is what the simulation keys on and what a log line
 	// carries: the one-way name of the account the ticket named.
 	ID identity.PlayerID
 
-	// Returning reports whether the player store already held a usable record for ID.
+	// Character is the character this session plays, minted by the store and stable for
+	// that character's life. It is what the player store keys a record on.
+	Character persist.CharacterID
+
+	// Name is that character's name, as the server accepted it. Unique within this
+	// world, which is what makes it a name rather than a label.
+	Name string
+
+	// Returning reports whether the player store already held a life for Character.
 	Returning bool
 
-	// Life is what this identity left behind — where they stood, their health and their
-	// pack — or nil for a player the store has never had a readable record for.
+	// Life is what this character left behind — where they stood, their health and their
+	// pack — or nil for a character the store has never had a readable life for.
 	//
 	// **Loaded here, before the welcome is built**, because ServerWelcome.spawn has to
 	// carry the position the player is actually placed at and Handshake is a pure
@@ -193,11 +209,12 @@ type Resolved struct {
 // than one because they have different lifetimes — an entity id is forgotten when a
 // session ends, a player's claim is released and then remembered.
 //
-// The store may be nil, which is the ephemeral world. Verification and exclusivity work
-// exactly as they do with one; nothing is written and nothing is ever found, so every
-// admitted ticket resolves to a player with no life behind them for the life of the
-// process. The account still names the same player — that has stopped depending on this
-// server's disk — so what an ephemeral world costs is the life, not the name.
+// The store is never nil here: a nil one handed to [NewIdentities] becomes
+// persist.NewMemoryStore, which is the ephemeral world. Verification, exclusivity, name
+// uniqueness and the per-account limit all work exactly as they do with a directory —
+// they are rules about the world rather than about the disk — and nothing is written, so
+// every character it mints is gone when the process ends. The account still names the
+// same player, so what an ephemeral world costs is the life, not the name.
 type Identities struct {
 	store *persist.Store
 
@@ -212,7 +229,7 @@ type Identities struct {
 	// connected.
 	log *slog.Logger
 
-	// live is every player with a session, and what that session needs remembered
+	// live is every account with a session, and what that session needs remembered
 	// about it. One map rather than a set and a table beside it: everything in
 	// liveIdentity has exactly the claim's lifetime, and claim and Release are already
 	// the two ends of it.
@@ -227,20 +244,27 @@ type Identities struct {
 
 // liveIdentity is what one live session's identity carries beside the claim itself.
 type liveIdentity struct {
-	// name is the display name this session is playing under. The autosave needs it:
-	// a record written mid-session must carry the same name the session's own teardown
-	// would write, not blank it — and the simulation, which is what the autosave asks
-	// for lives, has never heard of a display name.
-	name string
+	// character is which of this account's characters the session is playing. The
+	// autosave needs it and nothing else can supply it: the simulation keys a life by
+	// account, which is the one thing that does not say which character stood there.
+	character persist.CharacterID
 
 	// finalised records that this session's teardown has already written its last
 	// word. See RememberAll, which is the only reader.
 	finalised bool
 }
 
-// NewIdentities returns an empty claim set over store, which may be nil for an
-// ephemeral world. A nil logger discards, which is what the tests that are about
-// admission rather than about operators want.
+// NewIdentities returns an empty claim set over store. A nil logger discards, which is
+// what the tests that are about admission rather than about operators want.
+//
+// **A nil store becomes persist.NewMemoryStore rather than staying nil**, and the
+// substitution is here rather than at every use because of what stopped being optional.
+// A nil store used to mean "every read finds nothing and every write goes nowhere",
+// which was the whole of an ephemeral world while a player's name was a hash of their
+// account. A character has to be *minted* now, and its name has to be unique across the
+// world — authoritative logic that an ephemeral world owes its players exactly as much
+// as a persistent one does. So the ephemeral world is a store with no directory under
+// it, and this type never branches on having one.
 //
 // **A nil verifier is an error and not a permissive default**, and that is the whole of
 // the acceptance criterion in the type system: there is no way to build a claim set that
@@ -254,6 +278,9 @@ func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+	if store == nil {
+		store = persist.NewMemoryStore()
 	}
 	return &Identities{
 		store:    store,
@@ -278,12 +305,15 @@ func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (
 //  2. The ticket is verified: the signature, then the world it names, then its
 //     expiry, in that order and all of it arithmetic. Every refusal is BAD_REQUEST
 //     with one sentence for the client and the reason for the log.
-//  3. The account the ticket names becomes a player id, and the store is read for the
-//     life that player left behind. Only now — nothing is looked up for a ticket
-//     nobody has vouched for, which is what keeps an unauthenticated connection from
-//     costing this server a disk read.
-//  4. That player is claimed. One already holding a live session is
-//     ALREADY_CONNECTED.
+//  3. The account the ticket names becomes a player id. Only now — nothing is looked
+//     up for a ticket nobody has vouched for, which is what keeps an unauthenticated
+//     connection from costing this server a disk read.
+//  4. Which of that account's characters is playing is settled, and one is created if
+//     the account has none here. The three ways a creation is refused are the three
+//     the contract reserves: CHARACTER_NAME_TAKEN, CHARACTER_NAME_REFUSED and
+//     CHARACTER_LIMIT_REACHED.
+//  5. The store is read for the life that character left behind.
+//  6. The account is claimed. One already holding a live session is ALREADY_CONNECTED.
 //
 // **What is gone from this list is the whole of the old model.** There was a four-way
 // rule over `player_token`: mint on an empty one, resume a known one, mint a new
@@ -314,12 +344,17 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 	// digest of it.
 	id := identity.IDOf(identity.Account(claims.Account))
 
-	life, returning, err := i.recall(id)
+	character, err := i.character(id, hello.PlayerName)
 	if err != nil {
 		return Resolved{}, err
 	}
 
-	if !i.claim(id) {
+	life, returning, err := i.recall(character)
+	if err != nil {
+		return Resolved{}, err
+	}
+
+	if !i.claim(id, character.ID) {
 		return Resolved{}, &Refused{
 			Reason: vnet.RejectReasonALREADY_CONNECTED,
 			// Named as the account rather than as the identity, because that is what it
@@ -330,7 +365,81 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 			Detail: "that account already has a live session on this world",
 		}
 	}
-	return Resolved{ID: id, Returning: returning, Life: life}, nil
+	return Resolved{ID: id, Character: character.ID, Name: character.Name, Returning: returning, Life: life}, nil
+}
+
+// character settles which of this account's characters is playing, creating one when
+// the account holds none on this world.
+//
+// **Choosing is not on the wire yet and this is deliberately not a substitute for it.**
+// schemas/handshake.fbs already reserves the exchange — ServerCharacterList, then
+// SelectCharacterRequest or CreateCharacterRequest — and putting it there is the next
+// issue. Until it lands there is exactly one thing a hello says about a character, the
+// display name it has always carried, so that is what this resolves against:
+//
+//   - an account with characters here plays the one wearing that name, and the lowest
+//     id it holds when none does. Deterministic, so two connections settle the same
+//     way, and it never *creates* from a name — an account's second character is made
+//     through the wire exchange or not at all;
+//   - an account with none here has one created under that name, which is the only way
+//     a first connection can become a character at all.
+//
+// The lookup goes through the store's own fold rather than a comparison written here:
+// a name is taken under the store's rule, and a second spelling of that rule is one bug
+// away from a name that is taken and cannot be found.
+// **The decision and the write happen under the store's one lock**, which is why this
+// asks for both at once instead of reading the roster and then creating. Reading first
+// was a check-then-act race that #156's review found: two hellos for one fresh account
+// both saw an empty roster, both created under different names — Create serialises per
+// name, so both succeeded — and the one that then lost the single-session claim had
+// already written a second character nobody asked for. Nothing deletes a character, so
+// the roster slot and the name were gone for good.
+func (i *Identities) character(id identity.PlayerID, requested string) (persist.Character, error) {
+	character, _, err := i.store.ResolveOrCreate(id, requested)
+	if err != nil {
+		return persist.Character{}, refuseCharacter(err)
+	}
+	return character, nil
+}
+
+// refuseCharacter turns a store refusal into the answer the contract has for it, and
+// anything else into a server failure.
+//
+// **The three sentinels map one to one onto three reject reasons, and the mapping is a
+// switch rather than a parse.** Deriving a wire code from an error's prose is how a log
+// line becomes a contract — the same split [Refused] draws between Detail and Cause. A
+// fourth kind of error is not a refusal at all: a store that cannot mint an id or cannot
+// write is this server failing, and there is no reason code that says so.
+//
+// **The detail is the reason here, where a ticket's deliberately is not.** A refused
+// ticket says one identical sentence for all five of its cases, because a client that
+// could tell them apart could ask questions about credentials nobody presented. A
+// refused *name* is the opposite situation: the player picked it, the client has to
+// offer them another one, and the contract states in as many words that the client may
+// tell CHARACTER_NAME_TAKEN from CHARACTER_NAME_REFUSED. Saying which is what makes the
+// refusal actionable rather than a door that closes.
+func refuseCharacter(err error) error {
+	switch {
+	case errors.Is(err, persist.ErrNameTaken):
+		return &Refused{
+			Reason: vnet.RejectReasonCHARACTER_NAME_TAKEN,
+			Detail: "a character on this world already has that name; choose another",
+			Cause:  err,
+		}
+	case errors.Is(err, persist.ErrNameRefused):
+		return &Refused{
+			Reason: vnet.RejectReasonCHARACTER_NAME_REFUSED,
+			Detail: "that is not a name this world accepts; choose another",
+			Cause:  err,
+		}
+	case errors.Is(err, persist.ErrCharacterLimit):
+		return &Refused{
+			Reason: vnet.RejectReasonCHARACTER_LIMIT_REACHED,
+			Detail: "this account already holds as many characters as this world allows",
+			Cause:  err,
+		}
+	}
+	return fmt.Errorf("session: creating a character on this world: %w", err)
 }
 
 // verify turns the ticket in a hello into the claims it carries, or into the refusal it
@@ -390,42 +499,43 @@ func refuseTicket(cause error) *Refused {
 	}
 }
 
-// recall loads the life stored for id: the life itself, whether one was found, and any
-// reason this session cannot proceed.
+// recall loads the life stored for a character: the life itself, whether one was found,
+// and any reason this session cannot proceed.
 //
 // Asked as a load rather than as a stat, because the two differ on the case that
 // matters: a record that exists and cannot be read is not a first connection.
 //
-// **Three answers, and the middle one is where the rule changed.** A file that is
-// simply absent is a first connection. A file that cannot be *reached* — a permission,
-// a failing disk — is an error and refuses the connection, because a retry may well
+// **Four answers, and the middle two are where the rules are.** A record that is absent
+// — or one the store wrote when the character was created and no session has touched
+// since — is a first connection. A file that cannot be *reached* — a permission, a
+// failing disk — is an error and refuses the connection, because a retry may well
 // succeed and treating it as absent would throw away a readable life on a transient
 // fault. A file that is *corrupt* — the wrong magic, a version this build does not
 // speak, a broken checksum, or a life whose values game refuses — will never be
 // readable, so refusing the connection for ever helps nobody: it is set aside under a
-// name of its own and the player is admitted as new.
+// name of its own and the character is played as new.
 //
-// **The move is now load-bearing, and it was not before.** #146 could not set the file
-// aside at all, and #147's answer rested on two things: the file is moved before this
-// returns, *and* the identity minted next was a different one — 32 fresh random bytes,
-// a different hash, a different file name — so a failed move cost nothing, because
-// nothing that session went on to write could land on the record nobody could read.
+// **The move is load-bearing.** #146 could not set the file aside at all, and #147's
+// answer rested on two things: the file is moved before this returns, *and* the identity
+// minted next was a different one — 32 fresh random bytes, a different hash, a different
+// file name — so a failed move cost nothing, because nothing that session went on to
+// write could land on the record nobody could read.
 //
-// The second half of that is gone with the minting. A player's name is now a digest of
-// the account their ticket names, so the player admitted after a corrupt record is
-// **the same player**, writing to **the same path**. If the move fails, their first
+// The second half of that went with the minting and has not come back with characters.
+// A character id is stable for the life of the character, so the session admitted after
+// a corrupt record writes to **exactly the same path**. If the move fails, its first
 // teardown overwrites the one file nobody could read. So a failed move refuses the
 // connection instead: it is a filesystem problem a retry may well survive, which is the
 // same answer an unreachable record already gets one branch up, and the opposite answer
 // — admit and lose the evidence — is the one nobody can undo. See [Identities.refuseRecord].
-func (i *Identities) recall(id identity.PlayerID) (*game.Life, bool, error) {
-	rec, found, err := i.store.Load(id)
+func (i *Identities) recall(character persist.Character) (*game.Life, bool, error) {
+	rec, found, err := i.store.Load(character.ID)
 	switch {
 	case err != nil && !errors.Is(err, world.ErrCorruptStore):
-		return nil, false, fmt.Errorf("session: reading the player record for %s: %w", id.Short(), err)
+		return nil, false, fmt.Errorf("session: reading the record for character %s: %w", character.ID, err)
 	case err != nil:
-		return nil, false, i.refuseRecord(id, err)
-	case !found:
+		return nil, false, i.refuseRecord(character, err)
+	case !found || rec.Unplayed():
 		return nil, false, nil
 	}
 
@@ -435,7 +545,7 @@ func (i *Identities) recall(id identity.PlayerID) (*game.Life, bool, error) {
 	// rather than slot by slot.
 	life := game.Life{Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Slots: rec.Slots}
 	if vErr := life.Validate(); vErr != nil {
-		return nil, false, i.refuseRecord(id, vErr)
+		return nil, false, i.refuseRecord(character, vErr)
 	}
 	return &life, true, nil
 }
@@ -445,42 +555,34 @@ func (i *Identities) recall(id identity.PlayerID) (*game.Life, bool, error) {
 // Error level and not warn: a player is about to lose everything they had, and the
 // only reason it is not a refused connection is that refusing would not give it back.
 //
-// **A failed move is now returned rather than survived**, which is the one behaviour
-// this issue changed here and it changed because its reason did. While an unreadable
-// record was answered with a *freshly minted* identity, the move was belt to that
-// identity's braces; a player is named by their account now, so the session admitted
-// after a failed move writes to exactly the path whose contents could not be read. A
-// refusal costs that player one connection and an operator one look at a directory; the
-// alternative costs the player the record and everybody the evidence.
-func (i *Identities) refuseRecord(id identity.PlayerID, cause error) error {
-	aside, err := i.store.Quarantine(id)
+// **The character itself survives**: the store keeps it in the index, so the name is
+// still theirs and the account still owns it. What is gone is the life, and the session
+// that follows starts the character where one that has never played starts.
+//
+// **A failed move is returned rather than survived.** While an unreadable record was
+// answered with a *freshly minted* identity, the move was belt to that identity's
+// braces; a character id is stable now, so the session admitted after a failed move
+// writes to exactly the path whose contents could not be read. A refusal costs that
+// player one connection and an operator one look at a directory; the alternative costs
+// the player the record and everybody the evidence.
+//
+// The account is named by the first eight characters of its digest and the character by
+// its whole id: one is a prefix of a one-way hash and the other is a number this server
+// minted, so neither line says who is playing here.
+func (i *Identities) refuseRecord(character persist.Character, cause error) error {
+	aside, err := i.store.Quarantine(character.ID)
 	if err != nil {
-		i.log.Error("a player record could not be read and could not be set aside; the connection is refused rather than writing over it",
-			"player_id", id.Short(), "reason", cause.Error(), "error", err)
-		return fmt.Errorf("session: setting aside the unreadable record for %s: %w", id.Short(), err)
+		i.log.Error("a character record could not be read and could not be set aside; the connection is refused rather than writing over it",
+			"player_id", character.Owner.Short(), "character", character.ID.String(), "reason", cause.Error(), "error", err)
+		return fmt.Errorf("session: setting aside the unreadable record for character %s: %w", character.ID, err)
 	}
-	i.log.Error("a player record could not be read; it has been kept and the player joins as new",
-		"player_id", id.Short(), "reason", cause.Error(), "kept_at", aside)
+	i.log.Error("a character record could not be read; it has been kept and the character starts as new",
+		"player_id", character.Owner.Short(), "character", character.ID.String(), "reason", cause.Error(), "kept_at", aside)
 	return nil
 }
 
-// Admitted records the display name an identity's live session is playing under.
-//
-// Called once, when the handshake is accepted. It exists for the autosave: a record
-// written while a session is still running has to carry the same name that session's
-// own teardown would write, and the simulation — which is what the autosave asks for
-// lives — has never heard of a display name.
-func (i *Identities) Admitted(id identity.PlayerID, name string) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-
-	if held, live := i.live[id]; live {
-		held.name = name
-	}
-}
-
-// Remember writes the record one identity's session leaves behind, or has reached so
-// far. A no-op in an ephemeral world.
+// Remember writes the record one session's character leaves behind. A no-op in an
+// ephemeral world.
 //
 // Called from Serve's teardown, after the player has left the simulation and before
 // the claim is released — so a client reconnecting the instant this returns is never
@@ -495,12 +597,20 @@ func (i *Identities) Admitted(id identity.PlayerID, name string) {
 // **It is the session's last word**, so it marks the identity finalised: an autosave
 // that captured this player before they left must not land afterwards and put the older
 // life back. See RememberAll.
-func (i *Identities) Remember(id identity.PlayerID, life game.Life) error {
+//
+// **It takes the whole [Resolved] rather than an id, and that is what keeps #102's
+// teardown ordering intact through the change of key.** The order is sim.Leave, then
+// this, then Release — the claim goes last so a reconnect is never served a record that
+// is still being written. Reading the character out of the live map instead would make
+// this write *depend* on the claim it is supposed to precede: get the order wrong and
+// the character would simply not be found, and the teardown would write nothing at all,
+// silently. The session already holds the answer, so it hands it in.
+func (i *Identities) Remember(self Resolved, life game.Life) error {
 	i.writeMu.Lock()
 	defer i.writeMu.Unlock()
 
-	err := i.write(id, life)
-	i.finalise(id)
+	err := i.write(self.Character, life)
+	i.finalise(self.ID)
 	return err
 }
 
@@ -529,24 +639,33 @@ func (i *Identities) RememberAll(lives map[identity.PlayerID]game.Life) error {
 
 	var errs []error
 	for id, life := range lives {
-		if !i.stillPlaying(id) {
+		// The simulation keys a life by account, which is the one thing that cannot say
+		// which character stood there. The live claim is what knows, and asking it is
+		// also the skip: an account whose session has ended, or has written its last
+		// word, has no character here to write under.
+		character, playing := i.stillPlaying(id)
+		if !playing {
 			continue
 		}
-		if err := i.write(id, life); err != nil {
+		if err := i.write(character, life); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// write puts one life on disk under the name its session is playing under. The caller
-// holds writeMu.
-func (i *Identities) write(id identity.PlayerID, life game.Life) error {
-	return i.store.Save(id, persist.Record{
-		Name: i.nameOf(id),
+// write puts one life on disk under the character it belongs to. The caller holds
+// writeMu.
+//
+// **Nothing here names the character or its owner**, and that is the store's rule rather
+// than an omission: persist.Store.Save fills both from its own index and ignores what a
+// caller put in them, so there is no way for a save to rename a character or move it to
+// another account. A session writes a life; who lived it was decided at creation.
+func (i *Identities) write(character persist.CharacterID, life game.Life) error {
+	return i.store.Save(character, persist.Record{
 		// When this record was written, which is the end of the session on the teardown
 		// path and the moment of the pass on the autosave's. Both are "the last time
-		// this server knew anything about this player", which is what the field means.
+		// this server knew anything about this character", which is what the field means.
 		LastSeen: time.Now().UTC(),
 		Pos:      life.Pos,
 		Yaw:      life.Yaw,
@@ -555,14 +674,17 @@ func (i *Identities) write(id identity.PlayerID, life game.Life) error {
 	})
 }
 
-// stillPlaying reports whether id has a live session that has not yet written its last
-// record.
-func (i *Identities) stillPlaying(id identity.PlayerID) bool {
+// stillPlaying reports the character id has a live session on, and whether that session
+// has yet to write its last record.
+func (i *Identities) stillPlaying(id identity.PlayerID) (persist.CharacterID, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	held, live := i.live[id]
-	return live && !held.finalised
+	if !live || held.finalised {
+		return 0, false
+	}
+	return held.character, true
 }
 
 // finalise records that id's session has written its last word.
@@ -575,31 +697,23 @@ func (i *Identities) finalise(id identity.PlayerID) {
 	}
 }
 
-// nameOf is the display name id's live session is playing under, and empty for an
-// identity with none — which includes one whose claim has already been released.
-func (i *Identities) nameOf(id identity.PlayerID) string {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-
-	if held, live := i.live[id]; live {
-		return held.name
-	}
-	return ""
-}
-
-// claim adds id to the live set, answering false when it is already there.
-func (i *Identities) claim(id identity.PlayerID) bool {
+// claim adds id to the live set under the character it is playing, answering false when
+// it is already there.
+//
+// The character goes in with the claim rather than in a later call, so there is no
+// window in which an account is live and the autosave cannot say what to write for it.
+func (i *Identities) claim(id identity.PlayerID, character persist.CharacterID) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	if _, live := i.live[id]; live {
 		return false
 	}
-	i.live[id] = &liveIdentity{}
+	i.live[id] = &liveIdentity{character: character}
 	return true
 }
 
-// Release ends a session's exclusive hold on its identity.
+// Release ends a session's exclusive hold on its account.
 //
 // **Last in Serve's teardown, and that is the whole of the ordering rule**: after
 // sim.Leave, so a reconnect is never refused for a session that has already gone,
@@ -612,7 +726,7 @@ func (i *Identities) Release(id identity.PlayerID) {
 	delete(i.live, id)
 }
 
-// Count reports how many identities have a live session.
+// Count reports how many accounts have a live session.
 func (i *Identities) Count() int {
 	i.mu.Lock()
 	defer i.mu.Unlock()

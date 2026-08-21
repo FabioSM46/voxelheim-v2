@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -21,8 +22,13 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
-// knownIdentities is a claim set over a real player store that already holds a record
-// for each account given, so those accounts resume rather than arrive with nothing.
+// knownIdentities is a claim set over a real player store that already holds a
+// character with a life for each account given, so those accounts resume rather than
+// arrive with nothing.
+//
+// The first account named gets "Eivor", which is the name [helloCarrying] presents, so
+// a hello resolves to it by name; the rest get names of their own, because a name is
+// unique within a world and two seeded accounts cannot both have that one.
 func knownIdentities(t *testing.T, known ...ticket.AccountID) (*session.Identities, *persist.Store) {
 	t.Helper()
 
@@ -30,12 +36,45 @@ func knownIdentities(t *testing.T, known ...ticket.AccountID) (*session.Identiti
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	for _, account := range known {
-		if err := store.Save(testPlayerID(account), livingRecord("Eivor")); err != nil {
-			t.Fatalf("seeding a record: %v", err)
-		}
+	for i, account := range known {
+		seedCharacter(t, store, account, seededName(i))
 	}
 	return identitiesOver(store), store
+}
+
+// seededName is a name per seeded account: "Eivor" for the first, distinct for the
+// rest.
+func seededName(i int) string {
+	if i == 0 {
+		return "Eivor"
+	}
+	return fmt.Sprintf("Eivor the %dth", i+1)
+}
+
+// seedCharacter mints a character for account and gives it a life to come back to.
+func seedCharacter(t *testing.T, store *persist.Store, account ticket.AccountID, name string) persist.Character {
+	t.Helper()
+
+	character, err := store.Create(testPlayerID(account), name)
+	if err != nil {
+		t.Fatalf("creating the seeded character: %v", err)
+	}
+	if err := store.Save(character.ID, livingRecord()); err != nil {
+		t.Fatalf("seeding a record: %v", err)
+	}
+	return character
+}
+
+// onlyCharacter is the one character an account holds here, and a fatal failure when it
+// holds none or several — every use below seeded exactly one.
+func onlyCharacter(t *testing.T, store *persist.Store, account ticket.AccountID) persist.Character {
+	t.Helper()
+
+	held := store.Characters(testPlayerID(account))
+	if len(held) != 1 {
+		t.Fatalf("the account holds %d characters, want exactly 1", len(held))
+	}
+	return held[0]
 }
 
 // identitiesWith is a claim set admitting whatever verifier describes, for the tests
@@ -66,13 +105,17 @@ func verifierAt(t *testing.T, now time.Time) *session.Verifier {
 // livingRecord is the smallest record this build will resume: a living player, at a
 // position, holding nothing.
 //
-// The health is the part a seeded fixture cannot leave out. A record always describes
-// somebody alive — a player who dies and quits is written as their respawn would have
-// left them — so game.Life.Validate refuses a health of zero, and a record seeded
-// without one is refused as unreadable rather than resumed.
-func livingRecord(name string) persist.Record {
+// The health is the part a seeded fixture cannot leave out, and it now carries a second
+// meaning: a record always describes somebody alive — a player who dies and quits is
+// written as their respawn would have left them — so game.Life.Validate refuses a health
+// of zero, *and* zero is what persist.Record.Unplayed reads as "this character exists
+// and has never had a session". A record seeded without one is a character that has
+// never played rather than a life to come back to.
+//
+// The character, its owner and its name are deliberately absent: persist.Store.Save
+// fills all three from its own index and ignores what a caller puts here.
+func livingRecord() persist.Record {
 	return persist.Record{
-		Name:     name,
 		LastSeen: time.Unix(1, 0),
 		Pos:      [3]float64{0.5, 64, 0.5},
 		Health:   game.PlayerMaxHealth,
@@ -84,7 +127,16 @@ func livingRecord(name string) persist.Record {
 func helloCarrying(t *testing.T, raw []byte) *protocol.ClientHello {
 	t.Helper()
 
-	msg, err := protocol.Decode(protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", raw))
+	return helloAsking(t, "Eivor", raw)
+}
+
+// helloAsking is helloCarrying with the display name chosen, for the tests where two
+// accounts meet in one world: a character name is unique there, so two connections that
+// both ask for "Eivor" is itself one of the things under test.
+func helloAsking(t *testing.T, name string, raw []byte) *protocol.ClientHello {
+	t.Helper()
+
+	msg, err := protocol.Decode(protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, name, raw))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -208,11 +260,13 @@ func TestResolveAPlayer(t *testing.T) {
 
 		identities, _ := knownIdentities(t)
 
-		first, err := identities.Resolve(helloCarrying(t, testTicket(testAccount(4))))
+		first, err := identities.Resolve(helloAsking(t, "Eivor", testTicket(testAccount(4))))
 		if err != nil {
 			t.Fatalf("the first Resolve: %v", err)
 		}
-		second, err := identities.Resolve(helloCarrying(t, testTicket(testAccount(5))))
+		// A name of its own: two accounts are two players, and on this world they are
+		// also two names.
+		second, err := identities.Resolve(helloAsking(t, "Sigrun", testTicket(testAccount(5))))
 		if err != nil {
 			t.Fatalf("the second Resolve: %v", err)
 		}
@@ -698,13 +752,20 @@ func TestAPlayerComesBackAsThemselves(t *testing.T) {
 	}
 
 	// The record is written in teardown, before the claim is released — so by the time
-	// Serve has returned it is readable, under the name the account resolves to.
-	rec, found, err := store.Load(testPlayerID(account))
+	// Serve has returned it is readable, under the character the account resolved to.
+	// **That ordering is what #102 settled and what a change of key must not weaken**:
+	// the write happens after sim.Leave and before Release, and the character it writes
+	// under travels with the resolution rather than being read back out of the claim.
+	character := onlyCharacter(t, store, account)
+	rec, found, err := store.Load(character.ID)
 	if err != nil || !found {
-		t.Fatalf("the player's record was not written: %v (found %v)", err, found)
+		t.Fatalf("the character's record was not written: %v (found %v)", err, found)
 	}
 	if rec.Name != "Eivor" {
 		t.Errorf("the record holds the name %q, want %q", rec.Name, "Eivor")
+	}
+	if rec.Owner != testPlayerID(account) {
+		t.Errorf("the record is owned by %s, want the account's player id", rec.Owner.Short())
 	}
 	if rec.LastSeen.IsZero() {
 		t.Error("the record holds no last-seen time")
@@ -908,4 +969,176 @@ func TestARefusedTicketNeverReachesTheLogEither(t *testing.T) {
 	if !strings.Contains(logged, "expired") {
 		t.Error("the refusal line does not say which of the five refusals this was")
 	}
+}
+
+// TestResolveACharacter is the character half of a resolution: which of an account's
+// characters is playing, and the three ways asking for a new one is refused.
+//
+// **Every refusal here is authoritative and belongs to no other layer.** The client
+// offers a name; the server decides whether it may be worn, whether this account may
+// hold another character at all, and which reason code says so. A client that decided
+// any of it would be deciding who else exists on this world.
+func TestResolveACharacter(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a first connection creates the character it asked for", func(t *testing.T) {
+		t.Parallel()
+
+		identities, store := knownIdentities(t)
+		account := testAccount(30)
+
+		resolved, err := identities.Resolve(helloAsking(t, "Halvar", testTicket(account)))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if resolved.Character.IsZero() {
+			t.Error("the session was admitted with no character")
+		}
+		if resolved.Name != "Halvar" {
+			t.Errorf("the character is named %q, want %q", resolved.Name, "Halvar")
+		}
+		if resolved.Returning || resolved.Life != nil {
+			t.Error("a character that has just been created came back with a life")
+		}
+		held := store.Characters(testPlayerID(account))
+		if len(held) != 1 || held[0].ID != resolved.Character {
+			t.Errorf("the store holds %+v, want the character that was created", held)
+		}
+	})
+
+	t.Run("a name another account is wearing is CHARACTER_NAME_TAKEN", func(t *testing.T) {
+		t.Parallel()
+
+		identities, _ := knownIdentities(t, testAccount(31))
+
+		// testAccount(31) was seeded as "Eivor". A different account asking for it is
+		// refused, and told which of the two refusals it was — the contract says a
+		// client may tell "somebody has it" from "we will not accept it", because the
+		// player acts on them differently.
+		_, err := identities.Resolve(helloAsking(t, "eivor", testTicket(testAccount(32))))
+		if got := refusalReason(t, err); got != vnet.RejectReasonCHARACTER_NAME_TAKEN {
+			t.Errorf("the refusal is %s, want CHARACTER_NAME_TAKEN", got)
+		}
+		if identities.Count() != 0 {
+			t.Error("a refused creation left a player claimed")
+		}
+	})
+
+	t.Run("a name this world will not accept is CHARACTER_NAME_REFUSED", func(t *testing.T) {
+		t.Parallel()
+
+		identities, _ := knownIdentities(t)
+
+		for _, name := range []string{"", "   ", strings.Repeat("a", persist.MaxNameBytes+1), "Eivor\nSigrun"} {
+			_, err := identities.Resolve(helloAsking(t, name, testTicket(testAccount(33))))
+			if got := refusalReason(t, err); got != vnet.RejectReasonCHARACTER_NAME_REFUSED {
+				t.Errorf("%q was refused with %s, want CHARACTER_NAME_REFUSED", name, got)
+			}
+		}
+	})
+
+	t.Run("a full roster is not a locked door", func(t *testing.T) {
+		t.Parallel()
+
+		identities, store := knownIdentities(t)
+		account := testAccount(34)
+
+		// Filled through the store, because the wire has no way to ask for a second
+		// character yet — that is the next issue. The rule is the store's either way.
+		for i := range persist.MaxCharactersPerAccount {
+			seedCharacter(t, store, account, fmt.Sprintf("Halvar%d", i))
+		}
+		if _, err := store.Create(testPlayerID(account), "OneTooMany"); !errors.Is(err, persist.ErrCharacterLimit) {
+			t.Fatalf("the store did not refuse past the limit: %v", err)
+		}
+
+		// **CHARACTER_LIMIT_REACHED is not reachable from a hello, and that is a
+		// property of the interim resolution rather than of the rule.** An account with
+		// characters plays one instead of creating another, so the only path that can
+		// reach the limit is the CreateCharacterRequest the next issue puts on the wire.
+		// The mapping from the store's refusal to the reason code is tested where it
+		// lives — see TestRefuseCharacterMapsEveryStoreRefusal.
+		resolved, err := identities.Resolve(helloAsking(t, "Halvar0", testTicket(account)))
+		if err != nil {
+			t.Fatalf("Resolve for an account at its limit: %v", err)
+		}
+		if resolved.Name != "Halvar0" {
+			t.Errorf("the account resolved to %q, want the character it asked for", resolved.Name)
+		}
+	})
+
+	t.Run("an account with characters plays one rather than making another", func(t *testing.T) {
+		t.Parallel()
+
+		identities, store := knownIdentities(t)
+		account := testAccount(35)
+		mine := seedCharacter(t, store, account, "Eivor")
+
+		// A name it does not have, and one nobody has: still no creation. An account's
+		// second character is made through the wire exchange or not at all.
+		resolved, err := identities.Resolve(helloAsking(t, "SomebodyElse", testTicket(account)))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if resolved.Character != mine.ID {
+			t.Errorf("the session plays %s, want the character the account already had", resolved.Character)
+		}
+		if held := store.Characters(testPlayerID(account)); len(held) != 1 {
+			t.Errorf("the account now holds %d characters; a hello created one", len(held))
+		}
+		if _, taken := store.Named("SomebodyElse"); taken {
+			t.Error("a hello took a name without creating a character")
+		}
+	})
+
+	t.Run("a hello names which of several characters plays", func(t *testing.T) {
+		t.Parallel()
+
+		identities, store := knownIdentities(t)
+		account := testAccount(36)
+		first := seedCharacter(t, store, account, "Eivor")
+		second := seedCharacter(t, store, account, "Sigrun")
+
+		for _, want := range []persist.Character{first, second} {
+			resolved, err := identities.Resolve(helloAsking(t, want.Name, testTicket(account)))
+			if err != nil {
+				t.Fatalf("Resolve for %q: %v", want.Name, err)
+			}
+			if resolved.Character != want.ID || resolved.Name != want.Name {
+				t.Errorf("asking for %q played %s/%q", want.Name, resolved.Character, resolved.Name)
+			}
+			identities.Release(resolved.ID)
+		}
+
+		// A name this account does not hold settles on the lowest id, deterministically:
+		// two connections asking the same unknown name must play the same character.
+		lowest := first
+		if second.ID < lowest.ID {
+			lowest = second
+		}
+		resolved, err := identities.Resolve(helloAsking(t, "Halvar", testTicket(account)))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if resolved.Character != lowest.ID {
+			t.Errorf("an unknown name played %s, want the lowest id %s", resolved.Character, lowest.ID)
+		}
+	})
+
+	t.Run("one account's character is not another's to play", func(t *testing.T) {
+		t.Parallel()
+
+		identities, store := knownIdentities(t)
+		mine := seedCharacter(t, store, testAccount(37), "Eivor")
+
+		// Another account asking for that exact name does not get it — it is refused as
+		// taken, because naming somebody else's character is not a way to play it.
+		_, err := identities.Resolve(helloAsking(t, "Eivor", testTicket(testAccount(38))))
+		if got := refusalReason(t, err); got != vnet.RejectReasonCHARACTER_NAME_TAKEN {
+			t.Errorf("the refusal is %s, want CHARACTER_NAME_TAKEN", got)
+		}
+		if got, _ := store.Named("Eivor"); got.ID != mine.ID {
+			t.Error("the character changed hands")
+		}
+	})
 }

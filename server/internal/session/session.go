@@ -358,7 +358,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// rather than hold both until the process restarts.
 		if claimed {
 			if handshaken && player != nil {
-				if rErr := identities.Remember(self.ID, player.Record()); rErr != nil {
+				if rErr := identities.Remember(self, player.Record()); rErr != nil {
 					// Logged rather than returned: the session is over and the connection
 					// was fine, so failing it would report the wrong thing. Loud, because
 					// this is the line that says a player's record did not survive.
@@ -540,18 +540,23 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return nil
 			}
 			handshaken = true
-			displayName = playerName(msg)
-			// Told to the claim set now, so a record written by the autosave while this
-			// session is still running carries the name its teardown would write.
-			identities.Admitted(self.ID, displayName)
+			// **The character's name, not the hello's.** The two are usually the same
+			// string — a first connection creates the character under the name the hello
+			// carried — but the one the server accepted is the one that is unique on this
+			// world, and it is what a later connection is answered with whatever name it
+			// asked under. Taking it from the message would print a name nobody here is
+			// playing as.
+			displayName = self.Name
 			// entity_id is already on the logger the caller passed in; repeating it
 			// here would print it twice. The player id is the first 8 hex characters of
 			// a digest — enough to follow one player through a log — and the account it
 			// hashes is never printed at any level, on any path, nor is the ticket that
-			// named it.
+			// named it. The character id is a number this server minted and names nobody
+			// on its own.
 			log.Info("session admitted",
 				"player_name", displayName,
 				"player_id", self.ID.Short(),
+				"character", self.Character.String(),
 				"returning", self.Returning)
 
 			// The player exists in the world from here on. Joining before streaming
@@ -1014,13 +1019,6 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 	default:
 		return fmt.Errorf("session: %w: client sent %s", protocol.ErrMalformed, msg.Kind)
 	}
-}
-
-func playerName(msg protocol.Message) string {
-	if msg.ClientHello == nil {
-		return ""
-	}
-	return msg.ClientHello.PlayerName
 }
 
 // Registry tracks live connections so shutdown can close them all, hands out the

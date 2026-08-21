@@ -1,4 +1,4 @@
-// Internal tests: the encoder, the truncation rule and the on-disk layout are what
+// Internal tests: the encoder, the on-disk layout and the index built over it are what
 // is being pinned, and a corrupt file is produced by writing bytes rather than by
 // calling an exported function.
 package persist
@@ -10,15 +10,14 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-// testID is a distinct player per seed, derived from an account so a failing
-// test names the same file on every run.
+// testID is a distinct account per seed, derived so a failing test names the same
+// owner on every run.
 func testID(seed byte) identity.PlayerID {
 	var account identity.Account
 	for i := range account {
@@ -38,71 +37,131 @@ func openStore(t *testing.T) (*Store, string) {
 	return store, worldDir
 }
 
+// newCharacter mints one, failing the test rather than returning a refusal: every use
+// below is a set-up step, and the refusals have tests of their own in characters_test.go.
+func newCharacter(t *testing.T, store *Store, owner identity.PlayerID, name string) Character {
+	t.Helper()
+
+	character, err := store.Create(owner, name)
+	if err != nil {
+		t.Fatalf("Create(%s, %q): %v", owner.Short(), name, err)
+	}
+	return character
+}
+
 func TestStoreRoundTripsARecord(t *testing.T) {
 	t.Parallel()
 
 	store, worldDir := openStore(t)
-	id := testID(1)
+	owner := testID(1)
+	character := newCharacter(t, store, owner, "Eivor")
 
 	// Seconds, because that is the resolution the format keeps. A test that wrote
 	// time.Now() and compared it whole would fail on the nanoseconds the format
 	// deliberately does not store.
-	want := Record{Name: "Eivor", LastSeen: time.Unix(1_700_000_000, 0).UTC()}
-	if err := store.Save(id, want); err != nil {
+	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100}
+	if err := store.Save(character.ID, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	got, found, err := store.Load(id)
+	got, found, err := store.Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if !found {
 		t.Fatal("the record just written was not found")
 	}
-	if got.Name != want.Name {
-		t.Errorf("Name = %q, want %q", got.Name, want.Name)
+	// The three fields that name a character come from the index, never from the
+	// caller: a save that could restate them would be a second, unlocked way to rename
+	// a character or move it to another account.
+	if got.Character != character.ID {
+		t.Errorf("Character = %s, want %s", got.Character, character.ID)
+	}
+	if got.Owner != owner {
+		t.Errorf("Owner = %s, want %s", got.Owner.Short(), owner.Short())
+	}
+	if got.Name != "Eivor" {
+		t.Errorf("Name = %q, want %q", got.Name, "Eivor")
 	}
 	if !got.LastSeen.Equal(want.LastSeen) {
 		t.Errorf("LastSeen = %s, want %s", got.LastSeen, want.LastSeen)
 	}
 
-	// The file is named for the id and lives under the world directory. Both are part
-	// of the contract with #147 and with an operator reading a directory listing.
-	path := filepath.Join(worldDir, playersDirName, id.String()+recordFileExt)
+	// The file is named for the character id and lives under the world directory. Both
+	// are part of the contract with an operator reading a directory listing.
+	path := filepath.Join(worldDir, playersDirName, character.ID.String()+recordFileExt)
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("the record is not at %s: %v", path, err)
 	}
 
 	// A second save replaces the first rather than appending to it.
-	later := Record{Name: "Eivor Wolf-Kissed", LastSeen: want.LastSeen.Add(time.Hour)}
-	if err := store.Save(id, later); err != nil {
+	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61}
+	if err := store.Save(character.ID, later); err != nil {
 		t.Fatalf("the second Save: %v", err)
 	}
-	got, _, err = store.Load(id)
-	if err != nil {
-		t.Fatalf("the second Load: %v", err)
-	}
-	if got.Name != later.Name || !got.LastSeen.Equal(later.LastSeen) {
+	got, _, _ = store.Load(character.ID)
+	if got.Health != later.Health || !got.LastSeen.Equal(later.LastSeen) {
 		t.Errorf("the second save did not replace the first: %+v", got)
 	}
 }
 
-func TestStoreReportsAnUnknownIdentityAsNotFound(t *testing.T) {
+// A record's three naming fields are the store's, whatever a caller puts in them. This
+// is the authoritative half of "who owns this character": there is exactly one way to
+// answer it, and Save is not it.
+func TestSaveIgnoresACallersIdeaOfWhoACharacterIs(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openStore(t)
+	mine := newCharacter(t, store, testID(1), "Eivor")
+	theirs := newCharacter(t, store, testID(2), "Sigrun")
+
+	if err := store.Save(mine.ID, Record{
+		Character: theirs.ID,
+		Owner:     theirs.Owner,
+		Name:      "Sigrun the Second",
+		Health:    100,
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, _, err := store.Load(mine.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Character != mine.ID || got.Owner != mine.Owner || got.Name != mine.Name {
+		t.Errorf("a save restated who the character is: %s/%s/%q", got.Character, got.Owner.Short(), got.Name)
+	}
+	// And the other character is untouched, which is the failure this prevents.
+	if theirs2, ok := store.Character(theirs.ID); !ok || theirs2.Name != "Sigrun" {
+		t.Errorf("the other character changed: %+v (known %v)", theirs2, ok)
+	}
+}
+
+// An id no character wears is not a new file. The index says what exists, so a save
+// under an unknown id would create a character no lookup could ever find.
+func TestSaveRefusesAnUnknownCharacter(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openStore(t)
+	if err := store.Save(CharacterID(0xdead_beef), Record{Health: 100}); !errors.Is(err, ErrUnknownCharacter) {
+		t.Fatalf("Save under an unknown id = %v, want ErrUnknownCharacter", err)
+	}
+}
+
+func TestStoreReportsAnUnknownCharacterAsNotFound(t *testing.T) {
 	t.Parallel()
 
 	store, _ := openStore(t)
 
-	// Not an error, deliberately: a token this server never issued is a first
-	// connection, and the handshake mints a new identity for it.
-	rec, found, err := store.Load(testID(2))
+	rec, found, err := store.Load(CharacterID(0x1234_5678))
 	if err != nil {
-		t.Fatalf("Load of an unknown identity: %v", err)
+		t.Fatalf("Load of an unknown character: %v", err)
 	}
 	if found {
-		t.Fatal("an identity that was never saved was found")
+		t.Fatal("a character that was never created was found")
 	}
 	if rec != (Record{}) {
-		t.Errorf("a record came back for an unknown identity: %+v", rec)
+		t.Errorf("a record came back for an unknown character: %+v", rec)
 	}
 }
 
@@ -110,7 +169,6 @@ func TestStoreReportsAnUnknownIdentityAsNotFound(t *testing.T) {
 func TestStoreRefusesARecordItCannotReadExactly(t *testing.T) {
 	t.Parallel()
 
-	id := testID(3)
 	sound := encodeRecord(Record{Name: "Eivor", LastSeen: time.Unix(1_700_000_000, 0).UTC()})
 
 	damage := map[string]func([]byte) []byte{
@@ -149,19 +207,19 @@ func TestStoreRefusesARecordItCannotReadExactly(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			store, worldDir := openStore(t)
-			path := filepath.Join(worldDir, playersDirName, id.String()+recordFileExt)
-			if err := os.WriteFile(path, break_(sound), 0o600); err != nil {
+			store, _ := openStore(t)
+			character := newCharacter(t, store, testID(3), "Eivor")
+			if err := os.WriteFile(store.recordPath(character.ID), break_(sound), 0o600); err != nil {
 				t.Fatalf("writing the damaged record: %v", err)
 			}
 
-			_, found, err := store.Load(id)
+			_, found, err := store.Load(character.ID)
 			if !errors.Is(err, world.ErrCorruptStore) {
 				t.Fatalf("Load = %v, want ErrCorruptStore", err)
 			}
 			// The distinction that matters: unreadable is not "absent". Reported as
-			// absent, the handshake would mint a new identity whose teardown writes over
-			// the record nobody could read.
+			// absent, the session would start the character fresh and its teardown
+			// would write over the record nobody could read.
 			if found {
 				t.Error("a corrupt record was reported as found")
 			}
@@ -172,16 +230,15 @@ func TestStoreRefusesARecordItCannotReadExactly(t *testing.T) {
 func TestStoreRefusesAFileTooLargeToBeARecord(t *testing.T) {
 	t.Parallel()
 
-	store, worldDir := openStore(t)
-	id := testID(4)
-	path := filepath.Join(worldDir, playersDirName, id.String()+recordFileExt)
+	store, _ := openStore(t)
+	character := newCharacter(t, store, testID(4), "Eivor")
 
 	// Checked before the read, not after: finding this out by allocating it is how a
 	// corrupt directory becomes an out-of-memory.
-	if err := os.WriteFile(path, make([]byte, maxRecordSize+1), 0o600); err != nil {
+	if err := os.WriteFile(store.recordPath(character.ID), make([]byte, maxRecordSize+1), 0o600); err != nil {
 		t.Fatalf("writing the oversized record: %v", err)
 	}
-	if _, _, err := store.Load(id); !errors.Is(err, world.ErrCorruptStore) {
+	if _, _, err := store.Load(character.ID); !errors.Is(err, world.ErrCorruptStore) {
 		t.Fatalf("Load = %v, want ErrCorruptStore", err)
 	}
 }
@@ -197,9 +254,9 @@ func TestOpenStoreSweepsTemporaries(t *testing.T) {
 	dir := store.Dir()
 
 	// What a crash between the write and the rename leaves behind. Inert — a reader
-	// only ever opens an exact <id>.bin path — so this is housekeeping, and the
-	// housekeeping is the store's rather than an operator's.
-	leftover := filepath.Join(dir, testID(5).String()+recordFileExt+".tmp3141592")
+	// only ever opens an exact <character-id>.bin path — so this is housekeeping, and
+	// the housekeeping is the store's rather than an operator's.
+	leftover := filepath.Join(dir, CharacterID(0x51_92_af_00_11_22_33_44).String()+recordFileExt+".tmp3141592")
 	if err := os.WriteFile(leftover, []byte("half a record"), 0o600); err != nil {
 		t.Fatalf("writing the leftover: %v", err)
 	}
@@ -212,60 +269,30 @@ func TestOpenStoreSweepsTemporaries(t *testing.T) {
 	}
 }
 
-func TestSaveTruncatesALongNameAtARuneBoundary(t *testing.T) {
-	t.Parallel()
-
-	store, _ := openStore(t)
-
-	// Multi-byte runes chosen so the cap falls inside one: cutting there would store
-	// text that no longer decodes, from a name that was perfectly fine.
-	long := strings.Repeat("ᛁ", MaxNameBytes) // three bytes each
-	id := testID(6)
-	if err := store.Save(id, Record{Name: long, LastSeen: time.Unix(1, 0)}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, found, err := store.Load(id)
-	if err != nil || !found {
-		t.Fatalf("Load: %v (found %v)", err, found)
-	}
-	if len(got.Name) > MaxNameBytes {
-		t.Errorf("the stored name is %d bytes, past the %d cap", len(got.Name), MaxNameBytes)
-	}
-	if !utf8.ValidString(got.Name) {
-		t.Error("truncation cut through a rune and stored text that no longer decodes")
-	}
-	if !strings.HasPrefix(long, got.Name) {
-		t.Error("the stored name is not a prefix of the name given")
-	}
-	// A name that fits is stored whole — the cap must not shorten an ordinary name.
-	if err := store.Save(id, Record{Name: "Eivor"}); err != nil {
-		t.Fatalf("Save of a short name: %v", err)
-	}
-	if got, _, _ := store.Load(id); got.Name != "Eivor" {
-		t.Errorf("a short name came back as %q", got.Name)
-	}
-}
-
 func TestAnEphemeralWorldWritesNothing(t *testing.T) {
 	t.Parallel()
 
-	// The ephemeral world is a nil *Store, so that every persistence path is a no-op
-	// against one rather than a branch at each call site.
-	var store *Store
+	// The ephemeral world is a store with an index and no directory: the rules about
+	// names and allowances are the world's, and only the disk is missing.
+	store := NewMemoryStore()
 
 	if store.Dir() != "" {
-		t.Errorf("a nil store names a directory: %q", store.Dir())
+		t.Errorf("a memory store names a directory: %q", store.Dir())
 	}
-	if err := store.Save(testID(7), Record{Name: "Eivor", LastSeen: time.Now()}); err != nil {
-		t.Fatalf("Save on a nil store: %v", err)
+	character := newCharacter(t, store, testID(7), "Eivor")
+	if err := store.Save(character.ID, Record{LastSeen: time.Now(), Health: 100}); err != nil {
+		t.Fatalf("Save on a memory store: %v", err)
 	}
-	rec, found, err := store.Load(testID(7))
+	rec, found, err := store.Load(character.ID)
 	if err != nil {
-		t.Fatalf("Load on a nil store: %v", err)
+		t.Fatalf("Load on a memory store: %v", err)
 	}
 	if found || rec != (Record{}) {
-		t.Error("a nil store remembered something")
+		t.Error("a memory store remembered something")
+	}
+	// The rules still hold: the name is taken, by the account that took it.
+	if _, err := store.Create(testID(8), "eivor"); !errors.Is(err, ErrNameTaken) {
+		t.Errorf("a second account took the name on an ephemeral world: %v", err)
 	}
 
 	// And the world directory an ephemeral server was pointed at stays empty.
@@ -298,9 +325,10 @@ func TestARecordSurvivesReopening(t *testing.T) {
 		t.Fatalf("OpenStore: %v", err)
 	}
 
-	id := testID(8)
-	want := Record{Name: "Sigrun", LastSeen: time.Unix(1_600_000_000, 0).UTC()}
-	if err := store.Save(id, want); err != nil {
+	owner := testID(8)
+	character := newCharacter(t, store, owner, "Sigrun")
+	want := Record{LastSeen: time.Unix(1_600_000_000, 0).UTC(), Health: 77}
+	if err := store.Save(character.ID, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -308,17 +336,21 @@ func TestARecordSurvivesReopening(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-opening: %v", err)
 	}
-	got, found, err := reopened.Load(id)
+	got, found, err := reopened.Load(character.ID)
 	if err != nil || !found {
 		t.Fatalf("Load after reopening: %v (found %v)", err, found)
 	}
-	if got.Name != want.Name || !got.LastSeen.Equal(want.LastSeen) {
-		t.Errorf("the record came back as %+v, want %+v", got, want)
+	if got.Name != "Sigrun" || got.Owner != owner || !got.LastSeen.Equal(want.LastSeen) {
+		t.Errorf("the record came back as %+v, want Sigrun/%s/%s", got, owner.Short(), want.LastSeen)
+	}
+	// The index came back with it, rebuilt from the records and from nothing else.
+	if held := reopened.Characters(owner); len(held) != 1 || held[0].ID != character.ID {
+		t.Errorf("the reopened index holds %+v, want just %s", held, character.ID)
 	}
 }
 
-// TestStoreRoundTripsTheLife is the v2 half of the round trip: everything the record
-// gained, written and read back to the bit.
+// TestStoreRoundTripsTheLife is the life half of the round trip: everything the record
+// keeps about where a character stood, written and read back to the bit.
 //
 // The position is checked for exact equality rather than within a tolerance, and that
 // is the assertion. Position is a float64 on the way in and a float64 on the way out —
@@ -328,10 +360,9 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 	t.Parallel()
 
 	store, _ := openStore(t)
-	id := testID(7)
+	character := newCharacter(t, store, testID(7), "Eivor")
 
 	want := Record{
-		Name:     "Eivor",
 		LastSeen: time.Unix(1_700_000_000, 0).UTC(),
 		// Values a float32 could not hold exactly, so a narrowing anywhere in the
 		// format shows up as a failure rather than as a rounding nobody notices.
@@ -345,10 +376,10 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 	want.Slots[5] = protocol.InventoryStack{ItemID: 1, Count: 23}
 	want.Slots[protocol.InventorySlots-1] = protocol.InventoryStack{ItemID: 6, Count: 2}
 
-	if err := store.Save(id, want); err != nil {
+	if err := store.Save(character.ID, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	got, found, err := store.Load(id)
+	got, found, err := store.Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -405,15 +436,15 @@ func TestQuarantineKeepsTheRecordAndFreesThePath(t *testing.T) {
 	t.Parallel()
 
 	store, _ := openStore(t)
-	id := testID(8)
+	character := newCharacter(t, store, testID(8), "Eivor")
 
 	damaged := []byte("not a player record")
-	path := store.recordPath(id)
+	path := store.recordPath(character.ID)
 	if err := os.WriteFile(path, damaged, 0o600); err != nil {
 		t.Fatalf("writing the damaged record: %v", err)
 	}
 
-	aside, err := store.Quarantine(id)
+	aside, err := store.Quarantine(character.ID)
 	if err != nil {
 		t.Fatalf("Quarantine: %v", err)
 	}
@@ -427,17 +458,22 @@ func TestQuarantineKeepsTheRecordAndFreesThePath(t *testing.T) {
 	if string(kept) != string(damaged) {
 		t.Error("the bytes set aside are not the bytes that were there")
 	}
-	if _, _, err := store.Load(id); err != nil {
+	if _, _, err := store.Load(character.ID); err != nil {
 		t.Errorf("Load after Quarantine: %v, want the path to be free", err)
 	}
+	// The character itself survives: only its life is gone. Dropping it from the index
+	// would free a name a record on disk is still wearing.
+	if got, known := store.Character(character.ID); !known || got.Name != "Eivor" {
+		t.Errorf("quarantining a record took the character with it: %+v (known %v)", got, known)
+	}
 
-	// A second corrupt record for the same identity does not overwrite the first —
+	// A second corrupt record for the same character does not overwrite the first —
 	// which is the same silent overwrite this whole path exists to prevent, one turn
 	// further round.
 	if err := os.WriteFile(path, []byte("also not a record"), 0o600); err != nil {
 		t.Fatalf("writing the second damaged record: %v", err)
 	}
-	again, err := store.Quarantine(id)
+	again, err := store.Quarantine(character.ID)
 	if err != nil {
 		t.Fatalf("the second Quarantine: %v", err)
 	}
@@ -449,25 +485,41 @@ func TestQuarantineKeepsTheRecordAndFreesThePath(t *testing.T) {
 	}
 }
 
-// An ephemeral world keeps nothing, and every path is a no-op rather than a branch at
-// each call site.
+// A nil store keeps nothing, and every path is a no-op rather than a branch at each
+// call site. It is not the ephemeral world — NewMemoryStore is — but session hands one
+// in and this is what it costs.
 func TestANilStoreKeepsNothing(t *testing.T) {
 	t.Parallel()
 
 	var store *Store
+	id := CharacterID(0x9)
 
-	if err := store.Save(testID(9), Record{Name: "Eivor", Health: 100}); err != nil {
-		t.Errorf("Save on an ephemeral store: %v", err)
+	if err := store.Save(id, Record{Health: 100}); err != nil {
+		t.Errorf("Save on a nil store: %v", err)
 	}
-	rec, found, err := store.Load(testID(9))
+	rec, found, err := store.Load(id)
 	if err != nil {
-		t.Errorf("Load on an ephemeral store: %v", err)
+		t.Errorf("Load on a nil store: %v", err)
 	}
 	if found || rec != (Record{}) {
-		t.Error("an ephemeral store answered with a record")
+		t.Error("a nil store answered with a record")
 	}
-	aside, err := store.Quarantine(testID(9))
+	aside, err := store.Quarantine(id)
 	if err != nil || aside != "" {
-		t.Errorf("Quarantine on an ephemeral store = %q, %v; want the empty no-op", aside, err)
+		t.Errorf("Quarantine on a nil store = %q, %v; want the empty no-op", aside, err)
+	}
+	if store.Characters(testID(9)) != nil || store.Count() != 0 {
+		t.Error("a nil store holds characters")
+	}
+	if _, known := store.Character(id); known {
+		t.Error("a nil store knows a character")
+	}
+	if _, known := store.Named("Eivor"); known {
+		t.Error("a nil store knows a name")
+	}
+	// Create is the one method that is an error rather than a no-op: a caller that
+	// asked for a character and got the zero value would go on to save under id 0.
+	if _, err := store.Create(testID(9), "Eivor"); err == nil {
+		t.Error("a nil store minted a character")
 	}
 }

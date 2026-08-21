@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +132,12 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 
 	waitFor(t, "the player to join", func() bool { return first.sim.Count() == 1 })
 
+	// The character the handshake settled on. The record is keyed by it rather than by
+	// the account, which is the whole of #103 at this level: the simulation still keys a
+	// life by account — one live session per account — and the disk keys it by the
+	// character that lived it.
+	character := onlyCharacter(t, written, account)
+
 	// A pack change only the server could have decided, and a position only the
 	// simulation could have produced: the blade moved out of the slot every new player
 	// finds it in, and the settle every join begins with.
@@ -151,14 +162,19 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 	// mid-rename, and a poll that did that every millisecond would delete the write it
 	// was waiting for.
 	waitFor(t, "the record to be written", func() bool {
-		_, found, err := written.Load(id)
-		return err == nil && found
+		rec, found, err := written.Load(character.ID)
+		return err == nil && found && !rec.Unplayed()
 	})
 	stopFirst()
 
 	// Now that nothing is writing, a store opened afresh reads the same directory: this
-	// is the file a new process would find.
-	saved, found, err := openPlayerStore(t, dir).Load(id)
+	// is the file a new process would find, and its index is rebuilt from that file and
+	// from nothing else.
+	reopened := openPlayerStore(t, dir)
+	if again := onlyCharacter(t, reopened, account); again.ID != character.ID || again.Name != character.Name {
+		t.Fatalf("the reopened store holds %s/%q, want %s/%q", again.ID, again.Name, character.ID, character.Name)
+	}
+	saved, found, err := reopened.Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -232,21 +248,21 @@ func TestShutdownSavesASessionThatIsStillConnected(t *testing.T) {
 	cfg := livingWorldConfig()
 
 	conn := newScriptedConn("still-here")
-	srv, _ := persistentServer(t, newQueueTransport(conn), dir, cfg)
+	srv, players := persistentServer(t, newQueueTransport(conn), dir, cfg)
 	stop := start(t, srv)
 
 	account := testAccount(3)
-	id := testPlayerID(account)
 	conn.in <- helloFor(t, account)
 	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the session got %s, want a welcome", got)
 	}
 	waitFor(t, "the player to join", func() bool { return srv.sim.Count() == 1 })
+	character := onlyCharacter(t, players, account)
 
 	// Nothing closes the connection: the shutdown does, which is the whole point.
 	stop()
 
-	saved, found, err := openPlayerStore(t, dir).Load(id)
+	saved, found, err := openPlayerStore(t, dir).Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -281,20 +297,21 @@ func TestTheAutosaveWritesTheConnectedPlayers(t *testing.T) {
 	defer stop()
 
 	account := testAccount(4)
-	id := testPlayerID(account)
 	conn.in <- helloFor(t, account)
 	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the session got %s, want a welcome", got)
 	}
+	character := onlyCharacter(t, players, account)
 
 	// No disconnect and no shutdown: the record has to appear entirely on the
-	// autosave's account.
+	// autosave's account — so an unplayed record, which is what the character was
+	// created with, does not count as one.
 	waitFor(t, "the autosave to write the connected player", func() bool {
-		_, found, err := players.Load(id)
-		return err == nil && found
+		rec, found, err := players.Load(character.ID)
+		return err == nil && found && !rec.Unplayed()
 	})
 
-	saved, _, err := players.Load(id)
+	saved, _, err := players.Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -743,5 +760,145 @@ func TestAnEphemeralWorldKeepsItsClockInMemoryOnly(t *testing.T) {
 	sim.Step(1)
 	if got := sim.TickOfDay(); got != 1 {
 		t.Errorf("an ephemeral world's clock reads %d after one tick, want 1", got)
+	}
+}
+
+// TestEveryCharacterSurvivesARestart is the multi-character half of the restart, at the
+// level a player experiences it: three characters on one account, each standing
+// somewhere different, and a process that stops and starts between them.
+//
+// **Everything crosses the disk, index included.** The second server shares nothing with
+// the first but the directory — and the character index is rebuilt from the records
+// there and from nothing else, so a character that could not be found afterwards is a
+// character this world has lost.
+func TestEveryCharacterSurvivesARestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := livingWorldConfig()
+	account, neighbour := testAccount(5), testAccount(6)
+
+	// ---- three characters, each somewhere of its own -------------------------
+
+	seeded := map[string][3]float64{
+		"Eivor":  {12.5, 66, -8.5},
+		"Sigrun": {-40.5, 68, 21.5},
+		"Halvar": {103.5, 70, 55.5},
+	}
+	ids := make(map[string]persist.CharacterID, len(seeded))
+	{
+		store := openPlayerStore(t, dir)
+		for name, pos := range seeded {
+			character, err := store.Create(testPlayerID(account), name)
+			if err != nil {
+				t.Fatalf("Create(%q): %v", name, err)
+			}
+			ids[name] = character.ID
+			if err := store.Save(character.ID, persist.Record{
+				LastSeen: time.Unix(1, 0),
+				Pos:      pos,
+				Health:   game.PlayerMaxHealth,
+			}); err != nil {
+				t.Fatalf("seeding %q: %v", name, err)
+			}
+		}
+		// Somebody else's character, so "every character came back" cannot pass by
+		// coming back with everything to everybody.
+		if _, err := store.Create(testPlayerID(neighbour), "Bjorn"); err != nil {
+			t.Fatalf("Create for the neighbour: %v", err)
+		}
+	}
+
+	// ---- the restart: a process that has never seen any of them --------------
+
+	conn := newScriptedConn("after")
+	srv, players := persistentServer(t, newQueueTransport(conn), dir, cfg)
+	stop := start(t, srv)
+	defer stop()
+
+	// The index came back whole, and it came back with the owners intact.
+	held := players.Characters(testPlayerID(account))
+	if len(held) != len(seeded) {
+		t.Fatalf("the account holds %d characters after the restart, want %d", len(held), len(seeded))
+	}
+	for _, character := range held {
+		if ids[character.Name] != character.ID {
+			t.Errorf("%q came back as %s, want %s", character.Name, character.ID, ids[character.Name])
+		}
+		if character.Owner != testPlayerID(account) {
+			t.Errorf("%q came back owned by %s", character.Name, character.Owner.Short())
+		}
+	}
+	for _, character := range players.Characters(testPlayerID(neighbour)) {
+		if _, mine := seeded[character.Name]; mine {
+			t.Errorf("the neighbour came back holding %q", character.Name)
+		}
+	}
+
+	// And the one the hello names is the one that plays, standing where it stood. The
+	// welcome's spawn is the assertion, because it is built before any tick can move
+	// anybody.
+	conn.in <- helloAsking(t, account, "Sigrun")
+	spawn := welcomeOf(t, firstReply(t, conn)).Spawn(nil)
+	if spawn == nil {
+		t.Fatal("the welcome carries no spawn")
+	}
+	want := seeded["Sigrun"]
+	got := [3]float32{spawn.X(), spawn.Y(), spawn.Z()}
+	if got != ([3]float32{float32(want[0]), float32(want[1]), float32(want[2])}) {
+		t.Errorf("the welcome's spawn is %v, want Sigrun's %v", got, want)
+	}
+	if got == cfg.Spawn {
+		t.Fatal("Sigrun's position is the world spawn, so this assertion proves nothing")
+	}
+}
+
+// TestAPreCharacterPlayersDirectoryIsSetAsideOnStart is the set-aside at the level an
+// operator meets it: the directory a build before characters wrote is kept whole, a
+// fresh one is opened beside it, and the server starts with no characters at all.
+//
+// No migration runs and none exists. A v2 record names a player by the hash of their
+// account and cannot say which character it was, so there is nothing to convert — what
+// there is, is a directory somebody can copy away and read at their leisure.
+func TestAPreCharacterPlayersDirectoryIsSetAsideOnStart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	players := filepath.Join(dir, "players")
+	if err := os.MkdirAll(players, 0o755); err != nil {
+		t.Fatalf("creating the old players directory: %v", err)
+	}
+
+	// A record with this server's magic and the format version before this one, which
+	// is what a build before characters left behind.
+	old := make([]byte, 40)
+	copy(old[0:4], []byte("VXHP"))
+	binary.LittleEndian.PutUint32(old[4:8], persist.StoreVersion-1)
+	name := strings.Repeat("ab", 32) + ".bin"
+	if err := os.WriteFile(filepath.Join(players, name), old, 0o600); err != nil {
+		t.Fatalf("writing the old record: %v", err)
+	}
+
+	store, err := openPlayers(options{worldDir: dir}, discard())
+	if err != nil {
+		t.Fatalf("openPlayers: %v", err)
+	}
+	if store.Count() != 0 {
+		t.Errorf("the server started with %d characters, want none", store.Count())
+	}
+	if _, err := os.Stat(filepath.Join(players, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the old record is still where this build would read it: %v", err)
+	}
+
+	aside := store.SetAside()
+	if aside == "" {
+		t.Fatal("nothing was reported as set aside")
+	}
+	kept, err := os.ReadFile(filepath.Join(aside, name))
+	if err != nil {
+		t.Fatalf("the old record was not kept: %v", err)
+	}
+	if !bytes.Equal(kept, old) {
+		t.Error("the old record was changed on the way aside")
 	}
 }

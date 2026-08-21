@@ -62,7 +62,7 @@ service's public key before it can let anybody in — and it reads that key once
 
 ```bash
 # terminal 1 — the account service (listens on 127.0.0.1:7778)
-cd server && go run ./cmd/voxelheim-auth -auth-dir ./authdata \
+cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth \
   -discord-client-id <your Discord application's client id>
 
 # terminal 2 — the game server
@@ -73,6 +73,12 @@ cd server && go run ./cmd/voxelheimd \
 cd client && cargo run --release -- \
   --account-service http://127.0.0.1:7778 --server 127.0.0.1:7777 --world midgard
 ```
+
+**`-auth-dir` is deliberately outside the checkout above.** It holds the account service's
+Ed25519 signing key, and its own default (`auth`) resolves against the working directory — so
+running that command from `server/` puts a private key inside this repository, one `git add -A`
+away from a public commit. `.gitignore` covers the default and the two key file names for that
+reason, and the path here points somewhere a mistake cannot reach.
 
 **The client needs all three of those flags on this path, and none of them has a default that
 would do.** A server admits a player on a signed ticket and nothing else, so a client with no
