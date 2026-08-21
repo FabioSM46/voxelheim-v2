@@ -575,6 +575,11 @@ func TestALeftoverTemporaryFileIsIgnoredAndSweptUp(t *testing.T) {
 func unopenableDir(t *testing.T) string {
 	t.Helper()
 
+	// Both skips compile on every GOOS, and the order between them does not matter:
+	// os.Geteuid is declared in os/proc.go with no build constraint and returns -1 on
+	// Windows, so the root check cannot fire there and control falls through to the one
+	// that is meant to. Said here because it reads like a Unix-only symbol and was
+	// reported as one; `GOOS=windows go vet ./...` type-checks this file and settles it.
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory permissions this test relies on")
 	}
