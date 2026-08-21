@@ -207,10 +207,13 @@ impl Handshake {
     /// before the list has arrived is this client's own bug and not a peer's, and there
     /// is nothing to end a connection over: the server will refuse the frame in the terms
     /// it chooses, which is the answer a player should read.
-    pub fn chose(&mut self) {
-        if self.phase == Phase::Choosing {
-            self.phase = Phase::AwaitingWelcome;
+    #[must_use = "a choice made outside the phase must never reach the socket"]
+    pub fn chose(&mut self) -> bool {
+        if self.phase != Phase::Choosing {
+            return false;
         }
+        self.phase = Phase::AwaitingWelcome;
+        true
     }
 
     /// Feeds the handshake one decoded message.
@@ -393,7 +396,10 @@ mod tests {
         let mut handshake = Handshake::new();
         let admitted = handshake.apply(Message::CharacterList(character_list()));
         assert!(matches!(admitted, Ok(Transition::Characters(_))));
-        handshake.chose();
+        assert!(
+            handshake.chose(),
+            "a list had arrived, so a choice is legal"
+        );
         let welcomed = handshake.apply(Message::Welcome(params()));
         assert_eq!(welcomed, Ok(Transition::Established(params())));
         handshake
@@ -419,7 +425,7 @@ mod tests {
         assert_eq!(handshake.phase(), Phase::Choosing);
         assert!(!handshake.established(), "choosing is not playing");
 
-        handshake.chose();
+        assert!(handshake.chose(), "the phase was waiting for exactly this");
         assert_eq!(handshake.phase(), Phase::AwaitingWelcome);
         assert!(!handshake.established(), "asking is not playing either");
 
@@ -585,7 +591,7 @@ mod tests {
         ] {
             let mut handshake = Handshake::new();
             let _ = handshake.apply(Message::CharacterList(character_list()));
-            handshake.chose();
+            assert!(handshake.chose());
             let _ = handshake.apply(Message::Welcome(params_with_clock()));
             let snapshot = Snapshot {
                 tick_of_day,
@@ -861,7 +867,7 @@ mod tests {
 
         let mut asked = Handshake::new();
         let _ = asked.apply(Message::CharacterList(character_list()));
-        asked.chose();
+        assert!(asked.chose());
         assert_eq!(
             asked.apply(Message::CharacterList(character_list())),
             Err(HandshakeError::Repeated("ServerCharacterList"))
@@ -910,21 +916,34 @@ mod tests {
         );
     }
 
-    /// A choice sent in a phase that is not waiting for one moves nothing.
+    /// A choice sent in a phase that is not waiting for one moves nothing, **and says
+    /// so**, which is the half `net/session.rs` needs.
     ///
-    /// It cannot happen through `net/mod.rs`, which only sends one while the exchange is
-    /// live — and it is a no-op rather than a panic or an error because this client
-    /// getting its own state wrong is not a reason to end a connection the *server* is
-    /// still following.
+    /// It is a no-op rather than a panic or an error because this client getting its own
+    /// state wrong is not a reason to end a connection the *server* is still following.
+    /// But the answer is load-bearing: the session thread writes the selection frame only
+    /// when this returns `true`, because after `Established` the writer thread owns that
+    /// socket and a second writer is what `transport.Conn` does not survive.
     #[test]
-    fn a_choice_outside_the_phase_changes_nothing() {
+    fn a_choice_outside_the_phase_changes_nothing_and_says_so() {
         let mut fresh = Handshake::new();
-        fresh.chose();
+        assert!(
+            !fresh.chose(),
+            "no list has arrived, so there is nothing to answer"
+        );
         assert_eq!(fresh.phase(), Phase::AwaitingCharacters);
 
         let mut live = established();
-        live.chose();
+        assert!(!live.chose(), "this session has a character already");
         assert_eq!(live.phase(), Phase::Established);
+
+        // And twice in the one phase that accepts a choice: the second is refused, which
+        // is what keeps a double press off the wire even if one reached this far.
+        let mut once = Handshake::new();
+        let _ = once.apply(Message::CharacterList(character_list()));
+        assert!(once.chose());
+        assert!(!once.chose(), "a second choice is not a choice");
+        assert_eq!(once.phase(), Phase::AwaitingWelcome);
     }
 
     /// After the welcome the character phase is over: this session has a character,
