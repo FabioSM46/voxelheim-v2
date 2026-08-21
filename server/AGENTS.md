@@ -29,6 +29,7 @@ validation to get wrong.
 | `internal/certs` | the server's own TLS certificate: generated once, kept under the world directory | implement any cryptography |
 | `internal/persist` | the player store under `<world-dir>/players/`, the camp in `<world-dir>/structures.bin`, and the world's time of day in `<world-dir>/clock.bin` | be imported by `game` |
 | `internal/auth` | the account store under `<auth-dir>/accounts/`: who a person is, never how they prove it | be imported by anything but `cmd/voxelheim-auth` |
+| `internal/discord` | the Discord sign-in: OAuth 2.0 Authorization Code with PKCE, and the sign-ins in flight | import anything of ours, or keep anything the provider hands it |
 | `gen/` | flatc output | be hand-edited, ever |
 
 The dependency direction is one-way: `game` and `session` depend on `protocol`, `transport` and
@@ -1073,6 +1074,82 @@ simulation uses.
   than becoming a silent 33465. A named port is refused too — `:htpt` is a typo far more often
   than it is a service name, and a machine whose `/etc/services` differs is a machine where the
   same flag binds somewhere else.
+
+## Signing in with Discord, and the secret that does not exist
+
+`internal/discord` runs OAuth 2.0 Authorization Code with PKCE as a **public client**, and
+`cmd/voxelheim-auth/signin.go` is the one file where the identity it produces meets the store
+that records it. Two routes, `POST /v1/signin/discord/start` and
+`POST /v1/signin/discord/finish`.
+
+- **There is no client secret, and there is nowhere for one to come from.** `discord.Config`
+  has no field for it and no call sends one; PKCE is what stands in for it. The verifier is
+  minted here and never leaves the process — only its SHA-256 goes to the authorize endpoint —
+  so a code intercepted on the way back cannot be redeemed by whoever intercepted it. A secret
+  shipped to players is not a secret, which is the whole reason the flow is shaped this way.
+- **The redirect lands on the player's machine.** The client opens the authorize URL in a
+  browser and catches the redirect on a loopback listener of its own, which is why this service
+  needs no public callback URL and why the flow works behind a home router. `-discord-redirect-uri`
+  names that address; nothing here ever binds it.
+- **The state is consumed before the provider is called**, which is the "a code may be redeemed
+  once" rule and this service's rather than Discord's. Taking it afterwards would leave a window
+  in which two requests carrying one state both found the verifier, and would leave a state
+  usable for a replay after a provider call that failed halfway. The honest cost is that a
+  transient failure means starting again — a refusal that says so, rather than a sign-in that
+  half-succeeded.
+- **Unknown, expired and already-redeemed are one answer.** An error that distinguished them
+  would tell whoever is guessing which guesses are getting warmer. Nothing compares a state byte
+  by byte either: it is a map key and the lookup is the whole of the check, which is the shape
+  `internal/identity` resolves a token in.
+- **Nothing from the provider is logged, and most of it is never even decoded.** `refresh_token`,
+  `expires_in`, `scope` and `email` have no field in the two response structs, so there is no
+  value for anything to leak — the scope asked for is `identify`, and the struct agrees with it.
+  What *is* held is `discord.Secret`, which redacts through fmt, through log/slog **and** through
+  encoding/json. The third is the addition to `identity.Token`'s two: a `Secret` is a string, so
+  a struct holding one is something `encoding/json` would otherwise write out verbatim. A
+  provider's response body is a third party's text, so a refusal names the HTTP status and
+  nothing from the body — and the JSON decode error on the request body is deliberately not
+  logged either, because that body carries an authorization code.
+  `TestNothingFromTheProviderReachesTheLog` drives a whole sign-in plus every refusal through
+  both handlers and looks for each value in hex, base64, base64url and raw — the Discord user id
+  and the display name included, which are personal data rather than credentials.
+- **A refusal, never a half-succeeded sign-in.** Four sentinels — `ErrNoSuchSignIn`,
+  `ErrRejected`, `ErrProviderUnavailable`, `ErrTooManyPending` — and none of them returns an
+  identity, so the account store is only ever reached after somebody has actually proved who they
+  are. The provider is asked first and `auth.Store.Ensure` second, and every refusal test asserts
+  the accounts directory is still empty rather than trusting that it is. The 4xx/5xx split at the
+  token endpoint is the difference between "this sign-in is not valid" and "ask again later";
+  429 is the exception, because being rate-limited says nothing about the code. Every failure at
+  the *identity* endpoint is the provider's, a 401 included: the token it is refusing is one it
+  issued seconds ago.
+- **The endpoints are struct fields, not constants**, which is what lets every test point the
+  flow at an `httptest.Server`. A test that reached the real Discord would be a test of somebody
+  else's uptime. The fakes compute the S256 challenge from RFC 7636's formula spelled out at the
+  call site rather than by calling `challengeFor` — a fake that borrowed the code under test
+  would agree with a wrong one — and `TestTheChallengeIsTheRFC7636Transformation` pins that
+  function to appendix B's vector.
+- **`-discord-client-id` empty is "not configured", not an error.** A Discord application is
+  something an operator registers and this service cannot invent, so refusing to start without
+  one would mean the account service could not run at all — including in every test that is
+  about the store, the port or the health probe. The routes exist either way and answer 503
+  `sign_in_not_configured`, which is a service that says what is missing rather than one that is
+  silently absent. A client id *with* an unusable redirect URI is a real misconfiguration and
+  refuses **before the port is bound**, in the order the store already does.
+- **The pending table is capped and swept.** The start endpoint is unauthenticated by
+  construction — a sign-in is how somebody becomes known, so there is nobody to authenticate yet
+  — which makes an uncapped table a way to spend this service's memory for the price of an HTTP
+  request. The sweep runs on insert rather than on a timer, because that is the only place the
+  table grows, and the cap is checked after it so a table full of expired entries is not a
+  refusal.
+- **The account's display name is the one recorded at creation.** `auth.Store.Ensure` returns a
+  found account exactly as stored and hands the write-through decision to this flow; this flow
+  declines it for now. Comparing a fresh name against a stored one needs `auth.truncateName`,
+  which is unexported, and comparing untruncated would write on every sign-in for any name past
+  the 64-byte cap. Refreshing it is a change to `internal/auth`'s surface and belongs to the
+  issue that wants it.
+- **The access token is dropped, and no attempt is made to revoke it.** This service asks Discord
+  who somebody is once and has no further use for the answer. Revocation would be a fourth call
+  to a provider that has already answered, on a token that expires on its own.
 
 ## Generated bindings
 

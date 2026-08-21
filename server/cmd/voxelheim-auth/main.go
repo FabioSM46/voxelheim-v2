@@ -7,10 +7,13 @@
 // must not; the two are separate trust domains that happen to ship together, and
 // internal/auth's imports_test.go is what says so.
 //
-// What this command deliberately does not do yet: talk to any identity provider,
-// issue any ticket, or hold any signing key. It stands the service up and gives it
-// somewhere to keep accounts. Every one of those is its own issue, and each arrives
-// with the route that needs it.
+// It signs people in with the Discord account they already have — OAuth 2.0
+// Authorization Code with PKCE, as a public client, so there is no client secret here
+// or in anything shipped to a player. internal/discord runs that flow and internal/auth
+// records what it produces; signin.go is the one file that joins them.
+//
+// What this command deliberately does not do yet: issue any ticket, or hold any signing
+// key. Both are their own issue, and each arrives with the route that needs it.
 package main
 
 import (
@@ -75,10 +78,12 @@ func main() {
 }
 
 type options struct {
-	listen    string
-	authDir   string
-	logLevel  string
-	logFormat string
+	listen             string
+	authDir            string
+	discordClientID    string
+	discordRedirectURI string
+	logLevel           string
+	logFormat          string
 }
 
 func parseFlags() options {
@@ -91,6 +96,14 @@ func parseFlags() options {
 	flag.StringVar(&opts.authDir, "auth-dir", auth.DefaultAuthDir,
 		"directory the accounts are stored in; unlike the game server's -world-dir there is no empty, "+
 			"ephemeral form of this, because an account nobody kept is a person who cannot get back in")
+	// A public client's id, which is public: PKCE is what stands in for a secret, and
+	// there is no flag for one because there is no secret to give. Left empty, the
+	// sign-in routes answer 503 rather than the service refusing to start — see
+	// newSignIn.
+	flag.StringVar(&opts.discordClientID, "discord-client-id", "",
+		"the Discord application's client id; empty leaves Discord sign-in unconfigured and its routes refusing")
+	flag.StringVar(&opts.discordRedirectURI, "discord-redirect-uri", defaultDiscordRedirectURI,
+		"where Discord sends the browser back to; a loopback address on the player's machine, not on this service")
 	flag.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
 	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
 	flag.Parse()
@@ -171,12 +184,20 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	}
 	log.Info("account store opened", "accounts_dir", accounts.Dir(), "format_version", auth.StoreVersion)
 
+	// Before the listener as well, and for the reason the store is: a redirect URI that
+	// is not a URL is a configuration this service cannot act on, and discovering it
+	// after the port is bound and the probes are answering is worse.
+	signin, err := newSignIn(opts, accounts, log)
+	if err != nil {
+		return fmt.Errorf("configuring Discord sign-in: %w", err)
+	}
+
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", opts.listen, err)
 	}
 
-	svc := &service{log: log}
+	svc := &service{log: log, signin: signin}
 
 	// The address the listener actually bound rather than the one that was asked for,
 	// which is the only way `-listen 127.0.0.1:0` tells anybody where it went.
@@ -190,6 +211,10 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 // over a listener the test owns instead of only through a signal and a real port.
 type service struct {
 	log *slog.Logger
+
+	// signin is the Discord sign-in, and nil when this deployment has not been given a
+	// Discord application. The routes exist either way — see newSignIn.
+	signin *signIn
 }
 
 // route is one entry in this service's surface.
@@ -213,6 +238,8 @@ type route struct {
 func (s *service) routes() []route {
 	return []route{
 		{pattern: "GET /healthz", handler: s.health},
+		{pattern: "POST /v1/signin/discord/start", handler: s.signInStart},
+		{pattern: "POST /v1/signin/discord/finish", handler: s.signInFinish},
 	}
 }
 
