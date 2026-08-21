@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -560,6 +562,108 @@ func TestALeftoverTemporaryFileIsIgnoredAndSweptUp(t *testing.T) {
 	}
 	if files := chunkFiles(t, store); len(files) != 1 {
 		t.Errorf("the chunk directory holds %v, want only the chunk file", files)
+	}
+}
+
+// A directory this process may write to and search, but not open — which is exactly the
+// set of permissions that lets a temporary file be created and renamed into place and
+// then fails the directory flush. It is the only way to reach that branch from a test:
+// the alternative is a machine to pull the power out of.
+//
+// Restored before the test ends, because t.TempDir cannot remove what it cannot read.
+// Cleanups run last-registered-first, so this one runs before that one.
+func unopenableDir(t *testing.T) string {
+	t.Helper()
+
+	// Both skips compile on every GOOS, and the order between them does not matter:
+	// os.Geteuid is declared in os/proc.go with no build constraint and returns -1 on
+	// Windows, so the root check cannot fire there and control falls through to the one
+	// that is meant to. Said here because it reads like a Unix-only symbol and was
+	// reported as one; `GOOS=windows go vet ./...` type-checks this file and settles it.
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("the directory flush is a POSIX guarantee; syncDir is a documented no-op here")
+	}
+
+	dir := filepath.Join(t.TempDir(), "store")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	return dir
+}
+
+// The property temp-and-rename does not have on its own: a rename WriteAtomic reported as
+// successful is one a power loss cannot undo. A crash is not something a test can arrange,
+// so what is pinned is the mechanism — the parent directory is opened after the rename,
+// and a failure to open it reaches the caller instead of being dropped.
+//
+// Delete the syncDir call from WriteAtomic and this test fails on its first assertion,
+// because the write then succeeds; swallow its error and it fails on the same line.
+//
+// What this deliberately does not pin is the fsync itself. Flushing a directory has no
+// effect any process can observe — that is the entire point of it — so the test's reach
+// ends at the handle, and the flush is the kernel's half of the contract.
+func TestAnAtomicWriteFlushesTheDirectoryEntryItJustCreated(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(unopenableDir(t), worldFileName)
+
+	err := WriteAtomic(path, []byte("the durable one"))
+	if err == nil {
+		t.Fatal("WriteAtomic reported success without being able to flush the directory entry")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("WriteAtomic returned %v, want the directory flush's permission error", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the error is %q, which does not name %s", err, path)
+	}
+}
+
+// What that reported failure means for the write underneath it: the file is there.
+//
+// The rename has already happened and the previous contents are already gone, so
+// un-renaming would trade a doubt about durability for certain data loss. The error says
+// the true thing instead — this may not survive a power loss — and the answer to it is to
+// write again, which is what every caller of this function already does with an error.
+func TestADirectoryFlushThatFailedStillLeavesTheFileItRenamed(t *testing.T) {
+	t.Parallel()
+
+	dir := unopenableDir(t)
+	path := filepath.Join(dir, worldFileName)
+	want := []byte("landed, and not promised")
+
+	if err := WriteAtomic(path, want); err == nil {
+		t.Fatal("WriteAtomic reported success without being able to flush the directory entry")
+	}
+
+	// Search permission is enough to reach a name already known, which is why the file
+	// can be read out of a directory that cannot be opened.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the file WriteAtomic renamed into place cannot be read back: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("the file holds %q, want the data of the write that reported failure", got)
+	}
+
+	// Nor is there a leftover to sweep: the temporary file *became* the destination, so
+	// the cleanup that removes it must not run once the rename has succeeded.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, tempFileGlob))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(leftovers) != 0 {
+		t.Errorf("the failed flush left %v behind", leftovers)
 	}
 }
 
