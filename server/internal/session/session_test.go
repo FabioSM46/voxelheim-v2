@@ -184,8 +184,89 @@ func testTicketAt(account ticket.AccountID, now time.Time) []byte {
 	return minted[:]
 }
 
+// testAppearance is a face the contract allows: every colour inside 0x00RRGGBB and a
+// hair model that is a real member.
+//
+// Every path that stores an appearance or plays one checks it — the creation gate, the
+// startup scan and game.Sim.Join — so a fixture that skipped it would be testing the
+// refusal rather than the thing it meant to.
+func testAppearance() protocol.Appearance {
+	return protocol.Appearance{
+		SkinColor:     0x00E3C4A0,
+		ShirtColor:    0x004A5D3B,
+		TrousersColor: 0x002B2118,
+		ShoesColor:    0x00553311,
+		HairModel:     vnet.HairModelBraided,
+		HairColor:     0x00B07A32,
+	}
+}
+
+// chooseCharacter answers the character list a session has just been sent: it selects
+// the first character the account holds, or creates one under name when it holds none.
+//
+// **Every test that drives a whole Serve goes through this**, because a welcome no
+// longer answers a hello — schemas/handshake.fbs puts a choice between them. What the
+// tests about the phase itself do instead is send the two requests by hand.
+func chooseCharacter(t *testing.T, conn *fakeConn, name string) {
+	t.Helper()
+
+	list := characterList(t, nextFrame(t, conn))
+	if list.CharactersLength() == 0 {
+		conn.in <- protocol.EncodeCreateCharacterRequest(protocol.CreateCharacterRequest{
+			Name: name, Appearance: testAppearance(), HasAppearance: true,
+		})
+		return
+	}
+
+	var first vnet.CharacterSummary
+	if !list.Characters(&first, 0) {
+		t.Fatal("the character list says it holds a character and does not carry one")
+	}
+	conn.in <- protocol.EncodeSelectCharacterRequest(protocol.SelectCharacterRequest{
+		CharacterID: first.CharacterId(),
+	})
+}
+
+// createCharacter answers the character list without reading it: the choice goes into
+// the connection's queue behind the hello, and the server reads it when it reaches the
+// phase that is waiting for one.
+//
+// **The blind half of the pair above, and most Serve tests need it.** They drain their
+// outbound frames from a goroutine — a collector, or a loop that throws them away — so a
+// helper that read the list itself would be racing that goroutine for it and would
+// simply block. It can only ever create, because selecting needs an id only the list
+// carries; every test that uses it is admitted through an ephemeral claim set, whose
+// store starts empty, so a creation is the only move available anyway.
+func createCharacter(conn *fakeConn, name string) {
+	conn.in <- creation(name)
+}
+
+// characterList reads the frame a hello is answered with, failing the test when it is
+// anything else — which is the assertion every caller would otherwise write.
+func characterList(t *testing.T, frame []byte) *vnet.ServerCharacterList {
+	t.Helper()
+
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	if env.PayloadType() != vnet.PayloadServerCharacterList {
+		t.Fatalf("the answer to a hello is %s, want %s", env.PayloadType(), vnet.PayloadServerCharacterList)
+	}
+	table := payloadTable(t, env)
+	list := new(vnet.ServerCharacterList)
+	list.Init(table.Bytes, table.Pos)
+	return list
+}
+
 // hello is the frame a client holding a valid ticket for testAccount(seed) sends.
 func hello(seed byte) []byte { return helloNamed("Eivor", seed) }
+
+// creation is the frame a client sends to make a character and play it. The bytes
+// [createCharacter] queues, for the tests that write to a socket rather than to a
+// channel.
+func creation(name string) []byte {
+	return protocol.EncodeCreateCharacterRequest(protocol.CreateCharacterRequest{
+		Name: name, Appearance: testAppearance(), HasAppearance: true,
+	})
+}
 
 // helloNamed is hello under a chosen display name, for the tests that assert on one.
 func helloNamed(name string, seed byte) []byte {
@@ -405,7 +486,7 @@ func nextFrame(t *testing.T, conn *fakeConn) []byte {
 	}
 }
 
-func TestHandshake(t *testing.T) {
+func TestWelcome(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig()
@@ -413,16 +494,8 @@ func TestHandshake(t *testing.T) {
 	t.Run("a matching version is admitted with the server's parameters", func(t *testing.T) {
 		t.Parallel()
 
-		msg, err := protocol.Decode(protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor"))
-		if err != nil {
-			t.Fatalf("Decode: %v", err)
-		}
-
 		account := testAccount(1)
-		reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{ID: testPlayerID(account)})
-		if !accepted {
-			t.Fatal("a current-version hello was refused")
-		}
+		reply := session.Welcome(cfg, 7, session.Resolved{ID: testPlayerID(account)})
 
 		env := vnet.GetRootAsEnvelope(reply, 0)
 		if env.PayloadType() != vnet.PayloadServerWelcome {
@@ -488,15 +561,7 @@ func TestHandshake(t *testing.T) {
 	t.Run("the announced clock satisfies the contract's ordering", func(t *testing.T) {
 		t.Parallel()
 
-		msg, err := protocol.Decode(protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor"))
-		if err != nil {
-			t.Fatalf("Decode: %v", err)
-		}
-
-		reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{ID: testPlayerID(testAccount(1))})
-		if !accepted {
-			t.Fatal("a current-version hello was refused")
-		}
+		reply := session.Welcome(cfg, 7, session.Resolved{ID: testPlayerID(testAccount(1))})
 
 		welcome := welcomeFrom(t, vnet.GetRootAsEnvelope(reply, 0))
 		day, start, end := welcome.DayLengthTicks(), welcome.NightStartTicks(), welcome.NightEndTicks()
@@ -519,57 +584,6 @@ func TestHandshake(t *testing.T) {
 		}
 	})
 
-	refusals := map[string]struct {
-		frame  []byte
-		reason vnet.RejectReason
-	}{
-		// A hello with no version field decodes as Unknown, so the version check is
-		// what catches it — the absent case and the wrong case share one path.
-		"absent version": {
-			frame:  protocol.EncodeClientHello(vnet.ProtocolVersionUnknown, ""),
-			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
-		},
-		"future version": {
-			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(99), "Eivor"),
-			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
-		},
-		// The point of the V3 break, named rather than left to the general case: a V2
-		// client's snapshots would carry no vitals and its inventory no durability, and
-		// the handshake is where that has to be discovered. Mid-session it is a decode
-		// error on a connection both sides thought was healthy.
-		"the previous protocol": {
-			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(2), "Eivor"),
-			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
-		},
-		"first message is not a hello": {
-			frame:  protocol.EncodeServerWelcome(protocol.Welcome{TickRate: 20, ChunkSize: 32}),
-			reason: vnet.RejectReasonBAD_REQUEST,
-		},
-	}
-
-	for name, tc := range refusals {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			msg, err := protocol.Decode(tc.frame)
-			if err != nil {
-				t.Fatalf("Decode: %v", err)
-			}
-
-			reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{ID: testPlayerID(testAccount(1))})
-			if accepted {
-				t.Fatal("the handshake was accepted")
-			}
-
-			env := vnet.GetRootAsEnvelope(reply, 0)
-			if env.PayloadType() != vnet.PayloadServerReject {
-				t.Fatalf("reply is %s, want %s", env.PayloadType(), vnet.PayloadServerReject)
-			}
-			if got := rejectFrom(t, env).Reason(); got != tc.reason {
-				t.Errorf("Reason = %s, want %s", got, tc.reason)
-			}
-		})
-	}
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -617,6 +631,7 @@ func TestServeAdmitsAndAcceptsInput(t *testing.T) {
 	}()
 
 	conn.in <- hello(1)
+	chooseCharacter(t, conn, "Eivor")
 	env := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0)
 	if env.PayloadType() != vnet.PayloadServerWelcome {
 		t.Fatalf("first reply is %s, want %s", env.PayloadType(), vnet.PayloadServerWelcome)
@@ -777,6 +792,7 @@ func TestServeEndsWhenClientSendsAServerPayload(t *testing.T) {
 	}()
 
 	conn.in <- hello(1)
+	chooseCharacter(t, conn, "Eivor")
 	_ = nextFrame(t, conn) // the welcome
 	conn.in <- protocol.EncodeServerWelcome(protocol.Welcome{TickRate: 20, ChunkSize: 32})
 
@@ -914,6 +930,7 @@ func TestServeEndsAnIdleSessionCleanly(t *testing.T) {
 	}()
 
 	conn.in <- hello(1)
+	chooseCharacter(t, conn, "Eivor")
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("first reply is %s, want %s", got, vnet.PayloadServerWelcome)
 	}
@@ -971,6 +988,7 @@ func TestServeKeepsASessionThatKeepsTalking(t *testing.T) {
 	}()
 
 	conn.in <- hello(1)
+	chooseCharacter(t, conn, "Eivor")
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("first reply is %s, want %s", got, vnet.PayloadServerWelcome)
 	}
@@ -1020,13 +1038,32 @@ func TestTimeoutsValidate(t *testing.T) {
 		t.Fatalf("the defaults are invalid: %v", err)
 	}
 
+	// A policy every field of which is set, so that each case below is refused for the
+	// one thing it changes rather than for a field it forgot.
+	sound := session.Timeouts{
+		Handshake: 5 * time.Second,
+		Character: 2 * time.Minute,
+		Idle:      20 * time.Second,
+	}
+	without := func(change func(*session.Timeouts)) session.Timeouts {
+		broken := sound
+		change(&broken)
+		return broken
+	}
+
 	refused := map[string]session.Timeouts{
-		"no handshake window":     {Handshake: 0, Idle: 20 * time.Second},
-		"no idle window":          {Handshake: 5 * time.Second, Idle: 0},
-		"neither":                 {},
-		"negative idle window":    {Handshake: 5 * time.Second, Idle: -time.Second},
-		"handshake beyond idle":   {Handshake: 21 * time.Second, Idle: 20 * time.Second},
-		"handshake far beyond it": {Handshake: time.Hour, Idle: time.Second},
+		"no handshake window":       without(func(t *session.Timeouts) { t.Handshake = 0 }),
+		"no character window":       without(func(t *session.Timeouts) { t.Character = 0 }),
+		"no idle window":            without(func(t *session.Timeouts) { t.Idle = 0 }),
+		"none at all":               {},
+		"negative idle window":      without(func(t *session.Timeouts) { t.Idle = -time.Second }),
+		"negative character window": without(func(t *session.Timeouts) { t.Character = -time.Second }),
+		"handshake beyond idle":     without(func(t *session.Timeouts) { t.Handshake = 21 * time.Second }),
+		"handshake far beyond it":   without(func(t *session.Timeouts) { t.Handshake = time.Hour; t.Idle = time.Second }),
+		// A window shorter than the one a peer that has proved *less* is held to cannot
+		// mean anything: a client that has presented a ticket this server accepted would
+		// be disconnected on a stricter budget than one that has presented nothing.
+		"character below handshake": without(func(t *session.Timeouts) { t.Character = time.Second }),
 	}
 	for name, timeouts := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -1040,8 +1077,16 @@ func TestTimeoutsValidate(t *testing.T) {
 	// Equal is the boundary and it is allowed: a handshake window the same length as
 	// the idle window means every read gets the same budget, which is a policy rather
 	// than a mistake.
-	same := session.Timeouts{Handshake: 20 * time.Second, Idle: 20 * time.Second}
+	same := session.Timeouts{Handshake: 20 * time.Second, Character: 20 * time.Second, Idle: 20 * time.Second}
 	if err := same.Validate(); err != nil {
 		t.Errorf("Validate rejected the boundary %+v: %v", same, err)
+	}
+
+	// And a character window well past the idle one is the *expected* shape rather than
+	// a mistake: a character screen is not an idle session, and there is deliberately no
+	// rule tying the two together.
+	patient := session.Timeouts{Handshake: 5 * time.Second, Character: time.Hour, Idle: 20 * time.Second}
+	if err := patient.Validate(); err != nil {
+		t.Errorf("Validate rejected a character window longer than the idle one: %v", err)
 	}
 }

@@ -64,6 +64,7 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 	}()
 
 	first.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, first, "Eivor")
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, first), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the first session got %s, want a welcome", got)
 	}
@@ -152,6 +153,7 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 	// A ticket this server has never seen, naming the account it already knows. Nothing
 	// the first session handed the client comes back here, because nothing was handed.
 	second.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, second, "Eivor")
 	welcome := welcomeFrom(t, vnet.GetRootAsEnvelope(nextFrame(t, second), 0))
 
 	spawn := welcome.Spawn(nil)
@@ -207,6 +209,7 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 	}()
 
 	conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, conn, "Eivor")
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the session got %s, want a welcome", got)
 	}
@@ -259,6 +262,7 @@ func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 	}()
 
 	first.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, first, "Eivor")
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, first), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the first session got %s, want a welcome", got)
 	}
@@ -296,6 +300,7 @@ func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 
 	// The same account, on a server that wrote nothing down.
 	second.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, second, "Eivor")
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, second), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the reconnect got %s, want a welcome; an ephemeral world still knows who somebody is", got)
 	}

@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -89,12 +92,12 @@ func TestANameIsWornByOneCharacter(t *testing.T) {
 	first := newCharacter(t, store, testID(1), "Eivor")
 
 	for _, attempt := range []string{"Eivor", "eivor", "EIVOR", "  Eivor  "} {
-		if _, err := store.Create(testID(2), attempt); !errors.Is(err, ErrNameTaken) {
+		if _, err := store.Create(testID(2), attempt, testAppearance()); !errors.Is(err, ErrNameTaken) {
 			t.Errorf("Create(%q) = %v, want ErrNameTaken", attempt, err)
 		}
 	}
 	// The same account cannot take it twice either: the rule is about the world.
-	if _, err := store.Create(testID(1), "Eivor"); !errors.Is(err, ErrNameTaken) {
+	if _, err := store.Create(testID(1), "Eivor", testAppearance()); !errors.Is(err, ErrNameTaken) {
 		t.Errorf("the owner retook its own name: %v", err)
 	}
 	if store.Count() != 1 {
@@ -137,7 +140,7 @@ func TestTwoCreationsRacingForOneNameLeaveOneWinner(t *testing.T) {
 			defer done.Done()
 			start.Wait()
 
-			character, err := store.Create(testID(byte(i+1)), "Eivor")
+			character, err := store.Create(testID(byte(i+1)), "Eivor", testAppearance())
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -195,7 +198,7 @@ func TestAnAccountIsHeldToTheMaximum(t *testing.T) {
 	for i := range MaxCharactersPerAccount {
 		newCharacter(t, store, owner, fmt.Sprintf("Eivor%d", i))
 	}
-	if _, err := store.Create(owner, "OneTooMany"); !errors.Is(err, ErrCharacterLimit) {
+	if _, err := store.Create(owner, "OneTooMany", testAppearance()); !errors.Is(err, ErrCharacterLimit) {
 		t.Fatalf("Create past the limit = %v, want ErrCharacterLimit", err)
 	}
 	if held := store.Characters(owner); len(held) != MaxCharactersPerAccount {
@@ -246,7 +249,7 @@ func TestANameThisWorldWillNotAccept(t *testing.T) {
 			t.Parallel()
 
 			store, _ := openStore(t)
-			if _, err := store.Create(testID(1), name); !errors.Is(err, ErrNameRefused) {
+			if _, err := store.Create(testID(1), name, testAppearance()); !errors.Is(err, ErrNameRefused) {
 				t.Fatalf("Create(%q) = %v, want ErrNameRefused", name, err)
 			}
 			if store.Count() != 0 {
@@ -355,9 +358,13 @@ func TestAPreCharacterDirectoryIsSetAsideAndNotDeleted(t *testing.T) {
 	if aside == "" {
 		t.Fatal("SetAside is empty; nothing was reported as moved")
 	}
-	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+preAccountsSuffix+".") {
-		t.Errorf("the directory was set aside as %q, want a %s%s.<timestamp> name", base, playersDirName, preAccountsSuffix)
+	// The name says which format *this* build speaks, so an operator who finds two of
+	// these knows which is which. See supersededSuffix.
+	wantPrefix := fmt.Sprintf("%s%s%d.", playersDirName, supersededSuffix, StoreVersion)
+	if base := filepath.Base(aside); !strings.HasPrefix(base, wantPrefix) {
+		t.Errorf("the directory was set aside as %q, want a %s<timestamp> name", base, wantPrefix)
 	}
+
 	kept, err := os.ReadDir(aside)
 	if err != nil {
 		t.Fatalf("reading the directory set aside: %v", err)
@@ -462,30 +469,46 @@ func TestANewerDirectoryIsRefusedRatherThanMovedAside(t *testing.T) {
 func TestARecordTheIndexCannotUseIsKept(t *testing.T) {
 	t.Parallel()
 
+	// Every fixture is sound in every way but the one it is named for, appearance
+	// included: a record broken twice would pass this test while pinning nothing.
 	broken := map[string]func(t *testing.T, dir string){
 		"a name no character is written under": func(t *testing.T, dir string) {
 			t.Helper()
 			write(t, filepath.Join(dir, "not-a-character-id"+recordFileExt), encodeRecord(Record{
-				Character: 1, Owner: testID(1), Name: "Eivor", Health: 100,
+				Character: 1, Owner: testID(1), Name: "Eivor", Appearance: testAppearance(), Health: 100,
 			}))
 		},
 		"a record found under another character's name": func(t *testing.T, dir string) {
 			t.Helper()
 			write(t, filepath.Join(dir, CharacterID(2).String()+recordFileExt), encodeRecord(Record{
-				Character: 1, Owner: testID(1), Name: "Eivor", Health: 100,
+				Character: 1, Owner: testID(1), Name: "Eivor", Appearance: testAppearance(), Health: 100,
 			}))
 		},
 		"a name this world would not accept": func(t *testing.T, dir string) {
 			t.Helper()
 			write(t, filepath.Join(dir, CharacterID(3).String()+recordFileExt), encodeRecord(Record{
-				Character: 3, Owner: testID(1), Name: "", Health: 100,
+				Character: 3, Owner: testID(1), Name: "", Appearance: testAppearance(), Health: 100,
 			}))
 		},
 		"a broken checksum": func(t *testing.T, dir string) {
 			t.Helper()
-			body := encodeRecord(Record{Character: 4, Owner: testID(1), Name: "Eivor", Health: 100})
+			body := encodeRecord(Record{
+				Character: 4, Owner: testID(1), Name: "Eivor", Appearance: testAppearance(), Health: 100,
+			})
 			body[len(body)-1] ^= 0xff
 			write(t, filepath.Join(dir, CharacterID(4).String()+recordFileExt), body)
+		},
+		// The one check here that is not about a key. Every character in this index is a
+		// row in a ServerCharacterList, and a summary carrying a hair model no member
+		// names is a frame every client is required to refuse — so one damaged record
+		// left in would cost the account not one character but every way into the world.
+		"an appearance no client would accept": func(t *testing.T, dir string) {
+			t.Helper()
+			faceless := testAppearance()
+			faceless.HairModel = vnet.HairModelUnknown
+			write(t, filepath.Join(dir, CharacterID(5).String()+recordFileExt), encodeRecord(Record{
+				Character: 5, Owner: testID(1), Name: "Eivor", Appearance: faceless, Health: 100,
+			}))
 		},
 	}
 
@@ -539,7 +562,7 @@ func TestTwoRecordsWearingOneNameLeaveOneIndexed(t *testing.T) {
 	}
 	for _, id := range []CharacterID{1, 2} {
 		write(t, filepath.Join(players, id.String()+recordFileExt), encodeRecord(Record{
-			Character: id, Owner: testID(1), Name: "Eivor", Health: 100,
+			Character: id, Owner: testID(1), Name: "Eivor", Appearance: testAppearance(), Health: 100,
 		}))
 	}
 
@@ -629,20 +652,24 @@ func write(t *testing.T, path string, body []byte) {
 	}
 }
 
-// One account, many first connections, one character.
+// One account, many creations at once, and the allowance holds.
 //
 // **The race this closes is the one the cross-account test above cannot see.** That one
-// contends a name; this one contends the *decision to create at all*. Reading the roster
-// and then creating let two hellos for a fresh account both find it empty and both
-// create — under different names, so `Create`'s per-name lock let both through — and the
-// connection that afterwards lost the single-session claim had already written a second
-// character to disk. Nothing deletes a character, so the account was left holding one
-// nobody asked for, with its roster slot and its name spent for good.
+// contends a name; this one contends the *allowance*, which is a count rather than a
+// key: sixteen creations that each check "does this account have room" and then write
+// would all find room, and the account would end up holding sixteen characters under a
+// limit of five. Nothing deletes a character, so every one past the fifth is a roster
+// slot and a name spent for good.
+//
+// It is the shape of the defect #156's review found one layer up, where a roster read
+// outside the lock decided whether to create at all. That path is gone — choosing is on
+// the wire now — and what is left is this one, which is why the test moved here rather
+// than away.
 //
 // Asserted on the outcome rather than on the detector, for the reason the cross-account
 // test records: a check-then-act across two lock acquisitions is not a data race, and
 // `-race` reports nothing while the invariant is broken.
-func TestManyFirstConnectionsForOneAccountCreateOneCharacter(t *testing.T) {
+func TestManyCreationsAtOnceStopAtTheAllowance(t *testing.T) {
 	t.Parallel()
 
 	const contenders = 16
@@ -655,8 +682,7 @@ func TestManyFirstConnectionsForOneAccountCreateOneCharacter(t *testing.T) {
 
 	var mu sync.Mutex
 	var seen []Character
-	var creations int
-	var failures []error
+	var refusals []error
 
 	var done sync.WaitGroup
 	for i := range contenders {
@@ -665,42 +691,91 @@ func TestManyFirstConnectionsForOneAccountCreateOneCharacter(t *testing.T) {
 			defer done.Done()
 			start.Wait()
 
-			// A different requested name each, which is what made the old shape create
-			// several: one name would have collided in Create and hidden the defect.
-			character, created, err := store.ResolveOrCreate(owner, fmt.Sprintf("wanderer%d", i))
+			// A different name each, which is what makes this a test of the allowance:
+			// one name would collide in the index and hide the count behind it.
+			character, err := store.Create(owner, fmt.Sprintf("wanderer%d", i), testAppearance())
 
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				failures = append(failures, err)
+				refusals = append(refusals, err)
 				return
 			}
 			seen = append(seen, character)
-			if created {
-				creations++
-			}
 		}(i)
 	}
 
 	start.Done()
 	done.Wait()
 
-	if len(failures) != 0 {
-		t.Fatalf("%d of %d first connections were refused: %v", len(failures), contenders, failures[0])
+	if len(seen) != MaxCharactersPerAccount {
+		t.Errorf("%d of %d creations succeeded, want the %d this world allows", len(seen), contenders, MaxCharactersPerAccount)
 	}
-	if creations != 1 {
-		t.Errorf("%d characters were created for one account, want exactly 1", creations)
+	if got := len(refusals); got != contenders-MaxCharactersPerAccount {
+		t.Errorf("%d creations were refused, want %d", got, contenders-MaxCharactersPerAccount)
 	}
-	if held := store.Characters(owner); len(held) != 1 {
-		names := make([]string, 0, len(held))
-		for _, character := range held {
-			names = append(names, character.Name)
+	for _, err := range refusals {
+		if !errors.Is(err, ErrCharacterLimit) {
+			t.Errorf("a creation past the allowance was refused with %v, want ErrCharacterLimit", err)
 		}
-		t.Errorf("the account holds %d characters (%v), want the one it asked for", len(held), names)
 	}
-	for _, character := range seen {
-		if character.ID != seen[0].ID {
-			t.Fatalf("two connections played different characters: %s and %s", seen[0].ID, character.ID)
-		}
+	if held := store.Characters(owner); len(held) != MaxCharactersPerAccount {
+		t.Errorf("the account holds %d characters, want the %d it is allowed", len(held), MaxCharactersPerAccount)
+	}
+}
+
+// A character's face survives the process, which is the whole reason the record format
+// moved: schemas/player.fbs says an appearance is read from the stored character and
+// never from anything a client said at join time, and a store with nowhere to put one
+// leaves the server nothing truthful to answer with.
+func TestAnAppearanceSurvivesAReopen(t *testing.T) {
+	t.Parallel()
+
+	worldDir := t.TempDir()
+	store, err := OpenStore(worldDir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	owner := testID(3)
+	want := testAppearance()
+	want.HairModel = vnet.HairModelTopknot
+	want.ShoesColor = 0x00FFFFFF // the whole of the room a colour has, high byte clear
+
+	character, err := store.Create(owner, "Eivor", want)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if character.Appearance != want {
+		t.Errorf("the character was created wearing %+v, want %+v", character.Appearance, want)
+	}
+
+	// A life written over the first record, which is the write that could lose an
+	// appearance: Save fills the four naming fields from the index, and the appearance
+	// is one of them.
+	if err := store.Save(character.ID, Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reopened, err := OpenStore(worldDir)
+	if err != nil {
+		t.Fatalf("re-opening: %v", err)
+	}
+
+	// The index, which is what a character list is drawn from...
+	held := reopened.Characters(owner)
+	if len(held) != 1 {
+		t.Fatalf("the reopened index holds %d characters, want 1", len(held))
+	}
+	if held[0].Appearance != want {
+		t.Errorf("the index came back with %+v, want %+v", held[0].Appearance, want)
+	}
+	// ...and the record itself, which is what the index was rebuilt from.
+	rec, found, err := reopened.Load(character.ID)
+	if err != nil || !found {
+		t.Fatalf("Load after reopening: %v (found %v)", err, found)
+	}
+	if rec.Appearance != want {
+		t.Errorf("the record came back with %+v, want %+v", rec.Appearance, want)
 	}
 }

@@ -181,7 +181,7 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 // validOptions is a configuration every field of which passes validate.
 //
 // The cases below mutate the single field under test rather than building a literal
-// each time. With four validated flags, a literal that omits one is a case that
+// each time. With five validated flags, a literal that omits one is a case that
 // passes for a reason it did not mean — an omitted duration is zero, and zero is now
 // a refusal of its own.
 func validOptions() options {
@@ -192,6 +192,7 @@ func validOptions() options {
 		tickRate:         20,
 		viewDistance:     3,
 		handshakeTimeout: session.DefaultHandshakeTimeout,
+		characterTimeout: session.DefaultCharacterTimeout,
 		idleTimeout:      session.DefaultIdleTimeout,
 	}
 }
@@ -216,11 +217,19 @@ func TestOptionsValidate(t *testing.T) {
 		// issue exists to remove, spelled as a number.
 		"idle timeout 0":        func(o *options) { o.idleTimeout = 0 },
 		"handshake timeout 0":   func(o *options) { o.handshakeTimeout = 0 },
+		"character timeout 0":   func(o *options) { o.characterTimeout = 0 },
 		"negative idle timeout": func(o *options) { o.idleTimeout = -time.Second },
 		// A first read allowed to outlive the budget every later read is held to.
 		"handshake beyond idle": func(o *options) {
 			o.handshakeTimeout = 21 * time.Second
 			o.idleTimeout = 20 * time.Second
+		},
+		// And the same rule for the phase a person sits inside: a peer that has
+		// presented a ticket this server accepted must not be held to a stricter budget
+		// than one that has presented nothing.
+		"character below handshake": func(o *options) {
+			o.handshakeTimeout = 5 * time.Second
+			o.characterTimeout = time.Second
 		},
 	}
 
@@ -240,8 +249,16 @@ func TestOptionsValidate(t *testing.T) {
 		func(o *options) { o.tickRate = 1; o.viewDistance = 0 },
 		func(o *options) { o.tickRate = 255; o.viewDistance = protocol.MaxViewDistance },
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
-		func(o *options) { o.handshakeTimeout = time.Nanosecond; o.idleTimeout = time.Nanosecond },
+		func(o *options) {
+			o.handshakeTimeout = time.Nanosecond
+			o.characterTimeout = time.Nanosecond
+			o.idleTimeout = time.Nanosecond
+		},
+		// A character window far past the idle one is the expected shape rather than a
+		// mistake: a character screen is not an idle session.
+		func(o *options) { o.characterTimeout = time.Hour },
 	} {
+
 		opts := validOptions()
 		mutate(&opts)
 		if err := opts.validate(); err != nil {
@@ -704,10 +721,11 @@ func openPlayerStore(t *testing.T, dir string) *persist.Store {
 func seedCharacter(t *testing.T, store *persist.Store, account ticket.AccountID, name string) persist.Character {
 	t.Helper()
 
-	character, err := store.Create(testPlayerID(account), name)
+	character, err := store.Create(testPlayerID(account), name, testAppearance())
 	if err != nil {
 		t.Fatalf("creating the seeded character: %v", err)
 	}
+
 	if err := store.Save(character.ID, persist.Record{
 		LastSeen: time.Unix(1, 0),
 		Pos:      [3]float64{0.5, 64, 0.5},
@@ -730,20 +748,69 @@ func onlyCharacter(t *testing.T, store *persist.Store, account ticket.AccountID)
 	return held[0]
 }
 
-// firstReply is the handshake's answer on conn.
-func firstReply(t *testing.T, conn *scriptedConn) *vnet.Envelope {
+// nextReply is the next frame the server sends on conn.
+//
+// **It was `firstReply` while a handshake was one exchange.** A hello is answered with
+// the account's characters now and the welcome comes one message later, so most callers
+// read two — see [enterWorld], which is what they should be using.
+func nextReply(t *testing.T, conn *scriptedConn) *vnet.Envelope {
 	t.Helper()
 
 	select {
 	case frame := <-conn.out:
 		return vnet.GetRootAsEnvelope(frame, 0)
 	case <-time.After(5 * time.Second):
-		t.Fatalf("%s got no answer to its hello", conn.name)
+		t.Fatalf("%s got no answer", conn.name)
 		return nil
 	}
 }
 
-// TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome is the wiring test for the whole
+// testAppearance is a face the contract allows. Every path that stores one or plays one
+// checks it, so a fixture that skipped it would be testing the refusal.
+func testAppearance() protocol.Appearance {
+	return protocol.Appearance{
+		SkinColor:     0x00D9A066,
+		ShirtColor:    0x00394F3B,
+		TrousersColor: 0x00241E1A,
+		ShoesColor:    0x00080808,
+		HairModel:     vnet.HairModelLoose,
+		HairColor:     0x00734022,
+	}
+}
+
+// creationOf and selectionOf are the two frames the character phase accepts: make one
+// and play it, or play one this account already holds.
+func creationOf(name string) []byte {
+	return protocol.EncodeCreateCharacterRequest(protocol.CreateCharacterRequest{
+		Name: name, Appearance: testAppearance(), HasAppearance: true,
+	})
+}
+
+func selectionOf(id persist.CharacterID) []byte {
+	return protocol.EncodeSelectCharacterRequest(protocol.SelectCharacterRequest{CharacterID: uint64(id)})
+}
+
+// enterWorld drives a whole handshake on conn and answers with the welcome.
+//
+// **Both client frames are queued before either reply is read**, which is legal and is
+// what keeps these tests from having to interleave: a client that already knows which
+// character it wants may answer the list before it arrives, and the server reads the
+// choice when it reaches the phase that is waiting for one. What is asserted on the way
+// through is that the *first* answer to a hello is the character list — the phase this
+// contract added, at the level a whole server produces it.
+func enterWorld(t *testing.T, conn *scriptedConn, hello, choice []byte) *vnet.Envelope {
+	t.Helper()
+
+	conn.in <- hello
+	conn.in <- choice
+
+	if got := nextReply(t, conn).PayloadType(); got != vnet.PayloadServerCharacterList {
+		t.Fatalf("%s got %s in answer to its hello, want a character list", conn.name, got)
+	}
+	return nextReply(t, conn)
+}
+
+// TestTwoConnectionsOnOneAccountDoNotBothGetIn is the wiring test for the whole
 // identity path: the store main opens, the claim set it builds, and the two sessions
 // the accept loop starts.
 //
@@ -753,7 +820,14 @@ func firstReply(t *testing.T, conn *scriptedConn) *vnet.Envelope {
 //
 // **The two connections present two different tickets**, which is what the claim moving
 // to the account means: same person, two machines, two sign-ins, one live session.
-func TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome(t *testing.T) {
+//
+// **What each of them is answered with moved one message earlier.** The claim is taken
+// when a ticket verifies — before the character list is sent, and long before a person
+// has finished choosing — so the winner's first frame is that list and the loser's is
+// the refusal. Waiting for a welcome to tell them apart would mean holding a claim open
+// for as long as somebody stared at a screen.
+func TestTwoConnectionsOnOneAccountDoNotBothGetIn(t *testing.T) {
+
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -777,14 +851,15 @@ func TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome(t *testing.T) {
 	second.in <- helloFor(t, account)
 
 	// Which connection wins is a race between two session goroutines, and the rule is
-	// about the pair rather than about either one: exactly one welcome, and the other
-	// refused with the reason that says why.
-	welcomes, rejections := 0, 0
+	// about the pair rather than about either one: exactly one gets as far as choosing a
+	// character, and the other is refused with the reason that says why.
+	admitted, rejections := 0, 0
 	for _, conn := range []*scriptedConn{first, second} {
-		env := firstReply(t, conn)
+		env := nextReply(t, conn)
 		switch env.PayloadType() {
-		case vnet.PayloadServerWelcome:
-			welcomes++
+		case vnet.PayloadServerCharacterList:
+			admitted++
+
 		case vnet.PayloadServerReject:
 			rejections++
 			var reject vnet.ServerReject
@@ -797,12 +872,12 @@ func TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome(t *testing.T) {
 				t.Errorf("%s was refused with %s, want ALREADY_CONNECTED", conn.name, got)
 			}
 		default:
-			t.Fatalf("%s got %s, want a welcome or a rejection", conn.name, env.PayloadType())
+			t.Fatalf("%s got %s, want a character list or a rejection", conn.name, env.PayloadType())
 		}
 	}
 
-	if welcomes != 1 || rejections != 1 {
-		t.Errorf("%d welcomes and %d rejections; one account admits exactly one session", welcomes, rejections)
+	if admitted != 1 || rejections != 1 {
+		t.Errorf("%d accounts admitted and %d rejections; one account admits exactly one session", admitted, rejections)
 	}
 
 	cancel()

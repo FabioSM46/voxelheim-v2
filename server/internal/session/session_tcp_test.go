@@ -50,9 +50,14 @@ func TestServeOverRealTCP(t *testing.T) {
 	}
 	defer client.Close() //nolint:errcheck // test teardown
 
+	// Both halves of the handshake, written before either is read: the character phase
+	// is a phase of the *connection*, and a client that already knows what it wants may
+	// answer the list before it arrives.
 	w := bufio.NewWriter(client)
-	if err := transport.WriteFrame(w, hello(1)); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
+	for _, frame := range [][]byte{hello(1), creation("Eivor")} {
+		if err := transport.WriteFrame(w, frame); err != nil {
+			t.Fatalf("WriteFrame: %v", err)
+		}
 	}
 	if err := w.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
@@ -61,7 +66,17 @@ func TestServeOverRealTCP(t *testing.T) {
 	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
-	frame, err := transport.ReadFrame(bufio.NewReader(client))
+	reader := bufio.NewReader(client)
+	// The list first, because a hello is answered with the account's characters and not
+	// with a welcome — over a real socket exactly as over the fake one.
+	listed, err := transport.ReadFrame(reader)
+	if err != nil {
+		t.Fatalf("ReadFrame for the character list: %v", err)
+	}
+	if got := vnet.GetRootAsEnvelope(listed, 0).PayloadType(); got != vnet.PayloadServerCharacterList {
+		t.Fatalf("the answer to a hello is %s, want %s", got, vnet.PayloadServerCharacterList)
+	}
+	frame, err := transport.ReadFrame(reader)
 	if err != nil {
 		t.Fatalf("ReadFrame: %v", err)
 	}
@@ -70,6 +85,7 @@ func TestServeOverRealTCP(t *testing.T) {
 	if env.PayloadType() != vnet.PayloadServerWelcome {
 		t.Fatalf("reply is %s, want %s", env.PayloadType(), vnet.PayloadServerWelcome)
 	}
+
 	welcome := welcomeFrom(t, env)
 	if got := welcome.EntityId(); got != 11 {
 		t.Errorf("EntityId = %d, want 11", got)
@@ -123,7 +139,9 @@ func TestServeClosesAnIdleSessionOverRealTCP(t *testing.T) {
 		}
 		defer conn.Close() //nolint:errcheck // test teardown
 		served <- session.Serve(context.Background(), conn, serveConfig(),
-			session.Timeouts{Handshake: window, Idle: window}, chunks, sim, peers, ephemeralIdentities(), 12, discard())
+			session.Timeouts{Handshake: window, Character: window, Idle: window},
+			chunks, sim, peers, ephemeralIdentities(), 12, discard())
+
 	}()
 
 	client, err := net.Dial("tcp", tr.Addr())
@@ -133,19 +151,25 @@ func TestServeClosesAnIdleSessionOverRealTCP(t *testing.T) {
 	defer client.Close() //nolint:errcheck // test teardown
 
 	w := bufio.NewWriter(client)
-	if err := transport.WriteFrame(w, hello(1)); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
+	for _, frame := range [][]byte{hello(1), creation("Eivor")} {
+		if err := transport.WriteFrame(w, frame); err != nil {
+			t.Fatalf("WriteFrame: %v", err)
+		}
 	}
 	if err := w.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
-	// The welcome is what proves the handshake window was met, so anything that ends
+	// The welcome is what proves both pre-world windows were met, so anything that ends
 	// the session after this point ended it for being idle and not for being late.
 	if err := client.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
-	frame, err := transport.ReadFrame(bufio.NewReader(client))
+	reader := bufio.NewReader(client)
+	if _, err := transport.ReadFrame(reader); err != nil {
+		t.Fatalf("ReadFrame for the character list: %v", err)
+	}
+	frame, err := transport.ReadFrame(reader)
 	if err != nil {
 		t.Fatalf("ReadFrame: %v", err)
 	}

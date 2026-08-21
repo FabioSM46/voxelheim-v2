@@ -51,7 +51,7 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	// that nothing of the first player survives in memory.
 	next := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	out := &dropSink{}
-	restored, err := next.sim.Join(2, testPlayerID(2), [3]float32{0, 200, 0}, &saved, out.deliver)
+	restored, err := next.sim.Join(2, testPlayerID(2), [3]float32{0, 200, 0}, testAppearance(), &saved, out.deliver)
 	if err != nil {
 		t.Fatalf("Join with a record: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestARestoredPlayerSettlesLikeANewOne(t *testing.T) {
 	life := Life{Pos: [3]float64{4.5, 200, 4.5}, Yaw: -2, Health: PlayerMaxHealth}
 
 	out := &dropSink{}
-	player, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, &life, out.deliver)
+	player, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, testAppearance(), &life, out.deliver)
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestJoinRefusesAnInvalidRecord(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	life := Life{Pos: [3]float64{0, math.NaN(), 0}, Health: PlayerMaxHealth}
 
-	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, &life, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, testAppearance(), &life, func([]byte) bool { return true }); err == nil {
 		t.Fatal("Join admitted a player from a record with a NaN position")
 	}
 	if h.sim.Count() != 0 {
@@ -469,7 +469,7 @@ func TestRecordsRunBesideTheTick(t *testing.T) {
 	}
 	out := &dropSink{}
 	for id := uint64(1); id <= 3; id++ {
-		if _, err := sim.Join(id, testPlayerID(id), [3]float32{0.5, 64, 0.5}, nil, out.deliver); err != nil {
+		if _, err := sim.Join(id, testPlayerID(id), [3]float32{0.5, 64, 0.5}, testAppearance(), nil, out.deliver); err != nil {
 			t.Fatalf("Join: %v", err)
 		}
 	}

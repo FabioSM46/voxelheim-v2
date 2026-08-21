@@ -76,11 +76,41 @@ func internalIdentities(t *testing.T, store *persist.Store) (*Identities, func(i
 func seedCharacter(t *testing.T, store *persist.Store, account identity.Account) (persist.Character, string) {
 	t.Helper()
 
-	character, err := store.Create(identity.IDOf(account), "Eivor")
+	character, err := store.Create(identity.IDOf(account), "Eivor", testAppearance())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	return character, filepath.Join(store.Dir(), character.ID.String()+".bin")
+}
+
+// testAppearance is a face the contract allows. Every path that stores or plays one
+// checks it, so a fixture that skipped it would be testing the refusal instead.
+func testAppearance() protocol.Appearance {
+	return protocol.Appearance{
+		SkinColor:     0x00C68642,
+		ShirtColor:    0x00415B76,
+		TrousersColor: 0x00332B24,
+		ShoesColor:    0x00101010,
+		HairModel:     vnet.HairModelCropped,
+		HairColor:     0x005A3A22,
+	}
+}
+
+// play drives the two steps a connection takes: the hello, which admits an account and
+// claims its one live session, and the choice, which settles a character.
+//
+// One helper because the tests below are about what happens to a *record*, and each
+// would otherwise repeat a handshake to get there. **The claim it takes is not released
+// here**, exactly as it is not released by a failed choice in production: it belongs to
+// the connection, and Serve's teardown is what gives it back.
+func play(t *testing.T, identities *Identities, hello *protocol.ClientHello, wanted persist.CharacterID) (Resolved, error) {
+	t.Helper()
+
+	admitted, err := identities.Admit(hello)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return identities.Select(admitted, wanted)
 }
 
 // An internal test, because a claim set built without a verifier is a thing only this
@@ -124,7 +154,7 @@ func TestResolveRefusesWhenThePlayerStoreCannotBeRead(t *testing.T) {
 	// corruption, which is exactly the case this test is about — and unlike a
 	// permission bit, it fails the same way for a test run as root.
 	account := identity.Account{9}
-	_, path := seedCharacter(t, store, account)
+	character, path := seedCharacter(t, store, account)
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("removing the record the character was created with: %v", err)
 	}
@@ -132,16 +162,20 @@ func TestResolveRefusesWhenThePlayerStoreCannotBeRead(t *testing.T) {
 		t.Fatalf("creating the unreadable record: %v", err)
 	}
 
-	if _, err := identities.Resolve(hello(account)); err == nil {
-		t.Fatal("Resolve treated an unreadable record as a first connection")
+	if _, err := play(t, identities, hello(account), character.ID); err == nil {
+		t.Fatal("the selection treated an unreadable record as a first connection")
 	} else {
 		var refused *Refused
 		if errors.As(err, &refused) {
 			t.Errorf("an unreadable store was reported as the refusal %s", refused.Reason)
 		}
 	}
-	if identities.Count() != 0 {
-		t.Error("an unreadable store left a player claimed")
+	// The claim is still held, and that is the phase this contract added rather than a
+	// leak: it is taken when the ticket verifies, one message before a character is
+	// chosen, so a refusal here leaves it exactly where a person still reading their
+	// character list would. Serve releases it on every path out.
+	if identities.Count() != 1 {
+		t.Errorf("%d accounts are claimed, want the one whose selection failed", identities.Count())
 	}
 }
 
@@ -171,11 +205,12 @@ func TestResolveSetsACorruptRecordAsideAndAdmitsThePlayerAsNew(t *testing.T) {
 		t.Fatalf("writing the damaged record: %v", err)
 	}
 
-	resolved, err := identities.Resolve(hello(account))
+	resolved, err := play(t, identities, hello(account), character.ID)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("the selection: %v", err)
 	}
 	if resolved.Returning {
+
 		t.Error("a record that could not be read was resumed")
 	}
 	if resolved.Life != nil {
@@ -237,7 +272,8 @@ func TestResolveRefusesWhenACorruptRecordCannotBeSetAside(t *testing.T) {
 	identities, hello := internalIdentities(t, store)
 
 	account := identity.Account{13}
-	_, path := seedCharacter(t, store, account)
+	character, path := seedCharacter(t, store, account)
+
 	damaged := []byte("not a player record")
 	if err := os.WriteFile(path, damaged, 0o600); err != nil {
 		t.Fatalf("writing the damaged record: %v", err)
@@ -257,10 +293,11 @@ func TestResolveRefusesWhenACorruptRecordCannotBeSetAside(t *testing.T) {
 		t.Skip("this user can rename inside a read-only directory, so a failed move cannot be staged")
 	}
 
-	resolved, err := identities.Resolve(hello(account))
+	resolved, err := play(t, identities, hello(account), character.ID)
 	if err == nil {
 		t.Fatal("a record that could not be set aside was admitted; the next teardown would write over it")
 	}
+
 	// A failure and not a refusal: RejectReason has no member for "this server cannot
 	// keep your record safe", and BAD_REQUEST would blame a client for a directory it
 	// has never heard of. The session ends with no reply and Serve returns the error so
@@ -270,10 +307,12 @@ func TestResolveRefusesWhenACorruptRecordCannotBeSetAside(t *testing.T) {
 		t.Errorf("a server-side failure was reported as the refusal %s", refused.Reason)
 	}
 	if resolved != (Resolved{}) {
-		t.Error("Resolve returned a player beside its error")
+		t.Error("the selection returned a character beside its error")
 	}
-	if identities.Count() != 0 {
-		t.Error("a failed quarantine left a player claimed")
+	// Still claimed, for the reason the unreachable-record test states: the claim is the
+	// account's and it is taken one message earlier than the choice that failed.
+	if identities.Count() != 1 {
+		t.Errorf("%d accounts are claimed, want the one whose selection failed", identities.Count())
 	}
 
 	// And the evidence is exactly where it was.
@@ -308,14 +347,17 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	identities, _ := internalIdentities(t, store)
 
 	id := identity.IDOf(identity.Account{11})
-	character, err := store.Create(id, "Eivor")
+	character, err := store.Create(id, "Eivor", testAppearance())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	self := Resolved{ID: id, Character: character.ID, Name: character.Name}
-	if !identities.claim(id, character.ID) {
+	// The two steps a connection takes, in the order it takes them: the account is
+	// claimed when its ticket verifies, and the character is put on the claim when the
+	// choice settles. An autosave that ran between them would have nothing to write.
+	if !identities.claim(id) {
 		t.Fatal("the player was already claimed")
 	}
+	self := identities.playing(Admitted{ID: id}, character, false, nil)
 
 	// What the autosave captured, a moment before the player left.
 	stale := game.Life{Pos: [3]float64{1, 64, 1}, Health: 40}
@@ -368,13 +410,14 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	identities, _ := internalIdentities(t, store)
 
 	id := identity.IDOf(identity.Account{12})
-	character, err := store.Create(id, "Eivor")
+	character, err := store.Create(id, "Eivor", testAppearance())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if !identities.claim(id, character.ID) {
+	if !identities.claim(id) {
 		t.Fatal("the player was already claimed")
 	}
+	identities.playing(Admitted{ID: id}, character, false, nil)
 
 	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73}
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: life}); err != nil {
@@ -401,11 +444,12 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 // TestRefuseCharacterMapsEveryStoreRefusal pins the one place a store refusal becomes a
 // wire code.
 //
-// An internal test because refuseCharacter is unexported, and it has to be: one of the
-// three cases is not reachable from a hello at all. An account that already holds
-// characters plays one rather than creating another, so CHARACTER_LIMIT_REACHED waits
-// for the CreateCharacterRequest the next issue puts on the wire — and a mapping that
-// only the unreachable half got wrong would be found by nobody.
+// An internal test because refuseCharacter is unexported. All three cases are reachable
+// from the wire now — a CreateCharacterRequest can be refused for the name being taken,
+// for the name being unacceptable, and for the account being full — which is what the
+// character phase changed: while a character was resolved from the hello's display name,
+// an account that already held one never created another, so CHARACTER_LIMIT_REACHED was
+// a code nothing could produce.
 //
 // The fourth case is the one that is not a refusal: a store that cannot mint or cannot
 // write is this server failing, and RejectReason has no member that says so. Answering
@@ -450,5 +494,157 @@ func TestRefuseCharacterMapsEveryStoreRefusal(t *testing.T) {
 	var refused *Refused
 	if errors.As(failure, &refused) {
 		t.Errorf("a store failure was reported as the refusal %s", refused.Reason)
+	}
+}
+
+// An account that has been admitted and has not chosen yet is a person reading their
+// character list, and there is nothing for an autosave to write for one.
+//
+// It cannot happen through Serve — the autosave asks the *simulation* which lives to
+// write, and a session that has not chosen has not joined it — which is exactly why the
+// skip is worth a test: what would otherwise stand in the way is a Save refused with an
+// error, one layer further down and for a different reason.
+func TestAnAutosaveSkipsAnAccountThatHasNotChosen(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, _ := internalIdentities(t, store)
+
+	id := identity.IDOf(identity.Account{14})
+	character, err := store.Create(id, "Eivor", testAppearance())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !identities.claim(id) {
+		t.Fatal("the account was already claimed")
+	}
+
+	if err := identities.RememberAll(map[identity.PlayerID]game.Life{
+		id: {Pos: [3]float64{1, 64, 1}, Health: 40},
+	}); err != nil {
+		t.Fatalf("RememberAll: %v", err)
+	}
+
+	// The record the character was created with, untouched: unplayed, and therefore not
+	// a life.
+	saved, found, err := store.Load(character.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("the record Create wrote is gone")
+	}
+	if !saved.Unplayed() {
+		t.Errorf("an autosave wrote a life for an account that had not chosen a character: %+v", saved)
+	}
+}
+
+// The two ways a selection is refused leave one answer, and that is the point of it.
+//
+// A client that could tell "no such character" from "that one is not yours" could map
+// the world's characters by asking for ids it does not have — the rule
+// game.Player.RemoveStructure keeps for a camp, and the one
+// schemas/handshake.fbs states for this message in as many words.
+func TestASelectionThisAccountMayNotMakeLeavesOneAnswer(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, hello := internalIdentities(t, store)
+
+	mine := identity.Account{21}
+	seedCharacter(t, store, mine)
+	theirs, err := store.Create(identity.IDOf(identity.Account{22}), "Sigrun", testAppearance())
+	if err != nil {
+		t.Fatalf("Create for the other account: %v", err)
+	}
+
+	admitted, err := identities.Admit(hello(mine))
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	answers := make([]*Refused, 0, 2)
+	for what, wanted := range map[string]persist.CharacterID{
+		"a character another account owns": theirs.ID,
+		"a character nobody has":           persist.CharacterID(0xdead_beef),
+	} {
+		resolved, sErr := identities.Select(admitted, wanted)
+		var refused *Refused
+		if !errors.As(sErr, &refused) {
+			t.Fatalf("selecting %s answered %v, which carries no reason code", what, sErr)
+		}
+		if refused.Reason != vnet.RejectReasonBAD_REQUEST {
+			t.Errorf("selecting %s answered %s, want BAD_REQUEST", what, refused.Reason)
+		}
+		if refused.Cause == nil {
+			t.Errorf("selecting %s left nothing in the log to tell it apart by", what)
+		}
+		if resolved != (Resolved{}) {
+			t.Errorf("selecting %s returned a character beside its refusal", what)
+		}
+		answers = append(answers, refused)
+	}
+
+	// Identical on the wire; the causes above are what an operator reads instead.
+	if answers[0].Reason != answers[1].Reason || answers[0].Detail != answers[1].Detail {
+		t.Errorf("the two refusals differ on the wire: %s/%q and %s/%q",
+			answers[0].Reason, answers[0].Detail, answers[1].Reason, answers[1].Detail)
+	}
+	// A selection this account *can* make is still admitted, so the test above is not
+	// passing because everything is refused.
+	if _, err := identities.Select(admitted, admitted.Characters[0].ID); err != nil {
+		t.Errorf("the account's own character was refused: %v", err)
+	}
+}
+
+// An appearance the contract forbids is refused **before it is stored**, which is the
+// obligation schemas/common.fbs puts on whatever accepts a CreateCharacterRequest: a
+// character written down wearing a hair model no member names is one every client is
+// afterwards required to refuse, and the person who cannot get in is not the person who
+// sent it.
+func TestACreationWithAForbiddenAppearanceIsRefusedBeforeItIsStored(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, hello := internalIdentities(t, store)
+
+	admitted, err := identities.Admit(hello(identity.Account{23}))
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+
+	forbidden := testAppearance()
+	forbidden.HairModel = vnet.HairModelUnknown
+
+	resolved, err := identities.Create(admitted, "Eivor", forbidden)
+	var refused *Refused
+	if !errors.As(err, &refused) {
+		t.Fatalf("a forbidden appearance answered %v, which carries no reason code", err)
+	}
+	if refused.Reason != vnet.RejectReasonBAD_REQUEST {
+		t.Errorf("a forbidden appearance answered %s, want BAD_REQUEST — the name is fine and a name code would say otherwise", refused.Reason)
+	}
+	if !errors.Is(err, protocol.ErrAppearance) {
+		t.Error("the refusal does not reach through to what was wrong with the appearance")
+	}
+	if resolved != (Resolved{}) {
+		t.Error("a forbidden appearance returned a character beside its refusal")
+	}
+
+	// Nothing was written and nothing was spent: not the name, not a roster slot.
+	if got := store.Count(); got != 0 {
+		t.Errorf("the world holds %d characters after a refused creation, want none", got)
+	}
+	if _, taken := store.Named("Eivor"); taken {
+		t.Error("a refused creation took the name anyway")
 	}
 }

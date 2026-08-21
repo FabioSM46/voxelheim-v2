@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -42,11 +43,30 @@ func openStore(t *testing.T) (*Store, string) {
 func newCharacter(t *testing.T, store *Store, owner identity.PlayerID, name string) Character {
 	t.Helper()
 
-	character, err := store.Create(owner, name)
+	character, err := store.Create(owner, name, testAppearance())
+
 	if err != nil {
 		t.Fatalf("Create(%s, %q): %v", owner.Short(), name, err)
 	}
 	return character
+}
+
+// testAppearance is a face the contract allows: every colour inside 0x00RRGGBB and a
+// hair model that is a real member.
+//
+// This package stores an appearance without judging it — that gate is the handshake's,
+// where the value arrives from a client — but the startup scan refuses one the contract
+// forbids, so a fixture that wants its character to survive a reopen has to state a
+// legal one.
+func testAppearance() protocol.Appearance {
+	return protocol.Appearance{
+		SkinColor:     0xc68642,
+		ShirtColor:    0x4b6043,
+		TrousersColor: 0x2e2a25,
+		ShoesColor:    0x111111,
+		HairModel:     vnet.HairModelLoose,
+		HairColor:     0x9a3b1b,
+	}
 }
 
 func TestStoreRoundTripsARecord(t *testing.T) {
@@ -115,11 +135,19 @@ func TestSaveIgnoresACallersIdeaOfWhoACharacterIs(t *testing.T) {
 	mine := newCharacter(t, store, testID(1), "Eivor")
 	theirs := newCharacter(t, store, testID(2), "Sigrun")
 
+	// A face nobody chose, offered by the caller: an appearance is chosen once, at
+	// creation, and a save that could restate one would be a way to come back from a
+	// session wearing somebody else's.
+	borrowed := testAppearance()
+	borrowed.HairModel = vnet.HairModelTopknot
+	borrowed.SkinColor = 0x010203
+
 	if err := store.Save(mine.ID, Record{
-		Character: theirs.ID,
-		Owner:     theirs.Owner,
-		Name:      "Sigrun the Second",
-		Health:    100,
+		Character:  theirs.ID,
+		Owner:      theirs.Owner,
+		Name:       "Sigrun the Second",
+		Appearance: borrowed,
+		Health:     100,
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -131,6 +159,10 @@ func TestSaveIgnoresACallersIdeaOfWhoACharacterIs(t *testing.T) {
 	if got.Character != mine.ID || got.Owner != mine.Owner || got.Name != mine.Name {
 		t.Errorf("a save restated who the character is: %s/%s/%q", got.Character, got.Owner.Short(), got.Name)
 	}
+	if got.Appearance != mine.Appearance {
+		t.Errorf("a save restated what the character looks like: %+v, want %+v", got.Appearance, mine.Appearance)
+	}
+
 	// And the other character is untouched, which is the failure this prevents.
 	if theirs2, ok := store.Character(theirs.ID); !ok || theirs2.Name != "Sigrun" {
 		t.Errorf("the other character changed: %+v (known %v)", theirs2, ok)
@@ -291,7 +323,7 @@ func TestAnEphemeralWorldWritesNothing(t *testing.T) {
 		t.Error("a memory store remembered something")
 	}
 	// The rules still hold: the name is taken, by the account that took it.
-	if _, err := store.Create(testID(8), "eivor"); !errors.Is(err, ErrNameTaken) {
+	if _, err := store.Create(testID(8), "eivor", testAppearance()); !errors.Is(err, ErrNameTaken) {
 		t.Errorf("a second account took the name on an ephemeral world: %v", err)
 	}
 
@@ -519,7 +551,7 @@ func TestANilStoreKeepsNothing(t *testing.T) {
 	}
 	// Create is the one method that is an error rather than a no-op: a caller that
 	// asked for a character and got the zero value would go on to save under id 0.
-	if _, err := store.Create(testID(9), "Eivor"); err == nil {
+	if _, err := store.Create(testID(9), "Eivor", testAppearance()); err == nil {
 		t.Error("a nil store minted a character")
 	}
 }

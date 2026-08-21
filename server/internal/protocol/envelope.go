@@ -537,6 +537,76 @@ type Appearance struct {
 	HairColor     uint32
 }
 
+// ErrAppearance marks an appearance that breaks an invariant schemas/common.fbs states.
+//
+// One sentinel rather than one per invariant, because every caller answers all of them
+// the same way — a creation refused, a stored character refused entry — and what
+// distinguishes them is the wrapped sentence an operator reads.
+var ErrAppearance = errors.New("protocol: the appearance is not one this contract allows")
+
+// ColorChannels is the mask a colour on this wire fits in: 0x00RRGGBB, with the
+// most significant eight bits reserved and required to be zero.
+//
+// Exported because it is a contract limit like [InventorySlots] beside it — a number
+// the schema states in prose and cannot enforce — and because a client-facing tool that
+// offers a palette has to know where the room ends.
+const ColorChannels uint32 = 0x00FFFFFF
+
+// Validate enforces the invariants schemas/common.fbs documents for an Appearance.
+//
+// **Deliberately not called by [Decode], and that is the division of labour this whole
+// package keeps.** Decode owns the envelope and copies values verbatim; a colour it
+// disliked would arrive inside a frame that is perfectly readable, and closing the
+// connection over it would answer a value question with a framing verdict. So this is a
+// question a caller asks, at the two places the contract names it:
+//
+//   - whatever accepts a CreateCharacterRequest asks it **before the appearance is
+//     stored**, because a character persisted with a hair model no member names is one
+//     every client will afterwards refuse to load — and the person who cannot get in is
+//     not the person who sent it;
+//   - whatever puts a stored appearance back on the wire asks it again, for the reason
+//     game.Sim.Join re-asks about a stored life: the only thing between a file on disk
+//     and a frame a client must refuse is somebody having checked.
+//
+// The colours are checked and the hair model is checked; **absence is not**, and that
+// asymmetry is the contract's rather than an omission here. A table scalar carries no
+// presence bit, so an absent colour and a chosen black are the same bytes — refusing
+// absence would refuse a character wearing black shoes, and would make decode
+// correctness depend on the sender's builder settings. `HairModel.Unknown` has no such
+// twin: it is not a choice a player can make, so the zero value fails closed.
+func (a Appearance) Validate() error {
+	for _, worn := range [...]struct {
+		what  string
+		color uint32
+	}{
+		{"skin", a.SkinColor},
+		{"shirt", a.ShirtColor},
+		{"trousers", a.TrousersColor},
+		{"shoes", a.ShoesColor},
+		{"hair", a.HairColor},
+	} {
+		if worn.color > ColorChannels {
+			// Refused rather than masked: a set high byte means the peer is encoding
+			// something this build does not know about, and masking it would show a
+			// colour nobody chose while hiding the disagreement.
+			return fmt.Errorf("%w: the %s colour %#08x sets the reserved high byte", ErrAppearance, worn.what, worn.color)
+		}
+	}
+
+	// The generated names rather than a switch listing the five members, and the reason
+	// is what this side does with the value: the server stores a hair model and never
+	// draws one, so the vocabulary is the contract's and a member appended to it is
+	// already acceptable here. A list kept in this file would be a second copy of that
+	// vocabulary, and the first thing a second copy does is fall behind.
+	if _, known := vnet.EnumNamesHairModel[a.HairModel]; !known {
+		return fmt.Errorf("%w: hair model %d is not a member of this contract", ErrAppearance, a.HairModel)
+	}
+	if a.HairModel == vnet.HairModelUnknown {
+		return fmt.Errorf("%w: the hair model is Unknown, which is the absent-field value rather than a choice", ErrAppearance)
+	}
+	return nil
+}
+
 // CharacterSummary is one character an account owns on this world, as
 // ServerCharacterList lists it.
 //

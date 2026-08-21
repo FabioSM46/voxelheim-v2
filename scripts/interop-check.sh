@@ -21,7 +21,18 @@
 # that would have caught #154 on the day it landed is check 2 — the documented
 # development command, asserted to reach a world.
 #
+# **It cannot pass today, and this is where somebody who ran it should read why.** The
+# server answers a hello with `ServerCharacterList` and waits for a character to be
+# chosen; the screen that chooses one is the client half of that phase and is a separate
+# issue (#108). So the client closes with `ServerCharacterList arrived on time and this
+# build cannot answer it`, and every check below that needs a session fails. Nothing here
+# was changed to hide that: a script that reported a pass by asserting less would be worse
+# than one that fails honestly, and the failure names the thing to build next. Check 2 —
+# the documented development command, asserted to reach a world — is the one that comes
+# back when it does.
+#
 # **What it checks got narrower when trust on first use was removed, and the reason is
+
 # worth stating rather than leaving as a shorter script.** The client used to pin the
 # first certificate it saw into a file, so this script could read that file, delete it,
 # swap the server's key and watch the refusal happen — all of it on disk, all of it

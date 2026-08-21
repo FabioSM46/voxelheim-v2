@@ -127,7 +127,7 @@ func (h *structureHarness) join(entityID uint64, pos [3]float32) (*Player, *drop
 	h.t.Helper()
 
 	out := &dropSink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}

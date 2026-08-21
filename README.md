@@ -157,6 +157,17 @@ account rather than on a token this client kept, so the second launch on this pa
 character as the first. The client is deliberately not told which of the two happened and does not
 claim to know — the status line says `signed in`, and the server's log says `returning=true`.
 
+**Right now the client stops one message short of the world, and it says so.** The server answers a
+hello with the account's characters and waits for one to be chosen — the phase that exists so a
+welcome can carry the spawn of the character a player actually picked — and the screen that chooses
+one is the next issue in the set. So this client closes with
+`ServerCharacterList arrived on time and this build cannot answer it: the character phase is not
+implemented` — a named failure rather than a hang, and one the client was given deliberately for
+exactly this day. The two halves land in this order because the client half is written against the
+server's actual behaviour, and the contract has been reserving these messages since V7.
+
+
+
 The way a *player* reaches a server is `--account-service`: sign in once, then click a server out
 of the list that service answers with. Every row carries the address and the SHA-256 of the
 certificate that server presents, so the address is followed if it moves, and a server presenting

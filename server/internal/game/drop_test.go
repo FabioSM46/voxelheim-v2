@@ -44,6 +44,24 @@ func testPlayerID(entityID uint64) identity.PlayerID {
 	return identity.IDOf(account)
 }
 
+// testAppearance is a character the contract would accept: every colour inside
+// 0x00RRGGBB and a hair model that is a real member.
+//
+// Join validates what it is handed — a stored appearance is on its way to a
+// PlayerAppearance every viewer may refuse — so a test that wants a player at all has
+// to state a legal one. That is the point of asking there rather than trusting the
+// caller, and it is why this is one helper instead of a literal per call.
+func testAppearance() protocol.Appearance {
+	return protocol.Appearance{
+		SkinColor:     0x8d5524,
+		ShirtColor:    0x2f4f4f,
+		TrousersColor: 0x3b2f2f,
+		ShoesColor:    0x1c1c1c,
+		HairModel:     vnet.HairModelBraided,
+		HairColor:     0xd8b46a,
+	}
+}
+
 // dropTerrain is solid at and below groundTop and air above it, with an optional
 // region the server has not generated yet.
 //
@@ -118,7 +136,7 @@ func (h *dropHarness) join(entityID uint64, pos [3]float32) (*Player, *dropSink)
 	h.t.Helper()
 
 	out := &dropSink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}
@@ -420,7 +438,7 @@ func TestDropIdentitiesComeFromTheCounterThatNamesPlayers(t *testing.T) {
 
 	// A session mints its player's entity id from the same source before it joins.
 	entityID := mint()
-	if _, err := sim.Join(entityID, testPlayerID(entityID), [3]float32{0.5, 64, 0.5}, nil, func([]byte) bool { return true }); err != nil {
+	if _, err := sim.Join(entityID, testPlayerID(entityID), [3]float32{0.5, 64, 0.5}, testAppearance(), nil, func([]byte) bool { return true }); err != nil {
 		t.Fatalf("Join: %v", err)
 	}
 
@@ -625,7 +643,7 @@ func TestAPickupHoldsTheInventoryLockAcrossItsDelivery(t *testing.T) {
 
 	// Assigned before any tick can run, and read on the tick goroutine, which in this
 	// test is this one: Step calls deliver synchronously.
-	admitted, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 64, 0.5}, nil, deliver)
+	admitted, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 64, 0.5}, testAppearance(), nil, deliver)
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}

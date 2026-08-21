@@ -186,6 +186,13 @@ type Resolved struct {
 	// world, which is what makes it a name rather than a label.
 	Name string
 
+	// Appearance is what that character looks like, read from the store and from
+	// nowhere else. **Not from the message that chose it**: a selection names an id and
+	// a creation is the one and only time a client says what a character looks like, so
+	// on every connection after the first this value has one source, and it is the same
+	// one the world was drawn from last time.
+	Appearance protocol.Appearance
+
 	// Returning reports whether the player store already held a life for Character.
 	Returning bool
 
@@ -247,6 +254,10 @@ type liveIdentity struct {
 	// character is which of this account's characters the session is playing. The
 	// autosave needs it and nothing else can supply it: the simulation keys a life by
 	// account, which is the one thing that does not say which character stood there.
+	//
+	// **Zero for a session that has been admitted and has not chosen yet.** The claim is
+	// taken before the character list is sent, so this is filled in by
+	// [Identities.playing] when a selection or a creation settles it.
 	character persist.CharacterID
 
 	// finalised records that this session's teardown has already written its last
@@ -290,7 +301,83 @@ func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (
 	}, nil
 }
 
-// Resolve settles which player a hello is claiming, and claims them for this session.
+// Admitted is one account this server has let through the door: its ticket verified, its
+// one live session claimed, and its characters read — with nothing yet said about which
+// of them is playing.
+//
+// **It is the half of a handshake that used to be the whole of it.** Through V6 a hello
+// was answered with a welcome, so verifying a credential and settling a body were one
+// step. V7 puts a choice between them, and the reason is `ServerWelcome.spawn`: where a
+// player stands depends on which character they chose, so a welcome sent before the
+// choice would carry a spawn the client must not trust and a correction would have to
+// follow it. See the header of schemas/handshake.fbs.
+//
+// The claim is already held by the time one of these exists, which is what makes the
+// phase that follows safe to spend a person's time in: a second connection for the same
+// account is turned away at the door rather than after somebody has picked a character.
+type Admitted struct {
+	// ID names the account, one-way. It is what the exclusivity claim is held under,
+	// what the simulation keys a body on, and what a log line carries.
+	ID identity.PlayerID
+
+	// Characters is every character this account holds **on this world**, lowest id
+	// first, as the store's index knows them. An empty one is a legal and expected
+	// answer — a new account, or one that has never played here — and it is not a
+	// refusal: it says the only way forward is a creation.
+	Characters []persist.Character
+}
+
+// maxCharactersFitsTheWire is a compile-time reading of the one contract limit this
+// package converts rather than copies: `ServerCharacterList.max_characters` is a ubyte,
+// and persist's constant is documented as staying under 256. Written as a constant
+// conversion so that raising it past the wire's range is a build failure here rather
+// than a truncated number a client would believe.
+const maxCharactersFitsTheWire = uint8(persist.MaxCharactersPerAccount)
+
+// list is the answer a hello gets: every character this account holds on this world, and
+// how many it may hold.
+//
+// **The limit is announced rather than left for a client to hardcode**, for the reason
+// every limit in ServerWelcome is: the number belongs to the server, and a client that
+// guessed it would offer or refuse a creation this server disagrees with.
+//
+// The one case where the announced number is not [persist.MaxCharactersPerAccount] is a
+// build whose limit has been **lowered** under an account that already holds more than
+// the new allowance. The contract requires `max_characters` to be at least the length of
+// the list — a server that says otherwise is disagreeing with itself, and a client is
+// required to refuse the frame, which would shut that account out of the world over a
+// number nobody could act on. So the larger of the two is announced, which is also the
+// field's own reading: it is how many characters this account may hold *including the
+// ones above*, and it plainly may hold the ones it already has. Creating another is
+// still refused, because [persist.Store.Create] compares against the constant and not
+// against this — which is the half that does the enforcing.
+func (a Admitted) list() protocol.CharacterList {
+	summaries := make([]protocol.CharacterSummary, 0, len(a.Characters))
+	for _, character := range a.Characters {
+		summaries = append(summaries, protocol.CharacterSummary{
+			CharacterID: uint64(character.ID),
+			Name:        character.Name,
+			// Straight from the store, which is the whole of this issue's rule about a
+			// face: it was written down when the character was created and is read from
+			// nowhere else.
+			Appearance: character.Appearance,
+		})
+	}
+
+	allowed := maxCharactersFitsTheWire
+	// The upper bound is not defensive clutter: this is the one place a count becomes a
+	// ubyte, and a silent truncation is the single way this line could announce a number
+	// *smaller* than the list beside it — which is the frame the paragraph above exists
+	// to avoid. Unreachable, because the constant is documented as staying under 256 and
+	// the store refuses a creation past it.
+	if held := len(summaries); held > int(allowed) && held <= 0xFF {
+		allowed = uint8(held)
+	}
+	return protocol.CharacterList{Characters: summaries, MaxCharacters: allowed}
+}
+
+// Admit verifies the ticket a hello presents, claims the account's one live session, and
+// answers with the characters it holds here.
 //
 // **Runs on the session goroutine, before Join, and never under the simulation's
 // lock**: it reads the player store, and a tick that waits on a file is a tick every
@@ -308,30 +395,32 @@ func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (
 //  3. The account the ticket names becomes a player id. Only now — nothing is looked
 //     up for a ticket nobody has vouched for, which is what keeps an unauthenticated
 //     connection from costing this server a disk read.
-//  4. Which of that account's characters is playing is settled, and one is created if
-//     the account has none here. The three ways a creation is refused are the three
-//     the contract reserves: CHARACTER_NAME_TAKEN, CHARACTER_NAME_REFUSED and
-//     CHARACTER_LIMIT_REACHED.
-//  5. The store is read for the life that character left behind.
-//  6. The account is claimed. One already holding a live session is ALREADY_CONNECTED.
+//  4. The account is claimed, and one already holding a live session is
+//     ALREADY_CONNECTED. Before the list rather than after it, by the same rule the
+//     step above keeps: a connection that is not going in has no business reading a
+//     store.
 //
-// **What is gone from this list is the whole of the old model.** There was a four-way
-// rule over `player_token`: mint on an empty one, resume a known one, mint a new
-// identity for an unknown one, refuse a wrong-length one. A V7 server reads past that
-// field entirely — schemas/handshake.fbs retires it in as many words — so there is no
-// minting path here at all, and a client can no longer choose who it is by presenting
-// bytes. It presents a ticket somebody signed, or it does not come in.
+// **Two things are gone from this list, and the second went with this issue.** There was
+// a four-way rule over `player_token` — mint on an empty one, resume a known one, mint a
+// new identity for an unknown one, refuse a wrong-length one — and a V7 server reads
+// past that field entirely. And there was a *character* settled here, from the display
+// name the hello carried, because choosing had no message to arrive in. It has one now,
+// so this function settles an account and stops.
+//
+// **`ClientHello.player_name` therefore decides nothing at all any more.** It is still
+// untrusted display text and it is simply not read: what a player is called here is the
+// name their character was created under, which is the one that is unique on this world.
 //
 // The caller releases the claim in its teardown, last. See Serve.
-func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
+func (i *Identities) Admit(hello *protocol.ClientHello) (Admitted, error) {
 	if hello == nil {
-		// Unreachable: Serve resolves only a message that decoded as a hello.
-		return Resolved{}, errors.New("session: no hello to resolve a player from")
+		// Unreachable: Serve admits only a message that decoded as a hello.
+		return Admitted{}, errors.New("session: no hello to admit an account from")
 	}
 
 	claims, err := i.verify(hello.SessionTicket)
 	if err != nil {
-		return Resolved{}, err
+		return Admitted{}, err
 	}
 
 	// The one line that converts between two packages' sixteen bytes, and it stops
@@ -344,18 +433,8 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 	// digest of it.
 	id := identity.IDOf(identity.Account(claims.Account))
 
-	character, err := i.character(id, hello.PlayerName)
-	if err != nil {
-		return Resolved{}, err
-	}
-
-	life, returning, err := i.recall(character)
-	if err != nil {
-		return Resolved{}, err
-	}
-
-	if !i.claim(id, character.ID) {
-		return Resolved{}, &Refused{
+	if !i.claim(id) {
+		return Admitted{}, &Refused{
 			Reason: vnet.RejectReasonALREADY_CONNECTED,
 			// Named as the account rather than as the identity, because that is what it
 			// now is: the same person cannot hold two sessions on this world, whichever
@@ -365,41 +444,144 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 			Detail: "that account already has a live session on this world",
 		}
 	}
-	return Resolved{ID: id, Character: character.ID, Name: character.Name, Returning: returning, Life: life}, nil
+
+	// A map hit and a copy, never a walk of the directory: the index was built when the
+	// store was opened, precisely so that this — which happens on every connection — is
+	// not a read of every character in the world.
+	return Admitted{ID: id, Characters: i.store.Characters(id)}, nil
 }
 
-// character settles which of this account's characters is playing, creating one when
-// the account holds none on this world.
+// Select settles this session on one character the account already owns.
 //
-// **Choosing is not on the wire yet and this is deliberately not a substitute for it.**
-// schemas/handshake.fbs already reserves the exchange — ServerCharacterList, then
-// SelectCharacterRequest or CreateCharacterRequest — and putting it there is the next
-// issue. Until it lands there is exactly one thing a hello says about a character, the
-// display name it has always carried, so that is what this resolves against:
+// **The id is re-read from the store rather than matched against the list that was
+// sent**, which is what schemas/handshake.fbs asks for: an id the server minted is the
+// one kind of identifier a client may echo back, and whether it names a character *this
+// account* owns is a decision made against the store rather than against a message this
+// connection has in its hand.
 //
-//   - an account with characters here plays the one wearing that name, and the lowest
-//     id it holds when none does. Deterministic, so two connections settle the same
-//     way, and it never *creates* from a name — an account's second character is made
-//     through the wire exchange or not at all;
-//   - an account with none here has one created under that name, which is the only way
-//     a first connection can become a character at all.
-//
-// The lookup goes through the store's own fold rather than a comparison written here:
-// a name is taken under the store's rule, and a second spelling of that rule is one bug
-// away from a name that is taken and cannot be found.
-// **The decision and the write happen under the store's one lock**, which is why this
-// asks for both at once instead of reading the roster and then creating. Reading first
-// was a check-then-act race that #156's review found: two hellos for one fresh account
-// both saw an empty roster, both created under different names — Create serialises per
-// name, so both succeeded — and the one that then lost the single-session claim had
-// already written a second character nobody asked for. Nothing deletes a character, so
-// the roster slot and the name were gone for good.
-func (i *Identities) character(id identity.PlayerID, requested string) (persist.Character, error) {
-	character, _, err := i.store.ResolveOrCreate(id, requested)
-	if err != nil {
-		return persist.Character{}, refuseCharacter(err)
+// **"No such character" and "not yours" are one answer**, and that is the whole of the
+// refusal design here. `game.Player.RemoveStructure` draws the same line for a camp: a
+// client that could tell the two apart could map the world's characters by asking for
+// ids it does not have. So both are BAD_REQUEST carrying one identical sentence, and the
+// cause — which only an operator's log ever sees — is what says which it was.
+func (i *Identities) Select(admitted Admitted, wanted persist.CharacterID) (Resolved, error) {
+	if admitted.ID == (identity.PlayerID{}) {
+		// Unreachable: a session reaches the character phase only through a successful
+		// Admit, and that is the one thing that hands out an Admitted.
+		return Resolved{}, errors.New("session: a character cannot be chosen before an account has been admitted")
 	}
-	return character, nil
+
+	character, known := i.store.Character(wanted)
+	switch {
+	case !known:
+		return Resolved{}, refuseSelection(fmt.Errorf("no character on this world has id %s", wanted))
+	case character.Owner != admitted.ID:
+		return Resolved{}, refuseSelection(fmt.Errorf("character %s belongs to another account", wanted))
+	}
+
+	life, returning, err := i.recall(character)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return i.playing(admitted, character, returning, life), nil
+}
+
+// Create makes a new character for this account and settles the session on it.
+//
+// **Creation and selection are one step**, which is the contract's shape rather than a
+// shortcut: a created character is the character playing this session, so the answer to
+// a `CreateCharacterRequest` is a `ServerWelcome`.
+//
+// **The appearance is checked here, before anything is written, and this is the gate
+// schemas/common.fbs names in as many words.** A character persisted with a hair model
+// no member names, or a colour carrying the reserved high byte, is one every client is
+// required to refuse afterwards — and the person who cannot get in is not the person who
+// sent it. It is BAD_REQUEST rather than a decode error for the reason that file gives:
+// the frame is perfectly readable, and closing the connection over a value would answer a
+// value question with a framing verdict. It is BAD_REQUEST rather than one of the three
+// character refusals because those three are about the *name*, which is the half a player
+// picked and can pick again.
+func (i *Identities) Create(admitted Admitted, name string, appearance protocol.Appearance) (Resolved, error) {
+	if admitted.ID == (identity.PlayerID{}) {
+		// Unreachable, for the reason Select's guard is.
+		return Resolved{}, errors.New("session: a character cannot be created before an account has been admitted")
+	}
+
+	if err := appearance.Validate(); err != nil {
+		return Resolved{}, refuseAppearance(err)
+	}
+
+	character, err := i.store.Create(admitted.ID, name, appearance)
+	if err != nil {
+		return Resolved{}, refuseCharacter(err)
+	}
+
+	// No recall, deliberately. Store.Create has just written this character's first
+	// record and a record no session has touched is not a life — recall would read the
+	// file back only to be told what this line already knows.
+	return i.playing(admitted, character, false, nil), nil
+}
+
+// playing records which character the claim is playing and answers with the resolution
+// the rest of the session is built from.
+//
+// The character goes onto the live claim here rather than at the claim itself, because
+// at the claim nobody had chosen one yet. What that costs is one window — an account is
+// live and has no character while the person is looking at the list — and nothing reads
+// it: the autosave asks the *simulation* which lives to write, and a session that has
+// not chosen has not joined. [Identities.stillPlaying] fails closed over the same window.
+func (i *Identities) playing(admitted Admitted, character persist.Character, returning bool, life *game.Life) Resolved {
+	i.mu.Lock()
+	if held, live := i.live[admitted.ID]; live {
+		held.character = character.ID
+	}
+	// A claim that is not there is unreachable — this session holds it from Admit until
+	// its own teardown — and the absence of an else is deliberate: there is nothing this
+	// function could usefully do about it, and the teardown writes the record either way
+	// because it is handed the Resolved rather than reading the claim back.
+	i.mu.Unlock()
+
+	return Resolved{
+		ID:         admitted.ID,
+		Character:  character.ID,
+		Name:       character.Name,
+		Appearance: character.Appearance,
+		Returning:  returning,
+		Life:       life,
+	}
+}
+
+// refusedSelectionDetail is what a client is told about every character it may not play:
+// one this world has never minted, and one another account owns.
+//
+// **The same sentence for both, deliberately**, and for the reason [refusedTicketDetail]
+// is one sentence for five ticket refusals. A client that could tell "no such character"
+// from "not yours" could ask this server questions about characters nobody presented and
+// learn which ids exist — which is the enumeration `SelectCharacterRequest`'s own
+// contract note refuses to allow.
+const refusedSelectionDetail = "that character is not one this account can play on this world"
+
+// refuseSelection is the one shape a refused selection takes: BAD_REQUEST, one sentence
+// for the client, and the cause for the log.
+func refuseSelection(cause error) *Refused {
+	return &Refused{
+		Reason: vnet.RejectReasonBAD_REQUEST,
+		Detail: refusedSelectionDetail,
+		Cause:  cause,
+	}
+}
+
+// refuseAppearance is the answer to a creation whose appearance breaks the contract.
+//
+// The detail says which half of the request was wrong and nothing about the value:
+// a client that sent it has the value already, and a client that did not is a build
+// somebody has to fix rather than a player who has to choose again.
+func refuseAppearance(cause error) *Refused {
+	return &Refused{
+		Reason: vnet.RejectReasonBAD_REQUEST,
+		Detail: "that is not an appearance this world can store; the request named colours or a hair model this contract does not allow",
+		Cause:  cause,
+	}
 }
 
 // refuseCharacter turns a store refusal into the answer the contract has for it, and
@@ -676,12 +858,20 @@ func (i *Identities) write(character persist.CharacterID, life game.Life) error 
 
 // stillPlaying reports the character id has a live session on, and whether that session
 // has yet to write its last record.
+//
+// **A claim that has not chosen a character yet answers false**, which is the third of
+// the three skips and the one the character phase added. Nothing should reach here in
+// that state — the autosave asks the simulation which lives to write, and a session
+// still looking at the list has not joined it — and answering `(0, true)` would send a
+// life to [Store.Save] under the id that names no character, which is a write refused
+// with an error rather than a write to the wrong file. Failing closed here costs
+// nothing and keeps that from being the only thing standing in the way.
 func (i *Identities) stillPlaying(id identity.PlayerID) (persist.CharacterID, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	held, live := i.live[id]
-	if !live || held.finalised {
+	if !live || held.finalised || held.character.IsZero() {
 		return 0, false
 	}
 	return held.character, true
@@ -697,19 +887,22 @@ func (i *Identities) finalise(id identity.PlayerID) {
 	}
 }
 
-// claim adds id to the live set under the character it is playing, answering false when
-// it is already there.
+// claim adds id to the live set, answering false when it is already there.
 //
-// The character goes in with the claim rather than in a later call, so there is no
-// window in which an account is live and the autosave cannot say what to write for it.
-func (i *Identities) claim(id identity.PlayerID, character persist.CharacterID) bool {
+// **It claims an account with no character named, and that is the phase this issue
+// added.** The claim has to be taken at the door — before the list is sent, and long
+// before a person has finished choosing — because the alternative is two connections for
+// one account both browsing, both selecting, and one of them finding out afterwards. So
+// the character arrives later, through [Identities.playing], and every reader of the
+// claim fails closed over the window in between.
+func (i *Identities) claim(id identity.PlayerID) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	if _, live := i.live[id]; live {
 		return false
 	}
-	i.live[id] = &liveIdentity{character: character}
+	i.live[id] = &liveIdentity{}
 	return true
 }
 

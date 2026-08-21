@@ -125,8 +125,7 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 
 	account := testAccount(2)
 	id := testPlayerID(account)
-	before.in <- helloFor(t, account)
-	if got := firstReply(t, before).PayloadType(); got != vnet.PayloadServerWelcome {
+	if got := enterWorld(t, before, helloFor(t, account), creationOf("Eivor")).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the first run got %s, want a welcome", got)
 	}
 
@@ -192,9 +191,9 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 	// A ticket the restarted process has never seen, naming the account that played
 	// before it: the only route from the first life to the second is the record on the
 	// file system, and the only thing that says whose record it is came from the
-	// account service.
-	after.in <- helloFor(t, account)
-	welcome := welcomeOf(t, firstReply(t, after))
+	// account service. The character it selects is one *this* process knows about only
+	// because it rebuilt its index from that directory.
+	welcome := welcomeOf(t, enterWorld(t, after, helloFor(t, account), selectionOf(character.ID)))
 
 	spawn := welcome.Spawn(nil)
 	if spawn == nil {
@@ -252,8 +251,7 @@ func TestShutdownSavesASessionThatIsStillConnected(t *testing.T) {
 	stop := start(t, srv)
 
 	account := testAccount(3)
-	conn.in <- helloFor(t, account)
-	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
+	if got := enterWorld(t, conn, helloFor(t, account), creationOf("Eivor")).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the session got %s, want a welcome", got)
 	}
 	waitFor(t, "the player to join", func() bool { return srv.sim.Count() == 1 })
@@ -297,8 +295,7 @@ func TestTheAutosaveWritesTheConnectedPlayers(t *testing.T) {
 	defer stop()
 
 	account := testAccount(4)
-	conn.in <- helloFor(t, account)
-	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
+	if got := enterWorld(t, conn, helloFor(t, account), creationOf("Eivor")).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the session got %s, want a welcome", got)
 	}
 	character := onlyCharacter(t, players, account)
@@ -455,8 +452,7 @@ func TestACampSurvivesARestart(t *testing.T) {
 
 	account := testAccount(5)
 	id := testPlayerID(account)
-	before.in <- helloFor(t, account)
-	if got := firstReply(t, before).PayloadType(); got != vnet.PayloadServerWelcome {
+	if got := enterWorld(t, before, helloFor(t, account), creationOf("Eivor")).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the first run got %s, want a welcome", got)
 	}
 
@@ -497,7 +493,7 @@ func TestACampSurvivesARestart(t *testing.T) {
 	// ---- the restart ----------------------------------------------------------
 
 	after := newScriptedConn("after")
-	second, _ := persistentServer(t, newQueueTransport(after), dir, cfg)
+	second, players := persistentServer(t, newQueueTransport(after), dir, cfg)
 	stopSecond := start(t, second)
 	defer stopSecond()
 
@@ -507,8 +503,8 @@ func TestACampSurvivesARestart(t *testing.T) {
 		t.Fatalf("the restarted server holds %d structures before any session, want 2", got)
 	}
 
-	after.in <- helloFor(t, account)
-	welcome := welcomeOf(t, firstReply(t, after))
+	welcome := welcomeOf(t, enterWorld(t, after,
+		helloFor(t, account), selectionOf(onlyCharacter(t, players, account).ID)))
 	rejoinedAs := welcome.EntityId()
 
 	states := awaitSnapshotStructures(t, after, 2)
@@ -789,7 +785,7 @@ func TestEveryCharacterSurvivesARestart(t *testing.T) {
 	{
 		store := openPlayerStore(t, dir)
 		for name, pos := range seeded {
-			character, err := store.Create(testPlayerID(account), name)
+			character, err := store.Create(testPlayerID(account), name, testAppearance())
 			if err != nil {
 				t.Fatalf("Create(%q): %v", name, err)
 			}
@@ -804,7 +800,7 @@ func TestEveryCharacterSurvivesARestart(t *testing.T) {
 		}
 		// Somebody else's character, so "every character came back" cannot pass by
 		// coming back with everything to everybody.
-		if _, err := store.Create(testPlayerID(neighbour), "Bjorn"); err != nil {
+		if _, err := store.Create(testPlayerID(neighbour), "Bjorn", testAppearance()); err != nil {
 			t.Fatalf("Create for the neighbour: %v", err)
 		}
 	}
@@ -835,11 +831,11 @@ func TestEveryCharacterSurvivesARestart(t *testing.T) {
 		}
 	}
 
-	// And the one the hello names is the one that plays, standing where it stood. The
-	// welcome's spawn is the assertion, because it is built before any tick can move
-	// anybody.
-	conn.in <- helloAsking(t, account, "Sigrun")
-	spawn := welcomeOf(t, firstReply(t, conn)).Spawn(nil)
+	// And the one the *selection* names is the one that plays, standing where it stood.
+	// The welcome's spawn is the assertion, because it is built before any tick can move
+	// anybody — and it is why the choice comes before the welcome at all: a spawn belongs
+	// to a character, so it cannot be announced until there is one.
+	spawn := welcomeOf(t, enterWorld(t, conn, helloFor(t, account), selectionOf(ids["Sigrun"]))).Spawn(nil)
 	if spawn == nil {
 		t.Fatal("the welcome carries no spawn")
 	}

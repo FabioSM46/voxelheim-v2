@@ -64,7 +64,9 @@ import (
 	"sync"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
+
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -85,13 +87,23 @@ import (
 // years the single event it serves. A v2 record is refused by [world.CheckHeader] like
 // any other version this build does not speak — and a whole *directory* of them is set
 // aside on the first start under this format rather than read. See [OpenStore].
-const StoreVersion uint32 = 3
+//
+// **4 adds the appearance**, because a character's face is chosen once and has to
+// survive every session after it: schemas/player.fbs says an appearance is read from
+// the stored character and never from anything a client said at join time, and a store
+// with nowhere to put one leaves the server nothing truthful to answer with. Still no
+// migration, for a smaller version of the same reason: a v3 record does not say what
+// its character looks like, and the only value this build could invent is the
+// placeholder the contract reserves for an appearance that has not *arrived* — which is
+// a different claim entirely.
+const StoreVersion uint32 = 4
 
 // On-disk layout, little-endian throughout, one file per character.
 //
 //	players/<character-id-hex>.bin
 //	    magic[4] version:u32 last_seen:i64
 //	    character_id:u64 owner:32
+//	    skin:u32 shirt:u32 trousers:u32 shoes:u32 hair:u32 hair_model:u8
 //	    pos:3×f64 yaw:f64 health:u16
 //	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
 //	    name_len:u16 name[name_len] crc32:u32
@@ -99,6 +111,12 @@ const StoreVersion uint32 = 3
 // Everything fixed-width first and the one variable-length field last, so the only
 // length the decoder has to reason about is the name's — a truncated file fails the
 // exact-size check below rather than being read as a shorter pack.
+//
+// The appearance sits with the id, the owner and the name rather than with the life,
+// because that is what it is: chosen once when the character is created and never
+// written again, where every value below it is whatever the last session left. Its five
+// colours are written as the wire carries them — 0x00RRGGBB, the high byte reserved —
+// so the number in the file is the number in the frame, with no conversion to agree on.
 //
 // The slots are a whole table, always, empty ones included. A record is rewritten whole
 // on every save, so there is nothing to gain by omitting the empties and something to
@@ -119,22 +137,34 @@ const (
 	// corruptFileSuffix marks a record this build could not read. See Store.Quarantine.
 	corruptFileSuffix = ".corrupt"
 
-	// preAccountsSuffix marks the players directory a build before characters wrote.
-	// See setAsidePreAccounts.
-	preAccountsSuffix = ".pre-accounts"
+	// supersededSuffix marks a players directory written in a format this build does
+	// not speak, and it names the format this build *does* speak: a directory set aside
+	// by this version becomes players.pre-v4.<timestamp>.
+	//
+	// It said `.pre-accounts` while there had been exactly one such move, which was
+	// true of the format that introduced characters and stopped being true the moment a
+	// second version existed — a v3 directory is not one from before accounts, and a
+	// name that says so is a name an operator has to disbelieve. Built from
+	// [StoreVersion] so the next bump needs no edit here. See [Store.setAsideSuperseded].
+	supersededSuffix = ".pre-v"
 
 	// slotSize is one slot's four uint16s: item, count, durability, max durability.
 	slotSize  = 8
 	slotsSize = int(protocol.InventorySlots) * slotSize
 
-	offLastSeen  = world.HeaderSize
-	offCharacter = offLastSeen + 8
-	offOwner     = offCharacter + 8
-	offPos       = offOwner + identity.IDSize
-	offYaw       = offPos + 3*8
-	offHealth    = offYaw + 8
-	offSlots     = offHealth + 2
-	offNameLen   = offSlots + slotsSize
+	// appearanceSize is the five colours and the hair model, in the order the layout
+	// above names them.
+	appearanceSize = 5*4 + 1
+
+	offLastSeen   = world.HeaderSize
+	offCharacter  = offLastSeen + 8
+	offOwner      = offCharacter + 8
+	offAppearance = offOwner + identity.IDSize
+	offPos        = offAppearance + appearanceSize
+	offYaw        = offPos + 3*8
+	offHealth     = offYaw + 8
+	offSlots      = offHealth + 2
+	offNameLen    = offSlots + slotsSize
 
 	recordHeaderSize = offNameLen + 2
 	maxRecordSize    = recordHeaderSize + MaxNameBytes + world.ChecksumSize
@@ -164,6 +194,18 @@ type Record struct {
 	Character CharacterID
 	Owner     identity.PlayerID
 	Name      string
+
+	// Appearance is what this character looks like, and it is the store's too, for the
+	// same reason and one more: it is chosen once, at creation, and there is no message
+	// in this contract that changes it. A save that could restate it would be a way to
+	// become somebody else between two sessions.
+	//
+	// Written down as given. **This package judges no more of it than it judges a life**
+	// — schemas/common.fbs puts that obligation on whatever accepts a
+	// CreateCharacterRequest, before the value ever reaches here. What the startup scan
+	// does check is the narrower thing it checks a name for: whether the *index* can
+	// carry it. See [Store.readIndexed].
+	Appearance protocol.Appearance
 
 	// LastSeen is when the character's last session ended, to the second. Written at
 	// teardown, which is the only moment the server knows the answer.
@@ -262,8 +304,8 @@ func NewMemoryStore() *Store {
 // world.OpenStore: this runs after it, so a directory belonging to another seed has
 // already been refused and no player record is written into it.
 //
-// **The first start under this format sets the old directory aside**, before anything
-// else happens to it. See [Store.setAsidePreAccounts].
+// **The first start under this format sets a superseded directory aside**, before
+// anything else happens to it. See [Store.setAsideSuperseded].
 func OpenStore(worldDir string) (*Store, error) {
 	if worldDir == "" {
 		// Not a nil store returned quietly: an empty -world-dir is the ephemeral
@@ -279,10 +321,11 @@ func OpenStore(worldDir string) (*Store, error) {
 		return nil, fmt.Errorf("persist: creating %s: %w", s.dir, err)
 	}
 
-	// Before the sweep and before the scan: whatever is in a pre-character directory
-	// moves whole, temporaries and all, so that "nothing was deleted" is true of every
-	// byte in it rather than of the records alone.
-	moved, err := s.setAsidePreAccounts()
+	// Before the sweep and before the scan: whatever is in a superseded directory moves
+	// whole, temporaries and all, so that "nothing was deleted" is true of every byte in
+	// it rather than of the records alone.
+	moved, err := s.setAsideSuperseded()
+
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +358,7 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
-// SetAside is where a pre-character players directory was moved when this store was
+// SetAside is where a superseded players directory was moved when this store was
 // opened, and empty when there was nothing to move.
 func (s *Store) SetAside() string {
 	if s == nil {
@@ -333,22 +376,23 @@ func (s *Store) Unreadable() []string {
 	return s.unreadable
 }
 
-// setAsidePreAccounts moves the whole players directory out of the way when it holds
-// records from a build before characters, and reports whether it did.
+// setAsideSuperseded moves the whole players directory out of the way when it holds
+// records in a format this build does not speak, and reports whether it did.
 //
 // **Nothing is deleted and nothing is written over.** It is the doctrine
 // [Store.Quarantine] keeps, one level up: the directory is the only evidence of what
 // every player on this world had, and a format change is not a reason to lose it. The
 // records inside are unreadable to this build — a v2 record names a player by the hash
-// of their account and cannot say which character it was — so there is no migration to
-// run and deliberately none written. What there is, is a directory an operator can copy
-// somewhere and open at their leisure.
+// of their account and cannot say which character it was; a v3 record cannot say what
+// its character looks like — so there is no migration to run and deliberately none
+// written. What there is, is a directory an operator can copy somewhere and open at
+// their leisure.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
-// a fixed `players.pre-accounts` would be destroyed by the second run that found
-// something to move, which is the silent overwrite this exists to prevent. The
-// acceptance criterion names the directory `players.pre-accounts/`; the suffix that
-// follows is what keeps that name from being a place two set-asides collide.
+// a fixed name would be destroyed by the second run that found something to move, which
+// is the silent overwrite this exists to prevent. The version in it is the other half:
+// an operator who finds two of these needs to know which format each holds, and this
+// build can only name the one it speaks.
 //
 // A directory is detected from its contents rather than from a marker file: any record
 // carrying this store's magic and a version that is not this build's is a record from
@@ -356,7 +400,8 @@ func (s *Store) Unreadable() []string {
 // case that refuses to start instead — moving a newer build's directory aside would be
 // this build deciding it knows better than the one that wrote it, and an operator who
 // downgraded by accident should find that out before a player does.
-func (s *Store) setAsidePreAccounts() (bool, error) {
+func (s *Store) setAsideSuperseded() (bool, error) {
+
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return false, fmt.Errorf("persist: reading %s: %w", s.dir, err)
@@ -382,7 +427,8 @@ func (s *Store) setAsidePreAccounts() (bool, error) {
 		return false, nil
 	}
 
-	aside := fmt.Sprintf("%s%s.%d", s.dir, preAccountsSuffix, time.Now().UTC().UnixNano())
+	aside := fmt.Sprintf("%s%s%d.%d", s.dir, supersededSuffix, StoreVersion, time.Now().UTC().UnixNano())
+
 	if err := os.Rename(s.dir, aside); err != nil {
 		return false, fmt.Errorf("persist: setting %s aside: %w", s.dir, err)
 	}
@@ -474,7 +520,7 @@ func (s *Store) index() error {
 // readIndexed reads one record and answers the character it describes, refusing
 // anything the index cannot hold.
 //
-// Four ways a file is refused beyond the ones decodeRecord already covers, and each is
+// Five ways a file is refused beyond the ones decodeRecord already covers, and each is
 // a way the index would otherwise be wrong rather than a way the file is:
 //
 //   - a name that is not sixteen hex characters — not a name this store writes;
@@ -485,8 +531,16 @@ func (s *Store) index() error {
 //     that is tampering or a bug rather than a race — and either way one of the two has
 //     to go somewhere an operator can find it. Which one loses is deterministic rather
 //     than arbitrary: os.ReadDir sorts by file name, a file name is the character id in
-//     fixed-width hex, so the higher id is the one that arrives second and is kept aside.
+//     fixed-width hex, so the higher id is the one that arrives second and is kept aside;
+//   - an appearance the contract forbids. **The one check here that is not about a key,
+//     and it earns its place from what the index feeds**: every character in it is a row
+//     in a `ServerCharacterList`, and a summary carrying a hair model no member names is
+//     a frame every client is required to refuse. Left in, one damaged record would cost
+//     that account not one character but the whole list — and with it every way into the
+//     world. The rule itself is not restated here: [protocol.Appearance.Validate] is the
+//     one implementation, and this package still judges no life.
 func (s *Store) readIndexed(path, base string) (Character, error) {
+
 	id, named := parseCharacterID(base[:len(base)-len(recordFileExt)])
 	if !named {
 		return Character{}, fmt.Errorf("%w: %s is not a name a character record is written under", world.ErrCorruptStore, base)
@@ -515,7 +569,10 @@ func (s *Store) readIndexed(path, base string) (Character, error) {
 	if _, taken := s.byName[folded]; taken {
 		return Character{}, fmt.Errorf("%w: %s wears a name another character already has", world.ErrCorruptStore, base)
 	}
-	return Character{ID: id, Owner: rec.Owner, Name: accepted}, nil
+	if err := rec.Appearance.Validate(); err != nil {
+		return Character{}, fmt.Errorf("%w: %s: %w", world.ErrCorruptStore, base, err)
+	}
+	return Character{ID: id, Owner: rec.Owner, Name: accepted, Appearance: rec.Appearance}, nil
 }
 
 // setAsideUnreadable moves a file the index could not use out of the way and records
@@ -581,10 +638,12 @@ func (s *Store) read(path string) (Record, bool, error) {
 
 // Save writes a character's record, atomically. A no-op on a store with no directory.
 //
-// **The three fields that name a character are taken from the index and not from rec**,
-// whatever the caller put in them. Which account owns a character and what it is called
-// are decisions [Store.Create] made under a lock, and a save that could restate them
-// would be a second, unlocked way to rename a character or move it between accounts.
+// **The four fields that name a character are taken from the index and not from rec**,
+// whatever the caller put in them. Which account owns a character, what it is called and
+// what it looks like are decisions [Store.Create] made under a lock, and a save that
+// could restate them would be a second, unlocked way to rename a character, move it
+// between accounts, or come back from a session wearing somebody else's face.
+//
 // An id this store has never minted is [ErrUnknownCharacter] rather than a new file:
 // the index is what says a character exists, so writing one it does not know about
 // would create a character no lookup could find.
@@ -610,7 +669,9 @@ func (s *Store) writeRecord(character Character, rec Record) error {
 	rec.Character = character.ID
 	rec.Owner = character.Owner
 	rec.Name = character.Name
+	rec.Appearance = character.Appearance
 	return world.WriteAtomic(s.recordPath(character.ID), encodeRecord(rec))
+
 }
 
 // Quarantine moves a record this build could not use out of the way, and returns where
@@ -669,8 +730,10 @@ func encodeRecord(rec Record) []byte {
 	binary.LittleEndian.PutUint64(buf[offLastSeen:offLastSeen+8], uint64(rec.LastSeen.UTC().Unix()))
 	binary.LittleEndian.PutUint64(buf[offCharacter:offCharacter+8], uint64(rec.Character))
 	copy(buf[offOwner:offOwner+identity.IDSize], rec.Owner[:])
+	putAppearance(buf, rec.Appearance)
 
 	for axis, value := range rec.Pos {
+
 		at := offPos + axis*8
 		binary.LittleEndian.PutUint64(buf[at:at+8], math.Float64bits(value))
 	}
@@ -721,12 +784,14 @@ func decodeRecord(data []byte) (Record, error) {
 	}
 
 	rec := Record{
-		Name:      string(data[recordHeaderSize : uint64(recordHeaderSize)+nameLen]),
-		Character: CharacterID(binary.LittleEndian.Uint64(data[offCharacter : offCharacter+8])),
-		LastSeen:  time.Unix(int64(binary.LittleEndian.Uint64(data[offLastSeen:offLastSeen+8])), 0).UTC(),
-		Yaw:       math.Float64frombits(binary.LittleEndian.Uint64(data[offYaw : offYaw+8])),
-		Health:    binary.LittleEndian.Uint16(data[offHealth : offHealth+2]),
+		Name:       string(data[recordHeaderSize : uint64(recordHeaderSize)+nameLen]),
+		Character:  CharacterID(binary.LittleEndian.Uint64(data[offCharacter : offCharacter+8])),
+		LastSeen:   time.Unix(int64(binary.LittleEndian.Uint64(data[offLastSeen:offLastSeen+8])), 0).UTC(),
+		Appearance: appearanceAt(data),
+		Yaw:        math.Float64frombits(binary.LittleEndian.Uint64(data[offYaw : offYaw+8])),
+		Health:     binary.LittleEndian.Uint16(data[offHealth : offHealth+2]),
 	}
+
 	rec.Owner = identity.PlayerID(data[offOwner : offOwner+identity.IDSize])
 	for axis := range rec.Pos {
 		at := offPos + axis*8
@@ -742,4 +807,40 @@ func decodeRecord(data []byte) (Record, error) {
 		}
 	}
 	return rec, nil
+}
+
+// putAppearance writes one appearance into a record buffer, and appearanceAt reads one
+// back out. A pair rather than two loose blocks inside encodeRecord and decodeRecord,
+// because the order of six values is exactly the kind of thing two copies get wrong in
+// opposite directions — and the failure would be a character who comes back wearing
+// their trousers on their head.
+//
+// The colours go down as the wire carries them, 0x00RRGGBB. Nothing here refuses a
+// reserved high byte: that is [protocol.Appearance.Validate]'s question, asked before a
+// value is stored and again by the startup scan, and a refusal in the middle of an
+// encode would be a third answer in a place that cannot report one.
+func putAppearance(buf []byte, a protocol.Appearance) {
+	for i, color := range [...]uint32{a.SkinColor, a.ShirtColor, a.TrousersColor, a.ShoesColor, a.HairColor} {
+		at := offAppearance + i*4
+		binary.LittleEndian.PutUint32(buf[at:at+4], color)
+	}
+	buf[offAppearance+5*4] = byte(a.HairModel)
+}
+
+// appearanceAt reads the appearance out of a record whose length has already been
+// checked. Every offset it touches is inside the fixed-width header, which decodeRecord
+// has bounded before it calls this.
+func appearanceAt(data []byte) protocol.Appearance {
+	color := func(i int) uint32 {
+		at := offAppearance + i*4
+		return binary.LittleEndian.Uint32(data[at : at+4])
+	}
+	return protocol.Appearance{
+		SkinColor:     color(0),
+		ShirtColor:    color(1),
+		TrousersColor: color(2),
+		ShoesColor:    color(3),
+		HairColor:     color(4),
+		HairModel:     vnet.HairModel(data[offAppearance+5*4]),
+	}
 }

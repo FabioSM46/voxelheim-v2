@@ -308,6 +308,16 @@ type Player struct {
 	mineReady chan MiningCompletion
 	inventory inventory
 
+	// appearance is what this player looks like: the character's own, handed in at Join
+	// and never changed afterwards. **It is read from the stored character and from
+	// nothing a client said**, which is the whole of the rule schemas/player.fbs states
+	// — a face is chosen once, when the character is created, and a session that could
+	// restate it could arrive as somebody else.
+	//
+	// Immutable after Join, so it needs no lock: every reader is the tick, and there is
+	// no writer at all.
+	appearance protocol.Appearance
+
 	// Everything below is guarded by sim.mu.
 	pos      [3]float64
 	vel      [3]float64
@@ -342,6 +352,25 @@ type Player struct {
 	// the tick that sets it and the tick that clears it, and the inventory lock is only
 	// ever taken here without waiting. See offerInventoryLocked.
 	inventoryDirty bool
+
+	// described is every entity this session has been told the appearance of, against
+	// the tick it was last visible on. **This player is the viewer here, not the
+	// subject**: it answers "has this session already been sent a PlayerAppearance for
+	// that entity, and is that entity still in view".
+	//
+	// Per session rather than per character, and that is what makes a reconnect work
+	// without a rule of its own: a Player is built by Join, so a new session has told
+	// nobody anything and starts empty.
+	//
+	// The tick value is what bounds it. Every entry is refreshed while its entity stays
+	// visible and dropped when it does not, so the map is the size of what is in view
+	// rather than of everything that ever was — and an entity that leaves and comes back
+	// is described again, which is exactly what the client needs: a snapshot is the
+	// complete existence set, so an entity that stopped appearing in one was despawned,
+	// and its appearance went with it.
+	//
+	// Guarded by sim.mu, like everything else below the line above.
+	described map[uint64]uint64
 
 	// The combat seam. A swing is an event rather than a held control, so it arrives as
 	// a one-shot the tick consumes exactly once — see combat.go. Its ordering guard is
@@ -383,12 +412,23 @@ type Player struct {
 // point — where a player with no tent comes back to. Restoring a position is not moving
 // somebody's respawn to wherever they happened to log out.
 //
+// **appearance is the chosen character's, read from the store by the handshake.** It is
+// checked here for the reason resume is checked here: this is the boundary a stored
+// value crosses into the simulation, and from here it goes out on the wire in a
+// PlayerAppearance every viewer is required to refuse if it breaks the contract. A
+// caller that hands in one nobody validated gets an error rather than a session that
+// disconnects everybody who can see it.
+//
 // deliver is how a snapshot reaches that session, and it must not block — Step calls
 // it under the simulation's lock. It returns false for a frame it dropped.
-func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, spawn [3]float32, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
+func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
 	if deliver == nil {
 		return nil, errors.New("game: deliver must not be nil")
 	}
+	if err := appearance.Validate(); err != nil {
+		return nil, fmt.Errorf("game: the character's appearance cannot be worn: %w", err)
+	}
+
 	if playerID == (identity.PlayerID{}) {
 		// Unreachable through session, which resolves an identity before it joins.
 		// Refused rather than accepted anyway: the zero id is the digest of nothing and
@@ -419,12 +459,18 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, spawn [3]float32
 	}
 
 	p := &Player{
-		sim:       s,
-		entityID:  entityID,
-		playerID:  playerID,
+		sim:        s,
+		entityID:   entityID,
+		playerID:   playerID,
+		appearance: appearance,
+		// Empty, and that is the reconnect rule rather than an initialisation detail: a
+		// new session has described nobody to this client, so everything it can see is
+		// described again — including the players it was already looking at a moment ago.
+		described: make(map[uint64]uint64),
 		deliver:   deliver,
 		chunks:    newChunkFeed(),
 		mineReady: make(chan MiningCompletion, 1),
+
 		// A composite literal for the reason newStarterInventory returns one: the struct
 		// carries a mutex, which `go vet`'s copylocks check refuses to see assigned from
 		// a variable.
@@ -749,11 +795,63 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	visibleDrops := make([]protocol.ItemDropState, 0, len(dropped))
 	visibleMobs := make([]protocol.MobState, 0, len(prowling))
 	visibleStructures := make([]protocol.StructureState, 0, len(standing))
+
+	// At most one encoded appearance per player per tick, built the first time a viewer
+	// turns out not to have been told about them and handed to every viewer after that.
+	// It is Registry.BroadcastChunk's "one encode for every recipient", and it is what
+	// makes asking this question inside the per-viewer loop cost nothing on the ticks
+	// where nobody's view changed — which is almost all of them, because the answer is
+	// only ever built when somebody has just come into somebody else's cube.
+	faces := make([][]byte, len(players))
+
 	for _, viewer := range players {
 		visible = visible[:0]
 		for i, p := range players {
-			if withinView(viewer.chunk, p.chunk, s.viewDistance) {
-				visible = append(visible, states[i])
+			if !withinView(viewer.chunk, p.chunk, s.viewDistance) {
+				continue
+			}
+			visible = append(visible, states[i])
+
+			// **The appearance, once per entity per time it enters this viewer's cube**,
+			// and ahead of the snapshot that first carries the entity so a client usually
+			// has the face before it has anywhere to put it. Either order is legal —
+			// schemas/player.fbs says so in as many words — and this is the cheap half of
+			// making the placeholder rare.
+			//
+			// The viewer's own entity is in this loop like everybody else's: a session
+			// recognises itself by ServerWelcome.entity_id, and its own appearance arrives
+			// the same way as the rest.
+			if _, told := viewer.described[p.entityID]; told {
+				viewer.described[p.entityID] = tick
+				continue
+			}
+			if faces[i] == nil {
+				faces[i] = protocol.EncodePlayerAppearance(protocol.PlayerAppearance{
+					EntityID:      p.entityID,
+					Appearance:    p.appearance,
+					HasAppearance: true,
+				})
+			}
+			if viewer.deliver(faces[i]) {
+				// **Recorded only once the frame is in the queue**, which is
+				// session.View.MarkLoaded's rule and the same failure it exists to avoid:
+				// marking it when it was merely attempted leaves a client permanently
+				// drawing a placeholder for somebody the server believes it has described.
+				// Unlike a snapshot there is no later frame to supersede a dropped one, and
+				// unlike an inventory state this needs no durable flag to say so — an
+				// unrecorded entity is described again on the next tick, for as long as it
+				// stays in view.
+				viewer.described[p.entityID] = tick
+			}
+		}
+
+		// What is no longer in view is forgotten, which is what keeps this map the size
+		// of a view rather than of a session's whole history — and what makes an entity
+		// that comes back described again. Deleting during a range is defined; the map is
+		// this viewer's own and nothing else touches it.
+		for id, at := range viewer.described {
+			if at != tick {
+				delete(viewer.described, id)
 			}
 		}
 
