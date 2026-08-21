@@ -61,8 +61,18 @@ pub(super) struct Url {
 
 impl Url {
     /// `host:port`, which is both the `Host` header and what a socket connects to.
+    ///
+    /// **An IPv6 literal gets its brackets back here.** [`split_authority`] takes
+    /// them off so `host` is the address alone — which is what `IpAddr` parses and
+    /// what `signin::is_loopback` asks about — but `::1:7780` is neither a socket
+    /// address nor a legal `Host` header. Every consumer of this string is one of
+    /// those two things, so this is the one place they have to come back.
     pub(super) fn authority(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
     }
 }
 
@@ -501,6 +511,13 @@ mod tests {
         let parsed = url("http://[::1]:7780/callback");
         assert_eq!(parsed.host, "::1");
         assert_eq!(parsed.port, 7780);
+        // And gets them back for anything that has to dial or name it: `::1:7780`
+        // parses as neither a socket address nor a `Host` header.
+        assert_eq!(parsed.authority(), "[::1]:7780");
+        assert!(
+            parsed.authority().to_socket_addrs().is_ok(),
+            "an authority a socket cannot resolve is one nothing can connect to"
+        );
     }
 
     #[test]

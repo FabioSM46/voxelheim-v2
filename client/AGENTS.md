@@ -967,9 +967,11 @@ behind. The server list reads the cache, exactly as a session reads the identity
 **Where the listener binds is the account service's decision, not this client's.** The redirect URI
 is registered with the provider, so `net/signin.rs` reads it out of the `redirect_uri` inside the
 authorize URL and binds *that* — after checking it is loopback and plain HTTP, and refusing
-otherwise. A listener on a port of its own choosing would be a listener the browser never reaches. A
-redirect URI naming port 0 does get an ephemeral port, which is the one case where choosing one
-means anything.
+otherwise. A listener on a port of its own choosing would be a listener the browser never reaches —
+**including the one the kernel would choose.** A redirect URI naming port 0 is refused rather than
+bound: the browser is sent to the literal `redirect_uri`, so an ephemeral port is a port nothing was
+told about, and binding one turns a misconfiguration into a wait that runs to the deadline with
+nothing to say.
 
 **The tab is told what actually happened.** The listener holds the browser's connection until
 `finish` has answered, then renders a page saying the sign-in worked or that it did not. Answering
@@ -977,8 +979,15 @@ means anything.
 saying nothing is how a player concludes the game is broken. The pages are self-contained — no
 image, no script, no font, no request to anywhere.
 
-**The `state` is compared before anything is sent to `finish`.** A `code` may be redeemed once, so
-forwarding a redirect that belongs to a different attempt would spend somebody else's sign-in.
+**The `state` is compared twice, and the two comparisons answer different questions.** Before
+anything is sent to `finish`, because a `code` may be redeemed once and forwarding a redirect that
+belongs to a different attempt would spend somebody else's sign-in. And in the accept loop, because
+the redirect port and path are registered configuration — public and identical on every machine — so
+any page a player has open can issue a request to them. Ending the wait on the path alone would let
+an `<img>` tag abort a sign-in: the listener would be gone before the real redirect arrived. Nothing
+is stolen either way; what the second check protects is the attempt itself. Anything reaching that
+path without this attempt's `state` — including a query that will not decode — is answered `400` and
+the wait carries on.
 
 **Four hand-rolled readers, and the dependency budget is why.** `net/http.rs` and `net/json.rs`
 carry an HTTP/1.1 client, a URL splitter, percent-decoding, a flat-object JSON reader and an RFC

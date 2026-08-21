@@ -9,8 +9,9 @@
 //!
 //! - **`state`** is public. It is minted by the account service, travels to the
 //!   provider inside the authorize URL, and comes back through the browser. It is
-//!   compared against the one `start` answered with, **before anything is sent to
-//!   `finish`**.
+//!   compared against the one `start` answered with **twice**: in the accept loop,
+//!   so that a request from anything other than this sign-in cannot end the wait,
+//!   and again **before anything is sent to `finish`**.
 //! - **`finish_secret`** is private and stays in memory for the life of one
 //!   attempt. It is never put in a URL, never written to a file and never logged.
 //!   It exists because the provider's redirect carries `code` and `state` in the
@@ -31,9 +32,12 @@
 //! the provider, and the provider will send the browser there and nowhere else. So
 //! this client reads it out of the `redirect_uri` inside the authorize URL and
 //! binds *exactly that*, after checking it is loopback and plain HTTP. A listener
-//! on a port of its own choosing would be a listener the browser never reaches. A
-//! redirect URI naming port 0 does get an ephemeral port, which is the one case
-//! where choosing one is meaningful.
+//! on a port of its own choosing would be a listener the browser never reaches —
+//! **including the one the operating system would choose.** A redirect URI naming
+//! port 0 is refused rather than bound: the browser is sent to the literal
+//! `redirect_uri`, so an ephemeral port is a port nothing was told about, and
+//! binding one would turn a misconfiguration into a wait that ends at the deadline
+//! with nothing to say.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -260,7 +264,13 @@ fn attempt(
     let listener = bind(&redirect)?;
 
     let mut child = open_browser(browser, &started.authorize_url)?;
-    let caught = wait_for_redirect(&listener, &redirect.path, started.deadline, commands);
+    let caught = wait_for_redirect(
+        &listener,
+        &redirect.path,
+        &started.state,
+        started.deadline,
+        commands,
+    );
     // Reaped rather than killed, and never waited on: `xdg-open` usually exits the
     // moment it has handed the URL over, but on a desktop where it falls back to
     // running the browser itself it outlives the whole attempt — and killing it
@@ -352,6 +362,17 @@ fn loopback_redirect(authorize_url: &str) -> Result<Url, String> {
             redirect.host
         ));
     }
+    // Port 0 would bind, and that is the trap: the browser is sent to the literal
+    // `redirect_uri`, so the port the kernel picked is a port nobody was told
+    // about and the redirect arrives nowhere. Said now, rather than as a wait that
+    // runs to the deadline and blames the player for walking away.
+    if redirect.port == 0 {
+        return Err(
+            "the account service's redirect names port 0, which is not a port a browser can be \
+             sent to; it must name the port it is registered on"
+                .to_owned(),
+        );
+    }
     Ok(redirect)
 }
 
@@ -368,8 +389,12 @@ fn is_loopback(host: &str) -> bool {
 }
 
 /// Binds the redirect's address, and only it.
+///
+/// Through [`Url::authority`] rather than a second `host:port` of its own, because
+/// an IPv6 literal has to be bracketed to be an address at all and one formatter is
+/// one place to get that right.
 fn bind(redirect: &Url) -> Result<TcpListener, String> {
-    let address = format!("{}:{}", redirect.host, redirect.port);
+    let address = redirect.authority();
     TcpListener::bind(&address).map_err(|err| {
         format!(
             "cannot listen on {address} for the sign-in redirect: {err}. Another copy of the \
@@ -413,14 +438,31 @@ struct Caught {
 
 /// Waits for the provider's redirect on the loopback listener.
 ///
-/// **The redirect is the one request this accepts.** A connection that is not it —
-/// a browser's speculative open, a favicon fetch, anything else that finds the port
-/// — is answered `404` and does not end the wait, because a browser opens more than
-/// one connection and a listener that stopped at the first would stop at the wrong
-/// one.
+/// **`state` is half of what identifies the redirect, and the security-relevant
+/// half.** The port and the path are the account service's registered configuration
+/// — public, fixed, and the same on every machine — so any page a player has open
+/// can issue a request to `http://127.0.0.1:<port>/<path>` with an `<img>` tag. If
+/// the path alone ended the wait, that request would *be* the redirect: `complete`
+/// would refuse it (its `state` is not this attempt's, or it carries `error=…`),
+/// and the listener would already be gone when the real redirect arrived a moment
+/// later. That is not a way to steal a sign-in — the code and the `finish_secret`
+/// are still out of reach — but it is a way for any web page to stop one, so the
+/// wait ends only for a request carrying the `state` this attempt started with.
+///
+/// A genuine refusal from the provider carries that `state` too: RFC 6749 requires
+/// the error redirect to echo it, so "the player pressed Cancel" still arrives and
+/// is still reported as itself.
+///
+/// **Everything else is answered and the wait continues**, which is the same rule
+/// that was already needed for a browser's speculative opens and favicon fetches: a
+/// listener that stopped at the first connection would stop at the wrong one. A
+/// query that will not even decode is in that category rather than fatal — it used
+/// to end the whole attempt, which handed the same abort to anyone who could type
+/// `%zz`.
 fn wait_for_redirect(
     listener: &TcpListener,
     path: &str,
+    state: &str,
     deadline: Instant,
     commands: &Receiver<SignInCommand>,
 ) -> Result<Caught, String> {
@@ -428,15 +470,25 @@ fn wait_for_redirect(
         .set_nonblocking(true)
         .map_err(|err| format!("cannot poll the sign-in listener: {err}"))?;
 
+    // Whether anything reached the redirect path without this attempt's `state`.
+    // It changes only what the deadline says, and it is worth saying: a provider
+    // that answered without echoing the `state`, or a second copy of the game
+    // signing in, is a different problem from a player who walked away.
+    let mut refused_a_caller = false;
+
     loop {
         if cancelled(commands) {
             return Err("the sign-in was stopped".to_owned());
         }
         if Instant::now() >= deadline {
-            return Err(
+            return Err(if refused_a_caller {
+                "something came back to this client, but not with this sign-in. Press it again to \
+                 start a new one."
+                    .to_owned()
+            } else {
                 "the browser did not come back in time. Press it again to start a new sign-in."
-                    .to_owned(),
-            );
+                    .to_owned()
+            });
         }
 
         let mut stream = match listener.accept() {
@@ -466,8 +518,17 @@ fn wait_for_redirect(
             Ok(line) => match http::parse_request_line(&line) {
                 Ok((method, target)) if method == "GET" && target_path(&target) == path => {
                     let query = target.split_once('?').map_or("", |(_, query)| query);
-                    let params = http::query_pairs(query)?;
-                    return Ok(Caught { stream, params });
+                    match http::query_pairs(query) {
+                        Ok(params) if param(&params, "state") == Some(state) => {
+                            return Ok(Caught { stream, params });
+                        }
+                        // The right door, the wrong sign-in — or a query that is
+                        // not one. Answered, and the wait carries on.
+                        _ => {
+                            refused_a_caller = true;
+                            answer(&mut stream, 400, NOT_FOUND_PAGE);
+                        }
+                    }
                 }
                 _ => answer(&mut stream, 404, NOT_FOUND_PAGE),
             },
@@ -524,6 +585,12 @@ fn request_line(stream: &mut TcpStream) -> Result<String, String> {
 /// carries a `code` this service will redeem exactly once, so a redirect that is
 /// not the one this attempt started must not be forwarded — spending it would burn
 /// somebody else's sign-in.
+///
+/// [`wait_for_redirect`] checks the same value one layer up, so in practice a
+/// mismatch never gets this far. The check stays regardless: that one decides
+/// whether to keep waiting, this one decides whether to spend a `code`, and a
+/// credential is not a thing to forward on the strength of a caller having been
+/// careful.
 fn complete(
     service: &AccountService,
     started: &Started,
@@ -1090,7 +1157,10 @@ mod tests {
     }
 
     #[test]
-    fn a_redirect_with_the_wrong_state_is_refused_before_anything_is_sent_on() {
+    fn nothing_without_this_sign_ins_state_ends_the_wait_or_is_sent_on() {
+        // The redirect port and path are registered configuration, so any page on
+        // this machine can knock. None of these may end the wait, and the real
+        // redirect arriving afterwards must still work.
         let port = free_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
@@ -1104,24 +1174,80 @@ mod tests {
         let scratch = Scratch::new("signin-state");
         let path = scratch.join("service");
 
-        let attempt = drive(&service, Some(path.clone()), |_| {
-            "code=the-code&state=somebody-elses".to_owned()
+        let (event_tx, event_rx) = mpsc::channel();
+        let (browser_tx, browser_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+        let account = service.service();
+        let ticket_path = path.clone();
+        let worker = thread::spawn(move || {
+            run(
+                account,
+                Some(ticket_path),
+                Browser::Captured(browser_tx),
+                event_tx,
+                command_rx,
+            );
         });
 
+        let url = browser_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a browser");
+
+        for query in [
+            // Somebody else's sign-in, carrying a code that must not be spent.
+            "code=the-code&state=somebody-elses",
+            // The abort an `<img src>` would be: no state at all.
+            "error=access_denied",
+            // A query that does not decode. This used to end the whole attempt.
+            "code=%zz&state=the-state",
+        ] {
+            let answer = follow_redirect(&url, query);
+            assert!(answer.contains("400"), "{query} -> {answer}");
+            assert!(!answer.contains("You are signed in"), "{query} -> {answer}");
+        }
+
+        let page = follow_redirect(&url, &format!("code=c&state={}", state_from(&url)));
+        assert!(page.contains("200 OK"), "{page}");
+        assert!(page.contains("You are signed in"), "{page}");
+
+        let events: Vec<SignInEvent> = event_rx.iter().collect();
+        assert_eq!(events, vec![SignInEvent::Completed]);
+        drop(command_tx);
+        worker.join().expect("the sign-in thread");
+
+        let requests = service.seen();
+        let finishes: Vec<&(String, String)> = requests
+            .iter()
+            .filter(|(path, _)| path.ends_with(FINISH_PATH))
+            .collect();
+        assert_eq!(finishes.len(), 1, "{finishes:?}");
         assert!(
-            matches!(attempt.events.as_slice(), [SignInEvent::Refused(_)]),
-            "{:?}",
-            attempt.events
+            finishes[0].1.contains("\"code\":\"c\""),
+            "only the real redirect's code may be spent"
         );
-        assert!(
-            !attempt
-                .requests
-                .iter()
-                .any(|(path, _)| path.ends_with(FINISH_PATH)),
-            "a mismatched state must not spend the code: {:?}",
-            attempt.requests
-        );
-        assert_eq!(tickets::read(&path).0, None);
+        assert!(tickets::read(&path).0.is_some());
+    }
+
+    #[test]
+    fn complete_refuses_a_state_it_did_not_start_before_it_sends_anything() {
+        // `wait_for_redirect` now filters on `state` too, so this is the second of
+        // two gates rather than the only one — and it is the one that guards the
+        // request, so it is checked on its own rather than through an attempt.
+        let (events, _drain) = mpsc::channel();
+        // Discard: reaching a socket at all would be the failure under test.
+        let service = AccountService::parse("http://127.0.0.1:9").expect("a URL");
+        let started = Started {
+            state: "the-state".to_owned(),
+            finish_secret: Secret::new("sec".to_owned()),
+            authorize_url: String::new(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        let params = vec![
+            ("state".to_owned(), "somebody-elses".to_owned()),
+            ("code".to_owned(), "the-code".to_owned()),
+        ];
+        let refusal = complete(&service, &started, &params, None, &events).expect_err("a refusal");
+        assert!(refusal.contains("different sign-in"), "{refusal}");
     }
 
     #[test]
@@ -1137,8 +1263,11 @@ mod tests {
             "sec",
         );
         let scratch = Scratch::new("signin-denied");
-        let attempt = drive(&service, Some(scratch.join("service")), |_| {
-            "error=access_denied".to_owned()
+        // A real refusal echoes the `state` (RFC 6749 §4.1.2.1), which is what
+        // distinguishes "the player pressed Cancel" from a page on this machine
+        // shouting `error=access_denied` at the loopback port.
+        let attempt = drive(&service, Some(scratch.join("service")), |url| {
+            format!("error=access_denied&state={}", state_from(url))
         });
 
         match attempt.events.as_slice() {
@@ -1339,6 +1468,27 @@ mod tests {
         for host in ["203.0.113.5", "example.invalid", "0.0.0.0", "::"] {
             assert!(!is_loopback(host), "{host}");
         }
+    }
+
+    #[test]
+    fn a_redirect_naming_port_zero_is_refused_rather_than_bound() {
+        // It would bind, and that is the trap: the browser is sent to the literal
+        // URL, so whatever the kernel picked is a port nobody was told about.
+        let zero = "https://discord.invalid/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%3A0%2Fcb";
+        let err = loopback_redirect(zero).expect_err("port 0");
+        assert!(err.contains("port 0"), "{err}");
+    }
+
+    #[test]
+    fn an_ipv6_loopback_redirect_gets_an_address_a_socket_can_use() {
+        // `::1` is loopback and accepted, so the authority it turns into has to be
+        // one `TcpListener::bind` and `TcpStream::connect` accept: `::1:7780` is
+        // not, and `bind` builds its address from exactly this.
+        let ipv6 =
+            "https://discord.invalid/authorize?redirect_uri=http%3A%2F%2F%5B%3A%3A1%5D%3A7780%2Fcb";
+        let redirect = loopback_redirect(ipv6).expect("a loopback redirect");
+        assert_eq!(redirect.host, "::1");
+        assert_eq!(redirect.authority(), "[::1]:7780");
     }
 
     #[test]
