@@ -95,11 +95,14 @@ const (
 	errAccountUnavailable  = "account_unavailable"
 	errSignInCouldNotStart = "sign_in_could_not_start"
 
-	// A sign-in that names no world this service can issue a ticket for. Its own code
+	// A sign-in that named a world this service will not issue a ticket for. Its own code
 	// rather than errMalformedRequest, for the reason the whole vocabulary exists: the
 	// two are different things for a client to be told. "Your JSON was unreadable" sends
 	// somebody looking at their encoder; "the world you named is not one I will sign
 	// for" sends them to look at their configuration, which is where the mistake is.
+	//
+	// **Naming no world at all is not this refusal**; it mints an account ticket. See
+	// [finishRequest.World].
 	errWorldNotNamed = "world_not_named"
 
 	// A ticket that could not be minted. Reachable only through internal/ticket refusing
@@ -137,14 +140,28 @@ type finishRequest struct {
 	// client held it from `start`. Without it, `state` was a bearer credential.
 	FinishSecret discord.Secret `json:"finish_secret"`
 
-	// World is the world this sign-in wants a ticket for, and it is required.
+	// World is the world this sign-in wants a ticket for, and it is **optional**.
 	//
 	// **A ticket is minted here because there is nowhere else it could be.** A separate
 	// endpoint would need the caller to prove who they are, and the only thing that ever
 	// proved that is the authorization code this request is spending — a credential that
 	// outlived the sign-in so a ticket could be asked for later is exactly the refresh
-	// token this design does not have. So the world has to be named up front, and a
-	// player who wants to join a second world signs in again.
+	// token this design does not have. So whatever a ticket is going to say has to be said
+	// here.
+	//
+	// **Absent or empty mints an account ticket**, which names no world. That is not a
+	// convenience: requiring a world here closed the trust chain in a circle, because a
+	// player needs a ticket to read the server list, needs to name a world to be minted
+	// one, and the list is what tells them which worlds exist. An account ticket is how
+	// they get in the door; naming a world is how they get into a game. `ticket.Verify` is
+	// unchanged and still refuses an account ticket at every game server, which is the
+	// property that makes the second kind safe to issue — see the "Two kinds of ticket"
+	// section of internal/ticket's package comment.
+	//
+	// A name that is present and *not* one this service will issue for is still a refusal.
+	// Empty means "no world"; " " and "Midgard" are attempts at a world that failed, and
+	// silently treating either as "no world" would hand somebody an account ticket they
+	// cannot join anything with and no reason why.
 	//
 	// Not a [discord.Secret]: a world name is an identifier an operator publishes to
 	// everybody who might play there, and treating it as a secret would only make it
@@ -246,14 +263,23 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	world, err := ticket.WorldIDFor(req.World)
-	if err != nil {
-		// **The name is not quoted back into the log**, and internal/ticket does not
-		// quote it into the error either. It is text from an unauthenticated request
-		// body, and a log line that echoes one is a log line an attacker writes.
-		s.log.Info("a sign-in was refused", "reason", "the request does not name a world a ticket can be issued for")
-		s.refuse(w, http.StatusBadRequest, errWorldNotNamed)
-		return
+	// The zero world id is an account ticket: a request that named no world at all. Left
+	// as the zero value rather than resolved, which is what makes "the caller asked for no
+	// world" and "the caller asked for a world" two states rather than one string compared
+	// twice — and ticket.WorldIDFor cannot produce the zero id, so the two can never
+	// collide.
+	var world ticket.WorldID
+	if req.World != "" {
+		resolved, err := ticket.WorldIDFor(req.World)
+		if err != nil {
+			// **The name is not quoted back into the log**, and internal/ticket does not
+			// quote it into the error either. It is text from an unauthenticated request
+			// body, and a log line that echoes one is a log line an attacker writes.
+			s.log.Info("a sign-in was refused", "reason", "the request does not name a world a ticket can be issued for")
+			s.refuse(w, http.StatusBadRequest, errWorldNotNamed)
+			return
+		}
+		world = resolved
 	}
 
 	who, err := s.signin.flow.Redeem(r.Context(), req.State, req.Code, req.FinishSecret)
@@ -308,7 +334,13 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	// holding their two sixteen-byte ids together: internal/ticket keeps its own so that
 	// the game server can import it without reaching the accounts, and this line stops
 	// compiling if either width ever moves.
-	sessionTicket, claims, err := s.keys.Mint(ticket.AccountID(account.ID), world, time.Now())
+	//
+	// **Which mint is called is the whole of how the two kinds of ticket differ**, and it
+	// is a branch rather than a zero value passed to one function on purpose: internal/ticket
+	// keeps Mint refusing a zero world precisely so that a forgotten field cannot become an
+	// account ticket by accident. Asking for one is a different call, here, where the
+	// request has been read and the difference is known.
+	sessionTicket, claims, err := s.mintFor(ticket.AccountID(account.ID), world)
 	if err != nil {
 		// The account already exists at this point, and that is not a failure to undo:
 		// an account is idempotent, so the player retries and gets the same one with a
@@ -325,12 +357,23 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	// a log. The world id is the digest of a name this service already validated, so it
 	// is neither personal nor attacker-chosen text; the ticket itself is a bearer
 	// credential and is not here at all.
-	s.log.Info("sign-in completed",
+	//
+	// **`world_id` is present only when there is one**, rather than being logged as
+	// twenty-four zeros. A field whose value sometimes means "not applicable" is a field
+	// somebody eventually greps for and matches on; `ticket_scope` says which of the two
+	// kinds was issued, and the world id keeps meaning exactly one thing.
+	fields := []any{
 		"provider", discord.Provider,
 		"account_id", account.ID.String(),
 		"created", created,
-		"world_id", claims.World.String(),
-		"ticket_expires_at", claims.ExpiresAt)
+		"ticket_expires_at", claims.ExpiresAt,
+	}
+	if claims.World.IsZero() {
+		fields = append(fields, "ticket_scope", "account")
+	} else {
+		fields = append(fields, "ticket_scope", "world", "world_id", claims.World.String())
+	}
+	s.log.Info("sign-in completed", fields...)
 
 	s.writeJSON(w, http.StatusOK, finishResponse{
 		AccountID:   account.ID.String(),
@@ -342,6 +385,20 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 		SessionTicket:   sessionTicket.Encode(),
 		TicketExpiresAt: claims.ExpiresAt,
 	})
+}
+
+// mintFor signs the ticket this sign-in asked for: world-scoped, or an account ticket when
+// the request named no world.
+//
+// Split out so that the branch has a name and one place to live. Inline it and the reader of
+// signInFinish has to notice that a zero world means something rather than being a value that
+// happened not to be set — which is precisely the confusion internal/ticket's two mints exist
+// to make impossible.
+func (s *service) mintFor(account ticket.AccountID, world ticket.WorldID) (ticket.Ticket, ticket.Claims, error) {
+	if world.IsZero() {
+		return s.keys.MintAccountTicket(account, time.Now())
+	}
+	return s.keys.Mint(account, world, time.Now())
 }
 
 // errorResponse is the shape every refusal takes.

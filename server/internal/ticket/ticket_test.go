@@ -314,6 +314,11 @@ func TestMintRefusesWhatItCannotSign(t *testing.T) {
 	if _, _, err := pair.Mint(AccountID{}, world, time.Now()); !errors.Is(err, ErrUnmintable) {
 		t.Errorf("a ticket naming no account answered %v, want ErrUnmintable", err)
 	}
+	// **This refusal did not move when the account ticket arrived, and it is the reason a
+	// forgotten field cannot become one.** The format reads a world-less body back happily
+	// now — see TestAnAccountTicketNamesNoWorldAndIsRefusedByEveryGameServer — so this is
+	// no longer a rule about what a ticket may be. It is a rule about how one is asked
+	// for, and Pair.MintAccountTicket is the way to ask on purpose.
 	if _, _, err := pair.Mint(anAccount(), WorldID{}, time.Now()); !errors.Is(err, ErrUnmintable) {
 		t.Errorf("a ticket naming no world answered %v, want ErrUnmintable", err)
 	}
@@ -333,12 +338,19 @@ func TestMintRefusesWhatItCannotSign(t *testing.T) {
 }
 
 // A body this service would not sign is refused on the way back in as well, and the only
-// way to reach that branch is from inside this package: [Mint] will not produce one.
+// way to reach that branch is from inside this package: [encodeBody] will not produce one.
 //
 // Written as an internal test for exactly that reason. It is the halves-of-a-format
 // rule internal/auth keeps — a record this build would refuse to write is one this build
 // must refuse to read — and without it a bug in encodeBody would be answered by a
 // verifier handing a caller a ticket naming nobody.
+//
+// **The zero account id is the whole of the list, and it used to have the zero world id
+// beside it.** That case moved rather than being dropped: a world-less body is a legal
+// account ticket now, so refusing it here would put the two halves of the format back into
+// disagreement in the other direction — the mint writes one and the reader would refuse it.
+// What guards the mistake the old case was guarding is [Pair.Mint], which still will not
+// sign a zero world, and TestMintRefusesWhatItCannotSign is where that is asserted.
 func TestASignedBodyThisServiceWouldNotWriteIsStillRefused(t *testing.T) {
 	t.Parallel()
 
@@ -348,7 +360,6 @@ func TestASignedBodyThisServiceWouldNotWriteIsStillRefused(t *testing.T) {
 
 	for name, body := range map[string][]byte{
 		"a body naming no account": bodyWith(t, AccountID{}, world, now.Add(Lifetime)),
-		"a body naming no world":   bodyWith(t, anAccount(), WorldID{}, now.Add(Lifetime)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -396,8 +407,12 @@ func TestAWorldIDIsTheNameAndNothingElse(t *testing.T) {
 	if first == worldID(t, "midgard-2") {
 		t.Error("two world names produced one id")
 	}
+	// **This is the property the account ticket rests on**, not merely a curiosity about
+	// the digest. The zero id means "this ticket names no world"; a name that hashed to it
+	// would be a real world whose tickets every verifier read as world-less, and
+	// ticket.Verify would then admit an account ticket at that one game server.
 	if first.IsZero() {
-		t.Error("a world name hashed to the zero id, which Mint refuses")
+		t.Error("a world name hashed to the zero id, which is the value an account ticket claims")
 	}
 	if len(first.String()) != WorldIDSize*2 {
 		t.Errorf("a world id renders as %d characters, want %d hex characters", len(first.String()), WorldIDSize*2)
@@ -572,5 +587,156 @@ func renderings(secret []byte) map[string]string {
 		"base64":    base64.StdEncoding.EncodeToString(secret),
 		"base64url": base64.RawURLEncoding.EncodeToString(secret),
 		"decimal":   strings.Join(decimal, " "),
+	}
+}
+
+// **The property that makes the account ticket safe to issue, and the one to break this
+// test on if anybody ever moves it.**
+//
+// An account ticket names no world. It says only "the account service knows who this is",
+// and it exists because the trust chain closed in a circle without it: a player needs a
+// ticket to read the server list, needs to name a world to be minted one, and the list is
+// what tells them the worlds exist.
+//
+// What keeps that from widening anything is [Verify], which is the function a *game server*
+// calls. It is handed that server's own world and compares — so an account ticket fails
+// there exactly as a ticket for somebody else's world does, and it fails for every world a
+// game server could possibly be configured with, including the one no game server may have.
+func TestAnAccountTicketNamesNoWorldAndIsRefusedByEveryGameServer(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	now := time.Now()
+
+	minted, claims, err := pair.MintAccountTicket(anAccount(), now)
+	if err != nil {
+		t.Fatalf("MintAccountTicket: %v", err)
+	}
+	if !claims.World.IsZero() {
+		t.Errorf("an account ticket names world %s, want the zero id", claims.World)
+	}
+	if claims.Account != anAccount() {
+		t.Error("an account ticket does not name the account it was minted for")
+	}
+
+	// The account service's own check reads it, because that is what it is for.
+	read, err := VerifyAnyWorld(pair.Public(), minted[:], now)
+	if err != nil {
+		t.Fatalf("the account service could not verify its own account ticket: %v", err)
+	}
+	if read.World != claims.World || read.Account != claims.Account {
+		t.Error("VerifyAnyWorld answered claims that are not the ones that were signed")
+	}
+
+	// And no game server does. Both a real world and the misconfiguration a verifier can be
+	// in: the second is the one that would be a hole, because a game server that did not
+	// know its own world would otherwise be asking exactly the question an account ticket
+	// answers yes to.
+	for name, world := range map[string]WorldID{
+		"the world it was not issued for": midgard(t),
+		"another world again":             hel(t),
+		"a verifier with no world at all": {},
+	} {
+		if _, err := Verify(pair.Public(), minted[:], world, now); !errors.Is(err, ErrWrongWorld) {
+			t.Errorf("%s answered %v, want ErrWrongWorld", name, err)
+		}
+	}
+}
+
+// A world-scoped ticket is unchanged by the account ticket's arrival: the world it names is
+// the world it verifies at, and nowhere else.
+//
+// The half of the pair above that would still pass if [Verify] had been loosened to accept
+// anything, which is why it is here rather than left to the older tests.
+func TestAWorldTicketIsUnaffectedByTheAccountTicket(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	now := time.Now()
+
+	minted, _, err := pair.Mint(anAccount(), midgard(t), now)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if _, err := Verify(pair.Public(), minted[:], midgard(t), now); err != nil {
+		t.Errorf("the world it was issued for refused it: %v", err)
+	}
+	if _, err := Verify(pair.Public(), minted[:], hel(t), now); !errors.Is(err, ErrWrongWorld) {
+		t.Errorf("another world answered %v, want ErrWrongWorld", err)
+	}
+	// And the account service can read it too — somebody already holding a world ticket
+	// should not have to sign in again to read the list.
+	if _, err := VerifyAnyWorld(pair.Public(), minted[:], now); err != nil {
+		t.Errorf("VerifyAnyWorld refused a world-scoped ticket: %v", err)
+	}
+}
+
+// **VerifyAnyWorld drops exactly one check and keeps every other one.** It is the account
+// service's own verifier, so the temptation it has to be tested against is the one where
+// "any world" quietly became "any ticket".
+func TestVerifyAnyWorldStillRefusesEverythingButTheWorld(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	now := time.Now()
+
+	minted, claims, err := pair.MintAccountTicket(anAccount(), now)
+	if err != nil {
+		t.Fatalf("MintAccountTicket: %v", err)
+	}
+
+	// A key of the wrong length is a question about this service's own configuration, and
+	// crypto/ed25519 panics on one — a panic is not an answer a server can give a request.
+	if _, err := VerifyAnyWorld(nil, minted[:], now); !errors.Is(err, ErrPublicKeySize) {
+		t.Errorf("no public key answered %v, want ErrPublicKeySize", err)
+	}
+	if _, err := VerifyAnyWorld(pair.Public(), minted[:BodySize], now); !errors.Is(err, ErrTicketSize) {
+		t.Errorf("a short ticket answered %v, want ErrTicketSize", err)
+	}
+
+	// Signed by somebody else's key, which is what an invented ticket looks like.
+	if _, err := VerifyAnyWorld(newPair(t).Public(), minted[:], now); !errors.Is(err, ErrBadSignature) {
+		t.Errorf("another service's key answered %v, want ErrBadSignature", err)
+	}
+
+	// A genuine ticket with one bit of its body changed. The signature is over the body, so
+	// this is the edit an attacker holding a real ticket would make.
+	tampered := minted
+	tampered[0] ^= 1
+	if _, err := VerifyAnyWorld(pair.Public(), tampered[:], now); !errors.Is(err, ErrBadSignature) {
+		t.Errorf("a tampered body answered %v, want ErrBadSignature", err)
+	}
+
+	// **Expiry is checked, and it is the only thing that ever ends a ticket**: there is no
+	// revocation in this design. Exclusive at the instant, which is what Verify does too.
+	if _, err := VerifyAnyWorld(pair.Public(), minted[:], claims.ExpiresAt); !errors.Is(err, ErrExpired) {
+		t.Errorf("a ticket at its expiry answered %v, want ErrExpired", err)
+	}
+	if _, err := VerifyAnyWorld(pair.Public(), minted[:], claims.ExpiresAt.Add(time.Hour)); !errors.Is(err, ErrExpired) {
+		t.Errorf("an expired ticket answered %v, want ErrExpired", err)
+	}
+	if _, err := VerifyAnyWorld(pair.Public(), minted[:], claims.ExpiresAt.Add(-time.Second)); err != nil {
+		t.Errorf("a ticket a second before its expiry was refused: %v", err)
+	}
+}
+
+// A body naming no account is still refused by both verifiers, which is the one refusal
+// [decodeBody] kept. Reachable only from inside this package, exactly as before.
+func TestAnAccountlessBodyIsRefusedByBothVerifiers(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	now := time.Now()
+	body := bodyWith(t, AccountID{}, WorldID{}, now.Add(Lifetime))
+
+	var forged Ticket
+	copy(forged[:BodySize], body)
+	copy(forged[BodySize:], ed25519.Sign(pair.signing.key, body))
+
+	if _, err := VerifyAnyWorld(pair.Public(), forged[:], now); !errors.Is(err, ErrMalformedBody) {
+		t.Errorf("VerifyAnyWorld answered %v, want ErrMalformedBody", err)
+	}
+	if _, err := Verify(pair.Public(), forged[:], midgard(t), now); !errors.Is(err, ErrMalformedBody) {
+		t.Errorf("Verify answered %v, want ErrMalformedBody", err)
 	}
 }

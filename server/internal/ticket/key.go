@@ -271,7 +271,46 @@ func (p *Pair) LogValue() slog.Value { return slog.StringValue(p.String()) }
 // The claims come back beside the ticket because the caller has to tell somebody when it
 // runs out, and computing that a second time from [Lifetime] would be a second place for
 // the truncation to disagree. They are the ticket's own, read from what was signed.
+//
+// **A zero world is refused here, and the refusal did not move when the account ticket
+// arrived.** The format reads one back happily — see [decodeBody] — so this is not a rule
+// about what a ticket may be. It is a rule about how one is asked for: a caller that
+// forgot to fill the field in must get an error rather than a credential of a shape
+// nobody meant to issue. [Pair.MintAccountTicket] is the way to ask on purpose, and it is
+// deliberately a different method name rather than a sentinel value for this parameter.
 func (p *Pair) Mint(account AccountID, world WorldID, now time.Time) (Ticket, Claims, error) {
+	if world.IsZero() {
+		return Ticket{}, Claims{}, fmt.Errorf(
+			"%w: it names no world; MintAccountTicket is how a ticket for no world is asked for", ErrUnmintable)
+	}
+	return p.mint(account, world, now)
+}
+
+// MintAccountTicket signs a ticket that names **no world**: an account ticket, good for
+// [Lifetime] from now.
+//
+// It says one thing — the account service knows who this is — and it is what the server
+// list is read with. A player cannot name a world before they have seen the list, and the
+// list is what tells them the worlds exist, so a credential that has to name one up front
+// closes the trust chain in a circle. This is the way out of it.
+//
+// **It is not a way into a game.** [Verify] is what a game server calls, it is handed
+// that server's own world, and a ticket naming none fails that comparison exactly as a
+// ticket for somebody else's world does. Nothing about this method widens what a game
+// server admits; the account service's own [VerifyAnyWorld] is the only check that reads
+// one.
+//
+// A separate method rather than `Mint(account, WorldID{}, now)` on purpose. The zero
+// value is what a caller gets from a forgotten field, and the difference between "I meant
+// no world" and "I forgot the world" cannot be recovered from the argument — so it is
+// carried by which function was called, where it cannot be lost.
+func (p *Pair) MintAccountTicket(account AccountID, now time.Time) (Ticket, Claims, error) {
+	return p.mint(account, WorldID{}, now)
+}
+
+// mint is the signing both public mints share, after each has decided whether the world
+// it was given is one it will sign for.
+func (p *Pair) mint(account AccountID, world WorldID, now time.Time) (Ticket, Claims, error) {
 	claims := Claims{
 		Account: account,
 		World:   world,

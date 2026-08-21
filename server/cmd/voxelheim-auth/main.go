@@ -20,6 +20,14 @@
 // fine. internal/ticket holds the key pair and mints; tickets.go publishes the public
 // half.
 //
+// It also keeps the **server registry**: the list of game servers an operator has
+// registered, each with the address players reach it at and the SHA-256 of the certificate
+// it presents. That list is where the client's trust chain ends — the client knows this
+// service by construction, this service knows the game servers because an operator
+// registered them, and so a client can verify a server it has never met. Registration is
+// authenticated with an operator-configured key and the list is readable only by an account
+// holding a ticket; internal/registry holds the store and servers.go the two endpoints.
+//
 // What this command deliberately still does not do: withdraw a ticket before it
 // expires. There is no revocation and none is planned — ticket.Lifetime is the whole of
 // the answer, and the reasoning is written down beside the number.
@@ -43,6 +51,7 @@ import (
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/registry"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
@@ -92,8 +101,15 @@ type options struct {
 	authDir            string
 	discordClientID    string
 	discordRedirectURI string
-	logLevel           string
-	logFormat          string
+
+	// registrationKeyFile names a file holding the server-registration key, and is empty
+	// when the key comes from the environment or when there is none. **The key itself is
+	// never a flag** — see loadRegistrationKey, and note that this field holds a path
+	// rather than a secret, which is exactly the point.
+	registrationKeyFile string
+
+	logLevel  string
+	logFormat string
 }
 
 func parseFlags() options {
@@ -114,6 +130,14 @@ func parseFlags() options {
 		"the Discord application's client id; empty leaves Discord sign-in unconfigured and its routes refusing")
 	flag.StringVar(&opts.discordRedirectURI, "discord-redirect-uri", defaultDiscordRedirectURI,
 		"where Discord sends the browser back to; a loopback address on the player's machine, not on this service")
+	// A path, never the key. A flag holding a credential is visible in `ps` to every user
+	// on the machine and lands in shell history; the file it names should be readable only
+	// by the user this service runs as. Leaving both this and VOXELHEIM_REGISTRATION_KEY
+	// unset leaves registration unconfigured and its route refusing — see
+	// loadRegistrationKey.
+	flag.StringVar(&opts.registrationKeyFile, "registration-key-file", "",
+		"file holding the key game servers register with; the key may be given in "+
+			registrationKeyEnv+" instead, but not in both")
 	flag.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
 	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
 	flag.Parse()
@@ -213,6 +237,25 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		"ticket_lifetime", ticket.Lifetime,
 		"format_version", ticket.KeyStoreVersion)
 
+	// Beside them both, and before the listener for the reason they are: a registry
+	// directory this service cannot create is a configuration it cannot act on, and a
+	// service that has already bound a port and answered a health probe is a worse place
+	// to find that out.
+	servers, err := registry.OpenStore(opts.authDir)
+	if err != nil {
+		return fmt.Errorf("opening the server registry: %w", err)
+	}
+	log.Info("server registry opened", "servers_dir", servers.Dir(), "format_version", registry.StoreVersion)
+
+	// A key that is configured and unusable refuses here, before the port is bound, in the
+	// order everything else in this function does. A key that is *absent* is not an error:
+	// the registration route answers 503 and the list still works, because the list is read
+	// with a ticket and not with this.
+	registrationKey, err := loadRegistrationKey(opts.registrationKeyFile, log)
+	if err != nil {
+		return fmt.Errorf("configuring server registration: %w", err)
+	}
+
 	// Before the listener as well, and for the reason the store is: a redirect URI that
 	// is not a URL is a configuration this service cannot act on, and discovering it
 	// after the port is bound and the probes are answering is worse.
@@ -226,7 +269,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("listening on %s: %w", opts.listen, err)
 	}
 
-	svc := &service{log: log, keys: keys, signin: signin}
+	svc := &service{log: log, keys: keys, signin: signin, servers: servers, registrationKey: registrationKey}
 
 	// The address the listener actually bound rather than the one that was asked for,
 	// which is the only way `-listen 127.0.0.1:0` tells anybody where it went.
@@ -251,6 +294,18 @@ type service struct {
 	// signin is the Discord sign-in, and nil when this deployment has not been given a
 	// Discord application. The routes exist either way — see newSignIn.
 	signin *signIn
+
+	// servers is the registry of game servers, and like keys it is **never nil on a service
+	// that is running**: run returns before building this value if the directory cannot be
+	// opened. There is no "the registry is not configured" mode, because there is nothing
+	// for an operator to configure — the directory is created on first start and kept.
+	servers *registry.Store
+
+	// registrationKey is the credential a game server registers with, and nil when this
+	// deployment has not been given one. Unlike servers above, that is a real state: the
+	// key is a value an operator invents, so `POST /v1/servers` refuses with 503 until
+	// there is one. Reading the list is unaffected — it is authenticated with a ticket.
+	registrationKey *registry.Key
 }
 
 // route is one entry in this service's surface.
@@ -277,6 +332,8 @@ func (s *service) routes() []route {
 		{pattern: "GET /v1/ticket-key", handler: s.ticketKey},
 		{pattern: "POST /v1/signin/discord/start", handler: s.signInStart},
 		{pattern: "POST /v1/signin/discord/finish", handler: s.signInFinish},
+		{pattern: "POST /v1/servers", handler: s.registerServer},
+		{pattern: "GET /v1/servers", handler: s.listServers},
 	}
 }
 
