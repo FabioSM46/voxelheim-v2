@@ -230,16 +230,10 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// A redirect URI that is not a URL is a configuration this service cannot act on, and
 	// discord.New is the only place that knows which URIs those are — restating its rules
 	// in options.validate would be a second implementation of them, so the check *is* the
-	// construction. It is handed no account store because there is not one yet, which is
-	// the point of standing here; see the attachment below.
-	//
-	// **That nil is a contract the compiler does not know about**, and #143 is where it
-	// stops being one. Nothing prevents a later change to newSignIn from dereferencing
-	// that argument, and the result would be a nil-pointer panic at startup rather than a
-	// build failure — the review on #141 named it, and splitting configuration from
-	// wiring is the fix rather than a nil check, which would only turn the panic into a
-	// refusal. It is tracked there rather than with a TODO nobody reads.
-	signin, err := newSignIn(opts, nil, log)
+	// construction. What it produces is a *configuration* and not yet a sign-in: there is
+	// no account store at this point, and signInConfig has no field for one, so the
+	// question of what this line passes for a store cannot be asked (#143).
+	signinCfg, err := newSignIn(opts, log)
 	if err != nil {
 		return fmt.Errorf("configuring Discord sign-in: %w", err)
 	}
@@ -263,15 +257,15 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	}
 	log.Info("account store opened", "accounts_dir", accounts.Dir(), "format_version", auth.StoreVersion)
 
-	// The store the sign-in records accounts through, attached the moment there is one.
-	// **Building it in two steps is what checking the configuration first costs**, and the
-	// two steps are kept this close together for the reason it costs anything: a signIn
-	// that reached a request without a store would fail at the first finish. Nothing can
-	// reach this value in between — it does not leave this function until `service` is
-	// built below, and nothing answers until the listener after that.
-	if signin != nil {
-		signin.accounts = accounts
-	}
+	// The sign-in, built the moment both of its halves exist: the flow the configuration
+	// pass validated, and the store it records accounts through.
+	//
+	// **This is where a signIn comes into being, and there is nowhere else it can.** The
+	// two-step build this replaced kept a value with a nil store alive between here and
+	// the pass above and relied on nothing reaching it in between, which was true and was
+	// a property of the distance between two lines. An unconfigured deployment wires to
+	// nil, which is the state the sign-in routes answer 503 from.
+	signin := signinCfg.withAccounts(accounts)
 
 	// Beside the accounts, and before the listener for the same reason they are: a key
 	// pair that cannot be read is a configuration this service cannot act on, and the
