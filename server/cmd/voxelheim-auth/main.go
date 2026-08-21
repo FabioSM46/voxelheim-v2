@@ -232,6 +232,13 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// in options.validate would be a second implementation of them, so the check *is* the
 	// construction. It is handed no account store because there is not one yet, which is
 	// the point of standing here; see the attachment below.
+	//
+	// **That nil is a contract the compiler does not know about**, and #143 is where it
+	// stops being one. Nothing prevents a later change to newSignIn from dereferencing
+	// that argument, and the result would be a nil-pointer panic at startup rather than a
+	// build failure — the review on #141 named it, and splitting configuration from
+	// wiring is the fix rather than a nil check, which would only turn the panic into a
+	// refusal. It is tracked there rather than with a TODO nobody reads.
 	signin, err := newSignIn(opts, nil, log)
 	if err != nil {
 		return fmt.Errorf("configuring Discord sign-in: %w", err)
