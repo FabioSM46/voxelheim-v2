@@ -445,17 +445,27 @@ pub enum RecipeId {
     IronSword,
     SharpeningStone,
     Tent,
+    Campfire,
+    LeatherPatch,
 }
 
 impl RecipeId {
     /// The wire member. Total, because the `Unknown` the contract fails closed on is
     /// unrepresentable here.
-    fn wire(self) -> fb::RecipeID {
+    ///
+    /// `pub(crate)` for one reader outside this module: the mirror's sweep in
+    /// [`crate::player::RECIPES`]'s tests holds every row against `RecipeID::ENUM_VALUES`,
+    /// and this is the mapping that makes the two comparable. Handing it out is what lets
+    /// the contract itself be the source that sweep reads, rather than a second list of
+    /// members kept beside it — which is the drift the sweep exists to catch.
+    pub(crate) fn wire(self) -> fb::RecipeID {
         match self {
             Self::Forge => fb::RecipeID::Forge,
             Self::IronSword => fb::RecipeID::IronSword,
             Self::SharpeningStone => fb::RecipeID::SharpeningStone,
             Self::Tent => fb::RecipeID::Tent,
+            Self::Campfire => fb::RecipeID::Campfire,
+            Self::LeatherPatch => fb::RecipeID::LeatherPatch,
         }
     }
 }
@@ -3513,9 +3523,13 @@ mod tests {
     /// error into a protocol failure, which is why the two halves are one change. A
     /// snapshot carrying a vargr used to end the connection.
     ///
-    /// `RecipeID::Campfire` is deliberately absent: [`RecipeId`] is the display-only
-    /// mirror of the server's table, the recipe panel is a HUD element this issue put out
-    /// of scope, and nothing on the wire ever *sends* a recipe id to this client.
+    /// `RecipeID::Campfire` is absent from *this* test rather than from this client, and
+    /// the distinction is the whole of #113. Nothing on the wire ever *sends* a recipe id
+    /// here, so a recipe member is not something this decoder accepts or refuses — it is
+    /// an outbound vocabulary, swept against the contract in
+    /// [`a_craft_request_carries_one_recipe_member_and_a_tick`] instead. What that
+    /// vocabulary was missing until #113 was the campfire and the leather patch, which
+    /// left the panel unable to originate a craft for either.
     #[test]
     fn the_kinds_v6_reserved_are_the_kinds_this_build_now_draws() {
         assert_eq!(MobKind::from_wire(fb::MobKind::Vargr), Some(MobKind::Vargr));
@@ -4931,19 +4945,30 @@ mod tests {
     // Protocol V4 — craft intent
     // -----------------------------------------------------------------------
 
-    /// The four members this client can name, and the frame each one produces.
+    /// Every member this client can name, and the frame each one produces.
     ///
     /// Read back through the generated accessors rather than through [`decode`], because
     /// `decode` is the *inbound* path and a craft never arrives here. What matters is the
     /// bytes the server will read: the recipe member and the tick, and nothing else.
+    ///
+    /// **The table is swept against `RecipeID::ENUM_VALUES` rather than counted**, and the
+    /// loop at the bottom is that sweep. A hand-written mirror of an appended-to contract
+    /// fails in exactly one direction — a member arrives and the mirror does not gain it —
+    /// and a count of this table cannot see that happen, because the count and the table
+    /// are the same hand. #113 is what that cost: the campfire was on the wire from V6 and
+    /// this client could not name it.
     #[test]
     fn a_craft_request_carries_one_recipe_member_and_a_tick() {
-        for (recipe, wire) in [
+        let named = [
             (RecipeId::Forge, fb::RecipeID::Forge),
             (RecipeId::IronSword, fb::RecipeID::IronSword),
             (RecipeId::SharpeningStone, fb::RecipeID::SharpeningStone),
             (RecipeId::Tent, fb::RecipeID::Tent),
-        ] {
+            (RecipeId::Campfire, fb::RecipeID::Campfire),
+            (RecipeId::LeatherPatch, fb::RecipeID::LeatherPatch),
+        ];
+
+        for (recipe, wire) in named {
             let frame = encode_craft_request(&CraftRequest {
                 recipe,
                 client_tick: 41,
@@ -4960,6 +4985,20 @@ mod tests {
             // `RecipeId` cannot express it, and this is the frame that proves the mapping
             // preserves that rather than collapsing two members onto one.
             assert_ne!(request.recipe(), fb::RecipeID::Unknown, "{recipe:?}");
+        }
+
+        // Every member the contract names is one this client can ask for. `Unknown` is
+        // skipped because it is the absent-field case rather than a recipe, and it is
+        // deliberately unrepresentable on this side.
+        for member in fb::RecipeID::ENUM_VALUES {
+            if *member == fb::RecipeID::Unknown {
+                continue;
+            }
+            assert!(
+                named.iter().any(|(_, wire)| wire == member),
+                "the contract names {} and this client cannot ask for it",
+                member.variant_name().unwrap_or("a member past the end")
+            );
         }
     }
 

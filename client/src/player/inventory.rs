@@ -16,7 +16,7 @@
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
-use super::crafting::ITEM_SHARPENING_STONE;
+use super::crafting::{ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, set_if_changed,
 };
@@ -370,6 +370,35 @@ fn move_request(from: u8, to: u8, count: u16, slots: u8) -> Option<InventoryMove
     })
 }
 
+/// Every item id this client routes a click onto a worn item to a mend for.
+///
+/// **A table rather than a comparison, and that is the whole of the change**, exactly as
+/// [`super::combat::item_is_a_blade`] is a table rather than the `item_id ==
+/// ITEM_RUSTY_SWORD` it replaced. `kit.item_id == ITEM_SHARPENING_STONE` could not express
+/// a second kit, so the leather patch #92 landed on the server was craftable, drawable,
+/// spendable by the simulation — and unusable from this screen, because the one branch
+/// that turns a pair of clicks into a `RepairRequest` named the other kit by hand. A third
+/// kit is one more line here, as it is one more `repairRestore` there, and neither is an
+/// edit to the predicate.
+///
+/// It stays this client's own opinion and it still decides nothing: the server re-reads
+/// its own registry for every mend, where being a kit is a non-zero `repairRestore` rather
+/// than a number in this list. A wrong entry costs a request that is refused; the failure
+/// that actually costs something is the other direction — an item the server would have
+/// honoured and this list omitted, which is what the leather patch silently was.
+const KITS: &[u16] = &[ITEM_SHARPENING_STONE, ITEM_LEATHER_PATCH];
+
+/// Whether this client routes a click with one item id onto a worn item to a mend.
+///
+/// Split from [`repair_request`] for the reason [`super::combat::item_is_a_blade`] is
+/// split from `blade_in_hand`: this asks about an *item*, and that asks about the two
+/// *slots* the server last sent, which also have to hold a stack and something that wears
+/// out. The split is what lets the sweep in the tests below hold the list itself against
+/// the display registry, with no pack to build and no durability to choose.
+fn item_is_a_repair_kit(item_id: u16) -> bool {
+    KITS.contains(&item_id)
+}
+
 /// Whether one picked slot and one clicked slot are a mend, and the request if they are.
 ///
 /// **Read from the two slots the server last sent and from nothing else.** Durability is
@@ -384,10 +413,10 @@ fn move_request(from: u8, to: u8, count: u16, slots: u8) -> Option<InventoryMove
 /// makes every refusal silence, so the honest shape of a mend that did not happen is a
 /// durability bar that did not move.
 ///
-/// The kit id is presentation and routing, exactly as [`super::combat::ITEM_RUSTY_SWORD`]
+/// Which ids are kits is presentation and routing, exactly as `super::combat`'s `BLADES`
 /// is: the server reads its own registry, where being a kit is a non-zero `repairRestore`
-/// rather than a number, so this constant cannot make another item mend and cannot make
-/// this one legal.
+/// rather than membership of a list, so [`KITS`] cannot make another item mend and cannot
+/// make one of its own legal.
 ///
 /// The bounds and the two-different-slots rule are re-checked here for the reason
 /// [`move_request`] re-checks its own: this is the only place a `RepairRequest` is built,
@@ -405,7 +434,7 @@ fn repair_request(
     (kit_slot < slots
         && target_slot < slots
         && kit_slot != target_slot
-        && kit.item_id == ITEM_SHARPENING_STONE
+        && item_is_a_repair_kit(kit.item_id)
         && kit.count > 0
         && target.max_durability > 0)
         .then_some(RepairRequest {
@@ -425,7 +454,7 @@ mod tests {
     use super::*;
     use crate::net::{InventoryState, SessionParams};
     use crate::player::crafting::ITEM_IRON_SWORD;
-    use crate::player::items::ITEM_STONE;
+    use crate::player::items::{ITEM_STONE, ITEM_VARGR_PELT, item_label};
     use crate::wire::voxelheim::net as fb;
 
     fn stack(item_id: u16, count: u16) -> InventoryStack {
@@ -835,6 +864,18 @@ mod tests {
                 true,
             ),
             (
+                "a leather patch onto a worn blade — the pair that was a move until #113",
+                stack(ITEM_LEATHER_PATCH, 2),
+                worn(ITEM_IRON_SWORD, 40, 100),
+                true,
+            ),
+            (
+                "a vargr pelt onto a worn blade — two of them make a kit, and one is not",
+                stack(ITEM_VARGR_PELT, 2),
+                worn(ITEM_IRON_SWORD, 40, 100),
+                false,
+            ),
+            (
                 "a stone onto an empty slot",
                 stone,
                 InventoryStack::default(),
@@ -884,6 +925,92 @@ mod tests {
         assert!(repair_request(&inventory, 0, 0, 7, 2).is_none());
         assert!(repair_request(&inventory, 0, 1, 7, 1).is_none());
         assert!(repair_request(&inventory, 0, 9, 7, 2).is_none());
+    }
+
+    /// Every kit this list names mends, is named by the registry, and appears once.
+    ///
+    /// **Swept over [`KITS`] rather than over the ids written into the tests around it**,
+    /// which is what makes a third kit a decision made in that list rather than a branch
+    /// nobody adds. The three questions are the three ways an *entry* can be wrong: an id
+    /// the predicate does not honour, an id the panel would draw as "unknown item", and an
+    /// id typed twice.
+    ///
+    /// **What it cannot see is an entry that is missing**, and that limit is worth stating
+    /// rather than leaving for somebody to discover. `player::crafting`'s sweep can read
+    /// the contract because `RecipeID` is on the wire; nothing enumerates kits on this
+    /// side, because what makes an item a kit is a non-zero `repairRestore` in the
+    /// server's registry and that registry is deliberately never sent. So the leather
+    /// patch is pinned by name in the test below — the omission this list existed to end
+    /// is the one shape a sweep over the list is blind to.
+    #[test]
+    fn every_kit_mends_is_named_and_appears_once() {
+        assert!(!KITS.is_empty(), "no id routes a mend at all");
+
+        for &kit in KITS {
+            assert!(
+                item_is_a_repair_kit(kit),
+                "kit {kit} is not routed by its own list"
+            );
+            assert_ne!(
+                item_label(kit),
+                "unknown item",
+                "kit {kit} routes a mend and the panel cannot name it"
+            );
+
+            let inventory =
+                Inventory::from_stacks(vec![stack(kit, 1), worn(ITEM_IRON_SWORD, 40, 100)]);
+            assert!(
+                repair_request(&inventory, 0, 1, 7, 2).is_some(),
+                "kit {kit} onto a worn blade is not a mend"
+            );
+        }
+
+        // The other direction, and the proof the sweep is not passing vacuously: a list
+        // that honoured everything would satisfy the loop above perfectly.
+        for not_a_kit in [ITEM_STONE, ITEM_VARGR_PELT, ITEM_IRON_SWORD, u16::MAX] {
+            assert!(
+                !item_is_a_repair_kit(not_a_kit),
+                "item {not_a_kit} routes a mend"
+            );
+        }
+
+        let mut once = KITS.to_vec();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(
+            once.len(),
+            KITS.len(),
+            "an id appears twice in the kit list"
+        );
+    }
+
+    /// The mend the leather patch could not complete, and the move it used to be instead.
+    ///
+    /// The failure this pins is not that the gesture was refused — it is that it silently
+    /// meant something else. A patch onto a worn blade fell through to the move every
+    /// other pair is, so the kit landed in the blade's slot and nothing was mended.
+    #[test]
+    fn a_picked_leather_patch_mends_the_clicked_blade_too() {
+        let (mut app, sent) = mend_app(pack(&[
+            (0, stack(ITEM_LEATHER_PATCH, 2)),
+            (1, worn(ITEM_IRON_SWORD, 40, 100)),
+        ]));
+        let before = app.world().resource::<Inventory>().clone();
+
+        inventory_click(&mut app, 0, InventoryClickKind::Full);
+        inventory_click(&mut app, 1, InventoryClickKind::Full);
+
+        assert_eq!(asked(&sent), vec![Asked::Repair { kit: 0, target: 1 }]);
+        assert_eq!(
+            app.world().resource::<PickedStack>().slot(),
+            Some(0),
+            "the patch was put down after one mend"
+        );
+        assert_eq!(
+            *app.world().resource::<Inventory>(),
+            before,
+            "a repair spent a patch or restored a durability locally"
+        );
     }
 
     #[test]

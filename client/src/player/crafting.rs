@@ -23,8 +23,8 @@
 use bevy::prelude::*;
 
 use super::inventory::{ApplyInventory, Inventory};
-use super::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE};
-use super::structures::{ITEM_FORGE, ITEM_TENT};
+use super::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE, ITEM_VARGR_PELT};
+use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use super::{ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals};
 use crate::net::{CraftRequest, Outbound, RecipeId, Sent, StructureKind, encode_craft_request};
 
@@ -37,6 +37,17 @@ pub(super) const ITEM_IRON_SWORD: u16 = 10;
 
 /// Item id 11, what keeps a blade alive. Presentation only, for the reason above.
 pub(super) const ITEM_SHARPENING_STONE: u16 = 11;
+
+/// Item id 15, the other thing that keeps a blade alive — made where you are standing out
+/// of what you killed rather than at a forge out of what you dug.
+///
+/// Declared here rather than in [`super::items`] for the reason [`ITEM_IRON_SWORD`] is:
+/// a module *acts* on it. `super::inventory`'s `KITS` routes a click on this id to a mend,
+/// exactly as `super::combat`'s `BLADES` routes a click on the blade above to a swing, and
+/// both read the id from the module that declares its recipe. Presentation and routing
+/// only: the server's registry is where a non-zero `repairRestore` makes something a kit,
+/// so this constant cannot make another item mend and cannot make this one legal.
+pub(super) const ITEM_LEATHER_PATCH: u16 = 15;
 
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,11 +85,23 @@ impl Recipe {
     }
 }
 
-/// The four recipes, mirroring `recipeTable` in `server/internal/game/craft.go`.
+/// Every recipe the contract names, mirroring `recipeTable` in
+/// `server/internal/game/craft.go`.
 ///
 /// In the order a player meets them: the forge is the thing you build before you have one,
-/// the blade and the stone are what it is for, and the tent is the camp you come back to.
-pub const RECIPES: [Recipe; 4] = [
+/// the blade and the stone are what it is for, the tent is the camp you come back to, the
+/// fire is the one patch of ground nothing will spawn on, and the patch is what a hunt is
+/// worked into.
+///
+/// **No count of this table is written down anywhere**, and that is deliberate. A count is
+/// a claim about the mirror made by the same hand that writes the mirror, so it agrees
+/// with a mirror that has fallen a member behind the contract — which is exactly what
+/// happened: `RecipeID::Campfire` shipped on the wire in V6, the server has built one
+/// since #89, and `assert_eq!(RECIPES.len(), 4)` held the hole open rather than finding
+/// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
+/// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
+/// here until this client carries its row.
+pub const RECIPES: [Recipe; 6] = [
     Recipe {
         id: RecipeId::Forge,
         ingredients: &[
@@ -149,14 +172,52 @@ pub const RECIPES: [Recipe; 4] = [
         },
         station: None,
     },
+    // Four logs and one raw coal, under the tent's eight, and no station for the reason
+    // the tent has none: a fire is one of the things a player builds before they have
+    // anything, and the night it is worth most is the night nobody has a forge.
+    Recipe {
+        id: RecipeId::Campfire,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 4,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_COAL,
+                count: 1,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_CAMPFIRE,
+            count: 1,
+        },
+        station: None,
+    },
+    // Two pelts and nothing else. Station-less on purpose, and that is the whole
+    // difference between it and the sharpening stone above: a kit whose point is not
+    // having to walk home would be pointless if making it meant walking home.
+    Recipe {
+        id: RecipeId::LeatherPatch,
+        ingredients: &[Ingredient {
+            item_id: ITEM_VARGR_PELT,
+            count: 2,
+        }],
+        product: Ingredient {
+            item_id: ITEM_LEATHER_PATCH,
+            count: 1,
+        },
+        station: None,
+    },
 ];
 
 /// The mirrored row one wire identity names, when this build has one.
 ///
 /// `Option` rather than a total lookup, and it fails closed: a `RecipeId` with no row is a
 /// contract this build does not speak, and asking for it would be asking for something
-/// nobody could have seen on screen. Every member of the enum has a row today, and
-/// `every_recipe_id_has_exactly_one_row` is what keeps that true.
+/// nobody could have seen on screen. Every member the *contract* names has a row today,
+/// and `every_recipe_the_contract_names_has_exactly_one_row` is what keeps that true —
+/// swept against `RecipeID::ENUM_VALUES`, because the enum this function takes is the
+/// mirror rather than the source.
 pub fn recipe(id: RecipeId) -> Option<&'static Recipe> {
     RECIPES.iter().find(|recipe| recipe.id == id)
 }
@@ -315,12 +376,16 @@ mod tests {
     }
 
     #[test]
-    fn the_mirror_is_the_four_agreed_recipes_verbatim() {
+    fn the_mirror_is_the_agreed_recipes_verbatim() {
         // The server's `recipeTable`, read off `server/internal/game/craft.go`. A drift
         // here shows a wrong label rather than creating an item — but a wrong label is
         // exactly what a player plans against, so it is pinned.
-        assert_eq!(RECIPES.len(), 4);
-
+        //
+        // No `RECIPES.len()` assertion opens this test any more. It stood here saying
+        // four while the contract named six, and a count written beside the table it
+        // counts is the one check that cannot notice the table is short —
+        // `every_recipe_the_contract_names_has_exactly_one_row` is where that question
+        // moved, asked of the contract instead.
         let cost = |id: RecipeId| -> Vec<(u16, u16)> {
             recipe(id)
                 .expect("every member has a row")
@@ -342,6 +407,11 @@ mod tests {
             vec![(ITEM_STONE, 2), (ITEM_RAW_COAL, 1)]
         );
         assert_eq!(cost(RecipeId::Tent), vec![(ITEM_LOG, 8)]);
+        assert_eq!(
+            cost(RecipeId::Campfire),
+            vec![(ITEM_LOG, 4), (ITEM_RAW_COAL, 1)]
+        );
+        assert_eq!(cost(RecipeId::LeatherPatch), vec![(ITEM_VARGR_PELT, 2)]);
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -356,6 +426,8 @@ mod tests {
                 Some(StructureKind::Forge),
             ),
             (RecipeId::Tent, ITEM_TENT, None),
+            (RecipeId::Campfire, ITEM_CAMPFIRE, None),
+            (RecipeId::LeatherPatch, ITEM_LEATHER_PATCH, None),
         ] {
             let row = recipe(id).expect("every member has a row");
             assert_eq!(
@@ -370,22 +442,47 @@ mod tests {
         }
     }
 
+    /// Every recipe the contract names has exactly one row, and nothing has two.
+    ///
+    /// **Read from `RecipeID::ENUM_VALUES` and not from a list written beside it**, which
+    /// is the whole of the fix. What stood here walked four ids this file already knew
+    /// about, so it asked the mirror about the mirror: the campfire had been on the wire
+    /// since V6 and craftable on the server since #89, and both this loop and
+    /// `assert_eq!(RECIPES.len(), 4)` passed for every one of those commits. A test that
+    /// can only see what the table already contains does not merely miss an omission — it
+    /// makes the omission look deliberate to whoever adds the row and turns it red.
+    ///
+    /// The generated enum is the contract itself, so a seventh member appended to
+    /// `schemas/player.fbs` fails here until this client carries its row. `Unknown` is
+    /// skipped because it is the absent-field case rather than a recipe, and [`RecipeId`]
+    /// deliberately cannot express it.
     #[test]
-    fn every_recipe_id_has_exactly_one_row() {
-        // What makes the fail-closed lookup in `recipe` unreachable rather than merely
-        // unlikely, and what catches a fifth wire member arriving with no row to show it.
-        for id in [
-            RecipeId::Forge,
-            RecipeId::IronSword,
-            RecipeId::SharpeningStone,
-            RecipeId::Tent,
-        ] {
+    fn every_recipe_the_contract_names_has_exactly_one_row() {
+        for member in fb::RecipeID::ENUM_VALUES {
+            if *member == fb::RecipeID::Unknown {
+                continue;
+            }
+            let rows = RECIPES
+                .iter()
+                .filter(|row| row.id.wire() == *member)
+                .count();
             assert_eq!(
-                RECIPES.iter().filter(|row| row.id == id).count(),
+                rows,
                 1,
-                "{id:?}"
+                "the contract names {} and the mirror holds {rows} rows for it",
+                member.variant_name().unwrap_or("a member past the end")
             );
         }
+
+        // Implied by the loop above — a duplicated id makes some member's count two — and
+        // asserted anyway, because it is what the fail-closed `Option` in [`recipe`] rests
+        // on and no reader should have to derive it. Counted against the contract rather
+        // than against a number typed here, for the reason the loop is.
+        assert_eq!(
+            RECIPES.len(),
+            fb::RecipeID::ENUM_VALUES.len() - 1,
+            "the mirror holds a row the contract does not name, or two rows for one member"
+        );
     }
 
     /// Every item this mirror mentions has a row in the display registry.
@@ -393,8 +490,10 @@ mod tests {
     /// The names moved to [`super::items`] with the rest of an item's display facts, and
     /// the sweep there is the one that covers every item a player can hold. This test
     /// stays because it checks the other direction and the sweep cannot: it walks the
-    /// *recipes* and asks the registry, so a fifth recipe naming an item nobody registered
-    /// fails here rather than in a panel spelling out "unknown item 0/8".
+    /// *recipes* and asks the registry, so a recipe naming an item nobody registered fails
+    /// here rather than in a panel spelling out "unknown item 0/8". It covers a new row by
+    /// walking [`RECIPES`], which is why the two rows #113 added needed nothing added to
+    /// it.
     #[test]
     fn every_item_the_recipes_name_has_a_registry_row() {
         for row in RECIPES {

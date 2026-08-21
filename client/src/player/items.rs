@@ -20,19 +20,19 @@
 //! anything.
 
 use super::combat::ITEM_RUSTY_SWORD;
-use super::crafting::{ITEM_IRON_SWORD, ITEM_SHARPENING_STONE};
+use super::crafting::{ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use crate::world::palette;
 
 // Presentation-only item ids. The server registry remains the sole authority on whether
 // any of these can be placed and which block an action actually creates.
 //
-// These nine live here because no module *acts* on them — they are ids this client only
-// ever draws. The six that a module does act on stay where that module declares them:
+// These eight live here because no module *acts* on them — they are ids this client only
+// ever draws. The seven that a module does act on stay where that module declares them:
 // the blade in `super::combat`, the three bundles in `super::structures`, the forge's two
-// products in `super::crafting`. The table below names them from there, because one
-// declaration read from several places cannot drift the way two declarations of the same
-// number can.
+// products and the patch beside them in `super::crafting`. The table below names them from
+// there, because one declaration read from several places cannot drift the way two
+// declarations of the same number can.
 pub(super) const ITEM_STONE: u16 = 1;
 pub(super) const ITEM_DIRT: u16 = 2;
 pub(super) const ITEM_SNOW: u16 = 3;
@@ -40,15 +40,19 @@ pub(super) const ITEM_LOG: u16 = 4;
 pub(super) const ITEM_RAW_COAL: u16 = 5;
 pub(super) const ITEM_RAW_IRON: u16 = 6;
 
-/// What the dead leave behind, and what two pelts are worked into.
+/// What the dead leave behind.
 ///
 /// Presentation only, exactly as the six above are. The server's registry decides that a
-/// patch mends a blade and that a vargr leaves a pelt; nothing on this side routes a
-/// click or a key on any of these three, which is why they are declared here rather than
-/// in the module that would act on them.
+/// vargr leaves a pelt and a draugr leaves bone; nothing on this side routes a click or a
+/// key on either of these two, which is why they are declared here rather than in the
+/// module that would act on them.
+///
+/// **What two pelts are worked into is no longer one of them.** `ITEM_LEATHER_PATCH` sat
+/// in this group until #113, on the strength of a sentence that had stopped being true:
+/// `super::inventory`'s `KITS` routes a click on a patch to a mend, so it is declared
+/// beside its recipe in `super::crafting` with the other two products this client acts on.
 pub(super) const ITEM_BONE: u16 = 13;
 pub(super) const ITEM_VARGR_PELT: u16 = 14;
-pub(super) const ITEM_LEATHER_PATCH: u16 = 15;
 
 /// The shapes an item is drawn in.
 ///
