@@ -10,10 +10,22 @@ pub enum AppearanceOffset {}
 /// **Authoritative, and the client never invents a default.** Every value here was
 /// chosen by the player and stored by the server; a client that substituted its own
 /// colour for a missing one would draw somebody the server never described. An
-/// absent `Appearance`, an absent colour and an `Unknown` hair model are therefore
-/// all protocol errors at the decode boundary, not opportunities to guess. The one
-/// documented placeholder in this contract is a different case entirely — an entity
-/// whose `PlayerAppearance` has not arrived *yet*; see `player.fbs`.
+/// absent `Appearance` and an `Unknown` hair model are both protocol errors at the
+/// decode boundary, not opportunities to guess. The one documented placeholder in
+/// this contract is a different case entirely — an entity whose `PlayerAppearance`
+/// has not arrived *yet*; see `player.fbs`.
+///
+/// **An absent colour is deliberately not on that list, and the reason is written
+/// here so nobody adds it back.** A table scalar carries no presence bit: FlatBuffers
+/// writes no bytes for a field equal to its default, and `0x000000` — black — is a
+/// colour a player may legitimately choose. Absent and black are therefore the same
+/// bytes on the wire, so a decoder that refused absence would refuse a character
+/// wearing black shoes, and an encoder would have to be told to write defaults it
+/// otherwise omits. The claim this contract can keep is the narrower one: the wire
+/// could never distinguish an omitted colour from a chosen black one, exactly as it
+/// cannot distinguish a wrong colour from a right one. What a decoder *can* hold is
+/// that every value it accepts is one the peer could have meant — which is what the
+/// invariants below are.
 ///
 /// **A table rather than a struct**, deliberately, and against the rule of thumb
 /// that fixed-size shapes are inlined. A struct can never gain, lose or reorder a
@@ -30,7 +42,7 @@ pub enum AppearanceOffset {}
 /// rule to agree on. A client whose renderer wants linear values converts on the way
 /// in; that is a rendering detail and not a property of the wire.
 ///
-/// Decoder invariants, in both directions:
+/// Decoder invariants:
 ///   - every colour's top eight bits are zero. Refused rather than masked: a set
 ///     high byte means the peer is encoding something this build does not know
 ///     about, and masking it would show a colour nobody chose while hiding the
@@ -38,6 +50,25 @@ pub enum AppearanceOffset {}
 ///     repair a decoder invents is a different answer from the server's
 ///   - `hair_model` is a known member and never `Unknown`
 ///   - the table itself is present wherever it is referenced
+///
+/// **Which side refuses, and where, is not symmetric — and the asymmetry is the one
+/// `CraftRequest` already records.** A client reads its authority; a server reads
+/// untrusted input.
+///
+/// On the **client** these are decode errors: a server that sends a colour this
+/// contract forbids is a server this client cannot go on talking to, and the session
+/// ends rather than drawing somebody nobody described.
+///
+/// On the **server** they are refusals *above* the envelope, not framing errors.
+/// `internal/protocol` owns the envelope, and a colour it dislikes arrives inside a
+/// frame that is perfectly readable — closing the connection over it would answer a
+/// value question with a framing verdict, which is precisely what `CraftRequest` says
+/// not to do when an unknown recipe arrives. **The obligation that follows is
+/// explicit, and belongs to whatever accepts a `CreateCharacterRequest`: an
+/// appearance that breaks these invariants must be refused before it is stored.** A
+/// character persisted with `hair_model = 200` or a colour carrying a reserved high
+/// byte is one every client will afterwards refuse to load, and the person who cannot
+/// get in is not the person who sent it.
 pub struct Appearance<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }

@@ -68,6 +68,22 @@ pub enum HandshakeError {
     Repeated(&'static str),
     /// A payload only a client sends, arriving from the server.
     WrongDirection(&'static str),
+    /// A message that arrived exactly on time and that this build cannot answer.
+    ///
+    /// Distinct from every variant around it, which are all about a message arriving
+    /// in the wrong *place*. `ServerCharacterList` before the welcome is on time from
+    /// V7 — the trouble is that answering it means sending a selection, and the screen
+    /// that would choose one is a later issue.
+    ///
+    /// **It is a failure rather than something dropped, and that is the change #97's
+    /// review asked for.** Dropping it left the session in `AwaitingWelcome` while a
+    /// peer that speaks V7 waited for a selection this client never sends: neither end
+    /// closes, nothing is logged, and the player watches a window that never fills in.
+    /// A hang is the worst answer available here, because it is the one nobody can
+    /// diagnose from either side. It is also not a peer *ahead* of this build — this
+    /// client advertises `ProtocolVersion.Current`, so a server running the character
+    /// phase is a server doing exactly what this build claimed to speak.
+    Unanswerable(&'static str),
     /// A handshake-phase payload arriving on a session that already has a welcome.
     ///
     /// The mirror of [`Self::Premature`] rather than a second name for it, and distinct
@@ -98,6 +114,12 @@ impl fmt::Display for HandshakeError {
             Self::Repeated(kind) => write!(f, "second {kind} on an established session"),
             Self::WrongDirection(kind) => {
                 write!(f, "server sent {kind}, which only a client sends")
+            }
+            Self::Unanswerable(kind) => {
+                write!(
+                    f,
+                    "{kind} arrived on time and this build cannot answer it: the character phase is not implemented"
+                )
             }
             Self::OutOfPhase(kind) => {
                 write!(
@@ -195,15 +217,22 @@ impl Handshake {
             (Phase::AwaitingWelcome, Message::ActionRefused(_)) => {
                 Err(HandshakeError::Premature("ActionRefused"))
             }
-            // On time from V7, and dropped rather than refused because this build has
-            // no character-select screen — that is a separate issue, and the vocabulary
-            // landing before the screen is the whole point of a contract-only change.
-            // A server that speaks V7's handshake will wait for a selection this client
-            // never sends; a server that speaks V6's sends a welcome and nothing here
-            // is reached at all. Refusing would disconnect a peer that is merely ahead,
-            // which is what `Transition::Ignored` exists to avoid.
+            // On time from V7, and refused anyway, because being on time is not the
+            // same as being answerable: replying means sending a selection, and the
+            // screen that would choose one is a later issue. Dropping it — which is
+            // what this arm did until #97's review — left the session in
+            // `AwaitingWelcome` while the server waited for a selection that never
+            // comes, and a hang neither end can diagnose is a worse answer than a
+            // failure that names itself.
+            //
+            // `Transition::Ignored` is not the right tool here and the distinction is
+            // worth keeping: it exists for a peer speaking a contract *ahead* of this
+            // build, where dropping is the only honest thing to do. A server running
+            // the character phase is not ahead — this client advertised
+            // `ProtocolVersion.Current` in its hello, so the phase is one it claimed to
+            // speak. A server still on V6 sends a welcome and never reaches this arm.
             (Phase::AwaitingWelcome, Message::CharacterList(_)) => {
-                Ok(Transition::Ignored("ServerCharacterList"))
+                Err(HandshakeError::Unanswerable("ServerCharacterList"))
             }
             // An appearance names an entity id, and `ServerWelcome.entity_id` is how
             // this session learns which one is its own — so an appearance that precedes
@@ -767,23 +796,47 @@ mod tests {
         }
     }
 
-    /// A character list before the welcome is **on time** from V7, and this build drops
-    /// it rather than refusing: it has no character-select screen yet, and disconnecting
-    /// a peer that is merely ahead is what `Transition::Ignored` exists to avoid.
+    /// A character list before the welcome is **on time** from V7 and still fails,
+    /// because on time is not the same as answerable: replying means sending a
+    /// selection, and the screen that would choose one is a later issue.
     ///
-    /// The consequence is deliberate and worth stating: against a server that speaks
-    /// V7's handshake this session then waits for a welcome that will not come, because
-    /// nothing here sends a selection. Against the servers in this repository, which
-    /// still speak V6's handshake, nothing reaches this arm at all.
+    /// **The inverse of what this test asserted when #97 landed, and the reason is the
+    /// state it used to leave behind.** Dropping the message kept the session in
+    /// `AwaitingWelcome` waiting for a welcome that never comes, while the server
+    /// waited for a selection that is never sent — a hang with nothing logged at
+    /// either end. The review on #97 named it, and a failure that says what it is
+    /// beats a stall nobody can diagnose.
+    ///
+    /// It is not the `Transition::Ignored` case, and keeping those apart matters:
+    /// dropping is for a peer speaking a contract *ahead* of this build, and a server
+    /// running the character phase is not ahead — this client advertised
+    /// `ProtocolVersion.Current` in its own hello. Against the servers in this
+    /// repository, which still answer a hello with a welcome, nothing reaches this arm
+    /// at all.
     #[test]
-    fn a_character_list_before_the_welcome_is_dropped_rather_than_refused() {
+    fn a_character_list_this_build_cannot_answer_fails_rather_than_hanging() {
         let mut handshake = Handshake::new();
 
         assert_eq!(
             handshake.apply(Message::CharacterList(character_list())),
-            Ok(Transition::Ignored("ServerCharacterList"))
+            Err(HandshakeError::Unanswerable("ServerCharacterList"))
         );
+        // The phase does not advance on a failure, and the session ends above this
+        // layer — `net/session.rs` turns a handshake error into a protocol failure.
         assert_eq!(handshake.phase(), Phase::AwaitingWelcome);
+    }
+
+    /// The failure says which message it could not answer, and why.
+    ///
+    /// Pinned because this string is the whole diagnosis: it reaches a log and a status
+    /// line, and "the client stopped" with no message names nothing.
+    #[test]
+    fn the_unanswerable_failure_names_the_message_and_the_missing_phase() {
+        let rendered = HandshakeError::Unanswerable("ServerCharacterList").to_string();
+        assert!(
+            rendered.contains("ServerCharacterList") && rendered.contains("character phase"),
+            "the failure does not diagnose itself: {rendered}"
+        );
     }
 
     /// After the welcome the character phase is over: this session has a character,

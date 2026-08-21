@@ -540,10 +540,25 @@ impl HairModel {
 
 /// What a character looks like: four worn colours, a hair model and its colour.
 ///
-/// **Validated, so this type cannot hold a colour the contract forbids.** Every value
-/// here came off a wire that had its reserved high byte checked and its hair model
-/// named, exactly as [`SessionParams`] can only hold numbers a welcome passed. The
-/// client renders these and never substitutes a default of its own — the one
+/// **Validated on the way in, which is a narrower claim than the one this comment
+/// used to make.** Every appearance produced by [`decode`] came off a wire that had
+/// its reserved high byte checked and its hair model named — that much is enforced by
+/// [`appearance`], and it is what the client renders. What is *not* enforced is
+/// construction: the fields are public, so a value built inside this crate can hold a
+/// colour the contract forbids, and [`encode_create_character_request`] would put it
+/// on the wire. Saying otherwise was the whole of the defect #97's review found, and
+/// the honest fix is to say what holds rather than to assert what does not.
+///
+/// Two things keep that from mattering yet, and both expire. Nothing in this build
+/// constructs one except this module and its tests — there is no character-creation
+/// screen — and the server refuses an appearance it dislikes before storing it, which
+/// `schemas/common.fbs` now states as an obligation rather than leaving to inference.
+/// **When a screen does construct one (#108), the validation moves here**: private
+/// fields behind a fallible constructor, so the type carries its invariant the way
+/// [`RecipeId`] carries "never `Unknown`" — by making the other states
+/// unrepresentable rather than by promising nobody will reach them.
+///
+/// The client renders these and never substitutes a default of its own — the one
 /// documented placeholder is [`PLACEHOLDER_APPEARANCE`], and it is for an appearance
 /// that has not *arrived*, never for one that arrived wrong.
 ///
@@ -1817,6 +1832,11 @@ fn appearance(
 
     // The reserved high byte, checked once per colour through one closure so a fifth
     // colour cannot be added with the check forgotten.
+    //
+    // Presence is deliberately not checked, and `schemas/common.fbs` carries the
+    // reasoning: a table scalar equal to its default is not written at all, and black
+    // is a legal colour — so an absent `skin_color` and a chosen `0x000000` are the
+    // same bytes, and refusing absence would refuse black shoes.
     let color = |field: &'static str, raw: u32| -> Result<u32, DecodeError> {
         if raw & 0xFF00_0000 == 0 {
             Ok(raw)
