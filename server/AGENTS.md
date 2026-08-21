@@ -1076,6 +1076,23 @@ simulation uses.
   than becoming a silent 33465. A named port is refused too — `:htpt` is a typo far more often
   than it is a service name, and a machine whose `/etc/services` differs is a machine where the
   same flag binds somewhere else.
+- **Every configuration is checked before anything is created, and `run` is two passes because
+  of it.** The registration key and the Discord sign-in are read and refused first; only then are
+  the account store, the ticket signing key and the registry opened. It ran the other way round
+  until #136, so a start about to be refused for a typo'd `-discord-client-id` had already minted
+  an Ed25519 pair into the directory the typo named — and there is no revocation, so that pair
+  stayed valid for as long as the file existed, in a directory nobody would remember to delete.
+  **The directory is not created either**: `auth.OpenStore`, `ticket.LoadOrCreate` and
+  `registry.OpenStore` all `MkdirAll`, and a start that cannot succeed has no business leaving a
+  tree behind. `TestARefusedStartCreatesNothing` pins both halves for every shape of unusable
+  Discord configuration, and `TestAnAcceptedStartMintsTheSigningKey` pins that an accepted start
+  still mints — the point is that the two outcomes differ, and before the hoist they did not.
+  What the hoist may **not** do is move the storage below the listener: the store is opened before
+  the port is bound, `TestTheStoreIsOpenedBeforeThePortIsBound` says so, and putting the
+  configuration above the storage is what makes the storage genuinely the last thing that can
+  refuse a start rather than merely the first thing that runs. The cost is that `signIn` is built
+  in two steps — the flow when the configuration is checked, the account store when there is one —
+  which is why those two statements sit within a few lines of each other in `run`.
 
 ## Signing in with Discord, and the secret that does not exist
 
@@ -1136,7 +1153,8 @@ that records it. Two routes, `POST /v1/signin/discord/start` and
   about the store, the port or the health probe. The routes exist either way and answer 503
   `sign_in_not_configured`, which is a service that says what is missing rather than one that is
   silently absent. A client id *with* an unusable redirect URI is a real misconfiguration and
-  refuses **before the port is bound**, in the order the store already does.
+  refuses **before anything is created** — ahead of the account store rather than behind it, in
+  the configuration pass described above, and so long before the port is bound.
 - **The pending table is capped and swept.** The start endpoint is unauthenticated by
   construction — a sign-in is how somebody becomes known, so there is nobody to authenticate yet
   — which makes an uncapped table a way to spend this service's memory for the price of an HTTP

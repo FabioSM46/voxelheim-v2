@@ -201,10 +201,48 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("invalid flags: %w", err)
 	}
 
-	// Before the listener, deliberately, in the order cmd/voxelheimd opens its world
-	// in: the storage is the last thing that can refuse this configuration, and a
-	// service that has already bound a port and answered a health probe is a worse
-	// place to discover that its accounts directory cannot be created.
+	// **Every configuration is checked before anything is created**: this pass, and then
+	// the storage below. The order is the fix rather than a tidy-up.
+	//
+	// The configuration used to be checked last, so a start that was going to be refused
+	// for a typo'd -discord-client-id had **already minted an Ed25519 signing pair** into
+	// whatever directory the typo named. There is no revocation here — ticket.Lifetime is
+	// the whole of the answer — so a stray pair is valid for as long as the file exists,
+	// and it is a file nobody will remember to delete: the operator corrects the flag,
+	// starts again against the directory they meant, and that start mints a second pair
+	// beside the first. Anything that can refuse a start has to refuse it before the
+	// start writes (#136).
+	//
+	// Hoisting the whole of the configuration rather than only moving the mint is what
+	// keeps the rule true when a third thing needs configuring: everything an operator
+	// can get wrong is answered here, and the pass touches no disk this service owns —
+	// loadRegistrationKey reads a file the operator already made, and newSignIn parses a
+	// URL. Neither creates anything.
+	//
+	// A key that is configured and unusable refuses here. A key that is *absent* is not an
+	// error: the registration route answers 503 and the list still works, because the list
+	// is read with a ticket and not with this.
+	registrationKey, err := loadRegistrationKey(opts.registrationKeyFile, log)
+	if err != nil {
+		return fmt.Errorf("configuring server registration: %w", err)
+	}
+
+	// A redirect URI that is not a URL is a configuration this service cannot act on, and
+	// discord.New is the only place that knows which URIs those are — restating its rules
+	// in options.validate would be a second implementation of them, so the check *is* the
+	// construction. It is handed no account store because there is not one yet, which is
+	// the point of standing here; see the attachment below.
+	signin, err := newSignIn(opts, nil, log)
+	if err != nil {
+		return fmt.Errorf("configuring Discord sign-in: %w", err)
+	}
+
+	// Nothing above this line created a file or a directory. Everything below does, and
+	// it still happens before the listener, in the order cmd/voxelheimd opens its world
+	// in: the storage is the last thing that can refuse this configuration — now
+	// genuinely the last, which is what the pass above bought — and a service that has
+	// already bound a port and answered a health probe is a worse place to discover that
+	// its accounts directory cannot be created.
 	//
 	// The store is opened rather than held because nothing routed below reads an
 	// account yet — there is no provider flow, so there is no request that arrives
@@ -217,6 +255,16 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("opening the account store: %w", err)
 	}
 	log.Info("account store opened", "accounts_dir", accounts.Dir(), "format_version", auth.StoreVersion)
+
+	// The store the sign-in records accounts through, attached the moment there is one.
+	// **Building it in two steps is what checking the configuration first costs**, and the
+	// two steps are kept this close together for the reason it costs anything: a signIn
+	// that reached a request without a store would fail at the first finish. Nothing can
+	// reach this value in between — it does not leave this function until `service` is
+	// built below, and nothing answers until the listener after that.
+	if signin != nil {
+		signin.accounts = accounts
+	}
 
 	// Beside the accounts, and before the listener for the same reason they are: a key
 	// pair that cannot be read is a configuration this service cannot act on, and the
@@ -246,23 +294,6 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("opening the server registry: %w", err)
 	}
 	log.Info("server registry opened", "servers_dir", servers.Dir(), "format_version", registry.StoreVersion)
-
-	// A key that is configured and unusable refuses here, before the port is bound, in the
-	// order everything else in this function does. A key that is *absent* is not an error:
-	// the registration route answers 503 and the list still works, because the list is read
-	// with a ticket and not with this.
-	registrationKey, err := loadRegistrationKey(opts.registrationKeyFile, log)
-	if err != nil {
-		return fmt.Errorf("configuring server registration: %w", err)
-	}
-
-	// Before the listener as well, and for the reason the store is: a redirect URI that
-	// is not a URL is a configuration this service cannot act on, and discovering it
-	// after the port is bound and the probes are answering is worse.
-	signin, err := newSignIn(opts, accounts, log)
-	if err != nil {
-		return fmt.Errorf("configuring Discord sign-in: %w", err)
-	}
 
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
