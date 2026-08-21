@@ -62,7 +62,7 @@ service's public key before it can let anybody in — and it reads that key once
 
 ```bash
 # terminal 1 — the account service (listens on 127.0.0.1:7778)
-cd server && go run ./cmd/voxelheim-auth -auth-dir ./authdata
+cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth
 
 # terminal 2 — the game server
 cd server && go run ./cmd/voxelheimd \
@@ -71,6 +71,12 @@ cd server && go run ./cmd/voxelheimd \
 # terminal 3 — the client
 cd client && cargo run --release
 ```
+
+**`-auth-dir` is deliberately outside the checkout above.** It holds the account service's
+Ed25519 signing key, and its own default (`auth`) resolves against the working directory — so
+running that command from `server/` puts a private key inside this repository, one `git add -A`
+away from a public commit. `.gitignore` covers the default and the two key file names for that
+reason, and the path here points somewhere a mistake cannot reach.
 
 **`-world-name` is required and has no default**, and the refusal it produces is the point: a
 ticket names one world and is useless at any other, so a server that does not know which world it
