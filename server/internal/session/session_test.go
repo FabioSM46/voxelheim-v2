@@ -19,8 +19,10 @@ import (
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -62,29 +64,132 @@ func serveConfig() session.Config {
 // expire — and session.Timeouts.Validate is what stops a server from running this way.
 func noTimeouts() session.Timeouts { return session.Timeouts{} }
 
+// The account service every test in this package is admitted by: one signing pair and
+// one world, built once for the whole binary.
+//
+// **Shared deliberately, and it shares nothing that matters.** A pair is a key and a
+// world id is a digest of a name; neither carries state between tests, and every test
+// still builds its own claim set, so nothing about who is *live* is shared. What it
+// buys is that admitting a session costs a test one call instead of a fixture, which is
+// what keeps the twenty tests in this package that are about streaming and movement
+// from being about the door.
+//
+// A test that needs a *different* account service — another key, another world, another
+// clock — builds one itself with session.NewVerifier. Those are the tests about
+// refusals, and it is right that they should say so.
+var (
+	testPair  *ticket.Pair
+	testWorld ticket.WorldID
+)
+
+// testWorldName is the world these tests' server is. Lowercase letters and nothing
+// else, because ticket.WorldIDFor's vocabulary is the rule an operator is held to.
+const testWorldName = "midgard"
+
+// TestMain mints the pair above, once, in a directory that goes away with the run.
+//
+// A pair is generated rather than checked in, because a signing key in a public
+// repository is a signing key nobody may ever use for anything — and generating one is
+// what ticket.LoadOrCreate does on an empty directory anyway.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "voxelheim-session-tickets")
+	if err != nil {
+		panic("session_test: making a directory for the signing pair: " + err.Error())
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	if testPair, err = ticket.LoadOrCreate(dir); err != nil {
+		panic("session_test: minting the signing pair: " + err.Error())
+	}
+	if testWorld, err = ticket.WorldIDFor(testWorldName); err != nil {
+		panic("session_test: naming the world: " + err.Error())
+	}
+
+	// os.Exit skips deferred functions, so the cleanup above is deferred *after* the
+	// exit is, and therefore runs before it.
+	code := m.Run()
+	defer os.Exit(code)
+}
+
+// testVerifier is a verifier for the pair above, reading the real clock.
+func testVerifier() *session.Verifier {
+	verifier, err := session.NewVerifier(testPair.Public(), testWorld, nil)
+	if err != nil {
+		// Unreachable: the key is a real Ed25519 public key and the world is a real
+		// world id. A panic rather than a t.Fatalf because several callers are inside a
+		// goroutine, which is not a place Fatalf may be called from.
+		panic("session_test: building a verifier: " + err.Error())
+	}
+	return verifier
+}
+
 // ephemeralIdentities is a fresh claim set with no player store behind it — the
 // ephemeral world, which is how every test in this package runs unless it says
 // otherwise.
 //
-// Fresh per session rather than shared, because a session that presents no token
-// mints a fresh random identity, so two of them never collide however they are
-// wired. The tests that are *about* exclusivity build one deliberately and hand it
-// to both sessions; that is the whole difference, and it should be visible in the
-// test that depends on it.
-func ephemeralIdentities() *session.Identities { return session.NewIdentities(nil, nil) }
+// Fresh per session rather than shared, because a claim set is what knows who is
+// already playing: two sessions handed separate ones never refuse each other however
+// they are wired. The tests that are *about* exclusivity build one deliberately and
+// hand it to both sessions; that is the whole difference, and it should be visible in
+// the test that depends on it.
+func ephemeralIdentities() *session.Identities { return identitiesOver(nil) }
 
-// testToken is a token whose bytes are chosen rather than minted, so a test can
+// identitiesOver is a claim set over store — nil for the ephemeral world — admitting
+// tickets from the package's own account service.
+func identitiesOver(store *persist.Store) *session.Identities {
+	identities, err := session.NewIdentities(store, testVerifier(), nil)
+	if err != nil {
+		// Unreachable, and a panic for the reason testVerifier's is.
+		panic("session_test: building a claim set: " + err.Error())
+	}
+	return identities
+}
+
+// testAccount is an account whose bytes are chosen rather than random, so a test can
 // present the same one twice and can say what a log line must not contain.
 //
-// Distinct per seed and never the zero token: the zero token hashes to a real id,
-// but a test that accidentally shared one would be asserting about identities that
-// are the same by accident.
-func testToken(seed byte) identity.Token {
-	var token identity.Token
-	for i := range token {
-		token[i] = seed*17 + byte(i)
+// Distinct per seed and never the zero account: the zero account is the one no ticket
+// may name, and a test that accidentally shared one would be asserting about players
+// who are the same by accident.
+func testAccount(seed byte) ticket.AccountID {
+	var account ticket.AccountID
+	for i := range account {
+		account[i] = seed*17 + byte(i)
 	}
-	return token
+	return account
+}
+
+// testPlayerID is the player id an account resolves to: what the store keys on and
+// what a log line carries.
+func testPlayerID(account ticket.AccountID) identity.PlayerID {
+	return identity.IDOf(identity.Account(account))
+}
+
+// testTicket is a valid ticket for account, as the 96 bytes a ClientHello carries.
+func testTicket(account ticket.AccountID) []byte { return testTicketAt(account, time.Now()) }
+
+// testTicketAt is testTicket minted at a chosen moment.
+//
+// **Two mints of one account at one second are byte-identical**, and that is a property
+// of the design rather than of this helper: an expiry is stored to the second and
+// Ed25519 signs deterministically, so nothing about a ticket varies within a second. A
+// test that wants two *different* tickets for one account — which is what two machines
+// signing in a moment apart present — has to move the clock, and this is how it says so.
+func testTicketAt(account ticket.AccountID, now time.Time) []byte {
+	minted, _, err := testPair.Mint(account, testWorld, now)
+	if err != nil {
+		// Unreachable, and a panic for the reason testVerifier's is.
+		panic("session_test: minting a ticket: " + err.Error())
+	}
+	return minted[:]
+}
+
+// hello is the frame a client holding a valid ticket for testAccount(seed) sends.
+func hello(seed byte) []byte { return helloNamed("Eivor", seed) }
+
+// helloNamed is hello under a chosen display name, for the tests that assert on one.
+func helloNamed(name string, seed byte) []byte {
+	return protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, name, testTicket(testAccount(seed)))
 }
 
 // testChunks is a tiny world cache for the session tests.
@@ -313,8 +418,8 @@ func TestHandshake(t *testing.T) {
 			t.Fatalf("Decode: %v", err)
 		}
 
-		token := testToken(1)
-		reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{Token: token})
+		account := testAccount(1)
+		reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{ID: testPlayerID(account)})
 		if !accepted {
 			t.Fatal("a current-version hello was refused")
 		}
@@ -345,11 +450,17 @@ func TestHandshake(t *testing.T) {
 		if got := welcome.WorldSeed(); got != cfg.WorldSeed {
 			t.Errorf("WorldSeed = %d, want %d", got, cfg.WorldSeed)
 		}
-		// The welcome carries the identity the caller resolved, whatever the client
-		// presented. Handshake is not what decides which token that is — see
-		// TestResolveIdentity — it is what guarantees one is always announced.
-		if got := welcome.PlayerTokenBytes(); !bytes.Equal(got, token[:]) {
-			t.Errorf("PlayerToken is %d bytes and not the token given (%d bytes)", len(got), len(token))
+		// **The retired field, still carried and no longer naming anybody.** V7 settles
+		// identity from the session ticket, so this server mints nothing — but
+		// schemas/handshake.fbs still requires the vector to be present and exactly
+		// PlayerTokenLen bytes, and a client is required to treat any other length as a
+		// protocol error. So what is asserted is the shape and the emptiness: the right
+		// number of bytes, none of them anything.
+		if got := welcome.PlayerTokenBytes(); len(got) != protocol.PlayerTokenLen {
+			t.Errorf("PlayerToken is %d bytes, want the %d the contract requires", len(got), protocol.PlayerTokenLen)
+		}
+		if got := welcome.PlayerTokenBytes(); !bytes.Equal(got, make([]byte, protocol.PlayerTokenLen)) {
+			t.Error("PlayerToken carries something; a V7 server has no token to announce and must not invent one")
 		}
 		// The world's clock, announced from the constants that own it rather than from
 		// Config — which is why these are compared against game and not against cfg.
@@ -382,7 +493,7 @@ func TestHandshake(t *testing.T) {
 			t.Fatalf("Decode: %v", err)
 		}
 
-		reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{Token: testToken(1)})
+		reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{ID: testPlayerID(testAccount(1))})
 		if !accepted {
 			t.Fatal("a current-version hello was refused")
 		}
@@ -445,7 +556,7 @@ func TestHandshake(t *testing.T) {
 				t.Fatalf("Decode: %v", err)
 			}
 
-			reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{Token: testToken(1)})
+			reply, accepted := session.Handshake(msg, cfg, 7, session.Resolved{ID: testPlayerID(testAccount(1))})
 			if accepted {
 				t.Fatal("the handshake was accepted")
 			}
@@ -505,7 +616,7 @@ func TestServeAdmitsAndAcceptsInput(t *testing.T) {
 		done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(), chunks, sim, peers, ephemeralIdentities(), 3, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+	conn.in <- hello(1)
 	env := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0)
 	if env.PayloadType() != vnet.PayloadServerWelcome {
 		t.Fatalf("first reply is %s, want %s", env.PayloadType(), vnet.PayloadServerWelcome)
@@ -560,7 +671,7 @@ func serveWithWriteError(t *testing.T, wErr error) error {
 		done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(), chunks, sim, peers, ephemeralIdentities(), 3, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+	conn.in <- hello(1)
 
 	select {
 	case err := <-done:
@@ -665,7 +776,7 @@ func TestServeEndsWhenClientSendsAServerPayload(t *testing.T) {
 		done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(), chunks, sim, peers, ephemeralIdentities(), 3, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+	conn.in <- hello(1)
 	_ = nextFrame(t, conn) // the welcome
 	conn.in <- protocol.EncodeServerWelcome(protocol.Welcome{TickRate: 20, ChunkSize: 32})
 
@@ -802,7 +913,7 @@ func TestServeEndsAnIdleSessionCleanly(t *testing.T) {
 		done <- session.Serve(context.Background(), conn, serveConfig(), longTimeouts(), chunks, sim, peers, ephemeralIdentities(), 3, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+	conn.in <- hello(1)
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("first reply is %s, want %s", got, vnet.PayloadServerWelcome)
 	}
@@ -859,7 +970,7 @@ func TestServeKeepsASessionThatKeepsTalking(t *testing.T) {
 			session.Timeouts{Handshake: idle, Idle: idle}, chunks, sim, peers, ephemeralIdentities(), 3, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+	conn.in <- hello(1)
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("first reply is %s, want %s", got, vnet.PayloadServerWelcome)
 	}

@@ -11,7 +11,6 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
@@ -61,7 +60,7 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	return &server{
 		tr:         tr,
 		registry:   registry,
-		identities: session.NewIdentities(players, discard()),
+		identities: testIdentities(t, players),
 		cfg:        cfg,
 		timeouts:   session.Timeouts{},
 		chunks:     chunks,
@@ -119,9 +118,12 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 	first, written := persistentServer(t, newQueueTransport(before), dir, cfg)
 	stopFirst := start(t, first)
 
-	before.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	token := tokenFromWelcome(t, firstReply(t, before))
-	id := identity.IDOf(token)
+	account := testAccount(2)
+	id := testPlayerID(account)
+	before.in <- helloFor(t, account)
+	if got := firstReply(t, before).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the first run got %s, want a welcome", got)
+	}
 
 	waitFor(t, "the player to join", func() bool { return first.sim.Count() == 1 })
 
@@ -171,7 +173,11 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 	stopSecond := start(t, second)
 	defer stopSecond()
 
-	after.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token[:])
+	// A ticket the restarted process has never seen, naming the account that played
+	// before it: the only route from the first life to the second is the record on the
+	// file system, and the only thing that says whose record it is came from the
+	// account service.
+	after.in <- helloFor(t, account)
 	welcome := welcomeOf(t, firstReply(t, after))
 
 	spawn := welcome.Spawn(nil)
@@ -229,9 +235,12 @@ func TestShutdownSavesASessionThatIsStillConnected(t *testing.T) {
 	srv, _ := persistentServer(t, newQueueTransport(conn), dir, cfg)
 	stop := start(t, srv)
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	token := tokenFromWelcome(t, firstReply(t, conn))
-	id := identity.IDOf(token)
+	account := testAccount(3)
+	id := testPlayerID(account)
+	conn.in <- helloFor(t, account)
+	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the session got %s, want a welcome", got)
+	}
 	waitFor(t, "the player to join", func() bool { return srv.sim.Count() == 1 })
 
 	// Nothing closes the connection: the shutdown does, which is the whole point.
@@ -271,9 +280,12 @@ func TestTheAutosaveWritesTheConnectedPlayers(t *testing.T) {
 	stop := start(t, srv)
 	defer stop()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	token := tokenFromWelcome(t, firstReply(t, conn))
-	id := identity.IDOf(token)
+	account := testAccount(4)
+	id := testPlayerID(account)
+	conn.in <- helloFor(t, account)
+	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the session got %s, want a welcome", got)
+	}
 
 	// No disconnect and no shutdown: the record has to appear entirely on the
 	// autosave's account.
@@ -310,18 +322,6 @@ func waitFor(t *testing.T, what string, done func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
-}
-
-// tokenFromWelcome is the identity a welcome announces.
-func tokenFromWelcome(t *testing.T, env *vnet.Envelope) identity.Token {
-	t.Helper()
-
-	raw := welcomeOf(t, env).PlayerTokenBytes()
-	token, err := identity.TokenFrom(raw)
-	if err != nil {
-		t.Fatalf("the welcome's token: %v", err)
-	}
-	return token
 }
 
 func welcomeOf(t *testing.T, env *vnet.Envelope) *vnet.ServerWelcome {
@@ -436,13 +436,16 @@ func TestACampSurvivesARestart(t *testing.T) {
 	first, _ := persistentServer(t, newQueueTransport(before), dir, cfg)
 	stopFirst := start(t, first)
 
-	before.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	token := tokenFromWelcome(t, firstReply(t, before))
-	id := identity.IDOf(token)
+	account := testAccount(5)
+	id := testPlayerID(account)
+	before.in <- helloFor(t, account)
+	if got := firstReply(t, before).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the first run got %s, want a welcome", got)
+	}
 
 	waitFor(t, "the player to join", func() bool { return first.sim.Count() == 1 })
 
-	// The camp, owned by the identity the handshake just resolved — which is the value
+	// The camp, owned by the player the handshake just resolved — which is the value
 	// the whole issue turns on, and the one a test that invented an id could not check.
 	if err := first.sim.RestoreStructures([]game.Structure{
 		{Kind: vnet.StructureKindTent, Anchor: tentAnchor, Facing: vnet.FacingNorth, Owner: id},
@@ -470,7 +473,7 @@ func TestACampSurvivesARestart(t *testing.T) {
 	}
 	for _, rec := range saved {
 		if rec.Owner != id {
-			t.Errorf("a stored structure is owned by %s, want the connecting identity %s", rec.Owner.Short(), id.Short())
+			t.Errorf("a stored structure is owned by %s, want the connecting player %s", rec.Owner.Short(), id.Short())
 		}
 	}
 
@@ -487,7 +490,7 @@ func TestACampSurvivesARestart(t *testing.T) {
 		t.Fatalf("the restarted server holds %d structures before any session, want 2", got)
 	}
 
-	after.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token[:])
+	after.in <- helloFor(t, account)
 	welcome := welcomeOf(t, firstReply(t, after))
 	rejoinedAs := welcome.EntityId()
 

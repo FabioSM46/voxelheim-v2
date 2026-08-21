@@ -236,7 +236,7 @@ func TestBroadcastsRunSafelyWhileSessionsArriveAndLeave(t *testing.T) {
 			served <- session.Serve(context.Background(), conn, cfg, noTimeouts(), chunks, sim, peers, ephemeralIdentities(), uint64(round+1), discard())
 		}()
 
-		conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+		conn.in <- hello(1)
 		before := delivered.Load()
 		waitUntil(t, "a broadcast to reach the session", func() bool { return delivered.Load() > before })
 
@@ -319,7 +319,7 @@ func admit(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game.Sim,
 		}
 	})
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+	conn.in <- hello(byte(entityID))
 	view := (2*int(cfg.ViewDistance) + 1)
 	wantChunks := view * view * view
 	waitUntil(t, "the session's first view to arrive", func() bool {
@@ -487,7 +487,7 @@ func TestDirectBreakIsAProtocolErrorEvenWithoutAPosition(t *testing.T) {
 				served <- session.Serve(context.Background(), conn, cfg, noTimeouts(), chunks, sim, peers, ephemeralIdentities(), 1, discard())
 			}()
 
-			conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
+			conn.in <- hello(1)
 			waitUntil(t, "the player to join before the protocol violation", func() bool { return sim.Count() == 1 })
 			request := protocol.BlockEditRequest{Action: vnet.EditActionBreak, ClientTick: 1}
 			if test.hasPos {

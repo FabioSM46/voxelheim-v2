@@ -45,6 +45,21 @@ const (
 	// have to agree on. Whether a ticket of some *other* length is a refusal is not
 	// decided here; see ClientHello.SessionTicket.
 	SessionTicketLen = 96
+
+	// PlayerTokenLen is the exact length of a ServerWelcome.player_token, and it is
+	// the one thing about that field V7 did not retire.
+	//
+	// The field's *meaning* is gone: a V7 server settles identity from a session
+	// ticket, mints no tokens, and reads past ClientHello.player_token entirely. But
+	// schemas/handshake.fbs still requires a welcome to carry the vector — present,
+	// and exactly this many bytes — and requires a decoder to treat any other length
+	// as a protocol error the way it treats a zero tick rate. So the number outlives
+	// the meaning, and this is where a server building a welcome reads it.
+	//
+	// It is here rather than in internal/identity for exactly that reason: it is a
+	// fact about the wire, and the package that names players no longer has a 32-byte
+	// anything.
+	PlayerTokenLen = 32
 )
 
 // ErrMalformed marks a frame that is not a decodable Envelope. Every malformed
@@ -79,19 +94,20 @@ type ClientHello struct {
 	ProtocolVersion vnet.ProtocolVersion
 	PlayerName      string
 
-	// PlayerToken is the identity token the client presents, copied verbatim —
+	// PlayerToken is the retired identity token the client presents, copied verbatim —
 	// length included.
 	//
-	// **The length rule is a handshake decision, not a framing one.** The contract
-	// says absent, empty, or exactly 32 bytes, and anything else is
-	// RejectReason.BAD_REQUEST; but that is a refusal with a *reply*, and a decoder
-	// that shortened it to an error would close the connection with nothing said.
-	// The house rule AttackRequest.slot documents: this package owns the envelope,
-	// and what a value means is the caller's decision. session.Identities.Resolve is
-	// where it is made.
+	// **A V7 server reads past it, and that includes its length.** The contract retires
+	// the field rather than removing it, because tags never move and a peer built
+	// against V5 or V6 still writes one; `session.Identities.Resolve` settles identity
+	// from SessionTicket below and asks nothing at all about this vector. It is still
+	// decoded, because a decoder that dropped a field would be deciding something —
+	// which is not this package's job, and is the house rule AttackRequest.slot
+	// documents: this package owns the envelope, and what a value means is the caller's.
 	//
-	// Absent and empty both arrive as a zero-length slice, which is what the contract
-	// says they are: a first connection to this server.
+	// Nothing here refuses a wrong length any more, and nothing downstream does either:
+	// that rule was the V6 handshake's, and the V6 handshake is what a session ticket
+	// replaced.
 	PlayerToken []byte
 
 	// SessionTicket is the signed ticket the client presents, copied verbatim —
@@ -629,14 +645,16 @@ type Welcome struct {
 	InventorySlots uint8
 	HotbarSlots    uint8
 
-	// PlayerToken is the identity token this session plays under, which the client
-	// stores and presents on its next connection. Present and exactly 32 bytes on
-	// every accepted handshake — the identity was resolved before this struct was
-	// built, so there is no case in which the server has nothing to put here.
+	// PlayerToken is the retired identity field, which a welcome must still carry:
+	// present and exactly [PlayerTokenLen] bytes on every accepted handshake, because
+	// a decoder treats any other length as a protocol error.
 	//
-	// Not always the token the client sent: an unrecognised one is answered with a
-	// newly minted identity, because the server never adopts a client-chosen value as
-	// a key. See schemas/handshake.fbs.
+	// **What a server puts here no longer names anybody.** Through V6 it was the
+	// identity token the client stored and presented on its next connection; V7
+	// settles identity from `ClientHello.session_ticket`, so this server mints
+	// nothing and `session.Handshake` fills the field with zeroes — the right shape,
+	// and not a credential. See schemas/handshake.fbs, which retires the field and
+	// keeps its invariant.
 	PlayerToken []byte
 
 	// DayLengthTicks is how many ticks a full day lasts, and zero for a server that

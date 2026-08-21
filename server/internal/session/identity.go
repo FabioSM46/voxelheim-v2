@@ -1,6 +1,8 @@
 package session
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,38 +14,161 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 // Refused is a handshake refusal the contract has a code for.
 //
-// Resolution has two failure modes and they are not the same thing. A token the
-// client got wrong, and an identity that is already playing, are refusals: the
-// client is told which, in a ServerReject, and the connection ends politely. A
-// server that cannot mint an identity or cannot read its own player store is a
-// *failure*, and RejectReason has no member for it — answering SERVER_FULL would
-// tell the client something false about why, and BAD_REQUEST would blame it for
-// something it did not do. So the first is this type and the second is an ordinary
-// error, which ends the session with no reply at all.
+// Resolution has two failure modes and they are not the same thing. A ticket this
+// server will not admit, and an account that is already playing, are refusals: the
+// client is told which, in a ServerReject, and the connection ends politely. A server
+// that cannot read its own player store is a *failure*, and RejectReason has no member
+// for it — answering SERVER_FULL would tell the client something false about why, and
+// BAD_REQUEST would blame it for something it did not do. So the first is this type
+// and the second is an ordinary error, which ends the session with no reply at all.
 type Refused struct {
+	// Reason is the code the client is answered with.
 	Reason vnet.RejectReason
+
+	// Detail is what the client is told, and for a ticket it is deliberately not the
+	// reason. See [refusedTicketDetail].
 	Detail string
+
+	// Cause is the refusal an operator reads, and the client never does.
+	//
+	// **The two halves of "distinguishable in the log, indistinguishable to the
+	// client" are these two fields**, which is the whole reason the second one exists:
+	// with one field the choice is between an oracle on the wire and a log that cannot
+	// say which of five things went wrong. Nil for a refusal whose Detail already says
+	// everything there is to say — the account-already-playing one, and the two that
+	// belong to Handshake rather than here.
+	//
+	// It is unwrapped, so `errors.Is(err, ticket.ErrExpired)` reaches through a
+	// refusal and a caller can name the sentinel it means rather than match prose.
+	Cause error
 }
 
 func (r *Refused) Error() string {
-	return fmt.Sprintf("session: handshake refused: %s: %s", r.Reason, r.Detail)
+	if r.Cause == nil {
+		return fmt.Sprintf("session: handshake refused: %s: %s", r.Reason, r.Detail)
+	}
+	return fmt.Sprintf("session: handshake refused: %s: %s: %v", r.Reason, r.Detail, r.Cause)
 }
 
-// Resolved is the identity a hello settled on, and how it got there.
-type Resolved struct {
-	// ID names the identity. It is what the player store keys on and what a log line
-	// carries.
-	ID identity.PlayerID
+// Unwrap exposes the cause, so errors.Is and errors.As see through a refusal.
+func (r *Refused) Unwrap() error { return r.Cause }
 
-	// Token is what ServerWelcome carries back. For a returning player it is the
-	// token they presented; for everyone else it is one this server has just minted.
-	// Never the value a client sent that this server did not recognise.
-	Token identity.Token
+// refusedTicketDetail is what the client is told about **every** ticket this server
+// will not admit: absent, the wrong length, signed by another key, expired, or issued
+// for another world.
+//
+// **The same sentence for all of them, deliberately.** `game.Player.RemoveStructure`
+// draws the same line and gives the reason in a word — every refusal is silence,
+// because a client that could tell "no such structure" from "not yours" from "too far
+// away" could map somebody else's camp by asking. The same shape applies here with a
+// credential in place of a camp: a handshake that distinguishes "expired" from "signed
+// by another key" from "issued for another world" is answering questions about tickets
+// nobody presented, on a connection nobody has authenticated. [Refused.Cause] tells an
+// operator which of the five it was; the wire tells a player the one thing they can act
+// on, which is the same thing in every case — sign in again.
+const refusedTicketDetail = "the session ticket was not accepted; sign in again"
+
+// The two refusals this package makes about a ticket before anything is verified.
+//
+// Sentinels because a caller should name the case it means rather than match prose, and
+// because these two are the only ticket refusals that are not internal/ticket's own.
+// They are framing rather than cryptography, which is why they live here: both are
+// decided from the length of a field, before a signature is checked and before an
+// account is looked up, exactly as schemas/handshake.fbs requires.
+var (
+	// ErrTicketAbsent reports a hello that presents no ticket at all.
+	//
+	// **A legal message this server will not admit**, which is the distinction the
+	// contract asks for: absent and empty are a client "claiming no account", and
+	// whether such a session is admitted is a server's admission policy rather than a
+	// framing question. This server's answer is no. Identity comes from a ticket now,
+	// so a connection presenting none is a connection with nobody behind it.
+	ErrTicketAbsent = errors.New("session: the hello presents no session ticket")
+
+	// ErrTicketLength reports a ticket that is neither absent nor exactly
+	// protocol.SessionTicketLen bytes.
+	//
+	// The length is named in the wrapped message and the bytes never are: a ticket is
+	// a bearer credential, and the first thing anybody does with a refusal is read it
+	// out of a log.
+	ErrTicketLength = fmt.Errorf("session: a session ticket is exactly %d bytes", protocol.SessionTicketLen)
+)
+
+// Verifier is everything this server needs to check a ticket, and it is the whole of
+// what admitting a player costs: a public key, the world this server is, and a clock.
+//
+// **No network, no disk, no lookup.** That is the property the design rests on rather
+// than a happy accident of the implementation — internal/ticket's imports_test.go
+// asserts that not one file on the verification path can even reach a socket — and it
+// is why the account service being down costs nobody a game. The key is read once, at
+// startup, by whoever builds this.
+//
+// Built through [NewVerifier] and never as a literal: the two fields that can be wrong
+// are wrong in ways that are invisible afterwards, and one of them is worse than being
+// unable to start. See [NewVerifier].
+type Verifier struct {
+	// pub is the account service's Ed25519 public key.
+	pub ed25519.PublicKey
+
+	// world is this server's own world id, and what stops a ticket minted for one
+	// server being presented at another.
+	world ticket.WorldID
+
+	// now is where this verifier's idea of the current moment comes from.
+	//
+	// A function rather than a call to time.Now inside Resolve, for the reason
+	// NewStreamer takes one: an expiry is a decision about time, and a test that
+	// cannot say what time it is can only test expiry by waiting.
+	now func() time.Time
+}
+
+// NewVerifier settles what this server will admit, refusing a configuration that
+// cannot mean anything.
+//
+// **Both refusals are configuration answers rather than answers about a ticket**, which
+// is why they are made here — at startup, where an operator is reading — instead of
+// once per join, where the refusal looks exactly like a client's problem. That is #126's
+// lesson taken one layer out: a game server given no world refused every player with "the
+// ticket names another world", a sentence about the ticket that never once mentions that
+// this server names none.
+//
+// The zero world is the dangerous one and is refused for a reason worth stating plainly:
+// a ticket naming no world is an **account ticket**, minted for talking to the account
+// service, and a verifier configured with the zero id would ask "does this ticket name
+// no world" and admit every account that has ever signed in. internal/ticket refuses it
+// too; this is the same refusal moved to the moment somebody can act on it.
+//
+// A nil clock is time.Now, which is what every caller but a test wants.
+func NewVerifier(pub ed25519.PublicKey, world ticket.WorldID, now func() time.Time) (*Verifier, error) {
+	if len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("session: %w, got %d", ticket.ErrPublicKeySize, len(pub))
+	}
+	if world.IsZero() {
+		return nil, fmt.Errorf("session: %w: it was given no world to compare a ticket against", ticket.ErrVerifierWorld)
+	}
+	if now == nil {
+		now = time.Now
+	}
+	// Cloned, so that a caller which goes on to reuse its buffer cannot change what
+	// this server verifies with after it has started admitting players.
+	return &Verifier{pub: bytes.Clone(pub), world: world, now: now}, nil
+}
+
+// World is the world this verifier admits tickets for. Not a secret — a world id is a
+// digest of a name an operator publishes — and it is what the startup line prints.
+func (v *Verifier) World() ticket.WorldID { return v.world }
+
+// Resolved is the player a hello settled on, and how it got there.
+type Resolved struct {
+	// ID names the player. It is what the player store keys on and what a log line
+	// carries: the one-way name of the account the ticket named.
+	ID identity.PlayerID
 
 	// Returning reports whether the player store already held a usable record for ID.
 	Returning bool
@@ -59,22 +184,27 @@ type Resolved struct {
 	Life *game.Life
 }
 
-// Identities is the set of identities that have a live session, and the resolution
-// that turns the token in a ClientHello into one of them.
+// Identities is the set of accounts that have a live session, and the resolution that
+// turns the ticket in a ClientHello into one of them.
 //
 // It sits beside Registry deliberately: Registry answers "which connections are
 // live" one level down, in entity ids minted per session, and this answers the same
-// question one level up, in identities that outlive a connection. Two sets rather
+// question one level up, in players that outlive a connection. Two sets rather
 // than one because they have different lifetimes — an entity id is forgotten when a
-// session ends, an identity is released and then remembered.
+// session ends, a player's claim is released and then remembered.
 //
-// The store may be nil, which is the ephemeral world. Minting and exclusivity work
-// exactly as they do with one; nothing is written and nothing is ever found, so
-// every presented token resolves to a new identity for the life of the process. A
-// client cannot distinguish that from a server that has never seen it before, and
-// the contract already requires it to accept a token it did not send.
+// The store may be nil, which is the ephemeral world. Verification and exclusivity work
+// exactly as they do with one; nothing is written and nothing is ever found, so every
+// admitted ticket resolves to a player with no life behind them for the life of the
+// process. The account still names the same player — that has stopped depending on this
+// server's disk — so what an ephemeral world costs is the life, not the name.
 type Identities struct {
 	store *persist.Store
+
+	// verifier is how a ticket becomes an account. Never nil: NewIdentities refuses to
+	// build a claim set without one, because a server that cannot check a ticket
+	// cannot admit anybody and should be visibly broken rather than quietly open.
+	verifier *Verifier
 
 	// log is where a refused record is reported. It is the one thing here that has to
 	// say something to an operator: a player who joins as new because their file could
@@ -82,12 +212,7 @@ type Identities struct {
 	// connected.
 	log *slog.Logger
 
-	// mint is identity.NewToken, replaced only by the test that covers a failed read
-	// from crypto/rand — a branch that cannot be reached on any platform this server
-	// runs on, and that must never be allowed to become a zero token.
-	mint func() (identity.Token, error)
-
-	// live is every identity with a session, and what that session needs remembered
+	// live is every player with a session, and what that session needs remembered
 	// about it. One map rather than a set and a table beside it: everything in
 	// liveIdentity has exactly the claim's lifetime, and claim and Release are already
 	// the two ends of it.
@@ -116,20 +241,29 @@ type liveIdentity struct {
 // NewIdentities returns an empty claim set over store, which may be nil for an
 // ephemeral world. A nil logger discards, which is what the tests that are about
 // admission rather than about operators want.
-func NewIdentities(store *persist.Store, log *slog.Logger) *Identities {
+//
+// **A nil verifier is an error and not a permissive default**, and that is the whole of
+// the acceptance criterion in the type system: there is no way to build a claim set that
+// admits players without checking them, so "a server that cannot verify a ticket cannot
+// admit anybody" cannot be undone by forgetting an argument. The alternative — a nil
+// verifier meaning "let everyone in" — is the second way in that this design exists to
+// remove, and it would be reached by an omission rather than by a decision.
+func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (*Identities, error) {
+	if verifier == nil {
+		return nil, errors.New("session: a claim set needs a verifier; a server that cannot check a ticket cannot admit anybody")
+	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Identities{
-		store: store,
-		log:   log,
-		mint:  identity.NewToken,
-		live:  make(map[identity.PlayerID]*liveIdentity),
-	}
+		store:    store,
+		verifier: verifier,
+		log:      log,
+		live:     make(map[identity.PlayerID]*liveIdentity),
+	}, nil
 }
 
-// Resolve settles which identity a hello is claiming, and claims it for this
-// session.
+// Resolve settles which player a hello is claiming, and claims them for this session.
 //
 // **Runs on the session goroutine, before Join, and never under the simulation's
 // lock**: it reads the player store, and a tick that waits on a file is a tick every
@@ -137,108 +271,123 @@ func NewIdentities(store *persist.Store, log *slog.Logger) *Identities {
 //
 // The order is the contract's, and each step is a different kind of answer:
 //
-//  0. A session ticket of any length but 0 or 96 is BAD_REQUEST. Decided before
-//     everything, including the token rule below, because it is the only step here
-//     that does not look anything up — see the block comment on the check itself.
-//  1. A token of any length but 0 or 32 is BAD_REQUEST. Decided first among the token
-//     rules, before any identity is looked up, because it is a malformed request
-//     rather than a claim that failed.
-//  2. An empty token is a first connection: mint.
-//  3. A 32-byte token whose hash the store knows resumes that identity, and the
-//     welcome carries the token back unchanged.
-//  4. A 32-byte token the store does not know mints a **new** identity with a **new**
-//     token. The presented value is never adopted as a key — every token in
-//     circulation is one this server minted, so a client cannot choose who it is by
-//     inventing 32 bytes.
-//  5. Whatever identity that produced is claimed. An identity that already has a live
-//     session is ALREADY_CONNECTED, which only step 3 can reach: a minted token is 32
-//     random bytes and collides with nothing.
+//  1. A session ticket of any length but 96 is BAD_REQUEST, absent and empty
+//     included. Decided first, before a signature is checked and before anything is
+//     looked up, because it is a question about the message rather than about a
+//     credential — see [verify].
+//  2. The ticket is verified: the signature, then the world it names, then its
+//     expiry, in that order and all of it arithmetic. Every refusal is BAD_REQUEST
+//     with one sentence for the client and the reason for the log.
+//  3. The account the ticket names becomes a player id, and the store is read for the
+//     life that player left behind. Only now — nothing is looked up for a ticket
+//     nobody has vouched for, which is what keeps an unauthenticated connection from
+//     costing this server a disk read.
+//  4. That player is claimed. One already holding a live session is
+//     ALREADY_CONNECTED.
+//
+// **What is gone from this list is the whole of the old model.** There was a four-way
+// rule over `player_token`: mint on an empty one, resume a known one, mint a new
+// identity for an unknown one, refuse a wrong-length one. A V7 server reads past that
+// field entirely — schemas/handshake.fbs retires it in as many words — so there is no
+// minting path here at all, and a client can no longer choose who it is by presenting
+// bytes. It presents a ticket somebody signed, or it does not come in.
 //
 // The caller releases the claim in its teardown, last. See Serve.
 func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 	if hello == nil {
 		// Unreachable: Serve resolves only a message that decoded as a hello.
-		return Resolved{}, errors.New("session: no hello to resolve an identity from")
+		return Resolved{}, errors.New("session: no hello to resolve a player from")
 	}
 
-	// The framing half of V7's identity, and the whole of what this server does with a
-	// ticket today.
+	claims, err := i.verify(hello.SessionTicket)
+	if err != nil {
+		return Resolved{}, err
+	}
+
+	// The one line that converts between two packages' sixteen bytes, and it stops
+	// compiling the day either of them is a different width — which is why the account
+	// is carried in both places rather than shared through an import that would cost
+	// internal/identity its leaf property.
 	//
-	// A wrong-length ticket is a malformed request and is refused here, before any
-	// identity is looked up and before any signature could be checked — which is the
-	// order schemas/handshake.fbs states, and the only part of it that can be honoured
-	// without an account service to verify against. Everything after this line is still
-	// the V6 rule: this server resolves identity from PlayerToken, which is what a V6
-	// handshake is, and adopting ticket identity is a separate issue.
-	//
-	// Absent and empty are one zero-length slice and both mean "no account presented",
-	// so a client that has no ticket — which is every client in this repository today —
-	// passes straight through.
-	if n := len(hello.SessionTicket); n != 0 && n != protocol.SessionTicketLen {
-		return Resolved{}, &Refused{
-			Reason: vnet.RejectReasonBAD_REQUEST,
-			// The length and nothing else, for the reason the token refusal below says
-			// so: a ticket is a bearer credential, and a detail carrying any of its
-			// bytes would put one in a log the first time this was investigated.
-			Detail: fmt.Sprintf("session_ticket must be absent, empty or %d bytes, got %d",
-				protocol.SessionTicketLen, n),
-		}
+	// The account itself goes no further than this statement. Everything downstream —
+	// the store, the simulation, every log line — is handed the player id, which is a
+	// digest of it.
+	id := identity.IDOf(identity.Account(claims.Account))
+
+	life, returning, err := i.recall(id)
+	if err != nil {
+		return Resolved{}, err
 	}
 
-	var (
-		token     identity.Token
-		returning bool
-		life      *game.Life
-	)
-	switch len(hello.PlayerToken) {
-	case 0:
-		// A first connection to this server, or a client that has thrown its token
-		// away. Both mint below.
-
-	case identity.TokenSize:
-		presented, err := identity.TokenFrom(hello.PlayerToken)
-		if err != nil {
-			// Unreachable at this length; the case label is the check.
-			return Resolved{}, fmt.Errorf("session: reading the presented token: %w", err)
-		}
-
-		// The hash is the only thing that leaves this function's sight: the store is
-		// keyed by it and never by the token, so what is on disk cannot be replayed as
-		// a credential.
-		stored, known, err := i.recall(identity.IDOf(presented))
-		if err != nil {
-			return Resolved{}, err
-		}
-		if known {
-			token, returning, life = presented, true, stored
-		}
-
-	default:
-		return Resolved{}, &Refused{
-			Reason: vnet.RejectReasonBAD_REQUEST,
-			// The length and nothing else. A detail carrying any of the bytes would be
-			// a token in a log line the first time this refusal was investigated.
-			Detail: fmt.Sprintf("player_token must be absent, empty or %d bytes, got %d",
-				identity.TokenSize, len(hello.PlayerToken)),
-		}
-	}
-
-	if !returning {
-		minted, err := i.mint()
-		if err != nil {
-			return Resolved{}, fmt.Errorf("session: minting an identity: %w", err)
-		}
-		token = minted
-	}
-
-	id := identity.IDOf(token)
 	if !i.claim(id) {
 		return Resolved{}, &Refused{
 			Reason: vnet.RejectReasonALREADY_CONNECTED,
-			Detail: "that identity already has a live session",
+			// Named as the account rather than as the identity, because that is what it
+			// now is: the same person cannot hold two sessions on this world, whichever
+			// two machines they are sitting at. No cause, because the detail is already
+			// the whole reason and there is nothing here a client should not be told —
+			// it is their own second connection.
+			Detail: "that account already has a live session on this world",
 		}
 	}
-	return Resolved{ID: id, Token: token, Returning: returning, Life: life}, nil
+	return Resolved{ID: id, Returning: returning, Life: life}, nil
+}
+
+// verify turns the ticket in a hello into the claims it carries, or into the refusal it
+// earns.
+//
+// **Framing before cryptography, and cryptography before any lookup.** The length is
+// settled from a comparison, which is what schemas/handshake.fbs requires and is also
+// the cheap half: a connection nobody has authenticated should not be able to spend an
+// Ed25519 verification on bytes that cannot be a ticket. internal/ticket then does the
+// rest in the order its own doc fixes — the signature before any field is read.
+//
+// Two of Verify's answers are not about the ticket at all and are not refusals here.
+// [ticket.ErrPublicKeySize] and [ticket.ErrVerifierWorld] say this server is
+// misconfigured, and telling a client BAD_REQUEST for that would blame it for
+// something it did not do — the same split Refused's doc draws. [NewVerifier] makes
+// both unreachable by refusing such a configuration at startup; they are handled
+// anyway, because the cost is two lines and the alternative is a server that answers
+// every player with a lie about their ticket.
+func (i *Identities) verify(presented []byte) (ticket.Claims, error) {
+	switch len(presented) {
+	case protocol.SessionTicketLen:
+	case 0:
+		// Absent and empty arrive as one zero-length slice, and the contract says both
+		// mean "this client claims no account". This server admits nobody it cannot
+		// name, so that is a refusal — a policy answer rather than a framing one, which
+		// is why it is its own sentinel and not a length complaint.
+		return ticket.Claims{}, refuseTicket(ErrTicketAbsent)
+	default:
+		return ticket.Claims{}, refuseTicket(fmt.Errorf("%w, got %d", ErrTicketLength, len(presented)))
+	}
+
+	// [ticket.Verify] and never VerifyAnyWorld: the world comparison is what stops the
+	// operator of one world collecting its players' tickets and presenting them at
+	// another as those players, and what turns an account ticket away at a game
+	// server's door. internal/ticket/callers_test.go holds that boundary by name.
+	claims, err := ticket.Verify(i.verifier.pub, presented, i.verifier.world, i.verifier.now())
+	if err != nil {
+		if errors.Is(err, ticket.ErrPublicKeySize) || errors.Is(err, ticket.ErrVerifierWorld) {
+			return ticket.Claims{}, fmt.Errorf("session: this server cannot verify tickets: %w", err)
+		}
+		return ticket.Claims{}, refuseTicket(err)
+	}
+	return claims, nil
+}
+
+// refuseTicket is the one shape every ticket refusal takes: BAD_REQUEST, one sentence
+// for the client, and the cause for the log.
+//
+// One function rather than five literals, because the property being kept is that they
+// are **identical on the wire** — and five copies of a detail string is five chances for
+// one of them to say something the others do not.
+func refuseTicket(cause error) *Refused {
+	return &Refused{
+		Reason: vnet.RejectReasonBAD_REQUEST,
+		Detail: refusedTicketDetail,
+		Cause:  cause,
+	}
 }
 
 // recall loads the life stored for id: the life itself, whether one was found, and any
@@ -256,20 +405,26 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 // readable, so refusing the connection for ever helps nobody: it is set aside under a
 // name of its own and the player is admitted as new.
 //
-// #146 could not do that, and said so: a corrupt record read as "not found" would have
-// been written over by the new identity's first teardown, turning one bad file into a
-// lost player. Two things close that. The file is moved before this returns, and the
-// identity that gets minted is a *different* one — 32 fresh random bytes, a different
-// hash, a different file name — so nothing this session goes on to write can land on
-// the record nobody could read, whether or not the move succeeded.
+// **The move is now load-bearing, and it was not before.** #146 could not set the file
+// aside at all, and #147's answer rested on two things: the file is moved before this
+// returns, *and* the identity minted next was a different one — 32 fresh random bytes,
+// a different hash, a different file name — so a failed move cost nothing, because
+// nothing that session went on to write could land on the record nobody could read.
+//
+// The second half of that is gone with the minting. A player's name is now a digest of
+// the account their ticket names, so the player admitted after a corrupt record is
+// **the same player**, writing to **the same path**. If the move fails, their first
+// teardown overwrites the one file nobody could read. So a failed move refuses the
+// connection instead: it is a filesystem problem a retry may well survive, which is the
+// same answer an unreachable record already gets one branch up, and the opposite answer
+// — admit and lose the evidence — is the one nobody can undo. See [Identities.refuseRecord].
 func (i *Identities) recall(id identity.PlayerID) (*game.Life, bool, error) {
 	rec, found, err := i.store.Load(id)
 	switch {
 	case err != nil && !errors.Is(err, world.ErrCorruptStore):
 		return nil, false, fmt.Errorf("session: reading the player record for %s: %w", id.Short(), err)
 	case err != nil:
-		i.refuseRecord(id, err)
-		return nil, false, nil
+		return nil, false, i.refuseRecord(id, err)
 	case !found:
 		return nil, false, nil
 	}
@@ -280,8 +435,7 @@ func (i *Identities) recall(id identity.PlayerID) (*game.Life, bool, error) {
 	// rather than slot by slot.
 	life := game.Life{Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Slots: rec.Slots}
 	if vErr := life.Validate(); vErr != nil {
-		i.refuseRecord(id, vErr)
-		return nil, false, nil
+		return nil, false, i.refuseRecord(id, vErr)
 	}
 	return &life, true, nil
 }
@@ -290,17 +444,24 @@ func (i *Identities) recall(id identity.PlayerID) (*game.Life, bool, error) {
 //
 // Error level and not warn: a player is about to lose everything they had, and the
 // only reason it is not a refused connection is that refusing would not give it back.
-// A failed move is reported and not fatal — see recall for why the identity minted
-// next cannot write over the file either way.
-func (i *Identities) refuseRecord(id identity.PlayerID, cause error) {
+//
+// **A failed move is now returned rather than survived**, which is the one behaviour
+// this issue changed here and it changed because its reason did. While an unreadable
+// record was answered with a *freshly minted* identity, the move was belt to that
+// identity's braces; a player is named by their account now, so the session admitted
+// after a failed move writes to exactly the path whose contents could not be read. A
+// refusal costs that player one connection and an operator one look at a directory; the
+// alternative costs the player the record and everybody the evidence.
+func (i *Identities) refuseRecord(id identity.PlayerID, cause error) error {
 	aside, err := i.store.Quarantine(id)
 	if err != nil {
-		i.log.Error("a player record could not be read and could not be set aside; the player joins as new",
+		i.log.Error("a player record could not be read and could not be set aside; the connection is refused rather than writing over it",
 			"player_id", id.Short(), "reason", cause.Error(), "error", err)
-		return
+		return fmt.Errorf("session: setting aside the unreadable record for %s: %w", id.Short(), err)
 	}
 	i.log.Error("a player record could not be read; it has been kept and the player joins as new",
 		"player_id", id.Short(), "reason", cause.Error(), "kept_at", aside)
+	return nil
 }
 
 // Admitted records the display name an identity's live session is playing under.

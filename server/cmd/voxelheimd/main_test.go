@@ -22,11 +22,93 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 func discard() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// The account service every test in this package is admitted by: one signing pair and
+// one world, built once for the whole binary.
+//
+// Shared for the reason internal/session's tests share theirs — a pair is a key and a
+// world id is a digest of a name, so neither carries state between tests — and built
+// here rather than fetched, because a game server's key comes from a fetch exactly once
+// and the tests about *that* are the ones that stand an HTTP server up.
+var (
+	testPair  *ticket.Pair
+	testWorld ticket.WorldID
+)
+
+// testWorldName is the world these tests' server is registered under.
+const testWorldName = "midgard"
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "voxelheimd-tickets")
+	if err != nil {
+		panic("voxelheimd test: making a directory for the signing pair: " + err.Error())
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	if testPair, err = ticket.LoadOrCreate(dir); err != nil {
+		panic("voxelheimd test: minting the signing pair: " + err.Error())
+	}
+	if testWorld, err = ticket.WorldIDFor(testWorldName); err != nil {
+		panic("voxelheimd test: naming the world: " + err.Error())
+	}
+
+	// os.Exit skips deferred functions, so the cleanup above is deferred *after* the
+	// exit is, and therefore runs before it.
+	code := m.Run()
+	defer os.Exit(code)
+}
+
+// testIdentities is a claim set over store — nil for the ephemeral world — admitting
+// tickets from the package's own account service.
+func testIdentities(t *testing.T, store *persist.Store) *session.Identities {
+	t.Helper()
+
+	verifier, err := session.NewVerifier(testPair.Public(), testWorld, nil)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	identities, err := session.NewIdentities(store, verifier, discard())
+	if err != nil {
+		t.Fatalf("NewIdentities: %v", err)
+	}
+	return identities
+}
+
+// testAccount is a distinct account per seed, chosen rather than random so a failing
+// test names the same player on every run.
+func testAccount(seed byte) ticket.AccountID {
+	var account ticket.AccountID
+	for i := range account {
+		account[i] = seed*17 + byte(i)
+	}
+	return account
+}
+
+// testPlayerID is the player id an account resolves to: what the store keys on, what a
+// structure records as its owner, and what a log line carries.
+func testPlayerID(account ticket.AccountID) identity.PlayerID {
+	return identity.IDOf(identity.Account(account))
+}
+
+// helloFor is the frame a client holding a valid ticket for account sends.
+func helloFor(t *testing.T, account ticket.AccountID) []byte {
+	t.Helper()
+
+	minted, _, err := testPair.Mint(account, testWorld, time.Now())
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	return protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", minted[:])
+}
+
+// testTicketKey is the pair's public half in the hex the -ticket-key flag takes.
+func testTicketKey() string { return testPair.PublicHex() }
 
 func testConfig() session.Config {
 	return session.Config{
@@ -73,8 +155,9 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 		tr:       tr,
 		registry: registry,
 		// A nil player store is the ephemeral world, which is how most of these tests
-		// run: identities are still minted and still exclusive, and nothing is written.
-		identities: session.NewIdentities(players, discard()),
+		// run: tickets are still verified and accounts are still exclusive, and nothing
+		// is written.
+		identities: testIdentities(t, players),
 		cfg:        cfg,
 		// Left zero on purpose: these tests are about shutdown ordering and accept-loop
 		// behaviour, and a read deadline would end their connections on a schedule they
@@ -95,6 +178,8 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 func validOptions() options {
 	return options{
 		listen:           "127.0.0.1:0",
+		worldName:        testWorldName,
+		ticketKey:        testTicketKey(),
 		tickRate:         20,
 		viewDistance:     3,
 		handshakeTimeout: session.DefaultHandshakeTimeout,
@@ -614,36 +699,33 @@ func firstReply(t *testing.T, conn *scriptedConn) *vnet.Envelope {
 	}
 }
 
-// TestTwoConnectionsPresentingOneTokenDoNotBothGetAWelcome is the wiring test for
-// the whole identity path: the store main opens, the claim set it builds, and the
-// two sessions the accept loop starts.
+// TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome is the wiring test for the whole
+// identity path: the store main opens, the claim set it builds, and the two sessions
+// the accept loop starts.
 //
 // It is at this level rather than at Serve's because the thing being checked is that
-// the server hands *one* claim set to every session. A per-session one would pass
-// every test in internal/session and refuse nobody here.
-func TestTwoConnectionsPresentingOneTokenDoNotBothGetAWelcome(t *testing.T) {
+// the server hands *one* claim set to every session. A per-session one would pass every
+// test in internal/session and refuse nobody here.
+//
+// **The two connections present two different tickets**, which is what the claim moving
+// to the account means: same person, two machines, two sign-ins, one live session.
+func TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	players := openPlayerStore(t, dir)
+	account := testAccount(1)
 
-	// A token the store already knows, because that is the only way two connections
-	// can name one identity: a token the store does not know mints a fresh identity
-	// per connection, and two fresh identities never collide.
-	var token identity.Token
-	for i := range token {
-		token[i] = byte(i) + 1
-	}
 	// A living record, because that is the only kind this build resumes: a health of
-	// zero is refused as unreadable, which would set the file aside and mint a fresh
-	// identity per connection — the very thing this test is trying to make collide.
+	// zero is refused as unreadable, which would set the file aside and admit both
+	// connections with nothing — a pass for the wrong reason.
 	seeded := persist.Record{
 		Name:     "Eivor",
 		LastSeen: time.Unix(1, 0),
 		Pos:      [3]float64{0.5, 64, 0.5},
 		Health:   game.PlayerMaxHealth,
 	}
-	if err := players.Save(identity.IDOf(token), seeded); err != nil {
+	if err := players.Save(testPlayerID(account), seeded); err != nil {
 		t.Fatalf("seeding the record: %v", err)
 	}
 
@@ -658,9 +740,8 @@ func TestTwoConnectionsPresentingOneTokenDoNotBothGetAWelcome(t *testing.T) {
 		srv.run(ctx)
 	}()
 
-	hello := protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token[:])
-	first.in <- hello
-	second.in <- hello
+	first.in <- helloFor(t, account)
+	second.in <- helloFor(t, account)
 
 	// Which connection wins is a race between two session goroutines, and the rule is
 	// about the pair rather than about either one: exactly one welcome, and the other
@@ -688,7 +769,7 @@ func TestTwoConnectionsPresentingOneTokenDoNotBothGetAWelcome(t *testing.T) {
 	}
 
 	if welcomes != 1 || rejections != 1 {
-		t.Errorf("%d welcomes and %d rejections; one identity admits exactly one session", welcomes, rejections)
+		t.Errorf("%d welcomes and %d rejections; one account admits exactly one session", welcomes, rejections)
 	}
 
 	cancel()

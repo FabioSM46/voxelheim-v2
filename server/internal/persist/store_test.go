@@ -17,14 +17,14 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-// testID is a distinct identity per seed, derived rather than minted so a failing
+// testID is a distinct player per seed, derived from an account so a failing
 // test names the same file on every run.
 func testID(seed byte) identity.PlayerID {
-	var token identity.Token
-	for i := range token {
-		token[i] = seed*31 + byte(i)
+	var account identity.Account
+	for i := range account {
+		account[i] = seed*31 + byte(i)
 	}
-	return identity.IDOf(token)
+	return identity.IDOf(account)
 }
 
 func openStore(t *testing.T) (*Store, string) {

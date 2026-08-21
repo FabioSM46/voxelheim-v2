@@ -129,13 +129,13 @@ func (t Timeouts) Validate() error {
 // exhaustively; the admission rules are the part that must never drift, so they
 // live where a table test can cover every branch.
 //
-// **self is the identity this session plays under, already resolved.** Resolving one
-// reads the player store, mints from crypto/rand and claims exclusivity — state, I/O
-// and a decision that can be refused, none of which may happen in here without making
-// this function untestable in exactly the way it exists to avoid. So Serve resolves it
-// first and hands the answer in; Identities.Resolve is where those rules live and where
-// they are tested. By the time this is called the token is a real one, and the welcome
-// carries it whatever the client presented.
+// **self is the player this session plays under, already resolved.** Resolving one
+// verifies a ticket, reads the player store and claims exclusivity — state, I/O and a
+// decision that can be refused, none of which may happen in here without making this
+// function untestable in exactly the way it exists to avoid. So Serve resolves it
+// first and hands the answer in; Identities.Resolve is where those rules live and
+// where they are tested. By the time this is called, somebody holding the account
+// service's key has vouched for whoever is on the other end.
 //
 // **The welcome's spawn is where the player will actually stand**, which for a
 // returning identity is the position their record holds and not the world spawn.
@@ -148,20 +148,8 @@ func (t Timeouts) Validate() error {
 // The returned frame is always sent, whether accepted or not — a refused client
 // is told why rather than dropped silently.
 func Handshake(msg protocol.Message, cfg Config, entityID uint64, self Resolved) (reply []byte, accepted bool) {
-	if msg.Kind != vnet.PayloadClientHello || msg.ClientHello == nil {
-		return protocol.EncodeServerReject(
-			vnet.RejectReasonBAD_REQUEST,
-			fmt.Sprintf("expected %s as the first message, got %s", vnet.PayloadClientHello, msg.Kind),
-		), false
-	}
-
-	if got := msg.ClientHello.ProtocolVersion; got != vnet.ProtocolVersionCurrent {
-		// Covers the absent-field case too: a hello with no version decodes as
-		// ProtocolVersion.Unknown, which is not Current, so it lands here.
-		return protocol.EncodeServerReject(
-			vnet.RejectReasonPROTOCOL_MISMATCH,
-			fmt.Sprintf("server speaks protocol %d, client speaks %d", vnet.ProtocolVersionCurrent, got),
-		), false
+	if refusal, refused := unspeakable(msg); refused {
+		return refusal, false
 	}
 
 	return protocol.EncodeServerWelcome(protocol.Welcome{
@@ -173,7 +161,18 @@ func Handshake(msg protocol.Message, cfg Config, entityID uint64, self Resolved)
 		ViewDistance:   cfg.ViewDistance,
 		InventorySlots: protocol.InventorySlots,
 		HotbarSlots:    protocol.HotbarSlots,
-		PlayerToken:    self.Token[:],
+		// **The retired field, filled rather than dropped.** V7 settles identity from
+		// `session_ticket`, so this server mints no tokens and has nothing of its own to
+		// say here — but schemas/handshake.fbs still requires the field to be present and
+		// exactly protocol.PlayerTokenLen bytes on every accepted handshake, and a
+		// decoder is required to treat any other length as a protocol error. Zeroes are
+		// therefore the honest value: the right shape, and not a credential.
+		//
+		// Nothing can be resumed with them. A V7 server reads past `player_token` on the
+		// way in, so whatever a client stores from here names nobody and admits nobody —
+		// and no V6 client is on the far end of this frame to store it, because the
+		// version check two blocks up refused them before this was built.
+		PlayerToken: make([]byte, protocol.PlayerTokenLen),
 		// The world's clock, read from the constants that own it exactly as the two slot
 		// counts above are read from protocol's. Deliberately **not** fields of [Config]:
 		// everything in that struct is a decision an operator makes, and this is one the
@@ -186,8 +185,41 @@ func Handshake(msg protocol.Message, cfg Config, entityID uint64, self Resolved)
 	}), true
 }
 
+// unspeakable is the half of a handshake decided from the message alone: is this a
+// hello at all, and does it speak this protocol.
+//
+// **Split out so that Serve can ask it before a ticket is verified, and asking twice is
+// asking one implementation twice rather than writing the rule down twice.** The order
+// is what forced the split. Resolution happens between the decode and the welcome, so
+// with the version check living only inside [Handshake] a client speaking an older
+// protocol — which presents no ticket, because a ticket is what V7 added — was refused
+// for the ticket and never told about the version. That is the one refusal it could have
+// acted on, replaced by one it cannot: "sign in again" to a client that would then
+// present a ticket its own protocol has no field for.
+//
+// It is also the cheaper question. Everything here is a comparison; everything after it
+// is an Ed25519 verification on bytes chosen by a connection nobody has authenticated.
+func unspeakable(msg protocol.Message) (refusal []byte, refused bool) {
+	if msg.Kind != vnet.PayloadClientHello || msg.ClientHello == nil {
+		return protocol.EncodeServerReject(
+			vnet.RejectReasonBAD_REQUEST,
+			fmt.Sprintf("expected %s as the first message, got %s", vnet.PayloadClientHello, msg.Kind),
+		), true
+	}
+
+	if got := msg.ClientHello.ProtocolVersion; got != vnet.ProtocolVersionCurrent {
+		// Covers the absent-field case too: a hello with no version decodes as
+		// ProtocolVersion.Unknown, which is not Current, so it lands here.
+		return protocol.EncodeServerReject(
+			vnet.RejectReasonPROTOCOL_MISMATCH,
+			fmt.Sprintf("server speaks protocol %d, client speaks %d", vnet.ProtocolVersionCurrent, got),
+		), true
+	}
+	return nil, false
+}
+
 // placementSpawn is the position the welcome announces: the stored one for a returning
-// identity, the world spawn for everyone else.
+// player, the world spawn for everyone else.
 //
 // Narrowed to float32 here and nowhere else. The simulation keeps the float64 it was
 // restored with, so the rounding lives in the frame rather than folding back into the
@@ -241,11 +273,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// Declared up here rather than beside the read loop because the deferred
 		// teardown below reads them, and a closure can only see what already exists.
 		//
-		// self is the identity this connection resolved; claimed says the claim on it
+		// self is the player this connection resolved; claimed says the claim on them
 		// is this session's to release. handshaken is what separates a session that
 		// joined from one that was refused after resolving — only the first leaves a
-		// record behind, because a refused client never received the token that names
-		// it and a file for it would be an identity nobody can ever present.
+		// record behind, because a refused client never entered the world and a file
+		// for it would be a life nobody ever lived.
 		handshaken  bool
 		claimed     bool
 		self        Resolved
@@ -450,29 +482,48 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		}
 
 		if !handshaken {
-			// The identity resolves between decoding the hello and answering it, which
-			// is the one place it can: Handshake is pure and stays pure, and Join must
-			// not be reached with an identity the store has not been consulted about.
-			//
-			// A message that is not a hello carries no token to resolve, and Handshake
-			// is what refuses it one block below — asking the same question here as well
-			// would put that rule in two places. A hello whose *version* is wrong does
-			// resolve first and is then refused; it costs one store read and a claim the
-			// teardown releases a moment later, and the alternative is restating the
-			// version rule here to avoid it.
-			if msg.ClientHello != nil {
+			// **Is this a hello, and does it speak this protocol** — asked before a
+			// ticket is verified, because a client speaking an older protocol has no
+			// ticket to present and would otherwise be told about the one thing it
+			// cannot fix instead of the one thing it can. One implementation, asked
+			// here and again inside Handshake below; see unspeakable.
+			if refusal, refused := unspeakable(msg); refused {
+				out <- refusal
+				log.Info("handshake refused", "kind", msg.Kind.String())
+				// The deferred close drains the refusal before the caller closes the
+				// connection, so the client learns why.
+				return nil
+			}
+
+			// The player resolves between deciding the hello is legible and answering
+			// it, which is the one place it can: Handshake is pure and stays pure, and
+			// Join must not be reached with a player the store has not been consulted
+			// about. The check above guarantees the hello is here.
+			{
 				resolved, rErr := identities.Resolve(msg.ClientHello)
 				if rErr != nil {
 					var refused *Refused
 					if !errors.As(rErr, &refused) {
 						// No reply, deliberately. This is the server failing — it could not
-						// mint an identity, or could not read its own player store — and the
-						// contract has no reason code that says so. Sending one that says
-						// something else would be worse than saying nothing.
+						// read its own player store, or it cannot verify a ticket at all —
+						// and the contract has no reason code that says so. Sending one that
+						// says something else would be worse than saying nothing.
 						return rErr
 					}
 					out <- protocol.EncodeServerReject(refused.Reason, refused.Detail)
-					log.Info("handshake refused", "reason", refused.Reason.String(), "detail", refused.Detail)
+					// **The cause is logged and never sent**, and that asymmetry is the
+					// point: five different ticket refusals leave this server as one
+					// identical frame, so a client learns nothing it could ask this server
+					// about somebody else's ticket, while an operator reading a log can
+					// tell an expired ticket from one signed by another key from one minted
+					// before the signing domain existed. Nothing in a cause quotes a
+					// ticket's bytes — internal/ticket's refusals name lengths, world ids
+					// and expiry times, all of which are safe to write down.
+					attrs := []any{"reason", refused.Reason.String(), "detail", refused.Detail}
+					if refused.Cause != nil {
+						attrs = append(attrs, "cause", refused.Cause.Error())
+					}
+					log.Info("handshake refused", attrs...)
 					return nil
 				}
 				self, claimed = resolved, true
@@ -481,9 +532,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			reply, accepted := Handshake(msg, cfg, entityID, self)
 			out <- reply
 			if !accepted {
+				// Unreachable: unspeakable answered above, and it is the only thing
+				// Handshake refuses on. Kept because Handshake owns that decision and
+				// a caller that assumed it away would be the second place the rule
+				// lives.
 				log.Info("handshake refused", "kind", msg.Kind.String())
-				// The deferred close drains the refusal before the caller closes
-				// the connection, so the client learns why.
 				return nil
 			}
 			handshaken = true
@@ -493,8 +546,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			identities.Admitted(self.ID, displayName)
 			// entity_id is already on the logger the caller passed in; repeating it
 			// here would print it twice. The player id is the first 8 hex characters of
-			// a digest — enough to follow one identity through a log — and the token it
-			// hashes is never printed at any level, on any path.
+			// a digest — enough to follow one player through a log — and the account it
+			// hashes is never printed at any level, on any path, nor is the ticket that
+			// named it.
 			log.Info("session admitted",
 				"player_name", displayName,
 				"player_id", self.ID.Short(),

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 )
@@ -52,7 +51,7 @@ func TestServeOverRealTCP(t *testing.T) {
 	defer client.Close() //nolint:errcheck // test teardown
 
 	w := bufio.NewWriter(client)
-	if err := transport.WriteFrame(w, protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")); err != nil {
+	if err := transport.WriteFrame(w, hello(1)); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
 	if err := w.Flush(); err != nil {
@@ -134,7 +133,7 @@ func TestServeClosesAnIdleSessionOverRealTCP(t *testing.T) {
 	defer client.Close() //nolint:errcheck // test teardown
 
 	w := bufio.NewWriter(client)
-	if err := transport.WriteFrame(w, protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")); err != nil {
+	if err := transport.WriteFrame(w, hello(1)); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
 	if err := w.Flush(); err != nil {
