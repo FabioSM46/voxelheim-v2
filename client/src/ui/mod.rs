@@ -5,6 +5,7 @@ mod health;
 mod hotbar;
 mod icon;
 mod inventory;
+mod login;
 mod menu;
 mod status;
 
@@ -14,7 +15,9 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use icon::StackIcon;
 
-use crate::net::{ConnectionState, DisconnectRequest, InventoryStack, Session};
+use crate::net::{
+    ConnectionState, DisconnectRequest, InventoryStack, Session, SignInRequest, SignInState,
+};
 use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals,
     item_palette_id, item_shape,
@@ -73,12 +76,18 @@ impl Plugin for UiPlugin {
             .add_message::<InventoryClick>()
             .add_message::<CraftClick>()
             .add_message::<DisconnectRequest>()
+            // Registered here as well as by `net::SignInPlugin`, which is not built
+            // when no account service is configured. `add_message` is idempotent,
+            // and this is what keeps the login screen headlessly testable on its
+            // own — the same reason the four above are here.
+            .add_message::<SignInRequest>()
             .add_message::<AppExit>()
             .add_plugins((
                 crosshair::CrosshairPlugin,
                 health::HealthUiPlugin,
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
+                login::LoginPlugin,
                 menu::MenuPlugin,
                 status::StatusUiPlugin,
             ));
@@ -123,9 +132,27 @@ fn add_input_mode_systems(app: &mut App) {
 fn choose_input_mode(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     session: Option<Res<Session>>,
+    sign_in: Option<Res<SignInState>>,
     vitals: Res<SelfVitals>,
     mut mode: ResMut<InputMode>,
 ) {
+    // **The login screen owns the input while it is up.** The game is running
+    // behind it, so a click meant for the one control would otherwise also reach
+    // the world as a mining or attack intent. `Menu` is the mode that already
+    // means "this frame's input is not for the world", so this reuses the gate
+    // rather than adding a second one — and `Escape` cannot leave it, because a
+    // login screen is deliberately not dismissible.
+    if login::login_is_up(sign_in.as_deref()) {
+        set_mode(&mut mode, InputMode::Menu);
+        return;
+    }
+    // The frame it comes down, the player is playing rather than paused: they
+    // never opened the pause menu, and leaving them in it would be this client
+    // inventing a press they did not make.
+    if sign_in.is_some_and(|sign_in| sign_in.is_changed()) {
+        set_mode(&mut mode, InputMode::Playing);
+    }
+
     let Some(_session) = session else {
         set_mode(&mut mode, InputMode::Playing);
         return;
@@ -166,9 +193,14 @@ fn choose_input_mode(
 fn sync_cursor(
     mode: Res<InputMode>,
     state: Option<Res<ConnectionState>>,
+    sign_in: Option<Res<SignInState>>,
     mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
+    // The pointer belongs to whatever is on top, and while the login screen is up
+    // that is a button. A locked, invisible cursor over a screen whose whole
+    // content is one control is a control nobody can press.
     let playing = *mode == InputMode::Playing
+        && !login::login_is_up(sign_in.as_deref())
         && state
             .as_deref()
             .is_some_and(|state| *state == ConnectionState::Connected);

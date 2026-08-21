@@ -128,16 +128,18 @@ impl fmt::Debug for PlayerToken {
 pub struct SessionTicket([u8; SESSION_TICKET_LEN]);
 
 impl SessionTicket {
-    /// Wraps bytes that are already known to be a ticket. Unused until this client
-    /// has an account service to get one from; see [`PLACEHOLDER_APPEARANCE`].
-    #[allow(dead_code)]
+    /// Wraps bytes that are already known to be a ticket — decoded from what the
+    /// account service answered with, or read back out of the cache beside it.
     pub const fn from_bytes(bytes: [u8; SESSION_TICKET_LEN]) -> Self {
         Self(bytes)
     }
 
-    /// The bytes, for the one caller that must have them: the encoder that puts the
-    /// ticket on the wire. Nothing in this client reads a ticket's contents — they are
-    /// the account service's business, and this build has no account service.
+    /// The bytes, for the two callers that must have them: the encoder that puts the
+    /// ticket on the wire, and the cache that keeps one between launches. Nothing in
+    /// this client reads a ticket's *contents* — the account named, the world named
+    /// and the expiry signed into it are the account service's to state and the game
+    /// server's to check, and `internal/ticket` is explicit that nothing outside it
+    /// parses a ticket.
     pub const fn as_bytes(&self) -> &[u8; SESSION_TICKET_LEN] {
         &self.0
     }
