@@ -1265,6 +1265,18 @@ the list. It is where trust on first use stops being how a player decides who a 
   already made a mistake worth being told about. A key under `registry.MinKeyBytes` is refused
   at startup; there is no rate limit and none is coming, so the key's length is the whole of
   the bound on guessing.
+- **A credential is bounded before it is worked on, at both routes.** These are the two places
+  in this service reachable by somebody nobody has authenticated yet — a credential has to be
+  read to be refused — and an `Authorization` header is as long as whoever sent it chose, a
+  megabyte by `net/http`'s default. So the length is settled before the work:
+  `registry.MaxKeyBytes` bounds `registry.Key.Matches` before it copies and hashes, and
+  `ticket.EncodedSize` bounds `ticket.Decode` before it decodes. It is `transport.MaxFrameSize`
+  enforced on the length prefix, one protocol up — **the ordering is the security property** —
+  and neither check refuses anything the work would have accepted. `registry.ParseKey` refuses
+  a key over `MaxKeyBytes` for the same reason `Matches` does, and the two halves are one
+  decision: a bound on only the presentation is an operator whose long key silently stops
+  working, an authentication failure with nothing in any log, which is exactly what trimming
+  the key's whitespace exists to prevent.
 - **A re-registration replaces the record, which is the point rather than a convenience.** The
   address the list serves is the one the server last announced, so a home connection that gets
   a new address overnight is invisible to players. Nothing in a record survives a
