@@ -342,6 +342,14 @@ func (s *Store) SaveChunk(coord Coord, edits map[int]Block) error {
 // rename is visible to every reader on this machine the instant it returns — durability
 // is the part that is not free.
 //
+// **The second flush is a POSIX guarantee, and so is the durability half of that
+// sentence.** [os.File.Sync] is FlushFileBuffers on Windows, which refuses the read-only
+// handle [os.Open] returns for a directory, so [syncDir] is a documented no-op there and a
+// successful return goes on meaning atomic while it stops meaning durable. Closing that
+// would need MoveFileEx with MOVEFILE_WRITE_THROUGH, which [os.Rename] does not use and
+// which no standard-library call reaches — so the limit is stated here, where the callers
+// read it, rather than left to be discovered.
+//
 // A failure before the rename removes the temporary file and returns; the destination has
 // not been opened, so whatever it held is still what it holds. A failure of the directory
 // flush is the one case where the write has already landed — see the comment on it.
@@ -351,7 +359,8 @@ func (s *Store) SaveChunk(coord Coord, edits map[int]Block) error {
 // from disappearing. It matters most where an absent file is indistinguishable from a
 // directory nobody has written yet — internal/ticket refuses a half-present signing key
 // pair, but a pair that both vanished takes the first-start branch and mints a new one,
-// with nothing left for the refusal to fire on.
+// with nothing left for the refusal to fire on. That is precisely the case the missing
+// directory flush leaves open on Windows.
 func WriteAtomic(path string, data []byte) (err error) {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 
