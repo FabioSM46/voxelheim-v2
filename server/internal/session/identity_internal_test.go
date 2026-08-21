@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -66,6 +67,22 @@ func internalIdentities(t *testing.T, store *persist.Store) (*Identities, func(i
 	}
 }
 
+// seedCharacter mints the one character an account holds in these tests and answers the
+// path its record lives at, which is what a test damages.
+//
+// The path is derived from the character id rather than from the account, which is the
+// change #103 made to this file: a record is a character's now, and the account is a
+// field inside it.
+func seedCharacter(t *testing.T, store *persist.Store, account identity.Account) (persist.Character, string) {
+	t.Helper()
+
+	character, err := store.Create(identity.IDOf(account), "Eivor")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return character, filepath.Join(store.Dir(), character.ID.String()+".bin")
+}
+
 // An internal test, because a claim set built without a verifier is a thing only this
 // package can attempt: the constructor is the only way in from outside, and it refuses.
 //
@@ -107,7 +124,10 @@ func TestResolveRefusesWhenThePlayerStoreCannotBeRead(t *testing.T) {
 	// corruption, which is exactly the case this test is about — and unlike a
 	// permission bit, it fails the same way for a test run as root.
 	account := identity.Account{9}
-	path := filepath.Join(store.Dir(), identity.IDOf(account).String()+".bin")
+	_, path := seedCharacter(t, store, account)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("removing the record the character was created with: %v", err)
+	}
 	if err := os.Symlink(path, path); err != nil {
 		t.Fatalf("creating the unreadable record: %v", err)
 	}
@@ -145,8 +165,8 @@ func TestResolveSetsACorruptRecordAsideAndAdmitsThePlayerAsNew(t *testing.T) {
 	identities, hello := internalIdentities(t, store)
 
 	account := identity.Account{9}
+	character, path := seedCharacter(t, store, account)
 	damaged := []byte("not a player record")
-	path := filepath.Join(store.Dir(), identity.IDOf(account).String()+".bin")
 	if err := os.WriteFile(path, damaged, 0o600); err != nil {
 		t.Fatalf("writing the damaged record: %v", err)
 	}
@@ -167,6 +187,12 @@ func TestResolveSetsACorruptRecordAsideAndAdmitsThePlayerAsNew(t *testing.T) {
 	// the thing that decided.
 	if resolved.ID != identity.IDOf(account) {
 		t.Error("the account was admitted as somebody else")
+	}
+	// And it is still the same character. Quarantining a record takes the life, never
+	// the character: the name is still theirs and the account still owns it.
+	if resolved.Character != character.ID || resolved.Name != character.Name {
+		t.Errorf("the player came back as character %s/%q, want %s/%q",
+			resolved.Character, resolved.Name, character.ID, character.Name)
 	}
 
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
@@ -211,8 +237,8 @@ func TestResolveRefusesWhenACorruptRecordCannotBeSetAside(t *testing.T) {
 	identities, hello := internalIdentities(t, store)
 
 	account := identity.Account{13}
+	_, path := seedCharacter(t, store, account)
 	damaged := []byte("not a player record")
-	path := filepath.Join(store.Dir(), identity.IDOf(account).String()+".bin")
 	if err := os.WriteFile(path, damaged, 0o600); err != nil {
 		t.Fatalf("writing the damaged record: %v", err)
 	}
@@ -282,24 +308,28 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	identities, _ := internalIdentities(t, store)
 
 	id := identity.IDOf(identity.Account{11})
-	if !identities.claim(id) {
+	character, err := store.Create(id, "Eivor")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	self := Resolved{ID: id, Character: character.ID, Name: character.Name}
+	if !identities.claim(id, character.ID) {
 		t.Fatal("the player was already claimed")
 	}
-	identities.Admitted(id, "Eivor")
 
 	// What the autosave captured, a moment before the player left.
 	stale := game.Life{Pos: [3]float64{1, 64, 1}, Health: 40}
 	// What the teardown captured after them: the last word.
 	final := game.Life{Pos: [3]float64{9, 70, 9}, Health: 100}
 
-	if err := identities.Remember(id, final); err != nil {
+	if err := identities.Remember(self, final); err != nil {
 		t.Fatalf("Remember: %v", err)
 	}
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: stale}); err != nil {
 		t.Fatalf("RememberAll: %v", err)
 	}
 
-	saved, found, err := store.Load(id)
+	saved, found, err := store.Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -317,7 +347,7 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: stale}); err != nil {
 		t.Fatalf("RememberAll after Release: %v", err)
 	}
-	saved, _, err = store.Load(id)
+	saved, _, err = store.Load(character.ID)
 	if err != nil {
 		t.Fatalf("the second Load: %v", err)
 	}
@@ -338,17 +368,20 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	identities, _ := internalIdentities(t, store)
 
 	id := identity.IDOf(identity.Account{12})
-	if !identities.claim(id) {
+	character, err := store.Create(id, "Eivor")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !identities.claim(id, character.ID) {
 		t.Fatal("the player was already claimed")
 	}
-	identities.Admitted(id, "Eivor")
 
 	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73}
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: life}); err != nil {
 		t.Fatalf("RememberAll: %v", err)
 	}
 
-	saved, found, err := store.Load(id)
+	saved, found, err := store.Load(character.ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -358,8 +391,64 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	if saved.Pos != life.Pos || saved.Health != life.Health {
 		t.Errorf("the autosaved record is %v/%d, want %v/%d", saved.Pos, saved.Health, life.Pos, life.Health)
 	}
-	// The name comes from the claim, because the simulation does not carry one.
-	if saved.Name != "Eivor" {
-		t.Errorf("the autosaved record names %q, want the session's display name", saved.Name)
+	// The character it was written under comes from the claim, because the simulation
+	// keys a life by account and an account has several characters.
+	if saved.Character != character.ID || saved.Name != "Eivor" || saved.Owner != id {
+		t.Errorf("the autosaved record is %s/%q/%s, want the claimed character", saved.Character, saved.Name, saved.Owner.Short())
+	}
+}
+
+// TestRefuseCharacterMapsEveryStoreRefusal pins the one place a store refusal becomes a
+// wire code.
+//
+// An internal test because refuseCharacter is unexported, and it has to be: one of the
+// three cases is not reachable from a hello at all. An account that already holds
+// characters plays one rather than creating another, so CHARACTER_LIMIT_REACHED waits
+// for the CreateCharacterRequest the next issue puts on the wire — and a mapping that
+// only the unreachable half got wrong would be found by nobody.
+//
+// The fourth case is the one that is not a refusal: a store that cannot mint or cannot
+// write is this server failing, and RejectReason has no member that says so. Answering
+// one anyway would blame a client for a disk it has never heard of.
+func TestRefuseCharacterMapsEveryStoreRefusal(t *testing.T) {
+	t.Parallel()
+
+	cases := map[error]vnet.RejectReason{
+		persist.ErrNameTaken:      vnet.RejectReasonCHARACTER_NAME_TAKEN,
+		persist.ErrNameRefused:    vnet.RejectReasonCHARACTER_NAME_REFUSED,
+		persist.ErrCharacterLimit: vnet.RejectReasonCHARACTER_LIMIT_REACHED,
+	}
+
+	details := make(map[string]bool, len(cases))
+	for sentinel, want := range cases {
+		// Wrapped, because that is how the store returns them and a mapping that only
+		// worked on a bare sentinel would work on nothing real.
+		err := refuseCharacter(fmt.Errorf("persist: %w: something specific", sentinel))
+
+		var refused *Refused
+		if !errors.As(err, &refused) {
+			t.Fatalf("%v became %v, which carries no reason code", sentinel, err)
+		}
+		if refused.Reason != want {
+			t.Errorf("%v became %s, want %s", sentinel, refused.Reason, want)
+		}
+		// The cause reaches through, so a caller can name the sentinel it means rather
+		// than match prose.
+		if !errors.Is(err, sentinel) {
+			t.Errorf("%v is not reachable through the refusal it became", sentinel)
+		}
+		// Each says something different, which is the whole reason these are three
+		// codes and not one: the player acts on them differently.
+		if refused.Detail == "" || details[refused.Detail] {
+			t.Errorf("%v is told %q, which is empty or the same as another case", sentinel, refused.Detail)
+		}
+		details[refused.Detail] = true
+	}
+
+	// Anything else is a server failure and never a refusal.
+	failure := refuseCharacter(errors.New("the disk is full"))
+	var refused *Refused
+	if errors.As(failure, &refused) {
+		t.Errorf("a store failure was reported as the refusal %s", refused.Reason)
 	}
 }
