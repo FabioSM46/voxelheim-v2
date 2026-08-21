@@ -416,6 +416,11 @@ func recordVersion(path string) (uint32, bool) {
 	return binary.LittleEndian.Uint32(header[4:8]), true
 }
 
+// errRecordGone reports a record that disappeared between the directory listing and the
+// read of it. It is deliberately not a [world.ErrCorruptStore]: nothing is wrong with the
+// store, and treating it as corruption is what made a vanished file refuse a start.
+var errRecordGone = errors.New("persist: a record went away while the store was being opened")
+
 // index reads every record in the directory once and builds the character index from
 // it.
 //
@@ -449,6 +454,13 @@ func (s *Store) index() error {
 
 		character, err := s.readIndexed(path, entry.Name())
 		if err != nil {
+			if errors.Is(err, errRecordGone) {
+				// Nothing to set aside and nothing lost: a record that vanished between
+				// the directory listing and the read is a transient, and a retry sails
+				// through it. Refusing to start would be refusing over a condition that
+				// has already resolved itself.
+				continue
+			}
 			if aErr := s.setAsideUnreadable(path); aErr != nil {
 				return aErr
 			}
@@ -486,8 +498,12 @@ func (s *Store) readIndexed(path, base string) (Character, error) {
 		return Character{}, err
 	case !found:
 		// Raced by something outside this server; there is nothing to index and
-		// nothing to set aside.
-		return Character{}, fmt.Errorf("%w: %s went away while the store was being opened", world.ErrCorruptStore, base)
+		// nothing to set aside — and this sentinel is what makes that comment true.
+		// It said so already while returning ErrCorruptStore, which index() sets aside
+		// like any other unreadable record: the rename then failed with "no such file
+		// or directory" and the server refused to boot over a file that had simply
+		// gone, naming a path that no longer existed (found in review on #156).
+		return Character{}, fmt.Errorf("%w: %s", errRecordGone, base)
 	case rec.Character != id:
 		return Character{}, fmt.Errorf("%w: %s holds the record of character %s", world.ErrCorruptStore, base, rec.Character)
 	}

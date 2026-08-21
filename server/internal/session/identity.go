@@ -387,20 +387,19 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 // The lookup goes through the store's own fold rather than a comparison written here:
 // a name is taken under the store's rule, and a second spelling of that rule is one bug
 // away from a name that is taken and cannot be found.
+// **The decision and the write happen under the store's one lock**, which is why this
+// asks for both at once instead of reading the roster and then creating. Reading first
+// was a check-then-act race that #156's review found: two hellos for one fresh account
+// both saw an empty roster, both created under different names — Create serialises per
+// name, so both succeeded — and the one that then lost the single-session claim had
+// already written a second character nobody asked for. Nothing deletes a character, so
+// the roster slot and the name were gone for good.
 func (i *Identities) character(id identity.PlayerID, requested string) (persist.Character, error) {
-	if held := i.store.Characters(id); len(held) > 0 {
-		if named, exists := i.store.Named(requested); exists && named.Owner == id {
-			return named, nil
-		}
-		// Lowest id, which Characters already sorted by.
-		return held[0], nil
-	}
-
-	created, err := i.store.Create(id, requested)
+	character, _, err := i.store.ResolveOrCreate(id, requested)
 	if err != nil {
 		return persist.Character{}, refuseCharacter(err)
 	}
-	return created, nil
+	return character, nil
 }
 
 // refuseCharacter turns a store refusal into the answer the contract has for it, and

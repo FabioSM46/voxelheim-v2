@@ -628,3 +628,79 @@ func write(t *testing.T, path string, body []byte) {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 }
+
+// One account, many first connections, one character.
+//
+// **The race this closes is the one the cross-account test above cannot see.** That one
+// contends a name; this one contends the *decision to create at all*. Reading the roster
+// and then creating let two hellos for a fresh account both find it empty and both
+// create — under different names, so `Create`'s per-name lock let both through — and the
+// connection that afterwards lost the single-session claim had already written a second
+// character to disk. Nothing deletes a character, so the account was left holding one
+// nobody asked for, with its roster slot and its name spent for good.
+//
+// Asserted on the outcome rather than on the detector, for the reason the cross-account
+// test records: a check-then-act across two lock acquisitions is not a data race, and
+// `-race` reports nothing while the invariant is broken.
+func TestManyFirstConnectionsForOneAccountCreateOneCharacter(t *testing.T) {
+	t.Parallel()
+
+	const contenders = 16
+
+	store, _ := openStore(t)
+	owner := testID(1)
+
+	var start sync.WaitGroup
+	start.Add(1)
+
+	var mu sync.Mutex
+	var seen []Character
+	var creations int
+	var failures []error
+
+	var done sync.WaitGroup
+	for i := range contenders {
+		done.Add(1)
+		go func(i int) {
+			defer done.Done()
+			start.Wait()
+
+			// A different requested name each, which is what made the old shape create
+			// several: one name would have collided in Create and hidden the defect.
+			character, created, err := store.ResolveOrCreate(owner, fmt.Sprintf("wanderer%d", i))
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				failures = append(failures, err)
+				return
+			}
+			seen = append(seen, character)
+			if created {
+				creations++
+			}
+		}(i)
+	}
+
+	start.Done()
+	done.Wait()
+
+	if len(failures) != 0 {
+		t.Fatalf("%d of %d first connections were refused: %v", len(failures), contenders, failures[0])
+	}
+	if creations != 1 {
+		t.Errorf("%d characters were created for one account, want exactly 1", creations)
+	}
+	if held := store.Characters(owner); len(held) != 1 {
+		names := make([]string, 0, len(held))
+		for _, character := range held {
+			names = append(names, character.Name)
+		}
+		t.Errorf("the account holds %d characters (%v), want the one it asked for", len(held), names)
+	}
+	for _, character := range seen {
+		if character.ID != seen[0].ID {
+			t.Fatalf("two connections played different characters: %s and %s", seen[0].ID, character.ID)
+		}
+	}
+}
