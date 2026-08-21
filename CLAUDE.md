@@ -6,7 +6,9 @@ This is a **public repository**. Never put a real email address, personal data, 
 internal filesystem path, private hostname, secret or credential in a tracked file, commit, branch,
 PR, review, CI log or artifact. Use GitHub `noreply`, reserved example values and placeholders such
 as `<repo-root>`. The only approved public identity is the attribution handle `@FabioSM46` in
-`NOTICE`. Run `bash scripts/check-publication-privacy.sh` before every push.
+`NOTICE`. Before every push run `bash scripts/check-publication-privacy.sh` over the tracked
+tree and `bash scripts/check-commit-privacy.sh <base> <head>` over the commits the branch adds —
+a commit message is a published surface too, and no `Claude-Session:` trailer may reach one.
 
 Quick reference — the pipeline skills:
 
