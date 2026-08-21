@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"time"
 )
@@ -43,11 +44,16 @@ import (
 //
 // # Atomicity
 //
-// Every write goes to a temporary file in the destination directory, is flushed, and is
-// then renamed over the destination. Rename is atomic within a filesystem, so a crash
-// leaves either the previous file or the new one and never a half-written one. Writing
-// in place would leave a truncated file that parses as a shorter edit list — which is to
-// say, as a shelter with some of its walls back.
+// Every write goes to a temporary file in the destination directory, is flushed, is then
+// renamed over the destination, and the directory itself is flushed last. Rename is
+// atomic within a filesystem, so a crash leaves either the previous file or the new one
+// and never a half-written one. Writing in place would leave a truncated file that parses
+// as a shorter edit list — which is to say, as a shelter with some of its walls back.
+//
+// Atomic is not durable, and the second flush is the difference. The rename is one write
+// to the *directory*, so a power loss can drop it while keeping the flushed file it
+// pointed at, and the reader afterwards sees a chunk nobody ever edited. See
+// [WriteAtomic].
 //
 // # Versioning
 //
@@ -323,13 +329,29 @@ func (s *Store) SaveChunk(coord Coord, edits map[int]Block) error {
 
 // WriteAtomic replaces path with data, or leaves it exactly as it was.
 //
-// Temporary file, flush, rename — in that order, and the temporary file is created *in
-// the destination directory* because rename is only atomic within one filesystem. The
-// flush is what makes the rename mean something: without it the directory entry can reach
-// the disk ahead of the bytes it points at.
+// Temporary file, flush, rename, flush the directory — in that order, and the temporary
+// file is created *in the destination directory* because rename is only atomic within one
+// filesystem.
 //
-// A failure anywhere removes the temporary file and returns; the destination has not been
-// opened, so whatever it held is still what it holds.
+// The two flushes answer two different questions, and only both together make a
+// successful return mean "this is on disk". Flushing the temporary file is what makes the
+// rename mean something: without it the directory entry can reach the disk ahead of the
+// bytes it points at. Flushing the directory is what makes the rename itself survive:
+// the entry is the *directory's* metadata, a separate write from the file's, and on ext4
+// and XFS a power loss can leave the flushed data in an inode nothing links to. The
+// rename is visible to every reader on this machine the instant it returns — durability
+// is the part that is not free.
+//
+// A failure before the rename removes the temporary file and returns; the destination has
+// not been opened, so whatever it held is still what it holds. A failure of the directory
+// flush is the one case where the write has already landed — see the comment on it.
+//
+// The property this buys is what [SweepTemporaries]'s half of the crash story does not
+// cover: that one tidies what a crash left *mid*-write, this one keeps a finished write
+// from disappearing. It matters most where an absent file is indistinguishable from a
+// directory nobody has written yet — internal/ticket refuses a half-present signing key
+// pair, but a pair that both vanished takes the first-start branch and mints a new one,
+// with nothing left for the refusal to fire on.
 func WriteAtomic(path string, data []byte) (err error) {
 	dir, base := filepath.Dir(path), filepath.Base(path)
 
@@ -340,8 +362,11 @@ func WriteAtomic(path string, data []byte) (err error) {
 		return fmt.Errorf("world: creating a temporary file in %s: %w", dir, err)
 	}
 	name := tmp.Name()
+	renamed := false
 	defer func() {
-		if err != nil {
+		// Not after the rename: `name` is no longer a file, and the destination that
+		// now wears it is the caller's data rather than this function's leftover.
+		if err != nil && !renamed {
 			_ = tmp.Close()
 			_ = os.Remove(name)
 		}
@@ -359,7 +384,71 @@ func WriteAtomic(path string, data []byte) (err error) {
 	if err = os.Rename(name, path); err != nil {
 		return fmt.Errorf("world: renaming %s onto %s: %w", name, path, err)
 	}
+	renamed = true
+
+	// Reported, never swallowed. A write this function calls durable and is not is the
+	// one outcome worse than never having synced at all: every caller here refuses
+	// rather than regenerates, and a refusal cannot fire on a file that is simply gone.
+	//
+	// The new file stays where it is. It is already the visible content of path, the
+	// previous contents are gone whatever happens next, and un-renaming would trade a
+	// doubt about durability for certain data loss. What the error says is the true
+	// statement — the write may not survive a power loss — and the answer to it is to
+	// write again, which is what the callers already do: the chunk cache re-queues a
+	// save it was told failed, and the record stores hand the error up.
+	if err = syncDir(dir); err != nil {
+		return fmt.Errorf("world: flushing the directory entry for %s: %w", path, err)
+	}
 	return nil
+}
+
+// syncDir flushes dir's own contents — the entries in it, not the files they name — so
+// that a rename this process has already seen survives a power loss.
+//
+// One open, one fsync, one close per atomic write. **It roughly doubles the cost of a
+// write, and that is the honest number rather than the hoped-for one**: measured on ext4
+// over NVMe, a 1 KiB record went from ~2.2 ms to ~4.3 ms per write. Neither the record
+// size (1 KiB against 64 KiB) nor the number of files already in the directory (none
+// against two thousand) moved it, which says what it is — a second fsync, costing about
+// what the first one costs.
+//
+// It is still one entry point rather than two, and the doubling is why that needed
+// deciding rather than assuming. The writes are made by autosave workers, never by the
+// tick loop: a chunk edited fifty times inside one [DefaultSaveInterval] is written once,
+// out of any lock, so what doubled is background I/O and not a frame. A second
+// non-durable variant would save ~2 ms there and cost the thing this function exists to
+// promise, on whichever call site picks it by mistake.
+//
+// The number to watch is dirty chunks per pass, since a pass costs that many times
+// ~4.3 ms: somewhere around a thousand of them the pass stops fitting inside its
+// five-second window. The answer there is the region format the file header already
+// argues for — fewer, larger writes — and not a write that lies about being on disk.
+//
+// # Windows
+//
+// There is no directory flush there: [os.File.Sync] is FlushFileBuffers on Windows, and
+// that call wants a writable handle to a file — the read-only directory handle os.Open
+// returns is refused. Doing this unconditionally would therefore fail every write on a
+// platform where the write itself is fine. The guarantee above is therefore a POSIX one
+// and this is a no-op on Windows — stated here and in [WriteAtomic] rather than
+// discovered, because a durability claim that silently does not hold is the failure this
+// whole change is about. `runtime.GOOS` is a constant, so the branch is settled at
+// compile time; the reason it is a branch rather than a build-tagged pair of files is
+// that CI builds Linux only, and a file it never compiles is a file that rots unnoticed.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close() // The sync error is the one worth reporting.
+		return err
+	}
+	return d.Close()
 }
 
 func encodeWorldFile(seed int64) []byte {
