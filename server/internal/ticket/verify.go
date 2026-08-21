@@ -29,6 +29,12 @@ import (
 // for somewhere else, and this ticket has run out. Only the last of the three is
 // something waiting will not fix.
 //
+// **The two configuration answers are sentinels of their own for a different reason**:
+// [ErrPublicKeySize] and [ErrVerifierWorld] are not about the ticket at all, and neither
+// is anything to tell a player. They are what an operator reads, and they have to be
+// distinguishable from the ticket refusals they otherwise look exactly like — see
+// [ErrVerifierWorld] for the mistake that produced the second one.
+//
 // world is the caller's own world, so a ticket minted for one server is useless at
 // another — which is what stops the operator of one from collecting its players'
 // tickets and presenting them somewhere else as those players.
@@ -46,7 +52,16 @@ func Verify(pub ed25519.PublicKey, raw []byte, world WorldID, now time.Time) (Cl
 		// player and one admitting every account that has ever signed in. It is an
 		// error and not a quiet "no": the configuration is wrong, and an operator should
 		// be told which.
-		return Claims{}, fmt.Errorf("%w: the verifier names no world", ErrWrongWorld)
+		//
+		// **[ErrVerifierWorld] and not [ErrWrongWorld], because the two are different
+		// things to tell an operator and this one was wearing the other's name** (#126).
+		// A server started with no world refused every player with "the ticket names
+		// another world" — a sentence about the ticket, arriving once per join, that
+		// never once mentions that this server names none. The mistake takes a second to
+		// fix and is never found, because its symptom is the sentence that means the
+		// check is working. [ErrPublicKeySize] two lines up is the same class of question
+		// and has had its own sentinel from the start.
+		return Claims{}, fmt.Errorf("%w: it was given no world to compare a ticket against", ErrVerifierWorld)
 	}
 
 	claims, err := verifySigned(pub, raw)
@@ -61,8 +76,8 @@ func Verify(pub ed25519.PublicKey, raw []byte, world WorldID, now time.Time) (Cl
 		// the account service is not a ticket for joining a game.
 		return Claims{}, fmt.Errorf("%w: it names %s and this world is %s", ErrWrongWorld, claims.World, world)
 	}
-	if !now.Before(claims.ExpiresAt) {
-		return Claims{}, fmt.Errorf("%w: it expired at %s", ErrExpired, claims.ExpiresAt.Format(time.RFC3339))
+	if err := checkExpiry(claims, now); err != nil {
+		return Claims{}, err
 	}
 	return claims, nil
 }
@@ -97,10 +112,46 @@ func VerifyAnyWorld(pub ed25519.PublicKey, raw []byte, now time.Time) (Claims, e
 	if err != nil {
 		return Claims{}, err
 	}
-	if !now.Before(claims.ExpiresAt) {
-		return Claims{}, fmt.Errorf("%w: it expired at %s", ErrExpired, claims.ExpiresAt.Format(time.RFC3339))
+	if err := checkExpiry(claims, now); err != nil {
+		return Claims{}, err
 	}
 	return claims, nil
+}
+
+// checkExpiry is the pair of questions both verifiers ask about a ticket that is already
+// known to be genuine: that it has not run out, and that it does not claim more life than
+// this service has ever been able to mint.
+//
+// **The second question is the one that was missing** (#126). Four bytes of Unix seconds
+// hold any instant up to 2106, [encodeBody] writes whatever it is given inside that range,
+// and nothing here compared it against anything — so a body carrying 0xFFFFFFFF, signed
+// with the real key, verified with seventy-six years left. [Pair.Mint] cannot produce one
+// today, which makes this defence in depth rather than a live hole; it is here because the
+// game server is the party that must not have to trust the account service beyond its
+// signature, and one comparison is the whole cost of not having to.
+//
+// It lives beside the expiry rather than inside [verifySigned] because both are decisions
+// about time, and verifySigned deliberately answers nothing about time — a caller that
+// knows which question it is asking is the one holding `now`.
+//
+// The two comparisons are deliberately asymmetric about clock skew. Expiry has no
+// allowance: a ticket that has run out has run out, and with no revocation behind it the
+// direction to round in is the strict one. The lifetime bound has [verifierClockSkew],
+// because being strict there refuses tickets for being *fresh*, which is a bound that
+// breaks every join on a fleet whose clocks are a few seconds apart.
+func checkExpiry(claims Claims, now time.Time) error {
+	if !now.Before(claims.ExpiresAt) {
+		return fmt.Errorf("%w: it expired at %s", ErrExpired, claims.ExpiresAt.Format(time.RFC3339))
+	}
+	if claims.ExpiresAt.After(now.Add(Lifetime + verifierClockSkew)) {
+		// ErrMalformedBody rather than a fifth sentinel: its own doc already says it
+		// reports a signed body this build would not have written, and a ticket with
+		// more than a lifetime left is exactly that. Nothing about the ticket's *shape*
+		// is wrong, which is why the message says what is.
+		return fmt.Errorf("%w: it expires at %s, which is further off than the %s this service mints for",
+			ErrMalformedBody, claims.ExpiresAt.Format(time.RFC3339), Lifetime)
+	}
+	return nil
 }
 
 // verifySigned is the half both verifiers share: the length, the signature, and reading

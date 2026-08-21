@@ -215,7 +215,7 @@ func (s *service) registerServer(w http.ResponseWriter, r *http.Request) {
 		// The registry's own clock, not the announcer's. An announcer that could set this
 		// could claim to have been heard from at any moment it liked, and "heard from
 		// recently" would stop being something this service knows.
-		LastSeen: time.Now(),
+		LastSeen: s.clock(),
 	}
 
 	created, err := s.servers.Register(srv)
@@ -274,7 +274,7 @@ func (s *service) listServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now()
+	now := s.clock()
 	entries := make([]serverListEntry, 0, len(servers))
 	for _, srv := range servers {
 		entries = append(entries, serverListEntry{
@@ -318,7 +318,7 @@ func (s *service) authenticateReader(w http.ResponseWriter, r *http.Request) (ti
 
 	// The public half of this service's own pair, which is the same key a game server reads
 	// from /v1/ticket-key. Nothing here holds a second idea of what a valid ticket is.
-	claims, err := ticket.VerifyAnyWorld(s.keys.Public(), raw[:], time.Now())
+	claims, err := ticket.VerifyAnyWorld(s.keys.Public(), raw[:], s.clock())
 	switch {
 	case errors.Is(err, ticket.ErrExpired):
 		s.refuseUnauthorized(w, errTicketExpired)
