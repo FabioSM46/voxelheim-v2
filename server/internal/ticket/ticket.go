@@ -372,8 +372,34 @@ type Ticket [Size]byte
 // readability hex buys elsewhere in this repository buys nothing here.
 func (t Ticket) Encode() string { return base64.RawURLEncoding.EncodeToString(t[:]) }
 
+// EncodedSize is how many characters [Ticket.Encode] produces: 128, and never anything
+// else, because [Size] is fixed and unpadded base64url has no other length for it.
+//
+// Exported because it is the whole shape of a bearer credential arriving in an
+// `Authorization` header, and the one thing about that credential a reader can settle
+// before doing any work on it. The formula is spelled out rather than computed because a
+// const cannot call [encoding/base64.Encoding.EncodedLen]; the two are pinned to each
+// other by a test, which is where the arithmetic is checked rather than trusted.
+const EncodedSize = (Size*8 + 5) / 6
+
 // Decode reads a ticket back from [Ticket.Encode], refusing anything that is not one.
 func Decode(encoded string) (Ticket, error) {
+	// **The length is refused before anything is decoded**, which is an ordering rather
+	// than an extra rule: a ticket is exactly [EncodedSize] characters, so every input
+	// this turns away is one the decode below would have turned away anyway.
+	//
+	// The ordering is what matters. A ticket is presented as a bearer credential in an
+	// `Authorization` header by a caller nobody has authenticated yet — the credential has
+	// to be read to be refused — and a header is as long as whoever sent it chose, up to
+	// net/http's MaxHeaderBytes, which is a megabyte by default. Decoding first would
+	// spend a base64 pass and three quarters of a megabyte of allocation on learning what
+	// a comparison knows immediately. It is the argument cmd/voxelheim-auth's
+	// maxRegistrationRequestBytes makes about a request body, one field earlier.
+	if len(encoded) != EncodedSize {
+		// The length is named and the input is not, for the reason below.
+		return Ticket{}, fmt.Errorf("ticket: an encoded ticket is exactly %d characters, got %d",
+			EncodedSize, len(encoded))
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		// The input is not echoed. It is a bearer credential, and an error message

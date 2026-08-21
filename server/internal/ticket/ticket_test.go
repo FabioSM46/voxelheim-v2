@@ -556,6 +556,60 @@ func TestDecodeRefusesWhatIsNotATicket(t *testing.T) {
 	}
 }
 
+// EncodedSize is what Encode actually produces, checked rather than trusted.
+//
+// The constant is arithmetic a const expression has to spell out, because it cannot call
+// base64's own EncodedLen. This is where the two are held together — and where the number
+// in Encode's doc comment is held to the type it describes, so that a change to Size
+// cannot leave either of them saying 128.
+func TestEncodedSizeIsExactlyWhatEncodeProduces(t *testing.T) {
+	t.Parallel()
+
+	if want := base64.RawURLEncoding.EncodedLen(Size); EncodedSize != want {
+		t.Errorf("EncodedSize is %d, and unpadded base64url of %d bytes is %d", EncodedSize, Size, want)
+	}
+
+	pair := newPair(t)
+	minted, _, err := pair.Mint(anAccount(), midgard(t), time.Now())
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	if got := len(minted.Encode()); got != EncodedSize {
+		t.Errorf("Encode produced %d characters, want EncodedSize (%d)", got, EncodedSize)
+	}
+}
+
+// Decode refuses an oversized credential **on its length, before it decodes any of it**.
+//
+// A ticket is presented in an `Authorization` header by somebody nobody has authenticated
+// yet, and a header is as long as whoever sent it chose — a megabyte, by net/http's
+// default. Decoding first would sell an unauthenticated request a base64 pass and three
+// quarters of a megabyte of allocation for the price of a header.
+//
+// **The check is structural rather than a match on the message.** Reaching ErrTicketSize
+// means TicketFrom was handed decoded bytes, which means the decode ran; a refusal on
+// length cannot produce it. So this test fails against a Decode that checks the length
+// afterwards, which is exactly the version it was written against.
+func TestDecodeRefusesAnOversizedCredentialWithoutDecodingIt(t *testing.T) {
+	t.Parallel()
+
+	// Valid unpadded base64url throughout, so nothing but the length can refuse it.
+	oversized := strings.Repeat("A", 1<<20)
+
+	_, err := Decode(oversized)
+	if err == nil {
+		t.Fatal("a megabyte of base64 was decoded as a ticket")
+	}
+	if errors.Is(err, ErrTicketSize) {
+		t.Error("Decode decoded the whole credential before refusing it; the length is checked first")
+	}
+	// The refusal still quotes nothing of what it was given — it is somebody's bearer
+	// credential whether or not it turned out to be a ticket.
+	if strings.Contains(err.Error(), oversized[:64]) {
+		t.Errorf("the refusal quotes what it was given: %v", err)
+	}
+}
+
 // **Hours, not days.** The number is the entire cost of a theft, because there is no
 // revocation: a stolen ticket dies only by expiring. The bounds are what the issue
 // states, checked so that a later edit has to disagree with them out loud.

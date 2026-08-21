@@ -143,6 +143,29 @@ const (
 	// It bounds guessing rather than preventing it. There is deliberately no rate limit
 	// and no lockout here — see the package comment on what is not built.
 	MinKeyBytes = 32
+
+	// MaxKeyBytes is the longest registration key this service will start with, and the
+	// longest credential [Key.Matches] will hash.
+	//
+	// **It is one bound doing two jobs, and it has to be, which is the whole reason it is
+	// a constant rather than a check at the handler.** A key is presented in an
+	// `Authorization` header by somebody nobody has authenticated yet — the credential has
+	// to be read to be refused — and a header is as long as whoever sent it chose, up to
+	// net/http's MaxHeaderBytes, a megabyte by default. Without a bound, an unauthenticated
+	// request makes this process SHA-256 a megabyte to learn what a length comparison knows
+	// immediately. That is the argument cmd/voxelheim-auth's maxRegistrationRequestBytes
+	// makes about the request body, one field earlier.
+	//
+	// Bounding only the presentation would be worse than not bounding it: an operator whose
+	// key was longer than this would watch every registration fail with nothing in any log
+	// to explain it, which is the failure [ParseKey]'s whitespace rule exists to avoid. So
+	// [ParseKey] refuses to build a key this long in the first place, and a credential
+	// [Key.Matches] turns away on length is one no configuration could have made correct.
+	//
+	// Two hundred and fifty-six is far past what anybody needs — a 192-byte random value is
+	// 256 characters of base64, and [MinKeyBytes] is what an operator is actually held to.
+	// The point of the number is that there is one, not that it is close to anything.
+	MaxKeyBytes = 256
 )
 
 // The refusals this package makes, as sentinels because the callers branch on them.
@@ -216,6 +239,12 @@ func ParseKey(raw string) (Key, error) {
 	case len(key) < MinKeyBytes:
 		return Key{}, fmt.Errorf("%w: it is %d bytes, and a registration key must be at least %d",
 			ErrInvalidKey, len(key), MinKeyBytes)
+	case len(key) > MaxKeyBytes:
+		// The length is named and the key is not, exactly as above. See [MaxKeyBytes]:
+		// refusing here is what lets [Key.Matches] refuse on length without ever turning
+		// away a key an operator actually configured.
+		return Key{}, fmt.Errorf("%w: it is %d bytes, and a registration key must be at most %d",
+			ErrInvalidKey, len(key), MaxKeyBytes)
 	case !printableASCII(key):
 		// A key is presented in an `Authorization` header, which is bytes on one line.
 		// A key holding a newline, a tab or a space cannot be presented at all — so this
@@ -235,6 +264,13 @@ func ParseKey(raw string) (Key, error) {
 // operands of different lengths, so comparing the raw values would leak the key's length
 // through timing — a small leak, and a free one to close.
 func (k Key) Matches(presented string) bool {
+	// **Refused on length before it is copied or hashed.** [ParseKey] will not build a key
+	// longer than [MaxKeyBytes], so nothing this rejects could ever have matched, and
+	// returning early leaks nothing: the bound is an exported constant, so a caller learns
+	// from it only what it already says out loud.
+	if len(presented) > MaxKeyBytes {
+		return false
+	}
 	sum := sha256.Sum256([]byte(presented))
 	return subtle.ConstantTimeCompare(k.digest[:], sum[:]) == 1
 }

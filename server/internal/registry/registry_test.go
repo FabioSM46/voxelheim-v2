@@ -301,6 +301,52 @@ func TestAShortOrEmptyKeyIsRefused(t *testing.T) {
 	}
 }
 
+// **A credential longer than a key can be is refused before it is hashed, and no key can
+// be that long**, which are the two halves of one bound and are tested together because
+// either half alone is a bug.
+//
+// The presentation half is what the bound is for: this endpoint is reachable by anybody,
+// because a credential has to be read to be refused, and an `Authorization` header is as
+// long as whoever sent it chose — a megabyte, by net/http's default. Hashing it is work an
+// unauthenticated request should not be able to buy.
+//
+// The measurement is allocation rather than a value, because both versions answer false: a
+// wrong key is a wrong key whatever its length. What distinguishes them is that hashing a
+// megabyte has to copy it first, and refusing on length copies nothing. So this fails
+// against a Matches that hashes whatever it is given, which is the version it was written
+// against.
+//
+// No t.Parallel here: testing.AllocsPerRun pins GOMAXPROCS to 1 for its measurement and
+// says in as many words not to run it alongside parallel tests.
+func TestAnOversizedCredentialIsRefusedWithoutBeingHashed(t *testing.T) {
+	key, err := ParseKey(strings.Repeat("a", MinKeyBytes))
+	if err != nil {
+		t.Fatalf("ParseKey: %v", err)
+	}
+
+	oversized := strings.Repeat("a", 1<<20)
+	if key.Matches(oversized) {
+		t.Error("a megabyte of text matched the key")
+	}
+	if allocs := testing.AllocsPerRun(50, func() { key.Matches(oversized) }); allocs != 0 {
+		t.Errorf("Matches allocated %v times for a credential it can refuse on length alone", allocs)
+	}
+
+	// The other half. Were a key allowed to be longer than the bound, the refusal above
+	// would eventually be turning away a key an operator had configured — an authentication
+	// failure with nothing in any log to explain it, which is the failure the whitespace
+	// trimming exists to prevent, arriving by a different door.
+	if _, err := ParseKey(strings.Repeat("a", MaxKeyBytes+1)); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("a key one over the bound answered %v, want ErrInvalidKey", err)
+	}
+	if _, err := ParseKey(strings.Repeat("a", MaxKeyBytes)); err != nil {
+		t.Errorf("a key exactly at the bound was refused: %v", err)
+	}
+	if MaxKeyBytes <= MinKeyBytes {
+		t.Errorf("MaxKeyBytes (%d) leaves no room above MinKeyBytes (%d)", MaxKeyBytes, MinKeyBytes)
+	}
+}
+
 // **The key never reaches a message**, which is asserted here rather than left to the four
 // redaction methods: a refusal is the one place a value is most likely to be echoed.
 func TestAKeyRefusalNeverQuotesTheKey(t *testing.T) {

@@ -201,6 +201,11 @@ func TestARegistrationWithoutTheOperatorsKeyIsRefused(t *testing.T) {
 		"another scheme":                    "Basic " + base64.StdEncoding.EncodeToString([]byte("a:"+fixtureKey)),
 		"the key with no scheme":            fixtureKey,
 		"the key with whitespace around it": "Bearer  " + fixtureKey + " ",
+		// Reachable by anybody — the credential has to be read to be refused — so what
+		// this case pins is that an oversized one is still one refusal and not an
+		// invitation to hand this process a header to hash. registry.Key.Matches turns it
+		// away on length; see registry.MaxKeyBytes for why that cannot turn away a real key.
+		"a credential longer than any key": "Bearer " + strings.Repeat("k", registry.MaxKeyBytes+1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -484,6 +489,9 @@ func TestTheListIsRefusedToAnUnauthenticatedReader(t *testing.T) {
 		"a ticket of the wrong length":   "Bearer " + base64.RawURLEncoding.EncodeToString(make([]byte, ticket.Size-1)),
 		"another service's ticket":       "Bearer " + anAccountTicket(t, other),
 		"the registration key":           "Bearer " + fixtureKey,
+		// Valid base64url of a length no ticket has. ticket.Decode refuses it on that
+		// length before decoding any of it, which is the same argument one endpoint over.
+		"a credential longer than any ticket": "Bearer " + strings.Repeat("A", ticket.EncodedSize+1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
