@@ -13,6 +13,24 @@ server/dist/
 /world/
 server/world/
 
+# The account service keeps its Ed25519 signing key under -auth-dir, whose default is
+# `auth` — resolved against the working directory, so running it from server/ puts a
+# **private key** inside this repository. Ignored by directory for the default and for
+# the name the README suggests, and then by file name anywhere, because -auth-dir takes
+# whatever an operator types and the second rule is the one that still holds when they
+# type something else.
+#
+# The file-name rules are not redundant with the directory ones, and the reason is worth
+# knowing: `scripts/check-publication-privacy.sh` scans with `git grep -I`, which skips
+# binary files — so a committed key would pass every check this repository runs. Nothing
+# downstream would catch it, which is why it is caught here.
+/auth/
+server/auth/
+/authdata/
+server/authdata/
+signing-key.bin
+verifying-key.bin
+
 # Rust (client/)
 client/target/
 target/
