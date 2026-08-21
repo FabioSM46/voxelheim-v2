@@ -1,145 +1,101 @@
-// Internal tests, deliberately: newToken's failure branch is the one thing here
-// that cannot be reached from outside — crypto/rand does not fail on any platform
-// this server runs on — and it is exactly the branch that must never be allowed to
-// produce a zero token.
+// Internal tests, deliberately: the domain separating a player id from every other
+// digest in this repository is unexported — nothing outside needs to know what a player
+// id is *made of* — and it is the one property here that a test cannot state from the
+// outside without restating the implementation.
 package identity
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 )
 
-func TestNewTokenMintsDistinctTokens(t *testing.T) {
+// testAccount is a distinct account per seed, chosen rather than random so a failing
+// test names the same player on every run.
+func testAccount(seed byte) Account {
+	var account Account
+	for i := range account {
+		account[i] = seed*31 + byte(i)
+	}
+	return account
+}
+
+func TestIDOfIsTheAccountUnderThisPackagesDomain(t *testing.T) {
 	t.Parallel()
 
-	seen := make(map[Token]struct{}, 64)
-	for range 64 {
-		token, err := NewToken()
-		if err != nil {
-			t.Fatalf("NewToken: %v", err)
-		}
-		if token == (Token{}) {
-			t.Fatal("NewToken returned the zero token")
-		}
-		if _, repeat := seen[token]; repeat {
-			t.Fatal("NewToken returned the same token twice")
-		}
-		seen[token] = struct{}{}
+	account := testAccount(1)
+
+	want := PlayerID(sha256.Sum256(append([]byte(playerIDDomain), account[:]...)))
+	if got := IDOf(account); got != want {
+		t.Errorf("IDOf = %s, want the domain-separated digest %s", got, want)
+	}
+
+	// **The digest is not the account's bare SHA-256**, which is the whole point of the
+	// domain: nothing else in this repository that hashes sixteen bytes can produce a
+	// player id, and a player id can never be mistaken for a value computed for another
+	// purpose over the same account.
+	if IDOf(account) == PlayerID(sha256.Sum256(account[:])) {
+		t.Error("a player id is the account's bare SHA-256, so it shares a digest with every other use of one")
 	}
 }
 
-// failingReader is a crypto/rand that has stopped working.
-type failingReader struct{ err error }
-
-func (f failingReader) Read([]byte) (int, error) { return 0, f.err }
-
-// shortReader answers fewer bytes than asked for and then stops, which is the other
-// way a source of randomness fails: not an error on the first call, but a token that
-// is only partly random.
-type shortReader struct{ n int }
-
-func (s *shortReader) Read(p []byte) (int, error) {
-	if s.n <= 0 {
-		return 0, errors.New("out of entropy")
-	}
-	n := min(s.n, len(p))
-	for i := range p[:n] {
-		p[i] = 0xAB
-	}
-	s.n -= n
-	return n, nil
-}
-
-func TestNewTokenRefusesAFailedRead(t *testing.T) {
+func TestAPlayerIDIsStableAndDistinct(t *testing.T) {
 	t.Parallel()
 
-	// The rule the AC states: a failed read is a refusal, never a zero token. A zero
-	// token would be shared by every session that failed to mint one, which makes them
-	// all the same player — the one outcome worse than a refused handshake.
-	sources := map[string]interface{ Read([]byte) (int, error) }{
-		"a source that errors":          failingReader{err: errors.New("no entropy")},
-		"a source that stops part way":  &shortReader{n: TokenSize - 1},
-		"a source that answers nothing": &shortReader{n: 0},
-		"a source that errors with EOF": failingReader{err: fmt.Errorf("EOF")},
+	account := testAccount(2)
+
+	// Stable across calls and across restarts, which is what "recognised by a server
+	// that has never seen you" needs from this side: the store keys on this, so an id
+	// that varied would lose a player on every reconnection. Compared through a copy so
+	// the linter reads two expressions rather than one repeated — which is the same
+	// thing being asserted.
+	again := account
+	if IDOf(account) != IDOf(again) {
+		t.Error("IDOf is not stable for one account")
 	}
 
-	for name, source := range sources {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			token, err := newToken(source)
-			if err == nil {
-				t.Fatal("newToken accepted a broken source of randomness")
-			}
-			if token != (Token{}) {
-				t.Error("newToken returned a partly-filled token beside its error")
-			}
-		})
-	}
-}
-
-func TestTokenFromRefusesEveryLengthButThirtyTwo(t *testing.T) {
-	t.Parallel()
-
-	for _, size := range []int{0, 1, 7, 31, 33, 64} {
-		if _, err := TokenFrom(make([]byte, size)); !errors.Is(err, ErrTokenSize) {
-			t.Errorf("TokenFrom(%d bytes) = %v, want ErrTokenSize", size, err)
-		}
-	}
-
-	source := make([]byte, TokenSize)
-	source[0] = 9
-	token, err := TokenFrom(source)
-	if err != nil {
-		t.Fatalf("TokenFrom(32 bytes): %v", err)
-	}
-
-	// The copy is the point: source is usually a decoded frame, and a token that
-	// aliased it would change underneath whoever held it.
-	source[0] = 200
-	if token[0] != 9 {
-		t.Error("TokenFrom aliased the slice it was given instead of copying it")
-	}
-}
-
-func TestIDOfIsTheTokensSHA256(t *testing.T) {
-	t.Parallel()
-
-	token, err := NewToken()
-	if err != nil {
-		t.Fatalf("NewToken: %v", err)
-	}
-
-	if got, want := IDOf(token), PlayerID(sha256.Sum256(token[:])); got != want {
-		t.Errorf("IDOf = %s, want the token's SHA-256 %s", got, want)
-	}
-	// Stable across calls: the store keys on this, so an id that varied would lose a
-	// player on every reconnection. Compared through a copy so the linter reads two
-	// expressions rather than one repeated — which is the same thing being asserted.
-	again := token
-	if IDOf(token) != IDOf(again) {
-		t.Error("IDOf is not stable for one token")
-	}
-
-	// One bit is enough. The store is keyed by this, so two tokens sharing an id would
-	// be two players sharing a record.
-	other := token
+	// One bit is enough. The store is keyed by this, so two accounts sharing an id
+	// would be two people sharing a life.
+	other := account
 	other[0] ^= 1
-	if IDOf(token) == IDOf(other) {
-		t.Error("two tokens one bit apart share a player id")
+	if IDOf(account) == IDOf(other) {
+		t.Error("two accounts one bit apart share a player id")
+	}
+}
+
+// The id cannot be turned back into the account it names, which is what makes it safe
+// in a log line and in a file name.
+//
+// Stated as the property a test can actually hold: a digest is one-way by construction
+// and no test proves that, but the *shape* is checkable — the id is not the account, it
+// does not contain the account, and it is not the account padded out to 32 bytes. Those
+// are three ways of writing something that is called a hash and is not one.
+func TestAPlayerIDDoesNotCarryItsAccount(t *testing.T) {
+	t.Parallel()
+
+	account := testAccount(3)
+	id := IDOf(account)
+
+	if strings.Contains(id.String(), hex.EncodeToString(account[:])) {
+		t.Error("the player id contains its account in hex")
+	}
+	if strings.Contains(string(id[:]), string(account[:])) {
+		t.Error("the player id contains its account's bytes")
+	}
+	padded := PlayerID(append(append([]byte{}, account[:]...), make([]byte, IDSize-AccountIDSize)...))
+	if padded == id {
+		t.Error("the player id is the account padded out rather than hashed")
 	}
 }
 
 func TestPlayerIDFormatsForFileNamesAndForLogs(t *testing.T) {
 	t.Parallel()
 
-	id := IDOf(Token{1, 2, 3})
+	id := IDOf(testAccount(4))
 
 	full := id.String()
 	if len(full) != 2*IDSize {
@@ -161,62 +117,77 @@ func TestPlayerIDFormatsForFileNamesAndForLogs(t *testing.T) {
 	}
 }
 
-func TestATokenNeverRendersItsBytes(t *testing.T) {
+// The rule the acceptance criterion states as "no account id reaches a log line", held
+// as a property of the type rather than as a habit at every call site.
+//
+// Four routes out, and the last two are each one the others do not cover. The JSON
+// handler would hand a [16]byte to encoding/json and write the account out as an array
+// of 16 numbers, which a Stringer never sees; `%#v` walks the array by reflection and
+// prints `0x1f, 0x3e, …`, which neither a Stringer nor a LogValuer sees — the route
+// `ticket.Pair` leaked a signing key through while its own guard was green.
+func TestAnAccountNeverRendersItsBytes(t *testing.T) {
 	t.Parallel()
 
-	token, err := NewToken()
+	account := testAccount(5)
+
+	var text, jsonOut strings.Builder
+	slog.New(slog.NewTextHandler(&text, nil)).Info("handshake", "account", account)
+	slog.New(slog.NewJSONHandler(&jsonOut, nil)).Info("handshake", "account", account)
+
+	marshalled, err := json.Marshal(account)
 	if err != nil {
-		t.Fatalf("NewToken: %v", err)
+		t.Fatalf("marshalling the account: %v", err)
 	}
 
-	// Every renderer that could reach a log line or an error string. The JSON handler
-	// is the one that String alone does not cover: without LogValue it would hand the
-	// [32]byte to encoding/json and write the token out as an array of 32 numbers.
-	var text, jsonOut strings.Builder
-	slog.New(slog.NewTextHandler(&text, nil)).Info("handshake", "token", token)
-	slog.New(slog.NewJSONHandler(&jsonOut, nil)).Info("handshake", "token", token)
-
 	renderings := map[string]string{
-		"%v":           fmt.Sprintf("%v", token),
-		"String":       token.String(),
-		"Sprint":       fmt.Sprint(token),
-		"error string": fmt.Errorf("refusing %v", token).Error(),
+		// %v and %#v, and not %s beside them: %s reaches the same Stringer %v does, so
+		// it is the same route twice, and staticcheck is right that writing it out is
+		// a Sprintf where a String call would do. %#v is the route neither covers.
+		"%v":           fmt.Sprintf("%v", account),
+		"%#v":          fmt.Sprintf("%#v", account),
+		"String":       account.String(),
+		"Sprint":       fmt.Sprint(account),
+		"error string": fmt.Errorf("refusing %v", account).Error(),
 		"slog text":    text.String(),
 		"slog json":    jsonOut.String(),
+		"json":         string(marshalled),
+	}
+
+	// Every shape the bytes could take on the way out. The raw form is checked too: a
+	// renderer that wrote the array through fmt would put them there verbatim.
+	asNumbers, err := json.Marshal([AccountIDSize]byte(account))
+	if err != nil {
+		t.Fatalf("marshalling the comparison value: %v", err)
+	}
+	leaks := map[string]string{
+		"hex":             hex.EncodeToString(account[:]),
+		"raw bytes":       string(account[:]),
+		"a JSON array":    string(asNumbers),
+		"%#v's byte list": fmt.Sprintf("%#v", [AccountIDSize]byte(account)),
 	}
 
 	for name, rendered := range renderings {
 		if !strings.Contains(rendered, redacted) {
-			t.Errorf("%s rendered %q, which does not redact the token", name, rendered)
+			t.Errorf("%s rendered %q, which does not redact the account", name, rendered)
 		}
-		if strings.Contains(rendered, hex.EncodeToString(token[:])) {
-			t.Errorf("%s leaked the token as hex", name)
-		}
-		// The JSON handler's shape, had LogValue not caught it: the bytes as numbers.
-		asNumbers, err := json.Marshal([TokenSize]byte(token))
-		if err != nil {
-			t.Fatalf("marshalling the comparison value: %v", err)
-		}
-		if strings.Contains(rendered, string(asNumbers)) {
-			t.Errorf("%s leaked the token as a JSON array of bytes", name)
+		for shape, leaked := range leaks {
+			if strings.Contains(rendered, leaked) {
+				// The leaked value is deliberately not quoted back: a failure means the
+				// rendering holds an account, and this repository's CI log is public.
+				t.Errorf("%s leaked the account as %s", name, shape)
+			}
 		}
 	}
 }
 
-func TestEqualComparesTokens(t *testing.T) {
+func TestIsZeroNamesTheAccountNoTicketMayCarry(t *testing.T) {
 	t.Parallel()
 
-	token, err := NewToken()
-	if err != nil {
-		t.Fatalf("NewToken: %v", err)
+	var none Account
+	if !none.IsZero() {
+		t.Error("the zero account does not report itself as zero")
 	}
-	if !token.Equal(token) {
-		t.Error("a token does not equal itself")
-	}
-
-	other := token
-	other[TokenSize-1] ^= 0x80
-	if token.Equal(other) {
-		t.Error("two different tokens compared equal")
+	if testAccount(6).IsZero() {
+		t.Error("an account with bytes in it reports itself as zero")
 	}
 }

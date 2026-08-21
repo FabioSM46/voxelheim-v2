@@ -472,8 +472,8 @@ type Claims struct {
 
 // Ticket is one signed ticket: the [Size] bytes `ClientHello.session_ticket` carries.
 //
-// A fixed-size array rather than a slice, for the reason `identity.Token` is one: it is
-// copied by assignment, two of them cannot alias, and no caller can hand around a
+// A fixed-size array rather than a slice, for the reason `identity.Account` is one: it
+// is copied by assignment, two of them cannot alias, and no caller can hand around a
 // 95-byte one.
 //
 // **A bearer credential, and treated as one here.** Whatever holds these bytes can make
@@ -557,8 +557,8 @@ func (t Ticket) GoString() string { return redactedTicket }
 // LogValue redacts a ticket that reaches a log line, and it is not the same defence as
 // String: slog resolves a LogValuer before either handler formats anything, and without
 // it -log-format json would hand a [96]byte to encoding/json and write the ticket out as
-// an array of 96 numbers. This is the trap `identity.Token` documents, arriving here at
-// three times the width.
+// an array of 96 numbers. This is the trap `identity.Account` documents, arriving here
+// at six times the width.
 func (t Ticket) LogValue() slog.Value { return slog.StringValue(redactedTicket) }
 
 // MarshalJSON redacts a ticket that reaches encoding/json — a struct that happens to

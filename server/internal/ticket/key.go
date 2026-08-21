@@ -123,7 +123,7 @@ const redactedSigningKey = "ticket.SigningKey(redacted)"
 // any account on any world, and there is no revocation to undo it with.
 //
 // **A struct with an unexported field, which is stronger than the named types this
-// repository redacts elsewhere.** `identity.Token` and `discord.Secret` are a named
+// repository redacts elsewhere.** `identity.Account` and `discord.Secret` are a named
 // array and a named string, so a conversion gets the value back out; this one has no
 // conversion, no accessor and no `Reveal`. The only thing anybody can do with it is ask
 // it to sign, which is the whole of what a signing key is for. There is deliberately no
@@ -454,8 +454,8 @@ func (p Pair) GoString() string { return p.String() }
 // **All four of this type's renderings take a value receiver, and that is the defence
 // rather than a style choice.** A method set on *Pair leaves a Pair *value* implementing
 // neither fmt.Stringer nor slog.LogValuer, and a caller holds one after nothing more
-// exotic than a dereference. `identity.Token` and `discord.Secret` are declared the same
-// way for the same reason; a value receiver covers both a value and a pointer, and a
+// exotic than a dereference. `identity.Account` and `discord.Secret` are declared the
+// same way for the same reason; a value receiver covers both a value and a pointer, and a
 // pointer receiver covers only half of the calls that will actually be made.
 func (p Pair) LogValue() slog.Value { return slog.StringValue(p.String()) }
 

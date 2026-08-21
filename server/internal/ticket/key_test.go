@@ -472,9 +472,9 @@ func TestASigningKeyRedactsItselfWhateverFormatterReachesIt(t *testing.T) {
 // visible in a test that checks for a leak, which is why the disclosure is asserted below
 // as well as the secrecy.
 //
-// [discord.Secret] and [identity.Token] both take value receivers already; Pair was the
-// only redacting type in this repository that did not, and the comment above LogValue
-// asserted the opposite.
+// [discord.Secret] and `identity.Account` both take value receivers already; Pair was
+// the only redacting type in this repository that did not, and the comment above
+// LogValue asserted the opposite.
 func TestAPairIsRedactedWhenItIsPassedByValue(t *testing.T) {
 	t.Parallel()
 

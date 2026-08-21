@@ -3,6 +3,7 @@ package session_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -14,27 +15,52 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
-// knownIdentities is a claim set over a real player store that already holds a
-// record for each token given, so those tokens resume rather than mint.
-func knownIdentities(t *testing.T, known ...identity.Token) (*session.Identities, *persist.Store) {
+// knownIdentities is a claim set over a real player store that already holds a record
+// for each account given, so those accounts resume rather than arrive with nothing.
+func knownIdentities(t *testing.T, known ...ticket.AccountID) (*session.Identities, *persist.Store) {
 	t.Helper()
 
 	store, err := persist.OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	for _, token := range known {
-		if err := store.Save(identity.IDOf(token), livingRecord("Eivor")); err != nil {
+	for _, account := range known {
+		if err := store.Save(testPlayerID(account), livingRecord("Eivor")); err != nil {
 			t.Fatalf("seeding a record: %v", err)
 		}
 	}
-	return session.NewIdentities(store, nil), store
+	return identitiesOver(store), store
+}
+
+// identitiesWith is a claim set admitting whatever verifier describes, for the tests
+// that are about a *different* account service: another key, another world, another
+// clock.
+func identitiesWith(t *testing.T, verifier *session.Verifier) *session.Identities {
+	t.Helper()
+
+	identities, err := session.NewIdentities(nil, verifier, nil)
+	if err != nil {
+		t.Fatalf("NewIdentities: %v", err)
+	}
+	return identities
+}
+
+// verifierAt is a verifier for the package's own key and world, reading a clock the
+// caller chose.
+func verifierAt(t *testing.T, now time.Time) *session.Verifier {
+	t.Helper()
+
+	verifier, err := session.NewVerifier(testPair.Public(), testWorld, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	return verifier
 }
 
 // livingRecord is the smallest record this build will resume: a living player, at a
@@ -53,11 +79,12 @@ func livingRecord(name string) persist.Record {
 	}
 }
 
-// helloWith decodes a hello carrying token, which is what Resolve takes.
-func helloWith(t *testing.T, token []byte) *protocol.ClientHello {
+// helloCarrying decodes a hello presenting raw as its session ticket, which is what
+// Resolve takes. raw may be any length, including none.
+func helloCarrying(t *testing.T, raw []byte) *protocol.ClientHello {
 	t.Helper()
 
-	msg, err := protocol.Decode(protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token))
+	msg, err := protocol.Decode(protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", raw))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -77,166 +104,419 @@ func refusalReason(t *testing.T, err error) vnet.RejectReason {
 	return refused.Reason
 }
 
-func TestResolveIdentity(t *testing.T) {
+// refusalDetail is what the client is told, which is the half of a refusal that must
+// be the same sentence whatever went wrong.
+func refusalDetail(t *testing.T, err error) string {
+	t.Helper()
+
+	var refused *session.Refused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error %v is not a refusal with a reason code", err)
+	}
+	return refused.Detail
+}
+
+func TestResolveAPlayer(t *testing.T) {
 	t.Parallel()
 
-	t.Run("an empty token mints a new identity", func(t *testing.T) {
+	t.Run("a valid ticket names the account's player", func(t *testing.T) {
 		t.Parallel()
 
+		account := testAccount(1)
 		identities, _ := knownIdentities(t)
 
-		resolved, err := identities.Resolve(helloWith(t, nil))
+		resolved, err := identities.Resolve(helloCarrying(t, testTicket(account)))
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
+		// The whole of the new model in one assertion: who this is was decided by
+		// whoever signed the ticket, and this server computed the name from it.
+		if resolved.ID != testPlayerID(account) {
+			t.Error("the resolved player is not the one the ticket's account names")
+		}
 		if resolved.Returning {
-			t.Error("a client that presented nothing was reported as returning")
+			t.Error("a player with no stored record was reported as returning")
 		}
-		if resolved.Token == (identity.Token{}) {
-			t.Fatal("the minted token is the zero token")
-		}
-		if resolved.ID != identity.IDOf(resolved.Token) {
-			t.Error("the resolved id is not the hash of the resolved token")
+		if resolved.Life != nil {
+			t.Error("a player with no stored record arrived with a life")
 		}
 	})
 
-	t.Run("a known token resumes that identity", func(t *testing.T) {
+	t.Run("a stored record resumes that player", func(t *testing.T) {
 		t.Parallel()
 
-		token := testToken(2)
-		identities, _ := knownIdentities(t, token)
+		account := testAccount(2)
+		identities, _ := knownIdentities(t, account)
 
-		resolved, err := identities.Resolve(helloWith(t, token[:]))
+		resolved, err := identities.Resolve(helloCarrying(t, testTicket(account)))
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
 		if !resolved.Returning {
-			t.Error("a token the store knows was not reported as returning")
+			t.Error("an account the store holds a record for was not reported as returning")
 		}
-		if !resolved.Token.Equal(token) {
-			t.Error("a resumed identity was answered with a different token")
+		if resolved.Life == nil {
+			t.Fatal("a returning player arrived with no life")
 		}
-		if resolved.ID != identity.IDOf(token) {
-			t.Error("a resumed identity has a different player id")
-		}
-	})
-
-	t.Run("an unknown token mints a new token rather than adopting it", func(t *testing.T) {
-		t.Parallel()
-
-		// The rule that keeps every token in circulation one this server minted: a
-		// client cannot choose who it is by inventing 32 bytes.
-		presented := testToken(3)
-		identities, _ := knownIdentities(t)
-
-		resolved, err := identities.Resolve(helloWith(t, presented[:]))
-		if err != nil {
-			t.Fatalf("Resolve: %v", err)
-		}
-		if resolved.Returning {
-			t.Error("a token the store has never seen was reported as returning")
-		}
-		if resolved.Token.Equal(presented) {
-			t.Fatal("the presented token was adopted as this identity's key")
-		}
-		if resolved.ID == identity.IDOf(presented) {
-			t.Error("the identity is the one the client asked for")
+		if resolved.ID != testPlayerID(account) {
+			t.Error("a resumed player has a different player id")
 		}
 	})
 
-	t.Run("a wrong-length token is BAD_REQUEST", func(t *testing.T) {
+	t.Run("a second ticket for one account is ALREADY_CONNECTED", func(t *testing.T) {
 		t.Parallel()
 
-		for _, size := range []int{1, 7, 31, 33, 64} {
-			identities, _ := knownIdentities(t)
+		// **The claim moved to the account**, which is what makes this test different
+		// from the one it replaces: the two tickets below are *different bytes*, minted
+		// separately, exactly as two machines signing in would present. What they share
+		// is the account, and that is now the thing that cannot be in two places.
+		account := testAccount(3)
+		identities, _ := knownIdentities(t, account)
 
-			_, err := identities.Resolve(helloWith(t, make([]byte, size)))
-			if err == nil {
-				t.Fatalf("a %d-byte token was accepted", size)
-			}
-			if got := refusalReason(t, err); got != vnet.RejectReasonBAD_REQUEST {
-				t.Errorf("a %d-byte token was refused with %s, want BAD_REQUEST", size, got)
-			}
-			// Decided before any identity is looked up, so nothing was claimed.
-			if identities.Count() != 0 {
-				t.Errorf("a %d-byte token left an identity claimed", size)
-			}
-		}
-	})
-
-	t.Run("an identity that is already playing is ALREADY_CONNECTED", func(t *testing.T) {
-		t.Parallel()
-
-		token := testToken(4)
-		identities, _ := knownIdentities(t, token)
-
-		first, err := identities.Resolve(helloWith(t, token[:]))
+		first, err := identities.Resolve(helloCarrying(t, testTicket(account)))
 		if err != nil {
 			t.Fatalf("the first Resolve: %v", err)
 		}
 
-		_, err = identities.Resolve(helloWith(t, token[:]))
+		// A second ticket minted a minute later, which is what two machines signing in
+		// present: different bytes, one account. Identical bytes would let this test
+		// pass on a rule about tickets rather than the rule about accounts.
+		second := testTicketAt(account, time.Now().Add(time.Minute))
+		if bytes.Equal(second, testTicket(account)) {
+			t.Fatal("the two tickets are the same bytes, so this test would pass on the bytes rather than the account")
+		}
+		_, err = identities.Resolve(helloCarrying(t, second))
 		if err == nil {
-			t.Fatal("a second session on one identity was admitted")
+			t.Fatal("a second session on one account was admitted")
 		}
 		if got := refusalReason(t, err); got != vnet.RejectReasonALREADY_CONNECTED {
 			t.Errorf("the second hello was refused with %s, want ALREADY_CONNECTED", got)
 		}
 		if identities.Count() != 1 {
-			t.Errorf("%d identities are live, want the one that was admitted", identities.Count())
+			t.Errorf("%d players are live, want the one that was admitted", identities.Count())
 		}
 
 		// And it is free again once the session that held it releases.
 		identities.Release(first.ID)
-		if _, err := identities.Resolve(helloWith(t, token[:])); err != nil {
-			t.Fatalf("the identity was not free after Release: %v", err)
+		if _, err := identities.Resolve(helloCarrying(t, testTicket(account))); err != nil {
+			t.Fatalf("the account was not free after Release: %v", err)
 		}
 	})
 
-	t.Run("two clients presenting nothing get different identities", func(t *testing.T) {
+	t.Run("two accounts are two players", func(t *testing.T) {
 		t.Parallel()
 
 		identities, _ := knownIdentities(t)
 
-		first, err := identities.Resolve(helloWith(t, nil))
+		first, err := identities.Resolve(helloCarrying(t, testTicket(testAccount(4))))
 		if err != nil {
 			t.Fatalf("the first Resolve: %v", err)
 		}
-		second, err := identities.Resolve(helloWith(t, nil))
+		second, err := identities.Resolve(helloCarrying(t, testTicket(testAccount(5))))
 		if err != nil {
 			t.Fatalf("the second Resolve: %v", err)
 		}
 		if first.ID == second.ID {
-			t.Error("two minted identities collided, so the exclusivity rule could never fire")
+			t.Error("two accounts resolved to one player, so the exclusivity rule could never fire")
 		}
 	})
 
-	t.Run("an ephemeral world mints and never resumes", func(t *testing.T) {
+	t.Run("an ephemeral world admits and never resumes", func(t *testing.T) {
 		t.Parallel()
 
-		// No store: minting and exclusivity still work, nothing is written, and a
-		// presented token is therefore never known.
-		identities := session.NewIdentities(nil, nil)
-		token := testToken(5)
+		// No store: verification and exclusivity still work, nothing is written, and no
+		// life is ever found. **The account still names the same player**, which is what
+		// changed here: an ephemeral world costs a returning player their life, and no
+		// longer costs them their name.
+		identities := ephemeralIdentities()
+		account := testAccount(6)
 
-		resolved, err := identities.Resolve(helloWith(t, token[:]))
+		resolved, err := identities.Resolve(helloCarrying(t, testTicket(account)))
 		if err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
-		if resolved.Returning || resolved.Token.Equal(token) {
-			t.Error("an ephemeral world resumed an identity it cannot have stored")
+		if resolved.Returning || resolved.Life != nil {
+			t.Error("an ephemeral world resumed a life it cannot have stored")
+		}
+		if resolved.ID != testPlayerID(account) {
+			t.Error("an ephemeral world gave the account a different player id")
 		}
 	})
 }
 
-// TestServeRefusesASecondSessionOnOneIdentity is the rule end to end, through the
-// whole connection lifetime rather than through Resolve alone — because the half
-// that is easy to get wrong is not the refusal, it is the release.
-func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
+// The refusals, each verified in the direction that fails, and each one distinguishable
+// from the others **only** to whoever is reading the log.
+//
+// The two halves of that are the two assertions every case makes: the cause is the
+// sentinel that names what went wrong, and the detail is the one sentence every case
+// shares. A build that told the client which of these five it was would pass the first
+// assertion and fail the second, which is the direction that matters — an oracle is
+// added by making a message more helpful.
+func TestATicketThisServerWillNotAdmitIsRefused(t *testing.T) {
 	t.Parallel()
 
-	token := testToken(6)
-	identities, _ := knownIdentities(t, token)
+	foreign, err := ticket.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	foreignTicket, _, err := foreign.Mint(testAccount(7), testWorld, time.Now())
+	if err != nil {
+		t.Fatalf("Mint with another key: %v", err)
+	}
+
+	elsewhere, err := ticket.WorldIDFor("asgard")
+	if err != nil {
+		t.Fatalf("WorldIDFor: %v", err)
+	}
+	elsewhereVerifier, err := session.NewVerifier(testPair.Public(), elsewhere, nil)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	accountTicket, _, err := testPair.MintAccountTicket(testAccount(8), time.Now())
+	if err != nil {
+		t.Fatalf("MintAccountTicket: %v", err)
+	}
+
+	tampered := testTicket(testAccount(9))
+	tampered[0] ^= 0x01
+
+	cases := map[string]struct {
+		identities *session.Identities
+		presented  []byte
+		want       error
+	}{
+		// Malformed, in the two shapes a client can produce without a signing key: a
+		// ticket that is not the right length at all, and 96 bytes that are not a
+		// ticket. The first is refused from a comparison before anything is verified;
+		// the second gets as far as the signature and no further.
+		"no ticket at all":      {presented: nil, want: session.ErrTicketAbsent},
+		"an empty ticket":       {presented: []byte{}, want: session.ErrTicketAbsent},
+		"one byte short":        {presented: make([]byte, protocol.SessionTicketLen-1), want: session.ErrTicketLength},
+		"one byte too many":     {presented: make([]byte, protocol.SessionTicketLen+1), want: session.ErrTicketLength},
+		"ninety-six zeroes":     {presented: make([]byte, protocol.SessionTicketLen), want: ticket.ErrBadSignature},
+		"a tampered ticket":     {presented: tampered, want: ticket.ErrBadSignature},
+		"signed by another key": {presented: foreignTicket[:], want: ticket.ErrBadSignature},
+
+		// Issued for another world, in both of its shapes. A ticket for somebody else's
+		// world is what stops one operator replaying their players' tickets here; an
+		// account ticket names *no* world and is a credential for talking to the account
+		// service rather than for joining a game.
+		"issued for another world": {
+			identities: identitiesWith(t, elsewhereVerifier),
+			presented:  testTicket(testAccount(10)),
+			want:       ticket.ErrWrongWorld,
+		},
+		"an account ticket, naming no world": {presented: accountTicket[:], want: ticket.ErrWrongWorld},
+	}
+
+	// Expired is the one case that needs a clock rather than a fixture: the ticket is
+	// perfectly good and this server is reading the time on the far side of its life.
+	cases["expired"] = struct {
+		identities *session.Identities
+		presented  []byte
+		want       error
+	}{
+		identities: identitiesWith(t, verifierAt(t, time.Now().Add(ticket.Lifetime+time.Minute))),
+		presented:  testTicket(testAccount(11)),
+		want:       ticket.ErrExpired,
+	}
+
+	details := make(map[string]string, len(cases))
+	var mu sync.Mutex
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			identities := tc.identities
+			if identities == nil {
+				// A store that holds a record for every account these cases use, so a
+				// refusal that ran *after* the lookup would be visible as a resumed
+				// session rather than as an equally red test.
+				identities, _ = knownIdentities(t,
+					testAccount(7), testAccount(8), testAccount(9), testAccount(10), testAccount(11))
+			}
+
+			resolved, err := identities.Resolve(helloCarrying(t, tc.presented))
+			if err == nil {
+				t.Fatal("the ticket was admitted")
+			}
+			if !errors.Is(err, tc.want) {
+				t.Errorf("the refusal is %v, which does not name %v", err, tc.want)
+			}
+			if got := refusalReason(t, err); got != vnet.RejectReasonBAD_REQUEST {
+				t.Errorf("Reason = %s, want BAD_REQUEST", got)
+			}
+			if resolved != (session.Resolved{}) {
+				t.Error("Resolve returned a player beside its refusal")
+			}
+			// Nothing was claimed, which is the observable half of "nothing is looked up
+			// for a ticket nobody vouched for".
+			if identities.Count() != 0 {
+				t.Error("a refused ticket left a player claimed")
+			}
+
+			mu.Lock()
+			details[name] = refusalDetail(t, err)
+			mu.Unlock()
+		})
+	}
+
+	t.Cleanup(func() {
+		// Collected across the subtests and compared once: every one of them tells the
+		// client the same sentence. Skipped rather than failed when a subtest did not
+		// record one, because that subtest has already failed and this would only
+		// report it twice.
+		if len(details) != len(cases) {
+			return
+		}
+		var first, firstName string
+		for name, detail := range details {
+			if firstName == "" {
+				first, firstName = detail, name
+				continue
+			}
+			if detail != first {
+				t.Errorf("%q is told %q and %q is told %q; a client that can tell two refusals apart "+
+					"can ask this server about tickets it was never shown", name, detail, firstName, first)
+			}
+		}
+	})
+}
+
+// The refusal names no part of the ticket, in any encoding.
+//
+// A ticket is a bearer credential and a refusal is the first thing anybody reads out of
+// a log, so this is the same rule the whole handshake is held to, asked of the one
+// string this server composes about a ticket it turned away.
+func TestATicketRefusalCarriesNothingOfTheTicket(t *testing.T) {
+	t.Parallel()
+
+	identities, _ := knownIdentities(t)
+	presented := testTicket(testAccount(12))
+
+	_, err := identities.Resolve(helloCarrying(t, presented[:protocol.SessionTicketLen-1]))
+	if err == nil {
+		t.Fatal("a wrong-length ticket was admitted")
+	}
+
+	var refused *session.Refused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error %v is not a refusal with a reason code", err)
+	}
+	// Both halves: what reaches the client, and what reaches the log.
+	for what, text := range map[string]string{"the detail": refused.Detail, "the cause": refused.Cause.Error()} {
+		for encoding, rendered := range map[string]string{
+			"hex":       hex.EncodeToString(presented),
+			"base64":    base64.StdEncoding.EncodeToString(presented),
+			"base64url": base64.RawURLEncoding.EncodeToString(presented),
+			"raw bytes": string(presented),
+		} {
+			if strings.Contains(text, rendered) {
+				t.Errorf("%s carries the ticket as %s", what, encoding)
+			}
+		}
+	}
+	// The cause is allowed to say how long it was, and it is the only thing about the
+	// ticket it may say. Asserted so that a cause which said nothing at all — leaving an
+	// operator with five identical lines — would fail here.
+	if !strings.Contains(refused.Cause.Error(), "95") {
+		t.Errorf("the cause %q does not say what was wrong", refused.Cause.Error())
+	}
+}
+
+// The wire half of the same rule, driven through a whole connection: five reasons to be
+// turned away, one frame.
+//
+// Through Serve rather than through Resolve because the frame is what a client sees, and
+// the frame is composed one layer out from the refusal. A detail that leaked the reason
+// would have to leak it here.
+func TestEveryRefusedTicketLeavesTheSameFrame(t *testing.T) {
+	t.Parallel()
+
+	foreign, err := ticket.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	foreignTicket, _, err := foreign.Mint(testAccount(13), testWorld, time.Now())
+	if err != nil {
+		t.Fatalf("Mint with another key: %v", err)
+	}
+	stale, _, err := testPair.Mint(testAccount(14), testWorld, time.Now().Add(-ticket.Lifetime-time.Minute))
+	if err != nil {
+		t.Fatalf("Mint an expired ticket: %v", err)
+	}
+	otherWorld, err := ticket.WorldIDFor("asgard")
+	if err != nil {
+		t.Fatalf("WorldIDFor: %v", err)
+	}
+	wrongWorld, _, err := testPair.Mint(testAccount(15), otherWorld, time.Now())
+	if err != nil {
+		t.Fatalf("Mint for another world: %v", err)
+	}
+
+	presented := map[string][]byte{
+		"absent":        nil,
+		"malformed":     make([]byte, protocol.SessionTicketLen-1),
+		"another key":   foreignTicket[:],
+		"expired":       stale[:],
+		"another world": wrongWorld[:],
+		"not a ticket":  make([]byte, protocol.SessionTicketLen),
+	}
+
+	frames := make(map[string][]byte, len(presented))
+	for name, raw := range presented {
+		chunks, sim, peers := serveDeps(t)
+		conn := newFakeConn()
+		done := make(chan error, 1)
+		go func() {
+			done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(),
+				chunks, sim, peers, ephemeralIdentities(), 1, discard())
+		}()
+
+		conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", raw)
+		frame := nextFrame(t, conn)
+		env := vnet.GetRootAsEnvelope(frame, 0)
+		if env.PayloadType() != vnet.PayloadServerReject {
+			t.Fatalf("%s got %s, want a rejection", name, env.PayloadType())
+		}
+		if got := rejectFrom(t, env).Reason(); got != vnet.RejectReasonBAD_REQUEST {
+			t.Errorf("%s was refused with %s, want BAD_REQUEST", name, got)
+		}
+		frames[name] = bytes.Clone(frame)
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s: Serve returned %v, want nil for a refused handshake", name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: Serve did not return", name)
+		}
+	}
+
+	var reference, referenceName string
+	for name, frame := range frames {
+		if referenceName == "" {
+			reference, referenceName = string(frame), name
+			continue
+		}
+		if string(frame) != reference {
+			t.Errorf("the frame for %q differs from the one for %q; a client can tell the two refusals apart",
+				name, referenceName)
+		}
+	}
+}
+
+// TestServeRefusesASecondSessionOnOneAccount is the rule end to end, through the whole
+// connection lifetime rather than through Resolve alone — because the half that is easy
+// to get wrong is not the refusal, it is the release.
+func TestServeRefusesASecondSessionOnOneAccount(t *testing.T) {
+	t.Parallel()
+
+	account := testAccount(16)
+	identities, _ := knownIdentities(t, account)
 	chunks, sim, peers := serveDeps(t)
 
 	first := newFakeConn()
@@ -245,7 +525,7 @@ func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
 		firstDone <- session.Serve(context.Background(), first, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 1, discard())
 	}()
 
-	first.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token[:])
+	first.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, first), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the first session got %s, want a welcome", got)
 	}
@@ -256,7 +536,9 @@ func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
 		secondDone <- session.Serve(context.Background(), second, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 2, discard())
 	}()
 
-	second.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token[:])
+	// A second ticket, freshly minted for the same account: different bytes, same
+	// person, and it is the person the claim is about.
+	second.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
 	env := vnet.GetRootAsEnvelope(nextFrame(t, second), 0)
 	if env.PayloadType() != vnet.PayloadServerReject {
 		t.Fatalf("the second session got %s, want a rejection", env.PayloadType())
@@ -276,8 +558,8 @@ func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
 	}
 
 	// **The claim is released last, after the session has gone.** Once Serve has
-	// returned, the identity is free — which is what makes a reconnect right after a
-	// disconnect work, and what makes an idle session hand its identity back.
+	// returned, the account is free — which is what makes a reconnect right after a
+	// disconnect work, and what makes an idle session hand its place back.
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -290,7 +572,7 @@ func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
 		t.Fatal("the first session did not return")
 	}
 	if identities.Count() != 0 {
-		t.Fatalf("%d identities are still claimed after every session ended", identities.Count())
+		t.Fatalf("%d players are still claimed after every session ended", identities.Count())
 	}
 
 	third := newFakeConn()
@@ -298,7 +580,7 @@ func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
 	go func() {
 		thirdDone <- session.Serve(context.Background(), third, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 3, discard())
 	}()
-	third.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", token[:])
+	third.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, third), 0).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the reconnect got %s, want a welcome", got)
 	}
@@ -306,7 +588,7 @@ func TestServeRefusesASecondSessionOnOneIdentity(t *testing.T) {
 	<-thirdDone
 }
 
-func TestServeRefusesAWrongLengthToken(t *testing.T) {
+func TestServeRefusesAConnectionWithNoTicket(t *testing.T) {
 	t.Parallel()
 
 	identities, _ := knownIdentities(t)
@@ -318,18 +600,15 @@ func TestServeRefusesAWrongLengthToken(t *testing.T) {
 		done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 4, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", make([]byte, 7))
+	// The hello a V6 client sends: a display name and nothing else. It is a legal
+	// message and this server admits nobody it cannot name.
+	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
 	env := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0)
 	if env.PayloadType() != vnet.PayloadServerReject {
 		t.Fatalf("reply is %s, want a rejection", env.PayloadType())
 	}
-	reject := rejectFrom(t, env)
-	if got := reject.Reason(); got != vnet.RejectReasonBAD_REQUEST {
+	if got := rejectFrom(t, env).Reason(); got != vnet.RejectReasonBAD_REQUEST {
 		t.Errorf("Reason = %s, want BAD_REQUEST", got)
-	}
-	// The refusal says how long the token was and nothing about what was in it.
-	if detail := string(reject.Detail()); !strings.Contains(detail, "7") {
-		t.Errorf("Detail %q does not say what was wrong", detail)
 	}
 
 	select {
@@ -341,19 +620,62 @@ func TestServeRefusesAWrongLengthToken(t *testing.T) {
 		t.Fatal("Serve did not return after refusing the handshake")
 	}
 	if identities.Count() != 0 {
-		t.Error("a refused handshake left an identity claimed")
+		t.Error("a refused handshake left a player claimed")
 	}
 	if sim.Count() != 0 {
 		t.Error("a refused handshake joined the simulation")
 	}
 }
 
+// The retired field is ignored on the way in, whatever is in it.
+//
+// schemas/handshake.fbs retires `player_token` at V7 and says a V7 server reads past
+// it; this is that sentence as a test. The lengths below include the ones a V6 server
+// refused as BAD_REQUEST, because "reads past it" has to mean the length too — a rule
+// that survived would be a V6 rule refusing a V7 client for a field neither of them
+// uses.
+func TestTheRetiredTokenFieldIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	account := testAccount(17)
+	for name, token := range map[string][]byte{
+		"no token":              nil,
+		"an empty token":        {},
+		"a V6-length token":     bytes.Repeat([]byte{0x5C}, protocol.PlayerTokenLen),
+		"a wrong-length token":  bytes.Repeat([]byte{0x5C}, 7),
+		"a ticket-length token": bytes.Repeat([]byte{0x5C}, protocol.SessionTicketLen),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			identities, _ := knownIdentities(t, account)
+			msg, err := protocol.Decode(protocol.EncodeClientHelloFull(
+				vnet.ProtocolVersionCurrent, "Eivor", token, testTicket(account)))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+
+			resolved, err := identities.Resolve(msg.ClientHello)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if resolved.ID != testPlayerID(account) {
+				t.Error("the retired token changed which player resolved")
+			}
+			if !resolved.Returning {
+				t.Error("the retired token changed whether the stored life was found")
+			}
+		})
+	}
+}
+
 // TestAPlayerComesBackAsThemselves is the whole point of the issue, in one test: a
-// session ends, its record is written, and the token it was given brings the same
-// identity back.
+// session ends, its record is written, and the **account** brings the same player back
+// — with a ticket this server has never seen before.
 func TestAPlayerComesBackAsThemselves(t *testing.T) {
 	t.Parallel()
 
+	account := testAccount(18)
 	identities, store := knownIdentities(t)
 	chunks, sim, peers := serveDeps(t)
 
@@ -363,9 +685,10 @@ func TestAPlayerComesBackAsThemselves(t *testing.T) {
 		firstDone <- session.Serve(context.Background(), first, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 1, discard())
 	}()
 
-	// A first connection presents nothing and is answered with a minted token.
-	first.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	minted := welcomeToken(t, nextFrame(t, first))
+	first.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, first), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the first session got %s, want a welcome", got)
+	}
 
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -375,12 +698,8 @@ func TestAPlayerComesBackAsThemselves(t *testing.T) {
 	}
 
 	// The record is written in teardown, before the claim is released — so by the time
-	// Serve has returned it is readable.
-	token, err := identity.TokenFrom(minted)
-	if err != nil {
-		t.Fatalf("the welcome carried a token of the wrong length: %v", err)
-	}
-	rec, found, err := store.Load(identity.IDOf(token))
+	// Serve has returned it is readable, under the name the account resolves to.
+	rec, found, err := store.Load(testPlayerID(account))
 	if err != nil || !found {
 		t.Fatalf("the player's record was not written: %v (found %v)", err, found)
 	}
@@ -397,9 +716,12 @@ func TestAPlayerComesBackAsThemselves(t *testing.T) {
 		secondDone <- session.Serve(context.Background(), second, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 2, discard())
 	}()
 
-	second.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", minted)
-	if got := welcomeToken(t, nextFrame(t, second)); !bytes.Equal(got, minted) {
-		t.Error("the returning client was answered with a different token")
+	// A different ticket, the same person. Nothing the first session handed the client
+	// is presented here, because there no longer is anything: what makes this the same
+	// player is the account the account service signed.
+	second.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, second), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the returning client got %s, want a welcome", got)
 	}
 
 	_ = second.Close()
@@ -426,20 +748,25 @@ func (w *syncWriter) String() string {
 	return w.buf.String()
 }
 
-// TestTheTokenNeverReachesTheLog captures everything a full handshake logs, at every
-// level, and looks for the token in every encoding a leak could take.
+// TestTheCredentialNeverReachesTheLog captures everything a full handshake logs, at
+// every level, and looks for the credential in every encoding a leak could take.
 //
-// It is a test about a rule rather than about a line: the token is a bearer
-// credential on a transport that does not protect it, so a log file naming one is a
-// log file that hands the identity to whoever can read it. Both handlers, because
-// the JSON one is the one a Stringer would not have saved — it would have written a
-// [32]byte out as an array of numbers.
-func TestTheTokenNeverReachesTheLog(t *testing.T) {
+// **Extended rather than replaced**, which matters because what it looks for changed
+// while what it proves did not. It used to search for the identity token in both
+// directions — presented and welcomed — and both of those are gone with the minting. It
+// now searches for the three things a V7 handshake handles that must never be written
+// down: the ticket, the account it names, and the signature over it. The two positive
+// assertions are the originals: the log still names the player id, and it still says a
+// session was admitted, because a secrecy test that captured nothing would pass while
+// proving nothing.
+//
+// Both handlers, because the JSON one is the one a Stringer would not have saved — it
+// would write a [16]byte out as an array of numbers.
+func TestTheCredentialNeverReachesTheLog(t *testing.T) {
 	t.Parallel()
 
-	presented := testToken(7)
-	identities, _ := knownIdentities(t, presented)
-	chunks, sim, peers := serveDeps(t)
+	account := testAccount(19)
+	presented := testTicket(account)
 
 	for name, handler := range map[string]func(*syncWriter) slog.Handler{
 		"text": func(w *syncWriter) slog.Handler {
@@ -450,6 +777,9 @@ func TestTheTokenNeverReachesTheLog(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			identities, _ := knownIdentities(t, account)
+			chunks, sim, peers := serveDeps(t)
+
 			out := &syncWriter{}
 			conn := newFakeConn()
 			done := make(chan error, 1)
@@ -458,8 +788,10 @@ func TestTheTokenNeverReachesTheLog(t *testing.T) {
 					chunks, sim, peers, identities, 9, slog.New(handler(out)))
 			}()
 
-			conn.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", presented[:])
-			welcomed := welcomeToken(t, nextFrame(t, conn))
+			conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", presented)
+			if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+				t.Fatalf("the session got %s, want a welcome", got)
+			}
 			conn.in <- encodePlayerInput(1, 1)
 
 			if err := conn.Close(); err != nil {
@@ -479,26 +811,31 @@ func TestTheTokenNeverReachesTheLog(t *testing.T) {
 				t.Fatal("the handshake logged nothing, so this test proves nothing")
 			}
 
-			// Every shape a token could take on its way into a log line, for both the
-			// token the client presented and the one the server answered with. The raw
-			// bytes are checked too: a handler that wrote the array through fmt would put
-			// them there verbatim.
-			for label, token := range map[string][]byte{"presented": presented[:], "welcomed": welcomed} {
+			// The three secrets of a V7 handshake, and the signature separately from the
+			// whole ticket: a log line that carried only the last 64 bytes would still be
+			// signature material, and searching for the ticket alone would not find it.
+			for label, secret := range map[string][]byte{
+				"ticket":    presented,
+				"account":   account[:],
+				"signature": presented[len(presented)-ed25519.SignatureSize:],
+			} {
 				for encoding, rendered := range map[string]string{
-					"hex":       hex.EncodeToString(token),
-					"base64":    base64.StdEncoding.EncodeToString(token),
-					"base64url": base64.RawURLEncoding.EncodeToString(token),
-					"raw bytes": string(token),
+					"hex":       hex.EncodeToString(secret),
+					"base64":    base64.StdEncoding.EncodeToString(secret),
+					"base64url": base64.RawURLEncoding.EncodeToString(secret),
+					"raw bytes": string(secret),
 				} {
 					if strings.Contains(logged, rendered) {
-						t.Errorf("the %s token appears in the log as %s", label, encoding)
+						// The value is not quoted back: a failure means the log holds a
+						// credential, and this repository's CI log is public.
+						t.Errorf("the %s appears in the log as %s", label, encoding)
 					}
 				}
 			}
 
-			// The line that is supposed to be there, naming the identity rather than the
+			// The line that is supposed to be there, naming the player rather than the
 			// credential: eight hex characters of a digest nobody can reverse.
-			short := identity.IDOf(presented).Short()
+			short := testPlayerID(account).Short()
 			if !strings.Contains(logged, short) {
 				t.Errorf("the log does not name the player id %q", short)
 			}
@@ -509,133 +846,66 @@ func TestTheTokenNeverReachesTheLog(t *testing.T) {
 	}
 }
 
-// welcomeToken reads the identity token out of a ServerWelcome frame.
-func welcomeToken(t *testing.T, frame []byte) []byte {
-	t.Helper()
+// A refused handshake writes the same three secrets nowhere either, and it is the path
+// where one would most easily arrive: the refusal is the thing somebody investigates.
+func TestARefusedTicketNeverReachesTheLogEither(t *testing.T) {
+	t.Parallel()
 
-	env := vnet.GetRootAsEnvelope(frame, 0)
-	if env.PayloadType() != vnet.PayloadServerWelcome {
-		t.Fatalf("frame is %s, want a welcome", env.PayloadType())
-	}
-	token := welcomeFrom(t, env).PlayerTokenBytes()
-	if len(token) != identity.TokenSize {
-		t.Fatalf("the welcome carries a %d-byte token, want %d", len(token), identity.TokenSize)
-	}
-	return token
-}
-
-// helloWithTicket decodes a hello carrying both a token and a session ticket, which is
-// what Resolve takes. Either may be nil.
-func helloWithTicket(t *testing.T, token, ticket []byte) *protocol.ClientHello {
-	t.Helper()
-
-	msg, err := protocol.Decode(protocol.EncodeClientHelloFull(vnet.ProtocolVersionCurrent, "Eivor", token, ticket))
+	account := testAccount(20)
+	stale, _, err := testPair.Mint(account, testWorld, time.Now().Add(-ticket.Lifetime-time.Minute))
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("Mint an expired ticket: %v", err)
 	}
-	return msg.ClientHello
-}
 
-// The V7 ticket rule, and the one thing this server does with a ticket today.
-//
-// schemas/handshake.fbs says a session_ticket is absent, empty or exactly
-// SessionTicketLen bytes, and that any other length is BAD_REQUEST "decided before any
-// account is looked up and before any signature is checked". **Before** is the half
-// that needs a test rather than an assertion: the hello below presents a token the
-// store knows perfectly well, so a rule that ran after the lookup would resume that
-// identity and admit the session. It is refused instead, and nothing is claimed.
-func TestAWrongLengthTicketIsRefusedBeforeAnythingIsLookedUp(t *testing.T) {
-	t.Parallel()
+	identities, _ := knownIdentities(t, account)
+	chunks, sim, peers := serveDeps(t)
 
-	for name, size := range map[string]int{
-		"one byte":              1,
-		"one byte short":        protocol.SessionTicketLen - 1,
-		"one byte too many":     protocol.SessionTicketLen + 1,
-		"a token-length ticket": identity.TokenSize,
+	out := &syncWriter{}
+	conn := newFakeConn()
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(),
+			chunks, sim, peers, identities, 9, slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	}()
+
+	conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", stale[:])
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerReject {
+		t.Fatalf("the session got %s, want a rejection", got)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+
+	logged := out.String()
+	for label, secret := range map[string][]byte{
+		"ticket":    stale[:],
+		"account":   account[:],
+		"signature": stale[len(stale)-ed25519.SignatureSize:],
 	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			token := testToken(9)
-			identities, _ := knownIdentities(t, token)
-
-			resolved, err := identities.Resolve(helloWithTicket(t, token[:], make([]byte, size)))
-			if err == nil {
-				t.Fatal("a wrong-length ticket was admitted")
+		for encoding, rendered := range map[string]string{
+			"hex":       hex.EncodeToString(secret),
+			"base64":    base64.StdEncoding.EncodeToString(secret),
+			"base64url": base64.RawURLEncoding.EncodeToString(secret),
+			"raw bytes": string(secret),
+		} {
+			if strings.Contains(logged, rendered) {
+				t.Errorf("the %s appears in the refusal log as %s", label, encoding)
 			}
-			if got := refusalReason(t, err); got != vnet.RejectReasonBAD_REQUEST {
-				t.Errorf("Reason = %s, want BAD_REQUEST", got)
-			}
-			if resolved != (session.Resolved{}) {
-				t.Error("Resolve returned an identity beside its refusal")
-			}
-			// The claim is the observable half of "before anything is looked up": the
-			// presented token names a stored identity, so a rule that ran second would
-			// have resumed and claimed it.
-			if identities.Count() != 0 {
-				t.Error("a refused ticket left an identity claimed")
-			}
-		})
-	}
-}
-
-// The refusal names the length and never the bytes. A ticket is a bearer credential
-// exactly as a token is, and the first thing anybody does with a refusal is read it out
-// of a log.
-func TestATicketRefusalReportsTheLengthAndNeverTheTicket(t *testing.T) {
-	t.Parallel()
-
-	identities, _ := knownIdentities(t)
-	ticket := bytes.Repeat([]byte{0xAB}, 7)
-
-	_, err := identities.Resolve(helloWithTicket(t, nil, ticket))
-	if err == nil {
-		t.Fatal("a wrong-length ticket was admitted")
+		}
 	}
 
-	var refused *session.Refused
-	if !errors.As(err, &refused) {
-		t.Fatalf("error %v is not a refusal with a reason code", err)
+	// And the operator is told which refusal it was, which is the whole reason the
+	// cause is logged at all. Without this the test above could be satisfied by a
+	// server that logged nothing.
+	if !strings.Contains(logged, "handshake refused") {
+		t.Error("the log has no refusal line")
 	}
-	if !strings.Contains(refused.Detail, "7") {
-		t.Errorf("Detail %q does not say what was wrong", refused.Detail)
-	}
-	// Hex and raw, the two shapes a leak takes. Not a two-character needle: "ab" is a
-	// substring of "absent", which is a word this refusal legitimately contains.
-	if strings.Contains(strings.ToLower(refused.Detail), hex.EncodeToString(ticket)) ||
-		strings.Contains(refused.Detail, string(ticket)) {
-		t.Errorf("Detail %q carries the ticket's bytes", refused.Detail)
-	}
-}
-
-// A ticket of the stated length, and no ticket at all, both pass the framing rule
-// untouched — and neither changes which identity is resolved, because this server has
-// not adopted ticket identity. That is the V6 handshake, which is what every consumer
-// in this repository still speaks; the account service is a separate issue.
-func TestALegalTicketDoesNotChangeWhichIdentityResolves(t *testing.T) {
-	t.Parallel()
-
-	for name, ticket := range map[string][]byte{
-		"no ticket at all":     nil,
-		"an empty ticket":      {},
-		"a full-length ticket": bytes.Repeat([]byte{0x5C}, protocol.SessionTicketLen),
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			token := testToken(11)
-			identities, _ := knownIdentities(t, token)
-
-			resolved, err := identities.Resolve(helloWithTicket(t, token[:], ticket))
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
-			if !resolved.Returning {
-				t.Error("a known token did not resume its identity")
-			}
-			if resolved.Token != token {
-				t.Error("the resumed session is playing under a different token")
-			}
-		})
+	if !strings.Contains(logged, "expired") {
+		t.Error("the refusal line does not say which of the five refusals this was")
 	}
 }

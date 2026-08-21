@@ -18,14 +18,14 @@ validation to get wrong.
 
 | Package | Owns | Must not |
 | ------- | ---- | -------- |
-| `cmd/voxelheimd` | flags, logger, listener wiring, signal handling, shutdown | contain game logic |
+| `cmd/voxelheimd` | flags, logger, listener wiring, the one read of the account service's public key, signal handling, shutdown | contain game logic |
 | `cmd/voxelheim-auth` | the account service: its own flags, HTTP route table, port and directory | know anything about the game — it imports no package the simulation uses |
 | `internal/transport` | framing, TCP, TLS, the `Transport`/`Conn` interfaces | know what a frame means |
 | `internal/protocol` | FlatBuffers encode/decode, contract limits | know about connections |
-| `internal/session` | one connection's lifetime, handshake admission, entity ids, the one-session-per-identity claim | decide gameplay outcomes |
+| `internal/session` | one connection's lifetime, handshake admission, ticket verification, entity ids, the one-session-per-account claim | decide gameplay outcomes |
 | `internal/game` | the fixed-rate loop, every player, movement, collision, inventory, snapshots | read or write a socket |
 | `internal/world` | chunks, terrain generation, the RLE codec, the chunk cache, the world directory | know that sessions exist |
-| `internal/identity` | what a player token is, what a player id is, and the one-way hash between them | import anything of ours |
+| `internal/identity` | what an account is, what a player id is, and the one-way hash between them | import anything of ours, or mint anything |
 | `internal/certs` | the server's own TLS certificate: generated once, kept under the world directory | implement any cryptography |
 | `internal/persist` | the player store under `<world-dir>/players/`, the camp in `<world-dir>/structures.bin`, and the world's time of day in `<world-dir>/clock.bin` | be imported by `game` |
 | `internal/auth` | the account store under `<auth-dir>/accounts/`: who a person is, never how they prove it | be imported by anything but `cmd/voxelheim-auth` |
@@ -69,38 +69,64 @@ package can avoid the import would create two truths to keep in step for no bene
   before the payload is read. The ordering is the security property.
 - **Identities come from `session.Registry`, never from the wire.** An id a client can choose is an
   id a client can claim from someone else.
-- **A player token is a credential; a player id is a hash. Never confuse which one you are
-  holding.** The token is 32 bytes of `crypto/rand` the server mints and one client keeps, and
-  whatever holds it *is* that player — so it is never logged, never displayed, never written to
-  disk, and never used as a key. The player id is its SHA-256: it names the same identity, it is
-  what the store keys on and what a log line carries, and it gives nothing away. `identity.Token`
-  carries both a `String` and a `LogValue` that redact it, and the second is not redundant — slog's
-  JSON handler would otherwise marshal the array as 32 numbers, which a Stringer never sees.
-  `TestTheTokenNeverReachesTheLog` captures a whole handshake through both handlers and looks for
-  the token in hex, base64 and raw. **A token comparison, if one is ever needed, is
-  `identity.Token.Equal` and therefore `crypto/subtle`** — nothing on the resolution path needs one,
-  because an identity is found by hashing what was presented and looking *that* up.
-- **The identity resolves on the session goroutine, between the decode and the handshake, and never
+- **A session ticket is a credential; an account is a name; a player id is a hash of it. Never
+  confuse which one you are holding.** The ticket is 96 bytes the account service signed and one
+  client presents, and whatever holds it can make the claim it carries — so it is never logged and
+  never displayed. The account is the sixteen bytes inside it: not a credential, and redacted
+  anyway, because a log naming accounts is a record of who plays here and when they were online.
+  The player id is `SHA-256(playerIDDomain ‖ account)`: it names the same player, it is what the
+  store keys on and what a log line carries, and it gives nothing away. `identity.Account` carries
+  `String`, `GoString`, `LogValue` and `MarshalJSON` that all redact, and none of the four is
+  redundant — slog's JSON handler would marshal the array as 16 numbers, which a Stringer never
+  sees, and `%#v` prints `0x1f, 0x3e, …`, which neither of those sees.
+  `TestTheCredentialNeverReachesTheLog` captures a whole handshake through both handlers and looks
+  for the ticket, the account **and the signature alone** in hex, base64 and raw;
+  `TestARefusedTicketNeverReachesTheLogEither` does the same for the path somebody actually
+  investigates.
+
+  **This replaced a model, and the model is worth knowing because its shape survived.** Through V6
+  a player id was the SHA-256 of a *token this server minted* — 32 bytes of `crypto/rand` handed
+  to one client and presented back. `internal/identity` no longer mints anything and holds no
+  credential at all. What survived is the distance between the two values, because the reason for
+  it never depended on where the first one came from: a log line and a file name should name a
+  player without naming the person.
+- **The player resolves on the session goroutine, between the decode and the handshake, and never
   under `sim.mu`.** Resolution reads the player store, and a tick that waits on a file is a tick
   every connected player misses. `session.Handshake` stays a pure function of its inputs — it is
-  handed the resolved token and is table-tested on the rules that remain — and
-  `session.Identities.Resolve` is where the store lookup, the mint and the exclusivity claim live,
-  tested separately. The four-way rule, in order: a token of any length but 0 or 32 is
-  `BAD_REQUEST`; an empty one mints; a 32-byte one whose record the store holds *and can read*
-  resumes; a 32-byte one it does not know mints a **new** identity with a **new** token, because the
-  server never adopts a client-chosen value as a key. A record it holds and cannot read is the same
-  answer as one it does not have, once the file has been set aside — see the corrupt-record rule
-  under "Known gaps".
+  handed the resolved player and is table-tested on the rules that remain — and
+  `session.Identities.Resolve` is where verification, the store lookup and the exclusivity claim
+  live, tested separately. The rule, in order: a `session_ticket` of any length but 96 is
+  `BAD_REQUEST`, **absent and empty included**, decided before a signature is checked; the ticket
+  is then verified — signature, then world, then expiry, all arithmetic; the account it names
+  becomes a player id and *only then* is the store read; that player is claimed, and one already
+  playing is `ALREADY_CONNECTED`. A record the store holds and cannot read is the same answer as
+  one it does not have, once the file has been set aside — see the corrupt-record rule under
+  "Known gaps", which is where this issue changed something.
 
-  **What `Handshake` is handed is the whole resolved identity, not just the token**, because the
+  **`player_token` is read past entirely, its length included.** `schemas/handshake.fbs` retires
+  the field at V7 and a rule that survived would be a V6 rule refusing a V7 client over a field
+  neither of them uses. `TestTheRetiredTokenFieldIsIgnored` presents every length the old rule
+  refused.
+
+  **What `Handshake` is handed is the whole resolved player, not just an id**, because the
   welcome's `spawn` is the position the player is actually placed at and only the resolved record
   knows it. That is the reason the record loads during resolution: `Handshake` is pure and cannot go
   and find one.
-- **The identity claim is released last in `Serve`'s teardown**, after `sim.Leave` and after the
+- **The protocol version is settled before a ticket is verified**, and `session.unspeakable` is the
+  one implementation both callers ask. Resolution happens between the decode and the welcome, so
+  while the version check lived only inside `Handshake` a client speaking an older protocol —
+  which presents no ticket, because the ticket is what V7 added — was refused *for the ticket* and
+  never told about the version: the one refusal it could act on, replaced by one it cannot. It is
+  also the cheaper question, and it comes before an Ed25519 verification on bytes chosen by a
+  connection nobody has authenticated.
+- **The claim is released last in `Serve`'s teardown**, after `sim.Leave` and after the
   record write: `sim.Leave` → record write → release. Either other order is a reconnect served
   wrongly — refused for a session that has already gone, or handed a record that is still being
   written. It runs on every path out of `Serve`, an expired read deadline included, which is what
-  makes an idle session hand its identity back instead of holding it until a restart.
+  makes an idle session hand its place back instead of holding it until a restart. **The ordering
+  survived the move to the account unchanged**, and it had to: what the claim is keyed by changed,
+  and every reason the order is what it is was about *when* the key is released rather than what it
+  names.
 - **One reader, one writer per connection.** `transport.Conn` promises to survive that and nothing
   more. The writer goroutine keeps draining its queue even after a write fails, because a producer
   blocked on a dead writer is a deadlock.
@@ -187,8 +213,9 @@ package can avoid the import would create two truths to keep in step for no bene
 
 ## The session is encrypted, and that is not a setting
 
-- **There is no plaintext listener and no flag to ask for one.** An identity token is a bearer
-  credential: whatever can read one off the wire can come back as that player. A switch that
+- **There is no plaintext listener and no flag to ask for one.** A session ticket is a bearer
+  credential: whatever can read one off the wire can present it and be that player, because a
+  signature proves who issued a ticket and not who is holding it. A switch that
   turned the encryption off would make that exposure a configuration mistake somebody makes once
   and never notices, because a plaintext session looks correct from both ends. The only setting
   nobody can get wrong is the one that does not exist.
@@ -1133,13 +1160,12 @@ that records it. Two routes, `POST /v1/signin/discord/start` and
   half-succeeded.
 - **Unknown, expired and already-redeemed are one answer.** An error that distinguished them
   would tell whoever is guessing which guesses are getting warmer. Nothing compares a state byte
-  by byte either: it is a map key and the lookup is the whole of the check, which is the shape
-  `internal/identity` resolves a token in.
+  by byte either: it is a map key and the lookup is the whole of the check.
 - **Nothing from the provider is logged, and most of it is never even decoded.** `refresh_token`,
   `expires_in`, `scope` and `email` have no field in the two response structs, so there is no
   value for anything to leak — the scope asked for is `identify`, and the struct agrees with it.
   What *is* held is `discord.Secret`, which redacts through fmt, through log/slog **and** through
-  encoding/json. The third is the addition to `identity.Token`'s two: a `Secret` is a string, so
+  encoding/json — the three `identity.Account` also carries, plus `%#v`: a `Secret` is a string, so
   a struct holding one is something `encoding/json` would otherwise write out verbatim. A
   provider's response body is a third party's text, so a refusal names the HTTP status and
   nothing from the body — and the JSON decode error on the request body is deliberately not
@@ -1269,9 +1295,9 @@ import, which is what shapes almost every rule below.
   key inside it. `Pair` therefore declares its own `GoString`; the outer type has to say so.
   And **every rendering method on a redacting type takes a value receiver**, because a method set
   on `*T` leaves a `T` value implementing neither `fmt.Stringer` nor `slog.LogValuer`, which a
-  caller reaches by nothing more exotic than a dereference. `discord.Secret` and `identity.Token`
-  were already declared that way; `Pair` was the one that was not, and its own doc comment claimed
-  the opposite.
+  caller reaches by nothing more exotic than a dereference. `discord.Secret` was already declared
+  that way, `identity.Account` is declared that way for the same reason, and `Pair` was the one
+  that was not — its own doc comment claimed the opposite.
 - **The redaction test searches the form a leak actually takes.** `renderings()` covers raw, hex,
   base64, base64url, space-joined decimal **and `%#v`'s `0x9c, 0x1f, …`** — the last of which was
   missing, so the one guard that should have caught the `%#v` leak was green while the key sat in
@@ -1329,6 +1355,70 @@ import, which is what shapes almost every rule below.
   every game server holding a copy by hand; rotating would need a way to publish two keys and a
   window in which both verify. Deleting the pair is the whole of the ceremony today, and it costs
   every ticket in flight.
+
+### The doorman, and why it needs no telephone
+
+`cmd/voxelheimd` reads the public key once at startup and `session.Identities.Resolve` verifies a
+signature; nothing on the admission path touches the network again. This is the game server's half
+of the section above, and every rule in it follows from that one sentence.
+
+- **A start with no key is a refusal to start.** Exactly one of `-account-service` (read the key
+  from `GET /v1/ticket-key`) or `-ticket-key` (the key in hex, copied by hand) is required, and
+  `-world-name` is required beside them. The alternative is a flag or a fallback that admits
+  players unverified, which is the second way in this design exists to remove — and it is the
+  failure nobody notices, because a server with no doorman looks exactly like a server that is
+  working. `session.NewIdentities` refuses a nil verifier for the same reason one layer down: there
+  is no way to build a claim set that admits people without checking them, so the rule cannot be
+  undone by forgetting an argument.
+- **Two key sources, mutually exclusive rather than ordered** — `internal/registry`'s rule for its
+  own pair, and for its reason: a precedence rule is something an operator has to remember, and one
+  who has set both has already made a mistake worth being told about. `-ticket-key` exists because
+  the fetch cannot tell that it reached the right service (below), and pasting the key is the only
+  way to avoid that today.
+- **The key is decoded to bytes, so its case does not matter** — the deliberate opposite of
+  `internal/registry`'s certificate fingerprint, which is refused rather than folded. The
+  difference is what happens to the string: a fingerprint is *compared as text*, so two spellings
+  are two values that eventually fail to match; this one is compared as bytes.
+- **`ticket.Verify` and never `VerifyAnyWorld`.** The world comparison is what stops the operator of
+  one world collecting its players' tickets and presenting them at another as those players, and
+  what turns an account ticket away at the door. `internal/ticket/callers_test.go` holds that
+  boundary by name and named this issue while doing it.
+- **Five refusals, distinguishable in the log and identical on the wire.** Absent, the wrong length,
+  signed by another key, expired, issued for another world: every one is `BAD_REQUEST` carrying the
+  same sentence, and `session.Refused.Cause` carries the sentinel that says which. That split is
+  `game.Player.RemoveStructure`'s rule with a credential in place of a camp — a client that could
+  tell "expired" from "signed by another key" from "wrong world" could ask this server questions
+  about tickets nobody presented, on a connection nobody has authenticated.
+  `TestEveryRefusedTicketLeavesTheSameFrame` compares the frames byte for byte;
+  `TestATicketThisServerWillNotAdmitIsRefused` names each sentinel. **A ticket signed the old way
+  is `ErrNotATicket` rather than `ErrBadSignature`** and the log says so, because that is a
+  deployment an operator can recognise rather than a key mismatch that is not there (#138).
+- **Two of `Verify`'s answers are not refusals here.** `ErrPublicKeySize` and `ErrVerifierWorld` say
+  this server is misconfigured, and `BAD_REQUEST` would blame a client for something it did not do.
+  They end the session with no reply and reach a log, the same split `session.Refused` already
+  draws. `session.NewVerifier` makes both unreachable by refusing such a configuration at startup —
+  which is #126's lesson taken one layer out: the misconfiguration that hides is the one whose
+  symptom is the sentence that means the check is working.
+- **The exclusivity claim is the account's**, so the same person cannot hold two live sessions on
+  one world — two machines, two sign-ins, two different tickets, one session. The ordering that
+  makes it correct is unchanged and is stated above: `sim.Leave` → record write → release.
+- **The startup line names the world, the world id and the public key, at Info, on every start.**
+  All three are public, and they are what makes a fleet-wide key or world mismatch legible in one
+  line instead of as one refusal per player. Nothing else about a ticket is ever logged.
+- **`ServerWelcome.player_token` is filled with zeroes.** The field is retired and the contract
+  still requires it present and exactly 32 bytes, so the honest value is the right shape carrying
+  nothing. No V6 client is ever on the far end of a welcome — the version check refuses them first
+  — and a V7 server reads past the field on the way in, so nothing can be resumed with it.
+- **Reading the key over plaintext HTTP is a tracked gap and is not solved here** (#131). The
+  endpoint is deliberately unauthenticated, so the exposure is not confidentiality but
+  *substitution*: whoever can answer for that address hands this server their own public key, and
+  this server then admits the tickets they mint and refuses every real one — for as long as the key
+  is kept, which is for ever. A warning is logged on every non-`https` fetch, and `-ticket-key` is
+  the way around it in the meantime. Do not read the warning as mitigation.
+- **The bound before the work, at the one call this server makes**: the response is read through an
+  `io.LimitReader` and refused if it exceeds `maxTicketKeyResponseBytes` before any JSON is parsed,
+  and the published `algorithm` is compared rather than assumed. It is `ticket.Decode`'s ordering
+  and `registry.ParseKey`'s, one protocol up.
 
 ## The list that ends the trust chain
 
@@ -1462,13 +1552,21 @@ for any contract diff — so regenerate here and in the client in the same PR.
 ## Running it
 
 ```bash
-go run ./cmd/voxelheimd                       # 127.0.0.1:7777, world kept in ./world
-go run ./cmd/voxelheimd -listen 0.0.0.0:7777  # reachable from another machine
-go run ./cmd/voxelheimd -listen 127.0.0.1:0   # a free port, printed in the listening line
-go run ./cmd/voxelheimd -seed 42              # a different world; the same seed is the same world
-go run ./cmd/voxelheimd -log-level debug -log-format json
-go run ./cmd/voxelheimd -h                    # every flag, with the default it actually holds
+# -world-name and one of the two key flags are required: a server that cannot verify a
+# session ticket cannot admit anybody, and refuses to start rather than opening its door.
+go run ./cmd/voxelheimd -world-name midgard -account-service http://127.0.0.1:8080
+go run ./cmd/voxelheimd -world-name midgard -ticket-key <64 hex characters>
+
+go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -listen 0.0.0.0:7777  # reachable from another machine
+go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -listen 127.0.0.1:0   # a free port, printed in the listening line
+go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -seed 42              # a different world; the same seed is the same world
+go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -log-level debug -log-format json
+go run ./cmd/voxelheimd -h                                                          # every flag, with the default it actually holds
 ```
+
+The account service prints the key it publishes at startup, and `GET /v1/ticket-key` serves the
+same 64 characters — so `-ticket-key` is one copy of one string, and `-account-service` is that
+copy made by the machine.
 
 `-h` is the list, deliberately: the defaults are constants in `internal/game`, `internal/world`
 and `internal/session`, and a table here restating them would be a copy that drifts. What the
@@ -1479,6 +1577,9 @@ flags decide is the part worth writing down.
 | `-listen` | the address to bind. A `:0` port binds a free one and the startup line names it |
 | `-seed` | the terrain. It is regenerated from the seed, never read from disk |
 | `-world-dir` | where edits, player records, the clock and the TLS key are kept. Empty runs an ephemeral world |
+| `-world-name` | which world this is. A ticket names one world and is useless at any other, so this is what every ticket presented here must name. **Required** |
+| `-account-service` | where to read the signing key from, once, at startup. Mutually exclusive with `-ticket-key`; exactly one is **required** |
+| `-ticket-key` | that key in hex, when it is copied by hand instead of fetched |
 | `-tick-rate` | authoritative simulation ticks per second (1..255) |
 | `-view-distance` | the chunk streaming radius, in chunks (0..16) |
 | `-handshake-timeout` | how long a new connection may say nothing before it is closed |
@@ -1578,37 +1679,53 @@ Recorded here so the next reader does not mistake them for oversights:
   **A corrupt record is refused whole, kept, and the player joins as new.** Non-finite position or
   yaw, an unknown item id, a slot violating an `InventoryState` invariant, a bad checksum, a version
   this build does not speak — all the same answer: `Identities.recall` logs it at error, `Quarantine`
-  renames the file to `<id>.bin.corrupt.<nanos>`, and resolution mints a **new** identity, so nothing
-  the session goes on to write can land on the record nobody could read. The timestamped suffix is
-  not decoration: a fixed `.corrupt` would destroy the previous one. A record that is *unreachable*
-  rather than corrupt — a permission, a failing disk — still refuses the connection, because a retry
-  may succeed and reading it as "no record" would throw away a good life on a transient fault.
+  renames the file to `<id>.bin.corrupt.<nanos>`, and the player is admitted with nothing. The
+  timestamped suffix is not decoration: a fixed `.corrupt` would destroy the previous one. A record
+  that is *unreachable* rather than corrupt — a permission, a failing disk — still refuses the
+  connection, because a retry may succeed and reading it as "no record" would throw away a good life
+  on a transient fault.
+
+  **A failed quarantine now refuses the connection too, and that changed with the ticket.** #147's
+  answer rested on two things: the file is moved, *and* the identity minted next was a different one
+  — fresh random bytes, a different file name — so a failed move cost nothing, because nothing that
+  session went on to write could land on the damaged record. A player is named by their account now,
+  so the session admitted after a failed move writes to exactly the path whose contents nobody could
+  read, and its first teardown would destroy the evidence and the player's only record together. So
+  the answer moves to the one an unreachable record already gets: a refusal costs that player one
+  connection and an operator one look at a directory, and the alternative cannot be undone.
+  `TestResolveRefusesWhenACorruptRecordCannotBeSetAside` is the pin, and it skips rather than
+  asserts for a user a read-only directory does not stop.
 
   **`persist.StoreVersion` is 2 and there is no migration.** A v1 record held a name and a timestamp,
   which is not enough to reconstruct a life, and nothing has shipped. `CheckHeader` refuses it like
   any other unknown version. Note that it takes the caller's version rather than a package constant,
   so the player record and the chunk record version independently.
 
-  **What identifies a player.** An identity is a 32-byte token the server mints from `crypto/rand`
-  and announces in `ServerWelcome`; the client presents it in its next `ClientHello`, and the server
-  recognises it by looking up its SHA-256. The token is the credential and the hash is the name:
+  **What identifies a player.** An account, named by a session ticket the account service signed and
+  the client presents in its `ClientHello`. The player id is `SHA-256(playerIDDomain ‖ account)`:
   `<world-dir>/players/<player-id-hex>.bin` holds a display name, a last-seen time and the life under
-  the hash, so a leaked players directory is a list of hashes rather than a list of credentials.
+  that digest, so a leaked players directory is a list of digests rather than a list of accounts.
+  **This server issues nothing**, which is the whole of what changed — a player is the same player on
+  a server that has never seen them, and on one that keeps nothing at all.
 
-  **One live session per identity**, refused with `RejectReason.ALREADY_CONNECTED`; the older
-  session is never kicked, and `-idle-timeout` is what keeps a dead one from holding an identity for
-  long. **What a token is not**: an account, a password, or anything rotatable or revocable. It is a
-  bearer credential, so whatever can read one *is* that player. What protects it is the transport
-  and nothing in this directory: the session is encrypted with no way to ask for otherwise, and
-  the client refuses a server whose certificate is not the one it pinned. Before that landed,
-  anyone who could watch a handshake could copy a token and come back as that player;
-  `schemas/handshake.fbs` states both configurations rather than either alone.
+  **One live session per account**, refused with `RejectReason.ALREADY_CONNECTED`; the older session
+  is never kicked, and `-idle-timeout` is what keeps a dead one from holding a place for long. **What
+  a ticket is not**: a password, or anything rotatable or revocable. It is a bearer credential, so
+  whatever can read one can present it — a signature proves who *issued* a ticket, not who is holding
+  it. What protects it is the transport and nothing in this directory: the session is encrypted with
+  no way to ask for otherwise, and the client refuses a server whose certificate is not the one it
+  pinned. `schemas/handshake.fbs` states both configurations rather than either alone.
 
-  **In an ephemeral world (`-world-dir ""`) tokens are still minted and identities are still
-  exclusive**, and nothing is written — no record, no life. No token is ever recognised, so every
-  connection is a first one and a reconnect is a new player at the spawn even within the same
-  process. The client cannot tell that apart from a server that has never seen it, and the contract
-  already requires it to store whatever token arrives. The flag's own help text says so.
+  **A ticket is checked at admission and never again.** `ticket.Lifetime` is eight hours and a
+  session may outlive it; nothing disconnects a player whose ticket expires mid-evening. That is
+  deliberate rather than overlooked — the alternative is a server that throws people out of the world
+  on a timer they cannot see — and it bounds what a stolen ticket buys at one session rather than at
+  eight hours. Revocation does not exist at all; `internal/ticket`'s package doc states that cost.
+
+  **In an ephemeral world (`-world-dir ""`) tickets are still verified and accounts are still
+  exclusive**, and nothing is written — no record, no life. So a reconnect is the same player at the
+  spawn, with nothing they were carrying: what an ephemeral world costs is the life, and no longer the
+  name. That is a real change from the V6 model, where an ephemeral world could recognise nobody.
 - **No backpressure policy beyond a bounded queue.** A client that stops reading eventually blocks
   its own writer; nothing yet disconnects it.
 - **Two goroutines may deliver an `InventoryState` out of order.** Every session-side sender —
@@ -1710,6 +1827,16 @@ Recorded here so the next reader does not mistake them for oversights:
   Placement retains the older behaviour in which the editor's own view is not consulted: a
   neighbouring edit may be applied while its `BlockUpdate` reaches only sessions that hold the
   chunk.
+- **A game server cannot tell that it reached the right account service** when it fetches
+  `/v1/ticket-key` over plaintext HTTP, and #131 is where that is closed. The substitution it
+  allows outlives the attacker, because the key is read once and kept: a server holding somebody
+  else's public key admits every ticket they mint and refuses every real one, and nothing about it
+  looks wrong. `-ticket-key` avoids the fetch; the warning logged on every non-`https` fetch is a
+  statement of the gap and not a mitigation of it.
+- **Key rotation is still nowhere, and it now costs two sides.** One operator, one pair, and every
+  game server holding a copy. Rotating means publishing two keys and a window in which both verify;
+  until then, replacing the pair refuses every player on every world at once until each server is
+  restarted with the new key. Deleting the pair is the whole of the ceremony.
 - **An account can be found by its provider identity and by nothing else.** That is the only
   lookup the account service can perform today: the flow that will call it arrives holding a
   provider identity. Finding an account by its `auth.AccountID` — which is what the rest of the

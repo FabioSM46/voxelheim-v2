@@ -37,11 +37,11 @@ func testEntityIDs() func() uint64 {
 // The simulation keys players by entity id and never by identity, so these only have
 // to differ from one another and to be non-zero — Join refuses the zero id, which is
 // the digest of nothing and names nobody. Derived from the entity id rather than
-// minted so that a failing test names the same identity on every run.
+// derived so that a failing test names the same player on every run.
 func testPlayerID(entityID uint64) identity.PlayerID {
-	var token identity.Token
-	binary.LittleEndian.PutUint64(token[:8], entityID)
-	return identity.IDOf(token)
+	var account identity.Account
+	binary.LittleEndian.PutUint64(account[:8], entityID)
+	return identity.IDOf(account)
 }
 
 // dropTerrain is solid at and below groundTop and air above it, with an optional

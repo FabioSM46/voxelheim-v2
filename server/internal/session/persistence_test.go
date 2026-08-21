@@ -8,7 +8,6 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
@@ -34,7 +33,8 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	identities := session.NewIdentities(store, discard())
+	identities := identitiesOver(store)
+	account := testAccount(21)
 
 	// The derived spawn and a cache big enough to hold the walk, exactly as the
 	// end-to-end movement test builds them: the hardcoded spawn in testConfig is fine
@@ -63,8 +63,10 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 		firstDone <- session.Serve(context.Background(), first, cfg, noTimeouts(), chunks, sim, peers, identities, 1, discard())
 	}()
 
-	first.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	minted := welcomeToken(t, nextFrame(t, first))
+	first.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, first), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the first session got %s, want a welcome", got)
+	}
 	sink := collect(t, first)
 
 	// A pack this player could not have joined with: the starter blade somewhere other
@@ -118,11 +120,7 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 	// What the teardown wrote, read back through the store rather than assumed. Every
 	// assertion below compares against this, so the test cannot pass by agreeing with
 	// its own guess about where the player ended up.
-	token, err := identity.TokenFrom(minted)
-	if err != nil {
-		t.Fatalf("the welcome's token: %v", err)
-	}
-	saved, found, err := store.Load(identity.IDOf(token))
+	saved, found, err := store.Load(testPlayerID(account))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -151,7 +149,9 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 		<-secondDone
 	})
 
-	second.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", minted)
+	// A ticket this server has never seen, naming the account it already knows. Nothing
+	// the first session handed the client comes back here, because nothing was handed.
+	second.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
 	welcome := welcomeFrom(t, vnet.GetRootAsEnvelope(nextFrame(t, second), 0))
 
 	spawn := welcome.Spawn(nil)
@@ -195,7 +195,8 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	identities := session.NewIdentities(store, discard())
+	identities := identitiesOver(store)
+	account := testAccount(22)
 	chunks, sim, peers := serveDeps(t)
 
 	conn := newFakeConn()
@@ -205,8 +206,10 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 			session.Timeouts{Handshake: time.Hour, Idle: time.Hour}, chunks, sim, peers, identities, 1, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	minted := welcomeToken(t, nextFrame(t, conn))
+	conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the session got %s, want a welcome", got)
+	}
 	collect(t, conn)
 
 	// The deadline the session armed for its next read, expired from under it. Nothing
@@ -222,11 +225,7 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 		t.Fatal("the idle session did not return")
 	}
 
-	token, err := identity.TokenFrom(minted)
-	if err != nil {
-		t.Fatalf("the welcome's token: %v", err)
-	}
-	saved, found, err := store.Load(identity.IDOf(token))
+	saved, found, err := store.Load(testPlayerID(account))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -240,13 +239,17 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 
 // An ephemeral world keeps nothing, and a reconnect within one process is a new life.
 //
-// The claim the -world-dir help text makes, checked rather than described: the token is
-// still minted and still exclusive, and presenting it back gets a *different* identity
-// because no record was ever written for the first one.
+// The claim the -world-dir help text makes, checked rather than described. **What it is
+// a claim about moved with the ticket**: the old test presented a minted token back and
+// watched a *different* identity come out, because an ephemeral world could recognise
+// nobody. An account is recognised by the account service now, so the same person comes
+// back as the same person on a server that stores nothing — and what an ephemeral world
+// costs them is the life, which is exactly what this asserts.
 func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 	t.Parallel()
 
 	identities := ephemeralIdentities()
+	account := testAccount(23)
 	chunks, sim, peers := serveDeps(t)
 
 	first := newFakeConn()
@@ -255,9 +258,19 @@ func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 		firstDone <- session.Serve(context.Background(), first, serveConfig(), noTimeouts(), chunks, sim, peers, identities, 1, discard())
 	}()
 
-	first.in <- protocol.EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor")
-	minted := welcomeToken(t, nextFrame(t, first))
-	collect(t, first)
+	first.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, first), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the first session got %s, want a welcome", got)
+	}
+	sink := collect(t, first)
+
+	// A pack this player could not have joined with, which is the only thing an
+	// ephemeral world can be caught keeping: the starter blade somewhere other than the
+	// slot every new player finds it in.
+	const movedTo = 4
+	sword := uint16(game.ItemRustySword)
+	first.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: 0, To: movedTo, Count: 1})
+	waitUntil(t, "the blade to move to slot 4", func() bool { return sink.slotOf(sword) == movedTo })
 
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -281,10 +294,19 @@ func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 		<-secondDone
 	})
 
-	second.in <- protocol.EncodeClientHelloWithToken(vnet.ProtocolVersionCurrent, "Eivor", minted)
-	returned := welcomeToken(t, nextFrame(t, second))
+	// The same account, on a server that wrote nothing down.
+	second.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	if got := vnet.GetRootAsEnvelope(nextFrame(t, second), 0).PayloadType(); got != vnet.PayloadServerWelcome {
+		t.Fatalf("the reconnect got %s, want a welcome; an ephemeral world still knows who somebody is", got)
+	}
 
-	if string(returned) == string(minted) {
-		t.Error("an ephemeral world resumed an identity it cannot have stored")
+	back := collect(t, second)
+	waitUntil(t, "the joining pack", func() bool { return len(back.inventoryStates()) > 0 })
+	state := back.inventoryStates()[0]
+	if state.Stacks[movedTo].ItemID == sword {
+		t.Error("an ephemeral world restored a pack it cannot have stored")
+	}
+	if state.Stacks[0].ItemID != sword {
+		t.Errorf("the reconnect's slot 0 is %+v, want the starter blade every new player joins with", state.Stacks[0])
 	}
 }

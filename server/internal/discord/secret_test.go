@@ -20,7 +20,7 @@ const fixtureSecret = "vxh-fixture-secret-6b1d9c4e"
 // Four cases rather than one, because they are four mechanisms: fmt asks a Stringer,
 // slog asks a LogValuer *before* its handler formats anything, and encoding/json asks
 // a Marshaler and would otherwise write the string out verbatim. A type that covers
-// only the first is the trap identity.Token documents, and this is the same trap in a
+// only the first is the trap identity.Account documents, and this is the same trap in a
 // string's clothing.
 func TestASecretRedactsItselfOnEveryRouteOut(t *testing.T) {
 	t.Parallel()

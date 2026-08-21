@@ -25,6 +25,7 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -63,6 +64,9 @@ type options struct {
 	listen           string
 	seed             int64
 	worldDir         string
+	worldName        string
+	accountService   string
+	ticketKey        string
 	tickRate         uint
 	viewDistance     uint
 	handshakeTimeout time.Duration
@@ -80,6 +84,19 @@ func parseFlags() options {
 		"directory the world's edits and the players' records are stored in; empty runs an ephemeral world where "+
 			"nothing is kept — edits are lost on exit, no life is written, and a reconnect is a new player at the "+
 			"spawn even within the same process")
+	flag.StringVar(&opts.worldName, "world-name", "",
+		"the name this world is registered under with the account service, in lowercase letters, digits and "+
+			"hyphens. A session ticket names one world and is useless at any other, so this is what the tickets "+
+			"presented here must name. Required: a server that does not know which world it is cannot tell a "+
+			"ticket for it from a ticket for somebody else's")
+	flag.StringVar(&opts.accountService, "account-service", "",
+		"base URL of the account service, whose signing key is read once from "+ticketKeyPath+" at startup and "+
+			"then kept. Nothing is asked of it again: admitting a player is a signature check, so the service "+
+			"being down costs nobody a game. Mutually exclusive with -ticket-key")
+	flag.StringVar(&opts.ticketKey, "ticket-key", "",
+		"the account service's Ed25519 public key in hex, as GET "+ticketKeyPath+" publishes it and as that "+
+			"service prints it at startup. Use it instead of -account-service when the key is copied by hand "+
+			"rather than fetched. Exactly one of the two is required")
 	flag.UintVar(&opts.tickRate, "tick-rate", game.DefaultTickRate, "authoritative simulation ticks per second (1..255)")
 	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
 	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
@@ -115,7 +132,22 @@ func (o options) validate() error {
 	if err := o.timeouts().Validate(); err != nil {
 		return err
 	}
-	return nil
+
+	// The same discipline for the door. Asked of `ticket.WorldIDFor`, which is the one
+	// place a world name's vocabulary is decided — `registry.Server.Validate` asks the
+	// same function rather than restating it, so a name this server will run under is
+	// always one a ticket can be minted for.
+	//
+	// **Refused here rather than defaulted**, because there is no default that could be
+	// right: a world id is what stops a ticket minted for somebody else's server being
+	// presented at this one, and a server guessing at its own name would be a server
+	// admitting the wrong people or nobody at all. It is checked before the key is
+	// fetched, so an operator who typed the name wrong is told that instead of watching
+	// an HTTP request fail.
+	if _, err := ticket.WorldIDFor(o.worldName); err != nil {
+		return fmt.Errorf("invalid -world-name: %w", err)
+	}
+	return o.validateTicketKeySource()
 }
 
 // timeouts is the read-deadline policy these flags describe.
@@ -163,6 +195,16 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// **Before the world, before the port, before anything.** A server that cannot check
+	// a session ticket cannot admit anybody, so there is nothing else worth doing if this
+	// fails — and it is also the one step that can wait on somebody else's machine, which
+	// makes it the step to fail before this process has taken a directory or a port. From
+	// here on nothing on the admission path touches the network again.
+	verifier, err := openVerifier(ctx, opts, log)
+	if err != nil {
+		return err
+	}
+
 	// One cache per server, seeded once: every session streams from the same chunks,
 	// so a chunk two players can both see is generated once.
 	//
@@ -206,10 +248,14 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	registry := session.NewRegistry()
 
 	// Who is live, one level up from the connections: entity ids name a session,
-	// identities outlive one. Built here rather than inside Serve because it is shared
-	// by every session — being the one place that knows an identity is already playing
-	// is the whole of what it does.
-	identities := session.NewIdentities(players, log)
+	// players outlive one. Built here rather than inside Serve because it is shared by
+	// every session — being the one place that knows an account is already playing is
+	// the whole of what it does, and it holds the verifier for the same reason: one
+	// key, read once, shared by every door.
+	identities, err := session.NewIdentities(players, verifier, log)
+	if err != nil {
+		return err
+	}
 
 	// The simulation collides against exactly the chunks the sessions stream, read
 	// through Peek so that a tick never generates terrain — and edits the same chunks
@@ -256,6 +302,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 
 	log.Info("voxelheimd listening",
 		"addr", tr.Addr(),
+		"world_name", opts.worldName,
 		"tick_rate", cfg.TickRate,
 		"chunk_size", cfg.ChunkSize,
 		"view_distance", cfg.ViewDistance,
