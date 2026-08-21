@@ -26,6 +26,13 @@ CEREMONIES_JSON='[]'
 TMP_DIR="$(mktemp -d)"
 TITLE_LOG="${TMP_DIR}/titles"
 BODY_LOG="${TMP_DIR}/body"
+CREATE_LABEL_LOG="${TMP_DIR}/create-labels"
+EDIT_LABEL_LOG="${TMP_DIR}/edit-labels"
+ISSUE_LABELS_FILE="${TMP_DIR}/issue-labels"
+CREATE_APPLIES_LABEL=1
+EDIT_APPLIES_LABEL=1
+ISSUE_EDIT_STATUS=0
+ISSUE_VIEW_STATUS=0
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 assert_eq() {
@@ -87,18 +94,52 @@ gh() {
 
   if [ "${1:-}" = "issue" ] && [ "${2:-}" = "create" ]; then
     shift 2
-    local title="" body=""
+    local title="" body="" label=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --title) title="$2"; shift 2 ;;
         --body) body="$2"; shift 2 ;;
-        --label|--repo) shift 2 ;;
+        --label) label="$2"; shift 2 ;;
+        --repo) shift 2 ;;
         *) echo "unexpected issue-create argument: $1" >&2; return 64 ;;
       esac
     done
     printf '%s\n' "$title" >> "$TITLE_LOG"
     printf '%s\n' "$body" > "$BODY_LOG"
-    echo "https://example.invalid/issues/ceremony"
+    printf '%s\n' "$label" >> "$CREATE_LABEL_LOG"
+    if [ "$CREATE_APPLIES_LABEL" -eq 1 ]; then
+      printf '%s\n' "$label" > "$ISSUE_LABELS_FILE"
+    fi
+    echo "https://example.invalid/issues/321"
+    return 0
+  fi
+
+  if [ "${1:-}" = "issue" ] && [ "${2:-}" = "view" ]; then
+    if [ "$ISSUE_VIEW_STATUS" -ne 0 ]; then
+      return "$ISSUE_VIEW_STATUS"
+    fi
+    cat "$ISSUE_LABELS_FILE"
+    return 0
+  fi
+
+  if [ "${1:-}" = "issue" ] && [ "${2:-}" = "edit" ]; then
+    shift 2
+    local label=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --add-label) label="$2"; shift 2 ;;
+        --repo) shift 2 ;;
+        321) shift ;;
+        *) echo "unexpected issue-edit argument: $1" >&2; return 64 ;;
+      esac
+    done
+    printf '%s\n' "$label" >> "$EDIT_LABEL_LOG"
+    if [ "$ISSUE_EDIT_STATUS" -ne 0 ]; then
+      return "$ISSUE_EDIT_STATUS"
+    fi
+    if [ "$EDIT_APPLIES_LABEL" -eq 1 ]; then
+      printf '%s\n' "$label" > "$ISSUE_LABELS_FILE"
+    fi
     return 0
   fi
 
@@ -167,8 +208,15 @@ refinement_and_plan_json() {
 reset_case() {
   MILESTONES_JSON='[]'
   CEREMONIES_JSON='[]'
+  CREATE_APPLIES_LABEL=1
+  EDIT_APPLIES_LABEL=1
+  ISSUE_EDIT_STATUS=0
+  ISSUE_VIEW_STATUS=0
   : > "$TITLE_LOG"
   : > "$BODY_LOG"
+  : > "$CREATE_LABEL_LOG"
+  : > "$EDIT_LABEL_LOG"
+  : > "$ISSUE_LABELS_FILE"
 }
 
 run_advance() {
@@ -330,6 +378,44 @@ assert_file_contains "legacy name becomes Iteration in title" "$TITLE_LOG" "[Cer
 assert_file_contains "refinement body carries milestone marker" "$BODY_LOG" "$(iteration_marker backlog-refine 5)"
 assert_file_contains "refinement body carries exact command" "$BODY_LOG" '/scrum-master backlog-refine'
 assert_file_not_contains "refinement body has no weekly language" "$BODY_LOG" "Friday"
+assert_file_contains "refinement requests the ceremony label at creation" "$CREATE_LABEL_LOG" "ceremony"
+assert_eq "a successful creation needs no label retry" 0 "$(wc -l < "$EDIT_LABEL_LOG" | tr -d ' ')"
+
+# `gh issue create --label` creates first and labels second. It can return success
+# after only the first write landed, so creation must observe and repair the
+# missing postcondition rather than trusting the command's exit status.
+reset_case
+MILESTONES_JSON=$(milestone_json 5 "Iteration 5" 0)
+CREATE_APPLIES_LABEL=0
+run_advance
+assert_eq "a silently omitted creation label is repaired" 0 "$ADVANCE_STATUS"
+assert_contains "the repair is visible in the run log" "$ADVANCE_OUT" "created without label 'ceremony'"
+assert_file_contains "the repair explicitly adds the ceremony label" "$EDIT_LABEL_LOG" "ceremony"
+assert_file_contains "the repaired issue demonstrably carries the label" "$ISSUE_LABELS_FILE" "ceremony"
+
+reset_case
+MILESTONES_JSON=$(milestone_json 5 "Iteration 5" 0)
+CREATE_APPLIES_LABEL=0
+ISSUE_EDIT_STATUS=1
+run_advance
+assert_eq "a failed ceremony label repair fails closed" 1 "$ADVANCE_STATUS"
+assert_contains "the failed repair names the created issue" "$ADVANCE_OUT" "Ceremony issue #321 was created"
+
+reset_case
+MILESTONES_JSON=$(milestone_json 5 "Iteration 5" 0)
+CREATE_APPLIES_LABEL=0
+EDIT_APPLIES_LABEL=0
+run_advance
+assert_eq "a silent ceremony label repair fails closed" 1 "$ADVANCE_STATUS"
+assert_contains "the silent repair names the missing postcondition" "$ADVANCE_OUT" "still missing after the retry"
+
+reset_case
+MILESTONES_JSON=$(milestone_json 5 "Iteration 5" 0)
+ISSUE_VIEW_STATUS=1
+run_advance
+assert_eq "an unreadable ceremony label fails closed" 1 "$ADVANCE_STATUS"
+assert_contains "the unreadable label check is explicit" "$ADVANCE_OUT" "labels could not be verified"
+assert_eq "an unreadable label never authorizes a blind retry" 0 "$(wc -l < "$EDIT_LABEL_LOG" | tr -d ' ')"
 
 reset_case
 MILESTONES_JSON=$(milestone_json 5 "Iteration 5" 0)
