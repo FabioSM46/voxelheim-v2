@@ -1,0 +1,249 @@
+name: Body Privacy
+
+# Read the body of an issue or pull request and report the three categories
+# scripts/check-publication-privacy.sh already owns: a non-public email address, a
+# workstation path prefix, a private-network address.
+#
+# AGENTS.md lists issues and pull requests among the surfaces that are "globally readable
+# forever". Every other surface on that list is checked before it is published — tracked
+# content by check-publication-privacy.sh, commits by check-commit-privacy.sh. This one
+# cannot be: a body exists only once it has been posted.
+#
+# **This workflow cannot prevent a leak. It can only shorten how long nobody knew.**
+#
+# Read a green run as "nothing is published now", never as "nothing was published".
+#
+# It is the surface a machine writes most often. A human writing an issue is thinking about
+# the reader; an agent writing a pull-request body is transcribing what it just did, and
+# what it just did happened in a working directory with a name.
+#
+# ── The pull_request_target hazard, and why this file is safe from it ──────────────────
+#
+# `pull_request_target` runs with a WRITABLE token against the base repository, which is the
+# classic way a public repository is compromised: check out the branch under review, run its
+# build, and its author owns the token. Nothing here checks out, builds or executes anything
+# from the head. The checkout below pins an explicitly trusted ref — the base branch commit
+# for a pull request, the default branch for an issue — and this workflow names no part of
+# the pull request's head at all. scripts/test/body-privacy.test.sh asserts both, so the
+# property is pinned rather than merely intended.
+#
+# `pull_request_target` (not `pull_request`) is deliberate for one reason: a `pull_request`
+# run on a fork PR gets a read-only token, so it could scan a body and then be unable to
+# report on it — a check that fails silently on exactly the bodies nobody here wrote.
+#
+# ── Why the body is fetched rather than interpolated ───────────────────────────────────
+#
+# Interpolating `github.event.issue.body` out of the event payload looks like the obvious
+# source and is the one thing this file must not do, for two independent reasons.
+#
+# Actions renders a step's `env:` block into the run log WITH ITS VALUES, so an interpolated
+# body would republish the whole of it — including the value being looked for — into a
+# public Actions log. That is precisely the failure this check reports on, committed by the
+# check itself. And interpolating it into a `run:` script is worse still: that is shell
+# injection from a field any stranger can write, holding the token described above.
+#
+# Fetched over the API it lands in a file that nothing prints and that is deleted as soon as
+# it has been read. That field name is deliberately not written above as a workflow
+# expression either: body-privacy.test.sh reads this file for the shape and cannot tell an
+# example from a use — the same distinction check-commit-privacy.sh draws between a trailer
+# and a sentence naming one.
+#
+# ── What a red run means ───────────────────────────────────────────────────────────────
+#
+# Exactly one thing: the alarm could not be raised. Finding private data is reported with a
+# label and a comment and leaves this job green, because the report IS the product and a red
+# check adds nothing a human acts on. A failed fetch, an unreadable label list or a failed
+# write ends the run instead — the same fail-closed rule pr-label learned in #134, where a
+# write that silently did nothing looked exactly like a working pipeline.
+#
+# A `pull_request_target` run is keyed to the BASE branch commit, so its check should not
+# appear on the pull request's head SHA, which is the only place `pr-status-json` looks.
+# That is a property of the event rather than something this file enforces, so nothing here
+# is built on it: the design above is what makes it not matter. The verdict never goes red
+# on a finding, and the concurrency rule below refuses to cancel — a CANCELLED conclusion
+# counts as FAILING in `pr-status-json`, and if the assumption above is wrong, a cancelled
+# run is the one shape that could pin a pull request at needs-work with nothing to explain
+# it (AGENTS.md, "two traps to know before trying to trim CI further").
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request_target:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+  # Labels and comments on BOTH surfaces go through the issues API, but GitHub maps that
+  # endpoint to `pull-requests` when the number is a pull request. Both are required; either
+  # one alone leaves half the workflow unable to report what it found.
+  issues: write
+  pull-requests: write
+
+# One scan per body at a time. An `edited` burst (an agent fixing a body it just posted)
+# would otherwise race two runs into the same comment and produce two of them.
+#
+# `cancel-in-progress: false` deliberately — the superseded run is queued, not killed. A
+# cancelled job resolves to CANCELLED, which `pr-status-json` counts among its FAILING
+# conclusions, and only a manual re-run clears a terminal conclusion. The saved seconds are
+# not worth owning that shape; the queued run re-reads the current body and converges.
+concurrency:
+  group: body-privacy-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The trusted side, named explicitly rather than left to the default. Under
+          # `pull_request_target` the default already resolves to the base, but the default
+          # is the thing a reader has to take on faith — and a later `ref:` added by
+          # somebody reaching for the head is the whole hazard. `base.sha` is a commit on
+          # develop; for an `issues` event there is no pull request and `github.sha` is the
+          # default branch. Neither is the branch under review.
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Scan the body and report
+        env:
+          # GITHUB_TOKEN rather than the pipeline PAT, and least privilege is only half of
+          # why: GITHUB_TOKEN's own events do not trigger workflows, so the comment this job
+          # posts cannot start another run of anything. Under `pull_request_target` a PAT
+          # would also be a strictly larger blast radius for no capability gained.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # An integer and two constants. Everything in this block is rendered into the run
+          # log with its value, which is exactly why the body is not here.
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          MARKER: '<!-- body-privacy -->'
+          LABEL: needs-privacy-review
+        run: |
+          set -o pipefail
+
+          # Fails closed on an event shape this workflow does not understand, rather than
+          # addressing the API at an empty number.
+          case "$NUMBER" in
+            ''|*[!0-9]*)
+              echo "::error::body privacy: this event carries no issue or pull-request number"
+              exit 1
+              ;;
+          esac
+
+          BODY_FILE="${RUNNER_TEMP}/body.txt"
+          FINDINGS="${RUNNER_TEMP}/findings.txt"
+          COMMENT="${RUNNER_TEMP}/comment.md"
+
+          # `/issues/{n}` serves issues and pull requests alike, and on an `edited` event it
+          # answers with the CURRENT body — which is what should be judged, not whatever the
+          # payload froze. A failed fetch ends the step here under `set -e`: an empty body
+          # would score clean, and failing open is how a check that never ran gets a green
+          # check (#31).
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}" --jq '.body // ""' > "$BODY_FILE"
+
+          status=0
+          bash scripts/check-body-privacy.sh < "$BODY_FILE" > "$FINDINGS" || status=$?
+          rm -f "$BODY_FILE"
+
+          if [ "$status" -gt 1 ]; then
+            echo "::error::body privacy: the check could not run (exit ${status})"
+            exit 1
+          fi
+
+          # Three answers, not two. An unreadable label list is not the same as the label
+          # being absent, and acting on the second when the first is true is how a stale
+          # label survives a fix (pr-check-label, #134).
+          label_present() {
+            local names
+            names=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/labels" --jq '.[].name') || return 2
+            grep -Fxq -- "$LABEL" <<< "$names"
+          }
+
+          present=0
+          label_present || present=$?
+          if [ "$present" -gt 1 ]; then
+            echo "::error::body privacy: could not read the labels on #${NUMBER}"
+            exit 1
+          fi
+
+          # The standing report, if there is one. Updated in place rather than added to, so
+          # an edited body produces one current comment instead of a thread of stale ones —
+          # and one notification instead of a stream of them.
+          comment_id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/comments" --paginate \
+            --jq '.[] | select((.body // "") | startswith(env.MARKER)) | .id' | tail -n 1)
+
+          if [ "$status" -eq 1 ]; then
+            echo "body privacy: findings on #${NUMBER} — labelling and reporting"
+
+            # `sed` reads the findings file, which by the script's contract holds nothing
+            # taken from the body. That contract is what makes it safe to pipe this into a
+            # public comment without reading it first.
+            #
+            # Capped at 50 rendered findings: a body that pastes a build log can carry a
+            # workstation path on every line, and a comment over GitHub's 65,536-character
+            # limit is refused — which would turn a real finding into a red run and no
+            # report at all. Fifty locations is already more than anybody reads before
+            # rewriting the body wholesale.
+            {
+              printf '%s\n\n' "$MARKER"
+              printf '## Publication privacy — this body may contain private data\n\n'
+              head -n 50 "$FINDINGS" | sed 's/^body privacy: /- /'
+              elided=$(( $(wc -l < "$FINDINGS") - 50 ))
+              if [ "$elided" -gt 0 ]; then
+                printf -- '- …and %s further finding(s) in the same categories\n' "$elided"
+              fi
+              printf '\n'
+              printf 'Each finding names a line and a category and never the value. Quoting it here\n'
+              printf 'would publish it a second time, into a comment that carries notifications and\n'
+              printf 'that editing the body would not retract.\n\n'
+              printf '**This check could not prevent the leak, only shorten how long nobody knew.**\n'
+              printf 'The body was already published when the scan ran. Editing it changes what is\n'
+              printf 'read next, not what was already sent — and if the value was a credential,\n'
+              printf 'rotate it. Nothing here has been closed, edited or hidden; redacting text\n'
+              printf 'that somebody else wrote is a bigger decision than a check should make.\n\n'
+              printf 'Run the same check locally:\n\n'
+              printf '```\n'
+              printf 'gh issue view %s --json body --jq .body | bash scripts/check-body-privacy.sh\n' "$NUMBER"
+              printf '```\n'
+            } > "$COMMENT"
+
+            gh label create "$LABEL" \
+              --color d93f0b \
+              --description "Body may contain private data — a human must read it" \
+              --force
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/labels" \
+              -f "labels[]=${LABEL}" --silent
+          else
+            echo "body privacy: #${NUMBER} is clean"
+
+            if [ "$present" -eq 0 ]; then
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/labels/${LABEL}" --silent
+            fi
+
+            # A clean body with no standing report needs no comment at all. Only a report
+            # that is now wrong gets corrected — and it is corrected rather than deleted,
+            # because the record that something was flagged is worth keeping.
+            if [ -z "$comment_id" ]; then
+              exit 0
+            fi
+
+            {
+              printf '%s\n\n' "$MARKER"
+              printf '## Publication privacy — cleared\n\n'
+              printf 'The current body carries no non-public email address, workstation path or\n'
+              printf 'private-network address.\n\n'
+              printf 'This says nothing about what was readable before the edit. A body is public\n'
+              printf 'from the moment it is posted, and this check runs after that.\n'
+            } > "$COMMENT"
+          fi
+
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              -F body=@"$COMMENT" --silent
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/${NUMBER}/comments" \
+              -F body=@"$COMMENT" --silent
+          fi

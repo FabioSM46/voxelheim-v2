@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Reject tracked content that would expose private identity or workstation data.
 # Diagnostics name only a location and category; the rejected value is never printed.
+#
+# This is where the three categories were first defined, and every other privacy check
+# reads them: check-commit-privacy.sh for commit identities and messages,
+# check-body-privacy.sh for issue and pull-request bodies. Each holds its own copy and
+# scripts/test/commit-privacy.test.sh pins the set to each other, so widening a pattern
+# here without widening it there fails until they agree. Changing anything below is
+# therefore a change to every surface at once — which is the intent.
 
 set -euo pipefail
 

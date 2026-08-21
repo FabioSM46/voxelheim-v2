@@ -397,6 +397,7 @@ jobs:
           bash scripts/test/agent-skills-sync.test.sh
           bash scripts/test/commit-privacy.test.sh
           bash scripts/test/publication-privacy.test.sh
+          bash scripts/test/body-privacy.test.sh
           bash scripts/test/gh-automation-deepseek-rounds.test.sh
           bash scripts/test/iteration-lifecycle.test.sh
           bash scripts/test/pr-labeler-step.test.sh
