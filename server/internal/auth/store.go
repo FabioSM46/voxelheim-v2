@@ -86,14 +86,15 @@ var accountMagic = [4]byte{'V', 'X', 'H', 'A'}
 // no-op nil receiver here would create that mode by accident, for the convenience of
 // one branch. [OpenStore] refuses an unnamed directory instead.
 //
-// Safe for concurrent use. [Store.Load] and [Store.Save] each touch the path of
-// exactly one identity, and world.WriteAtomic renames onto it, so a reader sees the
-// whole of the old file or the whole of the new one. [Store.Ensure] is the one
-// operation that reads and then writes, and it holds mint for the pair.
+// Safe for concurrent use. [Store.Load] touches the path of exactly one identity and
+// world.WriteAtomic renames onto it, so a reader sees the whole of the old file or the
+// whole of the new one and needs no exclusion. Every *write* takes one lock: the pair
+// [Store.Ensure] makes out of a read and a write, and [Store.Save] on its own.
 type Store struct {
 	dir string
 
-	// mint serialises [Store.Ensure] against itself, and against nothing else.
+	// write serialises every write against every other one, and against the read
+	// [Store.Ensure] decides from.
 	//
 	// Ensure is check-then-create, and this service is an HTTP server: two requests
 	// for one person arriving together is the ordinary case rather than the exotic
@@ -101,11 +102,20 @@ type Store struct {
 	// second write landing on the first, so one person ends up with two account ids
 	// and whichever the loser was carrying is gone.
 	//
+	// **[Store.Save] holds it too, and the first version of this comment explained
+	// why it would not need to.** Save does not read before it writes, so nothing
+	// about Save alone is check-then-create — but Ensure is, and a Save that lands
+	// between Ensure's "no account here" and Ensure's own write is overwritten by an
+	// account minted on the strength of a directory that had already stopped looking
+	// like that. The exclusion belongs to the *pair*, so it cannot be held by only
+	// the operation that reads. Save is exported, so this is a caller's race and not
+	// merely an internal one (found in review on #98).
+	//
 	// **What this does not cover is two processes**, because a mutex cannot. One
 	// account service owns its accounts directory; running a second one against the
 	// same directory is a deployment mistake, and the fix for it is a lock in the
 	// filesystem rather than a wider lock in here.
-	mint sync.Mutex
+	write sync.Mutex
 }
 
 // OpenStore opens the accounts directory under authDir, creating it if it is not
@@ -201,7 +211,21 @@ func (s *Store) Load(id ProviderIdentity) (Account, bool, error) {
 // next read. Writing a file this build would then reject is the single failure that
 // looks like a success until a restart; internal/persist's structures file refuses to
 // exceed its own cap for exactly that reason.
+//
+// Serialised against a mint in flight; the write mutex's own comment carries the
+// interleaving that makes that necessary.
 func (s *Store) Save(acct Account) error {
+	s.write.Lock()
+	defer s.write.Unlock()
+	return s.save(acct)
+}
+
+// save is [Store.Save] without the lock, for the one caller that is already holding it.
+//
+// Split rather than made re-entrant, because a Go mutex is not: [Store.Ensure] calling
+// the exported method would deadlock on its own lock. The split makes that
+// unrepresentable instead of something each future caller has to remember.
+func (s *Store) save(acct Account) error {
 	data, err := encodeAccount(acct)
 	if err != nil {
 		return err
@@ -233,8 +257,8 @@ func (s *Store) Ensure(id ProviderIdentity, displayName string, now time.Time) (
 		return Account{}, false, err
 	}
 
-	s.mint.Lock()
-	defer s.mint.Unlock()
+	s.write.Lock()
+	defer s.write.Unlock()
 
 	existing, found, err := s.Load(id)
 	if err != nil {
@@ -257,7 +281,7 @@ func (s *Store) Ensure(id ProviderIdentity, displayName string, now time.Time) (
 		DisplayName: truncateName(displayName),
 		CreatedAt:   now.UTC().Truncate(time.Second),
 	}
-	if err := s.Save(acct); err != nil {
+	if err := s.save(acct); err != nil {
 		return Account{}, false, err
 	}
 	return acct, true, nil

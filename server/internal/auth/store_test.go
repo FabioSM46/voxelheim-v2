@@ -668,3 +668,46 @@ func TestNoCredentialEverReachesTheDisk(t *testing.T) {
 			len(data), want)
 	}
 }
+
+// A save that does not wait for a mint in flight is a save that gets overwritten.
+//
+// The interleaving is the one the review on #98 named: [Store.Ensure] reads, finds no
+// account, and then writes the one it mints. A [Store.Save] landing inside that window
+// is discarded by a write decided on a directory that had already changed, and both
+// calls return nil — so the loss is invisible from either side.
+//
+// Pinned by *blocking* rather than by racing, because the failure is a race and a race
+// reproduces when it feels like it. Holding the store's own write mutex is exactly the
+// state Ensure is in between its read and its write; a Save that returns while it is
+// held is a Save that would have landed in that window. The wait can only make a broken
+// build pass, never a correct one fail: it is the goroutine getting no chance to run.
+func TestSaveWaitsForAMintInFlight(t *testing.T) {
+	t.Parallel()
+
+	store, _ := openStore(t)
+	acct := testAccount(17, "Halvar")
+
+	store.write.Lock()
+	saved := make(chan error, 1)
+	go func() { saved <- store.Save(acct) }()
+
+	select {
+	case err := <-saved:
+		store.write.Unlock()
+		t.Fatalf("Save returned (%v) while a write was in flight; a mint would overwrite it", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.write.Unlock()
+	if err := <-saved; err != nil {
+		t.Fatalf("Save after the lock was released: %v", err)
+	}
+
+	got, found, err := store.Load(acct.Identity)
+	if err != nil || !found {
+		t.Fatalf("Load after the waiting Save: %+v found=%v err=%v", got, found, err)
+	}
+	if got != acct {
+		t.Errorf("Load returned %+v, want the account the waiting Save wrote %+v", got, acct)
+	}
+}
