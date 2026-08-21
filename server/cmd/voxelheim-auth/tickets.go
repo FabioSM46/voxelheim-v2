@@ -41,10 +41,17 @@ type ticketKeyResponse struct {
 // a public key is public, and a game server that had to authenticate to read it would
 // need a credential from this service before it could stop depending on this service.
 //
+// **So this is the one response in the service that says how long a copy stays good
+// rather than forbidding one**, and it says it explicitly instead of leaving a cache to
+// invent a heuristic from the fact that the bytes never change. "The same bytes for the
+// life of the pair" is exactly the sentence that stops being true at a rotation, and a
+// stale key is a game server refusing every player it should admit. The window, the
+// `must-revalidate` and the argument for both are on [cacheTicketKeyFreshness].
+//
 // s.keys is never nil here; run refuses to build a service without a pair. See the
 // [service] doc.
 func (s *service) ticketKey(w http.ResponseWriter, _ *http.Request) {
-	s.writeJSON(w, http.StatusOK, ticketKeyResponse{
+	s.writeJSON(w, http.StatusOK, cacheTicketKeyFreshness, ticketKeyResponse{
 		Algorithm:             ticket.Algorithm,
 		PublicKey:             s.keys.PublicHex(),
 		TicketLifetimeSeconds: int(ticket.Lifetime.Seconds()),

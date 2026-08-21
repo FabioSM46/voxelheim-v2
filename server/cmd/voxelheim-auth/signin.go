@@ -222,7 +222,12 @@ func (s *service) signInStart(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, startResponse{
+	// no-store, and not only because a POST response is uncacheable by default: what
+	// this carries is the state and the finish secret of a sign-in that is in flight, and
+	// those are the two values that let somebody else complete it. They are secrets with
+	// a short life rather than a document, and a copy of one outliving the response is
+	// the same failure as a copy of the ticket at the other end of the flow.
+	s.writeJSON(w, http.StatusOK, cacheNoStore, startResponse{
 		// Revealed exactly once, here, because both have to reach the client or the flow
 		// cannot work. Everywhere else they stay inside discord.Secret.
 		State:        start.State.Reveal(),
@@ -397,7 +402,15 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("sign-in completed", fields...)
 
-	s.writeJSON(w, http.StatusOK, finishResponse{
+	// **The reason this issue exists.** The body below carries a bearer credential with an
+	// eight-hour life and no revocation, so a copy kept anywhere on the path — a shared
+	// cache, a proxy an operator configured, the client's own disk — is that account until
+	// it expires, and there is no way to withdraw it in the meantime. `no-store` is the
+	// only directive that says so; sending none left the answer to whatever heuristic the
+	// intermediary preferred. It is independent of TLS (#131): transport encryption stops
+	// somebody reading the response in flight and says nothing about who may write it down
+	// at either end.
+	s.writeJSON(w, http.StatusOK, cacheNoStore, finishResponse{
 		AccountID:   account.ID.String(),
 		DisplayName: account.DisplayName,
 		Created:     created,
@@ -429,8 +442,17 @@ type errorResponse struct {
 }
 
 // refuse answers with one of the codes above and nothing else.
+//
+// **Every refusal in this service is no-store, and this is the one place that decides
+// it** — the shape of the response is fixed here, so there is nothing for a caller to
+// weigh. A refusal is an answer about one request: this state is not that state, this
+// key is not the key, ask again later. Stored and replayed at a later request it would
+// answer a question nobody asked, and several of these statuses are ones RFC 9111 §4.2.2
+// lets a cache assign a heuristic lifetime to. Some of them carry a credential's fate
+// besides — a 401 from the list, a spent sign-in — which is the second reason and not
+// the first.
 func (s *service) refuse(w http.ResponseWriter, status int, code string) {
-	s.writeJSON(w, status, errorResponse{Error: code})
+	s.writeJSON(w, status, cacheNoStore, errorResponse{Error: code})
 }
 
 // writeJSON writes one JSON value, and treats a failed write as a client that hung up.
@@ -438,8 +460,15 @@ func (s *service) refuse(w http.ResponseWriter, status int, code string) {
 // The status goes out before the body, so a marshal that fails cannot change it. That
 // is why body is a type declared in this file rather than anything a caller assembles:
 // every one of them marshals, so the failure below is a broken pipe and not a bug.
-func (s *service) writeJSON(w http.ResponseWriter, status int, body any) {
+//
+// **cache is a parameter and has no default**, because the responses this writes do not
+// agree about what a cache may do with them — see [cacheDirective], which is where that
+// argument lives, and which is why a new handler cannot acquire a directive by accident.
+// Both headers are set before the status, which is the only order net/http allows: a
+// header set after WriteHeader never leaves the process.
+func (s *service) writeJSON(w http.ResponseWriter, status int, cache cacheDirective, body any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", string(cache))
 	w.WriteHeader(status)
 
 	if err := json.NewEncoder(w).Encode(body); err != nil {
