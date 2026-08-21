@@ -1021,9 +1021,17 @@ printf '%s\n' "<certificate_sha256 from the server log>" \
   > "${XDG_DATA_HOME:-$HOME/.local/share}/voxelheim/identity/127.0.0.1_7777.pin"
 ```
 
-Deleting the *identity* file instead joins as a new character, which pins safely because a new
-character has nothing to present. Deleting the *pin* re-pins whatever answers next, so it is
-right only when you already know why the fingerprint changed.
+Writing it in is the remedy for both cases, and the only one that keeps the character. Deleting a
+file instead is narrower than it looks, because the two are checked independently —
+`ConnectError::Unverified` comes from the guard before the handshake, `ConnectError::Substituted`
+from the verifier during it:
+
+- Deleting the *identity* file answers the second case and only the second: with nothing to
+  present, the first connection pins safely. It does nothing about a fingerprint that changed —
+  `read_pin` still returns the old one and `PinnedServer` still refuses it.
+- Deleting the *pin* is what addresses a changed fingerprint, and it re-pins whatever answers
+  next, so it is right only when you already know why the fingerprint changed. With an identity
+  file still beside it that is the second case again; delete both to join as a new character.
 
 ### Who the client comes back as
 

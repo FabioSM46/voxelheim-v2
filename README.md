@@ -113,10 +113,19 @@ printf '%s\n' "<the certificate_sha256 from the server log>" \
   > "${XDG_DATA_HOME:-$HOME/.local/share}/voxelheim/identity/127.0.0.1_7777.pin"
 ```
 
-Deleting the *identity* file beside it instead joins as a new character, which pins safely
-because a new character has nothing to present. Deleting the *pin* re-pins whatever answers next,
-so it is the right move only when you know why the fingerprint changed. Against a server whose
-world directory you keep, the key is stable and none of this comes up twice.
+Writing that value in is the remedy for both cases, and the only one that keeps your character.
+Deleting a file instead is narrower than it looks, because the pin and the identity are checked
+independently:
+
+- Deleting the *identity* file answers the second case and only the second: with no pin to
+  disagree with, a client that has nothing to present pins safely on the spot. It does nothing
+  about a fingerprint that changed — the old pin is still there, and still refuses.
+- Deleting the *pin* is what addresses a changed fingerprint, and it re-pins whatever answers
+  next, so it is right only when you know why the fingerprint changed. With an identity file
+  still beside it you land in the second case instead; delete both to join as a new character.
+
+Against a server whose world directory you keep, the key is stable and none of this comes up
+twice.
 
 Every flag, and what a saved world and a remembered character actually mean, are in
 [`server/AGENTS.md`](server/AGENTS.md) and [`client/AGENTS.md`](client/AGENTS.md) under
