@@ -88,8 +88,8 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
   co-author trailer by construction; never copy a real address into a test. That vendor address is
   approved **by literal address, not by domain** — a no-reply under a private host would publish an
   internal hostname, which is the thing these scans exist to catch. `is_approved_email` is the list,
-  it lives in both privacy scripts, and `scripts/test/commit-privacy.test.sh` pins the two copies to
-  each other: widen what an address may be in one and the pin fails until the other agrees.
+  it lives in every privacy script, and `scripts/test/commit-privacy.test.sh` pins those copies to
+  each other: widen what an address may be in one and the pin fails until the others agree.
 - **Never publish internal machine paths.** Do not commit workstation usernames, home directories,
   mount points, checkout locations or other environment-specific paths. Documentation uses tokens
   such as `<repo-root>`, `<worktree>` and `<workspace>`. Tests use clearly synthetic fixture paths.
@@ -108,6 +108,17 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
   `bash scripts/check-commit-privacy.sh <base> <head>` walks the commits a branch adds and reads
   their author and committer fields *and* their message. Run both before any push. A suspected leak
   blocks publication; redact it before continuing rather than printing it into another diagnostic.
+- **So is an issue or pull-request body — but that one can only be checked afterwards.** The three
+  categories reach it through `scripts/check-body-privacy.sh`, driven by
+  `.github/workflows/body-privacy.yml` on `issues` and `pull_request_target` (`opened`, `edited`).
+  A finding gets the `needs-privacy-review` label and one comment naming the category and the line;
+  nothing is closed, edited or hidden. **This check cannot prevent a leak — a body is public from
+  the moment it is posted — it can only shorten how long nobody knew**, so a green run means
+  "nothing is published now", never "nothing was published". It is the surface a machine writes
+  most often and was the last one nothing read (#130): an agent writing a PR body is transcribing
+  what it just did, and what it just did happened in a working directory with a name. Run it on a
+  body before posting one:
+  `gh issue view <n> --json body --jq .body | bash scripts/check-body-privacy.sh`.
 
 - **Commits**: Never commit unless explicitly requested; conventional-commit style (`feat:`, `fix:`, `refactor:`, `docs:`, `ci:`)
 - **Read Before Write**: Find existing patterns before implementing

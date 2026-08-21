@@ -4,7 +4,6 @@ set -euo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 CHECK="$REPO_ROOT/scripts/check-commit-privacy.sh"
-PUBLICATION_CHECK="$REPO_ROOT/scripts/check-publication-privacy.sh"
 TEST_ROOT=$(mktemp -d)
 trap 'rm -rf -- "$TEST_ROOT"' EXIT
 
@@ -222,45 +221,58 @@ if (cd "$TEST_ROOT" && bash "$CHECK" >/dev/null 2>&1); then
   exit 1
 fi
 
-# ------------------------------------------------------------------- the pinned pair
-# The message scan applies the three categories the file scan already applies, and the
-# two scripts hold those definitions separately. That duplication is only safe while
-# something compares them: a widened path prefix or a corrected email pattern that lands
-# in one script and not the other would leave the two surfaces disagreeing about what is
-# private, silently and in the direction that publishes. Same idiom as the
-# FULL_REVIEW_MARKER pair — the definitions may live in two files, the agreement may not
-# be left to hand.
-pin_line() {
-  local label=$1 pattern=$2 mine theirs
-  mine=$(grep -E -- "$pattern" "$CHECK") || mine=""
-  theirs=$(grep -E -- "$pattern" "$PUBLICATION_CHECK") || theirs=""
-  if [ -z "$mine" ] || [ -z "$theirs" ]; then
-    echo "pin failure: the ${label} was not found in both privacy checks" >&2
-    exit 1
-  fi
-  if [ "$mine" != "$theirs" ]; then
-    echo "pin failure: the ${label} differs between the two privacy checks" >&2
-    exit 1
-  fi
+# -------------------------------------------------------------------- the pinned set
+# Every privacy check applies the same three categories, and each holds those definitions
+# separately. That duplication is only safe while something compares them: a widened path
+# prefix or a corrected email pattern that lands in one script and not the others would
+# leave the surfaces disagreeing about what is private, silently and in the direction that
+# publishes. Same idiom as the FULL_REVIEW_MARKER pair — the definitions may live in
+# several files, the agreement may not be left to hand.
+#
+# The set is a list rather than a pair because it grew (#130 added the body scan). A fourth
+# reader joins by adding one line here, which is the whole point: the alternative is a
+# fourth copy nothing compares, and nothing would go red on the day it drifted.
+PINNED_CHECKS=(
+  "$CHECK"
+  "$REPO_ROOT/scripts/check-publication-privacy.sh"
+  "$REPO_ROOT/scripts/check-body-privacy.sh"
+)
+
+# Each definition is compared against the first script's copy, and a definition missing
+# from any of them fails just as loudly as one that differs — a check that has quietly
+# stopped carrying a pattern is not a check that agrees.
+pin_extracted() {
+  local label=$1 reference="" reference_file="" script value
+  shift
+  for script in "${PINNED_CHECKS[@]}"; do
+    value=$("$@" "$script") || value=""
+    if [ -z "$value" ]; then
+      echo "pin failure: the ${label} was not found in ${script##*/}" >&2
+      exit 1
+    fi
+    if [ -z "$reference_file" ]; then
+      reference=$value
+      reference_file=$script
+      continue
+    fi
+    if [ "$value" != "$reference" ]; then
+      echo "pin failure: the ${label} differs between ${reference_file##*/} and ${script##*/}" >&2
+      exit 1
+    fi
+  done
 }
 
-pin_block() {
-  local label=$1 mine theirs
-  mine=$(awk '/^slash=\/$/{f=1} f{print} f&&/^\)$/{exit}' "$CHECK")
-  theirs=$(awk '/^slash=\/$/{f=1} f{print} f&&/^\)$/{exit}' "$PUBLICATION_CHECK")
-  if [ -z "$mine" ] || [ -z "$theirs" ]; then
-    echo "pin failure: the ${label} was not found in both privacy checks" >&2
-    exit 1
-  fi
-  if [ "$mine" != "$theirs" ]; then
-    echo "pin failure: the ${label} differs between the two privacy checks" >&2
-    exit 1
-  fi
+extract_line() {
+  grep -E -- "$1" "$2"
 }
 
-pin_line "email pattern" '^email_pattern='
-pin_line "private-network pattern" '^private_network_pattern='
-pin_line "approved-email list" '^ +noreply@github\.com\|'
-pin_block "workstation path prefixes"
+extract_path_prefix_block() {
+  awk '/^slash=\/$/{f=1} f{print} f&&/^\)$/{exit}' "$1"
+}
 
-echo "commit privacy — noreply identities and clean messages pass; exposed identities, private message content and generated session references fail without leaking"
+pin_extracted "email pattern" extract_line '^email_pattern='
+pin_extracted "private-network pattern" extract_line '^private_network_pattern='
+pin_extracted "approved-email list" extract_line '^ +noreply@github\.com\|'
+pin_extracted "workstation path prefixes" extract_path_prefix_block
+
+echo "commit privacy — noreply identities and clean messages pass; exposed identities, private message content and generated session references fail without leaking; ${#PINNED_CHECKS[@]} privacy checks agree on the three patterns"

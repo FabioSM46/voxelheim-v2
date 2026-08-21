@@ -3,15 +3,17 @@
 # through their message. Both are permanent, world-readable git objects.
 #
 # Diagnostics name only a commit and a category; the rejected value is never printed.
-# That discipline matters more here than anywhere else in the repository: a leak check
+# That discipline matters here in a way it does not in an ordinary check: a leak check
 # that echoes the leak has published it a second time, into a public CI log, where
 # nobody thinks to look for it and nobody can redact it.
 #
 # The message scan applies the three categories scripts/check-publication-privacy.sh
 # already applies to tracked content, plus the one generated shape that made this
-# necessary. The two scripts hold those three patterns separately and
-# scripts/test/commit-privacy.test.sh pins the pair — the same idiom the repository
-# uses wherever a definition must agree in two places.
+# necessary. Every privacy check holds those three patterns separately and
+# scripts/test/commit-privacy.test.sh pins the set — the same idiom the repository
+# uses wherever a definition must agree in more than one place. A new reader of the
+# patterns joins that pin rather than making another copy nothing compares;
+# scripts/check-body-privacy.sh was the third (#130).
 
 set -euo pipefail
 
