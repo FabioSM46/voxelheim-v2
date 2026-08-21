@@ -534,7 +534,12 @@ func (p Pair) mint(account AccountID, world WorldID, now time.Time) (Ticket, Cla
 
 	var t Ticket
 	copy(t[:BodySize], body)
-	copy(t[BodySize:], ed25519.Sign(p.signing.key, body))
+	// **The body goes on the wire; [signedMessage] of it is what gets signed.** The
+	// domain in there is what makes this signature a claim that these bytes are a
+	// *ticket* rather than a claim that this key signed thirty-two bytes — see
+	// [ticketBodyDomain]. [verifySigned] recomputes the same value, and the two agreeing
+	// is why the helper exists rather than two copies of one expression.
+	copy(t[BodySize:], ed25519.Sign(p.signing.key, signedMessage(body)))
 	return t, claims, nil
 }
 

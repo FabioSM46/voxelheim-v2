@@ -3,6 +3,7 @@ package ticket
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -160,6 +161,155 @@ func TestATamperedTicketIsRefused(t *testing.T) {
 				t.Errorf("a tampered ticket answered %v, want ErrBadSignature", err)
 			}
 		})
+	}
+}
+
+// **A signature has to say what it is a signature of, and until #138 this one did not.**
+//
+// The key's guarantee was "the account service signed these 32 bytes", which is not the
+// claim a game server needs — any *other* 32-byte object this pair ever signed would have
+// verified here as a ticket and been decoded into an account, a world and an expiry.
+// Nothing signs a second object today, which is exactly what made the gap cheap to close
+// now: the fix is [ticketBodyDomain], folded into what the signature covers rather than
+// into the body, so `ClientHello.session_ticket` did not move.
+//
+// **Verified in the direction that fails.** A round trip through the real path proves
+// only that the two halves agree with each other, which they did before the domain
+// existed too. What has to be shown is that the old shape is refused, and that the
+// refusal an operator reads distinguishes "this is not a ticket" from "this is not ours".
+func TestASignatureThatDoesNotSayItCoversATicketIsRefused(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	world := midgard(t)
+	now := time.Now()
+
+	minted, _, err := pair.Mint(anAccount(), world, now)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	body := minted[:BodySize]
+
+	// The body is byte-for-byte a real ticket's and the key is the real one. The only
+	// difference is what the signature covers: the bare body, which is what this service
+	// signed before the domain existed.
+	var old Ticket
+	copy(old[:BodySize], body)
+	copy(old[BodySize:], ed25519.Sign(pair.signing.key, body))
+
+	// **Refused by both verifiers**, and by name. VerifyAnyWorld drops the world
+	// comparison and nothing else, so a shape that got past it would be a shape the
+	// account service's own endpoint accepted.
+	for name, got := range map[string]error{
+		"Verify": func() error {
+			_, err := Verify(pair.Public(), old[:], world, now)
+			return err
+		}(),
+		"VerifyAnyWorld": func() error {
+			_, err := VerifyAnyWorld(pair.Public(), old[:], now)
+			return err
+		}(),
+	} {
+		if got == nil {
+			t.Errorf("%s admitted a ticket signed over the bare body", name)
+		}
+		if !errors.Is(got, ErrNotATicket) {
+			t.Errorf("%s answered %v for a ticket signed over the bare body, want ErrNotATicket", name, got)
+		}
+	}
+
+	// **The two answers must not be one sentinel.** An operator reading a log has to be
+	// able to tell a ticket minted before the domain from a key that does not match, and
+	// wrapping one in the other would make errors.Is answer yes to both.
+	if errors.Is(ErrNotATicket, ErrBadSignature) || errors.Is(ErrBadSignature, ErrNotATicket) {
+		t.Error("ErrNotATicket and ErrBadSignature satisfy each other; an operator cannot tell them apart")
+	}
+
+	// **A sibling domain is the object this issue is actually about**: something else this
+	// pair signs one day, domain-separated as a ticket now is. It is refused, and with
+	// ErrBadSignature rather than ErrNotATicket — which is the honest answer, because
+	// nothing here knows that domain and "not this one" is all that can be said about it.
+	sibling := sha256.Sum256(append([]byte("voxelheim/not-a-ticket/v1\x00"), body...))
+	var other Ticket
+	copy(other[:BodySize], body)
+	copy(other[BodySize:], ed25519.Sign(pair.signing.key, sibling[:]))
+	if _, err := Verify(pair.Public(), other[:], world, now); !errors.Is(err, ErrBadSignature) {
+		t.Errorf("a body signed under a sibling domain answered %v, want ErrBadSignature", err)
+	}
+
+	// Somebody else's key over the right domain is the other of the two answers, and it
+	// stays ErrBadSignature: this is not ours, which is a different sentence from ours
+	// and not a ticket.
+	stranger := newPair(t)
+	var foreign Ticket
+	copy(foreign[:BodySize], body)
+	copy(foreign[BodySize:], ed25519.Sign(stranger.signing.key, signedMessage(body)))
+	if _, err := Verify(pair.Public(), foreign[:], world, now); !errors.Is(err, ErrBadSignature) {
+		t.Errorf("a ticket signed by another key answered %v, want ErrBadSignature", err)
+	}
+
+	// And the real path is untouched: the ticket verifies, and it is still exactly the
+	// bytes the handshake carries. The domain is in the digest and none of it is on the
+	// wire — which is the reason this shape was taken over a tag inside the body.
+	if _, err := Verify(pair.Public(), minted[:], world, now); err != nil {
+		t.Errorf("a freshly minted ticket was refused: %v", err)
+	}
+	if BodySize != 32 || Size != 96 {
+		t.Errorf("the signing domain cost wire bytes: a body is %d and a ticket is %d, and the contract says 32 and 96",
+			BodySize, Size)
+	}
+}
+
+// The signing domain is versioned and separate, in the shape [worldIDDomain] established
+// one layer down.
+//
+// **Written out literally rather than derived from the constant it is checking**, which
+// is TestATicketIsTheBytesTheHandshakeCarries's rule and matters more here: the value is
+// not an implementation detail anybody may tidy. Changing a byte of it invalidates every
+// ticket in existence, and with no revocation in this design that is a decision somebody
+// makes on purpose rather than a refactor.
+func TestTheSigningDomainIsVersionedAndSeparate(t *testing.T) {
+	t.Parallel()
+
+	if ticketBodyDomain != "voxelheim/ticket-body/v1\x00" {
+		t.Errorf("the signing domain is %q; changing it stops every ticket in flight from verifying, "+
+			"so it is a decision rather than a refactor", ticketBodyDomain)
+	}
+	if ticketBodyDomain == worldIDDomain {
+		t.Error("the signing domain and the world-id domain are the same string, which is the collision both exist to prevent")
+	}
+	if !strings.HasSuffix(ticketBodyDomain, "\x00") {
+		t.Errorf("the signing domain %q does not end in the NUL separator worldIDDomain uses", ticketBodyDomain)
+	}
+	if !strings.Contains(ticketBodyDomain, "/v1") {
+		t.Errorf("the signing domain %q carries no version, so a later change to what a signature covers "+
+			"would be a silent reinterpretation of this one", ticketBodyDomain)
+	}
+
+	// The signed message is a digest, and its width is why the domain is free: none of
+	// these bytes are transmitted.
+	body := make([]byte, BodySize)
+	if got := len(signedMessage(body)); got != sha256.Size {
+		t.Errorf("the signed message is %d bytes, want a %d-byte digest", got, sha256.Size)
+	}
+	// A function of the body, and only of the body.
+	if !bytes.Equal(signedMessage(body), signedMessage(make([]byte, BodySize))) {
+		t.Error("the same body hashed to two different messages")
+	}
+	edited := make([]byte, BodySize)
+	edited[0] ^= 0x01
+	if bytes.Equal(signedMessage(body), signedMessage(edited)) {
+		t.Error("two different bodies hashed to the same message")
+	}
+	// And it is not the body: the whole point is that the bytes signed are not the bytes
+	// somebody can substitute another meaning for.
+	if bytes.Equal(signedMessage(body), body) {
+		t.Error("the signed message is the bare body, so the domain covers nothing")
+	}
+	// The concatenation is the domain in front, which is what makes a sibling domain a
+	// different message for the same body rather than a longer one.
+	if want := sha256.Sum256(append([]byte(ticketBodyDomain), body...)); !bytes.Equal(signedMessage(body), want[:]) {
+		t.Error("the signed message is not SHA-256 of the domain followed by the body")
 	}
 }
 
@@ -482,9 +632,7 @@ func TestASignedBodyThisServiceWouldNotWriteIsStillRefused(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			var forged Ticket
-			copy(forged[:BodySize], body)
-			copy(forged[BodySize:], ed25519.Sign(pair.signing.key, body))
+			forged := signedTicket(t, pair, body)
 
 			// The signature is genuine, so this is not ErrBadSignature: the refusal has
 			// to come from reading the body.
@@ -522,12 +670,7 @@ func TestVerifyRefusesATicketWithMoreLifeLeftThanThisServiceEverMints(t *testing
 	world := midgard(t)
 	now := time.Now()
 
-	sign := func(body []byte) Ticket {
-		var forged Ticket
-		copy(forged[:BodySize], body)
-		copy(forged[BodySize:], ed25519.Sign(pair.signing.key, body))
-		return forged
-	}
+	sign := func(body []byte) Ticket { return signedTicket(t, pair, body) }
 
 	// The issue's own reproduction: the largest expiry the format can hold, signed with
 	// the real key. Everything about it is genuine except how long it lasts.
@@ -568,6 +711,23 @@ func TestVerifyRefusesATicketWithMoreLifeLeftThanThisServiceEverMints(t *testing
 			t.Errorf("%s refused a freshly minted ticket: %v", name, err)
 		}
 	}
+}
+
+// signedTicket is a whole ticket over body, signed the way a mint signs it: over
+// [signedMessage] of the body rather than over the bare body.
+//
+// **Every test that lays a body out by hand goes through here**, so that "what a real
+// signature covers" is written down once in the tests as it is written down once in the
+// package. A test that signed the bare body would be constructing the one thing
+// TestASignatureThatDoesNotSayItCoversATicketIsRefused exists to reject, and would report
+// it as a failure of whatever it was actually testing.
+func signedTicket(t *testing.T, pair *Pair, body []byte) Ticket {
+	t.Helper()
+
+	var whole Ticket
+	copy(whole[:BodySize], body)
+	copy(whole[BodySize:], ed25519.Sign(pair.signing.key, signedMessage(body)))
+	return whole
 }
 
 // bodyWith lays out a body directly, bypassing encodeBody's refusals — which is what
@@ -997,10 +1157,7 @@ func TestAnAccountlessBodyIsRefusedByBothVerifiers(t *testing.T) {
 	pair := newPair(t)
 	now := time.Now()
 	body := bodyWith(t, AccountID{}, WorldID{}, now.Add(Lifetime))
-
-	var forged Ticket
-	copy(forged[:BodySize], body)
-	copy(forged[BodySize:], ed25519.Sign(pair.signing.key, body))
+	forged := signedTicket(t, pair, body)
 
 	if _, err := VerifyAnyWorld(pair.Public(), forged[:], now); !errors.Is(err, ErrMalformedBody) {
 		t.Errorf("VerifyAnyWorld answered %v, want ErrMalformedBody", err)
