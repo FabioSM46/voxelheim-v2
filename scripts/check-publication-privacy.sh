@@ -39,7 +39,17 @@ done
 is_approved_email() {
   local email=${1,,}
   case "$email" in
-    noreply@github.com|*@users.noreply.github.com|*@example.invalid|*@example.com|*@example.org|*@example.net)
+    # noreply@anthropic.com is the co-author trailer an agent's harness appends. It names
+    # no person, it is a vendor no-reply that is already public, and much of develop's
+    # history already carries it — so refusing it would redden a whole class of legitimate
+    # commits while protecting nothing, and a check that fires on a non-leak is one people
+    # learn to work around. No commit count is written here on purpose: it moves with every
+    # merge, and a number nobody re-measures is how a claim about the world goes stale.
+    # Approved by name and not as `noreply@*`: a no-reply under a private host would publish
+    # an internal hostname, which is the thing these scans exist to catch. No example of one
+    # is written here either, because the file scan reads this file too — the same problem
+    # the assembled-from-pieces path prefixes below solve the same way.
+    noreply@github.com|noreply@anthropic.com|*@users.noreply.github.com|*@example.invalid|*@example.com|*@example.org|*@example.net)
       return 0
       ;;
     *)

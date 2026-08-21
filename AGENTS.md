@@ -83,8 +83,13 @@ readable forever.** That includes source and documentation, commit author/commit
 branch names, commit and PR messages, review comments, CI logs, artifacts and release assets.
 
 - **Never publish a real email address.** Commits must use the GitHub-provided `noreply` address.
-  Source and fixtures may contain only GitHub `noreply` identities or addresses under reserved
-  example domains; never copy a real address into a test.
+  Source, fixtures and commit messages may contain only GitHub `noreply` identities, addresses
+  under reserved example domains, and the one vendor no-reply an agent harness appends to its
+  co-author trailer by construction; never copy a real address into a test. That vendor address is
+  approved **by literal address, not by domain** — a no-reply under a private host would publish an
+  internal hostname, which is the thing these scans exist to catch. `is_approved_email` is the list,
+  it lives in both privacy scripts, and `scripts/test/commit-privacy.test.sh` pins the two copies to
+  each other: widen what an address may be in one and the pin fails until the other agrees.
 - **Never publish internal machine paths.** Do not commit workstation usernames, home directories,
   mount points, checkout locations or other environment-specific paths. Documentation uses tokens
   such as `<repo-root>`, `<worktree>` and `<workspace>`. Tests use clearly synthetic fixture paths.
@@ -94,9 +99,15 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
 - **Never publish secrets or operational identifiers.** API keys, tokens, credentials, private
   certificates, internal hostnames and non-public service endpoints belong in GitHub Secrets or a
   local ignored file, never in Git, logs, issues or PRs.
-- Before any push, run `bash scripts/check-publication-privacy.sh` and the commit-email privacy
-  check. A suspected leak blocks publication; redact it before continuing rather than printing it
-  into another diagnostic.
+- **Never publish a generated agent session reference.** A `Claude-Session:` trailer, or a
+  `claude.ai/code/session_…` URL anywhere in a message, is an account-scoped endpoint. It is the one
+  non-public endpoint a machine can recognise, and it recurs *because* it is generated rather than
+  because anybody was careless — three of them reached `develop` before anything looked (#128).
+- **A commit message is a published surface, and it is checked like one.** Two scripts divide the
+  work: `bash scripts/check-publication-privacy.sh` scans tracked file content, and
+  `bash scripts/check-commit-privacy.sh <base> <head>` walks the commits a branch adds and reads
+  their author and committer fields *and* their message. Run both before any push. A suspected leak
+  blocks publication; redact it before continuing rather than printing it into another diagnostic.
 
 - **Commits**: Never commit unless explicitly requested; conventional-commit style (`feat:`, `fix:`, `refactor:`, `docs:`, `ci:`)
 - **Read Before Write**: Find existing patterns before implementing
@@ -582,7 +593,7 @@ connection errors (they fail fast) while keeping the worst case bounded.
 - [ ] **Schemas validated** — `bash scripts/check-schemas.sh` and regenerated bindings, when `schemas/` is touched
 - [ ] **No debug prints** in production code paths
 - [ ] **No hardcoded secrets** — no API keys, tokens, passwords, or credentials in code or fixtures
-- [ ] **Publication privacy clean** — no real email, personal data, internal path, hostname or endpoint; `scripts/check-publication-privacy.sh` passes
+- [ ] **Publication privacy clean** — no real email, personal data, internal path, hostname or endpoint; `scripts/check-publication-privacy.sh` passes over the tree and `scripts/check-commit-privacy.sh` passes over the commits the branch adds
 - [ ] **Server-authoritative rule honored** — no gameplay decisions client-side
 - [ ] **Workspace rules honored** — local AGENTS.md conventions
 

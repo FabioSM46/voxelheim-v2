@@ -69,11 +69,11 @@ jobs:
           persist-credentials: false
       - name: Reject publication privacy leaks
         run: bash scripts/check-publication-privacy.sh
-      - name: Reject public commit email addresses
+      - name: Reject commit privacy leaks
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/check-commit-email-privacy.sh "$BASE_SHA" "$HEAD_SHA"
+        run: bash scripts/check-commit-privacy.sh "$BASE_SHA" "$HEAD_SHA"
       - name: Classify changed files
         id: classify
         env:
@@ -380,7 +380,7 @@ jobs:
       - name: Automation helper tests
         run: |
           bash scripts/test/agent-skills-sync.test.sh
-          bash scripts/test/commit-email-privacy.test.sh
+          bash scripts/test/commit-privacy.test.sh
           bash scripts/test/publication-privacy.test.sh
           bash scripts/test/gh-automation-deepseek-rounds.test.sh
           bash scripts/test/iteration-lifecycle.test.sh
