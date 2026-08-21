@@ -22,7 +22,8 @@ validation to get wrong.
 | `cmd/voxelheim-auth` | the account service: its own flags, HTTP route table, port and directory | know anything about the game — it imports no package the simulation uses |
 | `internal/transport` | framing, TCP, TLS, the `Transport`/`Conn` interfaces | know what a frame means |
 | `internal/protocol` | FlatBuffers encode/decode, contract limits | know about connections |
-| `internal/session` | one connection's lifetime, handshake admission, ticket verification, entity ids, the one-session-per-account claim | decide gameplay outcomes |
+| `internal/session` | one connection's lifetime, handshake admission, ticket verification, the character phase, entity ids, the one-session-per-account claim | decide gameplay outcomes |
+
 | `internal/game` | the fixed-rate loop, every player, movement, collision, inventory, snapshots | read or write a socket |
 | `internal/world` | chunks, terrain generation, the RLE codec, the chunk cache, the world directory | know that sessions exist |
 | `internal/identity` | what an account is, what a player id is, and the one-way hash between them | import anything of ours, or mint anything |
@@ -90,35 +91,53 @@ package can avoid the import would create two truths to keep in step for no bene
   credential at all. What survived is the distance between the two values, because the reason for
   it never depended on where the first one came from: a log line and a file name should name a
   player without naming the person.
-- **The player resolves on the session goroutine, between the decode and the handshake, and never
-  under `sim.mu`.** Resolution reads the player store, and a tick that waits on a file is a tick
-  every connected player misses. `session.Handshake` stays a pure function of its inputs — it is
-  handed the resolved player and is table-tested on the rules that remain — and
-  `session.Identities.Resolve` is where verification, the store lookup and the exclusivity claim
-  live, tested separately. The rule, in order: a `session_ticket` of any length but 96 is
+- **A handshake is three exchanges and the middle one is a person deciding.** `ClientHello` is
+  answered with `ServerCharacterList`; a `SelectCharacterRequest` or a `CreateCharacterRequest`
+  is answered with `ServerWelcome`; `ServerReject` is legal in place of any of them and closes
+  the connection. `session.phase` is what decides which messages are legal and which deadline
+  the next read is armed with, and `schemas/handshake.fbs` holds the reason the choice comes
+  before the welcome: **`ServerWelcome.spawn` belongs to a character**, so a welcome sent before
+  there is one would carry a position the client must not trust, and every other field in that
+  message is authoritative the moment it arrives.
+- **The account is admitted on the session goroutine, between the decode and the list, and never
+  under `sim.mu`.** Admission reads the player store, and a tick that waits on a file is a tick
+  every connected player misses. `session.Welcome` stays a pure function of its inputs — it is
+  handed the settled character and is tested on the fields it announces — and
+  `session.Identities` is where verification, the store lookup and the exclusivity claim live,
+  tested separately. The rule, in order: a `session_ticket` of any length but 96 is
   `BAD_REQUEST`, **absent and empty included**, decided before a signature is checked; the ticket
   is then verified — signature, then world, then expiry, all arithmetic; the account it names
-  becomes a player id and *only then* is the store read; that player is claimed, and one already
-  playing is `ALREADY_CONNECTED`. A record the store holds and cannot read is the same answer as
-  one it does not have, once the file has been set aside — see the corrupt-record rule under
-  "Known gaps", which is where this issue changed something.
+  becomes a player id and *only then* is anything looked up; the account is claimed, and one
+  already playing is `ALREADY_CONNECTED`; and only then is the store read for that account's
+  characters. A record the store holds and cannot read is the same answer as one it does not
+  have, once the file has been set aside — see the corrupt-record rule under "Known gaps".
+- **The claim is taken at the hello and not at the choice**, which is what makes a phase a person
+  sits inside safe to have at all: two connections for one account would otherwise both browse,
+  both select, and one of them find out afterwards. The cost is a window in which an account is
+  live and has no character, and every reader of the claim fails closed over it —
+  `Identities.stillPlaying` answers false, so an autosave that reached one would write nothing.
+- **`ClientHello.player_name` decides nothing at all.** It is untrusted display text and it is no
+  longer read: what a player is called here is the name their character was created under, which
+  is the one that is unique on this world. **`player_token` is read past entirely, its length
+  included**; `schemas/handshake.fbs` retires the field at V7 and a rule that survived would be a
+  V6 rule refusing a V7 client over a field neither of them uses.
+  `TestTheRetiredTokenFieldIsIgnored` presents every length the old rule refused.
+- **Two refusals in the character phase are deliberately one answer.** A selection naming a
+  character this world has never minted and one naming another account's are both `BAD_REQUEST`
+  carrying the same sentence, because a client that could tell them apart could enumerate this
+  world's characters by asking for ids it does not have — `game.Player.RemoveStructure`'s rule
+  with a character in place of a camp. A refused *name* is the opposite case and says which of
+  the three it was: the player picked it, and `CHARACTER_NAME_TAKEN`, `CHARACTER_NAME_REFUSED`
+  and `CHARACTER_LIMIT_REACHED` are three different things to do about it.
 
-  **`player_token` is read past entirely, its length included.** `schemas/handshake.fbs` retires
-  the field at V7 and a rule that survived would be a V6 rule refusing a V7 client over a field
-  neither of them uses. `TestTheRetiredTokenFieldIsIgnored` presents every length the old rule
-  refused.
-
-  **What `Handshake` is handed is the whole resolved player, not just an id**, because the
-  welcome's `spawn` is the position the player is actually placed at and only the resolved record
-  knows it. That is the reason the record loads during resolution: `Handshake` is pure and cannot go
-  and find one.
 - **The protocol version is settled before a ticket is verified**, and `session.unspeakable` is the
-  one implementation both callers ask. Resolution happens between the decode and the welcome, so
-  while the version check lived only inside `Handshake` a client speaking an older protocol —
-  which presents no ticket, because the ticket is what V7 added — was refused *for the ticket* and
+  one implementation of it. Admission happens between the decode and the answer, so while the
+  version check lived where the welcome was built a client speaking an older protocol — which
+  presents no ticket, because the ticket is what V7 added — was refused *for the ticket* and
   never told about the version: the one refusal it could act on, replaced by one it cannot. It is
   also the cheaper question, and it comes before an Ed25519 verification on bytes chosen by a
   connection nobody has authenticated.
+
 - **The claim is released last in `Serve`'s teardown**, after `sim.Leave` and after the
   record write: `sim.Leave` → record write → release. Either other order is a reconnect served
   wrongly — refused for a session that has already gone, or handed a record that is still being
@@ -126,7 +145,10 @@ package can avoid the import would create two truths to keep in step for no bene
   makes an idle session hand its place back instead of holding it until a restart. **The ordering
   survived the move to the account unchanged**, and it had to: what the claim is keyed by changed,
   and every reason the order is what it is was about *when* the key is released rather than what it
-  names.
+  names. It survived the character phase for the same reason: the claim is taken a message earlier
+  than it used to be, and the record write is still the last thing that happens before it is given
+  back. A session that never chose a character writes nothing and releases anyway.
+
 - **One reader, one writer per connection.** `transport.Conn` promises to survive that and nothing
   more. The writer goroutine keeps draining its queue even after a write fails, because a producer
   blocked on a dead writer is a deadlock.
@@ -141,12 +163,12 @@ package can avoid the import would create two truths to keep in step for no bene
   `io.ErrClosedPipe`, which no socket produces, would have widened a production predicate to cover
   `io.Pipe` for the sole benefit of a double — and would have left the note under `IsClosed` about
   the two questions untrue.
-- **A silent connection is closed, on a read deadline the server arms.** Two flags, both
+- **A silent connection is closed, on a read deadline the server arms.** Three flags, all
   validated at startup by `session.Timeouts.Validate` — which is the one place the rule lives,
   asked by `options.validate` rather than restated there. `-handshake-timeout` (default `5s`)
   bounds the first read: a connection that has said nothing has not yet claimed to be a client,
   so it is closed **without a reply** — `ServerReject` answers a message, and there is none.
-  `-idle-timeout` (default `20s`) bounds every read after the handshake and is re-armed before
+  `-idle-timeout` (default `20s`) bounds every read after the welcome and is re-armed before
   each one, which is the same thing as after every frame and is one call site rather than two.
   Seconds are safe because **`PlayerInput` is the heartbeat**: the client sends one every tick,
   standing still and dead included, so a healthy client is never silent for longer than one tick
@@ -154,6 +176,22 @@ package can avoid the import would create two truths to keep in step for no bene
   adding one would put a second heartbeat on a wire that already has one. A handshake window
   longer than the idle window is refused: it would hold only clients that had already proved they
   were talking to the stricter number.
+
+  **`-character-timeout` (default `2m`) is the third, and it is the odd one because the phase it
+  bounds is the only one a person is inside.** Between the character list and the choice there is
+  somebody reading names, picking colours and typing, and neither of the other two numbers
+  describes that: held to the handshake window a player is disconnected for reading their own
+  list, and held to the idle window they are disconnected for choosing carefully — a character
+  screen sends nothing at all and is not idle. What bounds it at all is that the account's single
+  live session is already claimed while it waits, so a connection parked there is one the same
+  person cannot reconnect past. It must be at least the handshake window, by the argument above
+  read from the other side — a peer that has presented a ticket this server accepted must not be
+  held to a stricter number than one that has presented nothing — and it is *expected* to exceed
+  the idle window, so there is deliberately no rule tying those two together. A timed-out
+  character phase closes without a reply for the reason a timed-out handshake does: the client
+  was answered with a list and then said nothing, so there is no message for a `ServerReject` to
+  be the answer to.
+
 - **An expired deadline ends the session with `nil`, and `transport.IsDisconnect` says so.** The
   bullet above this one, arrived at from the other direction: a session that goes quiet has ended,
   and returning an error would make `acceptLoop` log "session ended with an error" for the most
@@ -734,8 +772,9 @@ Everything about it lives in `internal/game/clock.go` and the three constants be
   The constant says so, at length, where somebody reaching for `-tick-rate` will read it.
 - **The three numbers are announced from the constants, never from `session.Config`.**
   Every field of that struct is something an operator sets; these are the design, and
-  putting them there would invent a knob and then have to validate it. `Handshake` reads
+  putting them there would invent a knob and then have to validate it. `session.Welcome` reads
   `game.DayLengthTicks` the same way it reads `protocol.InventorySlots`.
+
 - **A stored tick at or beyond `DayLengthTicks` is refused, never wrapped.**
   `% DayLengthTicks` would turn a byte-mangled four billion into an ordinary
   mid-afternoon and destroy the only evidence anything was wrong. The refusal lives in
@@ -1056,7 +1095,36 @@ flush are wired in `cmd/voxelheimd/main.go`.
 
 ## Characters, and why the account is not the key
 
+- **Choosing one is on the wire, and creating one is the only way a character comes into
+  existence.** `Store.Create` is the single path in, and the `ResolveOrCreate` beside it — which
+  answered "which character does this account play" and made one from the hello's display name
+  when the account had none — is gone rather than left for somebody to wire back up. It was the
+  stand-in for a choice that had no message to arrive in; a second, name-driven way to create is
+  a way past the appearance a creation is required to carry.
+- **What a character looks like is written down with its name, and read from there for ever
+  after.** `persist.Character` carries an `Appearance` in the index, because a character list is
+  a map hit and an index holding only names would have to read every one of an account's records
+  to draw a screen; `persist.Record` carries it on disk, beside the id and the owner rather than
+  beside the life, because it is chosen once and never written again. `Store.Save` fills all four
+  from the index and ignores what a caller put in them — a save that could restate an appearance
+  would be a way to come back from a session wearing somebody else's face.
+- **`persist.StoreVersion` is 4 because of it, and there is no migration.** A v3 record cannot say
+  what its character looks like, and the only value this build could invent is the placeholder the
+  contract reserves for an appearance that has not *arrived*, which is a different claim entirely.
+  A directory of them is set aside whole on the first start under this format, as
+  `players.pre-v4.<timestamp>/` — the name says which format the build that moved it speaks,
+  because an operator who finds two of these needs to know which is which.
+- **The store writes an appearance down and judges none of it**, which is its rule about
+  descriptions rather than an oversight: it judges what a *key* may be, and
+  `schemas/common.fbs` puts the appearance's invariants on whatever accepts the
+  `CreateCharacterRequest` they arrived in. That gate is `session.Identities.Create`, and it
+  refuses **before anything is stored** — a character persisted with a hair model no member names
+  is one every client is afterwards required to refuse, and the person who cannot get in is not
+  the person who sent it. The startup scan is the one place that judges a stored one, and for a
+  reason that is about the index rather than about the value: every character in it is a row in a
+  `ServerCharacterList`, so one unusable record would cost that account the whole list.
 - **A record is keyed by a server-minted `persist.CharacterID` and the account is a field in it.**
+
   Keyed by the account there is one character per world, which is the thing #103 removed; keyed by
   the character, "every character this account owns here" is a filter over an index rather than a
   lookup. The id is the wire's `ulong` (`CharacterSummary.character_id`) rather than a digest,
@@ -1084,7 +1152,43 @@ flush are wired in `cmd/voxelheimd/main.go`.
   written by a *newer* build is the one case that refuses to start instead.
 
 
+## What a player looks like, and the "once" that is not once per session
+
+`PlayerAppearance` is the only message this server sends per *entity* rather than per tick or per
+event, and everything about it follows from that: it is sent when a player enters a session's view
+and not again while they stay there.
+
+- **It is a message and not a field of `EntityState`, and the struct's size is a test.** A
+  snapshot's entity list is a flat inlined array — the most frequently sent payload in the game,
+  once per visible entity per tick — and five colours and a hair model never change for the life of
+  a character. Carrying them there would pay for them at the tick rate, for ever, to send a value
+  identical in every frame. `TestEntityStateIsStillFortyBytesOnTheWire` reads the encoded width
+  and is what catches somebody quietly adding a fifth field.
+
+- **The viewer remembers, not the subject.** `Player.described` maps an entity id to the tick it
+  was last visible on, and it lives on the *viewer* because the question is "has this session been
+  told". It is built by `Join`, so a reconnect starts empty and everything in view is described
+  again — which is not a rule of its own but the absence of one.
+- **What bounds it is the pruning, and the pruning is also what makes a return work.** Entries not
+  refreshed on the tick they were checked are dropped, so the map is the size of a view rather than
+  of a session's history — and an entity that left and came back is described again, which is
+  exactly what the client needs: a snapshot is the complete existence set, so an entity that
+  stopped appearing in one was despawned and its appearance went with it.
+- **It is recorded as sent only once the frame is in the queue**, which is `View.MarkLoaded`'s rule
+  and the same failure it exists to avoid. Unlike a snapshot there is no later frame to supersede a
+  dropped one, and unlike an inventory state it needs no durable flag to say so: an unrecorded
+  entity is described again on the next tick, for as long as it stays in view.
+- **One encode per player per tick at most.** The frame is built the first time a viewer turns out
+  not to have been told and handed to every viewer after that — `Registry.BroadcastChunk`'s "one
+  encode for every recipient" — which is what makes asking the question inside the per-viewer loop
+  cost nothing on the ticks where nobody's view changed, which is almost all of them.
+- **The appearance a player wears comes from the store and from nothing a client said.**
+  `Sim.Join` takes it beside the life, and validates it there for the reason it validates the
+  life: this is the boundary a stored value crosses into the simulation, and from here it goes out
+  on a wire where a client is required to refuse anything the contract forbids.
+
 ## The account service, and why it is a second command
+
 
 `cmd/voxelheim-auth` keeps who the people playing here are. It ships from this module and
 shares nothing else with the game server: not a port, not a directory, not a package the
@@ -1396,8 +1500,9 @@ import, which is what shapes almost every rule below.
 
 ### The doorman, and why it needs no telephone
 
-`cmd/voxelheimd` reads the public key once at startup and `session.Identities.Resolve` verifies a
-signature; nothing on the admission path touches the network again. This is the game server's half
+`cmd/voxelheimd` reads the public key once at startup and `session.Identities.Admit` verifies a
+signature; nothing on the admission path touches the network again.
+ This is the game server's half
 of the section above, and every rule in it follows from that one sentence.
 
 - **A start with no key is a refusal to start.** Exactly one of `-account-service` (read the key
@@ -1705,7 +1810,9 @@ flags decide is the part worth writing down.
 | `-tick-rate` | authoritative simulation ticks per second (1..255) |
 | `-view-distance` | the chunk streaming radius, in chunks (0..16) |
 | `-handshake-timeout` | how long a new connection may say nothing before it is closed |
-| `-idle-timeout` | how long an admitted session may say nothing. Must be at least the handshake timeout |
+| `-character-timeout` | how long an admitted account may take to choose a character. The one window a person is inside; must be at least the handshake timeout |
+| `-idle-timeout` | how long a welcomed session may say nothing. Must be at least the handshake timeout |
+
 | `-log-level` | `debug`, `info`, `warn` or `error` |
 | `-log-format` | `text` or `json` |
 
@@ -1825,10 +1932,13 @@ Recorded here so the next reader does not mistake them for oversights:
   `TestResolveRefusesWhenACorruptRecordCannotBeSetAside` is the pin, and it skips rather than
   asserts for a user a read-only directory does not stop.
 
-  **`persist.StoreVersion` is 2 and there is no migration.** A v1 record held a name and a timestamp,
-  which is not enough to reconstruct a life, and nothing has shipped. `CheckHeader` refuses it like
-  any other unknown version. Note that it takes the caller's version rather than a package constant,
-  so the player record and the chunk record version independently.
+  **`persist.StoreVersion` is 4 and there is no migration at any step.** v1 held a name and a
+  timestamp, which is not enough to reconstruct a life; v2 was keyed by an identity rather than by
+  a character; v3 could not say what its character looks like. Nothing has shipped, and
+  `CheckHeader` refuses every one of them like any other unknown version. Note that it takes the
+  caller's version rather than a package constant, so the player record and the chunk record
+  version independently.
+
 
   **What identifies a player.** An account, named by a session ticket the account service signed and
   the client presents in its `ClientHello`. The player id is `SHA-256(playerIDDomain ‖ account)`:
@@ -1956,7 +2066,17 @@ Recorded here so the next reader does not mistake them for oversights:
   Placement retains the older behaviour in which the editor's own view is not consulted: a
   neighbouring edit may be applied while its `BlockUpdate` reaches only sessions that hold the
   chunk.
+- **No client can join this server until the client half of the character phase lands** (#108),
+  and that is a sequencing decision rather than a defect. `ClientHello` is answered with
+  `ServerCharacterList` now, and `client/src/net/handshake.rs` answers one with
+  `HandshakeError::Unanswerable("ServerCharacterList")` — a named failure it was given
+  deliberately, because the alternative it replaced was a hang neither end could diagnose. So the
+  client fails cleanly and says why, `scripts/interop-check.sh` cannot pass, and the way through
+  is the screen that chooses a character rather than anything on this side. It is the position
+  `MobKind.Vargr` was already in: the contract is reserved first and the server half is finished
+  first, because the client half is written against the server's actual behaviour.
 - **A game server cannot tell that it reached the right account service** when it fetches
+
   `/v1/ticket-key` over plaintext HTTP, and #131 is where that is closed. The substitution it
   allows outlives the attacker, because the key is read once and kept: a server holding somebody
   else's public key admits every ticket they mint and refuses every real one, and nothing about it

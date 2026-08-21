@@ -425,8 +425,7 @@ func TestAFailedAnnounceIsLoggedAndSurvived(t *testing.T) {
 
 			// **The whole assertion.** A player presents a ticket while every announcement
 			// this server makes is failing, and is welcomed.
-			conn.in <- helloFor(t, testAccount(11))
-			if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
+			if got := enterWorld(t, conn, helloFor(t, testAccount(11)), creationOf("Eivor")).PayloadType(); got != vnet.PayloadServerWelcome {
 				t.Fatalf("the session got %s while announcing was failing, want a welcome", got)
 			}
 

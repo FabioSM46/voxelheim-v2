@@ -74,9 +74,11 @@ type options struct {
 	tickRate            uint
 	viewDistance        uint
 	handshakeTimeout    time.Duration
+	characterTimeout    time.Duration
 	idleTimeout         time.Duration
-	logLevel            string
-	logFormat           string
+
+	logLevel  string
+	logFormat string
 }
 
 func parseFlags() options {
@@ -114,7 +116,14 @@ func parseFlags() options {
 	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
 	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
 		"how long a new connection may say nothing before it is closed; it gets no reply, having sent nothing to reply to")
+	flag.DurationVar(&opts.characterTimeout, "character-timeout", session.DefaultCharacterTimeout,
+		"how long an admitted account may take to choose a character before its connection is closed. Minutes "+
+			"rather than seconds because this is the one phase of a connection a person is inside — reading a "+
+			"character list, picking colours, typing a name — and neither of the other two windows describes "+
+			"that. What bounds it at all is that the account's single live session is already claimed while it "+
+			"waits. Must be at least the handshake timeout")
 	flag.DurationVar(&opts.idleTimeout, "idle-timeout", session.DefaultIdleTimeout,
+
 		"how long an admitted session may say nothing before it is closed; seconds are safe because the client sends "+
 			"PlayerInput every tick — standing still and dead included — so a healthy client is never silent for "+
 			"longer than one tick interval. Must be at least the handshake timeout")
@@ -165,7 +174,12 @@ func (o options) validate() error {
 
 // timeouts is the read-deadline policy these flags describe.
 func (o options) timeouts() session.Timeouts {
-	return session.Timeouts{Handshake: o.handshakeTimeout, Idle: o.idleTimeout}
+	return session.Timeouts{
+		Handshake: o.handshakeTimeout,
+		Character: o.characterTimeout,
+		Idle:      o.idleTimeout,
+	}
+
 }
 
 func newLogger(level, format string) (*slog.Logger, error) {

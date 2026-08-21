@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
 // MaxCharactersPerAccount is how many characters one account may hold on one world.
@@ -89,6 +90,16 @@ type Character struct {
 	// Name is the character's name as the server accepted it — the exact text, not the
 	// folded form uniqueness is decided on.
 	Name string
+
+	// Appearance is what this character looks like: the four worn colours, the hair
+	// model and its colour, exactly as the player chose them at creation.
+	//
+	// **In the index rather than only in the record, because the list is a map hit.**
+	// Every connection is answered with `ServerCharacterList`, and a summary carries an
+	// appearance — so an index that held only names would have to read every one of an
+	// account's records on every join to draw a screen. It is written down once and read
+	// on every connection, which is the shape [Store.Characters] exists for.
+	Appearance protocol.Appearance
 }
 
 // The three ways this store refuses to create a character.
@@ -131,6 +142,14 @@ var ErrUnknownCharacter = errors.New("persist: no character on this world has th
 // whichever rename happened to land second. Held together, one wins and the other is
 // told [ErrNameTaken].
 //
+// **It is the only way a character comes into existence, and it was not always.** There
+// was a `ResolveOrCreate` beside it, which answered "which character does this account
+// play" and made one from the hello's display name when the account had none — the
+// stand-in for a choice that had no message to arrive in. Choosing is on the wire now
+// (`SelectCharacterRequest`, `CreateCharacterRequest`), so that path is gone rather than
+// left for somebody to wire back up: a second, name-driven way to create is a way past
+// the appearance the contract requires a creation to carry.
+//
 // The disk write is inside the section deliberately. A character is created once in its
 // life, so the lock is held for one atomic write on a path nothing else contends for —
 // and moving the write out would put the index and the directory briefly out of step,
@@ -140,7 +159,14 @@ var ErrUnknownCharacter = errors.New("persist: no character on this world has th
 //
 // On an ephemeral world the index is real and the write is a no-op: the name is still
 // taken, the allowance is still spent, and nothing survives the process.
-func (s *Store) Create(owner identity.PlayerID, name string) (Character, error) {
+//
+// **The appearance is written down as given and is not judged here**, which is this
+// package's rule about descriptions rather than an oversight: it judges what a *key* may
+// be — a name, an id — and schemas/common.fbs puts the appearance's invariants on
+// whatever accepts the `CreateCharacterRequest` this value arrived in, before it ever
+// reaches a store. That gate is `session.Identities.Create`, and the startup scan is
+// what refuses one that reached the disk anyway.
+func (s *Store) Create(owner identity.PlayerID, name string, appearance protocol.Appearance) (Character, error) {
 	if s == nil {
 		return Character{}, errors.New("persist: this world has no character store")
 	}
@@ -153,16 +179,6 @@ func (s *Store) Create(owner identity.PlayerID, name string) (Character, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.createLocked(owner, accepted, folded)
-}
-
-// createLocked is [Store.Create] with s.mu already held, so that a caller which has
-// *decided* to create under this lock can do it without releasing one.
-//
-// It exists for [Store.ResolveOrCreate], and the reason is the whole of #156's review:
-// a decision made outside the lock that ends in a write inside it is a check-then-act
-// race however carefully the write itself is guarded.
-func (s *Store) createLocked(owner identity.PlayerID, accepted, folded string) (Character, error) {
 	if _, taken := s.byName[folded]; taken {
 		return Character{}, fmt.Errorf("%w: %q", ErrNameTaken, accepted)
 	}
@@ -175,87 +191,13 @@ func (s *Store) createLocked(owner identity.PlayerID, accepted, folded string) (
 		return Character{}, err
 	}
 
-	character := Character{ID: id, Owner: owner, Name: accepted}
+	character := Character{ID: id, Owner: owner, Name: accepted, Appearance: appearance}
 	if wErr := s.writeRecord(character, Record{}); wErr != nil {
 		return Character{}, wErr
 	}
 
 	s.insertLocked(character)
 	return character, nil
-}
-
-// ResolveOrCreate answers with the character this account plays, creating one only if
-// the account holds none — and it decides **and** writes under one lock.
-//
-// **The lock is the whole point, and the version of this that read the roster first was
-// wrong in a way no test caught** (found in review on #156). Two hellos for one fresh
-// account both saw an empty roster, both created — [Store.Create] serialises per *name*,
-// so two different names both succeed — and the connection that then lost the
-// single-session claim had already written a second character to disk. The account was
-// left holding a character nobody asked for, permanently: there is no deletion here, so
-// the roster slot and the name were gone for good.
-//
-// The resolution rule is unchanged and is documented where the caller used to hold it:
-// an account with characters plays the one wearing the requested name, or the lowest id
-// it holds when none does; an account with none has one created under that name, which
-// is the only way a first connection becomes a character. It never *creates* from a
-// name an account already has characters for — a second character is made through the
-// wire exchange or not at all.
-//
-// The bool reports whether a character was created, which is what lets a caller say
-// "welcome" differently from "welcome back" without comparing timestamps.
-func (s *Store) ResolveOrCreate(owner identity.PlayerID, requested string) (Character, bool, error) {
-	if s == nil {
-		return Character{}, false, errors.New("persist: this world has no character store")
-	}
-
-	// Validated before the lock, and its refusal is deliberately not returned here: a
-	// name this world would not accept cannot be worn, so on the resolve path it simply
-	// matches nothing, exactly as [Store.Named] treats it. The create path below asks
-	// again and *does* return the refusal, because there it is the answer.
-	accepted, folded, nameErr := acceptName(requested)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if ids := s.byOwner[owner]; len(ids) > 0 {
-		if nameErr == nil {
-			if id, taken := s.byName[folded]; taken {
-				if character, known := s.byID[id]; known && character.Owner == owner {
-					return character, false, nil
-				}
-			}
-		}
-		// The lowest id, found rather than assumed. **byOwner is insertion order, not
-		// sorted** — [Store.Characters] sorts a copy, which is where the "lowest id
-		// first" the caller relies on actually comes from. Taking ids[0] here made an
-		// unknown name play whichever character happened to be created first, and
-		// `a hello names which of several characters plays` caught it in eight runs out
-		// of eight. The determinism is the property: two connections naming nothing
-		// this account wears must settle on the same character.
-		lowest, found := Character{}, false
-		for _, id := range ids {
-			character, known := s.byID[id]
-			if !known {
-				continue
-			}
-			if !found || character.ID < lowest.ID {
-				lowest, found = character, true
-			}
-		}
-		if found {
-			return lowest, false, nil
-		}
-	}
-
-	if nameErr != nil {
-		return Character{}, false, nameErr
-	}
-	created, err := s.createLocked(owner, accepted, folded)
-	if err != nil {
-		return Character{}, false, err
-	}
-	return created, true, nil
 }
 
 // Characters is every character owner holds on this world, lowest id first.

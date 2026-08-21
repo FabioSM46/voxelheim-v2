@@ -16,7 +16,7 @@ func (h *structureHarness) joinAs(entityID uint64, playerID identity.PlayerID, p
 	h.t.Helper()
 
 	out := &dropSink{}
-	player, err := h.sim.Join(entityID, playerID, pos, nil, out.deliver)
+	player, err := h.sim.Join(entityID, playerID, pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join as %s: %v", playerID.Short(), err)
 	}
@@ -184,7 +184,7 @@ func TestOneIdentityCannotBeTwoPlayersAtOnce(t *testing.T) {
 	h.joinAs(1, testPlayerID(1), [3]float32{0.5, 64, 0.5})
 
 	out := &dropSink{}
-	if _, err := h.sim.Join(2, testPlayerID(1), [3]float32{0.5, 64, 0.5}, nil, out.deliver); err == nil {
+	if _, err := h.sim.Join(2, testPlayerID(1), [3]float32{0.5, 64, 0.5}, testAppearance(), nil, out.deliver); err == nil {
 		t.Fatal("one identity joined twice")
 	}
 	if h.sim.Count() != 1 {

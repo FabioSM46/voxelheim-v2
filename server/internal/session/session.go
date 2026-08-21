@@ -13,12 +13,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -73,15 +75,28 @@ func (c Config) Validate() error {
 // Twenty seconds is therefore hundreds of missed frames rather than a client
 // thinking, and the handshake window is shorter still: a connection that has said
 // nothing has not even claimed to be a client.
+//
+// The character window is the odd one out and is measured in minutes, because it is the
+// one phase of a connection paced by a person rather than by a machine. Between the
+// character list and the selection there is somebody reading names, picking colours and
+// typing — and neither of the other two numbers describes that. Five seconds is what a
+// connection that has said nothing gets; twenty seconds is what a client that sends a
+// heartbeat every tick gets; a character screen sends nothing at all and is not idle.
+//
+// Two minutes rather than "as long as they like": the claim on that account is already
+// held, so a connection parked here is one the same person cannot reconnect past from
+// another machine. It is a judgement rather than a measurement, and it is the operator's
+// to change — see -character-timeout.
 const (
 	DefaultHandshakeTimeout = 5 * time.Second
+	DefaultCharacterTimeout = 2 * time.Minute
 	DefaultIdleTimeout      = 20 * time.Second
 )
 
 // Timeouts bounds how long a connection may say nothing.
 //
 // Deliberately not part of Config: every field of that struct is announced to the
-// client in ServerWelcome, and these two are the server's business alone. The
+// client in ServerWelcome, and these are the server's business alone. The
 // client is never told how long its silence buys it, because a client that needs
 // to know is one that is planning to be silent for exactly that long.
 //
@@ -93,16 +108,31 @@ type Timeouts struct {
 	// its ClientHello.
 	Handshake time.Duration
 
-	// Idle bounds every read after the handshake, re-armed on each frame.
+	// Character bounds the read between the character list and the choice that answers
+	// it — a SelectCharacterRequest or a CreateCharacterRequest.
+	//
+	// **Its own number rather than either of the other two**, because the phase it
+	// bounds is the only one a person is inside. Held to the handshake window a player
+	// would be disconnected for reading their own character list; held to the idle
+	// window they would be disconnected for choosing carefully. What bounds it at all is
+	// that the account's single live session is already claimed by the time this phase
+	// starts.
+	Character time.Duration
+
+	// Idle bounds every read after the welcome, re-armed on each frame.
 	Idle time.Duration
 }
 
 // DefaultTimeouts is the policy the flags default to.
 func DefaultTimeouts() Timeouts {
-	return Timeouts{Handshake: DefaultHandshakeTimeout, Idle: DefaultIdleTimeout}
+	return Timeouts{
+		Handshake: DefaultHandshakeTimeout,
+		Character: DefaultCharacterTimeout,
+		Idle:      DefaultIdleTimeout,
+	}
 }
 
-// Validate enforces the two rules a deadline policy has to obey.
+// Validate enforces the rules a deadline policy has to obey.
 //
 // It lives here rather than in the flag parser so that the server runs under the
 // same rule the operator was checked against, instead of a copy of it that can
@@ -110,48 +140,96 @@ func DefaultTimeouts() Timeouts {
 // cannot mean anything: the first read would outlive the budget every later read
 // is held to, so the stricter number would apply only to clients that had already
 // proved they were talking.
+//
+// **The character window is held to the same floor and to no ceiling**, and the absence
+// of one is deliberate. It must be at least the handshake window by the argument above —
+// a peer that has presented a ticket this server accepted must not be held to a stricter
+// number than one that has presented nothing — and it is *expected* to exceed the idle
+// window, because a character screen is not an idle session. A rule tying the two
+// together would be a rule about two different things.
 func (t Timeouts) Validate() error {
 	switch {
 	case t.Handshake <= 0:
 		return fmt.Errorf("handshake timeout must be greater than zero, got %s", t.Handshake)
+	case t.Character <= 0:
+		return fmt.Errorf("character timeout must be greater than zero, got %s", t.Character)
 	case t.Idle <= 0:
 		return fmt.Errorf("idle timeout must be greater than zero, got %s", t.Idle)
 	case t.Handshake > t.Idle:
 		return fmt.Errorf("handshake timeout %s must not exceed the idle timeout %s", t.Handshake, t.Idle)
+	case t.Handshake > t.Character:
+		return fmt.Errorf("handshake timeout %s must not exceed the character timeout %s", t.Handshake, t.Character)
 	}
 	return nil
 }
 
-// Handshake decides what to answer a connection's first message.
+// phase is how far one connection has got through the handshake, and it is what decides
+// which messages are legal and which deadline the next read is armed with.
 //
-// A pure function of the message and the server's configuration: no I/O, no
-// state, no clock. The connection lifecycle around it is hard to test
-// exhaustively; the admission rules are the part that must never drift, so they
-// live where a table test can cover every branch.
+// **Three phases where V6 had two**, and the middle one is what this contract added:
+// ClientHello is answered with ServerCharacterList, and only a selection or a creation
+// earns a ServerWelcome. schemas/handshake.fbs holds the reason — the welcome's spawn
+// belongs to a character, so it cannot be sent before there is one.
+type phase uint8
+
+const (
+	// phaseHello is a connection that has said nothing yet. It is bounded by the
+	// shortest window and is answered by a character list or by a refusal.
+	phaseHello phase = iota
+
+	// phaseCharacter is an account admitted and choosing. Its ticket has been verified
+	// and its single live session claimed; what it owes the server is one message.
+	phaseCharacter
+
+	// phaseInWorld is a welcomed session: it has a body in the simulation, and every
+	// gameplay message becomes legal at exactly this moment and not before.
+	phaseInWorld
+)
+
+// String names the phase in a log line. Without it slog would print the number, and the
+// number is the one thing about a phase nobody can read.
+func (p phase) String() string {
+	switch p {
+	case phaseHello:
+		return "hello"
+	case phaseCharacter:
+		return "character"
+	case phaseInWorld:
+		return "in-world"
+	default:
+		return "phase(" + strconv.Itoa(int(p)) + ")"
+	}
+}
+
+// Welcome builds the last message of a handshake: the one that says a character is in
+// the world.
 //
-// **self is the player this session plays under, already resolved.** Resolving one
-// verifies a ticket, reads the player store and claims exclusivity — state, I/O and a
-// decision that can be refused, none of which may happen in here without making this
-// function untestable in exactly the way it exists to avoid. So Serve resolves it
-// first and hands the answer in; Identities.Resolve is where those rules live and
-// where they are tested. By the time this is called, somebody holding the account
-// service's key has vouched for whoever is on the other end.
+// A pure function of the server's configuration and the character that was chosen: no
+// I/O, no state, no clock. The connection lifecycle around it is hard to test
+// exhaustively; what a welcome announces is the part that must never drift, so it lives
+// where a test can read every field of it.
 //
-// **The welcome's spawn is where the player will actually stand**, which for a
-// returning identity is the position their record holds and not the world spawn.
+// **self is the character this session plays, already settled.** Settling one verifies a
+// ticket, reads the player store, claims exclusivity and answers a choice the player
+// made — state, I/O and several decisions that can be refused, none of which may happen
+// in here without making this function untestable in exactly the way it exists to avoid.
+// So Serve settles it first and hands the answer in; [Identities.Admit],
+// [Identities.Select] and [Identities.Create] are where those rules live and where they
+// are tested.
+//
+// **This is why it takes no message.** Through V6 a welcome answered the hello, so the
+// hello was an argument and this function refused one it could not read. It answers a
+// selection or a creation now, and what a *hello* is refused for is asked one phase
+// earlier — see [unspeakable], which Serve calls before a ticket is verified.
+//
+// **The welcome's spawn is where the player will actually stand**, which for a returning
+// character is the position their record holds and not the world spawn.
 // schemas/handshake.fbs says spawn is the position the player begins at, and a client
 // that placed itself at the world spawn and was then corrected by the first snapshot
 // would show every reconnect as a teleport. That is the whole reason the record is
-// loaded during resolution rather than at Join: this function is pure, so the answer
-// has to arrive with the identity.
-//
-// The returned frame is always sent, whether accepted or not — a refused client
-// is told why rather than dropped silently.
-func Handshake(msg protocol.Message, cfg Config, entityID uint64, self Resolved) (reply []byte, accepted bool) {
-	if refusal, refused := unspeakable(msg); refused {
-		return refusal, false
-	}
-
+// loaded while the character is being settled: this function is pure, so the answer has
+// to arrive with it.
+func Welcome(cfg Config, entityID uint64, self Resolved) []byte {
 	return protocol.EncodeServerWelcome(protocol.Welcome{
 		EntityID:       entityID,
 		Spawn:          placementSpawn(cfg, self),
@@ -182,20 +260,23 @@ func Handshake(msg protocol.Message, cfg Config, entityID uint64, self Resolved)
 		DayLengthTicks:  game.DayLengthTicks,
 		NightStartTicks: game.NightStartTicks,
 		NightEndTicks:   game.NightEndTicks,
-	}), true
+	})
 }
 
 // unspeakable is the half of a handshake decided from the message alone: is this a
 // hello at all, and does it speak this protocol.
 //
-// **Split out so that Serve can ask it before a ticket is verified, and asking twice is
-// asking one implementation twice rather than writing the rule down twice.** The order
-// is what forced the split. Resolution happens between the decode and the welcome, so
-// with the version check living only inside [Handshake] a client speaking an older
-// protocol — which presents no ticket, because a ticket is what V7 added — was refused
-// for the ticket and never told about the version. That is the one refusal it could have
-// acted on, replaced by one it cannot: "sign in again" to a client that would then
-// present a ticket its own protocol has no field for.
+// **Asked before a ticket is verified**, and the order is what forced it out of the
+// welcome. Admission happens between the decode and the answer, so with the version
+// check living where the welcome was built a client speaking an older protocol — which
+// presents no ticket, because a ticket is what V7 added — was refused for the ticket and
+// never told about the version. That is the one refusal it could have acted on, replaced
+// by one it cannot: "sign in again" to a client that would then present a ticket its own
+// protocol has no field for.
+//
+// It has one caller now. [Welcome] no longer takes a message at all, because the message
+// it answers is the character choice rather than the hello — so the rule is asked once,
+// where the hello is, instead of twice.
 //
 // It is also the cheaper question. Everything here is a comparison; everything after it
 // is an Ed25519 verification on bytes chosen by a connection nobody has authenticated.
@@ -273,13 +354,16 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// Declared up here rather than beside the read loop because the deferred
 		// teardown below reads them, and a closure can only see what already exists.
 		//
-		// self is the player this connection resolved; claimed says the claim on them
-		// is this session's to release. handshaken is what separates a session that
-		// joined from one that was refused after resolving — only the first leaves a
-		// record behind, because a refused client never entered the world and a file
-		// for it would be a life nobody ever lived.
-		handshaken  bool
+		// account is the account this connection was admitted as and claimed says the
+		// claim on it is this session's to release — both settled at the hello, before a
+		// character exists. self is the character it went on to play, and it is filled in
+		// one phase later. current is what separates a session that joined from one that
+		// was refused on the way: only a welcomed session leaves a record behind, because
+		// a refused client never entered the world and a file for it would be a life
+		// nobody ever lived.
+		current     phase
 		claimed     bool
+		account     Admitted
 		self        Resolved
 		displayName string
 	)
@@ -357,7 +441,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// which is what makes an idle session save its life and give its identity back
 		// rather than hold both until the process restarts.
 		if claimed {
-			if handshaken && player != nil {
+			if current == phaseInWorld && player != nil {
 				if rErr := identities.Remember(self, player.Record()); rErr != nil {
 					// Logged rather than returned: the session is over and the connection
 					// was fine, so failing it would report the wrong thing. Loud, because
@@ -366,7 +450,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 						"player_id", self.ID.Short(), "error", rErr)
 				}
 			}
-			identities.Release(self.ID)
+			// The account's, not the character's: the claim was taken when the ticket
+			// verified, which is one phase before there was a character to name it by.
+			identities.Release(account.ID)
 		}
 	}()
 
@@ -415,6 +501,41 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		}
 	}
 
+	// refuse answers an admission error and says how the session ends.
+	//
+	// **Two kinds of failure, and only one of them is the client's.** A [Refused] is a
+	// refusal the contract has a code for — a ticket this server will not admit, an
+	// account already playing, a name somebody else has, a character this account may
+	// not play — and it is answered with a ServerReject and a clean close, so the
+	// client learns why. Anything else is *this server* failing: it could not read its
+	// own player store, or it cannot verify a ticket at all, and RejectReason has no
+	// member that says so. Sending one that says something else would be worse than
+	// saying nothing, so the error is returned and the connection ends unanswered.
+	//
+	// One closure rather than the same fifteen lines in both phases, because what must
+	// not drift between them is which failures get a reply.
+	refuse := func(cause error) error {
+		var refused *Refused
+		if !errors.As(cause, &refused) {
+			return cause
+		}
+
+		out <- protocol.EncodeServerReject(refused.Reason, refused.Detail)
+		// **The cause is logged and never sent**, and that asymmetry is the point: five
+		// different ticket refusals leave this server as one identical frame, and so do
+		// the two ways a character can be one this account may not play — so a client
+		// learns nothing it could ask this server about somebody else's credential or
+		// somebody else's character, while an operator reading a log can tell them
+		// apart. Nothing in a cause quotes a ticket's bytes: internal/ticket's refusals
+		// name lengths, world ids and expiry times, all of which are safe to write down.
+		attrs := []any{"reason", refused.Reason.String(), "detail", refused.Detail}
+		if refused.Cause != nil {
+			attrs = append(attrs, "cause", refused.Cause.Error())
+		}
+		log.Info("handshake refused", attrs...)
+		return nil
+	}
+
 	// armRead bounds the read that follows it. The zero Time clears the deadline,
 	// which is what a zero duration asks for.
 	armRead := func(window time.Duration) error {
@@ -431,18 +552,21 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	lastFrame := time.Now()
 	for {
 		// Armed before every read, which is the same thing as re-armed after every
-		// frame and is one call site instead of two. The first read gets the handshake
-		// window; every read after it gets the idle window, measured from *after* the
-		// handshake's own work rather than from the frame that started it.
+		// frame and is one call site instead of two. Each phase gets its own window, and
+		// each is measured from *after* the previous phase's own work rather than from
+		// the frame that started it.
 		window := timeouts.Handshake
-		if handshaken {
+		switch current {
+		case phaseCharacter:
+			window = timeouts.Character
+		case phaseInWorld:
 			window = timeouts.Idle
 		}
 		if aErr := armRead(window); aErr != nil {
 			// Setting a deadline fails on a connection that has already been closed,
 			// which is a disconnect noticed one call early rather than a fault.
 			if transport.IsDisconnect(aErr) {
-				log.Info("client disconnected", "handshaken", handshaken)
+				log.Info("client disconnected", "phase", current.String())
 				return nil
 			}
 			return aErr
@@ -453,11 +577,19 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// Asked before IsDisconnect, which also answers for a deadline: both end the
 			// session the same way, and only this branch knows which sentence to log.
 			if transport.IsTimeout(rErr) {
-				if handshaken {
+				switch current {
+				case phaseInWorld:
 					log.Info("session idle",
 						"silent_for", time.Since(lastFrame).Round(time.Millisecond).String(),
 						"idle_timeout", timeouts.Idle.String())
-				} else {
+				case phaseCharacter:
+					// Nothing is written back here either, and for the same reason: the
+					// client was answered with a character list and then said nothing, so
+					// there is no message for a ServerReject to be the answer to.
+					log.Info("no character was chosen; closing without a reply",
+						"player_id", account.ID.Short(),
+						"character_timeout", timeouts.Character.String())
+				default:
 					// Nothing is written back. There is no reply to a client that has not
 					// spoken, and ServerReject answers a message rather than a silence.
 					log.Info("handshake timed out; closing without a reply",
@@ -466,7 +598,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return nil
 			}
 			if transport.IsDisconnect(rErr) {
-				log.Info("client disconnected", "handshaken", handshaken)
+				log.Info("client disconnected", "phase", current.String())
 				return nil
 			}
 			return fmt.Errorf("session: read: %w", rErr)
@@ -481,12 +613,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			return fmt.Errorf("session: decode: %w", dErr)
 		}
 
-		if !handshaken {
+		if current == phaseHello {
 			// **Is this a hello, and does it speak this protocol** — asked before a
 			// ticket is verified, because a client speaking an older protocol has no
 			// ticket to present and would otherwise be told about the one thing it
-			// cannot fix instead of the one thing it can. One implementation, asked
-			// here and again inside Handshake below; see unspeakable.
+			// cannot fix instead of the one thing it can. See unspeakable.
 			if refusal, refused := unspeakable(msg); refused {
 				out <- refusal
 				log.Info("handshake refused", "kind", msg.Kind.String())
@@ -495,64 +626,53 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return nil
 			}
 
-			// The player resolves between deciding the hello is legible and answering
-			// it, which is the one place it can: Handshake is pure and stays pure, and
-			// Join must not be reached with a player the store has not been consulted
-			// about. The check above guarantees the hello is here.
-			{
-				resolved, rErr := identities.Resolve(msg.ClientHello)
-				if rErr != nil {
-					var refused *Refused
-					if !errors.As(rErr, &refused) {
-						// No reply, deliberately. This is the server failing — it could not
-						// read its own player store, or it cannot verify a ticket at all —
-						// and the contract has no reason code that says so. Sending one that
-						// says something else would be worse than saying nothing.
-						return rErr
-					}
-					out <- protocol.EncodeServerReject(refused.Reason, refused.Detail)
-					// **The cause is logged and never sent**, and that asymmetry is the
-					// point: five different ticket refusals leave this server as one
-					// identical frame, so a client learns nothing it could ask this server
-					// about somebody else's ticket, while an operator reading a log can
-					// tell an expired ticket from one signed by another key from one minted
-					// before the signing domain existed. Nothing in a cause quotes a
-					// ticket's bytes — internal/ticket's refusals name lengths, world ids
-					// and expiry times, all of which are safe to write down.
-					attrs := []any{"reason", refused.Reason.String(), "detail", refused.Detail}
-					if refused.Cause != nil {
-						attrs = append(attrs, "cause", refused.Cause.Error())
-					}
-					log.Info("handshake refused", attrs...)
-					return nil
-				}
-				self, claimed = resolved, true
+			// The account is admitted between deciding the hello is legible and
+			// answering it, which is the one place it can: the answer is this account's
+			// character list, and only the store knows what is in it. The check above
+			// guarantees the hello is here.
+			admittedAccount, aErr := identities.Admit(msg.ClientHello)
+			if aErr != nil {
+				return refuse(aErr)
 			}
+			account, claimed = admittedAccount, true
 
-			reply, accepted := Handshake(msg, cfg, entityID, self)
-			out <- reply
-			if !accepted {
-				// Unreachable: unspeakable answered above, and it is the only thing
-				// Handshake refuses on. Kept because Handshake owns that decision and
-				// a caller that assumed it away would be the second place the rule
-				// lives.
-				log.Info("handshake refused", "kind", msg.Kind.String())
-				return nil
+			// **The list, not a welcome.** There is no body yet and no spawn to announce,
+			// because which character is playing has not been said — schemas/handshake.fbs
+			// puts the choice here for exactly that reason. An empty list is a legal
+			// answer and not a refusal: it says the only way forward is a creation.
+			out <- protocol.EncodeServerCharacterList(account.list())
+			current = phaseCharacter
+
+			// The first line that says who is on the far end, and on a connection that
+			// never chooses it is the only one. The player id is the first 8 hex
+			// characters of a digest; the account it hashes is never printed at any
+			// level, on any path, nor is the ticket that named it.
+			log.Info("account admitted; waiting for a character",
+				"player_id", account.ID.Short(),
+				"characters", len(account.Characters))
+			continue
+		}
+
+		if current == phaseCharacter {
+			resolved, cErr := chooseCharacter(msg, account, identities)
+			if cErr != nil {
+				return refuse(cErr)
 			}
-			handshaken = true
-			// **The character's name, not the hello's.** The two are usually the same
-			// string — a first connection creates the character under the name the hello
-			// carried — but the one the server accepted is the one that is unique on this
-			// world, and it is what a later connection is answered with whatever name it
-			// asked under. Taking it from the message would print a name nobody here is
-			// playing as.
+			self = resolved
+
+			// The welcome answers the choice rather than the hello, and it is the first
+			// moment every field in it is true: the spawn is this character's, because
+			// there is finally a character to have one.
+			out <- Welcome(cfg, entityID, self)
+			current = phaseInWorld
+			// **The character's name, not the hello's.** The hello carries a display name
+			// and this server no longer reads it: what a player is called here is the name
+			// their character was created under, which is the one that is unique on this
+			// world and the one every other session sees.
 			displayName = self.Name
 			// entity_id is already on the logger the caller passed in; repeating it
-			// here would print it twice. The player id is the first 8 hex characters of
-			// a digest — enough to follow one player through a log — and the account it
-			// hashes is never printed at any level, on any path, nor is the ticket that
-			// named it. The character id is a number this server minted and names nobody
-			// on its own.
+			// here would print it twice. The character id is a number this server minted
+			// and names nobody on its own.
 			log.Info("session admitted",
 				"player_name", displayName,
 				"player_id", self.ID.Short(),
@@ -568,7 +688,12 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// die. self.Life is what moves them somewhere else, and restoring a position
 			// is not the same thing as moving somebody's respawn point to wherever they
 			// happened to log out.
-			admitted, jErr := sim.Join(entityID, self.ID, cfg.Spawn, self.Life, trySend)
+			//
+			// The appearance goes in beside the life and comes from the same place: the
+			// stored character. Nothing the client said at any point in this handshake
+			// reaches it, and a creation's appearance reaches it only by having been
+			// written down first.
+			admitted, jErr := sim.Join(entityID, self.ID, cfg.Spawn, self.Appearance, self.Life, trySend)
 			if jErr != nil {
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}
@@ -628,6 +753,55 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			log.Info("session stopping: server is shutting down")
 			return nil
 		}
+	}
+}
+
+// chooseCharacter answers the one message the character phase is waiting for.
+//
+// **Two payloads are legal here and nothing else is.** A selection names a character the
+// account already owns; a creation makes one and plays it, because creation and
+// selection are one step in this contract. Everything else — a hello arriving twice, a
+// PlayerInput from a client that has decided it is already in the world, a payload only
+// a server sends — is answered with BAD_REQUEST and a closed connection, which is what
+// [unspeakable] does one phase earlier and for the same reason: the handshake is the one
+// place a refusal has a reply payload to say so in, and a client told nothing cannot
+// tell a refusal from a lost packet.
+//
+// It decides nothing itself. Whether an id names a character this account may play, and
+// whether a name and a face may be written down, are [Identities]' answers against a
+// store this function cannot see.
+func chooseCharacter(msg protocol.Message, account Admitted, identities *Identities) (Resolved, error) {
+	switch msg.Kind {
+	case vnet.PayloadSelectCharacterRequest:
+		if msg.SelectCharacter == nil {
+			// Unreachable: Decode sets the payload for this kind or fails the frame.
+			// Stated rather than dereferenced, because the alternative to an answer here
+			// is a nil-pointer panic in the goroutine holding a socket.
+			return Resolved{}, malformedChoice(msg.Kind)
+		}
+		return identities.Select(account, persist.CharacterID(msg.SelectCharacter.CharacterID))
+
+	case vnet.PayloadCreateCharacterRequest:
+		if msg.CreateCharacter == nil {
+			// Unreachable for the same reason, and doubly so: Decode refuses a creation
+			// carrying no appearance outright, so a frame that reaches here has one.
+			return Resolved{}, malformedChoice(msg.Kind)
+		}
+		return identities.Create(account, msg.CreateCharacter.Name, msg.CreateCharacter.Appearance)
+
+	default:
+		return Resolved{}, malformedChoice(msg.Kind)
+	}
+}
+
+// malformedChoice is the answer to a message that is not one of the two the character
+// phase accepts. It names what arrived, because a client whose build is sending the
+// wrong thing is the only party that can fix it.
+func malformedChoice(kind vnet.Payload) *Refused {
+	return &Refused{
+		Reason: vnet.RejectReasonBAD_REQUEST,
+		Detail: fmt.Sprintf("expected %s or %s while a character is being chosen, got %s",
+			vnet.PayloadSelectCharacterRequest, vnet.PayloadCreateCharacterRequest, kind),
 	}
 }
 

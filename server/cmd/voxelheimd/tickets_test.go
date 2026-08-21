@@ -82,10 +82,10 @@ func TestAPlayerIsAdmittedWithTheAccountServiceGone(t *testing.T) {
 	stop := start(t, srv)
 	defer stop()
 
-	conn.in <- helloFor(t, testAccount(6))
-	if got := firstReply(t, conn).PayloadType(); got != vnet.PayloadServerWelcome {
+	if got := enterWorld(t, conn, helloFor(t, testAccount(6)), creationOf("Eivor")).PayloadType(); got != vnet.PayloadServerWelcome {
 		t.Fatalf("the session got %s with the account service down, want a welcome", got)
 	}
+
 }
 
 // A server that cannot verify a ticket refuses to start, whichever way the key is

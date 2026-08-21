@@ -2496,6 +2496,83 @@ func TestForbiddenAppearanceValuesAreCarriedRatherThanRejected(t *testing.T) {
 	}
 }
 
+// The rule the test above leaves to somebody else, and this is that somebody: Validate
+// is what a caller asks before an appearance is stored or sent, and it is deliberately
+// not what Decode asks.
+func TestValidateAnswersTheContractsInvariants(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an appearance the contract allows", func(t *testing.T) {
+		t.Parallel()
+
+		// Every hair member but Unknown, against colours at the very top of the room a
+		// colour has: 0x00FFFFFF is the largest legal value and 0x01000000 the smallest
+		// illegal one, so this is the boundary rather than a value near it.
+		for model, name := range vnet.EnumNamesHairModel {
+			if model == vnet.HairModelUnknown {
+				continue
+			}
+			worn := Appearance{
+				SkinColor: ColorChannels, ShirtColor: ColorChannels,
+				TrousersColor: ColorChannels, ShoesColor: ColorChannels,
+				HairColor: ColorChannels, HairModel: model,
+			}
+			if err := worn.Validate(); err != nil {
+				t.Errorf("a character in %s was refused: %v", name, err)
+			}
+		}
+	})
+
+	t.Run("a colour outside the channels", func(t *testing.T) {
+		t.Parallel()
+
+		// One subtest per field, because a check written over four of the five would
+		// pass every test that only ever set the first.
+		for what, set := range map[string]func(*Appearance){
+			"skin":     func(a *Appearance) { a.SkinColor = ColorChannels + 1 },
+			"shirt":    func(a *Appearance) { a.ShirtColor = 0xFF000000 },
+			"trousers": func(a *Appearance) { a.TrousersColor = 0x01000000 },
+			"shoes":    func(a *Appearance) { a.ShoesColor = 0x80FFFFFF },
+			"hair":     func(a *Appearance) { a.HairColor = 0xFFFFFFFF },
+		} {
+			worn := anAppearance()
+			set(&worn)
+			if err := worn.Validate(); !errors.Is(err, ErrAppearance) {
+				t.Errorf("a %s colour with the reserved high byte set was answered %v, want ErrAppearance", what, err)
+			}
+		}
+	})
+
+	t.Run("a hair model that is not a choice", func(t *testing.T) {
+		t.Parallel()
+
+		// Unknown is the absent-field value rather than a shaved head, and 200 is a
+		// contract this build does not speak. Both fail closed; a colour has no such
+		// spare value, which is why absence is not on this list.
+		for _, model := range []vnet.HairModel{vnet.HairModelUnknown, vnet.HairModel(200)} {
+			worn := anAppearance()
+			worn.HairModel = model
+			if err := worn.Validate(); !errors.Is(err, ErrAppearance) {
+				t.Errorf("hair model %d was answered %v, want ErrAppearance", model, err)
+			}
+		}
+	})
+
+	t.Run("black is a colour somebody chose", func(t *testing.T) {
+		t.Parallel()
+
+		// The one case that must *not* be refused, and the reason schemas/common.fbs
+		// writes the rule as a prohibition: a table scalar carries no presence bit, so
+		// an absent colour and a chosen black are the same bytes on the wire. Refusing
+		// absence would refuse a character wearing black shoes — and would make decode
+		// correctness depend on the sender's builder settings.
+		worn := Appearance{HairModel: vnet.HairModelShaved}
+		if err := worn.Validate(); err != nil {
+			t.Errorf("a character dressed entirely in black was refused: %v", err)
+		}
+	})
+}
+
 // A union tag naming a payload the envelope does not carry is a frame that lies about
 // itself, and V7's two client payloads are no exception.
 func TestTheCharacterRequestTagsWithoutPayloadsAreMalformed(t *testing.T) {

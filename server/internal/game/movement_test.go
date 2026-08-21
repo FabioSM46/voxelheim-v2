@@ -145,10 +145,79 @@ func (s *sink) deliver(frame []byte) bool {
 	return true
 }
 
-func (s *sink) count() int {
+// snapshots is how many EntitySnapshot frames this session was sent.
+//
+// **Not the frame count, and the two stopped being the same number.** A tick also
+// delivers a PlayerAppearance for every entity that has just come into this session's
+// view, so the first tick after a join carries two frames and one snapshot. A test that
+// means "how many ticks reached this client" has to say so, and this is where it says
+// it — counting frames instead would make every appearance look like an extra tick.
+func (s *sink) snapshots() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.frames)
+
+	delivered := 0
+	for _, frame := range s.frames {
+		if vnet.GetRootAsEnvelope(frame, 0).PayloadType() == vnet.PayloadEntitySnapshot {
+			delivered++
+		}
+	}
+	return delivered
+}
+
+// appearances is every PlayerAppearance this session was sent, in order.
+//
+// The frames are read with the generated accessors rather than through
+// protocol.Decode, for the reason decodeSnapshot below does: this input is a frame the
+// server produced rather than a client's choice — and Decode has no case for this
+// payload at all, because a server never receives one.
+func (s *sink) appearances(t *testing.T) []protocol.PlayerAppearance {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var described []protocol.PlayerAppearance
+	for _, frame := range s.frames {
+		env := vnet.GetRootAsEnvelope(frame, 0)
+		if env.PayloadType() != vnet.PayloadPlayerAppearance {
+			continue
+		}
+		var table flatbuffers.Table
+		if !env.Payload(&table) {
+			t.Fatal("the appearance payload is absent")
+		}
+		var payload vnet.PlayerAppearance
+		payload.Init(table.Bytes, table.Pos)
+
+		sent := protocol.PlayerAppearance{EntityID: payload.EntityId()}
+		if worn := payload.Appearance(nil); worn != nil {
+			sent.HasAppearance = true
+			sent.Appearance = protocol.Appearance{
+				SkinColor:     worn.SkinColor(),
+				ShirtColor:    worn.ShirtColor(),
+				TrousersColor: worn.TrousersColor(),
+				ShoesColor:    worn.ShoesColor(),
+				HairModel:     worn.HairModel(),
+				HairColor:     worn.HairColor(),
+			}
+		}
+		described = append(described, sent)
+	}
+	return described
+}
+
+// describedAs is how many times this session was told what one entity looks like.
+func (s *sink) describedAs(t *testing.T, entityID uint64) int {
+	t.Helper()
+
+	times := 0
+	for _, sent := range s.appearances(t) {
+		if sent.EntityID == entityID {
+			times++
+		}
+	}
+	return times
 }
 
 func (s *sink) last() []byte {
@@ -210,11 +279,27 @@ func testPlayerID(entityID uint64) identity.PlayerID {
 	return identity.IDOf(account)
 }
 
+// testAppearance is a character the contract would accept, for the reason the copy in
+// the internal tests exists: Join validates the appearance it is handed, so a test that
+// wants a player has to state a legal one. Two copies because these are two packages —
+// game_test cannot see game's own helpers — and the values differ deliberately, so a
+// frame in one package's test cannot be mistaken for the other's.
+func testAppearance() protocol.Appearance {
+	return protocol.Appearance{
+		SkinColor:     0xf0d5b1,
+		ShirtColor:    0x7a3b2e,
+		TrousersColor: 0x2b3a55,
+		ShoesColor:    0x000000,
+		HairModel:     vnet.HairModelCropped,
+		HairColor:     0x30231d,
+	}
+}
+
 func (h *harness) join(entityID uint64, pos [3]float32) (*game.Player, *sink) {
 	h.t.Helper()
 
 	out := &sink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}
@@ -900,12 +985,12 @@ func TestASnapshotIsDeliveredOncePerTick(t *testing.T) {
 	h := newHarness(t, flatWorld{groundTop: 63})
 	player, out := h.join(1, [3]float32{0.5, 67, 0.5})
 
-	if got := out.count(); got != 0 {
+	if got := out.snapshots(); got != 0 {
 		t.Fatalf("joining delivered %d snapshots; a tick is what produces one", got)
 	}
 
 	h.advance(5)
-	if got := out.count(); got != 5 {
+	if got := out.snapshots(); got != 5 {
 		t.Fatalf("five ticks delivered %d snapshots, want 5", got)
 	}
 
@@ -1009,7 +1094,7 @@ func TestLeavingStopsTheSnapshots(t *testing.T) {
 	player, out := h.join(1, [3]float32{0.5, 67, 0.5})
 
 	h.advance(3)
-	delivered := out.count()
+	delivered := out.snapshots()
 
 	h.sim.Leave(player)
 	if got := h.sim.Count(); got != 0 {
@@ -1017,7 +1102,7 @@ func TestLeavingStopsTheSnapshots(t *testing.T) {
 	}
 
 	h.advance(3)
-	if got := out.count(); got != delivered {
+	if got := out.snapshots(); got != delivered {
 		t.Errorf("a session that left received %d more snapshots", got-delivered)
 	}
 
@@ -1041,10 +1126,10 @@ func TestAFullQueueDropsTheSnapshotAndTheTickCarriesOn(t *testing.T) {
 
 	h.advance(5)
 
-	if got := slowOut.count(); got != 0 {
+	if got := slowOut.snapshots(); got != 0 {
 		t.Errorf("a full queue accepted %d snapshots", got)
 	}
-	if got := fastOut.count(); got != 5 {
+	if got := fastOut.snapshots(); got != 5 {
 		t.Errorf("the other session received %d snapshots, want 5 — one slow client must not cost everyone a tick", got)
 	}
 	// A session that cannot be told about the world is still in it: dropping a frame
@@ -1059,20 +1144,20 @@ func TestJoinRefusesWhatItCannotSimulate(t *testing.T) {
 
 	h := newHarness(t, flatWorld{groundTop: 63})
 
-	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, nil, nil); err == nil {
+	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, testAppearance(), nil, nil); err == nil {
 		t.Error("a nil deliver was accepted; there would be nowhere to put a snapshot")
 	}
-	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, float32(math.NaN()), 0}, nil, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, float32(math.NaN()), 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
 		t.Error("a NaN spawn was accepted")
 	}
 	// The zero player id is the digest of nothing and names nobody, so a simulation
 	// that accepted it would hold two players who are the same person the moment
 	// anything keys a record on them.
-	if _, err := h.sim.Join(1, identity.PlayerID{}, [3]float32{0, 64, 0}, nil, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(1, identity.PlayerID{}, [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
 		t.Error("a player joined under no identity at all")
 	}
 
-	joined, err := h.sim.Join(7, testPlayerID(7), [3]float32{0, 64, 0}, nil, func([]byte) bool { return true })
+	joined, err := h.sim.Join(7, testPlayerID(7), [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true })
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
@@ -1084,7 +1169,7 @@ func TestJoinRefusesWhatItCannotSimulate(t *testing.T) {
 	if got := joined.EntityID(); got != 7 {
 		t.Errorf("EntityID = %d, want 7", got)
 	}
-	if _, err := h.sim.Join(7, testPlayerID(7), [3]float32{0, 64, 0}, nil, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(7, testPlayerID(7), [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
 		t.Error("the same entity id joined twice; the first session's handle would be orphaned")
 	}
 }
@@ -1229,8 +1314,8 @@ func TestInputAndTicksFromDifferentGoroutinesAreRaceFree(t *testing.T) {
 	close(stop)
 	senders.Wait()
 
-	if firstOut.count() != 400 || secondOut.count() != 400 {
-		t.Errorf("snapshots delivered: %d and %d, want 400 each", firstOut.count(), secondOut.count())
+	if firstOut.snapshots() != 400 || secondOut.snapshots() != 400 {
+		t.Errorf("snapshots delivered: %d and %d, want 400 each", firstOut.snapshots(), secondOut.snapshots())
 	}
 	for _, player := range []*game.Player{first, second} {
 		state := player.State()

@@ -433,6 +433,7 @@ func TestSessionWalksThePlayerAndStreamsWhereItWalks(t *testing.T) {
 	}()
 
 	conn.in <- hello(1)
+	createCharacter(conn, "Eivor")
 	waitUntil(t, "the player to join the simulation", func() bool { return sim.Count() == 1 })
 
 	// Settle onto the ground before measuring, so the walk is a walk and not a fall.
@@ -599,6 +600,7 @@ func TestRefusedInputDoesNotEndTheSession(t *testing.T) {
 	}()
 
 	conn.in <- hello(1)
+	createCharacter(conn, "Eivor")
 	waitUntil(t, "the player to join the simulation", func() bool { return sim.Count() == 1 })
 
 	// A NaN axis, an infinite yaw, and a client tick that goes backwards: every refusal
@@ -687,6 +689,7 @@ func TestSnapshotsStopBeforeTheOutboundQueueIsClosed(t *testing.T) {
 		}()
 
 		conn.in <- hello(1)
+		createCharacter(conn, "Eivor")
 		waitUntil(t, "the player to join the simulation", func() bool { return sim.Count() > 0 })
 
 		if err := conn.Close(); err != nil {

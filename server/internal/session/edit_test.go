@@ -237,6 +237,7 @@ func TestBroadcastsRunSafelyWhileSessionsArriveAndLeave(t *testing.T) {
 		}()
 
 		conn.in <- hello(1)
+		createCharacter(conn, "Eivor")
 		before := delivered.Load()
 		waitUntil(t, "a broadcast to reach the session", func() bool { return delivered.Load() > before })
 
@@ -320,6 +321,7 @@ func admit(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game.Sim,
 	})
 
 	conn.in <- hello(byte(entityID))
+	createCharacter(conn, "Eivor")
 	view := (2*int(cfg.ViewDistance) + 1)
 	wantChunks := view * view * view
 	waitUntil(t, "the session's first view to arrive", func() bool {
@@ -488,6 +490,7 @@ func TestDirectBreakIsAProtocolErrorEvenWithoutAPosition(t *testing.T) {
 			}()
 
 			conn.in <- hello(1)
+			createCharacter(conn, "Eivor")
 			waitUntil(t, "the player to join before the protocol violation", func() bool { return sim.Count() == 1 })
 			request := protocol.BlockEditRequest{Action: vnet.EditActionBreak, ClientTick: 1}
 			if test.hasPos {
