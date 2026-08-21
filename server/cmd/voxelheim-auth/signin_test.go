@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -20,6 +22,14 @@ import (
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/discord"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
+)
+
+// fixtureWorld is the world these sign-ins ask for a ticket on, and fixtureOtherWorld is
+// the one that has to refuse those tickets.
+const (
+	fixtureWorld      = "midgard"
+	fixtureOtherWorld = "hel"
 )
 
 // signInService is a service with a real account store in a directory of the test's
@@ -36,11 +46,37 @@ func signInService(t *testing.T, fake *fakeDiscord, log *slog.Logger) (*service,
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
+	// Real too, and beside the accounts exactly as the service keeps them: what several
+	// of these tests are about is the ticket a sign-in hands back, and a stub signer
+	// would be asserting against the test's own idea of one.
+	keys, err := ticket.LoadOrCreate(authDir)
+	if err != nil {
+		t.Fatalf("ticket.LoadOrCreate: %v", err)
+	}
 	flow, err := discord.New(fake.config())
 	if err != nil {
 		t.Fatalf("discord.New: %v", err)
 	}
-	return &service{log: log, signin: &signIn{flow: flow, accounts: accounts}}, accounts.Dir()
+	return &service{log: log, keys: keys, signin: &signIn{flow: flow, accounts: accounts}}, accounts.Dir()
+}
+
+// authDirOf is the directory the accounts directory sits in: the one -auth-dir names,
+// and where the key pair is kept.
+//
+// Derived rather than returned as a third value, so that signInService keeps the
+// signature every test in this file already uses.
+func authDirOf(accountsDir string) string { return filepath.Dir(accountsDir) }
+
+// worldID is a world id from a name, for the tests that verify a ticket the way a game
+// server would.
+func worldID(t *testing.T, name string) ticket.WorldID {
+	t.Helper()
+
+	id, err := ticket.WorldIDFor(name)
+	if err != nil {
+		t.Fatalf("ticket.WorldIDFor(%q): %v", name, err)
+	}
+	return id
 }
 
 // call drives one request through the real route table, which is the only way these
@@ -76,14 +112,24 @@ func start(t *testing.T, svc *service) startResponse {
 }
 
 // finish runs the finish endpoint with a state, a code and the secret `start` answered
-// with. The secret is the one field the browser never carried; see startResponse.
+// with, asking for a ticket on the fixture world. The secret is the one field the browser
+// never carried; see startResponse.
 func finish(t *testing.T, svc *service, state, code, finishSecret string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	return finishFor(t, svc, state, code, finishSecret, fixtureWorld)
+}
+
+// finishFor is finish over a named world, for the tests that are about which world a
+// ticket is issued for.
+func finishFor(t *testing.T, svc *service, state, code, finishSecret, world string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	body, err := json.Marshal(map[string]string{
 		"state":         state,
 		"code":          code,
 		"finish_secret": finishSecret,
+		"world":         world,
 	})
 	if err != nil {
 		t.Fatalf("building the finish request: %v", err)
@@ -419,7 +465,7 @@ func TestACodeTheProviderRefusesIsARefusalOfItsOwn(t *testing.T) {
 func TestTheSignInRoutesSayWhenTheyAreNotConfigured(t *testing.T) {
 	t.Parallel()
 
-	svc := &service{log: discard()}
+	svc := &service{log: discard(), keys: newKeys(t)}
 
 	for _, path := range []string{"/v1/signin/discord/start", "/v1/signin/discord/finish"} {
 		rec := call(t, svc, http.MethodPost, path, `{"state":"a","code":"b"}`)
@@ -568,4 +614,325 @@ func TestNothingFromTheProviderReachesTheLog(t *testing.T) {
 			}
 		})
 	}
+}
+
+// **The ticket a sign-in hands back is the credential a game server admits a player
+// on**, and this is the whole of that path driven end to end: sign in over HTTP, read
+// the public key off the endpoint a game server reads, and verify the ticket exactly as
+// that server will.
+//
+// Nothing here is verified with the service's own pair. The key comes from the published
+// endpoint, because that is the only copy a game server ever has, and a test that reached
+// into the service would be checking that a value equals itself.
+func TestASignInAnswersWithATicketAGameServerCanVerify(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, _ := signInService(t, fake, discard())
+
+	answer := signInOnce(t, svc, fake)
+	if answer.SessionTicket == "" {
+		t.Fatal("a completed sign-in handed back no ticket")
+	}
+
+	minted, err := ticket.Decode(answer.SessionTicket)
+	if err != nil {
+		t.Fatalf("the ticket in the response is not a ticket: %v", err)
+	}
+	claims, err := ticket.Verify(publishedKey(t, svc), minted[:], worldID(t, fixtureWorld), time.Now())
+	if err != nil {
+		t.Fatalf("the ticket was refused by the key this service publishes: %v", err)
+	}
+
+	// It names the account the same response names, which is what makes it that
+	// person's ticket rather than a well-formed one for nobody.
+	if got := claims.Account.String(); got != answer.AccountID {
+		t.Errorf("the ticket names account %s and the response names %s", got, answer.AccountID)
+	}
+	if !claims.ExpiresAt.Equal(answer.TicketExpiresAt.UTC()) {
+		t.Errorf("the ticket expires at %s and the response says %s", claims.ExpiresAt, answer.TicketExpiresAt)
+	}
+	// Short-lived, because there is no revocation: this is how long a stolen ticket
+	// works, and the response says so rather than leaving a client to guess.
+	if left := time.Until(claims.ExpiresAt); left <= 0 || left > ticket.Lifetime {
+		t.Errorf("the ticket has %s left, want something inside the %s lifetime", left, ticket.Lifetime)
+	}
+}
+
+// **A ticket is for one world.** The account service will issue a ticket for any world
+// anybody names — that is not an authorisation boundary and was never meant to be — but
+// a ticket issued for one is refused by another, which is what stops the operator of one
+// game server from collecting its players' tickets and replaying them somewhere else.
+func TestATicketIsRefusedByAWorldItWasNotIssuedFor(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, _ := signInService(t, fake, discard())
+
+	begun := start(t, svc)
+	rec := finishFor(t, svc, begun.State, fake.issue(t, begun.AuthorizeURL), begun.FinishSecret, fixtureWorld)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the sign-in answered %d: %s", rec.Code, rec.Body.String())
+	}
+	var answer finishResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("reading the finish response: %v", err)
+	}
+	minted, err := ticket.Decode(answer.SessionTicket)
+	if err != nil {
+		t.Fatalf("the ticket in the response is not a ticket: %v", err)
+	}
+
+	key := publishedKey(t, svc)
+	if _, err := ticket.Verify(key, minted[:], worldID(t, fixtureWorld), time.Now()); err != nil {
+		t.Fatalf("the ticket was refused by the world it was issued for: %v", err)
+	}
+	if _, err := ticket.Verify(key, minted[:], worldID(t, fixtureOtherWorld), time.Now()); !errors.Is(err, ticket.ErrWrongWorld) {
+		t.Errorf("another world answered %v, want ErrWrongWorld", err)
+	}
+}
+
+// **A sign-in that names no world it can issue for is refused before the provider is
+// asked**, and the ordering is what the second half of this test is about. An
+// authorization code may be redeemed once: refusing after the redemption would spend
+// somebody's sign-in, and mint them an account, for a mistake this service could see in
+// the request body without asking anybody anything.
+func TestASignInThatNamesNoUsableWorldIsRefusedBeforeTheProviderIsAsked(t *testing.T) {
+	t.Parallel()
+
+	for name, world := range map[string]string{
+		"no world at all":  "",
+		"a capital letter": "Midgard",
+		"a path traversal": "../../etc",
+		"a name too long":  strings.Repeat("a", ticket.MaxWorldNameBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := newFakeDiscord(t)
+			svc, accountsDir := signInService(t, fake, discard())
+
+			begun := start(t, svc)
+			code := fake.issue(t, begun.AuthorizeURL)
+
+			rec := finishFor(t, svc, begun.State, code, begun.FinishSecret, world)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("answered %d, want 400", rec.Code)
+			}
+			if got := refusalCode(t, rec); got != errWorldNotNamed {
+				t.Errorf("answered %q, want %q", got, errWorldNotNamed)
+			}
+			if files := accountFiles(t, accountsDir); len(files) != 0 {
+				t.Errorf("a refused sign-in left %d account records behind", len(files))
+			}
+
+			// Nothing reached the provider, so the code was not spent — and the client
+			// that started this sign-in can still finish it once it names a world.
+			if fake.spentCode(code) {
+				t.Error("the authorization code was redeemed before the world was checked")
+			}
+			if again := finish(t, svc, begun.State, code, begun.FinishSecret); again.Code != http.StatusOK {
+				t.Fatalf("the sign-in could not be retried: %d %s", again.Code, again.Body.String())
+			}
+		})
+	}
+}
+
+// The endpoint a game server reads once at startup and then keeps. **This is what makes
+// verification offline**: a server holding this key never calls this service on a join,
+// so this service being down costs nobody a game.
+func TestTheTicketKeyEndpointPublishesTheKeyTheTicketsAreSignedWith(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, _ := signInService(t, fake, discard())
+
+	rec := call(t, svc, http.MethodGet, "/v1/ticket-key", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/ticket-key answered %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("the key endpoint answered with content type %q, want application/json", got)
+	}
+
+	var answer ticketKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("reading the key response: %v", err)
+	}
+	if answer.Algorithm != ticket.Algorithm {
+		t.Errorf("the key is published as %q, want %q", answer.Algorithm, ticket.Algorithm)
+	}
+	if answer.TicketLifetimeSeconds != int(ticket.Lifetime.Seconds()) {
+		t.Errorf("the endpoint says a ticket lives %ds, want %d", answer.TicketLifetimeSeconds, int(ticket.Lifetime.Seconds()))
+	}
+	raw, err := hex.DecodeString(answer.PublicKey)
+	if err != nil {
+		t.Fatalf("the published key is not lowercase hex: %v", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		t.Fatalf("the published key is %d bytes, want %d", len(raw), ed25519.PublicKeySize)
+	}
+
+	// It is the same key on every read — a game server reads this once and keeps it, so
+	// an answer that varied would be a fleet slowly disagreeing about who signs tickets.
+	second := call(t, svc, http.MethodGet, "/v1/ticket-key", "")
+	if second.Body.String() != rec.Body.String() {
+		t.Error("two reads of the key endpoint answered differently")
+	}
+
+	// And it is not the private half by some accident of encoding.
+	if len(raw) == ed25519.PrivateKeySize || len(raw) == ed25519.SeedSize*2 {
+		t.Error("the endpoint published something the size of private key material")
+	}
+}
+
+// publishedKey is the public key read the way a game server reads it: off the endpoint,
+// over HTTP, and not out of the service's own memory.
+func publishedKey(t *testing.T, svc *service) ed25519.PublicKey {
+	t.Helper()
+
+	rec := call(t, svc, http.MethodGet, "/v1/ticket-key", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/ticket-key answered %d: %s", rec.Code, rec.Body.String())
+	}
+	var answer ticketKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("reading the key response: %v", err)
+	}
+	raw, err := hex.DecodeString(answer.PublicKey)
+	if err != nil {
+		t.Fatalf("the published key is not hex: %v", err)
+	}
+	return raw
+}
+
+// **Nothing of the signing key reaches the log, and the ticket does not either.**
+//
+// The counterpart of TestNothingFromTheProviderReachesTheLog, and it is the assertion
+// this whole issue turns on: a private key in a log is the same disclosure as a private
+// key in a repository, and a log line outlives the process that wrote it. There is no
+// revocation, so a disclosed signing key is not something an operator can recover from —
+// it mints tickets for every account on every world until somebody notices and every
+// game server is given a new key by hand.
+//
+// Both handlers, because the JSON one is the one a Stringer would not have saved. A whole
+// sign-in plus every refusal a handler can log, so that the paths where a value is most
+// likely to be pasted into a message are all exercised in one capture.
+//
+// **The seed is read off disk and checked before it is looked for**, by rebuilding the
+// key and comparing its public half against the published one: a test searching a log
+// for the wrong 32 bytes would pass while proving nothing.
+func TestNothingOfTheSigningKeyReachesTheLog(t *testing.T) {
+	t.Parallel()
+
+	for name, build := range map[string]func(*bytes.Buffer) slog.Handler{
+		"text": func(w *bytes.Buffer) slog.Handler {
+			return slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})
+		},
+		"json": func(w *bytes.Buffer) slog.Handler {
+			return slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var out bytes.Buffer
+			fake := newFakeDiscord(t)
+			svc, accountsDir := signInService(t, fake, slog.New(build(&out)))
+
+			// A whole sign-in that mints a ticket, the key endpoint, and every refusal
+			// the ticket half can produce.
+			begun := start(t, svc)
+			code := fake.issue(t, begun.AuthorizeURL)
+			rec := finish(t, svc, begun.State, code, begun.FinishSecret)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("the sign-in answered %d: %s", rec.Code, rec.Body.String())
+			}
+			var answer finishResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("reading the finish response: %v", err)
+			}
+
+			call(t, svc, http.MethodGet, "/v1/ticket-key", "")
+			finish(t, svc, begun.State, code, begun.FinishSecret)                                     // a replayed sign-in
+			finishFor(t, svc, begun.State, code, begun.FinishSecret, "Not A World")                   // a refused world
+			finishFor(t, svc, "a state nobody minted", code, "a finish secret", fixtureOtherWorld)    // an unknown state
+			call(t, svc, http.MethodPost, "/v1/signin/discord/finish", `{"world":"midgard","state":`) // a body that is not JSON
+
+			logged := out.String()
+			if logged == "" {
+				t.Fatal("the sign-in logged nothing, so this test proves nothing")
+			}
+
+			seed := seedOnDisk(t, authDirOf(accountsDir), publishedKey(t, svc))
+			minted, err := ticket.Decode(answer.SessionTicket)
+			if err != nil {
+				t.Fatalf("the ticket in the response is not a ticket: %v", err)
+			}
+
+			secrets := map[string][]byte{
+				"the seed":                 seed,
+				"the expanded private key": ed25519.NewKeyFromSeed(seed),
+				// The ticket is not key material, but it is a bearer credential and the
+				// contract's rule for one is the same: never logged, never displayed.
+				"the session ticket": minted[:],
+			}
+			for label, secret := range secrets {
+				for encoding, rendered := range map[string]string{
+					"raw":       string(secret),
+					"hex":       hex.EncodeToString(secret),
+					"base64":    base64.StdEncoding.EncodeToString(secret),
+					"base64url": base64.RawURLEncoding.EncodeToString(secret),
+				} {
+					if strings.Contains(logged, rendered) {
+						t.Errorf("%s appears in the log as %s", label, encoding)
+					}
+				}
+			}
+			if strings.Contains(logged, answer.SessionTicket) {
+				t.Error("the encoded session ticket appears in the log verbatim")
+			}
+			// A world name arrives in an unauthenticated request body, and a log line
+			// that echoes one is a log line an attacker writes.
+			if strings.Contains(logged, "Not A World") {
+				t.Error("a refused world name was echoed into the log")
+			}
+
+			// The lines that are supposed to be there. The sign-in names the world it
+			// issued for by id, which is a digest of a name an operator publishes.
+			if !strings.Contains(logged, "sign-in completed") {
+				t.Error("the log has no line for a completed sign-in")
+			}
+			if !strings.Contains(logged, worldID(t, fixtureWorld).String()) {
+				t.Error("the log does not say which world the sign-in issued a ticket for")
+			}
+		})
+	}
+}
+
+// seedOnDisk is the private material this service actually keeps, read out of the file
+// the way an attacker with the directory would — and checked against the published key
+// before it is used, so that a moved offset is a failure rather than a false pass.
+func seedOnDisk(t *testing.T, authDir string, published ed25519.PublicKey) []byte {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join(authDir, ticket.SigningKeyFileName))
+	if err != nil {
+		t.Fatalf("reading the signing key: %v", err)
+	}
+	// The record is a header, the seed, and a checksum; the guard below is what says
+	// this arithmetic still finds the seed.
+	if len(raw) < ed25519.SeedSize {
+		t.Fatalf("the signing key file is %d bytes, too short to hold a seed", len(raw))
+	}
+	header := len(raw) - ed25519.SeedSize - 4
+	if header < 0 {
+		t.Fatalf("the signing key file is %d bytes, which is not a record this test can read", len(raw))
+	}
+	seed := raw[header : header+ed25519.SeedSize]
+
+	if !ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey).Equal(published) {
+		t.Fatal("the bytes this test took for the seed do not rebuild the published key; it is looking at the wrong thing")
+	}
+	return seed
 }

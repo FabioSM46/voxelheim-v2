@@ -30,6 +30,7 @@ validation to get wrong.
 | `internal/persist` | the player store under `<world-dir>/players/`, the camp in `<world-dir>/structures.bin`, and the world's time of day in `<world-dir>/clock.bin` | be imported by `game` |
 | `internal/auth` | the account store under `<auth-dir>/accounts/`: who a person is, never how they prove it | be imported by anything but `cmd/voxelheim-auth` |
 | `internal/discord` | the Discord sign-in: OAuth 2.0 Authorization Code with PKCE, and the sign-ins in flight | import anything of ours, or keep anything the provider hands it |
+| `internal/ticket` | the Ed25519 signing pair beside the accounts, what a session ticket says, and the offline check a game server makes with the public half | import anything of ours but `internal/world`, or offer any way to read the private key |
 | `gen/` | flatc output | be hand-edited, ever |
 
 The dependency direction is one-way: `game` and `session` depend on `protocol`, `transport` and
@@ -1150,6 +1151,81 @@ that records it. Two routes, `POST /v1/signin/discord/start` and
 - **The access token is dropped, and no attempt is made to revoke it.** This service asks Discord
   who somebody is once and has no further use for the answer. Revocation would be a fourth call
   to a provider that has already answered, on a token that expires on its own.
+
+## A ticket the game server can check on its own
+
+`internal/ticket` holds the key pair and mints; `cmd/voxelheim-auth/tickets.go` publishes the
+public half at `GET /v1/ticket-key`; a finished sign-in hands the ticket back in
+`session_ticket`. `internal/ticket` is the one package here the **game server** is expected to
+import, which is what shapes almost every rule below.
+
+- **The game server verifies a signature instead of asking permission.** The alternative — a call
+  to the account service on every join — makes a small service a hard dependency of play, and its
+  failure mode is that nobody can play a game running on hardware that is up. A server reads the
+  public key once at startup, keeps it, and from then on admitting a player is arithmetic.
+- **The cost is stated rather than mitigated: there is no revocation.** A ticket cannot be
+  withdrawn before it expires, so a stolen one dies only by expiring, and `ticket.Lifetime` —
+  eight hours — is the whole of the answer. A grace period for an unreachable verifier would be
+  strictly worse than having none: it is a rule an attacker triggers by blocking the service.
+- **The bytes are the ones `ClientHello.session_ticket` carries**, and the body's layout is a
+  consequence of that number rather than a choice beside it: 96 = a 32-byte body and a 64-byte
+  detached signature, as `schemas/handshake.fbs` states. Inside the 32: 16 bytes of account id,
+  12 of world id, 4 of expiry. The world field is 12 rather than 8 because it is a truncated
+  digest and it is what defends against a ticket being replayed at another world — the attacker
+  there is the operator of the world the ticket was issued *for*, who picks their own world's
+  name, so the work is a second preimage; 96 bits is out of reach and 64 is not comfortably so.
+  The expiry is four bytes of Unix seconds and therefore stops working on 2106-02-07, which is
+  written down beside the constant; `Mint` refuses an expiry it cannot represent rather than
+  wrapping it. `internal/protocol` states the same 96, and `internal/ticket/imports_test.go`
+  parses that file to pin the pair, because the two packages must not import each other.
+- **There is no version field in the body**, and that is an argument rather than an omission: a
+  ticket is only ever presented in a `ClientHello`, which carries `protocol_version` beside it,
+  and the contract already says changing the length, the scheme or the split is a version bump.
+- **`internal/ticket` is a leaf, and it has to be.** The game server imports it in order to
+  verify, so anything reachable from it is reachable from the simulation — an import of
+  `internal/auth` would put the accounts directory back inside the trust domain it was split out
+  of, and `internal/auth/imports_test.go` would not see it coming, because the importer would be
+  `internal/ticket` rather than `cmd/voxelheimd`. Its own `imports_test.go` holds that end:
+  `internal/world` for the five record helpers, nothing else of ours. It is also why
+  `ticket.AccountID` is this package's own sixteen bytes — `signin.go` converts `auth.AccountID`
+  into it, and that one line stops compiling if either width moves.
+- **Verification touches nothing, and that is asserted as a claim about imports.** Every file but
+  `key.go` is held to an allow-list, and not one entry on it can open a file or a socket; `now` is
+  a parameter, so there is not even a clock. A behavioural test can show that one call did no I/O.
+  This shows that none can.
+- **Half a pair is refused rather than repaired, and an unreadable one is an error rather than a
+  fresh start** — `internal/certs`'s rules, with more at stake. It is refused even in the
+  direction that *could* be repaired, because deriving the missing public half would mean this
+  service deciding on its own that the survivor is the correct file, and one rule that always
+  says the same thing beats two that depend on which file went missing. Regenerating over a
+  damaged pair invalidates every ticket in flight and every copy a game server has stored: a
+  fleet refusing every player at once, on the strength of a permission problem. The two records
+  are the same size, so they carry different magics — without that a seed would read back as a
+  public key and nothing later in the load would notice.
+- **The private key is never logged; the public key always is.** `ticket.SigningKey` is a struct
+  with an unexported field, which is stronger than the named types redacted elsewhere here: there
+  is no conversion out of it, no accessor and no `Reveal`, because there is no legitimate caller
+  for the bytes. It redacts through fmt, through `%#v`, through log/slog and through
+  encoding/json — four routes, and `%#v` is the one a Stringer never sees. `ticket.Pair` renders
+  as its public key, so the deliberate disclosure is the default.
+  `TestNothingOfTheSigningKeyReachesTheLog` drives a whole mint plus every refusal through both
+  handlers, and **reads the seed off disk and proves it rebuilds the published key before looking
+  for it** — a secrecy test searching for the wrong bytes passes while proving nothing.
+- **A ticket is minted at the end of a sign-in, because there is nowhere else it could be.** A
+  separate endpoint would need the caller to prove who they are, and the only thing that ever
+  proved that is the authorization code the finish request spends. A credential that outlived the
+  sign-in so a ticket could be asked for later is exactly the refresh token this design does not
+  have. So `finish` names the world up front, and a player joining a second world signs in again.
+- **The world is checked before the provider is called.** A code may be redeemed once: refusing
+  after the redemption would spend somebody's sign-in, and mint them an account, for a mistake
+  this service could see in the request body without asking anybody anything. The name is
+  constrained rather than normalised — lowercase letters, digits and hyphens, `internal/auth`'s
+  rule for a provider name and for its reason — and it is never echoed into a log, because it
+  arrives in an unauthenticated body.
+- **Key rotation is a known gap, written down rather than built.** One operator, one pair, and
+  every game server holding a copy by hand; rotating would need a way to publish two keys and a
+  window in which both verify. Deleting the pair is the whole of the ceremony today, and it costs
+  every ticket in flight.
 
 ## Generated bindings
 

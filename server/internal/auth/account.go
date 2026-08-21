@@ -13,6 +13,15 @@
 // embarrassment rather than a way in — and that is a property of the format instead
 // of a rule somebody has to keep remembering.
 //
+// **That claim is about the accounts directory and not about -auth-dir, and the
+// distinction became load-bearing when internal/ticket arrived.** The ticket signing key
+// is kept *beside* this store rather than in it — under the auth directory itself, while
+// every file this package writes is under <auth-dir>/accounts/ — so a leaked accounts
+// directory is still the embarrassment described above, and a leaked auth directory is
+// somebody who can mint a ticket for any account on any world. The sentence above is
+// narrower than it used to be and it is still exactly true; what changed is what sits
+// next door.
+//
 // # The delta store's discipline, reused rather than re-derived
 //
 // Magic number, format version, trailing CRC-32, temporary-file-and-rename writes,
