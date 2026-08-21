@@ -62,14 +62,16 @@ service's public key before it can let anybody in — and it reads that key once
 
 ```bash
 # terminal 1 — the account service (listens on 127.0.0.1:7778)
-cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth
+cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth \
+  -discord-client-id <your Discord application's client id>
 
 # terminal 2 — the game server
 cd server && go run ./cmd/voxelheimd \
   -world-name midgard -account-service http://127.0.0.1:7778
 
 # terminal 3 — the client
-cd client && cargo run --release
+cd client && cargo run --release -- \
+  --account-service http://127.0.0.1:7778 --server 127.0.0.1:7777 --world midgard
 ```
 
 **`-auth-dir` is deliberately outside the checkout above.** It holds the account service's
@@ -77,6 +79,20 @@ Ed25519 signing key, and its own default (`auth`) resolves against the working d
 running that command from `server/` puts a private key inside this repository, one `git add -A`
 away from a public commit. `.gitignore` covers the default and the two key file names for that
 reason, and the path here points somewhere a mistake cannot reach.
+
+**The client needs all three of those flags on this path, and none of them has a default that
+would do.** A server admits a player on a signed ticket and nothing else, so a client with no
+account service to sign in against is refused whatever address it dials — which is what
+`cargo run --release` on its own does, and it says so rather than pretending. `--server` names an
+address that is in no list, and `--world` names the world to ask a ticket for, because a ticket
+names exactly one world and nothing about an address says which world is running there.
+
+**`-discord-client-id` is in the first command because signing in is what produces a ticket**, and
+a Discord application is something you register rather than something this repository can ship.
+Left out, the account service still starts and still publishes its key — the game server comes up
+fine — and its two sign-in routes refuse every request, so the login screen appears with nothing
+behind it. `server/cmd/voxelheim-auth` documents what to register and where. There is no client
+secret to keep: PKCE stands in for one, and the account service holds the verifier.
 
 **`-world-name` is required and has no default**, and the refusal it produces is the point: a
 ticket names one world and is useless at any other, so a server that does not know which world it
@@ -112,7 +128,8 @@ the one number that says movement is working.
 cd server && go run ./cmd/voxelheimd \
   -world-name midgard -account-service http://127.0.0.1:7778 \
   -log-level debug -log-format json
-cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release
+cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release -- \
+  --account-service http://127.0.0.1:7778 --server 127.0.0.1:7777 --world midgard
 ```
 
 ### Two things that surprise people once each
@@ -122,12 +139,23 @@ working directory, so the command above writes `server/world/` — edits, player
 server's TLS key. It is git-ignored. `-seed` regenerates the terrain rather than reading it: the
 same seed is the same world, and the directory holds only what players changed.
 
-**A client run this way joins as a new character every time, and that is the development path.**
-`--server` (and the default `127.0.0.1:7777`) names an address that is in no server list, so
-nothing states which certificate to expect there. The session is still encrypted — there is no
-plaintext path on either side — but it is unauthenticated, and a client that cannot verify who
-answered deliberately presents no stored identity and keeps none. A `voxelheimd` run with
-`-world-dir ""` mints a new certificate every start, so nothing would have matched anyway.
+**The development path is encrypted and unverified, and it presents a ticket anyway.** `--server`
+(and the default `127.0.0.1:7777`) names an address that is in no server list, so nothing states
+which certificate to expect there. The session is still encrypted — there is no plaintext path on
+either side — but it is unauthenticated, and a client that cannot verify who answered deliberately
+presents no stored *identity* and keeps none. A `voxelheimd` run with `-world-dir ""` mints a new
+certificate every start, so nothing would have matched anyway.
+
+What it does present is the session ticket, and that is a stated trade rather than an oversight
+(#154). A ticket names one world, expires in hours, and is refused at every other world, so what
+an address you typed can do with one is bounded and short — and the alternative was that
+development could not connect at all, since a hello with no ticket is refused and is meant to be.
+A *stored identity* is the credential that would not be bounded, and it is still never shown here.
+
+Because the ticket names an account, **the character comes back**: the server keys a player on the
+account rather than on a token this client kept, so the second launch on this path is the same
+character as the first. The client is deliberately not told which of the two happened and does not
+claim to know — the status line says `signed in`, and the server's log says `returning=true`.
 
 The way a *player* reaches a server is `--account-service`: sign in once, then click a server out
 of the list that service answers with. Every row carries the address and the SHA-256 of the

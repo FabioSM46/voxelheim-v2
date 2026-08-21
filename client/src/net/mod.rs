@@ -159,6 +159,16 @@ pub enum Identity {
     /// did not recognise, or a server that re-issued. All three are a new
     /// character as far as anything on screen can tell.
     New,
+    /// **This session kept no identity file, so the comparison the other two report
+    /// was never made** — and the honest answer is that the client does not know.
+    ///
+    /// It is what an `Unlisted` session reports, which is every session on the
+    /// development path. There the account the ticket names is what decides which
+    /// character comes back, and `schemas/handshake.fbs` is explicit that the server
+    /// does not tell the client which of the two it did. So the third variant is not a
+    /// missing value to be filled in later: it is the state of a client that presented
+    /// no token and is entitled to no opinion.
+    Untold,
 }
 
 /// The address this client dialled. Read by the UI so the status line can name it;
@@ -404,20 +414,51 @@ pub struct ConnectRequest {
     pub name: String,
 }
 
+/// When a session is opened, and against what.
+///
+/// Three shapes rather than an address and a pair of flags, because the differences
+/// between them are exactly the decisions a reviewer needs to see together: which
+/// certificate is expected, and whether anything is presented.
+#[derive(Debug, Clone)]
+enum Dial {
+    /// Nothing until a [`ConnectRequest`] names a row of the list. A player's client:
+    /// the row carries the address and the fingerprint to expect at it, from the same
+    /// row, so there is no way to dial one without the other.
+    OnRequest,
+    /// At build, against `addr`, with `expected`, presenting no account.
+    ///
+    /// `--server` with no account service. There is no ticket on this machine to
+    /// present and no service to ask for one, so the hello names no account — which a
+    /// server built after #102 refuses, in as many words. It is left reachable because
+    /// the refusal is the truthful answer to a launch that named nowhere to sign in,
+    /// and because it is the shape the tests below drive against a stub server.
+    AtBuild {
+        addr: String,
+        expected: tls::Expectation,
+    },
+    /// Once a sign-in has cached a ticket for the world this launch named, against
+    /// `addr`, which is in no list.
+    ///
+    /// **`--server` together with `--account-service`, and it is what #154 added.** The
+    /// login screen comes up first and nothing is dialled behind it; when the ticket is
+    /// in hand the address the developer typed is dialled with
+    /// [`tls::Expectation::Unlisted`] — encrypted, verified against nothing, and saying
+    /// so — and the ticket is presented, because it is the only thing that gets in.
+    WhenSignedIn { addr: String },
+}
+
 /// Owns the socket thread and publishes what it reports.
 ///
 /// **The address is no longer a launch setting**, which is the shape change this
-/// plugin carries. A client with an account service starts at
+/// plugin carries. A client with an account service and no address starts at
 /// [`ConnectionState::Idle`], with no socket and no [`ServerAddress`], and connects
-/// when a [`ConnectRequest`] names a server the list carried — address and expected
-/// certificate together, from the same row, so there is no way to dial one without the
-/// other. `--server` is the other way in and it is the development path: an address
-/// that is in no list, dialled at startup, with nothing to verify it against and
-/// therefore no identity presented. See [`tls::Expectation`].
+/// when a [`ConnectRequest`] names a server the list carried. `--server` is the other
+/// way in and it is the development path: an address that is in no list, with nothing
+/// to verify it against and therefore no identity presented. See [`Dial`] for the three
+/// shapes and [`tls::Expectation`] for what an address in no list means.
 pub struct NetPlugin {
-    /// What to dial when the app is built, and what to expect there. `None` waits for
-    /// the list, which is what a player's client does.
-    startup: Option<(String, tls::Expectation)>,
+    /// When to open a session, and against what.
+    dial: Dial,
     player_name: String,
     identity_path: Option<PathBuf>,
     /// Which transport the session thread builds.
@@ -436,23 +477,51 @@ impl NetPlugin {
     /// against.
     pub fn listening() -> Self {
         Self {
-            startup: None,
+            dial: Dial::OnRequest,
             player_name: DEFAULT_PLAYER_NAME.to_owned(),
             identity_path: None,
             transport: session::Transport::Encrypted,
         }
     }
 
-    /// Dials `server_addr` when the app is built, with nothing to verify it against.
+    /// Dials `server_addr` when the app is built, with nothing to verify it against and
+    /// no account to present.
     ///
-    /// **`--server`, and it is the development path.** An address given on the command
-    /// line is in no list, so nothing states which certificate to expect there: the
-    /// session is encrypted and unauthenticated, and it presents no identity and stores
-    /// none, which is what keeps "a stored identity is never presented to an unverified
-    /// server" true. Every launch on this path is a new character.
+    /// **`--server` with no account service.** An address given on the command line is
+    /// in no list, so nothing states which certificate to expect there: the session is
+    /// encrypted and unauthenticated, and it presents no identity and stores none,
+    /// which is what keeps "a stored identity is never presented to an unverified
+    /// server" true.
+    ///
+    /// It also presents no *account*, because this launch was told of no service to get
+    /// one from — and a server that admits players on a signed ticket refuses that
+    /// hello. Naming an account service alongside the address is what makes this path
+    /// connect; see [`Self::developing_against_signed_in`].
     pub fn developing_against(server_addr: impl Into<String>) -> Self {
         Self {
-            startup: Some((server_addr.into(), tls::Expectation::Unlisted)),
+            dial: Dial::AtBuild {
+                addr: server_addr.into(),
+                expected: tls::Expectation::Unlisted,
+            },
+            ..Self::listening()
+        }
+    }
+
+    /// Dials `server_addr` once a sign-in has cached a ticket, with nothing to verify it
+    /// against.
+    ///
+    /// **`--server` together with `--account-service`, and it is the development path
+    /// that can actually reach a world.** The certificate expectation is unchanged from
+    /// [`Self::developing_against`] — an address in no list states none, and this
+    /// session says so — but the hello now carries the world ticket the sign-in
+    /// obtained, which is the only thing a server built after #102 admits anybody on.
+    /// See [`session::Target::ticket`] for why presenting one here is a bounded trade
+    /// where presenting a stored identity would not be.
+    pub fn developing_against_signed_in(server_addr: impl Into<String>) -> Self {
+        Self {
+            dial: Dial::WhenSignedIn {
+                addr: server_addr.into(),
+            },
             ..Self::listening()
         }
     }
@@ -468,10 +537,10 @@ impl NetPlugin {
     #[cfg(test)]
     fn as_if_listed(server_addr: impl Into<String>) -> Self {
         Self {
-            startup: Some((
-                server_addr.into(),
-                tls::Expectation::Listed("0".repeat(tls::FINGERPRINT_CHARS)),
-            )),
+            dial: Dial::AtBuild {
+                addr: server_addr.into(),
+                expected: tls::Expectation::Listed("0".repeat(tls::FINGERPRINT_CHARS)),
+            },
             ..Self::listening()
         }
     }
@@ -532,21 +601,35 @@ impl Plugin for NetPlugin {
                 Update,
                 (
                     connect_on_request,
+                    connect_once_signed_in,
                     drain_session_events.in_set(DrainNetwork),
                     disconnect_on_request.after(DrainNetwork),
                 )
                     .chain(),
             );
 
-        let Some((addr, expected)) = self.startup.clone() else {
-            // The list decides, and it has not been read yet. No socket, no address.
-            app.insert_resource(ConnectionState::Idle);
-            return;
+        let (addr, expected) = match self.dial.clone() {
+            Dial::OnRequest => {
+                // The list decides, and it has not been read yet. No socket, no address.
+                app.insert_resource(ConnectionState::Idle);
+                return;
+            }
+            Dial::WhenSignedIn { addr } => {
+                // The login screen is what happens next, and nothing is dialled behind
+                // it: a hello with no ticket is refused, so connecting first would put
+                // a refusal on screen underneath a sign-in that was about to fix it.
+                // `connect_once_signed_in` opens the session when the ticket is in hand.
+                app.insert_resource(ConnectionState::Idle)
+                    .insert_resource(DialWhenSignedIn(addr));
+                return;
+            }
+            Dial::AtBuild { addr, expected } => (addr, expected),
         };
 
-        // `--server`: dialled now, and with `Unlisted` because nothing named a
-        // certificate to expect at an address somebody typed.
-        match start_session(&addr, expected, &settings) {
+        // `--server` with no account service: dialled now, `Unlisted` because nothing
+        // named a certificate to expect at an address somebody typed, and presenting no
+        // account because this launch was told of nowhere to get one.
+        match start_session(&addr, expected, &settings, None) {
             Ok((link, outbound)) => {
                 app.insert_resource(ConnectionState::Connecting)
                     .insert_resource(ServerAddress(addr))
@@ -578,14 +661,21 @@ struct SessionSettings {
 
 /// Starts the net thread and hands back the two ECS-side resources it needs.
 ///
-/// One function for both callers — the development path at build time and
-/// [`connect_on_request`] at run time — so a session is started exactly one way. The
+/// One function for all three callers — the development path at build time,
+/// [`connect_on_request`] when a list row is clicked, and [`connect_once_signed_in`]
+/// when a sign-in has produced a ticket — so a session is started exactly one way. The
 /// handle is dropped, detaching the thread: joining it would mean blocking app teardown
 /// on a socket, and the command channel closing is what tells it to stop.
+///
+/// `ticket` is the cached file the hello presents an account from, and `None` is a
+/// launch with none. **It is a path and never the bytes**: the ticket is read on the
+/// session thread, which is what keeps it out of the ECS entirely — the same fence the
+/// identity file sits behind. See [`session::Target::ticket`].
 fn start_session(
     addr: &str,
     expected: tls::Expectation,
     settings: &SessionSettings,
+    ticket: Option<PathBuf>,
 ) -> Result<(NetLink, Outbound), String> {
     let (event_tx, event_rx) = mpsc::channel();
     let (command_tx, command_rx) = mpsc::channel();
@@ -607,6 +697,7 @@ fn start_session(
                     expected,
                     player_name,
                     identity_override: identity_path,
+                    ticket,
                     transport,
                 },
                 event_tx,
@@ -672,12 +763,91 @@ fn connect_on_request(
         return;
     };
 
-    match start_session(chosen.address(), chosen.expectation(), &settings) {
+    // `None` for the ticket, and it stays `None` here until #107. Signing in caches an
+    // *account* ticket — one that names no world — and a game server refuses one of
+    // those with `ErrWrongWorld`, correctly: joining needs a ticket for the world being
+    // joined, and on this path choosing the world is the list's job rather than the
+    // command line's. #154 gave the development path a world to name; this one has a
+    // row that already carries the name and nothing yet that asks for a ticket in it.
+    match start_session(chosen.address(), chosen.expectation(), &settings, None) {
         Ok((link, outbound)) => {
             // Set here rather than through `Commands`, so the state is already
             // `Connecting` by the time the link it describes exists.
             *state = ConnectionState::Connecting;
             commands.insert_resource(ServerAddress(chosen.address().to_owned()));
+            commands.insert_resource(link);
+            commands.insert_resource(outbound);
+        }
+        Err(err) => {
+            error!("the network thread would not start: {err}");
+            *state = ConnectionState::Rejected { reason: err };
+        }
+    }
+}
+
+/// The address a [`Dial::WhenSignedIn`] launch dials once it has a ticket.
+///
+/// Present exactly on that path, which is what makes [`connect_once_signed_in`] a no-op
+/// everywhere else rather than a system with a flag to read. **It holds an address and
+/// nothing else**: no certificate, because an address in no list states none, and no
+/// ticket, because a ticket never reaches the ECS.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+struct DialWhenSignedIn(String);
+
+/// Opens the one session a `--server` launch with an account service asks for, as soon
+/// as the sign-in has a ticket to present.
+///
+/// **The trigger is the sign-in rather than a click, because there is nothing to click.**
+/// This path has no list and no rows: the address was decided at launch, so the only
+/// thing still missing when the app starts is the credential. The login screen is up
+/// until it arrives, and this dials underneath it the frame it does.
+///
+/// **Only from [`ConnectionState::Idle`], and that is what makes it happen once.** A
+/// session that ends leaves `Disconnected`, and one that is refused leaves `Rejected` —
+/// neither of which this reads, so a refusal is a refusal a player can read rather than
+/// a redial loop against a server that has already said no. [`connect_on_request`]
+/// accepts those two states because the list screen offers a way to ask again; this path
+/// offers none, and inventing one here would be inventing a retry policy.
+fn connect_once_signed_in(
+    dial: Option<Res<DialWhenSignedIn>>,
+    sign_in: Option<Res<SignInState>>,
+    sign_in_settings: Option<Res<SignInSettings>>,
+    settings: Res<SessionSettings>,
+    mut state: ResMut<ConnectionState>,
+    mut commands: Commands,
+) {
+    let Some(dial) = dial else {
+        return;
+    };
+    if !matches!(*state, ConnectionState::Idle) {
+        return;
+    }
+    // Absent on a client with no account service, which cannot be this path — and
+    // absent in a test that built `NetPlugin` on its own. Either way there is nothing
+    // to sign in with, so there is nothing to do and nothing to claim.
+    if sign_in.as_deref() != Some(&SignInState::SignedIn) {
+        return;
+    }
+    let Some(sign_in_settings) = sign_in_settings else {
+        return;
+    };
+
+    // The path, never the ticket. `SignInPlugin` derived it for the world this launch
+    // named, so the file it points at holds a ticket for that world and no other — see
+    // `tickets::world_ticket_path`. `None` is a launch that could name no file to keep
+    // a sign-in in, which the session thread reports as the refusal it is.
+    match start_session(
+        &dial.0,
+        tls::Expectation::Unlisted,
+        &settings,
+        sign_in_settings.ticket_path.clone(),
+    ) {
+        Ok((link, outbound)) => {
+            // Set here rather than through `Commands`, so the state is already
+            // `Connecting` by the time the link it describes exists — which is also
+            // what stops this system starting a second one on the next frame.
+            *state = ConnectionState::Connecting;
+            commands.insert_resource(ServerAddress(dial.0.clone()));
             commands.insert_resource(link);
             commands.insert_resource(outbound);
         }
@@ -765,6 +935,11 @@ fn drain_session_events(
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
                 // later line reaches for `{params:?}`.
+                let identity = match returning {
+                    Some(true) => Identity::Returning,
+                    Some(false) => Identity::New,
+                    None => Identity::Untold,
+                };
                 info!(
                     "session established: entity {} at {:?}, seed {}, {} Hz, chunk {}, view {}, {}",
                     params.entity_id,
@@ -773,18 +948,17 @@ fn drain_session_events(
                     params.tick_rate,
                     params.chunk_size,
                     params.view_distance,
-                    if returning {
-                        "a returning character"
-                    } else {
-                        "a new character"
+                    match identity {
+                        Identity::Returning => "a returning character",
+                        Identity::New => "a new character",
+                        // Not "a new character", which this session has no way to
+                        // know and the server may well contradict. See
+                        // `session::SessionEvent::Established`.
+                        Identity::Untold => "the character this account left here",
                     },
                 );
                 commands.insert_resource(Session(params));
-                commands.insert_resource(if returning {
-                    Identity::Returning
-                } else {
-                    Identity::New
-                });
+                commands.insert_resource(identity);
                 *state = ConnectionState::Connected;
             }
 
@@ -963,6 +1137,9 @@ pub struct SignInRequest;
 #[derive(Resource, Clone)]
 struct SignInSettings {
     service: signin::AccountService,
+    /// Which world a sign-in asks for a ticket for, and `None` for an account ticket
+    /// that names none. See [`SignInPlugin::for_world`].
+    world: Option<String>,
     /// `None` when no file could be named to keep a ticket in. A sign-in still
     /// works; it is simply forgotten at the end of the launch.
     ticket_path: Option<PathBuf>,
@@ -1003,6 +1180,7 @@ impl Drop for SignInChannels {
 /// rather than being silently absent.
 pub struct SignInPlugin {
     service: signin::AccountService,
+    world: Option<String>,
     ticket_path: Option<PathBuf>,
     browser: signin::Browser,
 }
@@ -1013,9 +1191,27 @@ impl SignInPlugin {
     pub fn new(service: AccountService) -> Self {
         Self {
             service,
+            world: None,
             ticket_path: None,
             browser: signin::Browser::System,
         }
+    }
+
+    /// Asks for a ticket scoped to `world` rather than an account ticket that names
+    /// none, and keeps it in a file of that world's own.
+    ///
+    /// **This is `--world`, and the reason it is a flag rather than something derived is
+    /// worth having in one place.** A ticket names one world; on the list path the row a
+    /// player clicked carries that name, and on the `--server` path there is no row. The
+    /// address cannot supply it either: what a world is called is the game server's
+    /// `-world-name`, which nothing states before the handshake — and a value taken from
+    /// the far end would let an address in no list choose which world's ticket it is
+    /// handed, which is precisely the choice that has to stay with the developer who
+    /// typed the address. So the same command line names both, and neither is inferred
+    /// from the other.
+    pub fn for_world(mut self, world: impl Into<String>) -> Self {
+        self.world = Some(world.into());
+        self
     }
 
     /// Keeps the ticket in `path` rather than in the derived file.
@@ -1046,8 +1242,16 @@ impl Plugin for SignInPlugin {
         // Startup system instead would mean either blocking a frame on a file or
         // spending a frame with the login screen up before anyone knows whether it
         // should be. The rule this respects is "a Bevy *system* never blocks".
+        // One file per scope: an account ticket where the list path expects one, and a
+        // world ticket in a file of that world's own. Reusing one file for both would
+        // put a live credential for the wrong thing behind a screen that says "signed
+        // in" and offers no control — see `tickets::world_ticket_path`.
         let ticket_path = self.ticket_path.clone().or_else(|| {
-            tickets::default_ticket_path(self.service.authority(), &session::Environment::read())
+            let env = session::Environment::read();
+            match self.world.as_deref() {
+                Some(world) => tickets::world_ticket_path(self.service.authority(), world, &env),
+                None => tickets::default_ticket_path(self.service.authority(), &env),
+            }
         });
 
         let (state, complaint) = match ticket_path.as_deref() {
@@ -1078,6 +1282,7 @@ impl Plugin for SignInPlugin {
         app.insert_resource(state)
             .insert_resource(SignInSettings {
                 service: self.service.clone(),
+                world: self.world.clone(),
                 ticket_path,
                 browser: self.browser.clone(),
             })
@@ -1108,12 +1313,13 @@ fn start_sign_in(
     let (event_tx, event_rx) = mpsc::channel();
     let (command_tx, command_rx) = mpsc::channel();
     let service = settings.service.clone();
+    let world = settings.world.clone();
     let ticket_path = settings.ticket_path.clone();
     let browser = settings.browser.clone();
 
     match thread::Builder::new()
         .name("voxelheim-signin".to_owned())
-        .spawn(move || signin::run(service, ticket_path, browser, event_tx, command_rx))
+        .spawn(move || signin::run(service, world, ticket_path, browser, event_tx, command_rx))
     {
         // Detached, as the session thread is: the app must never wait on a socket
         // to shut down, and dropping the ECS end of the channels is what stops it.
@@ -1354,12 +1560,12 @@ mod tests {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
-    use super::codec::PLAYER_TOKEN_LEN;
     use super::codec::server_side::{
         DEFAULT_TOKEN, EntityStateWire, WelcomeWire, encode_chunk_data, encode_chunk_unload,
         encode_entity_snapshot, encode_inventory_state, encode_mine_progress, encode_server_reject,
         encode_server_welcome,
     };
+    use super::codec::{PLAYER_TOKEN_LEN, SESSION_TICKET_LEN, SessionTicket};
     use super::frame::FRAME_HEADER_SIZE;
     use super::session::Scratch;
     use super::*;
@@ -1489,6 +1695,39 @@ mod tests {
             .map(|token| token.bytes().to_vec())
     }
 
+    /// The ticket a hello carried, read off the frame the stub recorded.
+    fn presented_ticket(hello: &[u8]) -> Option<Vec<u8>> {
+        let envelope = fb::root_as_envelope(hello).expect("the client encodes valid frames");
+        envelope
+            .payload_as_client_hello()
+            .expect("the first frame is a ClientHello")
+            .session_ticket()
+            .map(|ticket| ticket.bytes().to_vec())
+    }
+
+    /// The settings `SignInPlugin` would have inserted for a development launch that
+    /// named `world` and keeps its ticket in `ticket_path`.
+    ///
+    /// Built here rather than by building that plugin, because `SignInPlugin::build`
+    /// reads the real data directory to decide where a ticket lives and these tests are
+    /// about what happens *after* one exists.
+    fn sign_in_settings(world: &str, ticket_path: &std::path::Path) -> SignInSettings {
+        SignInSettings {
+            service: AccountService::parse("http://127.0.0.1:7780").expect("a service URL"),
+            world: Some(world.to_owned()),
+            ticket_path: Some(ticket_path.to_path_buf()),
+            browser: signin::Browser::System,
+        }
+    }
+
+    /// A cached ticket of `byte`s that will not expire during a test run.
+    fn live_ticket(byte: u8) -> tickets::CachedTicket {
+        tickets::CachedTicket::new(
+            SessionTicket::from_bytes([byte; SESSION_TICKET_LEN]),
+            tickets::now_unix() + 3_600,
+        )
+    }
+
     /// The name a hello announced.
     fn announced_name(hello: &[u8]) -> String {
         let envelope = fb::root_as_envelope(hello).expect("the client encodes valid frames");
@@ -1520,6 +1759,162 @@ mod tests {
 
     fn state(app: &App) -> ConnectionState {
         app.world().resource::<ConnectionState>().clone()
+    }
+
+    /// **The launch #154 exists for, end to end inside this module.** Signed out,
+    /// nothing is dialled — a hello with no ticket would be refused, so connecting
+    /// first would put a refusal on screen underneath the sign-in that was about to fix
+    /// it. Signed in, the address the developer typed is dialled and the cached ticket
+    /// reaches the wire.
+    #[test]
+    fn a_development_launch_with_an_account_service_dials_only_once_it_has_a_ticket() {
+        let (addr, stub) = spawn_stub(Reply::Hold);
+        let scratch = Scratch::new("net-dev-ticket");
+        let ticket_path = scratch.join("world-ticket");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(NetPlugin::developing_against_signed_in(&addr).over_plaintext())
+            .insert_resource(SignInState::SignedOut { reason: None })
+            .insert_resource(sign_in_settings("midgard", &ticket_path));
+
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(state(&app), ConnectionState::Idle);
+        assert!(
+            !app.world().contains_resource::<NetLink>(),
+            "a signed-out launch dialled anyway"
+        );
+        assert!(
+            !app.world().contains_resource::<ServerAddress>(),
+            "a signed-out launch published an address"
+        );
+
+        // What a finished sign-in leaves behind: a ticket in the file this launch
+        // named. The state change is the ECS half of the same event.
+        tickets::write(&ticket_path, live_ticket(0x7A)).expect("the scratch file is writable");
+        *app.world_mut().resource_mut::<SignInState>() = SignInState::SignedIn;
+
+        pump_until(&mut app, "the session to open", |app| {
+            app.world().contains_resource::<NetLink>()
+        });
+        assert_eq!(app.world().resource::<ServerAddress>().0, addr);
+
+        drop(app);
+        let received = stub.join().expect("the stub thread");
+        let hello = received.first().expect("a hello reached the socket");
+        assert_eq!(
+            presented_ticket(hello),
+            Some(vec![0x7A; SESSION_TICKET_LEN]),
+            "the ticket the sign-in cached did not reach the wire"
+        );
+    }
+
+    /// A launch that says it is signed in and has nothing to present is refused with a
+    /// sentence naming the remedy, **and the refusal happens before anything is
+    /// dialled** — which is what the unreachable address here proves: a session that
+    /// had opened a socket first would have failed with "cannot reach" instead.
+    #[test]
+    fn a_ticket_that_is_not_there_is_refused_before_a_socket_is_opened() {
+        let scratch = Scratch::new("net-no-ticket");
+        let ticket_path = scratch.join("world-ticket");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            // Port 9 discards, so reaching it at all would be the failure under test.
+            .add_plugins(NetPlugin::developing_against_signed_in("127.0.0.1:9").over_plaintext())
+            .insert_resource(SignInState::SignedIn)
+            .insert_resource(sign_in_settings("midgard", &ticket_path));
+
+        pump_until(&mut app, "Rejected", |app| {
+            matches!(state(app), ConnectionState::Rejected { .. })
+        });
+        let ConnectionState::Rejected { reason } = state(&app) else {
+            unreachable!("the loop above only exits on Rejected");
+        };
+        assert!(reason.contains("sign in again"), "{reason}");
+        assert!(!reason.contains("cannot reach"), "{reason}");
+    }
+
+    /// An expired cache is the same answer as an empty one. The ticket carries its own
+    /// signed expiry and the server is the authority on it; what this buys is a
+    /// sentence a player can act on instead of a handshake that ends in the server's
+    /// more general refusal.
+    #[test]
+    fn a_ticket_that_has_run_out_is_not_presented() {
+        let scratch = Scratch::new("net-stale-ticket");
+        let ticket_path = scratch.join("world-ticket");
+        tickets::write(
+            &ticket_path,
+            tickets::CachedTicket::new(
+                SessionTicket::from_bytes([0x11; SESSION_TICKET_LEN]),
+                tickets::now_unix() - 1,
+            ),
+        )
+        .expect("the scratch file is writable");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(NetPlugin::developing_against_signed_in("127.0.0.1:9").over_plaintext())
+            .insert_resource(SignInState::SignedIn)
+            .insert_resource(sign_in_settings("midgard", &ticket_path));
+
+        pump_until(&mut app, "Rejected", |app| {
+            matches!(state(app), ConnectionState::Rejected { .. })
+        });
+        let ConnectionState::Rejected { reason } = state(&app) else {
+            unreachable!("the loop above only exits on Rejected");
+        };
+        assert!(reason.contains("sign in again"), "{reason}");
+    }
+
+    /// **A refusal is not a retry.** There is no list on this path and therefore no row
+    /// to click again, so the one thing a redial would produce is the same refusal on a
+    /// loop against a server that has already said no.
+    #[test]
+    fn a_refused_development_session_is_not_dialled_again() {
+        let scratch = Scratch::new("net-no-redial");
+        let ticket_path = scratch.join("world-ticket");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(NetPlugin::developing_against_signed_in("127.0.0.1:9").over_plaintext())
+            .insert_resource(SignInState::SignedIn)
+            .insert_resource(sign_in_settings("midgard", &ticket_path));
+
+        pump_until(&mut app, "Rejected", |app| {
+            matches!(state(app), ConnectionState::Rejected { .. })
+        });
+
+        // A ticket arriving afterwards does not restart it either: the state is no
+        // longer `Idle`, which is the whole of the rule.
+        tickets::write(&ticket_path, live_ticket(0x22)).expect("the scratch file is writable");
+        for _ in 0..8 {
+            app.update();
+        }
+        assert!(
+            matches!(state(&app), ConnectionState::Rejected { .. }),
+            "a refused development session dialled again"
+        );
+    }
+
+    /// The other half of the same rule, and the one that keeps #150's guarantee true:
+    /// a session opened from a list row presents the identity file and **no ticket**,
+    /// because the ticket a sign-in caches on that path names no world and a game
+    /// server refuses one of those. Joining from the list is #107.
+    #[test]
+    fn a_listed_session_presents_no_ticket() {
+        let (addr, stub) = spawn_stub(Reply::Hold);
+        let (mut app, _scratch) = headless(&addr);
+        pump_until(&mut app, "Connecting", |app| {
+            !matches!(state(app), ConnectionState::Idle)
+        });
+        drop(app);
+
+        let received = stub.join().expect("the stub thread");
+        let hello = received.first().expect("a hello reached the socket");
+        assert_eq!(presented_ticket(hello), None);
     }
 
     #[test]
@@ -1611,6 +2006,32 @@ mod tests {
             std::fs::read(&identity).expect("the identity file was written"),
             DEFAULT_TOKEN.to_vec()
         );
+    }
+
+    /// **A session that kept no token says so rather than guessing**, and this is the
+    /// path where the guess would have been wrong: a ticket names an account, the
+    /// account decides which character the server restores, and the contract is
+    /// explicit that the client is not told which of the two happened. `New` here would
+    /// be the client contradicting the server about a fact only the server has.
+    #[test]
+    fn a_session_that_kept_no_token_reports_neither_new_nor_returning() {
+        let scratch = Scratch::new("net-untold");
+        let ticket_path = scratch.join("world-ticket");
+        tickets::write(&ticket_path, live_ticket(0x33)).expect("the scratch file is writable");
+        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+            &WelcomeWire::default(),
+        )]));
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(NetPlugin::developing_against_signed_in(&addr).over_plaintext())
+            .insert_resource(SignInState::SignedIn)
+            .insert_resource(sign_in_settings("midgard", &ticket_path));
+
+        pump_until(&mut app, "Connected", |app| {
+            state(app) == ConnectionState::Connected
+        });
+        assert_eq!(*app.world().resource::<Identity>(), Identity::Untold);
     }
 
     #[test]
@@ -2368,7 +2789,7 @@ mod tests {
         events
             .send(SessionEvent::Established {
                 params: params(),
-                returning: false,
+                returning: Some(false),
             })
             .expect("the app holds the receiver");
         app.update();
@@ -2486,7 +2907,7 @@ mod tests {
         events
             .send(SessionEvent::Established {
                 params: params(),
-                returning: false,
+                returning: Some(false),
             })
             .expect("the app holds the receiver");
         app.update();

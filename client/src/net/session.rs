@@ -27,12 +27,21 @@
 //! carried a certificate fingerprint for — because handing a bearer credential to
 //! whoever answers an address is the theft the encryption exists to prevent, performed
 //! by the client itself. `--server` is the other variant and it is the development
-//! path: encrypted, unverified, and a new character every time. That is not a check
-//! placed before the hello; it is the shape of the two variants, so there is no
-//! ordering to get wrong.
+//! path: encrypted and unverified. That is not a check placed before the hello; it is
+//! the shape of the two variants, so there is no ordering to get wrong.
 //!
 //! Nothing here decides anything from a token. It is read, presented, and stored;
 //! every consequence of it belongs to the server.
+//!
+//! ## The ticket, which is gated differently on purpose
+//!
+//! A session ticket is read from its own cache file on this thread and presented in the
+//! same hello, and it is **not** gated on the expectation the way the identity file is.
+//! The asymmetry is #154's and the argument is on [`Target::ticket`]: the two are
+//! different credentials, and only one of them is bounded enough to show an address
+//! nobody vouched for. What is unchanged is the certificate — an `Unlisted` session
+//! verifies nothing and says so, and a `Listed` mismatch is refused inside the
+//! handshake, before either file is opened.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -45,10 +54,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::codec::{
     self, ActionRefused, InventoryState, MineProgress, PLAYER_TOKEN_LEN, PlayerToken,
-    SessionParams, Snapshot, WorldUpdate,
+    SessionParams, SessionTicket, Snapshot, WorldUpdate,
 };
 use super::frame::{self, FrameDecoder};
 use super::handshake::{Handshake, Transition};
+use super::tickets;
 use super::tls;
 
 /// How long a connect attempt may take before it counts as unreachable. Without
@@ -113,9 +123,18 @@ pub(super) enum SessionEvent {
     /// the status line alone. It is not a gameplay answer: the server had already
     /// settled the identity before it sent the welcome, and both values of this
     /// flag describe a session that is equally established.
+    ///
+    /// **`None` is a session that kept no identity file, and it is the answer this
+    /// client is entitled to give there** — not `Some(false)`. A session that presents
+    /// no token has made no comparison, so "a new character" would be a claim with
+    /// nothing behind it, and on the path #154 added it is a claim the server
+    /// contradicts in the same handshake: a ticket names an account, the account
+    /// decides which character comes back, and this client is deliberately told
+    /// neither. Rendering a guess as a fact is the one thing a status line must not
+    /// do.
     Established {
         params: SessionParams,
-        returning: bool,
+        returning: Option<bool>,
     },
     /// The server said something about the voxel world. Ordered with respect to
     /// every other event on this channel, which is what lets an unload that
@@ -257,6 +276,24 @@ pub(super) struct Target {
     /// `expected` is [`tls::Expectation::Listed`], because that is the only session
     /// that presents anything.
     pub(super) identity_override: Option<PathBuf>,
+    /// The cached ticket this session signs in with, and `None` when this launch holds
+    /// no account to present.
+    ///
+    /// **Unlike `identity_override` above it is not gated on `expected`, and that
+    /// asymmetry is the whole of what #154 changed.** An identity token is long-lived
+    /// and names a player at one server until somebody deletes it, so it is shown only
+    /// to a server the list stated a certificate for. A session ticket is the other
+    /// shape of credential: it names one world, it expires in hours, and `ticket.Verify`
+    /// refuses it at every other world — so what an unverified address learns by being
+    /// presented one is one world's session for a few hours, at an address the developer
+    /// typed. That is a bounded trade, and the alternative was that development could
+    /// not connect at all, because a hello presenting no ticket is `ErrTicketAbsent` and
+    /// is meant to be.
+    ///
+    /// What is **not** widened is the certificate. [`tls::Expectation::Unlisted`] still
+    /// verifies nothing and still says so, and a `Listed` mismatch is still refused
+    /// inside the handshake, before this file is opened and before a byte is sent.
+    pub(super) ticket: Option<PathBuf>,
     pub(super) transport: Transport,
 }
 
@@ -277,8 +314,30 @@ pub(super) fn run(
         expected,
         player_name,
         identity_override,
+        ticket,
         transport,
     } = target;
+
+    // **Before the socket, because a session with nothing to present cannot end any
+    // other way.** A server that admits players on a signed ticket refuses a hello
+    // carrying none — `ErrTicketAbsent`, and correctly — so dialling first would spend
+    // a TLS handshake to be told what this file already says. Read here rather than in
+    // a system for the reason the identity file is: it is blocking file I/O, and this
+    // thread is the only place in the client that blocks.
+    let presented_ticket = match ticket {
+        Some(path) => match read_cached_ticket(&path, &events) {
+            Some(ticket) => Some(ticket),
+            // The refusal has already been sent; nothing was dialled.
+            None => return,
+        },
+        // No account service was named, so there is no ticket to hold and no sign-in
+        // this client could have done. The hello says so — an absent ticket is what
+        // `schemas/handshake.fbs` calls "no account presented" — and a server built
+        // after #102 answers it with a refusal a player can read. That refusal is the
+        // right one: this launch really has nothing, and the remedy is `--account-service`
+        // rather than anything this client could do differently.
+        None => None,
+    };
 
     let socket = match connect(&addr) {
         Ok(socket) => socket,
@@ -337,15 +396,13 @@ pub(super) fn run(
         return;
     }
 
-    // `None` for the ticket, and it stays `None` after #106. Signing in caches an
-    // *account* ticket — one whose world id is all zero, meaning "this ticket names
-    // no world" — and a game server refuses one of those with `ErrWrongWorld`,
-    // correctly: joining needs a ticket for the world being joined, and choosing
-    // the world is the server list's job. So this presents the V6 token it holds
-    // and no account until #107 has a world to name. `schemas/handshake.fbs` reads
-    // an absent ticket as "no account presented", which is a legal hello rather
-    // than a malformed one.
-    let hello = codec::encode_client_hello(&player_name, identity.presented, None);
+    // The ticket read above, which is what this server admits anybody on. It is a
+    // *world* ticket — a sign-in that named the world this launch is joining — because
+    // `ticket.Verify` refuses one that names another world and refuses an account
+    // ticket outright. `None` is a launch with no account service at all: the hello
+    // then presents no account, which `schemas/handshake.fbs` reads as a legal hello
+    // and this server refuses, in as many words, with something a player can act on.
+    let hello = codec::encode_client_hello(&player_name, identity.presented, presented_ticket);
     if let Err(err) = frame::write_frame(&mut stream, &hello) {
         let _ = events.send(SessionEvent::Refused(format!(
             "cannot send the handshake to {addr}: {err}"
@@ -412,6 +469,45 @@ impl Environment {
         Self {
             xdg_data_home: std::env::var(XDG_DATA_HOME).ok(),
             home: std::env::var(HOME).ok(),
+        }
+    }
+}
+
+/// The ticket in `path`, or `None` after a refusal has been sent explaining why there
+/// is none.
+///
+/// **This runs on the session thread and reads the cache the sign-in wrote**, which is
+/// the same fence the identity file sits behind: no ticket reaches the ECS, so there is
+/// no resource for a `{:?}` to find and no name outside `net` anything could start
+/// deciding from. `net/servers.rs` reads the same cache the same way on its own thread.
+///
+/// **An expiry that has passed is refused here rather than presented**, even though the
+/// server would refuse it too. The ticket carries its own signed expiry and that is the
+/// authority — this check is a courtesy, and what it buys is a sentence naming the
+/// remedy instead of a handshake that ends in the server's more general refusal. The
+/// clock is this machine's, so one that is wrong costs a sign-in nobody needed; the
+/// opposite arrangement would cost a refusal nobody could explain.
+///
+/// Nothing here quotes the file's contents. It is a bearer credential.
+fn read_cached_ticket(path: &Path, events: &Sender<SessionEvent>) -> Option<SessionTicket> {
+    let (cached, complaint) = tickets::read(path);
+    if let Some(complaint) = complaint
+        && events.send(SessionEvent::Warning(complaint)).is_err()
+    {
+        return None;
+    }
+
+    match cached {
+        Some(cached) if cached.is_live(tickets::now_unix()) => Some(cached.ticket()),
+        // Reachable two ways, and one sentence covers both: a cache that held nothing
+        // this client could read, and one whose ticket has run out since the launch
+        // decided the login screen was not needed. Either way there is nothing to
+        // present, and this server admits nobody it cannot name.
+        _ => {
+            let _ = events.send(SessionEvent::Refused(
+                "this client holds no live sign-in for that world; sign in again.".to_owned(),
+            ));
+            None
         }
     }
 }
@@ -501,6 +597,17 @@ impl IdentityFile {
     /// path that cannot verify is handed an identity file with nothing in it.
     fn forgetful() -> Self {
         Self::default()
+    }
+
+    /// Whether this session has a file to compare a welcome's token against.
+    ///
+    /// False on two paths that behave identically and mean different things: an
+    /// `Unlisted` session, which declines to look at one, and a session that could
+    /// name no file at all. Either way there is nothing to compare, so the answer
+    /// [`Self::store`] gives is the default rather than a finding — see
+    /// [`SessionEvent::Established`] for what is reported instead.
+    fn remembers(&self) -> bool {
+        self.path.is_some()
     }
 
     /// Settles the welcome's token against the one that was presented.
@@ -858,6 +965,9 @@ fn pump(
                     if let Some(complaint) = complaint {
                         events.send(SessionEvent::Warning(complaint)).ok()?;
                     }
+                    // The flag only means something when there is a file behind it.
+                    // See `SessionEvent::Established`.
+                    let returning = identity.remembers().then_some(returning);
                     events
                         .send(SessionEvent::Established { params, returning })
                         .ok()?;
