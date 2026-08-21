@@ -83,8 +83,13 @@ readable forever.** That includes source and documentation, commit author/commit
 branch names, commit and PR messages, review comments, CI logs, artifacts and release assets.
 
 - **Never publish a real email address.** Commits must use the GitHub-provided `noreply` address.
-  Source and fixtures may contain only GitHub `noreply` identities or addresses under reserved
-  example domains; never copy a real address into a test.
+  Source, fixtures and commit messages may contain only GitHub `noreply` identities, addresses
+  under reserved example domains, and the one vendor no-reply an agent harness appends to its
+  co-author trailer by construction; never copy a real address into a test. That vendor address is
+  approved **by literal address, not by domain** — a no-reply under a private host would publish an
+  internal hostname, which is the thing these scans exist to catch. `is_approved_email` is the list,
+  it lives in both privacy scripts, and `scripts/test/commit-privacy.test.sh` pins the two copies to
+  each other: widen what an address may be in one and the pin fails until the other agrees.
 - **Never publish internal machine paths.** Do not commit workstation usernames, home directories,
   mount points, checkout locations or other environment-specific paths. Documentation uses tokens
   such as `<repo-root>`, `<worktree>` and `<workspace>`. Tests use clearly synthetic fixture paths.
