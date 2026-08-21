@@ -46,6 +46,18 @@ assert_eq() {
   fi
 }
 
+# assert_contains <test-name> <haystack> <needle>
+assert_contains() {
+  local name="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "  ok   — ${name}"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL — ${name}: output did not contain '${needle}'"
+    fail=$((fail + 1))
+  fi
+}
+
 # reviews <login:state:id:timestamp>... → GraphQL-shaped payload
 #
 # state doubles as the body selector, because submittedAt contains colons and so
@@ -214,6 +226,72 @@ out=$(deepseek_rounds_from_graphql \
 assert_field "latest_review_id still tracks an APPROVE" "$out" '.latest_review_id' 222
 assert_field "APPROVE after an exhausted cap still completes" "$out" '.review_complete' true
 
+echo "pr-deepseek-rounds — repository identity follows the caller"
+
+# Renaming the repository exposed a split-brain helper: implicit gh commands used
+# the checkout's current remote, but explicit REST/GraphQL calls used a stale
+# literal. Resolution now follows the Actions event and falls back to gh's
+# canonical view of the current checkout for local invocations.
+GH_REPO_VIEW_RESULT="canonical-owner/canonical-repo"
+GH_REPO_VIEW_STATUS=0
+GH_REPO_CALL_LOG=$(mktemp)
+
+repo_lookup_calls() {
+  wc -l <"$GH_REPO_CALL_LOG" | tr -d ' '
+}
+
+gh() {
+  case "$*" in
+    "auth status"*) return 0 ;;
+    "repo view --json nameWithOwner --jq .nameWithOwner")
+      printf 'repo-view\n' >>"$GH_REPO_CALL_LOG"
+      [ "$GH_REPO_VIEW_STATUS" -eq 0 ] || return "$GH_REPO_VIEW_STATUS"
+      printf '%s\n' "$GH_REPO_VIEW_RESULT"
+      return 0
+      ;;
+  esac
+  echo "unexpected gh invocation: $*" >&2
+  return 64
+}
+
+REPO="explicit-owner/explicit-repo"
+GITHUB_REPOSITORY="event-owner/event-repo"
+resolve_repo
+assert_eq "the Actions event repository wins" "event-owner/event-repo" "$REPO"
+assert_eq "the Actions path costs no lookup" 0 "$(repo_lookup_calls)"
+
+REPO="explicit-owner/explicit-repo"
+GITHUB_REPOSITORY=""
+resolve_repo
+assert_eq "a local repository override is accepted" "explicit-owner/explicit-repo" "$REPO"
+assert_eq "an explicit local override costs no lookup" 0 "$(repo_lookup_calls)"
+
+REPO=""
+GITHUB_REPOSITORY=""
+resolve_repo
+assert_eq "local use resolves the checkout's canonical repository" "canonical-owner/canonical-repo" "$REPO"
+assert_eq "local resolution asks gh exactly once" 1 "$(repo_lookup_calls)"
+
+REPO=""
+GITHUB_REPOSITORY="not-an-owner-name"
+resolve_repo 2>/dev/null
+assert_eq "a malformed event repository fails" 1 $?
+assert_eq "a malformed repository is never accepted" "" "$REPO"
+
+for function_name in graphql_pr_review cmd_pr_comments cmd_pr_deepseek_rounds cmd_pr_deepseek_force_review cmd_iteration_advance; do
+  assert_contains "${function_name} resolves explicit API identity" \
+    "$(declare -f "$function_name")" "resolve_repo"
+done
+
+helper_text=$(<"${SCRIPT_DIR}/gh-automation.sh")
+if [[ "$helper_text" == *'REPO="FabioSM46/voxelheim"'* ]]; then
+  stale_repo_literal="present"
+else
+  stale_repo_literal="absent"
+fi
+assert_eq "the renamed repository is not hardcoded" "absent" "$stale_repo_literal"
+
+echo
 echo "pr-deepseek-rounds — failure modes are distinguishable"
 
 out=$(deepseek_rounds_from_graphql '{"data":{"repository":{"pullRequest":{"reviews":{"nodes":[]}}}}}' \
@@ -225,13 +303,16 @@ out=$(deepseek_rounds_from_graphql 'not json at all' "github-actions[bot]" 3 2>/
 assert_eq "unparseable payload exits non-zero" 1 $?
 assert_eq "unparseable payload emits no zeroed success" "" "$out"
 
-out=$(deepseek_rounds_error "REPO variable is not set" 3)
-assert_field "error shape carries the message" "$out" '.error' "REPO variable is not set"
+out=$(deepseek_rounds_error "Could not determine the current GitHub repository" 3)
+assert_field "error shape carries the message" "$out" '.error' "Could not determine the current GitHub repository"
 assert_field "error shape has no bot_review_count" "$out" '.bot_review_count' null
 
-out=$(REPO="" cmd_pr_deepseek_rounds 199 2>/dev/null)
-assert_eq "missing REPO exits non-zero" 1 $?
-assert_field "missing REPO reports an error" "$out" '.error' "REPO variable is not set"
+GH_REPO_VIEW_STATUS=1
+out=$(REPO="" GITHUB_REPOSITORY="" cmd_pr_deepseek_rounds 199 2>/dev/null)
+assert_eq "unresolvable repository exits non-zero" 1 $?
+assert_field "unresolvable repository reports an error" "$out" '.error' "Could not determine the current GitHub repository"
+
+rm -f "$GH_REPO_CALL_LOG"
 
 echo
 echo "${pass} passed, ${fail} failed"

@@ -136,7 +136,8 @@ STUB
 
   STEP_OUT=$(cd "$tmp" && PATH="${tmp}/bin:${PATH}" \
     STUB_STDOUT="$stub_stdout" STUB_STDERR="$stub_stderr" STUB_EXIT="$stub_exit" \
-    GH_TOKEN="stub" DEEPSEEK_BOT_USER="github-actions[bot]" \
+    GH_TOKEN="stub" GITHUB_REPOSITORY="example/repository" \
+    DEEPSEEK_BOT_USER="github-actions[bot]" \
     bash -e ./step.sh 2>&1)
   STEP_EXIT=$?
 
@@ -146,7 +147,11 @@ STUB
 PRESENT='"checks_missing":0,"checks_missing_names":"","required_check_state":"SUCCESS","mergeable":"MERGEABLE"'
 READY_JSON='{"pr":279,"unresolved_threads":0,"changes_requested":0,"ci_failing":0,"ci_pending":0,'"$PRESENT"',"deepseek_review_complete":true,"deepseek_rounds_exhausted":false,"deepseek_has_participated":true,"deepseek_unread_findings":0,"ready_to_merge":true}'
 FAILCLOSED_JSON='{"pr":279,"unresolved_threads":0,"changes_requested":0,"ci_failing":-1,"ci_pending":-1,'"$PRESENT"',"deepseek_review_complete":false,"deepseek_rounds_exhausted":false,"deepseek_has_participated":false,"deepseek_unread_findings":0,"ready_to_merge":false}'
+REVIEW_UNREADABLE_JSON='{"pr":279,"unresolved_threads":-1,"changes_requested":-1,"ci_failing":0,"ci_pending":0,'"$PRESENT"',"deepseek_review_complete":false,"deepseek_rounds_exhausted":false,"deepseek_has_participated":true,"deepseek_unread_findings":-1,"ready_to_merge":false}'
+CI_RED_JSON='{"pr":279,"unresolved_threads":0,"changes_requested":0,"ci_failing":1,"ci_pending":0,'"$PRESENT"',"deepseek_review_complete":true,"deepseek_rounds_exhausted":false,"deepseek_has_participated":true,"deepseek_unread_findings":0,"ready_to_merge":false}'
+CHANGES_REQUESTED_JSON='{"pr":279,"unresolved_threads":0,"changes_requested":1,"ci_failing":0,"ci_pending":0,'"$PRESENT"',"deepseek_review_complete":true,"deepseek_rounds_exhausted":false,"deepseek_has_participated":true,"deepseek_unread_findings":0,"ready_to_merge":false}'
 PENDING_JSON='{"pr":279,"unresolved_threads":2,"changes_requested":0,"ci_failing":0,"ci_pending":1,'"$PRESENT"',"deepseek_review_complete":false,"deepseek_rounds_exhausted":false,"deepseek_has_participated":true,"deepseek_unread_findings":0,"ready_to_merge":false}'
+DEEPSEEK_OPEN_JSON='{"pr":279,"unresolved_threads":0,"changes_requested":0,"ci_failing":0,"ci_pending":0,'"$PRESENT"',"deepseek_review_complete":false,"deepseek_rounds_exhausted":false,"deepseek_has_participated":false,"deepseek_unread_findings":0,"ready_to_merge":false}'
 # Every count the step used to branch on is 0, and the PR still is not ready —
 # DeepSeek left findings in a review body, where no thread counts them.
 UNREAD_JSON='{"pr":279,"unresolved_threads":0,"changes_requested":0,"ci_failing":0,"ci_pending":0,'"$PRESENT"',"deepseek_review_complete":true,"deepseek_rounds_exhausted":false,"deepseek_has_participated":true,"deepseek_unread_findings":3,"ready_to_merge":false}'
@@ -165,6 +170,8 @@ assert_contains "labeler reruns after CI or DeepSeek completes" "$workflow_text"
   "workflows: [CI, DeepSeek PR Review]"
 assert_contains "run block contains the status call" "$block" "pr-status-json"
 assert_contains "run block contains the label call" "$block" "pr-label"
+assert_contains "PR discovery uses the workflow repository" "$block" '--repo "$GITHUB_REPOSITORY"'
+assert_not_contains "PR discovery has no stale repository fallback" "$block" "FabioSM46/voxelheim"
 assert_not_contains "run block is dedented" "$block" "          PR_LIST="
 
 echo
@@ -175,8 +182,13 @@ echo "pr-labeler step — stderr never contaminates the parsed JSON"
 run_step "$FAILCLOSED_JSON" "[WARN] Could not determine ci_failing for PR #279 — failing closed" 0
 assert_eq "warn-on-stderr does not abort the step" 0 "$STEP_EXIT"
 assert_contains "warn-on-stderr still reaches the log" "$STEP_OUT" "[WARN] Could not determine ci_failing"
-assert_contains "fail-closed counts route to needs-work" "$STEP_OUT" "[LABEL] pr-label 279 add needs-work"
+assert_contains "fail-closed counts route to needs-review" "$STEP_OUT" "[LABEL] pr-label 279 add needs-review"
+assert_not_contains "unreadable CI is not asserted as failed" "$STEP_OUT" "add needs-work"
 assert_contains "fail-closed counts parse as -1" "$STEP_OUT" "ci_failing=-1"
+
+run_step "$REVIEW_UNREADABLE_JSON" "[WARN] Could not determine changes_requested for PR #279 — failing closed" 0
+assert_contains "unreadable review state routes to needs-review" "$STEP_OUT" "[LABEL] pr-label 279 add needs-review"
+assert_not_contains "unreadable review state is not asserted as changes requested" "$STEP_OUT" "add needs-work"
 
 # Stderr noise alongside a clean, ready payload must not cost the label.
 run_step "$READY_JSON" "gh: a deprecation notice on stderr" 0
@@ -189,7 +201,8 @@ echo "pr-labeler step — malformed input degrades, never aborts"
 
 run_step "not json at all" "" 0
 assert_eq "unparseable stdout does not abort the step" 0 "$STEP_EXIT"
-assert_contains "unparseable stdout fails closed to needs-work" "$STEP_OUT" "[LABEL] pr-label 279 add needs-work"
+assert_contains "unparseable stdout fails closed to needs-review" "$STEP_OUT" "[LABEL] pr-label 279 add needs-review"
+assert_not_contains "unparseable stdout asserts no failure" "$STEP_OUT" "add needs-work"
 assert_contains "unparseable fields read back empty" "$STEP_OUT" "ci_failing= "
 
 run_step "" "boom" 1
@@ -200,10 +213,22 @@ assert_not_contains "skipped PR gets no labels" "$STEP_OUT" "[LABEL]"
 echo
 echo "pr-labeler step — the frozen rule still routes correctly"
 
+run_step "$CI_RED_JSON" "" 0
+assert_contains "a real CI failure routes to needs-work" "$STEP_OUT" "[LABEL] pr-label 279 add needs-work"
+assert_not_contains "a real CI failure does not route to needs-review" "$STEP_OUT" "add needs-review"
+
+run_step "$CHANGES_REQUESTED_JSON" "" 0
+assert_contains "a real changes-requested review routes to needs-work" "$STEP_OUT" "[LABEL] pr-label 279 add needs-work"
+assert_not_contains "changes requested does not route to needs-review" "$STEP_OUT" "add needs-review"
+
 run_step "$PENDING_JSON" "" 0
 assert_eq "pending state does not abort the step" 0 "$STEP_EXIT"
 assert_contains "pending checks or threads route to needs-review" "$STEP_OUT" "[LABEL] pr-label 279 add needs-review"
 assert_not_contains "pending state never earns READY TO MERGE" "$STEP_OUT" "add READY TO MERGE"
+
+run_step "$DEEPSEEK_OPEN_JSON" "" 0
+assert_contains "DeepSeek-only waiting state routes to needs-review" "$STEP_OUT" "[LABEL] pr-label 279 add needs-review"
+assert_not_contains "DeepSeek-only waiting is never an unknown state" "$STEP_OUT" "Unknown state"
 
 run_step "$SKIPPED_GATE_JSON" "" 0
 assert_contains "a skipped aggregate gate routes to needs-review" "$STEP_OUT" "[LABEL] pr-label 279 add needs-review"

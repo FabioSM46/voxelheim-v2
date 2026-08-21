@@ -33,7 +33,13 @@
 
 set -euo pipefail
 
-REPO="FabioSM46/voxelheim"
+# GitHub Actions supplies the canonical owner/name for the repository that fired
+# the workflow. Local callers resolve it lazily through `gh repo view` instead of
+# baking a name into this script: REST redirects some renamed-repository routes,
+# while GraphQL and endpoints such as milestones do not. A stale literal therefore
+# split this helper in two — some commands followed the checkout's current remote,
+# while review status and iteration advancement queried the old repository.
+REPO="${REPO:-}"
 
 # The one stable check that must be PRESENT *and SUCCESSFUL* on the PR head.
 # `ci-gate` owns the branch-aware policy: develop accepts only classifier-authorised
@@ -65,6 +71,29 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 require_gh() {
   command -v gh &>/dev/null || die "gh CLI not found. Install: https://cli.github.com"
   gh auth status &>/dev/null || die "gh not authenticated. Run: gh auth login"
+}
+
+# Resolve the repository once for commands whose API shape needs an explicit
+# owner/name. Prefer Actions' event repository, then a caller's local REPO
+# override, then the current checkout as understood by gh. The last path is deliberately
+# canonical rather than a parser for `git remote get-url`: gh follows a repository
+# rename and reports its current name, whereas a stale local remote may not.
+resolve_repo() {
+  local candidate="${GITHUB_REPOSITORY:-${REPO:-}}"
+
+  if [ -z "$candidate" ]; then
+    candidate=$(gh repo view --json nameWithOwner --jq '.nameWithOwner') || {
+      echo "ERROR: could not determine the current GitHub repository" >&2
+      return 1
+    }
+  fi
+
+  if [[ ! "$candidate" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "ERROR: GitHub repository must have the form owner/name" >&2
+    return 1
+  fi
+
+  REPO="$candidate"
 }
 
 # Run `gh` under GH_CI_TOKEN when the caller supplied one, otherwise under whatever
@@ -116,6 +145,7 @@ gh_ci() {
 # (fail closed) and re-applying the label produces a fresh event.
 graphql_pr_review() {
   local pr="$1"
+  resolve_repo || return 1
   gh api graphql -f query='
     query($owner: String!, $repo: String!, $pr: Int!) {
       repository(owner: $owner, name: $repo) {
@@ -600,6 +630,7 @@ cmd_pr_status_json() {
 cmd_pr_comments() {
   local pr="$1"
   require_gh
+  resolve_repo || die "Could not resolve the repository for PR comments"
 
   echo "=== Review Comments for PR #${pr} ==="
   gh api "repos/${REPO}/pulls/${pr}/comments" \
@@ -864,13 +895,11 @@ cmd_pr_deepseek_rounds() {
     max_rounds=1
   fi
 
-  if [ -z "${REPO:-}" ]; then
-    echo "ERROR: REPO variable is not set" >&2
-    deepseek_rounds_error "REPO variable is not set" "$max_rounds"
+  require_gh
+  if ! resolve_repo; then
+    deepseek_rounds_error "Could not determine the current GitHub repository" "$max_rounds"
     return 1
   fi
-
-  require_gh
 
   local graphql_out exit_code
   graphql_out=$(gh api graphql -f query='
@@ -923,6 +952,7 @@ cmd_pr_deepseek_force_review() {
   local pr="${1:-}" ref="${2:-develop}"
   [ -n "$pr" ] || die "usage: pr-deepseek-force-review <pr-number> [ref]"
   require_gh
+  resolve_repo || die "Could not resolve the repository for review dispatch"
 
   gh workflow run deepseek-pr-review.yml \
     --repo "$REPO" \
@@ -1077,6 +1107,7 @@ ceremonies_for_marker() {
 
 cmd_iteration_advance() {
   require_gh
+  resolve_repo || die "Could not resolve the repository for iteration advancement"
 
   local milestones milestone_count
   milestones=$(gh api "repos/$REPO/milestones?state=open&per_page=100")
