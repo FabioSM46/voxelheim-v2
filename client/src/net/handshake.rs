@@ -68,6 +68,29 @@ pub enum HandshakeError {
     Repeated(&'static str),
     /// A payload only a client sends, arriving from the server.
     WrongDirection(&'static str),
+    /// A message that arrived exactly on time and that this build cannot answer.
+    ///
+    /// Distinct from every variant around it, which are all about a message arriving
+    /// in the wrong *place*. `ServerCharacterList` before the welcome is on time from
+    /// V7 — the trouble is that answering it means sending a selection, and the screen
+    /// that would choose one is a later issue.
+    ///
+    /// **It is a failure rather than something dropped, and that is the change #97's
+    /// review asked for.** Dropping it left the session in `AwaitingWelcome` while a
+    /// peer that speaks V7 waited for a selection this client never sends: neither end
+    /// closes, nothing is logged, and the player watches a window that never fills in.
+    /// A hang is the worst answer available here, because it is the one nobody can
+    /// diagnose from either side. It is also not a peer *ahead* of this build — this
+    /// client advertises `ProtocolVersion.Current`, so a server running the character
+    /// phase is a server doing exactly what this build claimed to speak.
+    Unanswerable(&'static str),
+    /// A handshake-phase payload arriving on a session that already has a welcome.
+    ///
+    /// The mirror of [`Self::Premature`] rather than a second name for it, and distinct
+    /// from [`Self::Repeated`], which is a *second* welcome or reject.
+    /// `ServerCharacterList` before the welcome is exactly on time from V7; after the
+    /// welcome the server is answering a phase this session has already left.
+    OutOfPhase(&'static str),
     /// Inventory pair count must match the value announced in ServerWelcome.
     InventorySlots { expected: u8, got: usize },
     /// A snapshot's `tick_of_day` is at or beyond the day length announced in
@@ -91,6 +114,18 @@ impl fmt::Display for HandshakeError {
             Self::Repeated(kind) => write!(f, "second {kind} on an established session"),
             Self::WrongDirection(kind) => {
                 write!(f, "server sent {kind}, which only a client sends")
+            }
+            Self::Unanswerable(kind) => {
+                write!(
+                    f,
+                    "{kind} arrived on time and this build cannot answer it: the character phase is not implemented"
+                )
+            }
+            Self::OutOfPhase(kind) => {
+                write!(
+                    f,
+                    "{kind} belongs to the handshake and this session is past it"
+                )
             }
             Self::InventorySlots { expected, got } => write!(
                 f,
@@ -182,6 +217,30 @@ impl Handshake {
             (Phase::AwaitingWelcome, Message::ActionRefused(_)) => {
                 Err(HandshakeError::Premature("ActionRefused"))
             }
+            // On time from V7, and refused anyway, because being on time is not the
+            // same as being answerable: replying means sending a selection, and the
+            // screen that would choose one is a later issue. Dropping it — which is
+            // what this arm did until #97's review — left the session in
+            // `AwaitingWelcome` while the server waited for a selection that never
+            // comes, and a hang neither end can diagnose is a worse answer than a
+            // failure that names itself.
+            //
+            // `Transition::Ignored` is not the right tool here and the distinction is
+            // worth keeping: it exists for a peer speaking a contract *ahead* of this
+            // build, where dropping is the only honest thing to do. A server running
+            // the character phase is not ahead — this client advertised
+            // `ProtocolVersion.Current` in its hello, so the phase is one it claimed to
+            // speak. A server still on V6 sends a welcome and never reaches this arm.
+            (Phase::AwaitingWelcome, Message::CharacterList(_)) => {
+                Err(HandshakeError::Unanswerable("ServerCharacterList"))
+            }
+            // An appearance names an entity id, and `ServerWelcome.entity_id` is how
+            // this session learns which one is its own — so an appearance that precedes
+            // the welcome describes somebody nobody can identify. Refused for the reason
+            // a snapshot is.
+            (Phase::AwaitingWelcome, Message::PlayerAppearance(_)) => {
+                Err(HandshakeError::Premature("PlayerAppearance"))
+            }
 
             (Phase::Established, Message::Welcome(_)) => {
                 Err(HandshakeError::Repeated("ServerWelcome"))
@@ -234,6 +293,19 @@ impl Handshake {
             (Phase::Established, Message::ActionRefused(refused)) => {
                 Ok(Transition::ActionRefused(refused))
             }
+            // The character phase is over: this session has a character, because it has
+            // a welcome. A list arriving now is a server that has lost track of where
+            // the handshake is, and there is no way to resynchronise one of those.
+            (Phase::Established, Message::CharacterList(_)) => {
+                Err(HandshakeError::OutOfPhase("ServerCharacterList"))
+            }
+            // Admitted because a session exists, and carried no further: the appearance
+            // is decoded and validated here, and nothing draws one until the issue that
+            // gives players a body worth colouring. `MineProgress` spent Protocol V2 in
+            // exactly this state.
+            (Phase::Established, Message::PlayerAppearance(_)) => {
+                Ok(Transition::Ignored("PlayerAppearance"))
+            }
         }
     }
 }
@@ -254,7 +326,8 @@ fn world_payload_name(update: &WorldUpdate) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::super::codec::{
-        ActionRefused, BlockCoord, ChunkCoord, InventoryStack, MineProgress,
+        ActionRefused, BlockCoord, CharacterList, ChunkCoord, InventoryStack, MineProgress,
+        PLACEHOLDER_APPEARANCE, PlayerAppearance,
     };
     use super::*;
 
@@ -703,5 +776,125 @@ mod tests {
             handshake.apply(Message::Reject(reject())),
             Err(HandshakeError::Repeated("ServerReject"))
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V7 — the character phase, and what this build does with it
+    // -----------------------------------------------------------------------
+
+    fn character_list() -> CharacterList {
+        CharacterList {
+            characters: Vec::new(),
+            max_characters: 3,
+        }
+    }
+
+    fn player_appearance() -> PlayerAppearance {
+        PlayerAppearance {
+            entity_id: 1,
+            appearance: PLACEHOLDER_APPEARANCE,
+        }
+    }
+
+    /// A character list before the welcome is **on time** from V7 and still fails,
+    /// because on time is not the same as answerable: replying means sending a
+    /// selection, and the screen that would choose one is a later issue.
+    ///
+    /// **The inverse of what this test asserted when #97 landed, and the reason is the
+    /// state it used to leave behind.** Dropping the message kept the session in
+    /// `AwaitingWelcome` waiting for a welcome that never comes, while the server
+    /// waited for a selection that is never sent — a hang with nothing logged at
+    /// either end. The review on #97 named it, and a failure that says what it is
+    /// beats a stall nobody can diagnose.
+    ///
+    /// It is not the `Transition::Ignored` case, and keeping those apart matters:
+    /// dropping is for a peer speaking a contract *ahead* of this build, and a server
+    /// running the character phase is not ahead — this client advertised
+    /// `ProtocolVersion.Current` in its own hello. Against the servers in this
+    /// repository, which still answer a hello with a welcome, nothing reaches this arm
+    /// at all.
+    #[test]
+    fn a_character_list_this_build_cannot_answer_fails_rather_than_hanging() {
+        let mut handshake = Handshake::new();
+
+        assert_eq!(
+            handshake.apply(Message::CharacterList(character_list())),
+            Err(HandshakeError::Unanswerable("ServerCharacterList"))
+        );
+        // The phase does not advance on a failure, and the session ends above this
+        // layer — `net/session.rs` turns a handshake error into a protocol failure.
+        assert_eq!(handshake.phase(), Phase::AwaitingWelcome);
+    }
+
+    /// The failure says which message it could not answer, and why.
+    ///
+    /// Pinned because this string is the whole diagnosis: it reaches a log and a status
+    /// line, and "the client stopped" with no message names nothing.
+    #[test]
+    fn the_unanswerable_failure_names_the_message_and_the_missing_phase() {
+        let rendered = HandshakeError::Unanswerable("ServerCharacterList").to_string();
+        assert!(
+            rendered.contains("ServerCharacterList") && rendered.contains("character phase"),
+            "the failure does not diagnose itself: {rendered}"
+        );
+    }
+
+    /// After the welcome the character phase is over: this session has a character,
+    /// because it has a welcome.
+    #[test]
+    fn a_character_list_after_the_welcome_ends_the_connection() {
+        let mut handshake = Handshake::new();
+        let _ = handshake.apply(Message::Welcome(params()));
+
+        assert_eq!(
+            handshake.apply(Message::CharacterList(character_list())),
+            Err(HandshakeError::OutOfPhase("ServerCharacterList"))
+        );
+    }
+
+    /// An appearance names an entity id, and `ServerWelcome.entity_id` is how a session
+    /// learns which one is its own — so one that precedes the welcome describes somebody
+    /// nobody can identify. Refused for the reason a snapshot is.
+    #[test]
+    fn an_appearance_before_the_welcome_ends_the_connection() {
+        let mut handshake = Handshake::new();
+
+        assert_eq!(
+            handshake.apply(Message::PlayerAppearance(player_appearance())),
+            Err(HandshakeError::Premature("PlayerAppearance"))
+        );
+    }
+
+    /// Admitted on a session and carried no further: validated at the decode boundary,
+    /// drawn by nobody until the issue that gives players a body worth colouring.
+    #[test]
+    fn an_appearance_after_the_welcome_is_admitted_and_dropped() {
+        let mut handshake = Handshake::new();
+        let _ = handshake.apply(Message::Welcome(params()));
+
+        assert_eq!(
+            handshake.apply(Message::PlayerAppearance(player_appearance())),
+            Ok(Transition::Ignored("PlayerAppearance"))
+        );
+    }
+
+    /// Direction beats phase, and it has to: a payload only a client sends is wrong
+    /// wherever it turns up, and saying so is more useful than "out of phase".
+    #[test]
+    fn the_character_requests_are_refused_for_their_direction_in_either_phase() {
+        for kind in ["SelectCharacterRequest", "CreateCharacterRequest"] {
+            let mut fresh = Handshake::new();
+            assert_eq!(
+                fresh.apply(Message::ClientOnly(kind)),
+                Err(HandshakeError::WrongDirection(kind))
+            );
+
+            let mut established = Handshake::new();
+            let _ = established.apply(Message::Welcome(params()));
+            assert_eq!(
+                established.apply(Message::ClientOnly(kind)),
+                Err(HandshakeError::WrongDirection(kind))
+            );
+        }
     }
 }

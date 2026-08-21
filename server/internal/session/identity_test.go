@@ -523,3 +523,119 @@ func welcomeToken(t *testing.T, frame []byte) []byte {
 	}
 	return token
 }
+
+// helloWithTicket decodes a hello carrying both a token and a session ticket, which is
+// what Resolve takes. Either may be nil.
+func helloWithTicket(t *testing.T, token, ticket []byte) *protocol.ClientHello {
+	t.Helper()
+
+	msg, err := protocol.Decode(protocol.EncodeClientHelloFull(vnet.ProtocolVersionCurrent, "Eivor", token, ticket))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	return msg.ClientHello
+}
+
+// The V7 ticket rule, and the one thing this server does with a ticket today.
+//
+// schemas/handshake.fbs says a session_ticket is absent, empty or exactly
+// SessionTicketLen bytes, and that any other length is BAD_REQUEST "decided before any
+// account is looked up and before any signature is checked". **Before** is the half
+// that needs a test rather than an assertion: the hello below presents a token the
+// store knows perfectly well, so a rule that ran after the lookup would resume that
+// identity and admit the session. It is refused instead, and nothing is claimed.
+func TestAWrongLengthTicketIsRefusedBeforeAnythingIsLookedUp(t *testing.T) {
+	t.Parallel()
+
+	for name, size := range map[string]int{
+		"one byte":              1,
+		"one byte short":        protocol.SessionTicketLen - 1,
+		"one byte too many":     protocol.SessionTicketLen + 1,
+		"a token-length ticket": identity.TokenSize,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			token := testToken(9)
+			identities, _ := knownIdentities(t, token)
+
+			resolved, err := identities.Resolve(helloWithTicket(t, token[:], make([]byte, size)))
+			if err == nil {
+				t.Fatal("a wrong-length ticket was admitted")
+			}
+			if got := refusalReason(t, err); got != vnet.RejectReasonBAD_REQUEST {
+				t.Errorf("Reason = %s, want BAD_REQUEST", got)
+			}
+			if resolved != (session.Resolved{}) {
+				t.Error("Resolve returned an identity beside its refusal")
+			}
+			// The claim is the observable half of "before anything is looked up": the
+			// presented token names a stored identity, so a rule that ran second would
+			// have resumed and claimed it.
+			if identities.Count() != 0 {
+				t.Error("a refused ticket left an identity claimed")
+			}
+		})
+	}
+}
+
+// The refusal names the length and never the bytes. A ticket is a bearer credential
+// exactly as a token is, and the first thing anybody does with a refusal is read it out
+// of a log.
+func TestATicketRefusalReportsTheLengthAndNeverTheTicket(t *testing.T) {
+	t.Parallel()
+
+	identities, _ := knownIdentities(t)
+	ticket := bytes.Repeat([]byte{0xAB}, 7)
+
+	_, err := identities.Resolve(helloWithTicket(t, nil, ticket))
+	if err == nil {
+		t.Fatal("a wrong-length ticket was admitted")
+	}
+
+	var refused *session.Refused
+	if !errors.As(err, &refused) {
+		t.Fatalf("error %v is not a refusal with a reason code", err)
+	}
+	if !strings.Contains(refused.Detail, "7") {
+		t.Errorf("Detail %q does not say what was wrong", refused.Detail)
+	}
+	// Hex and raw, the two shapes a leak takes. Not a two-character needle: "ab" is a
+	// substring of "absent", which is a word this refusal legitimately contains.
+	if strings.Contains(strings.ToLower(refused.Detail), hex.EncodeToString(ticket)) ||
+		strings.Contains(refused.Detail, string(ticket)) {
+		t.Errorf("Detail %q carries the ticket's bytes", refused.Detail)
+	}
+}
+
+// A ticket of the stated length, and no ticket at all, both pass the framing rule
+// untouched — and neither changes which identity is resolved, because this server has
+// not adopted ticket identity. That is the V6 handshake, which is what every consumer
+// in this repository still speaks; the account service is a separate issue.
+func TestALegalTicketDoesNotChangeWhichIdentityResolves(t *testing.T) {
+	t.Parallel()
+
+	for name, ticket := range map[string][]byte{
+		"no ticket at all":     nil,
+		"an empty ticket":      {},
+		"a full-length ticket": bytes.Repeat([]byte{0x5C}, protocol.SessionTicketLen),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			token := testToken(11)
+			identities, _ := knownIdentities(t, token)
+
+			resolved, err := identities.Resolve(helloWithTicket(t, token[:], ticket))
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if !resolved.Returning {
+				t.Error("a known token did not resume its identity")
+			}
+			if resolved.Token != token {
+				t.Error("the resumed session is playing under a different token")
+			}
+		})
+	}
+}

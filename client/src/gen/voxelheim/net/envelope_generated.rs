@@ -368,6 +368,66 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_server_character_list(&self) -> Option<ServerCharacterList<'a>> {
+        if self.payload_type() == Payload::ServerCharacterList {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { ServerCharacterList::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_select_character_request(&self) -> Option<SelectCharacterRequest<'a>> {
+        if self.payload_type() == Payload::SelectCharacterRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { SelectCharacterRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_create_character_request(&self) -> Option<CreateCharacterRequest<'a>> {
+        if self.payload_type() == Payload::CreateCharacterRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { CreateCharacterRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_player_appearance(&self) -> Option<PlayerAppearance<'a>> {
+        if self.payload_type() == Payload::PlayerAppearance {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PlayerAppearance::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -399,6 +459,10 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::PlaceStructureRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlaceStructureRequest>>("Payload::PlaceStructureRequest", pos),
           Payload::RemoveStructureRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<RemoveStructureRequest>>("Payload::RemoveStructureRequest", pos),
           Payload::ActionRefused => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ActionRefused>>("Payload::ActionRefused", pos),
+          Payload::ServerCharacterList => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ServerCharacterList>>("Payload::ServerCharacterList", pos),
+          Payload::SelectCharacterRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SelectCharacterRequest>>("Payload::SelectCharacterRequest", pos),
+          Payload::CreateCharacterRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<CreateCharacterRequest>>("Payload::CreateCharacterRequest", pos),
+          Payload::PlayerAppearance => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerAppearance>>("Payload::PlayerAppearance", pos),
           _ => Ok(()),
         }
      })?
@@ -652,6 +716,46 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::ActionRefused => {
                 if let Some(x) = self.payload_as_action_refused() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::ServerCharacterList => {
+                if let Some(x) = self.payload_as_server_character_list() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::SelectCharacterRequest => {
+                if let Some(x) = self.payload_as_select_character_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::CreateCharacterRequest => {
+                if let Some(x) = self.payload_as_create_character_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PlayerAppearance => {
+                if let Some(x) = self.payload_as_player_appearance() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

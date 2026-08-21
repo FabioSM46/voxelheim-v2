@@ -213,6 +213,16 @@ func (rcv *ServerWelcome) MutateHotbarSlots(n byte) bool {
 // / The identity token for this session. The client stores it and presents it
 // / as `ClientHello.player_token` on its next connection to **this** server.
 // /
+// / **Retired at V7 alongside its counterpart**, and for the same reason: a V7
+// / client's identity comes from the account service that signed its
+// / `ClientHello.session_ticket`, not from a value this server minted. The field
+// / stays where it is and every invariant below still holds for the value a server
+// / puts in it — present, 32 bytes, never the value the client sent unless the
+// / server chose it — because a V6 client on the far end still stores what arrives
+// / here and a V7 server has no reason to send a shorter one. What is retired is
+// / the *sentence above*: presenting this value on a later connection is the V6
+// / handshake, and a V7 server ignores it.
+// /
 // / Present and exactly 32 bytes on every accepted handshake; a decoder treats
 // / any other length as a protocol error, the way it treats a zero `tick_rate`.
 // /
@@ -255,6 +265,16 @@ func (rcv *ServerWelcome) PlayerTokenBytes() []byte {
 
 // / The identity token for this session. The client stores it and presents it
 // / as `ClientHello.player_token` on its next connection to **this** server.
+// /
+// / **Retired at V7 alongside its counterpart**, and for the same reason: a V7
+// / client's identity comes from the account service that signed its
+// / `ClientHello.session_ticket`, not from a value this server minted. The field
+// / stays where it is and every invariant below still holds for the value a server
+// / puts in it — present, 32 bytes, never the value the client sent unless the
+// / server chose it — because a V6 client on the far end still stores what arrives
+// / here and a V7 server has no reason to send a shorter one. What is retired is
+// / the *sentence above*: presenting this value on a later connection is the V6
+// / handshake, and a V7 server ignores it.
 // /
 // / Present and exactly 32 bytes on every accepted handshake; a decoder treats
 // / any other length as a protocol error, the way it treats a zero `tick_rate`.

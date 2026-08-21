@@ -32,6 +32,33 @@ pub const MAX_VIEW_DISTANCE: u8 = 16;
 /// `player_token` is absent, empty, or exactly this — nothing else is a token.
 pub const PLAYER_TOKEN_LEN: usize = 32;
 
+/// Length of a session ticket, in bytes. Fixed by `schemas/handshake.fbs` from V7:
+/// a `session_ticket` is absent, empty, or exactly this — nothing else is a ticket.
+/// Mirrors `protocol.SessionTicketLen`.
+pub const SESSION_TICKET_LEN: usize = 96;
+
+/// The neutral grey an entity is drawn in while its `PlayerAppearance` has not
+/// arrived yet — `0x808080` for every colour, with [`HairModel::Shaved`].
+///
+/// **A rendering placeholder and never a decoding default.** `schemas/player.fbs`
+/// documents it for exactly one case: the two streams are not ordered against each
+/// other, so a player can be visible for a frame or two before the message describing
+/// them lands. An `Appearance` that *did* arrive and broke an invariant is refused
+/// instead — the client may not invent what the server actually described.
+// Reserved ahead of the screen that uses it, the way `EditAction::Break` is kept
+// ahead of nothing: Protocol V7 lands the vocabulary and the character-select screen
+// is a separate issue. Every one of these is exercised by this module's own tests, so
+// it is unused rather than untested.
+#[allow(dead_code)]
+pub const PLACEHOLDER_APPEARANCE: Appearance = Appearance {
+    skin_color: 0x0080_8080,
+    shirt_color: 0x0080_8080,
+    trousers_color: 0x0080_8080,
+    shoes_color: 0x0080_8080,
+    hair_model: HairModel::Shaved,
+    hair_color: 0x0080_8080,
+};
+
 /// Initial builder capacity for the client's small intent messages. A hello,
 /// input or request fits without reallocating.
 const BUILDER_CAPACITY: usize = 128;
@@ -85,6 +112,41 @@ impl fmt::Debug for PlayerToken {
     /// [`SessionParams`].
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PlayerToken(<redacted>)")
+    }
+}
+
+/// A signed session ticket, exactly [`SESSION_TICKET_LEN`] bytes.
+///
+/// A newtype for the reason [`PlayerToken`] is one, and the reason is unchanged by
+/// the signature: this is a bearer credential. A signature proves who *issued* the
+/// ticket, not who is holding it, so a copy taken off the wire is as good as the
+/// original — which makes `schemas/handshake.fbs`'s rule the same rule as before,
+/// *never logged, never displayed*. [`fmt::Debug`] is written by hand and prints no
+/// bytes, so the redaction is a property of the type rather than a habit every call
+/// site has to remember, and there is deliberately no `Display`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SessionTicket([u8; SESSION_TICKET_LEN]);
+
+impl SessionTicket {
+    /// Wraps bytes that are already known to be a ticket. Unused until this client
+    /// has an account service to get one from; see [`PLACEHOLDER_APPEARANCE`].
+    #[allow(dead_code)]
+    pub const fn from_bytes(bytes: [u8; SESSION_TICKET_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes, for the one caller that must have them: the encoder that puts the
+    /// ticket on the wire. Nothing in this client reads a ticket's contents — they are
+    /// the account service's business, and this build has no account service.
+    pub const fn as_bytes(&self) -> &[u8; SESSION_TICKET_LEN] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SessionTicket {
+    /// Redacted, always. See the type's documentation.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SessionTicket(<redacted>)")
     }
 }
 
@@ -425,6 +487,149 @@ impl Facing {
             Self::West => fb::Facing::West,
         }
     }
+}
+
+/// Which hair model a character wears.
+///
+/// **A variant for every member the contract declares, `Unknown` excepted** — and that
+/// is a different rule from [`StructureKind`]'s, deliberately. A structure kind is
+/// admitted here in the commit that teaches the client to *draw* it, because drawing a
+/// default shelter would put a building in the world nobody placed. Hair is not a thing
+/// in the world: it is a property of a character the player already chose, and refusing
+/// one this build has no mesh for would refuse the whole player. So every declared
+/// member decodes, and choosing a mesh for one is the renderer's problem rather than
+/// the codec's.
+///
+/// `Unknown` has no variant, for the reason [`Facing`] has none: it exists on the wire
+/// so an absent field fails closed, and making it unrepresentable here is the stronger
+/// version of the promise that nothing ever renders one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HairModel {
+    Shaved,
+    Cropped,
+    Braided,
+    Loose,
+    Topknot,
+}
+
+impl HairModel {
+    fn from_wire(value: fb::HairModel) -> Option<Self> {
+        match value {
+            fb::HairModel::Shaved => Some(Self::Shaved),
+            fb::HairModel::Cropped => Some(Self::Cropped),
+            fb::HairModel::Braided => Some(Self::Braided),
+            fb::HairModel::Loose => Some(Self::Loose),
+            fb::HairModel::Topknot => Some(Self::Topknot),
+            _ => None,
+        }
+    }
+
+    /// The wire member. Total, because the `Unknown` the contract fails closed on is
+    /// unrepresentable here.
+    #[allow(dead_code)]
+    fn wire(self) -> fb::HairModel {
+        match self {
+            Self::Shaved => fb::HairModel::Shaved,
+            Self::Cropped => fb::HairModel::Cropped,
+            Self::Braided => fb::HairModel::Braided,
+            Self::Loose => fb::HairModel::Loose,
+            Self::Topknot => fb::HairModel::Topknot,
+        }
+    }
+}
+
+/// What a character looks like: four worn colours, a hair model and its colour.
+///
+/// **Validated on the way in, which is a narrower claim than the one this comment
+/// used to make.** Every appearance produced by [`decode`] came off a wire that had
+/// its reserved high byte checked and its hair model named — that much is enforced by
+/// [`appearance`], and it is what the client renders. What is *not* enforced is
+/// construction: the fields are public, so a value built inside this crate can hold a
+/// colour the contract forbids, and [`encode_create_character_request`] would put it
+/// on the wire. Saying otherwise was the whole of the defect #97's review found, and
+/// the honest fix is to say what holds rather than to assert what does not.
+///
+/// Two things keep that from mattering yet, and both expire. Nothing in this build
+/// constructs one except this module and its tests — there is no character-creation
+/// screen — and the server refuses an appearance it dislikes before storing it, which
+/// `schemas/common.fbs` now states as an obligation rather than leaving to inference.
+/// **When a screen does construct one (#108), the validation moves here**: private
+/// fields behind a fallible constructor, so the type carries its invariant the way
+/// [`RecipeId`] carries "never `Unknown`" — by making the other states
+/// unrepresentable rather than by promising nobody will reach them.
+///
+/// The client renders these and never substitutes a default of its own — the one
+/// documented placeholder is [`PLACEHOLDER_APPEARANCE`], and it is for an appearance
+/// that has not *arrived*, never for one that arrived wrong.
+///
+/// Each colour is `0x00RRGGBB`: eight bits per channel, sRGB, non-linear, top eight
+/// bits zero. `schemas/common.fbs` is authoritative and there is no second encoding
+/// anywhere on this wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Appearance {
+    pub skin_color: u32,
+    pub shirt_color: u32,
+    pub trousers_color: u32,
+    pub shoes_color: u32,
+    pub hair_model: HairModel,
+    pub hair_color: u32,
+}
+
+/// One character an account owns on this world, as `ServerCharacterList` lists it.
+///
+/// Enough to draw a row in a character-select screen and nothing else: no position, no
+/// health, no inventory. Those are the world's answer to "who is this", read once a
+/// character has been chosen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterSummary {
+    /// Server-minted and stable for the life of the character. **Not an entity id**:
+    /// that names a body in a running simulation and is forgotten when the session
+    /// ends, while this outlives every session the character has.
+    pub character_id: u64,
+    /// Display text. Shown, never parsed, and never an identifier.
+    pub name: String,
+    pub appearance: Appearance,
+}
+
+/// Every character this account owns on this world, and how many it may hold.
+///
+/// An empty `characters` is a legal, expected answer and not a refusal: it says the
+/// only way forward is a `CreateCharacterRequest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterList {
+    pub characters: Vec<CharacterSummary>,
+    /// How many characters this account may hold here, including the ones above. Sent
+    /// rather than hardcoded, for the reason every limit in `ServerWelcome` is: the
+    /// number belongs to the server.
+    pub max_characters: u8,
+}
+
+/// What one player entity looks like, sent once as that player comes into view.
+///
+/// Cached against the entity id and not resent. **Not part of a snapshot, and that is
+/// the whole point**: `EntityState` is a struct inlined once per visible entity per
+/// tick, and five colours that never change would be paid for at the tick rate for
+/// ever. See `schemas/player.fbs`.
+///
+/// An appearance for an entity this client has never seen is **not** an error: the two
+/// streams are not ordered against each other, so either can arrive first and a
+/// receiver holds whichever half it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerAppearance {
+    pub entity_id: u64,
+    pub appearance: Appearance,
+}
+
+/// One character a client asks the server to create. **Intent only.**
+///
+/// The name is untrusted text the *server* judges — an unacceptable one is
+/// `RejectReason::CHARACTER_NAME_REFUSED`, a refusal with a reply — so nothing here
+/// checks it. The appearance is already validated, because it is an [`Appearance`].
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCharacterRequest {
+    pub name: String,
+    pub appearance: Appearance,
 }
 
 /// Which recipe a [`CraftRequest`] names.
@@ -1011,6 +1216,13 @@ pub enum Message {
     /// Named apart from [`Self::Reject`], which is the *connection* being refused and
     /// closes it. This one is an answer inside a session that goes on.
     ActionRefused(ActionRefused),
+    /// Every character this account owns on this world — the second message of a V7
+    /// handshake, and the one that asks which of them is playing.
+    CharacterList(CharacterList),
+    /// What one visible player looks like. Decoded and validated here; no ECS system
+    /// consumes it until the appearance-rendering issue, exactly as `MineProgress` was
+    /// decoded from V2 and drawn later.
+    PlayerAppearance(PlayerAppearance),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -1209,6 +1421,39 @@ pub enum DecodeError {
         field: &'static str,
         value: u8,
     },
+    /// A message that must describe a face carries no `appearance` table at all.
+    ///
+    /// Refused rather than filled in with [`PLACEHOLDER_APPEARANCE`]: the placeholder
+    /// answers "the message has not arrived yet", and this message *did* arrive. `where`
+    /// names the payload so the log says which half of the contract to look at.
+    MissingAppearance { at: &'static str },
+    /// A colour's reserved top eight bits are not zero.
+    ///
+    /// Refused rather than masked. A set high byte means the peer is encoding something
+    /// this build does not know about, and masking it would draw a colour nobody chose
+    /// while hiding the disagreement — the reasoning [`Self::WorldClock`] records, where
+    /// a repair a decoder invents is a different answer from the server's.
+    AppearanceColorReserved { field: &'static str, value: u32 },
+    /// An `Appearance` carries `HairModel::Unknown` — the absent-field case — or a
+    /// member this build has no name for. Never guessed at: `schemas/common.fbs` says
+    /// the client renders what the player chose and invents no default.
+    UnknownHairModel(u8),
+    /// A `CharacterSummary` carries the reserved id 0, which names no character.
+    CharacterWithoutIdentity,
+    /// A `CharacterSummary` carries no name, or an empty one. A character with no name
+    /// is a store that has lost one, not a character.
+    CharacterWithoutName(u64),
+    /// One `character_id` names two rows of the same list.
+    DuplicateCharacter(u64),
+    /// A `ServerCharacterList` says it allows no characters at all, or fewer than it
+    /// just listed. A server disagreeing with itself about its own limit; taking the
+    /// larger of the two would be inventing a limit nobody set.
+    CharacterLimit { listed: usize, max: u8 },
+    /// A `PlayerAppearance` carries the reserved entity id 0.
+    ///
+    /// Distinct from having no matching entity, which is **not** an error: the two
+    /// streams are not ordered against each other. Zero names nobody at all.
+    AppearanceWithoutEntity,
 }
 
 impl fmt::Display for DecodeError {
@@ -1365,6 +1610,30 @@ impl fmt::Display for DecodeError {
                 f,
                 "structure {structure_id} has an unknown {field}: {value}"
             ),
+            Self::MissingAppearance { at } => write!(f, "{at} carries no appearance"),
+            Self::AppearanceColorReserved { field, value } => write!(
+                f,
+                "appearance {field} is {value:#010x}; the top eight bits are reserved and must be zero"
+            ),
+            Self::UnknownHairModel(value) => {
+                write!(f, "appearance has an unknown hair model: {value}")
+            }
+            Self::CharacterWithoutIdentity => {
+                write!(f, "a character summary carries the reserved id 0")
+            }
+            Self::CharacterWithoutName(character_id) => {
+                write!(f, "character {character_id} has no name")
+            }
+            Self::DuplicateCharacter(character_id) => {
+                write!(f, "character {character_id} is listed twice")
+            }
+            Self::CharacterLimit { listed, max } => write!(
+                f,
+                "the list holds {listed} characters and says the limit is {max}"
+            ),
+            Self::AppearanceWithoutEntity => {
+                write!(f, "a PlayerAppearance carries the reserved entity id 0")
+            }
         }
     }
 }
@@ -1497,6 +1766,29 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 }),
             }))
         }
+        fb::Payload::ServerCharacterList => {
+            let list = envelope
+                .payload_as_server_character_list()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::CharacterList(character_list(&list)?))
+        }
+        fb::Payload::PlayerAppearance => {
+            let payload = envelope
+                .payload_as_player_appearance()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let entity_id = payload.entity_id();
+            if entity_id == 0 {
+                return Err(DecodeError::AppearanceWithoutEntity);
+            }
+            // Nothing here asks whether the client knows this entity, and nothing may:
+            // `schemas/player.fbs` is explicit that the appearance stream and the
+            // snapshot stream are not ordered against each other, so an appearance for
+            // an entity nobody has seen yet is the ordinary case rather than an error.
+            Ok(Message::PlayerAppearance(PlayerAppearance {
+                entity_id,
+                appearance: appearance(payload.appearance(), "PlayerAppearance")?,
+            }))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -1513,7 +1805,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::CraftRequest
         | fb::Payload::RepairRequest
         | fb::Payload::PlaceStructureRequest
-        | fb::Payload::RemoveStructureRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::RemoveStructureRequest
+        | fb::Payload::SelectCharacterRequest
+        | fb::Payload::CreateCharacterRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -1531,6 +1825,93 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // arm distinguishable from the ones above at runtime, and so testable.
         _ => Ok(Message::Deferred(UNKNOWN_VARIANT)),
     }
+}
+
+/// Copies one appearance out of a frame and enforces every invariant
+/// `schemas/common.fbs` attaches to it.
+///
+/// An `Option` because `appearance` is a nested table, so absence has to be answered.
+/// It is refused rather than filled in with [`PLACEHOLDER_APPEARANCE`], for the reason
+/// a `BlockUpdate` with no position is refused rather than read as the origin: the
+/// placeholder means "the message has not arrived", and this one arrived.
+fn appearance(
+    value: Option<fb::Appearance<'_>>,
+    at: &'static str,
+) -> Result<Appearance, DecodeError> {
+    let value = value.ok_or(DecodeError::MissingAppearance { at })?;
+
+    // The reserved high byte, checked once per colour through one closure so a fifth
+    // colour cannot be added with the check forgotten.
+    //
+    // Presence is deliberately not checked, and `schemas/common.fbs` carries the
+    // reasoning: a table scalar equal to its default is not written at all, and black
+    // is a legal colour — so an absent `skin_color` and a chosen `0x000000` are the
+    // same bytes, and refusing absence would refuse black shoes.
+    let color = |field: &'static str, raw: u32| -> Result<u32, DecodeError> {
+        if raw & 0xFF00_0000 == 0 {
+            Ok(raw)
+        } else {
+            Err(DecodeError::AppearanceColorReserved { field, value: raw })
+        }
+    };
+
+    Ok(Appearance {
+        skin_color: color("skin_color", value.skin_color())?,
+        shirt_color: color("shirt_color", value.shirt_color())?,
+        trousers_color: color("trousers_color", value.trousers_color())?,
+        shoes_color: color("shoes_color", value.shoes_color())?,
+        hair_model: HairModel::from_wire(value.hair_model())
+            .ok_or(DecodeError::UnknownHairModel(value.hair_model().0))?,
+        hair_color: color("hair_color", value.hair_color())?,
+    })
+}
+
+/// Copies a character list out of a frame and enforces what `schemas/handshake.fbs`
+/// attaches to it.
+///
+/// An absent `characters` vector reads as an empty one — the two say the same thing,
+/// "no characters here", which is a legal answer and not a refusal.
+fn character_list(list: &fb::ServerCharacterList<'_>) -> Result<CharacterList, DecodeError> {
+    let mut characters = Vec::new();
+    let mut seen = HashSet::new();
+
+    for summary in list.characters().into_iter().flatten() {
+        let character_id = summary.character_id();
+        if character_id == 0 {
+            return Err(DecodeError::CharacterWithoutIdentity);
+        }
+        if !seen.insert(character_id) {
+            return Err(DecodeError::DuplicateCharacter(character_id));
+        }
+        let name = summary.name().unwrap_or_default();
+        if name.is_empty() {
+            return Err(DecodeError::CharacterWithoutName(character_id));
+        }
+        characters.push(CharacterSummary {
+            character_id,
+            // Copied out, never borrowed: the accessor is a view into the frame, and
+            // the frame is gone by the time anything draws a row from this.
+            name: name.to_owned(),
+            appearance: appearance(summary.appearance(), "CharacterSummary")?,
+        });
+    }
+
+    // A server that allows no characters, or fewer than it has just listed, is
+    // disagreeing with itself. Refused rather than repaired: taking the larger of the
+    // two would invent a limit nobody set, and a client that offered a creation the
+    // server will refuse is worse than one that says the frame was wrong.
+    let max = list.max_characters();
+    if max == 0 || usize::from(max) < characters.len() {
+        return Err(DecodeError::CharacterLimit {
+            listed: characters.len(),
+            max,
+        });
+    }
+
+    Ok(CharacterList {
+        characters,
+        max_characters: max,
+    })
 }
 
 /// Copies and validates the three slot-indexed inventory vectors into one row per slot.
@@ -2100,13 +2481,18 @@ fn session_params(welcome: &fb::ServerWelcome) -> Result<SessionParams, DecodeEr
 /// the server decides whether to honour it, and answers with the token that
 /// actually applies. Nothing here reads the value: this function puts it on the
 /// wire, and that is the entire client-side use of a token.
-pub fn encode_client_hello(player_name: &str, player_token: Option<PlayerToken>) -> Vec<u8> {
-    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+pub fn encode_client_hello(
+    player_name: &str,
+    player_token: Option<PlayerToken>,
+    session_ticket: Option<SessionTicket>,
+) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY * 2);
 
     // A string and a vector must both exist before the table that references them
     // opens.
     let name = builder.create_string(player_name);
     let token = player_token.map(|token| builder.create_vector(token.as_bytes()));
+    let ticket = session_ticket.map(|ticket| builder.create_vector(ticket.as_bytes()));
     let hello = fb::ClientHello::create(
         &mut builder,
         &fb::ClientHelloArgs {
@@ -2116,10 +2502,90 @@ pub fn encode_client_hello(player_name: &str, player_token: Option<PlayerToken>)
             // both the same way, and absent is the one that says "nothing to
             // present" without putting a zero-length vector on the wire to say it.
             player_token: token,
+            // Retired at V7 in the other direction: a client with an account writes
+            // this and leaves `player_token` absent. Both are `Option` because both
+            // are claims a client may not have to make, and this build has no account
+            // service, so `None` is what `net/session.rs` passes today.
+            session_ticket: ticket,
         },
     );
 
     finish_envelope(builder, fb::Payload::ClientHello, hello.as_union_value())
+}
+
+/// Builds the choice of an existing character.
+///
+/// The id is one the server minted and sent in a `ServerCharacterList`, which is the
+/// one kind of identifier a client may echo back. Whether it names a character this
+/// account owns is re-read server-side, so nothing here validates it.
+#[allow(dead_code)]
+pub fn encode_select_character_request(character_id: u64) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+
+    let payload = fb::SelectCharacterRequest::create(
+        &mut builder,
+        &fb::SelectCharacterRequestArgs { character_id },
+    );
+
+    finish_envelope(
+        builder,
+        fb::Payload::SelectCharacterRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds the request to make a new character.
+///
+/// The name is written verbatim, the empty string included: what names a server
+/// accepts is the *server's* rule, answered with `RejectReason::CHARACTER_NAME_REFUSED`
+/// — a refusal the player can read and act on. A client that pre-judged it would be
+/// holding an opinion about a rule it does not own.
+///
+/// The appearance needs no such caveat: an [`Appearance`] cannot be constructed holding
+/// a colour or a hair model the contract forbids, so this always writes a legal one.
+#[allow(dead_code)]
+pub fn encode_create_character_request(request: &CreateCharacterRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+
+    // A string and a nested table must both exist before the table that references
+    // them opens — unlike a struct, which is written inline while its parent is open.
+    let name = builder.create_string(&request.name);
+    let appearance = encode_appearance(&mut builder, request.appearance);
+    let payload = fb::CreateCharacterRequest::create(
+        &mut builder,
+        &fb::CreateCharacterRequestArgs {
+            name: Some(name),
+            appearance: Some(appearance),
+        },
+    );
+
+    finish_envelope(
+        builder,
+        fb::Payload::CreateCharacterRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Writes one appearance table and returns its offset.
+///
+/// Must be called while no other table is open: a nested table is reached through an
+/// offset and has to be finished before its parent starts.
+#[allow(dead_code)]
+fn encode_appearance<'b>(
+    builder: &mut FlatBufferBuilder<'b>,
+    appearance: Appearance,
+) -> flatbuffers::WIPOffset<fb::Appearance<'b>> {
+    fb::Appearance::create(
+        builder,
+        &fb::AppearanceArgs {
+            skin_color: appearance.skin_color,
+            shirt_color: appearance.shirt_color,
+            trousers_color: appearance.trousers_color,
+            shoes_color: appearance.shoes_color,
+            hair_model: appearance.hair_model.wire(),
+            hair_color: appearance.hair_color,
+        },
+    )
 }
 
 /// Builds one tick of intent.
@@ -3035,19 +3501,151 @@ pub(super) mod server_side {
         let payload = table.finish();
         finish_envelope(builder, fb::Payload::MineProgress, payload.as_union_value())
     }
+
+    /// An `Appearance` as it sits on the wire, before validation.
+    ///
+    /// Every field is settable, including into states a correct server never produces
+    /// — a colour with its reserved high byte set, a hair model no member has. That is
+    /// the point: the decoder's invariants need inputs that violate them, and
+    /// [`super::Appearance`] cannot express one.
+    #[derive(Debug, Clone, Copy)]
+    pub struct AppearanceWire {
+        pub skin_color: u32,
+        pub shirt_color: u32,
+        pub trousers_color: u32,
+        pub shoes_color: u32,
+        pub hair_model: fb::HairModel,
+        pub hair_color: u32,
+    }
+
+    impl Default for AppearanceWire {
+        fn default() -> Self {
+            Self {
+                skin_color: 0x00E3_C4A0,
+                shirt_color: 0x004A_5D3B,
+                trousers_color: 0x002B_2118,
+                shoes_color: 0x0055_3311,
+                hair_model: fb::HairModel::Braided,
+                hair_color: 0x00B0_7A32,
+            }
+        }
+    }
+
+    /// A `CharacterSummary` as it sits on the wire. `name` and `appearance` are
+    /// `Option` so a test can omit either, which is how an absent field reaches the
+    /// decoder.
+    #[derive(Debug, Clone)]
+    pub struct CharacterSummaryWire {
+        pub character_id: u64,
+        pub name: Option<String>,
+        pub appearance: Option<AppearanceWire>,
+    }
+
+    impl Default for CharacterSummaryWire {
+        fn default() -> Self {
+            Self {
+                character_id: 900,
+                name: Some("Eivor".to_owned()),
+                appearance: Some(AppearanceWire::default()),
+            }
+        }
+    }
+
+    fn appearance_offset<'b>(
+        builder: &mut FlatBufferBuilder<'b>,
+        appearance: AppearanceWire,
+    ) -> ::flatbuffers::WIPOffset<fb::Appearance<'b>> {
+        fb::Appearance::create(
+            builder,
+            &fb::AppearanceArgs {
+                skin_color: appearance.skin_color,
+                shirt_color: appearance.shirt_color,
+                trousers_color: appearance.trousers_color,
+                shoes_color: appearance.shoes_color,
+                hair_model: appearance.hair_model,
+                hair_color: appearance.hair_color,
+            },
+        )
+    }
+
+    /// A `ServerCharacterList` carrying exactly these summaries and this limit.
+    ///
+    /// `characters` of `None` omits the vector entirely, which the contract reads the
+    /// same way as an empty one — and a test has to be able to build both to say so.
+    pub fn encode_server_character_list(
+        characters: Option<&[CharacterSummaryWire]>,
+        max_characters: u8,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY * 4);
+
+        let vector = characters.map(|characters| {
+            // Every string and nested table must be finished before the vector that
+            // carries its offset opens.
+            let summaries: Vec<_> = characters
+                .iter()
+                .map(|summary| {
+                    let name = summary.name.as_ref().map(|n| builder.create_string(n));
+                    let appearance = summary
+                        .appearance
+                        .map(|appearance| appearance_offset(&mut builder, appearance));
+                    fb::CharacterSummary::create(
+                        &mut builder,
+                        &fb::CharacterSummaryArgs {
+                            character_id: summary.character_id,
+                            name,
+                            appearance,
+                        },
+                    )
+                })
+                .collect();
+            builder.create_vector(&summaries)
+        });
+
+        let payload = fb::ServerCharacterList::create(
+            &mut builder,
+            &fb::ServerCharacterListArgs {
+                characters: vector,
+                max_characters,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::ServerCharacterList,
+            payload.as_union_value(),
+        )
+    }
+
+    /// A `PlayerAppearance`. `appearance` of `None` omits the table, which is the
+    /// frame the decoder must refuse rather than fill in with a placeholder.
+    pub fn encode_player_appearance(entity_id: u64, appearance: Option<AppearanceWire>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
+        let payload = fb::PlayerAppearance::create(
+            &mut builder,
+            &fb::PlayerAppearanceArgs {
+                entity_id,
+                appearance,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::PlayerAppearance,
+            payload.as_union_value(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::server_side::{
-        DEFAULT_TOKEN, EntityStateWire, ItemDropStateWire, MobStateWire, PlayerVitalsWire,
-        StructureStateWire, WelcomeWire, encode_action_refused, encode_bare_block_update,
-        encode_bare_chunk_data, encode_bare_chunk_unload, encode_bare_entity_snapshot,
-        encode_block_update, encode_chunk_data, encode_chunk_unload, encode_entity_snapshot,
-        encode_entity_snapshot_with, encode_entity_snapshot_with_drops,
+        AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire, ItemDropStateWire,
+        MobStateWire, PlayerVitalsWire, StructureStateWire, WelcomeWire, encode_action_refused,
+        encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
+        encode_bare_entity_snapshot, encode_block_update, encode_chunk_data, encode_chunk_unload,
+        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_mine_progress, encode_server_reject,
-        encode_server_welcome,
+        encode_inventory_state_with_durability, encode_mine_progress, encode_player_appearance,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
     };
     use super::*;
 
@@ -3083,21 +3681,25 @@ mod tests {
     }
 
     /// V6 arrived adding no payload — appended table fields and appended enum members —
-    /// and then gained one without moving, which is a different claim and the one this
-    /// test makes now. [`the_v6_enums_append_without_moving_what_came_before`] carries
-    /// the other half: a moved union tag reinterprets every frame on the wire, where a
-    /// moved enum member reinterprets one field inside one.
+    /// and then gained one without moving. V7 appends four and *does* move the version,
+    /// and the difference between the two decisions is the whole content of this comment.
+    /// [`the_v7_enums_append_without_moving_what_came_before`] carries the other half: a
+    /// moved union tag reinterprets every frame on the wire, where a moved enum member
+    /// reinterprets one field inside one.
     ///
-    /// **Tag 20 is why the version does not move.** Union members are append-only exactly
-    /// so that appending one is not a break: this build reads a tag it has no name for as
-    /// [`Message::Deferred`] and drops it, and so does every build before it. An older
-    /// client therefore loses the refusal feedback and nothing else, where a version bump
-    /// would refuse it the whole session over a message it was never going to read. The
-    /// number is asserted here rather than left to whoever edits the list below.
+    /// **Tag 20 did not move the version and tags 21..24 do**, which is not a rule about
+    /// how many members were added. Union members are append-only exactly so that
+    /// appending one need not be a break: a peer reads a tag it has no name for as
+    /// [`Message::Deferred`] and drops it. What matters is what dropping it costs. A
+    /// dropped `ActionRefused` costs a player one explanation. Three of V7's four *are*
+    /// the handshake, so a V6 peer that drops `ServerCharacterList` never chooses a
+    /// character and waits for ever on a welcome that is not coming — which is precisely
+    /// the mid-session decode failure `ProtocolVersion` exists to turn into a clean
+    /// refusal at the handshake.
     #[test]
-    fn protocol_v6_preserves_every_union_tag_and_stays_at_six() {
+    fn protocol_v7_appends_four_union_tags_and_moves_to_seven() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 6);
+        assert_eq!(fb::ProtocolVersion::Current.0, 7);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -3119,6 +3721,10 @@ mod tests {
             (fb::Payload::PlaceStructureRequest, 18),
             (fb::Payload::RemoveStructureRequest, 19),
             (fb::Payload::ActionRefused, 20),
+            (fb::Payload::ServerCharacterList, 21),
+            (fb::Payload::SelectCharacterRequest, 22),
+            (fb::Payload::CreateCharacterRequest, 23),
+            (fb::Payload::PlayerAppearance, 24),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -3131,7 +3737,7 @@ mod tests {
         // implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            21,
+            25,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -3161,7 +3767,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 21] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 25] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -3183,14 +3789,18 @@ mod tests {
         (fb::Payload::PlaceStructureRequest, Handling::ClientOnly),
         (fb::Payload::RemoveStructureRequest, Handling::ClientOnly),
         (fb::Payload::ActionRefused, Handling::Consumed),
+        (fb::Payload::ServerCharacterList, Handling::Consumed),
+        (fb::Payload::SelectCharacterRequest, Handling::ClientOnly),
+        (fb::Payload::CreateCharacterRequest, Handling::ClientOnly),
+        (fb::Payload::PlayerAppearance, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
     ///
     /// Every field of every payload table in this contract is optional, so one empty
     /// table verifies as any of them — which is what lets a single helper produce a
-    /// frame for all nineteen named members *and* for a tag no member has, where no
-    /// encoder could exist at all. A `Consumed` payload therefore reaches its arm and
+    /// frame for every named member *and* for a tag no member has, where no encoder
+    /// could exist at all. A `Consumed` payload therefore reaches its arm and
     /// is usually refused there on a missing field, which is the decode boundary doing
     /// its job and not a classification.
     ///
@@ -3513,6 +4123,61 @@ mod tests {
         assert_eq!(fb::RecipeID::LeatherPatch.0, 6);
     }
 
+    /// V7's members sit where they were appended, and the enums they were appended to
+    /// did not move.
+    ///
+    /// The value is an integer on the wire: a renumbered `RejectReason` relabels every
+    /// refusal already written to a log, and a renumbered `HairModel` puts a different
+    /// head on every character already stored. `TestV7AppendsWithoutMovingWhatCameBefore`
+    /// is the server's half.
+    #[test]
+    fn the_v7_enums_append_without_moving_what_came_before() {
+        // The four RejectReason had before V7, restated so a renumbering fails here.
+        assert_eq!(fb::RejectReason::PROTOCOL_MISMATCH.0, 0);
+        assert_eq!(fb::RejectReason::SERVER_FULL.0, 1);
+        assert_eq!(fb::RejectReason::BAD_REQUEST.0, 2);
+        assert_eq!(fb::RejectReason::ALREADY_CONNECTED.0, 3);
+        // Appended after ALREADY_CONNECTED = 3.
+        assert_eq!(fb::RejectReason::CHARACTER_NAME_TAKEN.0, 4);
+        assert_eq!(fb::RejectReason::CHARACTER_NAME_REFUSED.0, 5);
+        assert_eq!(fb::RejectReason::CHARACTER_LIMIT_REACHED.0, 6);
+        assert_eq!(
+            fb::RejectReason::ENUM_VALUES.len(),
+            7,
+            "a new refusal needs a decision, not a test edit"
+        );
+
+        // New in V7. The zero member is the one that matters: an appearance with no
+        // hair model must fail closed rather than read as a head somebody chose.
+        assert_eq!(fb::HairModel::Unknown.0, 0);
+        assert_eq!(fb::HairModel::Shaved.0, 1);
+        assert_eq!(fb::HairModel::Cropped.0, 2);
+        assert_eq!(fb::HairModel::Braided.0, 3);
+        assert_eq!(fb::HairModel::Loose.0, 4);
+        assert_eq!(fb::HairModel::Topknot.0, 5);
+        assert_eq!(
+            fb::HairModel::ENUM_VALUES.len(),
+            6,
+            "a new hair model needs a decision, not a test edit"
+        );
+    }
+
+    /// V7 gave every player an appearance and put none of it in `EntityState`.
+    ///
+    /// `EntityState` is a struct, so its size is the stride of the entity array in
+    /// every snapshot — the most frequently sent payload in the game. This is what
+    /// catches somebody quietly adding a field later, which a FlatBuffers struct can
+    /// never take back. `TestEntityStateIsStillFortyBytesOnTheWire` is the other side's
+    /// half, measured from an encoded frame because Go has no `size_of` for one.
+    #[test]
+    fn entity_state_is_still_forty_bytes_on_the_wire() {
+        assert_eq!(
+            size_of::<fb::EntityState>(),
+            40,
+            "appearance belongs in PlayerAppearance, not in the struct every tick carries"
+        );
+    }
+
     /// This build speaks V6's two drawable members and draws them both.
     ///
     /// **The inverse of what this test asserted until #172, and the change is the point.**
@@ -3701,13 +4366,13 @@ mod tests {
     fn a_client_hello_round_trips_and_is_recognised_as_client_only() {
         // Direction is a protocol rule: the client's own message, arriving from a
         // server, is a protocol error rather than something to handle.
-        let frame = encode_client_hello("thora", None);
+        let frame = encode_client_hello("thora", None, None);
         assert_eq!(decode(&frame), Ok(Message::ClientOnly("ClientHello")));
     }
 
     #[test]
     fn a_client_hello_carries_the_current_protocol_version() {
-        let frame = encode_client_hello("thora", None);
+        let frame = encode_client_hello("thora", None, None);
         let envelope = fb::root_as_envelope(&frame).expect("our own encoder produces valid bytes");
         let hello = envelope
             .payload_as_client_hello()
@@ -3715,6 +4380,489 @@ mod tests {
 
         assert_eq!(hello.protocol_version(), fb::ProtocolVersion::Current);
         assert_eq!(hello.player_name(), Some("thora"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V7 — the session ticket, the character phase, and the face
+    // -----------------------------------------------------------------------
+
+    /// A legal appearance, matching [`AppearanceWire::default`] field for field. Every
+    /// value is distinct so a transposition shows up as a wrong colour rather than an
+    /// equal one.
+    fn an_appearance() -> Appearance {
+        Appearance {
+            skin_color: 0x00E3_C4A0,
+            shirt_color: 0x004A_5D3B,
+            trousers_color: 0x002B_2118,
+            shoes_color: 0x0055_3311,
+            hair_model: HairModel::Braided,
+            hair_color: 0x00B0_7A32,
+        }
+    }
+
+    /// Reads the ticket off a hello this module encoded.
+    fn hello_ticket(frame: &[u8]) -> Option<Vec<u8>> {
+        let envelope = fb::root_as_envelope(frame).expect("our own encoder produces valid bytes");
+        envelope
+            .payload_as_client_hello()
+            .expect("the payload is a ClientHello")
+            .session_ticket()
+            .map(|ticket| ticket.bytes().to_vec())
+    }
+
+    /// Absent, not empty, and for the reason the token is: the contract reads both as
+    /// "nothing presented", and absent is the one that does not put a zero-length
+    /// vector on the wire to say so. This is what `net/session.rs` sends today.
+    #[test]
+    fn a_client_with_no_account_presents_no_ticket_at_all() {
+        assert_eq!(
+            hello_ticket(&encode_client_hello("thora", None, None)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_client_with_an_account_presents_the_ticket_it_holds() {
+        let ticket = SessionTicket::from_bytes([0x5c; SESSION_TICKET_LEN]);
+        let carried = hello_ticket(&encode_client_hello("thora", None, Some(ticket)))
+            .expect("a presented ticket reaches the wire");
+        assert_eq!(carried, ticket.as_bytes());
+        assert_eq!(carried.len(), SESSION_TICKET_LEN);
+    }
+
+    /// The two fields are apart on the wire and must not be confused for one another: a
+    /// V6 peer writes only the token, a V7 peer only the ticket, and a peer in between
+    /// writes both.
+    #[test]
+    fn a_hello_carries_the_token_and_the_ticket_apart() {
+        let token = PlayerToken::from_bytes([0xA1; PLAYER_TOKEN_LEN]);
+        let ticket = SessionTicket::from_bytes([0xB2; SESSION_TICKET_LEN]);
+        let frame = encode_client_hello("thora", Some(token), Some(ticket));
+
+        assert_eq!(hello_token(&frame).as_deref(), Some(&token.as_bytes()[..]));
+        assert_eq!(
+            hello_ticket(&frame).as_deref(),
+            Some(&ticket.as_bytes()[..])
+        );
+    }
+
+    /// The redaction is a property of the type, exactly as it is for [`PlayerToken`].
+    /// A signature says who *issued* a ticket, not who is holding one, so a ticket in a
+    /// log line is as good as the account it names.
+    #[test]
+    fn a_ticket_is_never_printed_by_a_debug_that_holds_one() {
+        let ticket = SessionTicket::from_bytes([0xAB; SESSION_TICKET_LEN]);
+        let printed = format!("{ticket:?}");
+
+        assert_eq!(printed, "SessionTicket(<redacted>)");
+        assert!(!printed.contains("171"), "the bytes reached the output");
+        assert!(
+            !printed.contains("ab"),
+            "the bytes reached the output as hex"
+        );
+    }
+
+    /// The whole of a character list, in the order the server sent it.
+    #[test]
+    fn a_character_list_decodes_into_its_characters() {
+        let wire = [
+            CharacterSummaryWire::default(),
+            CharacterSummaryWire {
+                character_id: 7,
+                name: Some("Sigrún".to_owned()),
+                appearance: Some(AppearanceWire {
+                    hair_model: fb::HairModel::Shaved,
+                    ..AppearanceWire::default()
+                }),
+            },
+        ];
+
+        let decoded = decode(&encode_server_character_list(Some(&wire), 5));
+
+        assert_eq!(
+            decoded,
+            Ok(Message::CharacterList(CharacterList {
+                characters: vec![
+                    CharacterSummary {
+                        character_id: 900,
+                        name: "Eivor".to_owned(),
+                        appearance: an_appearance(),
+                    },
+                    CharacterSummary {
+                        character_id: 7,
+                        name: "Sigrún".to_owned(),
+                        appearance: Appearance {
+                            hair_model: HairModel::Shaved,
+                            ..an_appearance()
+                        },
+                    },
+                ],
+                max_characters: 5,
+            }))
+        );
+    }
+
+    /// An account with no characters here is a legal, expected answer and not a
+    /// refusal: it says the only way forward is a creation. An absent vector and an
+    /// empty one say the same thing, so both must decode the same way.
+    #[test]
+    fn an_account_with_no_characters_here_is_not_a_refusal() {
+        let empty = decode(&encode_server_character_list(Some(&[]), 3));
+        let absent = decode(&encode_server_character_list(None, 3));
+
+        assert_eq!(
+            empty,
+            Ok(Message::CharacterList(CharacterList {
+                characters: Vec::new(),
+                max_characters: 3,
+            }))
+        );
+        assert_eq!(absent, empty);
+    }
+
+    /// A name that is not UTF-8 is refused before the accessor that would read it runs.
+    ///
+    /// The generated `name()` accessor is `from_utf8_unchecked`, so the verifier is the
+    /// only thing between a malicious frame and undefined behaviour. It holds — [`decode`]
+    /// goes through `root_as_envelope`, whose verifier runs `core::str::from_utf8` on every
+    /// string it visits — but it holds *invisibly*, by library behaviour a call site cannot
+    /// show, guarded only by the "never `root_as_envelope_unchecked`" convention and the
+    /// version pinned in `Cargo.lock`. #117's review asked for the property to be pinned
+    /// rather than left to those two, and it was right to: both are conventions, and a
+    /// convention is what a regression walks through.
+    ///
+    /// **The bytes are patched into a finished frame rather than built through
+    /// `from_utf8_unchecked`.** `client/Cargo.toml` records that hand-written client code
+    /// contains no `unsafe`, and there is none today — writing the first one to test a
+    /// safety property would spend more than the test is worth. Patching is the more
+    /// faithful fixture anyway: it is exactly the bytes a hostile peer puts on the wire,
+    /// and the replacement is the same length as what it replaces, so no offset moves.
+    #[test]
+    fn a_character_name_that_is_not_utf8_is_refused_before_the_accessor_runs() {
+        // Distinctive enough to appear once in a frame, and checked below rather than
+        // assumed. 0xC3 opens a two-byte sequence and 0x28 is not a continuation byte.
+        const NAME: &[u8] = b"Qxvz";
+        const NOT_UTF8: &[u8] = &[0xC3, 0x28];
+
+        let mut frame = encode_server_character_list(
+            Some(&[CharacterSummaryWire {
+                character_id: 9,
+                name: Some(String::from_utf8(NAME.to_vec()).expect("the fixture name is ascii")),
+                ..CharacterSummaryWire::default()
+            }]),
+            3,
+        );
+
+        // The frame this patches is a good one, which is what makes the refusal below a
+        // statement about the bytes rather than about the fixture.
+        assert!(
+            decode(&frame).is_ok(),
+            "the unpatched fixture is not a decodable frame"
+        );
+
+        let occurrences = frame.windows(NAME.len()).filter(|w| *w == NAME).count();
+        assert_eq!(occurrences, 1, "the fixture name is not uniquely locatable");
+        let at = frame
+            .windows(NAME.len())
+            .position(|window| window == NAME)
+            .expect("the name is in the frame it was encoded into");
+        frame[at..at + NOT_UTF8.len()].copy_from_slice(NOT_UTF8);
+
+        // The reason is pinned, not just the refusal. Patching bytes into a finished
+        // buffer could in principle break something else and be refused for a reason
+        // that has nothing to do with UTF-8 — which would leave this test passing while
+        // the property it exists for went unchecked. The verifier names the field:
+        // `Utf8 error for string in 136..140 ... while verifying table field \`name\``.
+        let refusal = decode(&frame);
+        let Err(DecodeError::Malformed(reason)) = &refusal else {
+            panic!("invalid UTF-8 in a name was not refused: {refusal:?}");
+        };
+        assert!(
+            reason.contains("Utf8") && reason.contains("name"),
+            "the frame was refused for something other than the name's encoding: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_character_list_that_breaks_its_own_invariants_is_a_protocol_error() {
+        let named = |id: u64, name: Option<&str>| CharacterSummaryWire {
+            character_id: id,
+            name: name.map(str::to_owned),
+            ..CharacterSummaryWire::default()
+        };
+
+        for (case, frame, want) in [
+            (
+                "the reserved id 0",
+                encode_server_character_list(Some(&[named(0, Some("Eivor"))]), 3),
+                DecodeError::CharacterWithoutIdentity,
+            ),
+            (
+                "no name at all",
+                encode_server_character_list(Some(&[named(9, None)]), 3),
+                DecodeError::CharacterWithoutName(9),
+            ),
+            (
+                "an empty name",
+                encode_server_character_list(Some(&[named(9, Some(""))]), 3),
+                DecodeError::CharacterWithoutName(9),
+            ),
+            (
+                "one id twice",
+                encode_server_character_list(
+                    Some(&[named(9, Some("Eivor")), named(9, Some("Sigrún"))]),
+                    3,
+                ),
+                DecodeError::DuplicateCharacter(9),
+            ),
+            (
+                "a limit of none",
+                encode_server_character_list(Some(&[]), 0),
+                DecodeError::CharacterLimit { listed: 0, max: 0 },
+            ),
+            (
+                "more characters than the limit allows",
+                encode_server_character_list(
+                    Some(&[named(9, Some("Eivor")), named(10, Some("Sigrún"))]),
+                    1,
+                ),
+                DecodeError::CharacterLimit { listed: 2, max: 1 },
+            ),
+        ] {
+            assert_eq!(decode(&frame), Err(want), "{case}");
+        }
+    }
+
+    /// A summary with no appearance is refused rather than filled in with
+    /// [`PLACEHOLDER_APPEARANCE`]: the placeholder answers "the message has not
+    /// arrived", and this one arrived.
+    #[test]
+    fn a_character_with_no_appearance_is_a_protocol_error() {
+        let frame = encode_server_character_list(
+            Some(&[CharacterSummaryWire {
+                appearance: None,
+                ..CharacterSummaryWire::default()
+            }]),
+            3,
+        );
+
+        assert_eq!(
+            decode(&frame),
+            Err(DecodeError::MissingAppearance {
+                at: "CharacterSummary"
+            })
+        );
+    }
+
+    #[test]
+    fn a_player_appearance_decodes_into_its_entity_and_its_face() {
+        let decoded = decode(&encode_player_appearance(
+            4242,
+            Some(AppearanceWire::default()),
+        ));
+
+        assert_eq!(
+            decoded,
+            Ok(Message::PlayerAppearance(PlayerAppearance {
+                entity_id: 4242,
+                appearance: an_appearance(),
+            }))
+        );
+    }
+
+    /// **An appearance for an entity this client has never seen is not an error**, and
+    /// `schemas/player.fbs` says why: the appearance stream and the snapshot stream are
+    /// not ordered against each other, so either can arrive first.
+    ///
+    /// The decoder is the only place that could get this wrong, and the way it would is
+    /// by growing a check against state it does not have. There is no snapshot in this
+    /// test at all — which is exactly the situation the rule is about.
+    #[test]
+    fn an_appearance_for_an_entity_nobody_has_seen_still_decodes() {
+        let decoded = decode(&encode_player_appearance(
+            u64::MAX,
+            Some(AppearanceWire::default()),
+        ));
+
+        assert!(
+            matches!(decoded, Ok(Message::PlayerAppearance(_))),
+            "an unseen entity is the ordinary case, not a refusal; got {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn a_player_appearance_that_breaks_its_invariants_is_a_protocol_error() {
+        assert_eq!(
+            decode(&encode_player_appearance(
+                0,
+                Some(AppearanceWire::default())
+            )),
+            Err(DecodeError::AppearanceWithoutEntity)
+        );
+        assert_eq!(
+            decode(&encode_player_appearance(1, None)),
+            Err(DecodeError::MissingAppearance {
+                at: "PlayerAppearance"
+            })
+        );
+    }
+
+    /// Every colour's reserved top eight bits are checked, and each one is named.
+    ///
+    /// Refused rather than masked: a set high byte means the peer is encoding something
+    /// this build does not know about, and masking would draw a colour nobody chose
+    /// while hiding the disagreement. The loop covers all five so a colour cannot be
+    /// added with the check forgotten.
+    #[test]
+    fn a_colour_with_its_reserved_byte_set_is_a_protocol_error() {
+        for field in [
+            "skin_color",
+            "shirt_color",
+            "trousers_color",
+            "shoes_color",
+            "hair_color",
+        ] {
+            let mut wire = AppearanceWire::default();
+            // Distinct high bytes, so a check that read the wrong field would report a
+            // value that does not match the one it was handed.
+            match field {
+                "skin_color" => wire.skin_color |= 0xFF00_0000,
+                "shirt_color" => wire.shirt_color |= 0x0100_0000,
+                "trousers_color" => wire.trousers_color |= 0x8000_0000,
+                "shoes_color" => wire.shoes_color |= 0xAB00_0000,
+                _ => wire.hair_color |= 0x7F00_0000,
+            }
+            match decode(&encode_player_appearance(1, Some(wire))) {
+                Err(DecodeError::AppearanceColorReserved { field: got, .. }) => {
+                    assert_eq!(got, field)
+                }
+                other => panic!("{field} was accepted or misreported: {other:?}"),
+            }
+        }
+    }
+
+    /// `Unknown` is the absent-field case and a member past the end is a server one
+    /// contract ahead. Both are refused, because `schemas/common.fbs` says the client
+    /// renders what the player chose and invents no default.
+    #[test]
+    fn a_hair_model_this_build_cannot_name_is_a_protocol_error() {
+        for value in [fb::HairModel::Unknown, fb::HairModel(200)] {
+            let wire = AppearanceWire {
+                hair_model: value,
+                ..AppearanceWire::default()
+            };
+            assert_eq!(
+                decode(&encode_player_appearance(1, Some(wire))),
+                Err(DecodeError::UnknownHairModel(value.0))
+            );
+        }
+    }
+
+    /// Every declared hair model decodes, unlike [`StructureKind`], and the difference
+    /// is deliberate: hair is a property of a player the server already placed, so
+    /// refusing one this build has no mesh for would refuse the whole player.
+    #[test]
+    fn every_declared_hair_model_reaches_this_build() {
+        for (wire, want) in [
+            (fb::HairModel::Shaved, HairModel::Shaved),
+            (fb::HairModel::Cropped, HairModel::Cropped),
+            (fb::HairModel::Braided, HairModel::Braided),
+            (fb::HairModel::Loose, HairModel::Loose),
+            (fb::HairModel::Topknot, HairModel::Topknot),
+        ] {
+            assert_eq!(HairModel::from_wire(wire), Some(want));
+        }
+    }
+
+    /// The placeholder is a legal appearance in its own right — it has to be, since it
+    /// is what a renderer draws — and it is deliberately not what a missing one decodes
+    /// to. The tests above pin the second half; this pins the first.
+    #[test]
+    fn the_placeholder_is_itself_a_legal_appearance() {
+        let wire = AppearanceWire {
+            skin_color: PLACEHOLDER_APPEARANCE.skin_color,
+            shirt_color: PLACEHOLDER_APPEARANCE.shirt_color,
+            trousers_color: PLACEHOLDER_APPEARANCE.trousers_color,
+            shoes_color: PLACEHOLDER_APPEARANCE.shoes_color,
+            hair_model: PLACEHOLDER_APPEARANCE.hair_model.wire(),
+            hair_color: PLACEHOLDER_APPEARANCE.hair_color,
+        };
+
+        assert_eq!(
+            decode(&encode_player_appearance(1, Some(wire))),
+            Ok(Message::PlayerAppearance(PlayerAppearance {
+                entity_id: 1,
+                appearance: PLACEHOLDER_APPEARANCE,
+            }))
+        );
+    }
+
+    /// The client→server half of the character phase: the bytes reach the wire intact,
+    /// and receiving one back is a protocol error because direction is a protocol rule.
+    #[test]
+    fn a_select_character_request_round_trips_and_is_recognised_as_client_only() {
+        for character_id in [900_u64, 0, u64::MAX] {
+            let frame = encode_select_character_request(character_id);
+
+            let envelope = fb::root_as_envelope(&frame).expect("our own encoder is valid");
+            let payload = envelope
+                .payload_as_select_character_request()
+                .expect("the payload is a SelectCharacterRequest");
+            assert_eq!(payload.character_id(), character_id);
+
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::ClientOnly("SelectCharacterRequest"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_create_character_request_round_trips_and_is_recognised_as_client_only() {
+        // The empty name included: what names a server accepts is the server's rule,
+        // answered with CHARACTER_NAME_REFUSED, so this encoder holds no opinion.
+        for name in ["Sigrún", ""] {
+            let request = CreateCharacterRequest {
+                name: name.to_owned(),
+                appearance: an_appearance(),
+            };
+            let frame = encode_create_character_request(&request);
+
+            let envelope = fb::root_as_envelope(&frame).expect("our own encoder is valid");
+            let payload = envelope
+                .payload_as_create_character_request()
+                .expect("the payload is a CreateCharacterRequest");
+            assert_eq!(payload.name(), Some(name));
+            let appearance = payload.appearance().expect("the request carries a face");
+            assert_eq!(appearance.skin_color(), an_appearance().skin_color);
+            assert_eq!(appearance.hair_model(), fb::HairModel::Braided);
+
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::ClientOnly("CreateCharacterRequest"))
+            );
+        }
+    }
+
+    /// Decode is total over damage anywhere in V7's two new server payloads: every
+    /// truncation and every flipped byte either decodes or errors, and none panics.
+    #[test]
+    fn every_truncation_and_corruption_of_a_v7_payload_survives_decoding() {
+        let frames = [
+            encode_server_character_list(Some(&[CharacterSummaryWire::default()]), 3),
+            encode_player_appearance(1, Some(AppearanceWire::default())),
+        ];
+
+        for frame in frames {
+            for cut in 0..frame.len() {
+                let _ = decode(&frame[..cut]);
+            }
+            for index in 0..frame.len() {
+                let mut damaged = frame.clone();
+                damaged[index] ^= 0xFF;
+                let _ = decode(&damaged);
+            }
+        }
     }
 
     /// Reads the token off a hello this module encoded.
@@ -3731,13 +4879,13 @@ mod tests {
     fn a_first_connection_presents_no_token_at_all() {
         // Absent, not empty: the contract reads both as a first connection, and
         // absent is the one that does not put a zero-length vector on the wire.
-        assert_eq!(hello_token(&encode_client_hello("thora", None)), None);
+        assert_eq!(hello_token(&encode_client_hello("thora", None, None)), None);
     }
 
     #[test]
     fn a_returning_client_presents_the_token_it_holds() {
         let token = PlayerToken::from_bytes([0x5a; PLAYER_TOKEN_LEN]);
-        let carried = hello_token(&encode_client_hello("thora", Some(token)))
+        let carried = hello_token(&encode_client_hello("thora", Some(token), None))
             .expect("a presented token reaches the wire");
 
         assert_eq!(carried.len(), PLAYER_TOKEN_LEN);

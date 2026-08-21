@@ -11,6 +11,13 @@ use super::*;
 /// would poison the client's interpolation and, through the entity's transform,
 /// its renderer. The server must never emit one, and the client validates rather
 /// than assuming it never does.
+///
+/// **V7 added an appearance to every player and added nothing here.** What a
+/// character looks like travels in `PlayerAppearance` at the bottom of this file;
+/// the argument for keeping it out of this struct is written there, beside the
+/// message that carries it instead. Four fields, unchanged since V1, and the
+/// encoded size of this struct is pinned by a test on both sides — which is what
+/// catches somebody quietly adding a fifth.
 // struct EntityState, aligned to 8
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq)]

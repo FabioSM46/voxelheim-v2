@@ -6,6 +6,8 @@ pub mod voxelheim {
         use super::*;
         mod protocol_version_generated;
         pub use self::protocol_version_generated::*;
+        mod hair_model_generated;
+        pub use self::hair_model_generated::*;
         mod reject_reason_generated;
         pub use self::reject_reason_generated::*;
         mod edit_action_generated;
@@ -32,12 +34,22 @@ pub mod voxelheim {
         pub use self::vec_3_generated::*;
         mod chunk_coord_generated;
         pub use self::chunk_coord_generated::*;
+        mod appearance_generated;
+        pub use self::appearance_generated::*;
         mod client_hello_generated;
         pub use self::client_hello_generated::*;
         mod server_welcome_generated;
         pub use self::server_welcome_generated::*;
         mod server_reject_generated;
         pub use self::server_reject_generated::*;
+        mod character_summary_generated;
+        pub use self::character_summary_generated::*;
+        mod server_character_list_generated;
+        pub use self::server_character_list_generated::*;
+        mod select_character_request_generated;
+        pub use self::select_character_request_generated::*;
+        mod create_character_request_generated;
+        pub use self::create_character_request_generated::*;
         mod chunk_data_generated;
         pub use self::chunk_data_generated::*;
         mod chunk_unload_generated;
@@ -84,6 +96,8 @@ pub mod voxelheim {
         pub use self::entity_snapshot_generated::*;
         mod inventory_state_generated;
         pub use self::inventory_state_generated::*;
+        mod player_appearance_generated;
+        pub use self::player_appearance_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net
