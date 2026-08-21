@@ -191,7 +191,11 @@ func OpenStore(worldDir string) (*Store, error) {
 
 	// Whatever a crash left mid-rename. Inert, because a reader only ever opens an
 	// exact <id>.bin path, so this is housekeeping rather than correctness.
-	world.SweepTemporaries(dir)
+	//
+	// The pattern is what keeps it to temporaries of this store's own records. It can
+	// be a pattern rather than a list because this directory is one this store creates
+	// and fills — unlike the world directory above it, which is the operator's (#137).
+	world.SweepTemporaries(dir, "*"+recordFileExt)
 	return &Store{dir: dir}, nil
 }
 

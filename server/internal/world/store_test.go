@@ -279,6 +279,173 @@ func TestALeftoverBesideTheWorldFileIsSweptToo(t *testing.T) {
 	}
 }
 
+// **The negative half, and the one this whole guard exists for.** A sweep that only ever
+// showed it removes what it should would have passed against the glob it replaced, which
+// matched `*.tmp*` and so matched every name a crash could have left *and* every name
+// this code never writes. On the account service that glob ran over the operator's
+// `-auth-dir` and deleted whatever it found there (#137).
+//
+// The rule now is narrow enough to state: a file is removed only when it is exactly the
+// name [WriteAtomic] would have made for a destination the caller named. Anything else in
+// the directory belongs to somebody else, and is somebody else's to delete.
+func TestTheSweepLeavesAFileThisCodeNeverWrote(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	ours := filepath.Join(dir, worldFileName+".tmp2718281")
+	if err := os.WriteFile(ours, []byte("half a world file"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A name the old glob matched and this code cannot produce: nothing here is ever
+	// written to a destination called `editor-backup`.
+	theirs := filepath.Join(dir, "editor-backup.tmp1")
+	somebodyElses := []byte("somebody else's\n")
+	if err := os.WriteFile(theirs, somebodyElses, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	SweepTemporaries(dir, worldFileName)
+
+	if _, err := os.Stat(ours); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the temporary this code would have written survived the sweep (stat: %v)", err)
+	}
+	got, err := os.ReadFile(theirs)
+	if err != nil {
+		t.Fatalf("the sweep deleted a file this code never wrote: %v", err)
+	}
+	if !slices.Equal(got, somebodyElses) {
+		t.Errorf("the sweep rewrote a file this code never wrote: %q", got)
+	}
+}
+
+// **The one coupling in the sweep, asserted against the real os.CreateTemp rather than
+// against a name written out by hand.** [temporaryDestination] recognises a temporary by
+// the digits os.CreateTemp appends, and the standard library documents that run only as a
+// random string — so every other test here, which spells the leftover out itself, would go
+// on passing if the format ever changed while the sweep quietly stopped recognising
+// anything. This is the one that would go red.
+func TestTheSweepRecognisesWhatCreateTempActuallyProduces(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	// Built exactly as WriteAtomic builds it, from the same call with the same pattern.
+	tmp, err := os.CreateTemp(dir, worldFileName+tempFileMarker)
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	SweepTemporaries(dir, worldFileName)
+
+	if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the sweep did not recognise %s, which os.CreateTemp had just made for %s (stat: %v)",
+			filepath.Base(name), worldFileName, err)
+	}
+}
+
+// A destination named by a pattern rather than by a literal, which is what a store that
+// owns a whole directory of its own records passes. The chunk directory is the one in this
+// package; internal/persist, internal/auth and internal/registry each pass "*" and their
+// record extension for the same reason.
+//
+// The two survivors are the two ways the pattern could be too wide: a temporary of a
+// destination that is not a chunk file, and a name that carries the marker without the
+// shape.
+func TestTheChunkSweepTakesChunkTemporariesAndNothingElse(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ours := filepath.Join(dir, "c.0.0.0"+chunkFileExt+".tmp3141592")
+	notAChunk := filepath.Join(dir, "notes"+chunkFileExt+"-draft.tmp99")
+	notATemporary := filepath.Join(dir, "c.1.1.1"+chunkFileExt+".tmpster")
+	for _, path := range []string{ours, notAChunk, notATemporary} {
+		if err := os.WriteFile(path, []byte("contents"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	SweepTemporaries(dir, chunkFileGlob)
+
+	if _, err := os.Stat(ours); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a chunk temporary survived the sweep (stat: %v)", err)
+	}
+	for _, path := range []string{notAChunk, notATemporary} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the sweep took %s, which it did not write: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// **Naming nothing sweeps nothing**, which is the direction this has to fail in. A caller
+// that forgets its destinations still compiles — the signature is variadic — so what
+// decides whether that mistake is a leaked temporary or somebody else's deleted file is
+// this line, and it is worth a test of its own.
+func TestASweepThatNamesNothingRemovesNothing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	leftover := filepath.Join(dir, worldFileName+".tmp2718281")
+	if err := os.WriteFile(leftover, []byte("half a world file"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	SweepTemporaries(dir)
+
+	if _, err := os.Stat(leftover); err != nil {
+		t.Errorf("a sweep that named no destination removed one anyway: %v", err)
+	}
+}
+
+// A directory wearing a temporary's name is not a temporary: os.CreateTemp makes a regular
+// file, and os.Remove would have taken this one had it been empty.
+//
+// Not a hypothetical shape to guard against so much as the same question the rest of this
+// file asks in a second form — what does this code know it wrote — with the same answer.
+func TestTheSweepDoesNotRemoveADirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	impostor := filepath.Join(dir, worldFileName+".tmp2718281")
+	if err := os.Mkdir(impostor, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	SweepTemporaries(dir, worldFileName)
+
+	if _, err := os.Stat(impostor); err != nil {
+		t.Errorf("the sweep removed a directory: %v", err)
+	}
+}
+
+// The destination is recovered from the *last* marker, so a file whose own name ends in
+// `.tmp` is swept under the name it was going to have rather than under half of it.
+func TestADestinationEndingInTheMarkerIsRecoveredWhole(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ours := filepath.Join(dir, "record.tmp.tmp42")
+	if err := os.WriteFile(ours, []byte("half a record"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// The name the caller is replacing is `record.tmp`, and naming its first half must
+	// not be enough to have it removed.
+	SweepTemporaries(dir, "record")
+	if _, err := os.Stat(ours); err != nil {
+		t.Errorf("the sweep cut the destination at the first marker: %v", err)
+	}
+
+	SweepTemporaries(dir, "record.tmp")
+	if _, err := os.Stat(ours); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the temporary for record.tmp survived a sweep that named it (stat: %v)", err)
+	}
+}
+
 // A seed that does not match the stored world is a refusal to start. Mixing them would
 // not fail: the indices would all resolve, and the result would be one landscape wearing
 // another world's digging.
@@ -658,7 +825,7 @@ func TestADirectoryFlushThatFailedStillLeavesTheFileItRenamed(t *testing.T) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	leftovers, err := filepath.Glob(filepath.Join(dir, tempFileGlob))
+	leftovers, err := filepath.Glob(filepath.Join(dir, "*"+tempFileMarker+"*"))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}

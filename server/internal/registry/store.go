@@ -139,7 +139,11 @@ func OpenStore(authDir string) (*Store, error) {
 	// Whatever a crash left mid-rename. Inert, because a reader only ever opens an exact
 	// <key>.bin path and a temporary name never is one — so this is housekeeping rather than
 	// correctness, the same sweep every store writing through world.WriteAtomic inherits.
-	world.SweepTemporaries(dir)
+	//
+	// The pattern bounds it to temporaries of this store's own records. As in
+	// internal/auth, this is the servers directory created here rather than the
+	// operator's `-auth-dir` above it (#137).
+	world.SweepTemporaries(dir, "*"+serverFileExt)
 	return &Store{dir: dir}, nil
 }
 

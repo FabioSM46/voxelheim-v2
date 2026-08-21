@@ -122,8 +122,11 @@ func LoadOrCreate(worldDir string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("certs: creating %s: %w", worldDir, err)
 	}
 	// Whatever a crash left mid-rename, for the reason every other store under this
-	// directory sweeps: this one writes through world.WriteAtomic too.
-	world.SweepTemporaries(worldDir)
+	// directory sweeps: this one writes through world.WriteAtomic too. The two names
+	// bound it to the pair this package writes — `-world-dir` is the operator's, holds
+	// files belonging to three other packages, and may hold files belonging to nobody
+	// here at all (#137).
+	world.SweepTemporaries(worldDir, CertFileName, KeyFileName)
 
 	certPEM, keyPEM, err := generate()
 	if err != nil {

@@ -246,7 +246,16 @@ func LoadOrCreate(authDir string) (*Pair, error) {
 	// writing through world.WriteAtomic does. Inert — a reader only ever opens an exact
 	// path and a temporary name never is one — so this is housekeeping rather than
 	// correctness.
-	world.SweepTemporaries(authDir)
+	//
+	// **The two file names are the point of the call, not decoration.** This directory
+	// is the operator's `-auth-dir`: a path somebody typed, which may be shared or
+	// pre-existing, and this service has no business deleting anything in it that this
+	// service did not write. Naming the pair is what bounds the sweep to a temporary of
+	// one of them (#137). It still sweeps rather than declining to, because the
+	// temporary that a crash between CreateTemp and Rename leaves here is a second copy
+	// of the signing seed, and leaving that on disk with no reader is the worse of the
+	// two things this call can do to the operator's directory.
+	world.SweepTemporaries(authDir, SigningKeyFileName, VerifyingKeyFileName)
 
 	signingPath := filepath.Join(authDir, SigningKeyFileName)
 	verifyingPath := filepath.Join(authDir, VerifyingKeyFileName)

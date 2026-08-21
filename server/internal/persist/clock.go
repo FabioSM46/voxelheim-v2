@@ -88,8 +88,10 @@ func OpenClockStore(worldDir string) (*ClockStore, error) {
 
 	// Whatever a crash left mid-rename, for the reason [OpenStructureStore] sweeps: this
 	// store writes through world.WriteAtomic and inherits its leftovers. Inert either
-	// way — a reader only ever opens the exact path below.
-	world.SweepTemporaries(worldDir)
+	// way — a reader only ever opens the exact path below. One name, for the reason
+	// given there: the directory is the operator's and only this file in it is ours
+	// (#137).
+	world.SweepTemporaries(worldDir, clockFileName)
 	return &ClockStore{path: filepath.Join(worldDir, clockFileName)}, nil
 }
 
