@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -121,7 +122,18 @@ const (
 	worldFileName = "world.bin"
 	chunkDirName  = "chunks"
 	chunkFileExt  = ".vxd"
-	tempFileGlob  = "*.tmp*"
+
+	// chunkFileGlob is every name this store gives a chunk file and nothing else, in
+	// the form [filepath.Match] reads. It is what [Store.sweepTemporaries] hands
+	// [SweepTemporaries] for the chunk directory: a directory this store creates and
+	// fills with its own files can name the whole of its contents in one pattern.
+	chunkFileGlob = "c.*" + chunkFileExt
+
+	// tempFileMarker separates the name of the file [WriteAtomic] is replacing from the
+	// run of digits os.CreateTemp appends to it, so a temporary is always exactly
+	// <destination>.tmp<random>. Recognising that shape — against a destination the
+	// caller names — is the whole of [SweepTemporaries]; see the reasoning there.
+	tempFileMarker = ".tmp"
 
 	worldFileSize = 4 + 4 + 4 + 8 + 4
 
@@ -248,25 +260,115 @@ func (s *Store) sweepTemporaries() {
 	// replacing and the world file does not live under chunks/. Sweeping only the chunk
 	// directory left `world.bin.tmp*` behind for the life of the world, which is a small
 	// leak and a large contradiction of the sentence above.
-	for _, dir := range []string{s.dir, s.chunkDir} {
-		SweepTemporaries(dir)
-	}
+	//
+	// **Two calls rather than one loop, because the two directories are owned
+	// differently and the sweep now says so.** chunks/ is this store's own creation and
+	// holds nothing but chunk files, so one pattern names the whole of its contents. The
+	// world directory is the operator's `-world-dir`, holding this store's world file
+	// beside files that belong to internal/certs and internal/persist and possibly to
+	// nobody here at all — so this names the one file in it that is ours, and each of the
+	// other stores names its own on open.
+	SweepTemporaries(s.dir, worldFileName)
+	SweepTemporaries(s.chunkDir, chunkFileGlob)
 }
 
-// SweepTemporaries removes the temporary files a crash mid-[WriteAtomic] left in dir.
+// SweepTemporaries removes the temporaries a crash mid-[WriteAtomic] left in dir for the
+// destination files named by destinations.
 //
 // Exported for the same reason the framing helpers are: a second store under the world
 // directory writes through WriteAtomic and therefore inherits its leftovers. Best
 // effort, and silent about failures, because a temporary file is inert — a reader only
 // ever opens an exact record path, and a temporary name never is one.
-func SweepTemporaries(dir string) {
-	leftovers, err := filepath.Glob(filepath.Join(dir, tempFileGlob))
+//
+// # What it removes, and why the destinations are not optional
+//
+// A file in dir is removed only when its name is one WriteAtomic could have produced for
+// one of the destinations: exactly <destination>.tmp followed by the run of decimal
+// digits os.CreateTemp appends, and a regular file rather than a directory or a link.
+// Each destination is matched against that recovered name with [filepath.Match], so a
+// caller passing a literal file name is asking for that file and nothing else, and a
+// caller that owns a whole directory of its own records can name their shape instead
+// ("*.bin", [chunkFileGlob]).
+//
+// **It used to glob `*.tmp*` over whatever directory it was handed, and that is a
+// different function than the one its own documentation described.** The name was
+// anchored to nothing, so it matched every name a crash could have left *and* every name
+// this code never writes — which was tolerable while the only caller was this file, over
+// a world directory the server generates, and stopped being tolerable the moment
+// internal/ticket called it on `-auth-dir`. That is a path an operator typed, may well
+// be shared or pre-existing, and the account service deleted files out of it on startup
+// that nothing here had ever written (#137).
+//
+// The fix is the narrower statement rather than no statement: the sweep is what keeps a
+// crash mid-write from leaving a half-written record — and, in `-auth-dir`, a stray copy
+// of an Ed25519 seed — lying around for the life of the deployment, so it stays. What
+// changed is that it now removes only files it can show are its own.
+//
+// **Naming nothing sweeps nothing.** A caller that passes no destination gets a no-op
+// rather than the old behaviour, because the way this fails safely is by deleting too
+// little. The converse is worth stating too: a destination of "*" would restore exactly
+// the bug this signature exists to prevent, so name what you write.
+func SweepTemporaries(dir string, destinations ...string) {
+	if len(destinations) == 0 {
+		return
+	}
+
+	// Read rather than globbed, because the pattern belongs to the destination name and
+	// the destination is not recoverable from a glob of the temporary's.
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	for _, path := range leftovers {
-		_ = os.Remove(path)
+	for _, entry := range entries {
+		// os.CreateTemp makes a regular file. A directory or a symlink wearing the
+		// shape below is therefore not something this code left, whatever it is.
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		destination, ok := temporaryDestination(entry.Name())
+		if !ok {
+			continue
+		}
+		for _, want := range destinations {
+			// A malformed pattern is reported as no match: these are compile-time
+			// constants at every call site, and the failing direction to pick if one
+			// ever is not is the one that removes nothing.
+			if matched, err := filepath.Match(want, destination); err == nil && matched {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+				break
+			}
+		}
 	}
+}
+
+// temporaryDestination reports the file a temporary name was on its way to becoming, and
+// whether name is a name [WriteAtomic] could have produced at all.
+//
+// The shape is os.CreateTemp's: a pattern with no `*` in it is used whole as the prefix
+// and the random run is appended, so `base+".tmp"` yields `base.tmp` + digits. Nothing in
+// the standard library promises those characters are digits — it is documented only as a
+// random string — which is why this is asserted against the real os.CreateTemp by a test
+// rather than by reading. Should it ever stop being digits, this stops recognising the
+// temporary and the sweep leaves it behind: the harmless direction, since a leftover is
+// inert, and a red test rather than a silent one.
+//
+// The last `.tmp` rather than the first, so that a destination whose own name ends in
+// `.tmp` is recovered whole instead of being cut in half.
+func temporaryDestination(name string) (string, bool) {
+	cut := strings.LastIndex(name, tempFileMarker)
+	if cut <= 0 {
+		return "", false
+	}
+	random := name[cut+len(tempFileMarker):]
+	if random == "" {
+		return "", false
+	}
+	for i := 0; i < len(random); i++ {
+		if random[i] < '0' || random[i] > '9' {
+			return "", false
+		}
+	}
+	return name[:cut], true
 }
 
 // chunkPath is where one chunk's edits live. The coordinate is in the name so a directory

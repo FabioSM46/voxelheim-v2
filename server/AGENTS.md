@@ -975,6 +975,21 @@ flush are wired in `cmd/voxelheimd/main.go`.
   Writing in place would leave a truncated file that parses perfectly as a *shorter* edit
   list, which is to say as a shelter with some of its walls back. A crash between the two
   leaves an inert temporary file that no reader opens and the next `OpenStore` sweeps.
+- **The sweep removes temporaries this code can prove it wrote, and nothing else.**
+  `world.SweepTemporaries` takes the destination names the caller writes and removes only
+  `<destination>.tmp<digits>` — the shape `os.CreateTemp` gives a `WriteAtomic` temporary —
+  matching each destination with `filepath.Match`. It used to glob `*.tmp*` over whatever
+  directory it was handed, which was tolerable while the only caller was the world store and
+  stopped being tolerable when `internal/ticket` called it on `-auth-dir`: a path an operator
+  typed, out of which the account service then deleted files nothing here had written (#137).
+  **Naming nothing sweeps nothing**, because the safe direction to fail in is removing too
+  little; a destination of `*` would restore the bug exactly. The division that follows is
+  worth keeping: a directory the operator named (`-world-dir`, `-auth-dir`) is swept by the
+  literal names of the files this code puts in it, and a directory this code creates
+  (`chunks/`, `players/`, `accounts/`, `servers/`) may name the shape of its own records
+  instead. It does **not** decline to sweep the operator's directory — the temporary a crash
+  leaves beside `signing-key.bin` is a second copy of an Ed25519 seed, and leaving that on
+  disk is worse than tidying it.
 - **Every file carries a magic number, a format version and a trailing CRC, and a bad one is
   an error rather than a fallback to terrain.** "Read it as terrain" is the single answer
   that silently discards what a player built and then invites them to dig the replacement.

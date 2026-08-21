@@ -143,7 +143,12 @@ func OpenStore(authDir string) (*Store, error) {
 	// exact <key>.bin path and a temporary name never is one, so this is housekeeping
 	// rather than correctness — the same sweep every store writing through
 	// world.WriteAtomic inherits.
-	world.SweepTemporaries(dir)
+	//
+	// The pattern bounds it to temporaries of this store's own records. Note which
+	// directory this is: the accounts directory *under* `-auth-dir`, created here, not
+	// `-auth-dir` itself — which is the operator's and is swept by name in
+	// internal/ticket (#137).
+	world.SweepTemporaries(dir, "*"+accountFileExt)
 	return &Store{dir: dir}, nil
 }
 

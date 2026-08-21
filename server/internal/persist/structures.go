@@ -132,7 +132,10 @@ func OpenStructureStore(worldDir string) (*StructureStore, error) {
 	// Whatever a crash left mid-rename, for the reason [OpenStore] sweeps the players
 	// directory: this store writes through world.WriteAtomic and inherits its
 	// leftovers. Inert either way — a reader only ever opens the exact path below.
-	world.SweepTemporaries(worldDir)
+	//
+	// One name, because this store writes one file and the directory it writes it into
+	// is the operator's `-world-dir` rather than one of ours (#137).
+	world.SweepTemporaries(worldDir, structuresFileName)
 	return &StructureStore{path: filepath.Join(worldDir, structuresFileName)}, nil
 }
 
