@@ -54,6 +54,83 @@ voxelheim/
 └── .opencode/skills/     # Generated OpenCode skill adapters
 ```
 
+## Running It
+
+Two processes, in either order. The client retries a refused connection, and a server nobody
+has joined simulates an empty world quite happily.
+
+```bash
+# terminal 1 — the authoritative server
+cd server && go run ./cmd/voxelheimd     # listens on 127.0.0.1:7777
+
+# terminal 2 — the client
+cd client && cargo run --release         # connects to 127.0.0.1:7777
+```
+
+`--release` is not a nicety on the client: a Bevy debug build renders slowly enough to be
+mistaken for a bug in the renderer.
+
+### Watching what either one is doing
+
+The server logs through `log/slog`; `-log-level` takes `debug`, `info`, `warn` or `error` and
+`-log-format` takes `text` or `json`. The client logs through Bevy's `LogPlugin`, so `RUST_LOG`
+selects what reaches the terminal — and it draws three lines in the corner of the window that
+need no flag at all: the connection and any refusal the server sent, the streamed world (chunks
+held, quads merged, last mesh duration), and where the **server** says the player is, which is
+the one number that says movement is working.
+
+```bash
+cd server && go run ./cmd/voxelheimd -log-level debug -log-format json
+cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release
+```
+
+### Two things that surprise people once each
+
+**The world is on disk by default.** `-world-dir` defaults to `world`, resolved against the
+working directory, so the command above writes `server/world/` — edits, player records and the
+server's TLS key. It is git-ignored. `-seed` regenerates the terrain rather than reading it: the
+same seed is the same world, and the directory holds only what players changed.
+
+**A client that will not connect is usually the certificate pin, and it is working correctly.**
+The client records the SHA-256 of a server's certificate the first time it connects to an address
+and refuses any other one afterwards, because there is no domain name here for web PKI to attest.
+Two ordinary development situations trip it, and the refusal names the file both times:
+
+- *A new world directory.* The TLS key lives in the world directory, so a server pointed at a
+  fresh one — or run with `-world-dir ""`, which keeps nothing and warns at startup that it
+  presents a new certificate every start — answers with a fingerprint the client has not seen.
+- *An identity with no pin.* A client that played against an earlier server holds an identity
+  token for `127.0.0.1:7777` and, if that server predates pinning, no pin beside it. Presenting a
+  stored token to an unverified certificate is exactly what pinning exists to prevent, so the
+  first connection is refused rather than the second.
+
+You run the server, so you can read the fingerprint it logs at startup —
+`msg="listening with an encrypted session" certificate_sha256=…` — and write that one line into
+the pin file the refusal names:
+
+```bash
+printf '%s\n' "<the certificate_sha256 from the server log>" \
+  > "${XDG_DATA_HOME:-$HOME/.local/share}/voxelheim/identity/127.0.0.1_7777.pin"
+```
+
+Writing that value in is the remedy for both cases, and the only one that keeps your character.
+Deleting a file instead is narrower than it looks, because the pin and the identity are checked
+independently:
+
+- Deleting the *identity* file answers the second case and only the second: with no pin to
+  disagree with, a client that has nothing to present pins safely on the spot. It does nothing
+  about a fingerprint that changed — the old pin is still there, and still refuses.
+- Deleting the *pin* is what addresses a changed fingerprint, and it re-pins whatever answers
+  next, so it is right only when you know why the fingerprint changed. With an identity file
+  still beside it you land in the second case instead; delete both to join as a new character.
+
+Against a server whose world directory you keep, the key is stable and none of this comes up
+twice.
+
+Every flag, and what a saved world and a remembered character actually mean, are in
+[`server/AGENTS.md`](server/AGENTS.md) and [`client/AGENTS.md`](client/AGENTS.md) under
+"Running it".
+
 ## Development Process
 
 Every change — feature, bugfix, refactor — flows through the same rigorous loop:
