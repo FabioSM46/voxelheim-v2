@@ -243,7 +243,10 @@ func (s *service) registerServer(w http.ResponseWriter, r *http.Request) {
 		"created", created,
 		"certificate_sha256", srv.Fingerprint)
 
-	s.writeJSON(w, http.StatusOK, registerResponse{
+	// no-store: this is the acknowledgement of a state change, not a document. It names
+	// the registration that just landed, so a stored copy could only ever be served back
+	// as an answer to a later registration that may have gone differently.
+	s.writeJSON(w, http.StatusOK, cacheNoStore, registerResponse{
 		Name:                srv.Name,
 		Created:             created,
 		OfflineAfterSeconds: int(registry.OfflineAfter.Seconds()),
@@ -293,7 +296,15 @@ func (s *service) listServers(w http.ResponseWriter, r *http.Request) {
 	// construction; it is minted at random and describes nobody.
 	s.log.Debug("the server list was read", "account_id", claims.Account.String(), "servers", len(entries))
 
-	s.writeJSON(w, http.StatusOK, serverListResponse{
+	// **no-store, and this is the one here that a reader might expect to be cacheable.**
+	// It is a GET, it changes nothing, and a menu may refresh it — every reason to want a
+	// cache. But the list is people's home addresses, which is the whole reason it sits
+	// behind a ticket at all, and a stored copy answers whoever asks next: `private` would
+	// still write it to the client's disk, and any gateway that stripped the credential on
+	// the way through would be serving it to accounts that never presented one. The
+	// `Online` field is computed against this instant besides, so a fresh read is what the
+	// endpoint is for.
+	s.writeJSON(w, http.StatusOK, cacheNoStore, serverListResponse{
 		Servers:             entries,
 		OfflineAfterSeconds: int(registry.OfflineAfter.Seconds()),
 	})
