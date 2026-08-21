@@ -133,7 +133,7 @@ func openVerifier(ctx context.Context, opts options, log *slog.Logger) (*session
 
 // ticketKey answers the account service's public key and where it came from.
 //
-// "Where" is the *redacted* spelling of the endpoint. This string exists in order to be
+// "Where" is the *loggable* spelling of the endpoint. This string exists in order to be
 // logged, and `-account-service` is a flag value that may carry userinfo, so the one
 // thing it must not be is the address verbatim.
 func ticketKey(ctx context.Context, opts options, log *slog.Logger) (ed25519.PublicKey, string, error) {
@@ -150,7 +150,7 @@ func ticketKey(ctx context.Context, opts options, log *slog.Logger) (ed25519.Pub
 		return nil, "", err
 	}
 	key, err := fetchTicketKey(ctx, base, log)
-	return key, base.JoinPath(ticketKeyPath).Redacted(), err
+	return key, redacted(base.JoinPath(ticketKeyPath)), err
 }
 
 // parseTicketKey reads a public key an operator or an endpoint stated in hex.
@@ -197,6 +197,35 @@ func parseAccountService(raw string) (*url.URL, error) {
 	return base, nil
 }
 
+// redacted is a URL as it may be written down: userinfo removed entirely rather than
+// masked.
+//
+// **`url.URL.Redacted` is not this, and the difference is the whole reason this function
+// exists.** That call masks the password and keeps the username — `https://ops:secret@host`
+// becomes `https://ops:xxxxx@host` — which is the standard library's line and the right
+// default for a general-purpose renderer. It leaves one shape open: a service that takes a
+// token in the username position with an empty password hands `Redacted` nothing to mask,
+// so the credential survives verbatim into every line naming the address (#151).
+//
+// Dropping the username costs this server nothing, and that is the judgement rather than
+// an assumption. Nothing here ever reads a username back: `-account-service` is a base URL
+// an operator publishes, its userinfo is needed only by the request, and no code path asks
+// for `URL.User` outside the request it is attached to. A username is therefore not a
+// documented non-secret for this flag — the flag's own help names no userinfo at all — so
+// the loggable spelling keeps the part an operator needs to recognise the address and
+// discards the part that can only be a credential.
+//
+// The copy is deliberate: the argument is left as its caller holds it, because the caller
+// still has to make the request with the userinfo intact.
+func redacted(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	loggable := *u
+	loggable.User = nil
+	return loggable.String()
+}
+
 // fetchTicketKey reads the key from the account service, once.
 //
 // **What this call cannot tell you is that it reached the right service, and that is a
@@ -213,7 +242,7 @@ func fetchTicketKey(ctx context.Context, base *url.URL, log *slog.Logger) (ed255
 		log.Warn("the account service's key is being read over an unauthenticated connection; anybody able to "+
 			"answer for that address can hand this server a key of their own, and this server would then admit "+
 			"the tickets they mint and refuse every real one",
-			"account_service", base.Redacted())
+			"account_service", redacted(base))
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, fetchTicketKeyTimeout)
@@ -222,21 +251,29 @@ func fetchTicketKey(ctx context.Context, base *url.URL, log *slog.Logger) (ed255
 	// Requested in full and named redacted, and the split is the point. The request
 	// needs whatever userinfo the operator wrote into `-account-service`, because that
 	// is how a password gets to a service that wants one; every message this server
-	// writes about the address is the `Redacted` spelling, because that is how the
-	// password stops here. Same call the warning above already made, applied to the one
+	// writes about the address is the loggable spelling, because that is how the
+	// credential stops here. Same call the warning above already made, applied to the one
 	// string that is both a target and a thing to write down.
 	target := base.JoinPath(ticketKeyPath)
-	endpoint := target.Redacted()
+	endpoint := redacted(target)
 
+	// **Stripped, because these two errors carry the address a second time.** net/http
+	// wraps a transport failure in a *url.Error that renders as
+	// `Get "http://token@host/v1/ticket-key": …`, and its own masking is `stripPassword`,
+	// which — like `url.URL.Redacted` — takes out the password and leaves the username.
+	// So the endpoint named by `%s` is loggable while the error beside it is not, and
+	// wrapping it whole would put back exactly what this function's other half removed.
+	// `stripURL` is announce.go's, for this reason; announce.go's own note that this file
+	// wraps the *url.Error whole described the shape that made this a bug.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, err)
+		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, stripURL(err))
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, err)
+		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, stripURL(err))
 	}
 	// Closed, not drained. Draining a response before closing it is what keeps its
 	// connection reusable, and there is no second request to reuse one for: this

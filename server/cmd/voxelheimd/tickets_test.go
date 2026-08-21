@@ -289,18 +289,24 @@ func TestTheStartupLineNamesTheKeyAndTheWorld(t *testing.T) {
 	}
 }
 
-// A password written into -account-service reaches neither a log line nor a refusal.
+// Userinfo written into -account-service reaches neither a log line nor a refusal.
 //
 // An address is a flag value, and a flag value can carry userinfo: nothing about
 // `http://ops:<secret>@accounts.example` is malformed, so nothing refuses it, and the
 // credential is then inside a string this server writes down twice — once as the startup
 // line's `ticket_key_source`, once inside every message naming the endpoint it failed to
-// read. `url.URL.Redacted` is the call the plaintext warning already made; what this pins
-// is that every other spelling of the address goes through it too.
+// read. What this pins is that every spelling of the address this server writes goes
+// through the loggable rendering.
 //
 // Both directions are here on purpose. The startup line is the one the review found, and
 // a refusal is the path an operator is *more* likely to paste somewhere, because a server
 // that came up cleanly gives nobody a reason to copy its log.
+//
+// **Two shapes of userinfo, because they fail differently.** `url.URL.Redacted` masks a
+// password and keeps the username, so the password subtests below passed the moment #148
+// landed while a deployment that puts a token in the username position with no password
+// at all was still written down in full — there was nothing for the masking to mask. The
+// password cases are kept exactly as they were and the token cases are added beside them.
 func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
 	t.Parallel()
 
@@ -358,6 +364,122 @@ func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
 			t.Error("the refusal no longer names the endpoint it could not read")
 		}
 	})
+
+	// The username half, and the reason this is a second case rather than a second
+	// assertion on the first: some services take a token in that position with an empty
+	// password, so there is no password for the standard library to mask and the whole
+	// credential survives verbatim. Assembled through url.User rather than written into a
+	// literal address, so the file never holds a string shaped like a credentialled URL.
+	const token = "not-a-real-token"
+
+	withToken := func(t *testing.T, raw string) string {
+		t.Helper()
+
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", raw, err)
+		}
+		parsed.User = url.User(token)
+		return parsed.String()
+	}
+
+	t.Run("a token in the username position, in the startup line", func(t *testing.T) {
+		t.Parallel()
+
+		service := accountService(t, publishedKey(), http.StatusOK)
+
+		var logged strings.Builder
+		log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		if _, err := openVerifier(context.Background(), options{
+			worldName:      testWorldName,
+			accountService: withToken(t, service.URL),
+		}, log); err != nil {
+			t.Fatalf("openVerifier: %v", err)
+		}
+
+		// Both lines this start writes about the address land in this one buffer: the
+		// plaintext warning fetchTicketKey opens with, which always fires here because
+		// httptest speaks http, and the startup line's ticket_key_source.
+		if strings.Contains(logged.String(), token) {
+			t.Error("the token in -account-service's username was written to the startup log")
+		}
+		if !strings.Contains(logged.String(), ticketKeyPath) {
+			t.Error("the startup log no longer names the endpoint the key was read from")
+		}
+	})
+
+	// **Every way the read can fail, rather than one of them.** fetchTicketKey names the
+	// endpoint in a message per refusal, and the refusal is the path that actually gets
+	// copied: a server that came up cleanly gives nobody a reason to quote its log, while
+	// one that will not start gets its error pasted into a ticket.
+	t.Run("a token in the username position, in every refusal", func(t *testing.T) {
+		t.Parallel()
+
+		for name, address := range map[string]func(t *testing.T) string{
+			"the service cannot be reached": func(t *testing.T) string {
+				return withToken(t, "http://"+deadAddress(t))
+			},
+			"it answers with a status that is not 200": func(t *testing.T) string {
+				service := accountService(t, publishedKey(), http.StatusInternalServerError)
+				return withToken(t, service.URL)
+			},
+			"its answer is longer than a key response can be": func(t *testing.T) string {
+				service := accountService(t, strings.Repeat("x", maxTicketKeyResponseBytes+1), http.StatusOK)
+				return withToken(t, service.URL)
+			},
+			"its answer is not the JSON this endpoint publishes": func(t *testing.T) string {
+				service := accountService(t, "{not json", http.StatusOK)
+				return withToken(t, service.URL)
+			},
+			"the key it publishes is for another algorithm": func(t *testing.T) string {
+				body := fmt.Sprintf(`{"algorithm":"rsa","public_key":%q}`, testPair.PublicHex())
+				return withToken(t, accountService(t, body, http.StatusOK).URL)
+			},
+			"the key it publishes is not hex": func(t *testing.T) string {
+				body := fmt.Sprintf(`{"algorithm":%q,"public_key":"not a key"}`, ticket.Algorithm)
+				return withToken(t, accountService(t, body, http.StatusOK).URL)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				_, err := openVerifier(context.Background(), options{
+					worldName:      testWorldName,
+					accountService: address(t),
+				}, discard())
+				if err == nil {
+					t.Fatal("a key was read from a service that could not publish one")
+				}
+				// The error is never quoted into these messages. It is the one string
+				// under test that holds the credential, and a test failure is a CI log.
+				if strings.Contains(err.Error(), token) {
+					t.Error("the token in -account-service's username is inside the refusal")
+				}
+				if !strings.Contains(err.Error(), ticketKeyPath) {
+					t.Error("the refusal no longer names the endpoint it could not read")
+				}
+			})
+		}
+	})
+}
+
+// deadAddress is a host:port nothing is listening on.
+//
+// The operating system picks it — a listener is opened for its choice of a free port and
+// closed again before the address is handed back — because a port written down here is a
+// port some machine running these tests has something on.
+func deadAddress(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	return addr
 }
 
 // A key copied by hand is read the same way whichever case it was written in, because
