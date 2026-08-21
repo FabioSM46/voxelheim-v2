@@ -828,7 +828,7 @@ func TestTheServerKeepsItsCertificateUnderTheWorldDirectory(t *testing.T) {
 	dir := t.TempDir()
 	opts := options{listen: "127.0.0.1:0", worldDir: dir}
 
-	first, err := listen(opts, discard())
+	first, _, err := listen(opts, discard())
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -848,7 +848,7 @@ func TestTheServerKeepsItsCertificateUnderTheWorldDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
-	second, err := listen(opts, discard())
+	second, _, err := listen(opts, discard())
 	if err != nil {
 		t.Fatalf("second listen: %v", err)
 	}
@@ -873,7 +873,7 @@ func TestTheServerKeepsItsCertificateUnderTheWorldDirectory(t *testing.T) {
 func TestTheServerSpeaksNoPlaintext(t *testing.T) {
 	t.Parallel()
 
-	tr, err := listen(options{listen: "127.0.0.1:0", worldDir: t.TempDir()}, discard())
+	tr, _, err := listen(options{listen: "127.0.0.1:0", worldDir: t.TempDir()}, discard())
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestAnEphemeralWorldEncryptsWithoutKeepingAKey(t *testing.T) {
 	var logged strings.Builder
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	tr, err := listen(options{listen: "127.0.0.1:0", worldDir: ""}, log)
+	tr, _, err := listen(options{listen: "127.0.0.1:0", worldDir: ""}, log)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestTheStartupLogNamesTheFingerprintAndNeverTheKey(t *testing.T) {
 	var logged strings.Builder
 	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	tr, err := listen(options{listen: "127.0.0.1:0", worldDir: dir}, log)
+	tr, announced, err := listen(options{listen: "127.0.0.1:0", worldDir: dir}, log)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -956,6 +956,13 @@ func TestTheStartupLogNamesTheFingerprintAndNeverTheKey(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), fingerprint) {
 		t.Error("the startup log does not name the certificate fingerprint")
+	}
+
+	// The number listen *returns* is the number it logged, because the announcer sends that
+	// one to the account service and a client now takes its expectation from there rather
+	// than from a pinned file. Two sources for this string is a server nobody can join.
+	if announced != fingerprint {
+		t.Errorf("listen logged %s and returned %s; there is one certificate and one digest of it", fingerprint, announced)
 	}
 
 	keyPEM, err := os.ReadFile(filepath.Join(dir, certs.KeyFileName))

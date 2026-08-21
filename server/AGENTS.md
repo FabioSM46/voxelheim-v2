@@ -1565,6 +1565,83 @@ ticket** — "this ticket names no world".
   asking. It accepts either kind, so somebody already holding a world ticket does not have to
   sign in again to read the list.
 
+### Telling the list where home is, and the one thing announcing may never do
+
+`cmd/voxelheimd/announce.go` is the other end of `POST /v1/servers`: the game server saying
+where it is, repeatedly, so that a home connection which changes address overnight stops being
+invisible to players. It is outbound only — nothing in the account service dials a game server,
+which is what keeps one behind a router with a single forwarded port.
+
+- **A failed announce is logged and survived, never fatal, and that is the criterion the rest
+  of this design rests on.** Admitting a player is a signature check precisely so that the
+  account service being down costs nobody a game; an announcer that could refuse a start or end
+  a process would rebuild that hard dependency in one line. So *every* way this goes wrong ends
+  in a server that is still serving: nothing configured, half configured, an address no player
+  could dial, a service that is unreachable, one that refuses, one that stalls, one that answers
+  nonsense. `TestAFailedAnnounceIsLoggedAndSurvived` drives the last four through a real
+  handshake and asserts the player is welcomed anyway, and
+  `TestABrokenAnnounceConfigurationDoesNotRefuseTheStart` asserts the first two through `run`.
+  **This is the deliberate opposite of `openVerifier`**, which is fatal on the same service
+  being down — and the asymmetry is the whole point: one call decides who may play and happens
+  once, the other decides who can *find* the server and happens for ever.
+- **Announcing is off unless `-account-service`, `-announce-address` and a registration key are
+  all given, and "off" is one clean startup line rather than a complaint per interval.** Nothing
+  configured is Info — a LAN game, a test, an operator who has registered nothing — and a half
+  or unusable configuration is Warn, because somebody meant to be in the list and will not be.
+  Neither is ever repeated: nothing about it can change while the process runs.
+- **A failure at runtime *is* repeated, but not loudly.** The first failure and every change of
+  reason warns; an identical repeat is a debug line; the return to success is one Info. A
+  service that has been down since lunchtime is one thing that is wrong, not three hundred, and
+  a warning that fires on a timer stops being read. Every failed announce is still logged, which
+  is what the acceptance criterion asks for.
+- **The registration key comes from the environment or a file and never from a flag.**
+  `loadRegistrationKey`'s rule at the other end of the same secret — one variable,
+  `VOXELHEIM_REGISTRATION_KEY`, deliberately shared, because it is one value and two names for
+  it is one more thing to get wrong. It is not a player credential and it is a credential:
+  whoever holds it can put an address in the list under a name players trust, which is a better
+  attack than the one the list replaces. `registry.Key` keeps only a digest because it only ever
+  *compares*; this end has to *present*, so `main.registrationKey` holds the bytes and redacts
+  through all four routes instead.
+- **The outer type redacts too, and that is not belt and braces.** `fmt` reaches a Stringer only
+  through a value it could hand to an interface and `reflect.Value.CanInterface` is false for an
+  **unexported field**, so `%+v` on an `announcer` printed the whole key straight past every
+  method `registrationKey` declares. It is `ticket.Pair`'s lesson for the third time, it was
+  found by the secrecy test rather than by reasoning, and the fix is four value-receiver methods
+  on `announcer` itself. **A struct that holds a redacting type is not a redacting type.**
+- **The fingerprint is the one `certs.Fingerprint` produced, handed down from `listen`.** That
+  function now returns it as well as logging it, because #150 made a client take its expectation
+  from the list rather than from a pinned file: the number in the startup line, the number in the
+  list and the number a client demands are one string, or the server is one nobody can join.
+  Nothing in this file computes a digest.
+- **The announced address is separate from `-listen` and cannot be derived from it.** A server
+  bound to `0.0.0.0` is reachable at an address only its operator knows. `0.0.0.0:7777` and
+  `[::]:7777` are refused *here* and nowhere else — they are well-formed `host:port`, so
+  `internal/registry` would write them down and serve a row every client dials and none reaches,
+  and the listening side is the only side that knows the difference between "bind everywhere"
+  and "come to this address".
+- **The address is the one value this server keeps out of its own log**, which is
+  `internal/registry`'s rule for the same string: it locates somebody's house, which is why the
+  list is behind a credential at all. The operator typed it and `-h` documents it, so nothing is
+  lost.
+- **Nothing from a response body is written down except a refusal code out of the closed set
+  `cmd/voxelheim-auth` answers with**, and the acknowledged name is deliberately not among them
+  — the world name in the success line is this server's own. Whatever answered that address is
+  not known to be the account service, so its free text is a stranger writing in this log. The
+  transport error is unwrapped from its `*url.Error` for the same reason one layer down: that
+  wrapper renders as the URL it was given, which is the one string an operator may have written
+  a password into.
+- **The interval is read rather than copied.** `registry.OfflineAfter` is documented as the
+  number the announcing side must be under, and `internal/registry/imports_test.go` forbids this
+  process from importing that package at all — so the account service publishes it as
+  `offline_after_seconds` in every acknowledgement and `announcer.settle` believes it, within
+  limits. The rule in one line: never slower than four announcements inside the published window,
+  never faster than the configured interval, and a floor under the derived value so that a
+  service answering nonsense cannot turn this into a hot loop. It only ever narrows, which is
+  what lets a test shorten the interval and keep it.
+- Deliberately not here: a display name (the account service defaults it to the name), any
+  discovery of this server's own public address, anything inbound, and any status beyond having
+  been heard from.
+
 ## Generated bindings
 
 Committed, never hand-edited, regenerated with the flatc release pinned in `.flatc-version` at the
@@ -1599,6 +1676,11 @@ go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -listen 0.0.0.0:77
 go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -listen 127.0.0.1:0   # a free port, printed in the listening line
 go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -seed 42              # a different world; the same seed is the same world
 go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -log-level debug -log-format json
+
+# In the list players choose from. The key is never a flag; announcing is off without all three,
+# and a failed announce is logged and survived rather than being a reason not to start.
+VOXELHEIM_REGISTRATION_KEY=<key> go run ./cmd/voxelheimd -world-name midgard \
+  -account-service http://127.0.0.1:8080 -listen 0.0.0.0:7777 -announce-address <host>:7777
 go run ./cmd/voxelheimd -h                                                          # every flag, with the default it actually holds
 ```
 
@@ -1618,6 +1700,8 @@ flags decide is the part worth writing down.
 | `-world-name` | which world this is. A ticket names one world and is useless at any other, so this is what every ticket presented here must name. **Required** |
 | `-account-service` | where to read the signing key from, once, at startup. Mutually exclusive with `-ticket-key`; exactly one is **required** |
 | `-ticket-key` | that key in hex, when it is copied by hand instead of fetched |
+| `-announce-address` | the `host:port` players dial, announced to `-account-service`. **Separate from `-listen`**; announcing is off without it |
+| `-registration-key-file` | a file holding the registration key. The key is never a flag; `VOXELHEIM_REGISTRATION_KEY` is the other source, and never both |
 | `-tick-rate` | authoritative simulation ticks per second (1..255) |
 | `-view-distance` | the chunk streaming radius, in chunks (0..16) |
 | `-handshake-timeout` | how long a new connection may say nothing before it is closed |
