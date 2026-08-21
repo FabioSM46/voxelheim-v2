@@ -1247,8 +1247,10 @@ import, which is what shapes almost every rule below.
 - **The key directory's mode is made true rather than asked for; the key file's is refused.**
   `os.MkdirAll(dir, 0o700)` does nothing to a directory that already exists, and rename(2) is
   governed by permission on the directory — so 0600 on the seed does not stop anybody who can
-  write there swapping in a pair of their own. `LoadOrCreate` tightens the directory to `0700` on
-  every start. It does **not** tighten a signing key found at 0644: a directory that is too open
+  write there swapping in a pair of their own. `LoadOrCreate` sets the directory to **exactly**
+  `0700` on every start — "carries no bit outside 0700" is the security question and only half of
+  the one that matters, since 0600 and 0500 pass it while leaving a directory this service cannot
+  traverse or write. It does **not** tighten a signing key found at 0644: a directory that is too open
   is a risk that can still be closed, and a key file that is too open is a disclosure that has
   already happened, so that one is `ErrKeyPermissions` and a message an operator has to read.
 - **`LoadOrCreate` serialises, and only within one process.** Two concurrent callers both saw an

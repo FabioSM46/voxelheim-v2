@@ -795,6 +795,71 @@ func TestAPreCreatedKeyDirectoryIsTightenedBeforeAPairIsWritten(t *testing.T) {
 	})
 }
 
+// **A directory this service cannot use is not a directory it may accept** (PR review
+// on #126).
+//
+// [secureDir] asked whether the mode carried bits *outside* [authDirMode], which is the
+// security question and only half of the question that matters. Every mode below 0700 is
+// a subset of it: at 0600, 0400 or 0000 there is no owner execute bit, so nothing inside
+// can be opened by path at all, and at 0500 no pair can be written in. secureDir answered
+// "already correct" to each of them, and LoadOrCreate then failed a few lines further on
+// with a generic permission error naming a key file — for a fault that is in the
+// directory, and after a function whose whole job is to make the mode of that directory
+// true. Normalising to exactly authDirMode is what secureDir's own comment already
+// claimed: a mode it merely tolerates is one nobody can reason about.
+//
+// The assertion is on the mode that results rather than on an error, because root ignores
+// the permission bits and would otherwise pass this test for the wrong reason.
+func TestAKeyDirectoryTooTightForThisServiceIsSetToTheModeItNeeds(t *testing.T) {
+	t.Parallel()
+
+	for name, mode := range map[string]fs.FileMode{
+		"no owner execute, so nothing inside can be opened by path": 0o600,
+		"read and traverse only, so no pair can be written in":      0o500,
+		"reachable by nobody at all":                                0o000,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := filepath.Join(t.TempDir(), "auth")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatalf("Mkdir: %v", err)
+			}
+			if err := os.Chmod(dir, mode); err != nil {
+				t.Fatalf("Chmod: %v", err)
+			}
+			// So that a run which leaves the directory unusable still cleans up after
+			// itself: t.TempDir's own removal is registered first and therefore runs
+			// last.
+			t.Cleanup(func() { _ = os.Chmod(dir, authDirMode) })
+
+			pair, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("LoadOrCreate: %v", err)
+			}
+
+			info, err := os.Stat(dir)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != authDirMode {
+				t.Errorf("the key directory is mode %04o after a first start, want %04o; this service cannot reach the pair it just wrote",
+					got, authDirMode)
+			}
+
+			// And the pair is a real one that loads, so the mode was corrected around
+			// the write rather than instead of it.
+			again, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("the second start could not read the pair: %v", err)
+			}
+			if again.PublicHex() != pair.PublicHex() {
+				t.Error("the second start read a different pair")
+			}
+		})
+	}
+}
+
 // **A signing key found at a mode anybody else can read is refused, and until #126
 // nothing looked** (defect 11).
 //

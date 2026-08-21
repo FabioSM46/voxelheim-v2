@@ -362,24 +362,34 @@ func createPair(signingPath, verifyingPath string) (*Pair, error) {
 // The mode is read back rather than assumed: chmod answers nil on filesystems that do not
 // keep a Unix mode at all, and a permission this package claims to have set is one it has
 // to be able to see.
+//
+// **Exactly [authDirMode], not merely inside it.** The bits an attacker needs are the ones
+// *outside* 0700, so "carries nothing outside the mask" is the check this began as — and
+// it accepted every mode below 0700 as already correct. A directory at 0600, 0400 or 0000
+// has no owner execute bit, so nothing in it can be opened by path at all; one at 0500
+// cannot have a pair written into it. Each was passed as correct here and then failed a
+// few lines later on a generic permission error naming a key file, for a fault that is in
+// the directory — and the post-chmod read-back had the same gap, so a mode that came back
+// clamped below 0700 was accepted as taken. Correcting in one direction only is the same
+// tolerated mode this comment argues against a paragraph above.
 func secureDir(dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("ticket: reading %s: %w", dir, err)
 	}
-	if info.Mode().Perm()&^authDirMode == 0 {
+	if info.Mode().Perm() == authDirMode {
 		return nil
 	}
 	if err := os.Chmod(dir, authDirMode); err != nil {
-		return fmt.Errorf("%w: %s is mode %04o and could not be tightened to %o: %w",
+		return fmt.Errorf("%w: %s is mode %04o and could not be set to %04o: %w",
 			ErrKeyPermissions, dir, info.Mode().Perm(), authDirMode, err)
 	}
 	after, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("ticket: reading %s: %w", dir, err)
 	}
-	if mode := after.Mode().Perm(); mode&^authDirMode != 0 {
-		return fmt.Errorf("%w: %s is mode %04o, anybody who can write it can replace the key pair inside it, and chmod %o did not take",
+	if mode := after.Mode().Perm(); mode != authDirMode {
+		return fmt.Errorf("%w: %s is mode %04o rather than %04o and chmod did not take; anything looser lets whoever can write here replace the key pair inside it, and anything tighter is a pair this service cannot reach",
 			ErrKeyPermissions, dir, mode, authDirMode)
 	}
 	return nil
