@@ -445,6 +445,11 @@ fn who(identity: Option<Identity>) -> &'static str {
     match identity {
         Some(Identity::Returning) => "returning",
         Some(Identity::New) => "new character",
+        // A session that kept no token made no comparison, so neither of the two
+        // words above is a thing this client knows. It says what it does know — an
+        // account was presented and the server admitted it — and leaves which
+        // character that is to the server, which is the only side that decided it.
+        Some(Identity::Untold) => "signed in",
         None => "-",
     }
 }
@@ -752,10 +757,24 @@ mod tests {
         );
         assert!(new.contains("new character"), "{new}");
 
-        // Everything else on the line is unchanged by either answer.
+        // **And a third answer, which is neither of those two words.** A session that
+        // kept no token made no comparison, so claiming either would be this client
+        // answering a question only the server has the answer to.
+        let untold = describe(
+            &ConnectionState::Connected,
+            address(),
+            Some(&session()),
+            Some(Identity::Untold),
+        );
+        assert!(untold.contains("signed in"), "{untold}");
+        assert!(!untold.contains("new character"), "{untold}");
+        assert!(!untold.contains("returning"), "{untold}");
+
+        // Everything else on the line is unchanged by any of the answers.
         for expected in ["entity 3", "seed 1", "20 Hz", "chunk 32", "view 8"] {
             assert!(returning.contains(expected), "{returning}");
             assert!(new.contains(expected), "{new}");
+            assert!(untold.contains(expected), "{untold}");
         }
     }
 
@@ -763,7 +782,12 @@ mod tests {
     fn a_status_line_never_shows_a_token() {
         // The resource the line is built from carries one, so the line is a place
         // it could reach a screen. `ANY_TOKEN` is 0x11 repeated.
-        for identity in [None, Some(Identity::Returning), Some(Identity::New)] {
+        for identity in [
+            None,
+            Some(Identity::Returning),
+            Some(Identity::New),
+            Some(Identity::Untold),
+        ] {
             let line = describe(
                 &ConnectionState::Connected,
                 address(),

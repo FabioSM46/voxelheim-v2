@@ -248,12 +248,22 @@ pub(super) enum Browser {
 
 /// Runs one attempt from `start` to a cached ticket.
 ///
+/// `world` is which ticket this attempt is asking for, and the two values are two
+/// different credentials rather than one with a decoration. `None` asks for an
+/// **account** ticket — one that names no world, which is what a player signs in with
+/// before they have chosen one and what the server list is read with. `Some(name)` asks
+/// for a **world** ticket, which is the only thing a game server admits anybody on: it
+/// is `--server` with `--account-service`, where the address came from the command line
+/// and so the world has to as well. See [`super::SignInPlugin`] for why nothing can
+/// infer it from the address, and `net/tickets.rs` for why the two are cached apart.
+///
 /// Returns when the attempt ends. Every failure is reported as an event and then
 /// returned from — the thread never panics, because a panicking sign-in thread
 /// would take down a client that could otherwise have shown the player what went
 /// wrong.
 pub(super) fn run(
     service: AccountService,
+    world: Option<String>,
     ticket_path: Option<PathBuf>,
     browser: Browser,
     events: Sender<SignInEvent>,
@@ -261,6 +271,7 @@ pub(super) fn run(
 ) {
     let outcome = attempt(
         &service,
+        world.as_deref(),
         ticket_path.as_deref(),
         &browser,
         &events,
@@ -276,6 +287,7 @@ pub(super) fn run(
 
 fn attempt(
     service: &AccountService,
+    world: Option<&str>,
     ticket_path: Option<&Path>,
     browser: &Browser,
     events: &Sender<SignInEvent>,
@@ -304,7 +316,14 @@ fn attempt(
     }
 
     let mut caught = caught?;
-    let outcome = complete(service, &started, &caught.params, ticket_path, events);
+    let outcome = complete(
+        service,
+        &started,
+        world,
+        &caught.params,
+        ticket_path,
+        events,
+    );
     answer_the_tab(&mut caught.stream, outcome.is_ok());
     outcome
 }
@@ -618,6 +637,7 @@ fn request_line(stream: &mut TcpStream) -> Result<String, String> {
 fn complete(
     service: &AccountService,
     started: &Started,
+    world: Option<&str>,
     params: &[(String, String)],
     ticket_path: Option<&Path>,
     events: &Sender<SignInEvent>,
@@ -646,8 +666,17 @@ fn complete(
             .to_owned(),
     );
 
+    // **`world` is absent rather than empty when this attempt wants an account
+    // ticket**, which is the same encoding `encode_client_hello` uses for a token
+    // nobody holds and the one `signin.go` reads: an empty string there is "the caller
+    // meant to name a world and failed", and it is refused with `world_not_named`
+    // rather than quietly minting the other kind of ticket.
+    let world = match world {
+        Some(world) => format!(",\"world\":{}", json::quote(world)),
+        None => String::new(),
+    };
     let body = format!(
-        "{{\"state\":{state},\"code\":{code},\"finish_secret\":{secret}}}",
+        "{{\"state\":{state},\"code\":{code},\"finish_secret\":{secret}{world}}}",
         state = json::quote(&started.state),
         code = json::quote(code.reveal()),
         secret = json::quote(started.finish_secret.reveal()),
@@ -1001,14 +1030,26 @@ mod tests {
         ticket_path: Option<PathBuf>,
         query: impl Fn(&str) -> String,
     ) -> Attempt {
+        drive_for_world(service, None, ticket_path, query)
+    }
+
+    /// The same, asking for a ticket scoped to `world` when there is one.
+    fn drive_for_world(
+        service: &FakeService,
+        world: Option<&str>,
+        ticket_path: Option<PathBuf>,
+        query: impl Fn(&str) -> String,
+    ) -> Attempt {
         let (event_tx, event_rx) = mpsc::channel();
         let (browser_tx, browser_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         let account = service.service();
+        let world = world.map(str::to_owned);
 
         let worker = thread::spawn(move || {
             run(
                 account,
+                world,
                 ticket_path,
                 Browser::Captured(browser_tx),
                 event_tx,
@@ -1102,6 +1143,39 @@ mod tests {
             .expect("a finish request");
         assert!(!finish.1.contains("world"), "{}", finish.1);
         assert!(finish.1.contains("finish_secret"), "{}", finish.1);
+    }
+
+    /// **The other half of the same encoding, and what #154 needed.** A game server
+    /// admits nobody on an account ticket, so a launch that names an address has to
+    /// name the world too — and that name reaches `finish`, which is the only place a
+    /// world-scoped ticket is minted.
+    #[test]
+    fn a_sign_in_for_a_world_names_it_in_the_finish_body() {
+        let port = free_loopback_port();
+        let service = FakeService::spawn(
+            &format!("http://127.0.0.1:{port}/discord/callback"),
+            FinishAnswer::Ticket {
+                encoded: encoded_ticket(2),
+                expires_at: "2099-01-01T08:00:00Z".to_owned(),
+            },
+            "s",
+            "sec",
+        );
+        let scratch = Scratch::new("signin-for-world");
+        let attempt = drive_for_world(
+            &service,
+            Some("midgard"),
+            Some(scratch.join("service")),
+            |url| format!("code=c&state={}", state_from(url)),
+        );
+
+        assert_eq!(attempt.events, vec![SignInEvent::Completed]);
+        let finish = attempt
+            .requests
+            .iter()
+            .find(|(path, _)| path.ends_with(FINISH_PATH))
+            .expect("a finish request");
+        assert!(finish.1.contains("\"world\":\"midgard\""), "{}", finish.1);
     }
 
     #[test]
@@ -1206,6 +1280,7 @@ mod tests {
         let worker = thread::spawn(move || {
             run(
                 account,
+                None,
                 Some(ticket_path),
                 Browser::Captured(browser_tx),
                 event_tx,
@@ -1270,7 +1345,8 @@ mod tests {
             ("state".to_owned(), "somebody-elses".to_owned()),
             ("code".to_owned(), "the-code".to_owned()),
         ];
-        let refusal = complete(&service, &started, &params, None, &events).expect_err("a refusal");
+        let refusal =
+            complete(&service, &started, None, &params, None, &events).expect_err("a refusal");
         assert!(refusal.contains("different sign-in"), "{refusal}");
     }
 
@@ -1349,6 +1425,7 @@ mod tests {
         let worker = thread::spawn(move || {
             run(
                 account,
+                None,
                 Some(path),
                 Browser::Captured(browser_tx),
                 event_tx,
@@ -1391,6 +1468,7 @@ mod tests {
         let worker = thread::spawn(move || {
             run(
                 account,
+                None,
                 Some(path),
                 Browser::Captured(browser_tx),
                 event_tx,

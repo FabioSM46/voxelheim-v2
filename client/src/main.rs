@@ -69,6 +69,10 @@ const PLAYER_NAME_ENV: &str = "VOXELHEIM_NAME";
 /// outright, which is how one machine runs two characters against one server.
 const IDENTITY_ENV: &str = "VOXELHEIM_IDENTITY";
 
+/// Environment variable holding the world to ask a ticket for, with the same
+/// precedence.
+const WORLD_ENV: &str = "VOXELHEIM_WORLD";
+
 /// Environment variable holding the account service URL, with the same precedence.
 ///
 /// There is deliberately **no default**. An account service is something an
@@ -82,8 +86,8 @@ Voxelheim client
 
 Usage:
   voxelheim-client --account-service URL
+  voxelheim-client --account-service URL --server ADDRESS --world NAME
   voxelheim-client [ADDRESS]
-  voxelheim-client --server ADDRESS
   voxelheim-client --help
 
 Arguments:
@@ -95,6 +99,8 @@ Options:
                   URL of the account service to sign in against. The servers you
                   can join come from its list; you never type an address.
   -s, --server    the same address as ADDRESS, named explicitly
+  -w, --world     which world to ask for a ticket for, with --server. Only with
+                  --server: from the list, the row you click names the world.
   -n, --name      the display name announced to the server
   -i, --identity  file holding this server's identity token
   -h, --help      print this and exit
@@ -102,29 +108,41 @@ Options:
 Environment:
   VOXELHEIM_ACCOUNT_SERVICE  used when --account-service is not given
   VOXELHEIM_SERVER           used when no address is given on the command line
+  VOXELHEIM_WORLD            used when --world is not given
   VOXELHEIM_NAME             used when --name is not given
   VOXELHEIM_IDENTITY         used when --identity is not given
 
-There are two ways to reach a server and you give exactly one of them.
+There are three ways to launch this and they are not interchangeable.
 
-  With --account-service, you sign in with Discord once and then pick a server
-  out of the list it answers with. The list carries each server's address and
-  the fingerprint of the certificate it presents, so the address is followed if
-  it moves and a server presenting anything else is refused before this client
-  sends a byte. There is no way past that refusal, by design: ask whoever runs
-  the server to register the fingerprint it logs at startup.
+  --account-service alone is the path a player takes. You sign in with Discord
+  once and then pick a server out of the list it answers with. The list carries
+  each server's address and the fingerprint of the certificate it presents, so
+  the address is followed if it moves and a server presenting anything else is
+  refused before this client sends a byte. There is no way past that refusal, by
+  design: ask whoever runs the server to register the fingerprint it logs at
+  startup.
 
-  With an ADDRESS or --server, you connect straight to an address that is in no
-  list. This is the development path. Nothing states which certificate to expect
-  there, so the session is encrypted but unverified -- and for that reason it
-  presents no stored identity and keeps none, which means a new character every
-  time. Give an account service instead to play.
+  --account-service with --server and --world is the development path. You sign
+  in the same way, but the address is the one you typed and the world is the one
+  you named, because an address in no list comes with neither. Nothing states
+  which certificate to expect there, so the session is encrypted and UNVERIFIED
+  -- it is a server you chose to trust by typing its address. The ticket that
+  sign-in produces is presented to it, and that is a deliberate trade: a ticket
+  names one world, expires in hours, and is refused at every other world, so
+  what that address can do with it is bounded and short.
+
+  An ADDRESS or --server on its own presents no account at all. A server admits
+  players on a signed ticket, so it will refuse this and say so. It stays
+  because it is the honest answer to a launch that named nowhere to sign in.
 
 The name defaults to voxelheim; with neither an account service nor an address,
 the address defaults to 127.0.0.1:7777.
 
-The sign-in is kept in $XDG_DATA_HOME/voxelheim/account/<service>, falling back
-to $HOME/.local/share. Deleting that file is how you sign out.
+Sign-ins are kept under $XDG_DATA_HOME/voxelheim, falling back to
+$HOME/.local/share: account/<service> for the ticket the server list is read
+with, and world-ticket/<service>/<world> for one you join a world with. They are
+separate files because the two are not interchangeable. Deleting one is how you
+sign out of it.
 
 Identity is remembered per server: without --identity the token a server issues
 is kept in $XDG_DATA_HOME/voxelheim/identity/<address>. Coming back with it
@@ -138,6 +156,7 @@ fn main() -> ExitCode {
         player_name: std::env::var(PLAYER_NAME_ENV).ok(),
         identity_path: std::env::var(IDENTITY_ENV).ok(),
         account_service: std::env::var(ACCOUNT_SERVICE_ENV).ok(),
+        world: std::env::var(WORLD_ENV).ok(),
     };
 
     match parse_launch(&args, &environment) {
@@ -166,6 +185,7 @@ fn run(start: Start) -> AppExit {
         player_name,
         identity_path,
         account_service,
+        world,
     } = start;
 
     // The address is not in the title on the list path, and cannot be: nothing has
@@ -176,11 +196,15 @@ fn run(start: Start) -> AppExit {
         None => "Voxelheim".to_owned(),
     };
 
-    // Exactly one of the two, which `parse_launch` has already refused to let be both.
-    // `developing_against` dials at build; `listening` waits for a row to be clicked.
-    let net = match server_addr {
-        Some(addr) => NetPlugin::developing_against(addr),
-        None => NetPlugin::listening(),
+    // The three shapes `parse_launch` admits, and nothing else can be built here.
+    // `listening` waits for a row of the list to be clicked; `developing_against` dials
+    // at build with no account to present; `developing_against_signed_in` waits for the
+    // sign-in and then dials the address that was typed, presenting the ticket it
+    // produced.
+    let net = match (server_addr, &account_service) {
+        (Some(addr), Some(_)) => NetPlugin::developing_against_signed_in(addr),
+        (Some(addr), None) => NetPlugin::developing_against(addr),
+        (None, _) => NetPlugin::listening(),
     };
 
     let mut app = App::new();
@@ -199,13 +223,26 @@ fn run(start: Start) -> AppExit {
     .add_plugins(UiPlugin);
 
     // Built only when there is a service to sign in against, which is what makes the
-    // login screen and the server list absent rather than broken on a client that has
-    // none. See ACCOUNT_SERVICE_ENV. The two go together: the list is read with the
-    // ticket a sign-in caches, and `ServerListPlugin` reads the settings this one
-    // inserts rather than keeping a second idea of where this client signs in.
+    // login screen absent rather than broken on a client that has none. See
+    // ACCOUNT_SERVICE_ENV.
+    //
+    // **The server list is built only when the list is what decides the address**, and
+    // that is the one place the two plugins come apart. With `--server` the address was
+    // typed and the world was named, so there is no row to click and no list to read —
+    // `ServerListPlugin` would open a socket for an answer nothing would draw, and
+    // `ui/servers.rs` draws nothing without the resource it inserts. `ServerListPlugin`
+    // still reads the settings `SignInPlugin` inserts rather than keeping a second idea
+    // of where this client signs in.
     if let Some(service) = account_service {
-        app.add_plugins(SignInPlugin::new(service))
-            .add_plugins(ServerListPlugin);
+        match world {
+            Some(world) => {
+                app.add_plugins(SignInPlugin::new(service).for_world(world));
+            }
+            None => {
+                app.add_plugins(SignInPlugin::new(service))
+                    .add_plugins(ServerListPlugin);
+            }
+        }
     }
 
     app.run()
@@ -222,15 +259,21 @@ enum Launch {
 
 /// Everything the app needs from the command line and the environment.
 ///
-/// **Exactly one of `server_addr` and `account_service` is `Some`**, which
-/// [`parse_launch`] enforces rather than leaving to the reader: they are two answers to
-/// the same question — where does a server come from — and a client that had both would
-/// have to pick one silently. Which it picked would decide whether a certificate is
-/// verified, so it is a usage error instead.
+/// **At least one of `server_addr` and `account_service` is `Some`**, and which of the
+/// three combinations [`parse_launch`] admits decides how the session is opened:
+///
+/// | `server_addr` | `account_service` | `world` | what happens                          |
+/// | ------------- | ----------------- | ------- | ------------------------------------- |
+/// | `Some`        | `None`            | `None`  | dialled at build, presenting nothing   |
+/// | `None`        | `Some`            | `None`  | the login screen, then the server list |
+/// | `Some`        | `Some`            | `Some`  | the login screen, then that address     |
+///
+/// Every other shape is a usage error, and the reasons are on the match in
+/// [`parse_launch`] that produces them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Start {
-    /// The development address, already carrying a port. `Some` exactly when no
-    /// account service was given.
+    /// The address to dial, already carrying a port. `None` means the server list
+    /// decides, which is the path a player takes.
     server_addr: Option<String>,
     /// A display name. Never an identity: the token is that, and the server mints
     /// it.
@@ -239,10 +282,15 @@ struct Start {
     /// the choice to `net/session.rs`, which is the only code that knows where a
     /// token belongs.
     identity_path: Option<PathBuf>,
-    /// `--account-service`, already parsed. `Some` is the path a player takes: the
-    /// login screen, then the server list, then a row that carries both the address
-    /// and the certificate to expect at it.
+    /// `--account-service`, already parsed. `Some` is a launch that signs in: with no
+    /// address it is the path a player takes — the login screen, then the server list,
+    /// then a row carrying both the address and the certificate to expect at it — and
+    /// with one it is the development path.
     account_service: Option<AccountService>,
+    /// `--world`, which names the world a ticket is asked for. `Some` exactly when both
+    /// of the two above are, because it is the one path where nothing else can say
+    /// which world an address is running.
+    world: Option<String>,
 }
 
 /// The environment the launch settings fall back to, read once in [`main`].
@@ -257,6 +305,7 @@ struct LaunchEnv {
     player_name: Option<String>,
     identity_path: Option<String>,
     account_service: Option<String>,
+    world: Option<String>,
 }
 
 /// Which setting an argument was naming, for the two errors that report it.
@@ -267,6 +316,7 @@ const SERVER_ADDR: &str = "server address";
 const PLAYER_NAME: &str = "player name";
 const IDENTITY_PATH: &str = "identity file";
 const ACCOUNT_SERVICE: &str = "account service";
+const WORLD: &str = "world";
 
 /// Resolves every launch setting from, in order of precedence: the command line,
 /// the environment, then the built-in default.
@@ -286,6 +336,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
     let mut player_name: Option<String> = None;
     let mut identity_path: Option<String> = None;
     let mut account_service: Option<String> = None;
+    let mut world: Option<String> = None;
     let mut args = args.iter();
 
     while let Some(arg) = args.next() {
@@ -304,6 +355,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
             "-n" | "--name" => (&mut player_name, PLAYER_NAME, after("a name")?),
             "-i" | "--identity" => (&mut identity_path, IDENTITY_PATH, after("a path")?),
             "-a" | "--account-service" => (&mut account_service, ACCOUNT_SERVICE, after("a URL")?),
+            "-w" | "--world" => (&mut world, WORLD, after("a world name")?),
             other => {
                 if let Some(value) = other.strip_prefix("--server=") {
                     (&mut server_addr, SERVER_ADDR, value.to_owned())
@@ -313,6 +365,8 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
                     (&mut identity_path, IDENTITY_PATH, value.to_owned())
                 } else if let Some(value) = other.strip_prefix("--account-service=") {
                     (&mut account_service, ACCOUNT_SERVICE, value.to_owned())
+                } else if let Some(value) = other.strip_prefix("--world=") {
+                    (&mut world, WORLD, value.to_owned())
                 // Anything else that looks like a flag is a typo worth reporting;
                 // silently ignoring it would hide a misspelled --server.
                 } else if other.starts_with('-') {
@@ -355,26 +409,77 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
         .map(|raw| AccountService::parse(raw.trim()))
         .transpose()?;
 
-    // **Two ways to reach a server, and exactly one of them per launch.** They are not
-    // a setting and an override: an account service means every address comes from its
-    // list, carrying the certificate to expect at it, while an address given here is in
-    // no list and can be verified against nothing. A client holding both would have to
-    // choose silently, and the choice decides whether the session is verified — so it
-    // is refused, the way an option given twice is, and for the same reason.
-    let addr = match (given_addr, &account) {
-        (Some(addr), Some(_)) => {
+    let world = world
+        .or_else(|| exported(env.world.as_deref()))
+        .map(|world| world.trim().to_owned());
+
+    // **Three launches, and which one this is decides what may be presented and to
+    // whom.** The address and the account service are not a setting and an override:
+    // an account service with no address means every address comes from its list,
+    // carrying the certificate to expect at it, while an address given here is in no
+    // list and can be verified against nothing.
+    //
+    // They were mutually exclusive until #154, on the argument that a stored credential
+    // must not be handed to an address nobody stated a certificate for. The argument
+    // was right about the credential it was written for — a token that names a player
+    // at one server until somebody deletes it — and it does not carry to the one this
+    // now presents. A session ticket names one world, expires in hours, and is refused
+    // at every other world, so an unverified address learns one world's session for an
+    // afternoon, at an address the developer typed. The alternative was that
+    // development could not connect at all: a hello with no ticket is refused, and it
+    // is meant to be.
+    //
+    // What did not change is the verification. An address given here is still
+    // `Unlisted`, still verified against nothing, and still says so; a listed server is
+    // still refused before a byte is sent when its certificate is not the one the list
+    // carried.
+    let addr = match (given_addr, &account, &world) {
+        // The development path, and the only one that both names an address and can
+        // sign in. `--world` is what a list row would have carried; see
+        // `net::SignInPlugin::for_world` for why nothing infers it from the address.
+        (Some(addr), Some(_), Some(_)) => Some(with_default_port(addr.trim())),
+        // An address and a service with no world. Not defaulted and not guessed: a
+        // ticket names exactly one world, this launch would have to pick which, and a
+        // wrong guess is a refusal the player cannot read a remedy out of.
+        (Some(addr), Some(_), None) => {
             return Err(format!(
-                "both an account service and a server address were given ({}). The server \
-                 list is where addresses come from; --server names one that is in no list \
-                 and is the development path. Give one of the two.",
+                "an account service and a server address were both given ({}), but no world. \
+                 A ticket names one world and is refused at every other, so this client has \
+                 to be told which world that address is running: add --world NAME, the same \
+                 name the server was started with as -world-name.",
                 addr.trim()
             ));
         }
-        (Some(addr), None) => Some(with_default_port(addr.trim())),
+        // An address alone. Nothing to sign in against, so the hello presents no
+        // account and the server refuses it — which it says, so this is not a usage
+        // error. See DEFAULT_SERVER_ADDR.
+        (Some(addr), None, None) => Some(with_default_port(addr.trim())),
+        // A world with no address is a world nothing would ask for. On the list path
+        // the row that is clicked names the world, so a `--world` here would either be
+        // ignored — the silent precedence rule this file refuses everywhere else — or
+        // would have to override a row, which is a way to ask for a ticket for one
+        // world and present it at another.
+        (None, Some(_), Some(world)) => {
+            return Err(format!(
+                "a world was given ({world}) with an account service and no address. The \
+                 server list is where worlds come from on that path: the row you click names \
+                 one. Give --server as well to name both yourself."
+            ));
+        }
+        (None, Some(_), None) => None,
         // No service and no address: the development default, which is a `voxelheimd`
         // running beside this one.
-        (None, None) => Some(DEFAULT_SERVER_ADDR.to_owned()),
-        (None, Some(_)) => None,
+        (None, None, None) => Some(DEFAULT_SERVER_ADDR.to_owned()),
+        // A world with nothing to ask one for. Refused rather than ignored, whether or
+        // not an address came with it: the launch this was meant to be is one flag
+        // away, and connecting without it produces a refusal from the server that says
+        // nothing about the flag that was typed.
+        (_, None, Some(world)) => {
+            return Err(format!(
+                "a world was given ({world}) with no account service. A ticket for a world \
+                 comes from signing in, so name where to sign in with --account-service URL."
+            ));
+        }
     };
 
     Ok(Launch::Connect(Start {
@@ -382,6 +487,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
         player_name: name.trim().to_owned(),
         identity_path: identity,
         account_service: account,
+        world,
     }))
 }
 
@@ -709,6 +815,7 @@ mod tests {
                 player_name: Some("ignored".to_owned()),
                 identity_path: Some("/tmp/ignored".to_owned()),
                 account_service: None,
+                world: None,
             },
         )
         .expect("a complete command line");
@@ -720,6 +827,7 @@ mod tests {
                 player_name: "thora".to_owned(),
                 identity_path: Some(PathBuf::from("/tmp/one")),
                 account_service: None,
+                world: None,
             }
         );
     }
@@ -748,6 +856,8 @@ mod tests {
             "VOXELHEIM_IDENTITY",
             "--account-service",
             "VOXELHEIM_ACCOUNT_SERVICE",
+            "--world",
+            "VOXELHEIM_WORLD",
             // The development path is documented as one, which is the acceptance
             // criterion this line stands for: a player must not read `--server` as
             // the ordinary way in.
@@ -760,12 +870,11 @@ mod tests {
         }
     }
 
-    /// **The two ways to reach a server are two, not one with an override.** Given
-    /// both, a client would have to choose silently — and the choice decides whether
-    /// the certificate is verified against anything, which is not a decision to make
-    /// without saying so.
+    /// **The combination #150 forbade is the development path #154 needs**, and what
+    /// makes it admissible is the third value: the world a ticket is asked for. Without
+    /// it there is still nothing this client could do but guess.
     #[test]
-    fn an_account_service_and_an_address_together_are_a_usage_error() {
+    fn an_account_service_and_an_address_need_a_world_between_them() {
         for both in [
             vec![
                 "--account-service",
@@ -775,12 +884,12 @@ mod tests {
             ],
             vec!["server.example:7777", "-a", "http://127.0.0.1:7780"],
         ] {
-            let err = start(&both, &nothing()).expect_err("both were accepted");
-            assert!(err.contains("account service"), "{err}");
-            assert!(err.contains("--server"), "{err}");
+            let err = start(&both, &nothing()).expect_err("a world has to be named");
+            assert!(err.contains("--world"), "{err}");
+            assert!(err.contains("server.example:7777"), "{err}");
         }
 
-        // An exported address is the same conflict from the other direction: it is a
+        // An exported address reaches the same rule from the other direction: it is a
         // value somebody set, and the refusal names it rather than quietly winning or
         // quietly losing.
         let err = start(
@@ -790,8 +899,114 @@ mod tests {
                 ..LaunchEnv::default()
             },
         )
-        .expect_err("an exported address was accepted beside a service");
+        .expect_err("an exported address was accepted with no world");
         assert!(err.contains("server.example:7777"), "{err}");
+    }
+
+    /// The launch this issue exists for: sign in, and connect to the address that was
+    /// typed rather than to a row of a list.
+    #[test]
+    fn an_account_service_an_address_and_a_world_are_the_development_path() {
+        let start = start(
+            &[
+                "--account-service",
+                "http://127.0.0.1:7780",
+                "--server",
+                "127.0.0.1:7777",
+                "--world",
+                "midgard",
+            ],
+            &nothing(),
+        )
+        .expect("all three together are a complete command line");
+
+        assert_eq!(start.server_addr.as_deref(), Some("127.0.0.1:7777"));
+        assert_eq!(start.world.as_deref(), Some("midgard"));
+        assert!(start.account_service.is_some());
+    }
+
+    #[test]
+    fn every_spelling_of_the_world_option_works() {
+        for raw in [
+            vec!["--world", "midgard"],
+            vec!["-w", "midgard"],
+            vec!["--world=midgard"],
+        ] {
+            let mut whole = vec!["-a", "http://127.0.0.1:7780", "-s", "127.0.0.1:7777"];
+            whole.extend(raw.iter().copied());
+            let start = start(&whole, &nothing()).expect("a complete command line");
+            assert_eq!(start.world.as_deref(), Some("midgard"), "{raw:?}");
+        }
+    }
+
+    /// Lower precedence than the command line, and an exported empty value is an unset
+    /// one — the rule every other setting here follows.
+    #[test]
+    fn the_command_line_world_beats_the_environment() {
+        let both = LaunchEnv {
+            world: Some("exported".to_owned()),
+            ..LaunchEnv::default()
+        };
+        let typed = start(
+            &[
+                "-a",
+                "http://127.0.0.1:7780",
+                "-s",
+                "127.0.0.1:7777",
+                "--world",
+                "typed",
+            ],
+            &both,
+        )
+        .expect("a complete command line");
+        assert_eq!(typed.world.as_deref(), Some("typed"));
+
+        let exported = start(
+            &["-a", "http://127.0.0.1:7780", "-s", "127.0.0.1:7777"],
+            &both,
+        )
+        .expect("an exported world is enough");
+        assert_eq!(exported.world.as_deref(), Some("exported"));
+    }
+
+    /// **A world nothing would ask for is refused rather than ignored.** Both shapes
+    /// are a command line one flag away from a launch that works, and a client that
+    /// dropped the value silently would leave the player reading a refusal from the
+    /// server that says nothing about the flag they typed.
+    #[test]
+    fn a_world_with_nothing_to_ask_for_one_is_a_usage_error() {
+        // No account service: nothing can mint a ticket for a world.
+        let err = start(
+            &["--server", "127.0.0.1:7777", "--world", "midgard"],
+            &nothing(),
+        )
+        .expect_err("a world with no service was accepted");
+        assert!(err.contains("--account-service"), "{err}");
+
+        // A service but no address: the row that is clicked names the world, so a
+        // second answer here could only disagree with it.
+        let err = start(
+            &[
+                "--account-service",
+                "http://127.0.0.1:7780",
+                "-w",
+                "midgard",
+            ],
+            &nothing(),
+        )
+        .expect_err("a world with no address was accepted");
+        assert!(err.contains("--server"), "{err}");
+    }
+
+    /// An address with no account service still launches: there is nothing to sign in
+    /// against, the hello presents no account, and the server says so. Refusing it here
+    /// would be this client answering for the server.
+    #[test]
+    fn an_address_alone_is_still_a_launch() {
+        let start = start(&["127.0.0.1:7777"], &nothing()).expect("an address alone");
+        assert_eq!(start.server_addr.as_deref(), Some("127.0.0.1:7777"));
+        assert_eq!(start.world, None);
+        assert!(start.account_service.is_none());
     }
 
     /// With a service, the address is the list's to decide and this client resolves

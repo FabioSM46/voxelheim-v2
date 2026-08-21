@@ -44,7 +44,7 @@ keeps meaning "everything the client is".
 
 | Module | Owns | Must not |
 | ------ | ---- | -------- |
-| `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service`, the development address, `--name` and `--identity` | contain game or network logic, or let an account service and an address be given together |
+| `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service`, the development address, `--world`, `--name` and `--identity` | contain game or network logic, or admit a combination of address, service and world that is not one of the three launches on `Start` |
 | `net/mod.rs` | `NetPlugin`, `SignInPlugin`, `ServerListPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState`/`ServerList` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
 | `net/codec.rs` | FlatBuffers encode/decode, contract limits, `ServerWelcome` validation | know about connections |
@@ -914,11 +914,29 @@ that owns a socket.
   same file and the same token is presented to a listed server and is not presented to an
   unlisted one.
 - **`Unlisted` is `--server`, and it is the development path.** An address typed on the command
-  line is in no list, so the session is encrypted and unauthenticated, presents no identity and
-  stores none — which means a new character every launch. It is never what a failed list read
-  falls back to; the two cannot be confused, because `main.rs` refuses `--server` and
-  `--account-service` together rather than letting one silently win. The usage text says so in
-  the words a player reads.
+  line is in no list, so the session is encrypted and unauthenticated, and it presents no
+  identity and stores none. It is never what a failed list read falls back to: a session is
+  `Unlisted` because the command line named an address, never because a list could not be read.
+
+  **It does present a session ticket, and that is what #154 changed.** `--server` and
+  `--account-service` were mutually exclusive until then, on the argument above — nothing stated
+  a certificate, so nothing should be handed over. The argument was right about the credential it
+  was written for and does not carry to a ticket: a ticket names one world, expires in hours, and
+  `Verify` refuses it at any other world, so an unverified address learns one world's session for
+  an afternoon at an address the developer typed, where a stored identity would have been that
+  player at that server until somebody deleted the file. The two are therefore gated differently
+  and deliberately: the identity file is opened only for `Listed`, and `session::Target::ticket`
+  is whatever the launch decided regardless of the expectation. **What did not move is the
+  certificate** — `Unlisted` still verifies nothing and still says so, in the usage text and on
+  the status line.
+
+  The combination is a launch of its own rather than a precedence rule: `--server` with
+  `--account-service` also requires `--world`, because `finish` mints a ticket for a named world
+  and an address states no world. `net::SignInPlugin::for_world` carries the argument for why
+  nothing infers it — a value taken from the far end would let an address in no list choose which
+  world's ticket it is handed, which is exactly the choice that has to stay with whoever typed
+  the address. Every other combination of the three is a usage error, listed on `Start` in
+  `main.rs`.
 - **What a fingerprint that does not match means, and what happens.** It is refused inside the
   handshake, before a byte of this protocol is sent, with a message naming the address, both
   fingerprints and **the list** as the source of the expectation — and no bypass flag, no prompt.
@@ -1003,12 +1021,24 @@ mints it and the account service redeems the code, because PKCE requires the red
 verifier. It never exists on this machine and nothing here talks to Discord's token endpoint. There
 is no client secret in the binary either.
 
-**A sign-in asks for an *account* ticket — one that names no world.** The `finish` body carries
-`state`, `code` and `finish_secret` and deliberately no `world` field at all, which is the same
-"absent rather than empty" encoding `encode_client_hello` uses for a token nobody holds. A ticket
-that names no world is what a player signs in with before they have chosen one, and it is what the
-server list reads; a *world* ticket is what joining needs, and choosing the world is the server
-list's job.
+**A sign-in asks for one of two tickets, and which one is the launch's decision.** With no
+`--world`, the `finish` body carries `state`, `code` and `finish_secret` and no `world` field at
+all — the same "absent rather than empty" encoding `encode_client_hello` uses for a token nobody
+holds — and what comes back is an **account** ticket, which names no world. That is what a player
+signs in with before they have chosen one, and it is what the server list is read with. With
+`--world`, the body names it and what comes back is a **world** ticket, which is the only thing a
+game server admits anybody on.
+
+**The two are cached apart**, in `voxelheim/account/<service>` and
+`voxelheim/world-ticket/<service>/<world>`. One file for both would put a live credential for the
+wrong thing behind a screen that says "signed in" and offers no control — an account ticket at a
+game server is `ErrWrongWorld`, a world ticket for another world is the same refusal, and from the
+login screen both look like the dead end #154 removed. `tickets::world_ticket_path` says why the
+world is a path component rather than a suffix.
+
+On the list path, choosing the world is still the list's job and the row already carries the name;
+nothing there asks for a world ticket yet, so a listed session presents the identity file and no
+ticket. That is #107.
 
 **Nothing about a ticket reaches the ECS.** `SignInState` is the whole of what leaves `net`, and it
 carries a state and a line of text. The ticket lives on the sign-in thread for the length of one
@@ -1111,21 +1141,29 @@ for any contract diff — so regenerate here and in the server in the same PR.
 
 ```bash
 cargo run --release -- --account-service http://127.0.0.1:7780   # sign in, then pick a server
-cargo run --release                          # development: 127.0.0.1:7777
-cargo run -- 192.0.2.5:7000                  # development: an explicit address
+cargo run --release -- --account-service http://127.0.0.1:7780 \
+    --server 127.0.0.1:7777 --world midgard                      # development: sign in, one address
+cargo run --release                          # development: 127.0.0.1:7777, and refused
+cargo run -- 192.0.2.5:7000                  # the same, at an explicit address
 cargo run -- --server norse.example         # bare host gets port 7777
 VOXELHEIM_SERVER=192.0.2.5:7000 cargo run    # lower precedence than the CLI
+cargo run -- --world midgard                # VOXELHEIM_WORLD is the fallback
 cargo run -- --name thora                   # display name; VOXELHEIM_NAME is the fallback
 cargo run -- --identity /tmp/second         # a second character on one server
 cargo run -- --help
 ```
 
-**The first line is the path a player takes and the rest are the development one, which is not a
-style preference.** With `--account-service` the addresses come from that service's list, each
-carrying the certificate to expect at it; with an address instead, nothing states what to expect
-there, so the session presents no identity and keeps none — a new character every launch. Giving
-both is a usage error rather than a silent precedence rule, because which one won would decide
-whether the certificate was verified against anything.
+**The first line is the path a player takes, the second is the development one, and the third
+connects and is refused.** With `--account-service` alone the addresses come from that service's
+list, each carrying the certificate to expect at it. With `--server` as well, the address is the
+one that was typed and `--world` names the world to ask a ticket for — the session is unverified
+and says so, and it presents the ticket because a server admits nobody without one. With an
+address and no service there is nothing to sign in against, so the hello names no account and the
+server refuses it; that is left reachable because it is the truthful answer to a launch that named
+nowhere to sign in, not because it is a mode anybody should use.
+
+A world with nothing to ask one for — no service, or a service with no address — is a usage error
+rather than a value silently dropped. The table on `Start` in `main.rs` is the whole rule.
 
 A server has to be listening for any of that to reach one — `go run ./cmd/voxelheimd` from
 `server/`, whose own "Running it" section has the flags. The account-service line additionally
@@ -1207,6 +1245,14 @@ Five rules hold that down, and they are all in `net/session.rs`:
 - **Nothing is decided from it.** It is read, presented, and stored. The one thing derived from
   it is whether the welcome's token is the one presented, which the status line renders as
   `returning` or `new character`; the server had settled the identity before it answered.
+
+  **A session that kept no file reports neither, and says `signed in` instead.** With nothing
+  presented there was no comparison to make, so `new character` would be a claim with nothing
+  behind it — and on the development path it is a claim the server contradicts in the same
+  handshake, because the ticket names an account and the account is what the server restores a
+  character from. `schemas/handshake.fbs` is explicit that the client is not told which of the two
+  happened, so `net::Identity` has a third variant for not knowing rather than a default that
+  guesses.
 - **A missing or unreadable file is a first connection, never a failure** — but only one of
   those two is then replaced, and the difference is whether the bytes were *read*. A
   wrong-length file has been seen not to be a token, so the welcome's token overwrites it. A
@@ -1275,29 +1321,38 @@ Recorded here so the next reader does not mistake them for oversights:
 
 - **`--server` reaches a server nothing can verify, and it is the development path.** An address
   typed on the command line is in no list, so no fingerprint states what to expect there and the
-  session is encrypted but unauthenticated. What keeps that from being a hole is that the same
-  variant presents no identity and stores none — see "The session is encrypted, and that is not a
-  setting" — so a client on this path has nothing to hand to whoever answered, at the cost of a
-  new character every launch. There is no way to *state* an expected fingerprint on the command
-  line either: adding one would be a second source of truth beside the list, which is the thing
-  #107 removed. A developer who needs a returning character runs an account service.
+  session is encrypted but unauthenticated. What keeps that from being a hole is what it may hand
+  over: no stored identity, ever — see "The session is encrypted, and that is not a setting" — and
+  a session ticket only when the launch signed in for one, which is bounded by naming one world
+  and expiring in hours. **That second half is a stated trade rather than a property**, and it is
+  #154's: the exposure is one world's session for an afternoon to whoever answered an address the
+  developer chose, against a development path that otherwise cannot connect at all. There is no
+  way to *state* an expected fingerprint on the command line either: adding one would be a second
+  source of truth beside the list, which is the thing #107 removed.
 - **This is a client-side check and the account service is a single point of trust.** Everything
   this client verifies traces back to the one `--account-service` URL: whoever controls that
   service, or the registration key that writes to its registry, chooses which certificate the
   client will accept for a given name. That is the trust chain ending somewhere, which it must,
   and it is why the registration endpoint is behind a key and the list is behind a ticket. What
   the connection to that service is *not* is authenticated — see the plain-HTTP gap below.
-- **The two stacks are checked meeting, but by hand and not by CI, and #107 narrowed what it can
-  check.** `scripts/interop-check.sh` drives the real client against the real server over TLS:
-  a session established and encrypted, and a stored identity never presented to a server nothing
-  stated a certificate for. What it can no longer check end to end is the refusal, because the
-  expectation now comes from an account service's list rather than from a file the script could
-  write — standing one up would mean a Discord application and a browser. That assertion moved to
-  `net/tls.rs`'s own tests, where the expectation is a value; what the script still owns is the
-  half no unit test on either side can see. It is not in CI because the client opens a window and
-  needs a display, and because the Go and Rust gates run in separate jobs with separate
-  toolchains — no job has both binaries. **Run it after touching `internal/transport`,
-  `internal/certs` or `net/tls.rs`.**
+- **The two stacks are checked meeting, but by hand and not by CI — and the gap that leaves is
+  what #154 fell into.** `scripts/interop-check.sh` drives the real client against the real server
+  over TLS: the documented development command reaching a world, a hello with no account refused
+  in the server's own words, a ticket for one world refused by a server running another, and a
+  stored identity never presented to a server nothing stated a certificate for. It mints its own
+  ticket with a key it generated and gives the server the public half as `-ticket-key`, because a
+  real sign-in needs a Discord application and a browser; the account service is the only thing it
+  stands in for.
+
+  **It did not catch #154 because it had itself stopped working** — it started `voxelheimd`
+  without `-world-name`, which that server now refuses, so the whole script died at the first
+  check. A check nobody runs is a check that rots into a check nobody can run, and both halves of
+  #154 shipped green underneath it. What it can *not* check end to end is the certificate refusal,
+  because the expectation comes from a list rather than from a file the script could write; that
+  assertion lives in `net/tls.rs`'s own tests, where the expectation is a value. It is not in CI
+  because the client opens a window and needs a display, and because the Go and Rust gates run in
+  separate jobs with separate toolchains — no job has both binaries. **Run it after touching
+  `internal/transport`, `internal/certs`, `internal/session`, `internal/ticket` or `net/`.**
 
   It is worth saying what that script caught the first time it ran, because it is the argument
   for keeping it: every unit test on both sides passed while the client discarded whatever one
@@ -1324,12 +1379,13 @@ Recorded here so the next reader does not mistake them for oversights:
   what exists; what it means operationally is that the account service belongs on a loopback
   address or behind a private network until the crate discussion happens. It deserves its own
   issue rather than a drive-by.
-- **A sign-in caches an account ticket and nothing presents one to a *game* server yet.** The
-  ticket is what reads the server list, which is what #107 added; `ClientHello.session_ticket` is
-  still `None` in `net/session.rs`, because joining needs a ticket minted for the world being
-  joined and this client holds one that names no world. A game server answers `ErrWrongWorld` to
-  an account ticket, correctly. Turning one into the other is the next step and is not this
-  issue's: the session still identifies a player by the per-server token, exactly as before.
+- **Joining from the list still presents no ticket, and that is #107.** #154 gave the
+  *development* path a world to name, so `--server` with `--account-service` signs in for that
+  world and presents what comes back. A row of the list already carries the world name — it is the
+  registry's own identifier — but nothing on that path asks for a world ticket yet, so
+  `connect_on_request` passes `None` and a listed session identifies a player by the per-server
+  token, exactly as before. A game server answers `ErrWrongWorld` to an account ticket, correctly,
+  so presenting the cached one there would be worse than presenting nothing.
 - **The loopback listener binds a fixed port, so two clients cannot sign in at once.** The port is
   the account service's `redirect_uri`, which the provider requires to match exactly; a second
   client signing in at the same moment finds the port taken and says so. The refusal names it.

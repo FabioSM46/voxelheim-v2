@@ -46,6 +46,11 @@ use super::session::{Environment, data_home, identity_file_name, write_atomicall
 /// wrong-length rule above ambiguous.
 const TICKET_DIR: &[&str] = &["voxelheim", "account"];
 
+/// Where cached *world* tickets live: one directory per service, one file per world
+/// inside it. See [`world_ticket_path`] for why they are not kept beside the account
+/// ticket that [`TICKET_DIR`] holds.
+const WORLD_TICKET_DIR: &[&str] = &["voxelheim", "world-ticket"];
+
 /// How many bytes the expiry occupies in the record: an `i64` of Unix seconds,
 /// little-endian, which is what every other record in this repository is.
 const EXPIRES_AT_LEN: usize = 8;
@@ -119,6 +124,38 @@ pub(super) fn default_ticket_path(authority: &str, env: &Environment) -> Option<
     let mut path = data_home(env)?;
     path.extend(TICKET_DIR);
     path.push(identity_file_name(authority)?);
+    Some(path)
+}
+
+/// Where a ticket for one world is kept:
+/// `$XDG_DATA_HOME/voxelheim/world-ticket/<authority>/<world>`.
+///
+/// **A file of its own, and the separation is the point rather than tidiness.**
+/// [`default_ticket_path`] holds an *account* ticket — one that names no world, which is
+/// what a sign-in produces before a world has been chosen and what the server list is
+/// read with. A world ticket names one world and `ticket.Verify` refuses it at every
+/// other, so the two are not interchangeable in either direction: an account ticket
+/// presented to a game server is `ErrWrongWorld`, and a world ticket sitting where the
+/// account one belongs would leave a client that believes it is signed in holding a
+/// credential for something other than what it is about to do. Both failures look
+/// identical from the login screen — signed in, with no way through and no control to
+/// press — which is the dead end #154 exists to remove, so one file per scope is what
+/// keeps it removed.
+///
+/// Two path components rather than one name with a separator in it, because every
+/// character a world name may hold is a character [`identity_file_name`] also passes
+/// through from an authority: under any joining rule, world `b` at authority `a-b` and
+/// world `a-b` at authority `a` would land on one file. A directory boundary is the one
+/// separator neither half can contain.
+pub(super) fn world_ticket_path(
+    authority: &str,
+    world: &str,
+    env: &Environment,
+) -> Option<PathBuf> {
+    let mut path = data_home(env)?;
+    path.extend(WORLD_TICKET_DIR);
+    path.push(identity_file_name(authority)?);
+    path.push(identity_file_name(world)?);
     Some(path)
 }
 
@@ -400,6 +437,47 @@ mod tests {
         // And an address that does not reduce to a safe name is no file at all,
         // rather than an invented escaping scheme.
         assert_eq!(default_ticket_path("../escape:1", &env), None);
+    }
+
+    /// **An account ticket and a world ticket never share a file**, and neither do two
+    /// worlds. A cache that held the wrong scope would leave a client believing it is
+    /// signed in while holding a credential the thing it is about to do cannot use —
+    /// which reads, from the login screen, exactly like the dead end #154 removed.
+    #[test]
+    fn a_world_ticket_is_kept_apart_from_the_account_one_and_from_other_worlds() {
+        let scratch = Scratch::new("ticket-world-path");
+        let env = scratch.environment();
+
+        let midgard = world_ticket_path("127.0.0.1:7780", "midgard", &env).expect("a path");
+        assert!(
+            midgard.ends_with("voxelheim/world-ticket/127.0.0.1_7780/midgard"),
+            "{midgard:?}"
+        );
+
+        assert_ne!(
+            Some(midgard.clone()),
+            default_ticket_path("127.0.0.1:7780", &env)
+        );
+        assert_ne!(
+            Some(midgard),
+            world_ticket_path("127.0.0.1:7780", "asgard", &env)
+        );
+        assert_ne!(
+            world_ticket_path("127.0.0.1:7780", "midgard", &env),
+            world_ticket_path("127.0.0.1:7781", "midgard", &env)
+        );
+
+        // The one shape a joining rule would have collapsed: a hyphen is legal in both
+        // halves, so `a-b` at `a` and `b` at `a-b` have to stay two files. A directory
+        // boundary is the separator neither half can contain.
+        assert_ne!(
+            world_ticket_path("host-a", "b", &env),
+            world_ticket_path("host", "a-b", &env)
+        );
+
+        // A world that does not reduce to a safe name is no file at all, rather than an
+        // invented escaping scheme — the rule the address half already follows.
+        assert_eq!(world_ticket_path("127.0.0.1:7780", "../escape", &env), None);
     }
 
     #[test]
