@@ -1,12 +1,27 @@
 // Package persist stores what the server keeps about a player between connections.
 //
-// # Keyed by a hash, never by the credential
+// # Keyed by a character, owned by an account
 //
-// One file per identity, named for its [identity.PlayerID] — the SHA-256 of the
-// token the client presents. The token itself is never written here, and neither is
-// anything derived from it that could be presented in its place: a leaked players
-// directory is a list of hashes, and a hash is not a way in. That is the whole
-// reason the id exists as a separate type from the token.
+// One file per **character**, named for the [CharacterID] this server minted for it.
+// An account may hold several characters on one world — that is the whole reason the
+// key is not the account — and the account that owns one is a field inside the record
+// rather than the name of the file. Keyed by the account you are back to one character
+// per world; keyed by the character, "every character this account owns here" is a
+// filter over an index instead of a lookup.
+//
+// The owner is written down as an [identity.PlayerID], the one-way hash of the account,
+// and never as the account itself. A leaked players directory is therefore a directory
+// of digests and a list of digests, which is not a way in and is not a list of who
+// plays here. That is the whole reason the id exists as a separate type from the
+// account.
+//
+// # The index, and why it is built once
+//
+// A name is unique within a world and an account's characters have to be found on every
+// connection. Both are map hits: [OpenStore] reads the directory once, at startup, and
+// keeps a character's id, owner and name in memory. Nothing walks the directory again —
+// a join that did would cost an account with one character a read of every character in
+// the world. See characters.go, which owns the index and the rules over it.
 //
 // # The delta store's discipline, reused rather than re-derived
 //
@@ -41,12 +56,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
@@ -59,26 +75,23 @@ import (
 // a reader of an older build must refuse a newer record rather than parse a prefix
 // of it. Deliberately separate from world.StoreVersion — see the package comment.
 //
-// **2 adds the life: position, yaw, health and every slot.** No migration, and none is
-// possible: a v1 record holds a display name and a timestamp, which is not enough to
-// reconstruct where anybody stood. Nothing has shipped, so there is nothing to migrate
-// — a v1 file is refused by [world.CheckHeader] like any other version this build does
-// not speak, and the connection presenting its token is admitted as a new player.
-const StoreVersion uint32 = 2
-
-// MaxNameBytes is the longest display name a record keeps.
+// **2 added the life: position, yaw, health and every slot.**
 //
-// A cap rather than a validation: player_name is untrusted display text of any
-// length the frame can hold, and a record is a fixed-shape thing on the server's own
-// disk. Names longer than this are truncated on the way in — at a rune boundary, so
-// what is stored is still the text it was a prefix of — and never refused, because a
-// long name is not a reason to turn a player away.
-const MaxNameBytes = 64
+// **3 makes the record a character's rather than an identity's.** It gains the id the
+// character is keyed by and the account that owns it, and its name stops being a
+// display string nothing keyed on. There is no migration and there deliberately is
+// none: a v2 record names a player by the hash of their account, which is not enough to
+// say which of that account's characters it was, and the code to guess would outlive by
+// years the single event it serves. A v2 record is refused by [world.CheckHeader] like
+// any other version this build does not speak — and a whole *directory* of them is set
+// aside on the first start under this format rather than read. See [OpenStore].
+const StoreVersion uint32 = 3
 
-// On-disk layout, little-endian throughout, one file per identity.
+// On-disk layout, little-endian throughout, one file per character.
 //
-//	players/<player-id-hex>.bin
+//	players/<character-id-hex>.bin
 //	    magic[4] version:u32 last_seen:i64
+//	    character_id:u64 owner:32
 //	    pos:3×f64 yaw:f64 health:u16
 //	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
 //	    name_len:u16 name[name_len] crc32:u32
@@ -92,10 +105,13 @@ const MaxNameBytes = 64
 // lose: a slot's index *is* its identity to the client, and a sparse encoding would put
 // that mapping in the file instead of in the layout.
 //
-// The id is in the file name and not in the record, unlike the chunk store's
-// coordinate. It could not be a check if it were: the name is a hash of a secret, so
-// a record copied to the wrong name is not something this package can detect by
-// re-reading a field — only the client's token decides which file is looked up.
+// **The id is in the record as well as in the file name, and that reasoning inverted
+// with #103.** It could not be a check while the name was a hash of a secret: a record
+// copied to the wrong name was not something this package could detect, because only
+// the client's token decided which file was opened. A character id is a number this
+// server minted and nothing derives it from a credential, so the two can be compared —
+// and the startup scan does compare them, refusing a record that does not agree with
+// the name it was found under.
 const (
 	playersDirName = "players"
 	recordFileExt  = ".bin"
@@ -103,16 +119,22 @@ const (
 	// corruptFileSuffix marks a record this build could not read. See Store.Quarantine.
 	corruptFileSuffix = ".corrupt"
 
+	// preAccountsSuffix marks the players directory a build before characters wrote.
+	// See setAsidePreAccounts.
+	preAccountsSuffix = ".pre-accounts"
+
 	// slotSize is one slot's four uint16s: item, count, durability, max durability.
 	slotSize  = 8
 	slotsSize = int(protocol.InventorySlots) * slotSize
 
-	offLastSeen = world.HeaderSize
-	offPos      = offLastSeen + 8
-	offYaw      = offPos + 3*8
-	offHealth   = offYaw + 8
-	offSlots    = offHealth + 2
-	offNameLen  = offSlots + slotsSize
+	offLastSeen  = world.HeaderSize
+	offCharacter = offLastSeen + 8
+	offOwner     = offCharacter + 8
+	offPos       = offOwner + identity.IDSize
+	offYaw       = offPos + 3*8
+	offHealth    = offYaw + 8
+	offSlots     = offHealth + 2
+	offNameLen   = offSlots + slotsSize
 
 	recordHeaderSize = offNameLen + 2
 	maxRecordSize    = recordHeaderSize + MaxNameBytes + world.ChecksumSize
@@ -120,7 +142,7 @@ const (
 
 var playerMagic = [4]byte{'V', 'X', 'H', 'P'}
 
-// Record is what the server remembers about one player between connections.
+// Record is what the server remembers about one character between connections.
 //
 // The life — position, yaw, health, slots — is written verbatim and read back
 // verbatim. **This package judges none of it**, and that is deliberate rather than an
@@ -130,12 +152,20 @@ var playerMagic = [4]byte{'V', 'X', 'H', 'P'}
 // values through game.Life.Validate before a player is built from them. Two half-copies
 // of one rule is two rules the first time either is edited.
 type Record struct {
-	// Name is the display name the player last connected with, truncated to
-	// MaxNameBytes. Untrusted text, kept for a log line and an operator's eye;
-	// nothing keys on it and it is not unique.
-	Name string
+	// Character is the character this record belongs to, and Owner is the account that
+	// owns it. Name is that character's name.
+	//
+	// **All three are the store's and not the caller's.** [Store.Save] fills them from
+	// its index and ignores whatever a caller put here, because a caller that could set
+	// them could move a character to another account or rename it past the uniqueness
+	// check — which is authoritative logic, and it lives in [Store.Create]. They are
+	// fields of this struct because they are read back out of the file: it is the
+	// records that the index is rebuilt from at startup.
+	Character CharacterID
+	Owner     identity.PlayerID
+	Name      string
 
-	// LastSeen is when the player's last session ended, to the second. Written at
+	// LastSeen is when the character's last session ended, to the second. Written at
 	// teardown, which is the only moment the server knows the answer.
 	LastSeen time.Time
 
@@ -147,9 +177,12 @@ type Record struct {
 	// Yaw is which way they faced, in radians.
 	Yaw float64
 
-	// Health is what they had left. Always non-zero in a record this server wrote — a
+	// Health is what they had left. Always non-zero in a record a session wrote — a
 	// record describes a living player, because a dead one is written as their respawn
 	// would have left them.
+	//
+	// Zero in the one record no session wrote: the first, laid down by [Store.Create].
+	// See [Record.Unplayed].
 	Health uint16
 
 	// Slots is the whole pack, in the shape the wire announces, so a stored pack and a
@@ -157,49 +190,124 @@ type Record struct {
 	Slots [protocol.InventorySlots]protocol.InventoryStack
 }
 
-// Store is one world's players directory.
+// Unplayed reports the record of a character that exists and has never had a session.
 //
-// Pure I/O and safe for concurrent use: every method touches the path of exactly one
-// identity, and one identity has at most one live session by construction (see
-// session.Identities), so two goroutines never write the same file.
+// **Zero health is the marker, and it is not an arbitrary one.** This format has always
+// documented that a record written for a live player carries a non-zero health, because
+// a dead player is written as their respawn would have left them — so zero was already
+// a value no session could produce. [Store.Create] lays one down so that a character
+// exists on disk the moment it exists in the index, which is what lets the index be
+// rebuilt from the records alone, and this is how a reader tells that first record from
+// a life.
 //
-// **A nil *Store is the ephemeral world**, and every method is a no-op on one rather
-// than a branch at each call site — the same shape world.Cache uses for a nil
-// world.Store, and for the same reason.
+// A reader that treated it as a life instead would hand game a health of zero, be told
+// the record is invalid, and set aside the file the store had just written — turning
+// every new character into a quarantine.
+func (r Record) Unplayed() bool { return r.Health == 0 }
+
+// Store is one world's players directory and the index over it.
+//
+// The file half needs no lock of its own: every path is derived from one character id,
+// and a character has at most one live session by construction — one account holds one
+// session (see session.Identities) and one session plays one character — so two
+// goroutines never write the same file. The index half is guarded by [Store.mu].
+// [Store.Load] never takes it; [Store.Save] takes it only to look up which character it
+// is writing; [Store.Create] is the one method that holds it across a write, and
+// characters.go says why.
+//
+// **A nil *Store keeps nothing at all** and every method is a no-op on one rather than a
+// branch at each call site, the same shape world.Cache uses for a nil world.Store. It is
+// not the ephemeral world, though: an ephemeral world still has to refuse a name
+// somebody else is already playing under, because that is a rule about the world rather
+// than about the disk. [NewMemoryStore] is what an ephemeral world gets — a real index
+// with no directory under it.
 type Store struct {
+	// dir is the players directory. Empty for a store that writes nothing.
 	dir string
+
+	// setAside is where a pre-character players directory was moved, and empty when
+	// there was nothing to move. Reported so that whoever opened the store can say so
+	// in a log line: this package writes to no logger.
+	setAside string
+
+	// unreadable is every file the startup scan could not index and set aside instead,
+	// by the path it went to. Reported for the same reason.
+	unreadable []string
+
+	mu      sync.Mutex
+	byID    map[CharacterID]Character
+	byName  map[string]CharacterID
+	byOwner map[identity.PlayerID][]CharacterID
+}
+
+// NewMemoryStore returns a store with an index and no directory: the ephemeral world.
+//
+// Names are still unique, an account still holds at most
+// [MaxCharactersPerAccount] characters, and every refusal is decided exactly as it is
+// with a directory — because those are the world's rules and not the disk's. What an
+// ephemeral world costs is the life: nothing is written, so nothing is ever found, and
+// every character it minted is gone when the process ends.
+func NewMemoryStore() *Store {
+	return &Store{
+		byID:    make(map[CharacterID]Character),
+		byName:  make(map[string]CharacterID),
+		byOwner: make(map[identity.PlayerID][]CharacterID),
+	}
 }
 
 // OpenStore opens the players directory under worldDir, creating it if it is not
-// there.
+// there, and builds the character index from what it holds.
 //
 // worldDir is the operator's -world-dir, already opened and seed-checked by
 // world.OpenStore: this runs after it, so a directory belonging to another seed has
 // already been refused and no player record is written into it.
+//
+// **The first start under this format sets the old directory aside**, before anything
+// else happens to it. See [Store.setAsidePreAccounts].
 func OpenStore(worldDir string) (*Store, error) {
 	if worldDir == "" {
 		// Not a nil store returned quietly: an empty -world-dir is the ephemeral
 		// world, and choosing it is main's decision to make rather than a shape this
-		// constructor should accept and forget about.
+		// constructor should accept and forget about. NewMemoryStore is the store an
+		// ephemeral world gets, and main is what asks for it.
 		return nil, errors.New("persist: the world directory must be named")
 	}
 
-	dir := filepath.Join(worldDir, playersDirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("persist: creating %s: %w", dir, err)
+	s := NewMemoryStore()
+	s.dir = filepath.Join(worldDir, playersDirName)
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return nil, fmt.Errorf("persist: creating %s: %w", s.dir, err)
+	}
+
+	// Before the sweep and before the scan: whatever is in a pre-character directory
+	// moves whole, temporaries and all, so that "nothing was deleted" is true of every
+	// byte in it rather than of the records alone.
+	moved, err := s.setAsidePreAccounts()
+	if err != nil {
+		return nil, err
+	}
+	if moved {
+		return s, nil
 	}
 
 	// Whatever a crash left mid-rename. Inert, because a reader only ever opens an
-	// exact <id>.bin path, so this is housekeeping rather than correctness.
+	// exact <character-id>.bin path, so this is housekeeping rather than correctness.
 	//
 	// The pattern is what keeps it to temporaries of this store's own records. It can
 	// be a pattern rather than a list because this directory is one this store creates
 	// and fills — unlike the world directory above it, which is the operator's (#137).
-	world.SweepTemporaries(dir, "*"+recordFileExt)
-	return &Store{dir: dir}, nil
+	// This store writes exactly one kind of file, so one destination name is the whole
+	// list; the variadic fails closed, so a second kind would have to be named here.
+	world.SweepTemporaries(s.dir, "*"+recordFileExt)
+
+	if err := s.index(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
-// Dir is the players directory this store writes to. Empty for an ephemeral world.
+// Dir is the players directory this store writes to. Empty for a store with no
+// directory under it.
 func (s *Store) Dir() string {
 	if s == nil {
 		return ""
@@ -207,20 +315,226 @@ func (s *Store) Dir() string {
 	return s.dir
 }
 
-// Load reads the record stored for id.
+// SetAside is where a pre-character players directory was moved when this store was
+// opened, and empty when there was nothing to move.
+func (s *Store) SetAside() string {
+	if s == nil {
+		return ""
+	}
+	return s.setAside
+}
+
+// Unreadable is every file the startup scan could not index, by the path it was set
+// aside to. Empty for the ordinary case.
+func (s *Store) Unreadable() []string {
+	if s == nil {
+		return nil
+	}
+	return s.unreadable
+}
+
+// setAsidePreAccounts moves the whole players directory out of the way when it holds
+// records from a build before characters, and reports whether it did.
+//
+// **Nothing is deleted and nothing is written over.** It is the doctrine
+// [Store.Quarantine] keeps, one level up: the directory is the only evidence of what
+// every player on this world had, and a format change is not a reason to lose it. The
+// records inside are unreadable to this build — a v2 record names a player by the hash
+// of their account and cannot say which character it was — so there is no migration to
+// run and deliberately none written. What there is, is a directory an operator can copy
+// somewhere and open at their leisure.
+//
+// The timestamp in the name is the same decision Quarantine records and not decoration:
+// a fixed `players.pre-accounts` would be destroyed by the second run that found
+// something to move, which is the silent overwrite this exists to prevent. The
+// acceptance criterion names the directory `players.pre-accounts/`; the suffix that
+// follows is what keeps that name from being a place two set-asides collide.
+//
+// A directory is detected from its contents rather than from a marker file: any record
+// carrying this store's magic and a version that is not this build's is a record from
+// another format, and one is enough. A version *newer* than this build's is the one
+// case that refuses to start instead — moving a newer build's directory aside would be
+// this build deciding it knows better than the one that wrote it, and an operator who
+// downgraded by accident should find that out before a player does.
+func (s *Store) setAsidePreAccounts() (bool, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return false, fmt.Errorf("persist: reading %s: %w", s.dir, err)
+	}
+
+	older := false
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != recordFileExt {
+			continue
+		}
+		version, ours := recordVersion(filepath.Join(s.dir, entry.Name()))
+		switch {
+		case !ours || version == StoreVersion:
+			continue
+		case version > StoreVersion:
+			return false, fmt.Errorf("%w: %s was written by a build that speaks format version %d; this build speaks %d and will not move a newer world aside",
+				world.ErrCorruptStore, s.dir, version, StoreVersion)
+		default:
+			older = true
+		}
+	}
+	if !older {
+		return false, nil
+	}
+
+	aside := fmt.Sprintf("%s%s.%d", s.dir, preAccountsSuffix, time.Now().UTC().UnixNano())
+	if err := os.Rename(s.dir, aside); err != nil {
+		return false, fmt.Errorf("persist: setting %s aside: %w", s.dir, err)
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return false, fmt.Errorf("persist: creating %s after setting the previous one aside: %w", s.dir, err)
+	}
+	s.setAside = aside
+	return true, nil
+}
+
+// recordVersion reads the format version out of a file's header, and reports whether
+// the file is one this package wrote at all.
+//
+// Eight bytes, not the whole file: this runs over every record in the directory before
+// anything has been indexed, and the question at that point is only which format the
+// directory is in.
+func recordVersion(path string) (uint32, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = file.Close() }()
+
+	var header [world.HeaderSize]byte
+	if _, err := io.ReadFull(file, header[:]); err != nil {
+		return 0, false
+	}
+	if [4]byte(header[0:4]) != playerMagic {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(header[4:8]), true
+}
+
+// index reads every record in the directory once and builds the character index from
+// it.
+//
+// **The records are the source of truth and the index is derived**, which is what makes
+// a restart preserve every character without a second file to keep in step with the
+// first. A file this scan cannot use is set aside rather than skipped: skipping it would
+// leave its id free for a later mint to write over and its name free for a later
+// character to take, and the first of those loses the evidence Quarantine exists to keep.
+//
+// A damaged record does not refuse to start. A world with one is a world that has lost
+// one character, and refusing to open would take every other character, the terrain and
+// the ability to log in at all hostage to it — the same call restoreStructures makes
+// about the camp. A set-aside that *fails* does refuse, for the reason
+// [Store.setAsideUnreadable] gives: a file left where the index would read it is one a
+// later mint can write over.
+//
+// It reads and writes the index without taking [Store.mu], which is safe for the one
+// reason that never generalises: this runs inside [OpenStore], before the store has
+// been returned to anybody, so there is no second goroutine for the lock to exclude.
+func (s *Store) index() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return fmt.Errorf("persist: reading %s: %w", s.dir, err)
+	}
+
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != recordFileExt {
+			continue
+		}
+		path := filepath.Join(s.dir, entry.Name())
+
+		character, err := s.readIndexed(path, entry.Name())
+		if err != nil {
+			if aErr := s.setAsideUnreadable(path); aErr != nil {
+				return aErr
+			}
+			continue
+		}
+		s.insertLocked(character)
+	}
+	return nil
+}
+
+// readIndexed reads one record and answers the character it describes, refusing
+// anything the index cannot hold.
+//
+// Four ways a file is refused beyond the ones decodeRecord already covers, and each is
+// a way the index would otherwise be wrong rather than a way the file is:
+//
+//   - a name that is not sixteen hex characters — not a name this store writes;
+//   - a record whose own character id is not the one it was found under. The id is in
+//     both places precisely so this can be asked;
+//   - a name this world would not accept, which includes the empty one;
+//   - a name a character already indexed is wearing. Only this server writes here, so
+//     that is tampering or a bug rather than a race — and either way one of the two has
+//     to go somewhere an operator can find it. Which one loses is deterministic rather
+//     than arbitrary: os.ReadDir sorts by file name, a file name is the character id in
+//     fixed-width hex, so the higher id is the one that arrives second and is kept aside.
+func (s *Store) readIndexed(path, base string) (Character, error) {
+	id, named := parseCharacterID(base[:len(base)-len(recordFileExt)])
+	if !named {
+		return Character{}, fmt.Errorf("%w: %s is not a name a character record is written under", world.ErrCorruptStore, base)
+	}
+
+	rec, found, err := s.read(path)
+	switch {
+	case err != nil:
+		return Character{}, err
+	case !found:
+		// Raced by something outside this server; there is nothing to index and
+		// nothing to set aside.
+		return Character{}, fmt.Errorf("%w: %s went away while the store was being opened", world.ErrCorruptStore, base)
+	case rec.Character != id:
+		return Character{}, fmt.Errorf("%w: %s holds the record of character %s", world.ErrCorruptStore, base, rec.Character)
+	}
+
+	accepted, folded, err := acceptName(rec.Name)
+	if err != nil {
+		return Character{}, fmt.Errorf("%w: %s: %w", world.ErrCorruptStore, base, err)
+	}
+	if _, taken := s.byName[folded]; taken {
+		return Character{}, fmt.Errorf("%w: %s wears a name another character already has", world.ErrCorruptStore, base)
+	}
+	return Character{ID: id, Owner: rec.Owner, Name: accepted}, nil
+}
+
+// setAsideUnreadable moves a file the index could not use out of the way and records
+// where it went.
+//
+// A failure is returned rather than survived, and for the reason [Store.Quarantine]
+// gives: a file left in place is one a later mint or a later name can write over, and
+// this runs at startup where an operator is reading.
+func (s *Store) setAsideUnreadable(path string) error {
+	aside, err := setAside(path, corruptFileSuffix)
+	if err != nil {
+		return err
+	}
+	s.unreadable = append(s.unreadable, aside)
+	return nil
+}
+
+// Load reads the record stored for a character.
 //
 // Three answers, and the middle one is the point: found, not found, or unreadable.
-// An identity with no file is not an error — it is a token this server has never
-// issued, and the handshake mints a new one for it. A file that exists and cannot be
-// read is an error and must stay one: reporting it as "not found" would mint a new
-// identity whose first teardown writes over the record nobody could read, which
-// turns one corrupt file into a lost player.
-func (s *Store) Load(id identity.PlayerID) (Record, bool, error) {
-	if s == nil {
+// A character with no file is not an error — [Store.Create] writes one, but an
+// ephemeral world writes nothing at all — and the caller starts that character fresh.
+// A file that exists and cannot be read is an error and must stay one: reporting it as
+// "not found" would admit the character and let its first teardown write over the
+// record nobody could read, which turns one corrupt file into a lost character.
+func (s *Store) Load(id CharacterID) (Record, bool, error) {
+	if s == nil || s.dir == "" {
 		return Record{}, false, nil
 	}
-	path := s.recordPath(id)
+	return s.read(s.recordPath(id))
+}
 
+// read is Load without the ephemeral guard and without deriving the path, so that the
+// startup scan can read a file it found rather than one it named.
+func (s *Store) read(path string) (Record, bool, error) {
 	info, err := os.Stat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -249,19 +563,42 @@ func (s *Store) Load(id identity.PlayerID) (Record, bool, error) {
 	return rec, true, nil
 }
 
-// Save writes id's record, atomically. A no-op in an ephemeral world.
+// Save writes a character's record, atomically. A no-op on a store with no directory.
 //
-// The name is truncated here rather than by the caller, so the cap is a property of
-// the format instead of a rule every writer has to remember.
-func (s *Store) Save(id identity.PlayerID, rec Record) error {
+// **The three fields that name a character are taken from the index and not from rec**,
+// whatever the caller put in them. Which account owns a character and what it is called
+// are decisions [Store.Create] made under a lock, and a save that could restate them
+// would be a second, unlocked way to rename a character or move it between accounts.
+// An id this store has never minted is [ErrUnknownCharacter] rather than a new file:
+// the index is what says a character exists, so writing one it does not know about
+// would create a character no lookup could find.
+func (s *Store) Save(id CharacterID, rec Record) error {
 	if s == nil {
 		return nil
 	}
-	return world.WriteAtomic(s.recordPath(id), encodeRecord(rec))
+
+	character, known := s.Character(id)
+	if !known {
+		return fmt.Errorf("%w: %s", ErrUnknownCharacter, id)
+	}
+	return s.writeRecord(character, rec)
+}
+
+// writeRecord puts one record on disk under the character's own name, owner and id. It
+// takes no lock, so [Store.Create] can call it while holding one.
+func (s *Store) writeRecord(character Character, rec Record) error {
+	if s.dir == "" {
+		return nil
+	}
+
+	rec.Character = character.ID
+	rec.Owner = character.Owner
+	rec.Name = character.Name
+	return world.WriteAtomic(s.recordPath(character.ID), encodeRecord(rec))
 }
 
 // Quarantine moves a record this build could not use out of the way, and returns where
-// it went. A no-op in an ephemeral world, which reports an empty path.
+// it went. A no-op on a store with no directory, which reports an empty path.
 //
 // **The file is kept, never deleted and never written over.** A record that fails to
 // load is the only evidence of what a player had, and the bug that produced it is a bug
@@ -269,31 +606,43 @@ func (s *Store) Save(id identity.PlayerID, rec Record) error {
 // next save to replace — turns "one player lost an evening" into "nobody can ever find
 // out why".
 //
+// **The character survives; only its life is gone.** The index is untouched, so the
+// name stays that character's and the account still owns it — a player comes back to
+// the character they had, standing where a character that has never played stands. The
+// alternative, dropping it from the index, would free a name that a record on disk is
+// still wearing.
+//
 // The timestamp in the name is not decoration: renaming to a fixed `.corrupt` would
 // destroy the *previous* corrupt record the second time this ran, which is the same
 // silent overwrite this function exists to prevent.
-func (s *Store) Quarantine(id identity.PlayerID) (string, error) {
-	if s == nil {
+func (s *Store) Quarantine(id CharacterID) (string, error) {
+	if s == nil || s.dir == "" {
 		return "", nil
 	}
+	return setAside(s.recordPath(id), corruptFileSuffix)
+}
 
-	path := s.recordPath(id)
-	aside := fmt.Sprintf("%s%s.%d", path, corruptFileSuffix, time.Now().UTC().UnixNano())
+// setAside renames path out of the way under a suffix and a timestamp, and answers
+// where it went. The one mechanism behind [Store.Quarantine], the startup scan's
+// refusals and the pre-character directory move — one rename, one naming rule, one
+// place to be right about not overwriting anything.
+func setAside(path, suffix string) (string, error) {
+	aside := fmt.Sprintf("%s%s.%d", path, suffix, time.Now().UTC().UnixNano())
 	if err := os.Rename(path, aside); err != nil {
 		return "", fmt.Errorf("persist: setting %s aside: %w", path, err)
 	}
 	return aside, nil
 }
 
-// recordPath is where one identity's record lives. The hex id is the whole name:
-// fixed length, and every character comes from a digest, so nothing a client sends
-// reaches the filesystem.
-func (s *Store) recordPath(id identity.PlayerID) string {
+// recordPath is where one character's record lives. The hex id is the whole name:
+// fixed length, and every character of it comes from a number this server minted, so
+// nothing a client sends reaches the filesystem.
+func (s *Store) recordPath(id CharacterID) string {
 	return filepath.Join(s.dir, id.String()+recordFileExt)
 }
 
 func encodeRecord(rec Record) []byte {
-	name := truncateName(rec.Name)
+	name := rec.Name
 
 	buf := make([]byte, recordHeaderSize+len(name)+world.ChecksumSize)
 	copy(buf[0:4], playerMagic[:])
@@ -302,6 +651,8 @@ func encodeRecord(rec Record) []byte {
 	// than by anything that needs sub-second resolution — and because a zero time
 	// round-trips through Unix seconds unambiguously.
 	binary.LittleEndian.PutUint64(buf[offLastSeen:offLastSeen+8], uint64(rec.LastSeen.UTC().Unix()))
+	binary.LittleEndian.PutUint64(buf[offCharacter:offCharacter+8], uint64(rec.Character))
+	copy(buf[offOwner:offOwner+identity.IDSize], rec.Owner[:])
 
 	for axis, value := range rec.Pos {
 		at := offPos + axis*8
@@ -330,7 +681,8 @@ func encodeRecord(rec Record) []byte {
 // Validate-everything-then-return, the shape world.decodeChunkFile uses: nothing is
 // assembled until every check has passed, so a half-valid record is never a value a
 // caller can hold. What it checks is the *file* — see the Record doc for why the life's
-// own values are judged one layer up.
+// own values are judged one layer up, and readIndexed for the checks that are about the
+// index rather than about either.
 func decodeRecord(data []byte) (Record, error) {
 	if len(data) < recordHeaderSize+world.ChecksumSize {
 		return Record{}, fmt.Errorf("%w: %d bytes is shorter than an empty player record",
@@ -353,11 +705,13 @@ func decodeRecord(data []byte) (Record, error) {
 	}
 
 	rec := Record{
-		Name:     string(data[recordHeaderSize : uint64(recordHeaderSize)+nameLen]),
-		LastSeen: time.Unix(int64(binary.LittleEndian.Uint64(data[offLastSeen:offLastSeen+8])), 0).UTC(),
-		Yaw:      math.Float64frombits(binary.LittleEndian.Uint64(data[offYaw : offYaw+8])),
-		Health:   binary.LittleEndian.Uint16(data[offHealth : offHealth+2]),
+		Name:      string(data[recordHeaderSize : uint64(recordHeaderSize)+nameLen]),
+		Character: CharacterID(binary.LittleEndian.Uint64(data[offCharacter : offCharacter+8])),
+		LastSeen:  time.Unix(int64(binary.LittleEndian.Uint64(data[offLastSeen:offLastSeen+8])), 0).UTC(),
+		Yaw:       math.Float64frombits(binary.LittleEndian.Uint64(data[offYaw : offYaw+8])),
+		Health:    binary.LittleEndian.Uint16(data[offHealth : offHealth+2]),
 	}
+	rec.Owner = identity.PlayerID(data[offOwner : offOwner+identity.IDSize])
 	for axis := range rec.Pos {
 		at := offPos + axis*8
 		rec.Pos[axis] = math.Float64frombits(binary.LittleEndian.Uint64(data[at : at+8]))
@@ -372,21 +726,4 @@ func decodeRecord(data []byte) (Record, error) {
 		}
 	}
 	return rec, nil
-}
-
-// truncateName cuts name to at most MaxNameBytes without splitting a rune.
-//
-// The rune boundary is the whole subtlety: player_name is untrusted UTF-8 of the
-// client's choosing, and a cut through the middle of a multi-byte rune stores text
-// that no longer decodes — a replacement character in an operator's log, from a name
-// that was fine.
-func truncateName(name string) string {
-	if len(name) <= MaxNameBytes {
-		return name
-	}
-	cut := MaxNameBytes
-	for cut > 0 && !utf8.RuneStart(name[cut]) {
-		cut--
-	}
-	return name[:cut]
 }

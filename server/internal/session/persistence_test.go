@@ -120,7 +120,7 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 	// What the teardown wrote, read back through the store rather than assumed. Every
 	// assertion below compares against this, so the test cannot pass by agreeing with
 	// its own guess about where the player ended up.
-	saved, found, err := store.Load(testPlayerID(account))
+	saved, found, err := store.Load(onlyCharacter(t, store, account).ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 		t.Fatal("the session left no record behind")
 	}
 	if saved.Name != "Eivor" {
-		t.Errorf("the record names %q, want the display name the session connected with", saved.Name)
+		t.Errorf("the record names %q, want the character the session created", saved.Name)
 	}
 	if saved.Health == 0 {
 		t.Error("the record holds no health; a record always describes a living player")
@@ -225,7 +225,7 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 		t.Fatal("the idle session did not return")
 	}
 
-	saved, found, err := store.Load(testPlayerID(account))
+	saved, found, err := store.Load(onlyCharacter(t, store, account).ID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

@@ -27,7 +27,7 @@ validation to get wrong.
 | `internal/world` | chunks, terrain generation, the RLE codec, the chunk cache, the world directory | know that sessions exist |
 | `internal/identity` | what an account is, what a player id is, and the one-way hash between them | import anything of ours, or mint anything |
 | `internal/certs` | the server's own TLS certificate: generated once, kept under the world directory | implement any cryptography |
-| `internal/persist` | the player store under `<world-dir>/players/`, the camp in `<world-dir>/structures.bin`, and the world's time of day in `<world-dir>/clock.bin` | be imported by `game` |
+| `internal/persist` | the character store under `<world-dir>/players/` and the name index over it, the camp in `<world-dir>/structures.bin`, and the world's time of day in `<world-dir>/clock.bin` | be imported by `game` |
 | `internal/auth` | the account store under `<auth-dir>/accounts/`: who a person is, never how they prove it | be imported by anything but `cmd/voxelheim-auth` |
 | `internal/discord` | the Discord sign-in: OAuth 2.0 Authorization Code with PKCE, and the sign-ins in flight | import anything of ours, or keep anything the provider hands it |
 | `internal/ticket` | the Ed25519 signing pair beside the accounts, what a session ticket says, and the offline check a game server makes with the public half | import anything of ours but `internal/world`, or offer any way to read the private key |
@@ -1048,6 +1048,40 @@ flush are wired in `cmd/voxelheimd/main.go`.
 - **`-world-dir ""` is an ephemeral world**, chosen explicitly and logged as a warning. It is
   how the tests in this repository run, and the reason every persistence path is a no-op
   against a nil store rather than a branch at each call site.
+- **The one exception is the character index, and #103 is why.** A nil `persist.Store` still keeps
+  nothing, but `session.NewIdentities` substitutes `persist.NewMemoryStore` for one: an index with
+  no directory under it. A name being unique within a world and an account holding at most so many
+  characters are rules about the *world*, not about the disk, and an ephemeral world owes its
+  players both. What it costs them is still only the life.
+
+## Characters, and why the account is not the key
+
+- **A record is keyed by a server-minted `persist.CharacterID` and the account is a field in it.**
+  Keyed by the account there is one character per world, which is the thing #103 removed; keyed by
+  the character, "every character this account owns here" is a filter over an index rather than a
+  lookup. The id is the wire's `ulong` (`CharacterSummary.character_id`) rather than a digest,
+  because a client is shown it and hands it back; it is never zero, which the contract reserves.
+- **The name index is built once, at startup, from the records themselves.** There is no second
+  file to keep in step with the first: `OpenStore` reads the directory once and keeps id, owner
+  and name in memory, so a join is a map hit. A record the index cannot use is *set aside* rather
+  than skipped — skipped, its id stays free for a later mint to write over.
+- **Name uniqueness is one critical section, and that is the acceptance criterion rather than an
+  implementation detail.** `Store.Create` checks the name, checks the allowance, mints the id,
+  writes the record and updates the index under one lock — the shape `Sim.PlaceStructure` uses.
+  Split into a check and a later insert, two creations racing for one name both see it free and
+  both take it. **A `-race` run does not catch that**, because there is no data race to catch:
+  `TestTwoCreationsRacingForOneNameLeaveOneWinner` asserts the outcome instead.
+- **The three refusals map one to one onto reject reasons** — `ErrNameTaken`,
+  `ErrNameRefused` and `ErrCharacterLimit` become `CHARACTER_NAME_TAKEN`,
+  `CHARACTER_NAME_REFUSED` and `CHARACTER_LIMIT_REACHED` in `session.refuseCharacter`, by a
+  switch and never by parsing prose. A refused *name* says which of the two it was, unlike a
+  refused ticket: the player picked it, and the contract says the client may tell them apart.
+- **`players/` from a build before characters is set aside whole on the first start, never
+  migrated.** `players.pre-accounts.<timestamp>/`, the doctrine `Store.Quarantine` keeps one level
+  up, timestamp included so a second set-aside cannot destroy the first. A v2 record names a player
+  by the hash of their account and cannot say which character it was, so there is nothing to
+  convert — and the code to guess would outlive by years the single event it serves. A directory
+  written by a *newer* build is the one case that refuses to start instead.
 
 
 ## The account service, and why it is a second command
@@ -1075,8 +1109,10 @@ simulation uses.
   over to show that somebody is who they say they are is checked by the flow that receives it
   and then dropped. A leaked accounts directory is an embarrassment rather than a way in, and
   that is a property of the format instead of a rule somebody has to keep remembering.
-- **The store judges its keys, and nothing but its keys.** `internal/persist` deliberately judges
-  no contents, because `internal/game` owns what a life may say. There is no such layer above
+- **The store judges its keys, and nothing but its keys.** `internal/persist` still judges no
+  *life*, because `internal/game` owns what a life may say — what it judges is what a key may be,
+  and #103 made a character's name one of those: unique within the world, so it is decided in the
+  store rather than described by it. There is no such layer above
   `internal/auth`, so the line is drawn elsewhere: between keys and description. A provider
   identity and an account id are refused if they are not ones this build would write — on the way
   in *and* on the way out, because a format whose two halves disagree about what an account is
@@ -1097,8 +1133,10 @@ simulation uses.
   a digest is fixed-length hex, and the directory listing is not a roster of provider ids either.
   The identity is written *into* the record as well, so a file copied onto another identity's path
   is caught rather than answered — `internal/world` writes a chunk's coordinate into its file for
-  the same reason, and `internal/persist` cannot, because its name is the hash of a secret and
-  there is nothing in the record to compare against. The NUL between the two halves of the hashed
+  the same reason, and `internal/persist` now does too. It could not while a player record was
+  named for the hash of a token: only the credential decided which file was opened, so there was
+  nothing to compare a name against. A character id is a number this server minted, so #103 put it
+  in the record beside the file name and the startup scan checks the two agree. The NUL between the two halves of the hashed
   input is load-bearing: without it `("disc", "ordX")` and `("discord", "X")` share a file, which
   is two people sharing an account.
 - **The HTTP surface is a table, and the table is the whole surface.** `routes()` is the one place

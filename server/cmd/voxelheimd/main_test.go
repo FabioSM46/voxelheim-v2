@@ -100,11 +100,20 @@ func testPlayerID(account ticket.AccountID) identity.PlayerID {
 func helloFor(t *testing.T, account ticket.AccountID) []byte {
 	t.Helper()
 
+	return helloAsking(t, account, "Eivor")
+}
+
+// helloAsking is helloFor under a chosen display name, which is what a hello says about
+// a character until the character phase lands on the wire: an account with several
+// characters plays the one wearing that name.
+func helloAsking(t *testing.T, account ticket.AccountID, name string) []byte {
+	t.Helper()
+
 	minted, _, err := testPair.Mint(account, testWorld, time.Now())
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	return protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", minted[:])
+	return protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, name, minted[:])
 }
 
 // testTicketKey is the pair's public half in the hex the -ticket-key flag takes.
@@ -686,6 +695,41 @@ func openPlayerStore(t *testing.T, dir string) *persist.Store {
 	return store
 }
 
+// seedCharacter mints the character an account plays here and gives it a life to come
+// back to, answering the character so a test can read its record afterwards.
+//
+// The life is a *living* one, because that is the only kind this build resumes: a health
+// of zero is what persist.Record.Unplayed reads as "this character has never played", so
+// a fixture without one would be admitted with nothing and pass for the wrong reason.
+func seedCharacter(t *testing.T, store *persist.Store, account ticket.AccountID, name string) persist.Character {
+	t.Helper()
+
+	character, err := store.Create(testPlayerID(account), name)
+	if err != nil {
+		t.Fatalf("creating the seeded character: %v", err)
+	}
+	if err := store.Save(character.ID, persist.Record{
+		LastSeen: time.Unix(1, 0),
+		Pos:      [3]float64{0.5, 64, 0.5},
+		Health:   game.PlayerMaxHealth,
+	}); err != nil {
+		t.Fatalf("seeding the record: %v", err)
+	}
+	return character
+}
+
+// onlyCharacter is the one character an account holds in this world, and a fatal failure
+// when it holds none or several.
+func onlyCharacter(t *testing.T, store *persist.Store, account ticket.AccountID) persist.Character {
+	t.Helper()
+
+	held := store.Characters(testPlayerID(account))
+	if len(held) != 1 {
+		t.Fatalf("the account holds %d characters, want exactly 1", len(held))
+	}
+	return held[0]
+}
+
 // firstReply is the handshake's answer on conn.
 func firstReply(t *testing.T, conn *scriptedConn) *vnet.Envelope {
 	t.Helper()
@@ -716,18 +760,7 @@ func TestTwoConnectionsOnOneAccountDoNotBothGetAWelcome(t *testing.T) {
 	players := openPlayerStore(t, dir)
 	account := testAccount(1)
 
-	// A living record, because that is the only kind this build resumes: a health of
-	// zero is refused as unreadable, which would set the file aside and admit both
-	// connections with nothing — a pass for the wrong reason.
-	seeded := persist.Record{
-		Name:     "Eivor",
-		LastSeen: time.Unix(1, 0),
-		Pos:      [3]float64{0.5, 64, 0.5},
-		Health:   game.PlayerMaxHealth,
-	}
-	if err := players.Save(testPlayerID(account), seeded); err != nil {
-		t.Fatalf("seeding the record: %v", err)
-	}
+	seedCharacter(t, players, account, "Eivor")
 
 	first, second := newScriptedConn("first"), newScriptedConn("second")
 	tr := newQueueTransport(first, second)

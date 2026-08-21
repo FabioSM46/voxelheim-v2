@@ -405,7 +405,23 @@ func openPlayers(opts options, log *slog.Logger) (*persist.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening the player store: %w", err)
 	}
-	log.Info("player store opened", "players_dir", store.Dir(), "format_version", persist.StoreVersion)
+	log.Info("player store opened",
+		"players_dir", store.Dir(), "format_version", persist.StoreVersion,
+		"characters", store.Count(), "max_per_account", persist.MaxCharactersPerAccount)
+
+	// **The one event a format change gets, and it is a warning rather than a line
+	// nobody reads.** A directory written before characters cannot be read by this
+	// build and is not migrated — see persist.StoreVersion — so it is moved aside
+	// whole and a fresh one is opened. Nothing was deleted; an operator who wants
+	// those bytes will find them at kept_at, and this is the only time anything says so.
+	if aside := store.SetAside(); aside != "" {
+		log.Warn("this world's players directory predates characters; it has been kept and a fresh one opened",
+			"kept_at", aside, "format_version", persist.StoreVersion)
+	}
+	for _, kept := range store.Unreadable() {
+		log.Error("a character record could not be indexed; it has been kept and that character is not in this world",
+			"kept_at", kept)
+	}
 
 	return store, nil
 }
