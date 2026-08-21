@@ -56,16 +56,39 @@ voxelheim/
 
 ## Running It
 
-Two processes, in either order. The client retries a refused connection, and a server nobody
-has joined simulates an empty world quite happily.
+**Three processes now, and the order matters for the first two.** A player is admitted on a
+signed ticket rather than a token this server minted, so the game server has to hold the account
+service's public key before it can let anybody in — and it reads that key once, at startup.
 
 ```bash
-# terminal 1 — the authoritative server
-cd server && go run ./cmd/voxelheimd     # listens on 127.0.0.1:7777
+# terminal 1 — the account service (listens on 127.0.0.1:7778)
+cd server && go run ./cmd/voxelheim-auth -auth-dir ./authdata
 
-# terminal 2 — the client
-cd client && cargo run --release         # connects to 127.0.0.1:7777
+# terminal 2 — the game server
+cd server && go run ./cmd/voxelheimd \
+  -world-name midgard -account-service http://127.0.0.1:7778
+
+# terminal 3 — the client
+cd client && cargo run --release
 ```
+
+**`-world-name` is required and has no default**, and the refusal it produces is the point: a
+ticket names one world and is useless at any other, so a server that does not know which world it
+is cannot tell its own players' tickets from somebody else's. An empty name resolves to a world id
+of zero, which the verifier refuses outright — the server fails at startup rather than starting and
+admitting everyone. Lowercase letters, digits and hyphens.
+
+**Exactly one of `-account-service` and `-ticket-key` is required, never both.** The first fetches
+the key; the second takes it as hex, which is what `voxelheim-auth` prints at startup and what
+`GET /v1/ticket-key` publishes. Use `-ticket-key` when you would rather not keep the account
+service running:
+
+```bash
+cd server && go run ./cmd/voxelheimd -world-name midgard -ticket-key <hex from the auth log>
+```
+
+Nothing is asked of the account service after that first read. Admitting a player is a signature
+check, so the service being down costs nobody a game.
 
 `--release` is not a nicety on the client: a Bevy debug build renders slowly enough to be
 mistaken for a bug in the renderer.
@@ -80,7 +103,9 @@ held, quads merged, last mesh duration), and where the **server** says the playe
 the one number that says movement is working.
 
 ```bash
-cd server && go run ./cmd/voxelheimd -log-level debug -log-format json
+cd server && go run ./cmd/voxelheimd \
+  -world-name midgard -account-service http://127.0.0.1:7778 \
+  -log-level debug -log-format json
 cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release
 ```
 
