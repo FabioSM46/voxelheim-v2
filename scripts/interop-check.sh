@@ -21,15 +21,16 @@
 # that would have caught #154 on the day it landed is check 2 — the documented
 # development command, asserted to reach a world.
 #
-# **It cannot pass today, and this is where somebody who ran it should read why.** The
-# server answers a hello with `ServerCharacterList` and waits for a character to be
-# chosen; the screen that chooses one is the client half of that phase and is a separate
-# issue (#108). So the client closes with `ServerCharacterList arrived on time and this
-# build cannot answer it`, and every check below that needs a session fails. Nothing here
-# was changed to hide that: a script that reported a pass by asserting less would be worse
-# than one that fails honestly, and the failure names the thing to build next. Check 2 —
-# the documented development command, asserted to reach a world — is the one that comes
-# back when it does.
+# **It could not pass at all between #104 and #108, and what fixed it is `--name`.** The
+# server answers a hello with `ServerCharacterList` and waits for a character to be chosen,
+# and the screen that chooses one waits for a person — which no unattended check can be.
+# `--name Eivor` is the client asking for that character by name and having one created
+# under it when the account holds none, which is what the server itself did with a hello's
+# display name before V7 moved the choice onto the wire. It is a request like any other:
+# the server admits or refuses it on its own terms, and check 2 asserts a world on the far
+# side of a real one. Every `run_client` below passes it, and that is load-bearing rather
+# than decoration — drop it and the client sits on the character screen until `timeout`
+# kills it.
 #
 # **What it checks got narrower when trust on first use was removed, and the reason is
 
@@ -168,6 +169,11 @@ start_server() {
 # Runs the client for a few seconds and returns whatever it said. Never fails the
 # script itself: every check below reads the log, and a client killed by `timeout`
 # exits non-zero by construction.
+#
+# `--name Eivor` is what answers the character phase without a person at the keyboard;
+# see the header. It is passed on every run, including the two that are refused before
+# the phase is reached, because a flag that appeared only where it was needed would be
+# read as part of what those checks are asserting.
 run_client() {
   local log=$1; shift
   # `world settled` is a debug line and it is the signal that chunks arrived and meshed,
@@ -272,7 +278,28 @@ grep -q "a new character" "$WORK/client-again.log" \
   || fail "the server did not restore the account's character on the second launch"
 pass "a second launch is the same account's character, and the client claims nothing about it"
 
-# ---- 6. the fingerprint the server announces is the one a list would carry ----
+# ---- 6. the character phase happened, and the second launch found the first's ----
+#
+# **The one check that reads the phase itself rather than the world on the far side of
+# it.** Check 2 proves a session established; this proves how. The account starts with no
+# characters here, so the first launch is offered an empty list and asks for a creation;
+# the second is offered the character that creation made and asks to play it. Both halves
+# are read from the client's own log, and the counts are the server's own answer — an
+# `--name` that quietly created a second character every launch would pass every other
+# check on this page and fail this one.
+grep -q "the server is waiting for a character: 0 of at most" "$WORK/client-join.log" \
+  || fail "the first launch was not offered an empty character list; see $WORK/client-join.log"
+grep -q "asking to create a character" "$WORK/client-join.log" \
+  || fail "the first launch did not ask to create one; see $WORK/client-join.log"
+grep -q "the server is waiting for a character: 1 of at most" "$WORK/client-again.log" \
+  || fail "the second launch was not offered the character the first made; see $WORK/client-again.log"
+grep -q "asking to play a character this account already has" "$WORK/client-again.log" \
+  || fail "the second launch did not ask to play it; see $WORK/client-again.log"
+grep -q "asking to create a character" "$WORK/client-again.log" \
+  && fail "the second launch created another character instead of playing the first"
+pass "a character is created on the first launch and played on the second"
+
+# ---- 7. the fingerprint the server announces is the one a list would carry ----
 #
 # Not a client assertion at all — it is the join between the two halves. The number in
 # the server's startup line is what an operator registers with the account service, and
@@ -284,4 +311,4 @@ pass "a second launch is the same account's character, and the client claims not
 pass "the server announces a fingerprint of the shape the registry and the client agree on"
 
 echo
-echo "interop: 6/6"
+echo "interop: 7/7"

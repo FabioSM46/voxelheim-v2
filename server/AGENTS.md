@@ -2066,15 +2066,14 @@ Recorded here so the next reader does not mistake them for oversights:
   Placement retains the older behaviour in which the editor's own view is not consulted: a
   neighbouring edit may be applied while its `BlockUpdate` reaches only sessions that hold the
   chunk.
-- **No client can join this server until the client half of the character phase lands** (#108),
-  and that is a sequencing decision rather than a defect. `ClientHello` is answered with
-  `ServerCharacterList` now, and `client/src/net/handshake.rs` answers one with
-  `HandshakeError::Unanswerable("ServerCharacterList")` — a named failure it was given
-  deliberately, because the alternative it replaced was a hang neither end could diagnose. So the
-  client fails cleanly and says why, `scripts/interop-check.sh` cannot pass, and the way through
-  is the screen that chooses a character rather than anything on this side. It is the position
-  `MobKind.Vargr` was already in: the contract is reserved first and the server half is finished
-  first, because the client half is written against the server's actual behaviour.
+- **The client half of the character phase landed in #108, and the gap it closed is worth keeping
+  a sentence about.** Between #104 and #108 this server answered every hello with
+  `ServerCharacterList` and no client could answer one, so nothing could join and
+  `scripts/interop-check.sh` could not pass. That was the sequencing working as intended — the
+  client half is written against the server's actual behaviour, which is the position
+  `MobKind.Vargr` is still in — but it is also what a gap between two halves of one contract costs
+  while it is open, and the only thing that made it survivable was that the client failed by name
+  rather than hanging. The check is green again and asserts the phase itself (check 6).
 - **A game server cannot tell that it reached the right account service** when it fetches
 
   `/v1/ticket-key` over plaintext HTTP, and #131 is where that is closed. The substitution it

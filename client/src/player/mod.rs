@@ -41,7 +41,9 @@
 //! | `target.rs` | the voxel raycast, mining intent/progress, placement and outline |
 //! | `structures.rs` | the tents and forges a snapshot names, and the two requests for one |
 //! | `constants.rs` | the numbers, and which of them mirror the server |
+//! | `appearance.rs` | which part of a body each appearance colour covers, and where it sits |
 
+mod appearance;
 mod camera;
 mod combat;
 mod constants;
@@ -62,6 +64,8 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
+
+pub(crate) use appearance::{BodyPart, parts as body_parts};
 
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
 pub use interpolate::SnapshotBuffer;

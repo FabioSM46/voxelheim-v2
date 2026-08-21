@@ -157,16 +157,20 @@ account rather than on a token this client kept, so the second launch on this pa
 character as the first. The client is deliberately not told which of the two happened and does not
 claim to know — the status line says `signed in`, and the server's log says `returning=true`.
 
-**Right now the client stops one message short of the world, and it says so.** The server answers a
-hello with the account's characters and waits for one to be chosen — the phase that exists so a
-welcome can carry the spawn of the character a player actually picked — and the screen that chooses
-one is the next issue in the set. So this client closes with
-`ServerCharacterList arrived on time and this build cannot answer it: the character phase is not
-implemented` — a named failure rather than a hang, and one the client was given deliberately for
-exactly this day. The two halves land in this order because the client half is written against the
-server's actual behaviour, and the contract has been reserving these messages since V7.
+**Who goes in is chosen after the server answers, not before.** The hello is answered with this
+account's characters on that world, and the client puts them on a screen: pick one, or make another
+while there is room — a name, and a face built from stated palettes with a live preview of it. The
+world arrives only after the server's welcome, which carries the spawn of the character that was
+actually picked. Whether a name may be worn is the server's answer and never this client's guess,
+so `already taken` and `not acceptable` arrive in the server's own words.
 
-
+`--name` skips that screen, and it is the same sentence a hello used to carry: it asks for the
+character wearing that name and has one created under it when this account holds none. That is what
+`voxelheimd` itself did with a display name before V7 moved the choice onto the wire, and it is
+what lets an unattended run — `scripts/interop-check.sh` — reach a world. The server decides either
+way: a name it refuses is refused with `--name` too. The character played on each server is
+remembered under `$XDG_DATA_HOME/voxelheim/characters/<address>` and preselected next time, so the
+common case is one keypress.
 
 The way a *player* reaches a server is `--account-service`: sign in once, then click a server out
 of the list that service answers with. Every row carries the address and the SHA-256 of the

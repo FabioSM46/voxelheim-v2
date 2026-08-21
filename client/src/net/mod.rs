@@ -55,13 +55,14 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 pub use codec::{
-    ActionRefused, AttackRequest, BlockCoord, BlockEditRequest, ChunkCoord, CraftRequest,
-    EditAction, EntityState, Facing, InventoryMoveRequest, InventoryStack, InventoryState,
-    ItemDropState, LifeState, MineProgress, MineRequest, MobAction, MobKind, MobState,
-    PlaceStructureRequest, PlayerInput, PlayerVitals, RecipeId, RefusalReason, RefusedAction,
-    Reject, RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind,
-    StructureState, WorldClock, WorldUpdate,
+    ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
+    ChunkCoord, CraftRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
+    InventoryStack, InventoryState, ItemDropState, LifeState, MineProgress, MineRequest, MobAction,
+    MobKind, MobState, PlaceStructureRequest, PlayerInput, PlayerVitals, RecipeId, RefusalReason,
+    RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams, Snapshot,
+    StructureKind, StructureState, WorldClock, WorldUpdate,
 };
+
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
 // name nothing outside `net` can start deciding from.
@@ -75,7 +76,8 @@ pub use codec::{
 };
 pub use servers::ListedServer;
 use servers::ServerListEvent;
-use session::{NetCommand, SessionEvent};
+use session::{Choice, NetCommand, SessionEvent};
+
 pub use signin::AccountService;
 use signin::{SignInCommand, SignInEvent};
 
@@ -120,8 +122,16 @@ pub enum ConnectionState {
     Connecting,
     /// The socket is up and `ClientHello` is on the wire.
     Handshaking,
+    /// The account's characters have arrived and one of them is being chosen.
+    ///
+    /// **The one state this client spends waiting for a person**, which is why it is a
+    /// state of its own rather than a longer `Handshaking`: what the status line should
+    /// say is that the game is waiting for the player, not that it is waiting for the
+    /// server. [`CharacterChoice`] carries the list while this is the state.
+    Choosing,
     /// A validated `ServerWelcome` arrived. [`Session`] exists.
     Connected,
+
     /// There is no session. `reason` is written for a player to read.
     Rejected { reason: String },
     /// A session that existed has ended.
@@ -169,6 +179,115 @@ pub enum Identity {
     /// missing value to be filled in later: it is the state of a client that presented
     /// no token and is entitled to no opinion.
     Untold,
+}
+
+/// The characters this account owns on this world, present exactly while one is being
+/// chosen.
+///
+/// Inserted when the server answers the hello with them and removed the moment the
+/// exchange ends — a welcome, a refusal or a session that went away — so its presence is
+/// what the character screen is up on, the same shape [`Session`] has for a live session.
+///
+/// **Nothing in it is decided here.** The rows are the server's, the limit is the
+/// server's, and `preselect` is this client's own note about which character it played
+/// here last: a convenience read from a file, matched against the list, and worth exactly
+/// one keypress. See `session::ChosenCharacter`.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct CharacterChoice {
+    characters: Vec<CharacterSummary>,
+    max_characters: u8,
+    preselect: Option<u64>,
+    answered: bool,
+}
+
+impl CharacterChoice {
+    /// Every character this account holds here, in the order the server listed them.
+    ///
+    /// That order is the server's and carries no meaning a client may read — it is not
+    /// recency, not creation order and not rank — so this screen shows it as given rather
+    /// than sorting it into an opinion of its own.
+    pub fn characters(&self) -> &[CharacterSummary] {
+        &self.characters
+    }
+
+    /// How many characters this account may hold here, including the ones above.
+    pub fn max_characters(&self) -> u8 {
+        self.max_characters
+    }
+
+    /// Which character to start on: the one this client played here last, when it is
+    /// still in the list. `None` starts on the first row.
+    pub fn preselect(&self) -> Option<u64> {
+        self.preselect
+    }
+
+    /// Whether this account may create another character here.
+    ///
+    /// The server refuses one past the limit with `CHARACTER_LIMIT_REACHED` whatever this
+    /// answers; what it buys is a screen that does not offer what it has just been told
+    /// is unavailable. It is the same courtesy a grayed-out recipe row is.
+    pub fn has_room(&self) -> bool {
+        self.characters.len() < usize::from(self.max_characters)
+    }
+
+    /// Whether a choice has already gone out for this exchange.
+    ///
+    /// **The one piece of state that keeps a second click from ending the session.** A
+    /// welcome is the answer to a choice, so the server leaves the character phase the
+    /// moment it takes one — and a second `SelectCharacterRequest` then arrives on a
+    /// session that is in the world, where it is a protocol error and closes the
+    /// connection. It lives here rather than on the screen so that *any* producer is
+    /// covered by it, and the screen reads it to stop offering a control that would.
+    pub fn answered(&self) -> bool {
+        self.answered
+    }
+
+    /// A pending choice without a socket, so the screen that draws one can be exercised
+    /// headlessly. Test-only, for the reason `ListedServer::for_a_test` is: this is a
+    /// value the server sends, and a system that could build one would be a client
+    /// inventing its own characters.
+    #[cfg(test)]
+    pub fn for_a_test(characters: Vec<CharacterSummary>, max_characters: u8) -> Self {
+        Self {
+            characters,
+            max_characters,
+            preselect: None,
+            answered: false,
+        }
+    }
+
+    /// The same, remembering a character this client played here before.
+    #[cfg(test)]
+    pub fn preselecting(mut self, character_id: u64) -> Self {
+        self.preselect = Some(character_id);
+        self
+    }
+
+    /// The same, already answered — what the boundary leaves behind once a choice has
+    /// gone out, and the state a screen must offer nothing in.
+    #[cfg(test)]
+    pub fn already_answered(mut self) -> Self {
+        self.answered = true;
+        self
+    }
+}
+
+/// The character screen answering the list: play this one, or make this one.
+///
+/// **A message rather than a frame, and the boundary is the point.** `ui` may ask; only
+/// `net` may write to a socket — the same rule [`ConnectRequest`] and
+/// [`DisconnectRequest`] follow. The frame itself is built and written on the session
+/// thread, which is the only writer on that socket until the welcome.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub enum ChooseCharacter {
+    /// Play the character this id names — one the server minted and listed.
+    Play(u64),
+    /// Make one and play it. What names a character is the *server's* rule, so an
+    /// unacceptable name is a refusal with a reply rather than something judged here.
+    Create {
+        name: String,
+        appearance: Appearance,
+    },
 }
 
 /// The address this client dialled. Read by the UI so the status line can name it;
@@ -461,6 +580,9 @@ pub struct NetPlugin {
     dial: Dial,
     player_name: String,
     identity_path: Option<PathBuf>,
+    /// Where per-server files are kept, when a caller names the directory. `None` in
+    /// every shipped launch — see [`session::Target::data_home`].
+    data_home: Option<PathBuf>,
     /// Which transport the session thread builds.
     ///
     /// Always [`session::Transport::Encrypted`] in a shipped client — the other variant
@@ -480,6 +602,7 @@ impl NetPlugin {
             dial: Dial::OnRequest,
             player_name: DEFAULT_PLAYER_NAME.to_owned(),
             identity_path: None,
+            data_home: None,
             transport: session::Transport::Encrypted,
         }
     }
@@ -571,6 +694,21 @@ impl NetPlugin {
         self.identity_path = path;
         self
     }
+
+    /// Keeps this client's per-server files under `path` rather than under the data
+    /// directory the environment names.
+    ///
+    /// **Test-only, and it exists because one of those files is written by a *session***:
+    /// the character a welcome settles on is remembered per server, so a test that drove a
+    /// whole handshake would otherwise leave a file in the developer's own data directory
+    /// — and a later run reading it back would make one test depend on another. The
+    /// identity file has `--identity` for the same reason; this one has no flag, because
+    /// nothing a player does needs to move it.
+    #[cfg(test)]
+    fn with_data_home(mut self, path: PathBuf) -> Self {
+        self.data_home = Some(path);
+        self
+    }
 }
 
 impl Plugin for NetPlugin {
@@ -582,6 +720,7 @@ impl Plugin for NetPlugin {
         let settings = SessionSettings {
             player_name: self.player_name.clone(),
             identity_path: self.identity_path.clone(),
+            data_home: self.data_home.clone(),
             transport: self.transport,
         };
 
@@ -593,6 +732,7 @@ impl Plugin for NetPlugin {
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
             .add_message::<ConnectRequest>()
+            .add_message::<ChooseCharacter>()
             // Registered whether or not a session exists yet, which is the whole
             // point: the connect system is what makes one. Each of the three reads
             // the link as an `Option`, so a client with no session is a client
@@ -603,6 +743,9 @@ impl Plugin for NetPlugin {
                     connect_on_request,
                     connect_once_signed_in,
                     drain_session_events.in_set(DrainNetwork),
+                    // After the drain, so a choice made this frame is sent against the
+                    // exchange this frame's events describe rather than the last one's.
+                    send_character_choice.after(DrainNetwork),
                     disconnect_on_request.after(DrainNetwork),
                 )
                     .chain(),
@@ -656,6 +799,9 @@ impl Plugin for NetPlugin {
 struct SessionSettings {
     player_name: String,
     identity_path: Option<PathBuf>,
+    /// Where the per-server files live when something names the directory. `None` in
+    /// every shipped launch — see [`session::Target::data_home`].
+    data_home: Option<PathBuf>,
     transport: session::Transport,
 }
 
@@ -686,6 +832,7 @@ fn start_session(
     let addr = addr.to_owned();
     let player_name = settings.player_name.clone();
     let identity_path = settings.identity_path.clone();
+    let data_home = settings.data_home.clone();
     let transport = settings.transport;
 
     thread::Builder::new()
@@ -698,6 +845,7 @@ fn start_session(
                     player_name,
                     identity_override: identity_path,
                     ticket,
+                    data_home,
                     transport,
                 },
                 event_tx,
@@ -931,6 +1079,32 @@ fn drain_session_events(
         match channels.events.try_recv() {
             Ok(SessionEvent::Handshaking) => *state = ConnectionState::Handshaking,
 
+            Ok(SessionEvent::Characters {
+                list,
+                played_before,
+            }) => {
+                // The remembered id is matched against the list here rather than on the
+                // screen, because "still in the list" is the only thing that makes it
+                // worth anything — a character on another account, or a file from a world
+                // that has moved on, preselects nothing rather than a row that is not
+                // there.
+                let preselect = played_before
+                    .filter(|id| list.characters.iter().any(|c| c.character_id == *id));
+                info!(
+                    "the server is waiting for a character: {} of at most {}",
+                    list.characters.len(),
+                    list.max_characters
+                );
+                commands.insert_resource(CharacterChoice {
+                    characters: list.characters,
+                    max_characters: list.max_characters,
+                    preselect,
+                    answered: false,
+                });
+
+                *state = ConnectionState::Choosing;
+            }
+
             Ok(SessionEvent::Established { params, returning }) => {
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
@@ -959,6 +1133,9 @@ fn drain_session_events(
                 );
                 commands.insert_resource(Session(params));
                 commands.insert_resource(identity);
+                // The exchange is over: this session has a character. Removing it is
+                // what takes the screen down, the same way inserting it put one up.
+                commands.remove_resource::<CharacterChoice>();
                 *state = ConnectionState::Connected;
             }
 
@@ -995,6 +1172,7 @@ fn drain_session_events(
                 commands.remove_resource::<Outbound>();
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
+                commands.remove_resource::<CharacterChoice>();
             }
 
             Ok(SessionEvent::Ended(detail)) => {
@@ -1006,6 +1184,7 @@ fn drain_session_events(
                 commands.remove_resource::<Outbound>();
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
+                commands.remove_resource::<CharacterChoice>();
             }
 
             Err(TryRecvError::Empty) => break,
@@ -1048,11 +1227,68 @@ fn drain_session_events(
                     commands.remove_resource::<Outbound>();
                     commands.remove_resource::<Session>();
                     commands.remove_resource::<Identity>();
+                    commands.remove_resource::<CharacterChoice>();
                 }
                 break;
             }
         }
     }
+}
+
+/// Hands the player's choice of character to the net thread.
+///
+/// **Down the command channel rather than the outbound one**, which is what keeps a
+/// single writer on that socket through the handshake: the session thread writes the
+/// hello, then this, and starts the writer thread when the welcome arrives. It is also
+/// what lets the handshake state machine be told that a choice went out — see
+/// `handshake::Handshake::chose`.
+///
+/// The whole frame's batch is consumed and the last one wins, the rule every other
+/// request system here keeps: two clicks in one frame are one choice, not one replayed
+/// on the next frame.
+fn send_character_choice(
+    mut choices: MessageReader<ChooseCharacter>,
+    link: Option<ResMut<NetLink>>,
+    pending: Option<ResMut<CharacterChoice>>,
+) {
+    let Some(choice) = choices.read().last().cloned() else {
+        return;
+    };
+    // Only while the server is actually waiting for one, and only once. A choice
+    // arriving at any other moment is a screen that outlived its exchange; a *second*
+    // one arrives on a session the server has already welcomed, where it is a protocol
+    // error that closes the connection. See [`CharacterChoice::answered`].
+    let Some(mut pending) = pending.filter(|pending| !pending.answered) else {
+        return;
+    };
+
+    // No link is no session; the messages are still consumed above, so nothing replays
+    // into a session opened later.
+    let Some(mut link) = link else {
+        return;
+    };
+
+    let channels = match link.0.get_mut() {
+        Ok(channels) => channels,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let choice = match choice {
+        ChooseCharacter::Play(character) => Choice::Play(character),
+        ChooseCharacter::Create { name, appearance } => {
+            Choice::Create(codec::CreateCharacterRequest { name, appearance })
+        }
+    };
+    // Which of the two went out, and deliberately not who: a character's name is player
+    // text, and the one thing a log needs to say here is which request the session is
+    // now waiting on an answer to. The screen shows the rest, including a refusal.
+    match &choice {
+        Choice::Play(_) => debug!("asking to play a character this account already has"),
+        Choice::Create(_) => debug!("asking to create a character"),
+    }
+    // A closed channel means the thread has already gone, which
+    // `drain_session_events` is about to report. There is nothing to say about it here.
+    let _ = channels.commands.send(NetCommand::Choose(choice));
+    pending.answered = true;
 }
 
 /// Ends the live session without closing the app.
@@ -1093,6 +1329,7 @@ fn disconnect_on_request(
     commands.remove_resource::<Outbound>();
     commands.remove_resource::<Session>();
     commands.remove_resource::<Identity>();
+    commands.remove_resource::<CharacterChoice>();
 }
 
 /// Where a sign-in has got to, and the only thing about one that leaves this
@@ -1561,10 +1798,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::codec::server_side::{
-        DEFAULT_TOKEN, EntityStateWire, WelcomeWire, encode_chunk_data, encode_chunk_unload,
-        encode_entity_snapshot, encode_inventory_state, encode_mine_progress, encode_server_reject,
+        AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire, WelcomeWire,
+        encode_chunk_data, encode_chunk_unload, encode_entity_snapshot, encode_inventory_state,
+        encode_mine_progress, encode_server_character_list, encode_server_reject,
         encode_server_welcome,
     };
+
     use super::codec::{PLAYER_TOKEN_LEN, SESSION_TICKET_LEN, SessionTicket};
     use super::frame::FRAME_HEADER_SIZE;
     use super::session::Scratch;
@@ -1581,11 +1820,37 @@ mod tests {
         /// Answer with these frames, then hold the connection open until the
         /// client closes it. Holding matters: closing immediately would race a
         /// `Connected` assertion against the `Disconnected` that follows.
+        ///
+        /// **The answer to the hello, which is where a refusal belongs**: a ticket this
+        /// server will not admit is refused here, before any character is mentioned.
         Frames(Vec<Vec<u8>>),
+        /// Answer the hello with a character list, wait for the client's choice, and
+        /// only then send these frames.
+        ///
+        /// **The ordinary path from V7 on**, and it is a variant of its own rather than
+        /// the default because the difference is what each test is about: a welcome
+        /// answers a *choice*, and a stub that sent one straight after the hello would be
+        /// testing a server this client refuses.
+        AfterAChoice(Vec<Vec<u8>>),
         /// Close without answering.
         Close,
         /// Hold the connection open and say nothing.
         Hold,
+    }
+
+    /// The list a stub answers a hello with: one character, and room for more.
+    ///
+    /// Its contents matter to exactly one test — the one that asserts what reaches the
+    /// ECS — and every other test needs only that *something* answerable arrived.
+    fn one_character() -> Vec<u8> {
+        encode_server_character_list(
+            Some(&[CharacterSummaryWire {
+                character_id: 900,
+                name: Some("Eivor".to_owned()),
+                appearance: Some(AppearanceWire::default()),
+            }]),
+            3,
+        )
     }
 
     /// A one-connection stand-in for `voxelheimd`, speaking the same framing.
@@ -1598,6 +1863,16 @@ mod tests {
     /// the outbound half of the boundary: that a Bevy system's frame actually reaches a
     /// socket, framed the way the server reads it.
     fn spawn_stub(reply: Reply) -> (String, JoinHandle<Vec<Vec<u8>>>) {
+        spawn_stub_serving(reply, 1)
+    }
+
+    /// The same, answering `connections` clients one after another at one address.
+    ///
+    /// **A second connection buys exactly one thing, and it is what this client
+    /// *remembered* from the first.** The character played on a server is written down per
+    /// address, so the two sessions have to reach the same one — which a stub that served
+    /// a single connection could not offer.
+    fn spawn_stub_serving(reply: Reply, connections: usize) -> (String, JoinHandle<Vec<Vec<u8>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let addr = listener
             .local_addr()
@@ -1606,46 +1881,78 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let mut received = Vec::new();
-            let Ok((mut socket, _)) = listener.accept() else {
-                return received;
-            };
-            socket
-                .set_read_timeout(Some(PATIENCE))
-                .expect("a fresh socket accepts a read timeout");
-
-            // The hello always comes first: the server would refuse anything else.
-            if let Some(frame) = read_one_frame(&mut socket) {
-                received.push(frame);
-            }
-
-            match reply {
-                Reply::Close => return received,
-                Reply::Hold => {}
-                Reply::Frames(frames) => {
-                    for payload in &frames {
-                        let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
-                        framed.extend_from_slice(payload);
-                        if socket.write_all(&framed).is_err() {
-                            return received;
-                        }
-                    }
-                    if socket.flush().is_err() {
-                        return received;
-                    }
+            for _ in 0..connections {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    return received;
+                };
+                socket
+                    .set_read_timeout(Some(PATIENCE))
+                    .expect("a fresh socket accepts a read timeout");
+                if !serve_one(&mut socket, &reply, &mut received) {
+                    return received;
                 }
             }
-
-            // Read until the client hangs up, which is how the socket stays open for
-            // exactly as long as the client wants it — and how everything sent after the
-            // handshake is recorded.
-            while let Some(frame) = read_one_frame(&mut socket) {
-                received.push(frame);
-            }
-
             received
         });
 
         (addr, handle)
+    }
+
+    /// Answers one connection, and reports whether it ended in a way worth carrying on
+    /// from.
+    ///
+    /// Every frame the client sent is pushed onto `received`, in order, which is the only
+    /// way to check the outbound half of the boundary: that a Bevy system's frame actually
+    /// reaches a socket, framed the way the server reads it.
+    fn serve_one(socket: &mut TcpStream, reply: &Reply, received: &mut Vec<Vec<u8>>) -> bool {
+        // The hello always comes first: the server would refuse anything else.
+        if let Some(frame) = read_one_frame(socket) {
+            received.push(frame);
+        }
+
+        let send = |socket: &mut TcpStream, payload: &[u8]| {
+            let mut framed = (payload.len() as u32).to_be_bytes().to_vec();
+            framed.extend_from_slice(payload);
+            socket.write_all(&framed).and_then(|()| socket.flush())
+        };
+
+        match reply {
+            Reply::Close => return true,
+            Reply::Hold => {}
+            Reply::Frames(frames) => {
+                for payload in frames {
+                    if send(socket, payload).is_err() {
+                        return false;
+                    }
+                }
+            }
+            Reply::AfterAChoice(frames) => {
+                // The list, then the choice the client makes, then the answer to it.
+                // Reading the choice before answering is what makes this a stand-in for
+                // the server rather than a stream of frames: a welcome that overtook the
+                // selection would be refused, correctly.
+                if send(socket, &one_character()).is_err() {
+                    return false;
+                }
+                match read_one_frame(socket) {
+                    Some(choice) => received.push(choice),
+                    None => return false,
+                }
+                for payload in frames {
+                    if send(socket, payload).is_err() {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Read until the client hangs up, which is how the socket stays open for exactly
+        // as long as the client wants it — and how everything sent after the handshake is
+        // recorded.
+        while let Some(frame) = read_one_frame(socket) {
+            received.push(frame);
+        }
+        true
     }
 
     /// Reads exactly one length-prefixed frame, the way the server's `ReadFrame`
@@ -1656,6 +1963,33 @@ mod tests {
         let mut payload = vec![0u8; u32::from_be_bytes(header) as usize];
         socket.read_exact(&mut payload).ok()?;
         Some(payload)
+    }
+
+    /// The character screen's stand-in: play the first character on offer, or make one.
+    ///
+    /// Every test in this module is about the boundary rather than about the screen —
+    /// `ui/character.rs` is where choosing is tested — but a session that nobody answers
+    /// for waits in `Choosing` for ever, which is exactly what the server does. So the
+    /// helpers below register this, and the one test that is about the *phase* drives the
+    /// message itself.
+    fn answer_the_character_phase(
+        choice: Option<Res<CharacterChoice>>,
+        mut choices: MessageWriter<ChooseCharacter>,
+    ) {
+        let Some(choice) = choice.filter(|choice| !choice.answered()) else {
+            return;
+        };
+        match choice.characters().first() {
+            Some(character) => {
+                choices.write(ChooseCharacter::Play(character.character_id));
+            }
+            None => {
+                choices.write(ChooseCharacter::Create {
+                    name: "Eivor".to_owned(),
+                    appearance: codec::PLACEHOLDER_APPEARANCE,
+                });
+            }
+        }
     }
 
     /// Builds a headless app: no window, no renderer, no display needed.
@@ -1677,11 +2011,13 @@ mod tests {
     /// The same, keeping its identity in a file the test chose.
     fn headless_with_identity(addr: &str, identity: &std::path::Path) -> App {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(
-            NetPlugin::as_if_listed(addr)
-                .over_plaintext()
-                .with_identity_path(Some(identity.to_path_buf())),
-        );
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(
+                NetPlugin::as_if_listed(addr)
+                    .over_plaintext()
+                    .with_identity_path(Some(identity.to_path_buf())),
+            )
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
         app
     }
 
@@ -1950,7 +2286,7 @@ mod tests {
             hotbar_slots: 9,
             ..WelcomeWire::default()
         };
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(&welcome)]));
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(&welcome)]));
 
         let (mut app, _scratch) = headless(&addr);
         pump_until(&mut app, "Connected", |app| {
@@ -1983,7 +2319,7 @@ mod tests {
         let scratch = Scratch::new("net-first");
         let identity = scratch.join("identity");
         let welcome = WelcomeWire::default();
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(&welcome)]));
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(&welcome)]));
 
         let mut app = headless_with_identity(&addr, &identity);
         pump_until(&mut app, "Connected", |app| {
@@ -2018,7 +2354,7 @@ mod tests {
         let scratch = Scratch::new("net-untold");
         let ticket_path = scratch.join("world-ticket");
         tickets::write(&ticket_path, live_ticket(0x33)).expect("the scratch file is writable");
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2026,7 +2362,8 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .add_plugins(NetPlugin::developing_against_signed_in(&addr).over_plaintext())
             .insert_resource(SignInState::SignedIn)
-            .insert_resource(sign_in_settings("midgard", &ticket_path));
+            .insert_resource(sign_in_settings("midgard", &ticket_path))
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
 
         pump_until(&mut app, "Connected", |app| {
             state(app) == ConnectionState::Connected
@@ -2040,7 +2377,7 @@ mod tests {
         let identity = scratch.join("identity");
         std::fs::write(&identity, DEFAULT_TOKEN).expect("a writable scratch directory");
 
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2077,16 +2414,18 @@ mod tests {
         let identity = scratch.join("identity");
         std::fs::write(&identity, [0x11; PLAYER_TOKEN_LEN]).expect("a writable directory");
 
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(
-            NetPlugin::developing_against(&addr)
-                .over_plaintext()
-                .with_identity_path(Some(identity.clone())),
-        );
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(
+                NetPlugin::developing_against(&addr)
+                    .over_plaintext()
+                    .with_identity_path(Some(identity.clone())),
+            )
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
         pump_until(&mut app, "Connected", |app| {
             state(app) == ConnectionState::Connected
         });
@@ -2119,7 +2458,7 @@ mod tests {
         let identity = scratch.join("identity");
         std::fs::write(&identity, [0x11; PLAYER_TOKEN_LEN]).expect("a writable directory");
 
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2135,6 +2474,133 @@ mod tests {
             presented_token(hello),
             Some(vec![0x11; PLAYER_TOKEN_LEN]),
             "a server the list named was not shown the identity this client holds"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The character phase, end to end across the thread boundary
+    // -----------------------------------------------------------------------
+
+    /// **The whole exchange, over a real socket.** A hello is answered with the account's
+    /// characters, they reach the ECS as a resource a screen can draw, the choice made
+    /// against it reaches the wire as a `SelectCharacterRequest`, and the welcome that
+    /// answers it is what makes a session.
+    #[test]
+    fn a_hello_is_answered_with_characters_and_the_choice_reaches_the_wire() {
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
+            &WelcomeWire::default(),
+        )]));
+        let (mut app, _scratch) = headless(&addr);
+
+        // The list first, and the state that says the game is waiting for a person.
+        pump_until(&mut app, "the character list", |app| {
+            app.world().contains_resource::<CharacterChoice>()
+        });
+        let choice = app.world().resource::<CharacterChoice>().clone();
+        assert_eq!(state(&app), ConnectionState::Choosing);
+        assert_eq!(choice.characters().len(), 1);
+        assert_eq!(choice.characters()[0].character_id, 900);
+        assert_eq!(choice.characters()[0].name, "Eivor");
+        assert_eq!(choice.max_characters(), 3);
+        // Nothing is said about `answered` here: the stand-in for the screen runs after
+        // the drain and inside the same frame, so by the time this reads the resource the
+        // choice has already gone out. What that flag stops is a *second* press, and
+        // `ui/character.rs` is where a press is.
+
+        // And then the answer, which the stand-in for the screen writes.
+        pump_until(&mut app, "Connected", |app| {
+            state(app) == ConnectionState::Connected
+        });
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "the exchange is over and the screen has nothing left to draw"
+        );
+
+        drop(app);
+        let received = stub.join().expect("the stub thread");
+        assert_eq!(received.len(), 2, "hello, then the choice");
+        let envelope = fb::root_as_envelope(&received[1]).expect("the client encodes valid frames");
+        let selection = envelope
+            .payload_as_select_character_request()
+            .expect("the choice is a selection");
+        assert_eq!(
+            selection.character_id(),
+            900,
+            "the client echoed back an id the server did not mint"
+        );
+    }
+
+    /// A welcome that answers no choice ends the connection with a reason a player can
+    /// read.
+    ///
+    /// **The spawn in a welcome belongs to a character**, so one that arrives before the
+    /// picking carries a position for somebody nobody chose. `Reply::Frames` is what makes
+    /// this a *server* that skipped the phase rather than a client that failed to answer.
+    #[test]
+    fn a_welcome_that_answers_no_choice_is_refused() {
+        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+            &WelcomeWire::default(),
+        )]));
+        let (mut app, _scratch) = headless(&addr);
+
+        pump_until(&mut app, "Rejected", |app| {
+            matches!(state(app), ConnectionState::Rejected { .. })
+        });
+        let ConnectionState::Rejected { reason } = state(&app) else {
+            unreachable!("the loop above only exits on Rejected");
+        };
+        assert!(reason.contains("chosen"), "{reason}");
+        assert!(
+            !app.world().contains_resource::<Session>(),
+            "a welcome nobody asked for made a session"
+        );
+    }
+
+    /// **The character a session played is the one the next launch starts on.**
+    ///
+    /// Two sessions at one address: the first plays a character, and the second is offered
+    /// the same list and starts on it. Nothing about the preselection is sent — it is a
+    /// note this client keeps, matched against the list the server sent — and it is worth
+    /// exactly one keypress, which is the whole of what it claims to be.
+    ///
+    /// A creation is deliberately not remembered, and the wire is why: `ServerWelcome`
+    /// names an entity and no character, so a client that has just made one cannot know
+    /// the id the server minted for it.
+    #[test]
+    fn the_character_played_is_the_one_preselected_next_time() {
+        let scratch = Scratch::new("net-remembers");
+        let (addr, _stub) = spawn_stub_serving(
+            Reply::AfterAChoice(vec![encode_server_welcome(&WelcomeWire::default())]),
+            2,
+        );
+
+        let mut preselections = Vec::new();
+        for _ in 0..2 {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .add_plugins(
+                    NetPlugin::as_if_listed(&addr)
+                        .over_plaintext()
+                        .with_identity_path(Some(scratch.join("identity")))
+                        .with_data_home(scratch.join("data")),
+                )
+                .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
+
+            pump_until(&mut app, "the character list", |app| {
+                app.world().contains_resource::<CharacterChoice>()
+            });
+            preselections.push(app.world().resource::<CharacterChoice>().preselect());
+
+            pump_until(&mut app, "Connected", |app| {
+                state(app) == ConnectionState::Connected
+            });
+            drop(app);
+        }
+
+        assert_eq!(
+            preselections,
+            vec![None, Some(900)],
+            "the first visit remembers nothing and the second starts on what was played"
         );
     }
 
@@ -2164,7 +2630,7 @@ mod tests {
     /// comes from the list on every launch" that this module owns.
     #[test]
     fn a_connect_request_dials_the_server_the_row_named() {
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2178,7 +2644,8 @@ mod tests {
             )
             .insert_resource(ServerList::Ready(vec![ListedServer::for_a_test(
                 "midgard", &addr, true,
-            )]));
+            )]))
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
         app.update();
 
         app.world_mut().write_message(ConnectRequest {
@@ -2228,7 +2695,7 @@ mod tests {
         let identity = scratch.join("identity");
         std::fs::write(&identity, [0x11; PLAYER_TOKEN_LEN]).expect("a writable directory");
 
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2253,7 +2720,7 @@ mod tests {
         let identity = scratch.join("identity");
         std::fs::write(&identity, [0x11; 7]).expect("a writable directory");
 
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2282,11 +2749,12 @@ mod tests {
     fn a_welcome_without_a_usable_token_is_refused_over_a_real_socket() {
         // The decoder's invariant, reaching the ECS the way a zero tick rate does.
         for broken in [None, Some(vec![0x11; PLAYER_TOKEN_LEN - 1])] {
-            let (addr, _stub) =
-                spawn_stub(Reply::Frames(vec![encode_server_welcome(&WelcomeWire {
+            let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
+                &WelcomeWire {
                     player_token: broken.clone(),
                     ..WelcomeWire::default()
-                })]));
+                },
+            )]));
 
             let (mut app, _scratch) = headless(&addr);
             pump_until(&mut app, "Rejected", |app| {
@@ -2303,7 +2771,7 @@ mod tests {
 
     #[test]
     fn the_name_the_plugin_was_given_is_the_name_on_the_wire() {
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2312,12 +2780,14 @@ mod tests {
         // in the developer's own data directory.
         let scratch = Scratch::new("net-named");
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(
-            NetPlugin::as_if_listed(&addr)
-                .over_plaintext()
-                .with_player_name("thora")
-                .with_identity_path(Some(scratch.join("identity"))),
-        );
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(
+                NetPlugin::as_if_listed(&addr)
+                    .over_plaintext()
+                    .with_player_name("thora")
+                    .with_identity_path(Some(scratch.join("identity"))),
+            )
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
         pump_until(&mut app, "Connected", |app| {
             state(app) == ConnectionState::Connected
         });
@@ -2332,7 +2802,7 @@ mod tests {
     fn the_identity_goes_when_the_session_does() {
         // Inserted and removed exactly where `Session` is: a status line reading a
         // stale `Identity` after a disconnect would describe a session that ended.
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2459,7 +2929,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_after_the_welcome_leaves_the_session_alone() {
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
             encode_server_welcome(&WelcomeWire::default()),
             encode_entity_snapshot(7, &[EntityStateWire::at(1, 0.5)]),
         ]));
@@ -2484,7 +2954,7 @@ mod tests {
             hotbar_slots: 2,
             ..WelcomeWire::default()
         };
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
             encode_server_welcome(&welcome),
             encode_inventory_state(Some(&[1, 4, 3, 2])),
         ]));
@@ -2516,7 +2986,7 @@ mod tests {
 
     #[test]
     fn mining_progress_after_the_welcome_reaches_its_inbox() {
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
             encode_server_welcome(&WelcomeWire::default()),
             encode_mine_progress(Some([3, 70, -1]), 128),
         ]));
@@ -2543,7 +3013,7 @@ mod tests {
         // frame decoder, the channel and the drain, because an unload applied after
         // the load it precedes would delete a chunk the player can see.
         let coord = [0, 2, 0];
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
             encode_server_welcome(&WelcomeWire::default()),
             encode_chunk_unload(coord),
             encode_chunk_data(coord, &[1u16, 32768]),
@@ -2620,7 +3090,7 @@ mod tests {
             tick_rate: 0,
             ..WelcomeWire::default()
         };
-        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(&welcome)]));
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(&welcome)]));
 
         let (mut app, _scratch) = headless(&addr);
         pump_until(&mut app, "Rejected", |app| {
@@ -2645,7 +3115,7 @@ mod tests {
         //
         // The player plugin is what originates it, so this builds both — which is also the
         // only place the two halves are exercised against each other without a real server.
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 
@@ -2659,9 +3129,11 @@ mod tests {
                     .over_plaintext()
                     .with_identity_path(Some(scratch.join("identity"))),
             )
-            .add_plugins(crate::player::PlayerPlugin);
+            .add_plugins(crate::player::PlayerPlugin)
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
 
         // Long enough for the 20 Hz cadence to fire several times.
+
         pump_until(&mut app, "input frames to reach the stub", |app| {
             app.world()
                 .resource::<crate::player::PlayerStats>()
@@ -2678,9 +3150,18 @@ mod tests {
             Ok(super::codec::Message::ClientOnly("ClientHello")),
             "the handshake still goes first, and from the reader thread"
         );
+        // And the choice second, from that same thread: the writer does not exist until
+        // the welcome, which is what keeps one writer on this socket through a handshake
+        // that waits for a person. Everything after it is input, and input is the only
+        // thing the ECS originates.
+        assert_eq!(
+            super::codec::decode(&sent[1]),
+            Ok(super::codec::Message::ClientOnly("SelectCharacterRequest")),
+            "the character the screen chose is what answers the list"
+        );
 
         let mut ticks = Vec::new();
-        for frame in &sent[1..] {
+        for frame in &sent[2..] {
             assert_eq!(
                 super::codec::decode(frame),
                 Ok(super::codec::Message::ClientOnly("PlayerInput")),
@@ -2710,7 +3191,7 @@ mod tests {
 
     #[test]
     fn dropping_the_app_stops_the_net_thread() {
-        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+        let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
 

@@ -1,7 +1,9 @@
 //! The client's on-screen surface and the input mode that owns the pointer.
 
+mod character;
 mod crosshair;
 mod health;
+
 mod hotbar;
 mod icon;
 mod inventory;
@@ -16,10 +18,14 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use icon::StackIcon;
 
+/// The character a launch named, for `main.rs` to hand to the character screen.
+pub use character::PlayAs;
+
 use crate::net::{
-    ConnectRequest, ConnectionState, DisconnectRequest, InventoryStack, RefreshServerList,
-    ServerList, Session, SignInRequest, SignInState,
+    CharacterChoice, ChooseCharacter, ConnectRequest, ConnectionState, DisconnectRequest,
+    InventoryStack, RefreshServerList, ServerList, Session, SignInRequest, SignInState,
 };
+
 use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals,
     item_palette_id, item_shape,
@@ -89,7 +95,9 @@ impl Plugin for UiPlugin {
             .add_message::<ConnectRequest>()
             .add_message::<RefreshServerList>()
             .add_message::<AppExit>()
+            .add_message::<ChooseCharacter>()
             .add_plugins((
+                character::CharacterUiPlugin,
                 crosshair::CrosshairPlugin,
                 health::HealthUiPlugin,
                 hotbar::HotbarPlugin,
@@ -137,34 +145,73 @@ fn add_input_mode_systems(app: &mut App) {
 /// a screen nobody can read. Closing one that is already open is the same rule rather than
 /// a second one — and both are presentation, since the server owns every outcome a click
 /// in there could ask for.
+/// Every resource that decides which screen owns the pointer, as one parameter.
+///
+/// Grouped rather than listed, for the reason `net::Inboxes` is: there is one of these
+/// per overlay and the list only grows. What it buys beyond a shorter signature is that
+/// the two systems below ask the *same* question — a screen that took the pointer in one
+/// and not the other would be a control nobody can press, or a click that also reached
+/// the world.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Overlays<'w> {
+    sign_in: Option<Res<'w, SignInState>>,
+    list: Option<Res<'w, ServerList>>,
+    choice: Option<Res<'w, CharacterChoice>>,
+    state: Option<Res<'w, ConnectionState>>,
+}
+
+impl Overlays<'_> {
+    /// Whether any full-screen overlay is up. While one is, this frame's input is not
+    /// for the world.
+    fn any_is_up(&self) -> bool {
+        login::login_is_up(self.sign_in.as_deref())
+            || character::character_is_up(self.choice.as_deref())
+            || servers::server_list_is_up(
+                self.list.as_deref(),
+                self.state.as_deref(),
+                self.sign_in.as_deref(),
+            )
+    }
+
+    /// Whether the sign-in or the connection moved this frame, which is what takes a
+    /// player out of a pause menu they never opened.
+    fn moved(&self) -> bool {
+        self.sign_in
+            .as_ref()
+            .is_some_and(|sign_in| sign_in.is_changed())
+            || self.state.as_ref().is_some_and(|state| state.is_changed())
+    }
+
+    /// Whether this is a live session.
+    fn connected(&self) -> bool {
+        self.state
+            .as_deref()
+            .is_some_and(|state| *state == ConnectionState::Connected)
+    }
+}
+
 fn choose_input_mode(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     session: Option<Res<Session>>,
-    sign_in: Option<Res<SignInState>>,
-    list: Option<Res<ServerList>>,
-    state: Option<Res<ConnectionState>>,
+    overlays: Overlays<'_>,
     vitals: Res<SelfVitals>,
     mut mode: ResMut<InputMode>,
 ) {
-    // **The login screen and the server list own the input while either is up.** The
-    // game is running behind them, so a click meant for a control would otherwise also
-    // reach the world as a mining or attack intent. `Menu` is the mode that already
-    // means "this frame's input is not for the world", so this reuses the gate rather
-    // than adding a second one — and `Escape` cannot leave it, because neither screen
-    // is dismissible: the login screen has no "not now", and the server list is where
-    // a client with no session belongs.
-    let overlay_is_up = login::login_is_up(sign_in.as_deref())
-        || servers::server_list_is_up(list.as_deref(), state.as_deref(), sign_in.as_deref());
-    if overlay_is_up {
+    // **A full-screen overlay owns the input while one is up.** The game is running
+    // behind them, so a click meant for a control would otherwise also reach the world as
+    // a mining or attack intent. `Menu` is the mode that already means "this frame's
+    // input is not for the world", so this reuses the gate rather than adding a second
+    // one — and `Escape` cannot leave it, because none of the three is dismissible: the
+    // login screen has no "not now", the server list is where a client with no session
+    // belongs, and a session that has been sent a character list is waiting for one.
+    if overlays.any_is_up() {
         set_mode(&mut mode, InputMode::Menu);
         return;
     }
     // The frame either comes down, the player is playing rather than paused: they
     // never opened the pause menu, and leaving them in it would be this client
     // inventing a press they did not make.
-    if sign_in.is_some_and(|sign_in| sign_in.is_changed())
-        || state.is_some_and(|state| state.is_changed())
-    {
+    if overlays.moved() {
         set_mode(&mut mode, InputMode::Playing);
     }
 
@@ -207,23 +254,16 @@ fn choose_input_mode(
 /// Captures and hides the pointer only for a live playing session.
 fn sync_cursor(
     mode: Res<InputMode>,
-    state: Option<Res<ConnectionState>>,
-    sign_in: Option<Res<SignInState>>,
-    list: Option<Res<ServerList>>,
+    overlays: Overlays<'_>,
     mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    // The pointer belongs to whatever is on top, and while the login screen or the
-    // server list is up that is a button. A locked, invisible cursor over a screen
-    // whose whole content is controls is a screen nobody can press. The list is
-    // redundant with the `Connected` test below — the two are never up together — and
-    // it is named anyway, because "the pointer is released for every overlay" should
-    // be readable here rather than inferred from a state machine somewhere else.
-    let playing = *mode == InputMode::Playing
-        && !login::login_is_up(sign_in.as_deref())
-        && !servers::server_list_is_up(list.as_deref(), state.as_deref(), sign_in.as_deref())
-        && state
-            .as_deref()
-            .is_some_and(|state| *state == ConnectionState::Connected);
+    // The pointer belongs to whatever is on top, and while an overlay is up that is a
+    // button. A locked, invisible cursor over a screen whose whole content is controls is
+    // a screen nobody can press. The overlay test is redundant with the `Connected` one
+    // beside it — none of the three is up on a live session — and it is asked anyway,
+    // because "the pointer is released for every overlay" should be readable here rather
+    // than inferred from a state machine somewhere else.
+    let playing = *mode == InputMode::Playing && !overlays.any_is_up() && overlays.connected();
     let (grab_mode, visible) = if playing {
         // Bevy falls back to Confined on X11, where Locked is unsupported.
         (CursorGrabMode::Locked, false)
