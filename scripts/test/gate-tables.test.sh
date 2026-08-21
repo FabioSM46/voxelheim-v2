@@ -57,6 +57,8 @@ GATES = {
         ("go vet", "go vet ./...", None),
         ("golangci-lint", "golangci/golangci-lint-action", "golangci-lint run"),
         ("go build", "go build ./...", None),
+        ("GOARCH=386", "GOARCH=386 go build ./...", None),
+        ("GOARCH=arm", "GOARCH=arm go build ./...", None),
         ("go test", "go test ./...", None),
     ],
     "client": [
@@ -87,6 +89,7 @@ STEPS = {
         "Vet",
         "Lint (golangci-lint)",
         "Build",
+        "Cross-compile (32-bit)",
         "Test",
     ],
     "client": [

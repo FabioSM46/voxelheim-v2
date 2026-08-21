@@ -76,6 +76,9 @@ func signInService(t *testing.T, fake *fakeDiscord, log *slog.Logger) (*service,
 		signin:          &signIn{flow: flow, accounts: accounts},
 		servers:         servers,
 		registrationKey: &key,
+		// now is left nil, so every test in this file runs against the real clock
+		// exactly as the service does. The one test that needs a different one sets it
+		// itself, where the choice is visible.
 	}, accounts.Dir()
 }
 
@@ -771,7 +774,7 @@ func TestTheTicketKeyEndpointPublishesTheKeyTheTicketsAreSignedWith(t *testing.T
 	t.Parallel()
 
 	fake := newFakeDiscord(t)
-	svc, _ := signInService(t, fake, discard())
+	svc, accountsDir := signInService(t, fake, discard())
 
 	rec := call(t, svc, http.MethodGet, "/v1/ticket-key", "")
 	if rec.Code != http.StatusOK {
@@ -806,9 +809,35 @@ func TestTheTicketKeyEndpointPublishesTheKeyTheTicketsAreSignedWith(t *testing.T
 		t.Error("two reads of the key endpoint answered differently")
 	}
 
-	// And it is not the private half by some accident of encoding.
-	if len(raw) == ed25519.PrivateKeySize || len(raw) == ed25519.SeedSize*2 {
-		t.Error("the endpoint published something the size of private key material")
+	// **And it is not private key material — checked against the bytes on disk, because
+	// the check that used to be here could not fail** (#126).
+	//
+	// It compared len(raw) against ed25519.PrivateKeySize and against ed25519.SeedSize*2.
+	// Both of those are 64, and the Fatalf twelve lines up has already ended the test
+	// unless len(raw) is exactly 32 — so no build could take the branch. A length was
+	// never the right question anyway: the seed this service keeps is 32 bytes, the same
+	// as the key it publishes, so the only check with anything behind it is a comparison
+	// against the file that holds the secret.
+	authDir := authDirOf(accountsDir)
+	signingFile, err := os.ReadFile(filepath.Join(authDir, ticket.SigningKeyFileName))
+	if err != nil {
+		t.Fatalf("reading the signing key file: %v", err)
+	}
+	if bytes.Contains(signingFile, raw) {
+		// Not quoted: if this fires, the published value is private key material.
+		t.Error("the bytes the endpoint published are inside the signing key file")
+	}
+
+	// **And the search is checked, because a Contains that can never match is the same
+	// false pass in a new spelling.** The published bytes are in the file that is
+	// supposed to hold them, which is what makes their absence from the other one mean
+	// something.
+	verifyingFile, err := os.ReadFile(filepath.Join(authDir, ticket.VerifyingKeyFileName))
+	if err != nil {
+		t.Fatalf("reading the verifying key file: %v", err)
+	}
+	if !bytes.Contains(verifyingFile, raw) {
+		t.Error("the published key is not in the verifying key file; this test is not looking at the pair the service signs with")
 	}
 }
 
@@ -1100,5 +1129,96 @@ func TestTheSignInLogSaysWhichKindOfTicketWasIssued(t *testing.T) {
 				t.Errorf("the log does not say which world the sign-in issued a ticket for: %s", logged)
 			}
 		})
+	}
+}
+
+// **The one refusal in this handler that leaves an account behind, driven at last**
+// (#126, defect 12).
+//
+// `errTicketUnavailable` was unreachable from any test: the mint ran off the wall clock,
+// the account id came from a real store, and the world had already been validated — so
+// nothing a test could hand the endpoint made `internal/ticket` refuse to sign. It was
+// also the counter-example to this handler's own doc, which said in as many words that
+// there is no path here on which a refusal leaves an account behind.
+//
+// The clock is what makes it reachable, and it is not a contrivance: a host that has
+// never set its clock reads the epoch, `ticket.Pair.Mint` refuses to sign against one,
+// and this is what the player sees. Before #126 that same host answered **200** with a
+// ticket that had expired eight hours before it was issued — which is worse in every way,
+// because the player is told it worked and is then refused at every game server.
+//
+// Three things are asserted, and the second is the one the doc was wrong about:
+// the status and code the client gets, that the account really is on disk afterwards, and
+// that the sign-in cannot simply be repeated — `Redeem` spent the state before the mint
+// was ever attempted.
+func TestASignInWhoseTicketCannotBeMintedAnswers500AndSaysSo(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, accountsDir := signInService(t, fake, discard())
+
+	// A sign-in has to be *begun* on a clock the flow accepts — the pending sign-in
+	// carries its own expiry — so only the finish half runs at the epoch. That is also
+	// the sequence a real host produces: it is up before it is synchronised.
+	begun := start(t, svc)
+	code := fake.issue(t, begun.AuthorizeURL)
+	svc.now = func() time.Time { return time.Unix(0, 0) }
+
+	rec := finish(t, svc, begun.State, code, begun.FinishSecret)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a sign-in whose ticket could not be minted answered %d: %s", rec.Code, rec.Body.String())
+	}
+	var refusal errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("reading the refusal: %v", err)
+	}
+	if refusal.Error != errTicketUnavailable {
+		t.Errorf("the refusal is %q, want %q", refusal.Error, errTicketUnavailable)
+	}
+	// Nothing of the ticket, the key or the request body is quoted back to a caller
+	// nobody has authenticated. The refusal is one code and nothing else.
+	if got := rec.Body.Len(); got > 128 {
+		t.Errorf("the refusal body is %d bytes, want the error code and nothing else", got)
+	}
+
+	// **The account is on disk.** This is the invariant the handler's doc denied: the
+	// store ran before the mint, and a refusal after it does not undo what it wrote.
+	entries, err := os.ReadDir(accountsDir)
+	if err != nil {
+		t.Fatalf("reading the accounts directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("the refusal left %d accounts on disk, want the one it created before it refused", len(entries))
+	}
+
+	// And the player cannot simply try again with the same request: the authorization
+	// code and the state were spent by the redemption that ran before the mint. This is
+	// the sentence the comment beside the refusal used to have backwards.
+	again := finish(t, svc, begun.State, code, begun.FinishSecret)
+	if again.Code != http.StatusBadRequest {
+		t.Fatalf("repeating the sign-in answered %d, want 400: the state was already spent", again.Code)
+	}
+	var repeat errorResponse
+	if err := json.Unmarshal(again.Body.Bytes(), &repeat); err != nil {
+		t.Fatalf("reading the second refusal: %v", err)
+	}
+	if repeat.Error != errSignInNotFound {
+		t.Errorf("repeating the sign-in answered %q, want %q", repeat.Error, errSignInNotFound)
+	}
+
+	// A clock that is set mints for the same account: the account this refusal created is
+	// the account a later sign-in resumes, which is the whole of why it is not undone.
+	svc.now = nil
+	second := start(t, svc)
+	ok := finish(t, svc, second.State, fake.issue(t, second.AuthorizeURL), second.FinishSecret)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("a sign-in on a clock that is set answered %d: %s", ok.Code, ok.Body.String())
+	}
+	var answer finishResponse
+	if err := json.Unmarshal(ok.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("reading the finish response: %v", err)
+	}
+	if answer.Created {
+		t.Error("the later sign-in created a second account; the one the refusal left should have been resumed")
 	}
 }

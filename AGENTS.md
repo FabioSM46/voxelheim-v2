@@ -589,6 +589,7 @@ connection errors (they fail fast) while keeping the worst case bounded.
 - [ ] **Formatting clean** — `gofmt -l` empty (server) / `cargo fmt --all --check` (client)
 - [ ] **Lint passes** — `go vet ./...` and `golangci-lint run` (server) / `cargo clippy --workspace --all-targets --locked -- -D warnings` (client)
 - [ ] **Build succeeds** — `go build ./...` / `cargo build --workspace --locked`
+- [ ] **Cross-compiles for 32-bit** (server) — `GOARCH=386 go build ./...` and `GOARCH=arm go build ./...`; the runners are amd64 only, so an untyped constant that overflows `int` is invisible to every other gate
 - [ ] **Tests green** — `go test ./...` / `cargo test --workspace --locked`; this repository starts with a clean baseline — keep it that way
 - [ ] **Schemas validated** — `bash scripts/check-schemas.sh` and regenerated bindings, when `schemas/` is touched
 - [ ] **No debug prints** in production code paths
@@ -610,7 +611,7 @@ none of them, so an agent following the skills ran four server gates where CI ru
 
 | Job          | Gates                                                                            |
 | ------------ | -------------------------------------------------------------------------------- |
-| `server`     | `gofmt` check, `go vet`, `golangci-lint` (version pinned in ci.yml), `go build`, `go test` |
+| `server`     | `gofmt` check, `go vet`, `golangci-lint` (version pinned in ci.yml), `go build`, `GOARCH=386 go build ./...` + `GOARCH=arm go build ./...`, `go test` |
 | `client`     | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --locked`, `cargo test --locked` (with Bevy's Linux system deps) |
 | `schemas`    | `scripts/check-schemas.sh`: every contract generates for both consumers, **and the committed `gen/` bindings are the ones it produces** — flatc pinned in `.flatc-version` |
 | `automation` | The full `scripts/test/*.test.sh` suite plus `test_deepseek_review.py` — the pipeline's own regression tests |

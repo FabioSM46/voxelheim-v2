@@ -5,7 +5,9 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -382,7 +384,13 @@ func TestNoPrivateMaterialIsInAnErrorMessage(t *testing.T) {
 		}
 		for encoding, leaked := range renderings(seed) {
 			if strings.Contains(refusal.Error(), leaked) {
-				t.Errorf("the refusal for %s carries the seed as %s: %q", name, encoding, refusal)
+				// **The offending text is not quoted, and that is the whole point of
+				// this test.** A failure here means the refusal carries the signing
+				// key; printing it would move the disclosure from a log line nobody
+				// meant to write into a CI log this repository publishes. The refusal
+				// is named and the encoding is named, which is what a fix needs.
+				t.Errorf("the refusal for %s carries the seed as %s; it is not quoted here, "+
+					"because a failure that printed it would put the key in a public CI log", name, encoding)
 			}
 		}
 	}
@@ -424,20 +432,104 @@ func TestASigningKeyRedactsItselfWhateverFormatterReachesIt(t *testing.T) {
 		"a struct holder": fmt.Sprintf("%v", struct{ K SigningKey }{key}),
 		"the pair itself": fmt.Sprintf("%v %s %#v", pair, pair, pair),
 	}
+	// **Neither loop quotes what it found.** A failure here means the rendering under
+	// test contains the signing key, so printing it would publish the key into whatever
+	// read the test output — which on this repository is a public CI log. Where it leaked
+	// and in which encoding is what a fix needs; the bytes are not.
 	for where, got := range rendered {
 		for encoding, leaked := range renderings(seed) {
 			if strings.Contains(got, leaked) {
-				t.Errorf("%s carries the seed as %s: %q", where, encoding, got)
+				t.Errorf("%s carries the seed as %s (the rendering is deliberately not printed)", where, encoding)
 			}
 		}
 		for encoding, leaked := range renderings(ed25519.NewKeyFromSeed(seed)) {
 			if strings.Contains(got, leaked) {
-				t.Errorf("%s carries the expanded private key as %s: %q", where, encoding, got)
+				t.Errorf("%s carries the expanded private key as %s (the rendering is deliberately not printed)", where, encoding)
 			}
 		}
 	}
 	if !strings.Contains(fmt.Sprintf("%v", key), redactedSigningKey) {
 		t.Error("a signing key does not render as the redaction")
+	}
+}
+
+// **A [Pair] is redacted by value as well as through a pointer, and until #126 it was
+// not.**
+//
+// String, GoString, LogValue and PublicHex were declared on *Pair, so a Pair *value*
+// satisfied neither fmt.Stringer nor slog.LogValuer — and a caller does not have to do
+// anything unusual to hold one. `log.Info("keys", "pair", *keys)` is a dereference; a
+// struct field of type Pair rather than *Pair is a design choice somebody is entitled to
+// make; a `[]Pair` is a slice of values. Every one of those reached slog's default text
+// handler, which formats an unrecognised value with `%+v` and walks straight through the
+// unexported field into the ed25519 key.
+//
+// The receivers are what fixes it and this is the test that says so, driven through **real
+// handlers rather than a stand-in**: which of the two handlers a value reaches matters
+// here, because they fail differently. The text handler prints the key as decimal bytes;
+// the JSON handler marshals a struct with no exported fields to `{}` and so leaks
+// nothing, while publishing nothing an operator can use either. Only one of those is
+// visible in a test that checks for a leak, which is why the disclosure is asserted below
+// as well as the secrecy.
+//
+// [discord.Secret] and [identity.Token] both take value receivers already; Pair was the
+// only redacting type in this repository that did not, and the comment above LogValue
+// asserted the opposite.
+func TestAPairIsRedactedWhenItIsPassedByValue(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pair, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	seed := seedOnDisk(t, dir, pair)
+
+	// The dereference is the whole of what this test does differently.
+	value := *pair
+
+	var text, jsonOut bytes.Buffer
+	slog.New(slog.NewTextHandler(&text, nil)).Info("a pair", "pair", value)
+	slog.New(slog.NewJSONHandler(&jsonOut, nil)).Info("a pair", "pair", value)
+
+	rendered := map[string]string{
+		"%v on a value":                 fmt.Sprintf("%v", value),
+		"%s on a value":                 fmt.Sprintf("a pair: %s", value),
+		"%#v on a value":                fmt.Sprintf("%#v", value),
+		"an error built from a value":   fmt.Errorf("a pair: %v", value).Error(),
+		"a slog text handler":           text.String(),
+		"a slog JSON handler":           jsonOut.String(),
+		"a struct holding a Pair field": fmt.Sprintf("%v", struct{ P Pair }{value}),
+		"a slice of values":             fmt.Sprintf("%v", []Pair{value}),
+	}
+	// Nothing quoted back, for the reason the test above gives: a failure here means the
+	// rendering holds the signing key, and this repository's CI log is public.
+	for where, got := range rendered {
+		for encoding, leaked := range renderings(seed) {
+			if strings.Contains(got, leaked) {
+				t.Errorf("%s carries the seed as %s (the rendering is deliberately not printed)", where, encoding)
+			}
+		}
+		for encoding, leaked := range renderings(ed25519.NewKeyFromSeed(seed)) {
+			if strings.Contains(got, leaked) {
+				t.Errorf("%s carries the expanded private key as %s (the rendering is deliberately not printed)", where, encoding)
+			}
+		}
+	}
+
+	// And the deliberate disclosure survives the dereference. A value that redacted
+	// itself into silence would pass every line above while telling an operator nothing,
+	// which is the failure the JSON handler makes on its own.
+	for where, got := range map[string]string{
+		"%v on a value":       fmt.Sprintf("%v", value),
+		"a slog text handler": text.String(),
+		"a slog JSON handler": jsonOut.String(),
+	} {
+		if !strings.Contains(got, pair.PublicHex()) {
+			// Not quoted either: a rendering that is missing the public key is, in the
+			// state this test was written against, a rendering that holds the private one.
+			t.Errorf("%s does not carry the public key, which is the one half an operator needs", where)
+		}
 	}
 }
 
@@ -544,4 +636,424 @@ func flipPayloadBit(original []byte) []byte {
 	damaged := bytes.Clone(original)
 	damaged[headerSize()] ^= 0x01
 	return damaged
+}
+
+// **Two starts against one directory must not be able to destroy the pair, and until
+// #126 they could** (defect 5).
+//
+// [LoadOrCreate] took no lock, so two callers that both saw an empty directory both
+// generated and both wrote — and the four writes are two renames each, which interleave.
+// One order leaves the signing half from one pair beside the verifying half of another,
+// and the next start refuses with "not two halves of one pair": correct, unrecoverable
+// without a backup, and pointing the operator at the one recovery a first start does not
+// have. The issue measured 64 damaged directories in 200 rounds.
+//
+// The assertions are the two halves of what a lock has to buy. Every caller holding the
+// same public key is the property a service needs — two of them signing with different
+// keys is a fleet where half the tickets fail — and the pair still loading afterwards is
+// the property the *next* start needs.
+//
+// **What this does not buy is two separate processes**, and the limit is written down
+// rather than implied: the mutex is this process's. `internal/auth` and `internal/registry`
+// serialise their own writes exactly this far and no further, so one `-auth-dir` per
+// process is a property of the deployment here as it already is there.
+func TestTwoStartsAtOnceLeaveOnePairThatLoads(t *testing.T) {
+	t.Parallel()
+
+	// The issue's reproduction: four callers on one directory, enough rounds that the
+	// interleaving is not left to a single coin flip.
+	const callers, rounds = 4, 200
+
+	for round := range rounds {
+		dir := t.TempDir()
+
+		var wg sync.WaitGroup
+		release := make(chan struct{})
+		pairs := make([]*Pair, callers)
+		errs := make([]error, callers)
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-release
+				pairs[i], errs[i] = LoadOrCreate(dir)
+			}()
+		}
+		close(release)
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: concurrent start %d answered %v", round, i, err)
+			}
+		}
+		for i := 1; i < callers; i++ {
+			if pairs[i].PublicHex() != pairs[0].PublicHex() {
+				t.Fatalf("round %d: two concurrent starts are signing with different keys", round)
+			}
+		}
+
+		// And the next start reads back the pair they left — the assertion the damaged
+		// directories failed, one start later, where nobody would connect it to this.
+		again, err := LoadOrCreate(dir)
+		if err != nil {
+			t.Fatalf("round %d: the start after the concurrent ones could not read the pair they left: %v", round, err)
+		}
+		if again.PublicHex() != pairs[0].PublicHex() {
+			t.Fatalf("round %d: the pair on disk is not the one the concurrent starts returned", round)
+		}
+	}
+}
+
+// **`os.MkdirAll(dir, 0o700)` says nothing about a directory that already exists, and
+// this is the test that turns the request into a fact** (#126, defect 7).
+//
+// rename(2) is governed by permission on the directory rather than on the file, so 0600
+// on the seed stops anybody else reading it and does nothing at all to stop anybody who
+// can write here replacing both halves with a pair of their own — after which this
+// service publishes the attacker's public key at an unauthenticated endpoint and every
+// game server in the fleet admits whoever they mint for. `mkdir -p` under a default umask
+// is 0755, which is to say this is the ordinary deployment rather than an exotic one.
+//
+// Tightened rather than refused; [secureDir] carries the argument for which, and the
+// asymmetry with the key *file* below is deliberate.
+func TestAPreCreatedKeyDirectoryIsTightenedBeforeAPairIsWritten(t *testing.T) {
+	t.Parallel()
+
+	for name, mode := range map[string]fs.FileMode{
+		"the mode mkdir -p leaves under a default umask": 0o755,
+		"group writable":                    0o775,
+		"writable by anybody at all":        0o777,
+		"a group that was meant to read it": 0o750,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := filepath.Join(t.TempDir(), "auth")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatalf("Mkdir: %v", err)
+			}
+			// Chmod rather than a mode handed to Mkdir: Mkdir applies the process umask,
+			// so the mode a test asks for there is not the mode it gets — which is the
+			// same reason t.TempDir() hands back 0777-minus-umask and not 0700.
+			if err := os.Chmod(dir, mode); err != nil {
+				t.Fatalf("Chmod: %v", err)
+			}
+
+			pair, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("LoadOrCreate: %v", err)
+			}
+
+			info, err := os.Stat(dir)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != authDirMode {
+				t.Errorf("the key directory is mode %04o after a first start, want %04o; anybody who can write it can replace the pair inside it",
+					got, authDirMode)
+			}
+
+			// And the pair is a real one that loads, so the tightening happened around
+			// the write rather than instead of it.
+			again, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("the second start could not read the pair: %v", err)
+			}
+			if again.PublicHex() != pair.PublicHex() {
+				t.Error("the second start read a different pair")
+			}
+		})
+	}
+
+	// A directory loosened *after* the pair was written is tightened on the next start
+	// too. The window that matters is every start, not only the first: the pair is
+	// replaceable for as long as the directory is writable.
+	t.Run("a directory loosened after the first start", func(t *testing.T) {
+		t.Parallel()
+
+		dir := filepath.Join(t.TempDir(), "auth")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		if _, err := LoadOrCreate(dir); err != nil {
+			t.Fatalf("LoadOrCreate: %v", err)
+		}
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatalf("Chmod: %v", err)
+		}
+		if _, err := LoadOrCreate(dir); err != nil {
+			t.Fatalf("the second start refused: %v", err)
+		}
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if got := info.Mode().Perm(); got != authDirMode {
+			t.Errorf("a directory loosened after the first start is mode %04o on the next one, want %04o", got, authDirMode)
+		}
+	})
+}
+
+// **A directory this service cannot use is not a directory it may accept** (PR review
+// on #126).
+//
+// [secureDir] asked whether the mode carried bits *outside* [authDirMode], which is the
+// security question and only half of the question that matters. Every mode below 0700 is
+// a subset of it: at 0600, 0400 or 0000 there is no owner execute bit, so nothing inside
+// can be opened by path at all, and at 0500 no pair can be written in. secureDir answered
+// "already correct" to each of them, and LoadOrCreate then failed a few lines further on
+// with a generic permission error naming a key file — for a fault that is in the
+// directory, and after a function whose whole job is to make the mode of that directory
+// true. Normalising to exactly authDirMode is what secureDir's own comment already
+// claimed: a mode it merely tolerates is one nobody can reason about.
+//
+// The assertion is on the mode that results rather than on an error, because root ignores
+// the permission bits and would otherwise pass this test for the wrong reason.
+func TestAKeyDirectoryTooTightForThisServiceIsSetToTheModeItNeeds(t *testing.T) {
+	t.Parallel()
+
+	for name, mode := range map[string]fs.FileMode{
+		"no owner execute, so nothing inside can be opened by path": 0o600,
+		"read and traverse only, so no pair can be written in":      0o500,
+		"reachable by nobody at all":                                0o000,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := filepath.Join(t.TempDir(), "auth")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatalf("Mkdir: %v", err)
+			}
+			if err := os.Chmod(dir, mode); err != nil {
+				t.Fatalf("Chmod: %v", err)
+			}
+			// So that a run which leaves the directory unusable still cleans up after
+			// itself: t.TempDir's own removal is registered first and therefore runs
+			// last.
+			t.Cleanup(func() { _ = os.Chmod(dir, authDirMode) })
+
+			pair, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("LoadOrCreate: %v", err)
+			}
+
+			info, err := os.Stat(dir)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			if got := info.Mode().Perm(); got != authDirMode {
+				t.Errorf("the key directory is mode %04o after a first start, want %04o; this service cannot reach the pair it just wrote",
+					got, authDirMode)
+			}
+
+			// And the pair is a real one that loads, so the mode was corrected around
+			// the write rather than instead of it.
+			again, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("the second start could not read the pair: %v", err)
+			}
+			if again.PublicHex() != pair.PublicHex() {
+				t.Error("the second start read a different pair")
+			}
+		})
+	}
+}
+
+// **A signing key found at a mode anybody else can read is refused, and until #126
+// nothing looked** (defect 11).
+//
+// This package writes the seed at [signingKeyFileMode] and asserts that it did. It never
+// asked what mode the file it *found* was at — and the documented recovery for a damaged
+// pair is to restore it from a backup, which `cp`, `tar -x` without `-p` and a container
+// image layer all land at 0644. The service then starts, mints, publishes, and any local
+// account on the machine can read the one value in this repository whose disclosure
+// cannot be undone.
+//
+// **Refused rather than tightened, which is the opposite of what [secureDir] does one
+// level up, and the difference is what each one can still buy.** A directory that is too
+// open is a risk that can be closed. A key file that is too open is a disclosure that has
+// already happened, for however long the file has been sitting there — chmod would fix
+// the mode and hide the fact that the pair needs replacing. An operator has to be told.
+func TestASigningKeyAnybodyElseCanReadIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for name, mode := range map[string]fs.FileMode{
+		"world readable, as cp and tar -x without -p leave it": 0o644,
+		"readable by a group": 0o640,
+		"writable by anybody": 0o666,
+		"anybody at all":      0o777,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			pair, err := LoadOrCreate(dir)
+			if err != nil {
+				t.Fatalf("LoadOrCreate: %v", err)
+			}
+			seed := seedOnDisk(t, dir, pair)
+			signingPath := filepath.Join(dir, SigningKeyFileName)
+			before, err := os.ReadFile(signingPath)
+			if err != nil {
+				t.Fatalf("reading the signing key: %v", err)
+			}
+			if err := os.Chmod(signingPath, mode); err != nil {
+				t.Fatalf("Chmod: %v", err)
+			}
+
+			_, err = LoadOrCreate(dir)
+			if !errors.Is(err, ErrKeyPermissions) {
+				t.Fatalf("a signing key at %04o answered %v, want ErrKeyPermissions", mode, err)
+			}
+			// The refusal names the file and what to do about it, and carries none of
+			// what is inside it. Not quoted on failure, for the reason every other
+			// secrecy assertion here is not.
+			if !strings.Contains(err.Error(), SigningKeyFileName) {
+				t.Errorf("the refusal %q does not name the file that is wrong", err)
+			}
+			for encoding, leaked := range renderings(seed) {
+				if strings.Contains(err.Error(), leaked) {
+					t.Errorf("the refusal carries the seed as %s (deliberately not printed)", encoding)
+				}
+			}
+
+			// And the file was not written over: whatever the operator has is still
+			// there, which is the same promise every other refusal in this file makes.
+			after, err := os.ReadFile(signingPath)
+			if err != nil {
+				t.Fatalf("reading the signing key again: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Error("the refusal wrote over the key file")
+			}
+		})
+	}
+
+	// **The published half is not asked**, and that is not an oversight: it is the value
+	// this service serves to anybody who asks for it at GET /v1/ticket-key, so a mode
+	// that let somebody read it protects nothing and refusing on it would be a refusal
+	// with no threat behind it.
+	t.Run("the published half at 0644 is not a refusal", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		first, err := LoadOrCreate(dir)
+		if err != nil {
+			t.Fatalf("LoadOrCreate: %v", err)
+		}
+		if err := os.Chmod(filepath.Join(dir, VerifyingKeyFileName), 0o644); err != nil {
+			t.Fatalf("Chmod: %v", err)
+		}
+		again, err := LoadOrCreate(dir)
+		if err != nil {
+			t.Fatalf("a world-readable public key was refused: %v", err)
+		}
+		if again.PublicHex() != first.PublicHex() {
+			t.Error("the pair changed")
+		}
+	})
+}
+
+// **A failed second write leaves no orphaned private key** (#126, defect 8).
+//
+// The pair is written in two renames. When the second one failed, the first was left on
+// disk — and from the next start onwards that is half a pair, which this package refuses,
+// with a message that used to offer only the recovery a first start cannot have. There is
+// no backup of a key that existed for a microsecond, and the correct fix was the one the
+// message warned against.
+//
+// [createPair] is the seam this drives, and it exists because a failure no test can reach
+// is how this survived a green suite. The second write is pointed at a path whose parent
+// is a **regular file**, so world.WriteAtomic cannot create its temporary there — a
+// failure that does not depend on the uid the test runs as, which a permission-based one
+// would.
+func TestAFailedSecondWriteLeavesNoOrphanedPrivateKey(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("this is a file, not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	signingPath := filepath.Join(dir, SigningKeyFileName)
+
+	_, err := createPair(signingPath, filepath.Join(blocker, VerifyingKeyFileName))
+	if err == nil {
+		t.Fatal("a pair whose public half could not be written was reported as created")
+	}
+	if _, statErr := os.Stat(signingPath); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("the private half survived a pair write that failed: Stat answered %v", statErr)
+	}
+	// The refusal carries the path that could not be written and nothing of the key that
+	// was almost created.
+	if !strings.Contains(err.Error(), VerifyingKeyFileName) {
+		t.Errorf("the refusal %q does not name the write that failed", err)
+	}
+
+	// And the directory is a clean first start again, which is the whole point of
+	// removing it: an operator who fixes whatever broke the write just restarts.
+	if err := os.Remove(blocker); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	pair, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatalf("the start after a failed pair write was refused: %v", err)
+	}
+	again, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatalf("the pair written after the failure does not load: %v", err)
+	}
+	if again.PublicHex() != pair.PublicHex() {
+		t.Error("the pair written after the failure is not the one that loads")
+	}
+}
+
+// The half-a-pair refusal names **both** recoveries and says which situation each belongs
+// to (#126, defect 8).
+//
+// It used to offer one: "restore the missing half from a backup", with a warning against
+// deleting the other. That is right for a pair that has been in service and useless for
+// the state that most often produces this — a first start whose second write failed —
+// where no backup exists and the correct fix is precisely the one it warned against. The
+// operator is the only party who knows whether a game server was ever given this public
+// key, so the message states both and lets them choose.
+func TestTheHalfAPairRefusalOffersTheRecoveryAFirstStartCanActuallyUse(t *testing.T) {
+	t.Parallel()
+
+	for name, missing := range map[string]string{
+		"the public half is missing":  VerifyingKeyFileName,
+		"the private half is missing": SigningKeyFileName,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			if _, err := LoadOrCreate(dir); err != nil {
+				t.Fatalf("LoadOrCreate: %v", err)
+			}
+			if err := os.Remove(filepath.Join(dir, missing)); err != nil {
+				t.Fatalf("Remove: %v", err)
+			}
+
+			_, err := LoadOrCreate(dir)
+			if err == nil {
+				t.Fatal("half a pair was accepted")
+			}
+			message := err.Error()
+			for _, want := range []string{
+				// Both files, so the operator knows what to look for.
+				SigningKeyFileName, VerifyingKeyFileName,
+				// The recovery for a pair that has been in service...
+				"backup",
+				// ...and the one for a first start that did not finish, which is the
+				// sentence that was missing.
+				"delete",
+			} {
+				if !strings.Contains(message, want) {
+					t.Errorf("the refusal %q does not mention %q", message, want)
+				}
+			}
+		})
+	}
 }

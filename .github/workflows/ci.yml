@@ -210,6 +210,21 @@ jobs:
       - name: Build
         if: ${{ steps.ws.outputs.present == 'true' }}
         run: go build ./...
+      # A 32-bit build is a gate rather than a nicety, and it is here because the
+      # regression that motivated it was invisible without one: an untyped constant
+      # that overflows `int` compiles on a 64-bit runner and nowhere else, so
+      # internal/ticket stopped building for GOARCH=386 and GOARCH=arm while every
+      # job on this workflow stayed green (#126). The runners are amd64 only, which
+      # is the whole reason nothing noticed.
+      #
+      # Two architectures rather than one: 386 is 32-bit with a 64-bit-ish ABI and
+      # arm is the word size a server actually gets deployed on. Compile only —
+      # there is nothing here that can execute either binary.
+      - name: Cross-compile (32-bit)
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          GOARCH=386 go build ./...
+          GOARCH=arm go build ./...
       - name: Test
         if: ${{ steps.ws.outputs.present == 'true' }}
         run: go test ./...

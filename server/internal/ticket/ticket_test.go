@@ -295,9 +295,61 @@ func TestVerifyRefusesLengthsItCannotRead(t *testing.T) {
 	}
 
 	// A verifier that does not know which world it is is a misconfiguration and says
-	// so, rather than silently refusing every ticket it is ever shown.
-	if _, err := Verify(pair.Public(), minted[:], WorldID{}, now); !errors.Is(err, ErrWrongWorld) {
-		t.Errorf("a verifier with no world answered %v, want ErrWrongWorld", err)
+	// so, rather than silently refusing every ticket it is ever shown — and it says so
+	// with its own sentinel. See TestAMisconfiguredVerifierIsNotACrossWorldTicket.
+	if _, err := Verify(pair.Public(), minted[:], WorldID{}, now); !errors.Is(err, ErrVerifierWorld) {
+		t.Errorf("a verifier with no world answered %v, want ErrVerifierWorld", err)
+	}
+}
+
+// **A game server that was never told which world it is must not be reported as somebody
+// else's ticket, and until #126 it was.**
+//
+// Both refusals were [ErrWrongWorld], so the two states that a log has to tell apart
+// produced the same sentinel and, near enough, the same sentence. The misconfiguration is
+// the one that hides: every player is refused, every line says the ticket names another
+// world, and nothing anywhere says that this verifier names none — so the operator reads
+// a run of refusals as an attack, or as a client bug, and never as the empty flag it is.
+//
+// The distinction is asserted in **both** directions, because a sentinel that answered
+// [ErrVerifierWorld] for a genuine cross-world ticket would be exactly as useless, and a
+// test that only checked the new one would not notice.
+func TestAMisconfiguredVerifierIsNotACrossWorldTicket(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	now := time.Now()
+
+	minted, _, err := pair.Mint(anAccount(), midgard(t), now)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+
+	// A configured verifier, shown a ticket for somewhere else. The signature is good and
+	// the ticket is simply not for here — an ordinary answer, and nothing about the
+	// verifier is wrong.
+	_, crossWorld := Verify(pair.Public(), minted[:], hel(t), now)
+	if !errors.Is(crossWorld, ErrWrongWorld) {
+		t.Errorf("a ticket for another world answered %v, want ErrWrongWorld", crossWorld)
+	}
+	if errors.Is(crossWorld, ErrVerifierWorld) {
+		t.Errorf("a ticket for another world answered %v, which also reads as a misconfigured verifier", crossWorld)
+	}
+
+	// A verifier that was never configured, shown the very ticket it should have
+	// admitted. The ticket is fine; this server is not.
+	_, unconfigured := Verify(pair.Public(), minted[:], WorldID{}, now)
+	if !errors.Is(unconfigured, ErrVerifierWorld) {
+		t.Errorf("a verifier with no world answered %v, want ErrVerifierWorld", unconfigured)
+	}
+	if errors.Is(unconfigured, ErrWrongWorld) {
+		t.Errorf("a verifier with no world answered %v, which is the answer a cross-world ticket gets", unconfigured)
+	}
+
+	// And the refusal says what is wrong with *this* server rather than describing the
+	// ticket, which is the whole of what an operator needs from it.
+	if !strings.Contains(unconfigured.Error(), "verifier") {
+		t.Errorf("the refusal %q does not say that the verifier is the thing that is unconfigured", unconfigured)
 	}
 }
 
@@ -334,6 +386,72 @@ func TestMintRefusesWhatItCannotSign(t *testing.T) {
 	// nothing rather than minting something that already expired.
 	if _, _, err := pair.Mint(anAccount(), world, time.Unix(0, 0).Add(-Lifetime)); !errors.Is(err, ErrUnmintable) {
 		t.Errorf("a ticket expiring before the epoch answered %v, want ErrUnmintable", err)
+	}
+}
+
+// **A clock this service cannot trust is refused at the mint, and until #126 it was not.**
+//
+// The guard above it — [encodeBody]'s — is applied to the *expiry*, which is `now` plus
+// [Lifetime]. So it fires only once `now` is further back than a whole lifetime, and the
+// eight hours between 1969-12-31T16:00:00Z and the epoch were a window in which a host
+// that had never set its clock minted happily. What the player got was a 200, a ticket
+// that had expired before it was issued, and no way to try again: the sign-in's state is
+// spent by the redemption that happens before the mint, so the same request answers
+// `sign_in_not_found` from then on.
+//
+// The window is what makes this a real configuration rather than a contrived one. A host
+// with no RTC and no NTP yet reads exactly the epoch, and a container that starts before
+// the clock is stepped reads a few seconds either side of it.
+//
+// **The bound is on `now` rather than on the expiry**, because it is a question about the
+// machine and not about the format: an expiry that fits in four bytes is what the record
+// can hold, and a clock at zero is a service that does not know what time it is. The two
+// guards are both kept for the same reason [encodeBody] refuses what [decodeBody] refuses.
+func TestMintRefusesAClockThatHasNotBeenSet(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	world := midgard(t)
+
+	// Every one of these is inside the window the expiry guard leaves open: add
+	// Lifetime to any of them and the result is still a positive Unix second, which is
+	// why each was minted rather than refused.
+	for name, now := range map[string]time.Time{
+		"the epoch itself":                                    time.Unix(0, 0),
+		"one second before the epoch":                         time.Unix(-1, 0),
+		"a second short of a whole lifetime before the epoch": time.Unix(1, 0).Add(-Lifetime),
+		"the zero time":                                       {},
+		"a whole lifetime before the epoch":                   time.Unix(0, 0).Add(-Lifetime),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, _, err := pair.Mint(anAccount(), world, now); !errors.Is(err, ErrUnmintable) {
+				t.Errorf("Mint at %s answered %v, want ErrUnmintable", now.UTC().Format(time.RFC3339), err)
+			}
+			// The account ticket goes through the same shared mint, so it has to
+			// refuse the same clock — a second entry point that did not would be the
+			// hole this one closed.
+			if _, _, err := pair.MintAccountTicket(anAccount(), now); !errors.Is(err, ErrUnmintable) {
+				t.Errorf("MintAccountTicket at %s answered %v, want ErrUnmintable", now.UTC().Format(time.RFC3339), err)
+			}
+		})
+	}
+
+	// One second past the epoch is the first instant this service will sign for, and it
+	// signs a ticket that verifies — the refusal is a bound on a clock that is unset, not
+	// a general distrust of old ones.
+	first := time.Unix(1, 0)
+	minted, claims, err := pair.Mint(anAccount(), world, first)
+	if err != nil {
+		t.Fatalf("Mint one second after the epoch answered %v, want a ticket", err)
+	}
+	if !claims.ExpiresAt.After(first) {
+		t.Errorf("the ticket expires at %s, which is not after the %s it was minted at",
+			claims.ExpiresAt.Format(time.RFC3339), first.UTC().Format(time.RFC3339))
+	}
+	if _, err := Verify(pair.Public(), minted[:], world, first); err != nil {
+		t.Errorf("the ticket minted one second after the epoch was refused at that instant: %v", err)
 	}
 }
 
@@ -374,6 +492,81 @@ func TestASignedBodyThisServiceWouldNotWriteIsStillRefused(t *testing.T) {
 				t.Errorf("a signed but unwritable body answered %v, want ErrMalformedBody", err)
 			}
 		})
+	}
+}
+
+// **The game server is the party that must not have to trust the account service beyond
+// its signature, and until #126 nothing on the verify side bounded a ticket's remaining
+// life** (defect 10).
+//
+// A body carrying 0xFFFFFFFF in its expiry word is a legal record — [expiresAtSize] holds
+// exactly that value, it is 2106, and [encodeBody] writes it without complaint — so a
+// ticket signed with the real key verified with seventy-six years left on it. [Pair.Mint]
+// cannot produce one today, which is what makes this defence in depth rather than a live
+// hole: it costs one comparison, and what it buys is that a mint which ever *could*
+// produce one is caught by the half of the system that admits players rather than by the
+// half that signs.
+//
+// **The bound carries an explicit allowance for clock skew, and that is not slack for its
+// own sake.** A ticket's expiry is computed from the account service's clock and this
+// comparison is made against the game server's. Without an allowance, a game server whose
+// clock is two seconds behind sees every freshly minted ticket as having more than
+// [Lifetime] left and refuses all of them — turning a bound meant to catch a forgery into
+// the most effective denial of service in the design. The allowance is one-sided: it
+// widens what a verifier accepts as *fresh*, and it does not extend any ticket's life,
+// because [ErrExpired] is checked against `now` with no allowance at all.
+func TestVerifyRefusesATicketWithMoreLifeLeftThanThisServiceEverMints(t *testing.T) {
+	t.Parallel()
+
+	pair := newPair(t)
+	world := midgard(t)
+	now := time.Now()
+
+	sign := func(body []byte) Ticket {
+		var forged Ticket
+		copy(forged[:BodySize], body)
+		copy(forged[BodySize:], ed25519.Sign(pair.signing.key, body))
+		return forged
+	}
+
+	// The issue's own reproduction: the largest expiry the format can hold, signed with
+	// the real key. Everything about it is genuine except how long it lasts.
+	in2106 := sign(bodyWith(t, anAccount(), world, time.Unix(maxExpiresAtUnix, 0)))
+	if _, err := Verify(pair.Public(), in2106[:], world, now); !errors.Is(err, ErrMalformedBody) {
+		t.Errorf("a validly signed ticket expiring in 2106 answered %v, want ErrMalformedBody", err)
+	}
+	// The account service's own verifier drops the world comparison and nothing else, so
+	// it has to make this check too — it is the endpoint a ticket is presented to.
+	if _, err := VerifyAnyWorld(pair.Public(), in2106[:], now); !errors.Is(err, ErrMalformedBody) {
+		t.Errorf("VerifyAnyWorld answered %v for a ticket expiring in 2106, want ErrMalformedBody", err)
+	}
+
+	// The edge, from both sides, so the bound is pinned rather than merely present.
+	atTheBound := sign(bodyWith(t, anAccount(), world, now.Add(Lifetime+verifierClockSkew)))
+	if _, err := Verify(pair.Public(), atTheBound[:], world, now); err != nil {
+		t.Errorf("a ticket expiring exactly at the bound was refused: %v", err)
+	}
+	pastTheBound := sign(bodyWith(t, anAccount(), world, now.Add(Lifetime+verifierClockSkew+2*time.Second)))
+	if _, err := Verify(pair.Public(), pastTheBound[:], world, now); !errors.Is(err, ErrMalformedBody) {
+		t.Errorf("a ticket expiring past the bound answered %v, want ErrMalformedBody", err)
+	}
+
+	// **And a real ticket is unaffected by any of it, including on a verifier whose clock
+	// is behind.** This is the assertion that would have caught a bound written without
+	// an allowance, which is the version of this fix that breaks every join.
+	minted, _, err := pair.Mint(anAccount(), world, now)
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	for name, at := range map[string]time.Time{
+		"a verifier whose clock agrees":             now,
+		"a verifier a second behind":                now.Add(-time.Second),
+		"a verifier the whole allowance behind":     now.Add(-verifierClockSkew),
+		"a verifier an hour into the ticket's life": now.Add(time.Hour),
+	} {
+		if _, err := Verify(pair.Public(), minted[:], world, at); err != nil {
+			t.Errorf("%s refused a freshly minted ticket: %v", name, err)
+		}
 	}
 }
 
@@ -630,10 +823,23 @@ func TestTheLifetimeIsHoursAndNotDays(t *testing.T) {
 // than as text — which is exactly what a [96]byte or an ed25519 key does when nothing
 // redacts it — and it is spelled out here rather than taken from fmt so that it is the
 // digits and not the brackets around them.
+//
+// **The Go-syntax form is the one this map was missing, and its absence is the reason a
+// leak sat inside a green test for three releases.** `%#v` prints a byte slice as
+// `0x9c, 0x1f, …`, and none of the four forms below contains a substring of that — so a
+// signing key printed with the one verb a Stringer never sees was being searched for in
+// four encodings it does not take (#126). It is spelled out here for the reason the
+// decimal form is: what a leak looks like is the digits and the separator, not the type
+// name and the braces fmt puts around them, and a key reached through an unexported field
+// is printed by the same walker whatever the enclosing type happens to be called.
 func renderings(secret []byte) map[string]string {
 	decimal := make([]string, len(secret))
+	goSyntax := make([]string, len(secret))
 	for i, b := range secret {
 		decimal[i] = strconv.Itoa(int(b))
+		// The exact spelling fmt gives one element of a byte slice under %#v:
+		// lowercase, 0x-prefixed and NOT zero-padded, so 0 renders as `0x0`.
+		goSyntax[i] = fmt.Sprintf("%#x", b)
 	}
 	return map[string]string{
 		"raw bytes": string(secret),
@@ -641,6 +847,7 @@ func renderings(secret []byte) map[string]string {
 		"base64":    base64.StdEncoding.EncodeToString(secret),
 		"base64url": base64.RawURLEncoding.EncodeToString(secret),
 		"decimal":   strings.Join(decimal, " "),
+		"Go syntax": strings.Join(goSyntax, ", "),
 	}
 }
 
@@ -686,14 +893,22 @@ func TestAnAccountTicketNamesNoWorldAndIsRefusedByEveryGameServer(t *testing.T) 
 	// in: the second is the one that would be a hole, because a game server that did not
 	// know its own world would otherwise be asking exactly the question an account ticket
 	// answers yes to.
+	//
+	// The two answers are different sentinels and both are refusals, which is the point:
+	// a game server that names a world turns the ticket away because it names another,
+	// and one that names none turns it away because it is misconfigured. See
+	// TestAMisconfiguredVerifierIsNotACrossWorldTicket for why those must not be the same
+	// error. What matters here is that neither of them admits it.
 	for name, world := range map[string]WorldID{
 		"the world it was not issued for": midgard(t),
 		"another world again":             hel(t),
-		"a verifier with no world at all": {},
 	} {
 		if _, err := Verify(pair.Public(), minted[:], world, now); !errors.Is(err, ErrWrongWorld) {
 			t.Errorf("%s answered %v, want ErrWrongWorld", name, err)
 		}
+	}
+	if _, err := Verify(pair.Public(), minted[:], WorldID{}, now); !errors.Is(err, ErrVerifierWorld) {
+		t.Errorf("a verifier with no world at all answered %v, want ErrVerifierWorld", err)
 	}
 }
 

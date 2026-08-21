@@ -1212,6 +1212,58 @@ import, which is what shapes almost every rule below.
   `TestNothingOfTheSigningKeyReachesTheLog` drives a whole mint plus every refusal through both
   handlers, and **reads the seed off disk and proves it rebuilds the published key before looking
   for it** — a secrecy test searching for the wrong bytes passes while proving nothing.
+- **A type composed of redacting types is not itself redacted, and `ticket.Pair` had to learn it
+  twice** (#126). `fmt` reaches a `Stringer` or a `GoStringer` only through a value it could hand
+  to an interface, and `reflect.Value.CanInterface` is false for an **unexported field** — so the
+  reflection walker steps straight past every method `SigningKey` declares and prints the ed25519
+  key inside it. `Pair` therefore declares its own `GoString`; the outer type has to say so.
+  And **every rendering method on a redacting type takes a value receiver**, because a method set
+  on `*T` leaves a `T` value implementing neither `fmt.Stringer` nor `slog.LogValuer`, which a
+  caller reaches by nothing more exotic than a dereference. `discord.Secret` and `identity.Token`
+  were already declared that way; `Pair` was the one that was not, and its own doc comment claimed
+  the opposite.
+- **The redaction test searches the form a leak actually takes.** `renderings()` covers raw, hex,
+  base64, base64url, space-joined decimal **and `%#v`'s `0x9c, 0x1f, …`** — the last of which was
+  missing, so the one guard that should have caught the `%#v` leak was green while the key sat in
+  its output. Nothing in either secrecy test quotes what it found: a failure means the rendering
+  holds the signing key, and this repository's CI log is public.
+- **A clock at or before the epoch is a refusal at the mint.** `encodeBody` bounds the *expiry*,
+  which is `now` plus `Lifetime`, so it only ever fired a whole lifetime before 1970 — and a host
+  that had never set its clock got a 200 and a ticket that expired before it was issued, with no
+  retry, because `Redeem` spends the sign-in before the mint. The bound on `now` lives in
+  `Pair.mint`, where the question is about the machine rather than about the format.
+- **`Verify` bounds a ticket's remaining life, not only its expiry.** A body carrying `0xFFFFFFFF`
+  is a legal record, so a ticket signed with the real key verified with seventy-six years left.
+  `Mint` cannot produce one today, which makes this defence in depth — and the game server is the
+  party that must not have to trust the account service beyond its signature. The bound carries
+  `verifierClockSkew` and the expiry does not: being strict about *freshness* refuses real tickets
+  on a fleet whose clocks differ by seconds, and being lax about expiry is a stolen credential
+  nobody can revoke.
+- **A verifier that names no world answers `ErrVerifierWorld`, not `ErrWrongWorld`.** They are two
+  different things to tell an operator, and the misconfiguration is the one that hides: every
+  player refused, every line saying the ticket names another world, nothing saying that this
+  server names none. `ErrPublicKeySize` is the same class of question and always had its own
+  sentinel.
+- **The key directory's mode is made true rather than asked for; the key file's is refused.**
+  `os.MkdirAll(dir, 0o700)` does nothing to a directory that already exists, and rename(2) is
+  governed by permission on the directory — so 0600 on the seed does not stop anybody who can
+  write there swapping in a pair of their own. `LoadOrCreate` sets the directory to **exactly**
+  `0700` on every start — "carries no bit outside 0700" is the security question and only half of
+  the one that matters, since 0600 and 0500 pass it while leaving a directory this service cannot
+  traverse or write. It does **not** tighten a signing key found at 0644: a directory that is too open
+  is a risk that can still be closed, and a key file that is too open is a disclosure that has
+  already happened, so that one is `ErrKeyPermissions` and a message an operator has to read.
+- **`LoadOrCreate` serialises, and only within one process.** Two concurrent callers both saw an
+  empty directory, both generated and both wrote, and the four renames interleave into a pair the
+  next start refuses — 76 damaged directories in 200 rounds of four callers. A package mutex fixes
+  that exactly as far as `auth.Store` and `registry.Store` fix their own: **one `-auth-dir` per
+  process is a property of the deployment**, and none of the three enforces it.
+- **A failed second write removes the first half.** This is the one place in the package where
+  deleting a private key is right, and it is right because of what this function knows and no
+  later start can: the key it just made has never been published, never signed anything, and is
+  worth nothing. Left behind it is half a pair that refuses every start, with the one recovery a
+  first start has no backup for — which is why that refusal now names both recoveries and says
+  which situation each belongs to.
 - **A ticket is minted at the end of a sign-in, because there is nowhere else it could be.** A
   separate endpoint would need the caller to prove who they are, and the only thing that ever
   proved that is the authorization code the finish request spends. A credential that outlived the

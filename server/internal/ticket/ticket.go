@@ -100,6 +100,25 @@ import (
 // is one edit and one decision.
 const Lifetime = 8 * time.Hour
 
+// verifierClockSkew is how far a verifier's clock may sit behind the account service's
+// before [Verify]'s bound on a ticket's *remaining* life would start refusing tickets
+// that are simply fresh.
+//
+// **It widens nothing about how long a ticket is good for.** [ErrExpired] is decided
+// against `now` with no allowance at all, which is the direction that costs something —
+// there is no revocation, so a ticket that outlived its expiry by five minutes would be
+// five minutes of a stolen credential nobody can withdraw. This constant only appears in
+// the opposite comparison, the one that asks whether a ticket claims *more* life than
+// this service ever mints, where the risk of being strict is that a game server two
+// seconds behind its account service refuses every player it is ever shown.
+//
+// Five minutes is the same number [registry.OfflineAfter] uses, and it is the order of
+// magnitude an unsynchronised host drifts by rather than a measured figure — a fleet
+// running NTP is inside a second of it, and a fleet that is not has a bigger problem than
+// this bound. Unexported because nothing outside this package has a decision to make with
+// it; a game server calls [Verify] and is told yes or no.
+const verifierClockSkew = 5 * time.Minute
+
 // Algorithm names the signature scheme, for the endpoint that publishes the public key.
 //
 // Published rather than assumed, so that a game server reading the key is told what to
@@ -172,7 +191,16 @@ const (
 
 // maxExpiresAtUnix is the largest instant [expiresAtSize] bytes of Unix seconds can
 // hold: 2106-02-07T06:28:15Z.
-const maxExpiresAtUnix = 1<<(8*expiresAtSize) - 1
+//
+// **Typed, and the type is the fix rather than decoration** (#126). Untyped, this
+// constant takes its default type from the context it lands in — and one of those
+// contexts is `fmt.Errorf`'s `...any`, where "default" means `int`. On a 64-bit build
+// that is fine and on a 32-bit one 4294967295 does not fit, so `internal/ticket` stopped
+// compiling for GOARCH=386 and GOARCH=arm the day the message was written, while every
+// gate stayed green because CI is amd64-only. int64 is the type the value is actually
+// compared against — [Claims.ExpiresAt]'s `Unix()` — so naming it here costs nothing and
+// makes the constant mean the same thing on every machine.
+const maxExpiresAtUnix int64 = 1<<(8*expiresAtSize) - 1
 
 // MaxWorldNameBytes is the longest world name [WorldIDFor] will hash.
 //
@@ -222,6 +250,31 @@ var (
 	// ErrWrongWorld reports a ticket issued for another world. The signature is good;
 	// the ticket is simply not for here.
 	ErrWrongWorld = errors.New("ticket: the ticket names another world")
+
+	// ErrKeyPermissions reports a key pair the filesystem lets more than this service
+	// reach: a signing key anybody can read, or a directory anybody can write and
+	// therefore replace both halves in.
+	//
+	// A refusal at startup rather than a repair, which is this package's rule for
+	// everything it finds on disk. A mode this service did not choose is a configuration
+	// an operator should be told about, and quietly chmod'ing somebody's directory is a
+	// decision about their machine that this package has no business making.
+	ErrKeyPermissions = errors.New("ticket: the key pair is kept somewhere more than this service can reach")
+
+	// ErrVerifierWorld reports a verifier that was never told which world it is.
+	//
+	// **A question about this server's own configuration, and therefore not
+	// [ErrWrongWorld]** (#126). Both refusals used to be that one sentinel, which made a
+	// game server started without a world indistinguishable, in its own logs, from one
+	// being shown somebody else's ticket. The first is a mistake an operator can fix in a
+	// second and will never find, because the refusal it produces is the one that means
+	// "this is working" — every player turned away, every line saying the ticket names
+	// another world, nothing saying which world this one is.
+	//
+	// [ErrPublicKeySize] is the same class of question and already had its own sentinel;
+	// this is the second of the two configuration answers [Verify] can give, and the
+	// distinction is why a caller gets a sentinel rather than a string to match on.
+	ErrVerifierWorld = errors.New("ticket: this verifier has not been told which world it is")
 
 	// ErrExpired reports a ticket that has run out. The only way a ticket ever stops
 	// working, which is the design's stated cost.
@@ -466,7 +519,14 @@ func encodeBody(c Claims) ([]byte, error) {
 	unix := c.ExpiresAt.Unix()
 	if unix <= 0 || unix > maxExpiresAtUnix {
 		// Refused rather than wrapped. See [expiresAtSize]: this is what 2106 looks
-		// like when it arrives, and what a clock set to 1970 looks like today.
+		// like when it arrives.
+		//
+		// **It is not what a clock set to 1970 looks like, and the comment here said it
+		// was** (#126). This bound is on the *expiry*, which [Pair.mint] has already put
+		// a whole [Lifetime] ahead of `now` — so a host sitting at the epoch produces
+		// an expiry of 28800, sails past this line, and mints a ticket that expired
+		// before it was issued. The clock itself is bounded in [Pair.mint], where the
+		// question belongs; this line is the format's own rule and nothing more.
 		return nil, fmt.Errorf("%w: it expires at %s, which is outside the %d..%d this format holds",
 			ErrUnmintable, c.ExpiresAt.UTC().Format(time.RFC3339), 1, maxExpiresAtUnix)
 	}

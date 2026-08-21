@@ -110,7 +110,7 @@ other place the mistake is available.
 
 | Workspace | Gate command (from `$WORKTREE_DIR`) |
 | --------- | ----------------------------------- |
-| `server` | `cd server && test -z "$(gofmt -l .)" && go vet ./... && golangci-lint run && go build ./... && go test ./...` |
+| `server` | `cd server && test -z "$(gofmt -l .)" && go vet ./... && golangci-lint run && go build ./... && GOARCH=386 go build ./... && GOARCH=arm go build ./... && go test ./...` |
 | `client` | `cd client && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --workspace --locked && cargo test --workspace --locked` |
 | `schemas` | `bash scripts/check-schemas.sh` — and because a contract change rebuilds both consumers, run the `server` and `client` gates too |
 | `scripts/`, `.github/`, `.claude/`, `.agents/` or `.opencode/` touched | the full `scripts/test/*.test.sh` suite (glob it — never retype the list) plus `python3 .github/scripts/test_deepseek_review.py`; run them under a failure flag so a red test is the block's exit status, as `/dev-issue` Step 6 spells out |

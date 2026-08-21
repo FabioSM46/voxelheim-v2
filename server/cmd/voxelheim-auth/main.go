@@ -306,6 +306,28 @@ type service struct {
 	// key is a value an operator invents, so `POST /v1/servers` refuses with 503 until
 	// there is one. Reading the list is unaffected — it is authenticated with a ticket.
 	registrationKey *registry.Key
+
+	// now is where this service's idea of the present comes from. **Nil means time.Now,
+	// which is what every production path uses**; `run` never sets it.
+	//
+	// It is here for the reason internal/auth, internal/ticket and internal/registry all
+	// take `now` as a parameter rather than reading the clock: what a test writes down is
+	// what a test reads back. The concrete need is one refusal — `errTicketUnavailable`,
+	// the 500 [service.signInFinish] answers when a mint fails — which no test could
+	// reach at all while every mint ran off the wall clock, and which is the one path in
+	// that handler that leaves an account behind (#126).
+	//
+	// Read through [service.clock] and never directly, so that a handler which forgot is
+	// a handler with a literal time.Now in it that a reviewer can see.
+	now func() time.Time
+}
+
+// clock is this service's idea of the present: the injected one, or the real one.
+func (s *service) clock() time.Time {
+	if s.now == nil {
+		return time.Now()
+	}
+	return s.now()
 }
 
 // route is one entry in this service's surface.

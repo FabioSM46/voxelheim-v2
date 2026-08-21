@@ -237,8 +237,23 @@ func (s *service) signInStart(w http.ResponseWriter, _ *http.Request) {
 //
 // The order is the whole of the rule this endpoint exists to keep: the world is checked
 // first, the provider is asked second and the account store third, so an account is
-// created only after somebody has actually proved who they are. There is no path here on
-// which a refusal leaves an account behind.
+// created only after somebody has actually proved who they are.
+//
+// **There is exactly one path on which a refusal leaves an account behind, and this
+// comment used to say there were none** (#126). It is the mint below: `accounts.Ensure`
+// has already run by then, so a ticket this service will not sign answers 500 with the
+// account created. That is a real state and not a theoretical one — `Redeem` spends the
+// sign-in before the exchange, so the player cannot simply try again; the same request
+// answers `sign_in_not_found` from then on, and a new sign-in is the only way through.
+//
+// It is left as it is rather than reordered, and the reason is that both orders are
+// wrong in some direction. Minting before `Ensure` would need an account id that does not
+// exist yet; not spending the code until the ticket is signed would mean holding a
+// redeemed authorization code across a second failure point. What the ordering *does*
+// buy is the property that matters more: nothing before the provider answers can create
+// an account, so no unauthenticated request reaches the store at all. The residual is one
+// 500 that costs somebody a second sign-in, and it is written down here rather than
+// asserted away. TestASignInWhoseTicketCannotBeMintedAnswers500AndSaysSo drives it.
 //
 // **The world is checked before the provider is called, and that ordering is not
 // tidiness.** An authorization code may be redeemed once; refusing after the redemption
@@ -311,7 +326,7 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	account, created, err := s.signin.accounts.Ensure(
 		auth.ProviderIdentity{Provider: discord.Provider, Subject: who.Subject},
 		who.DisplayName,
-		time.Now(),
+		s.clock(),
 	)
 	switch {
 	case errors.Is(err, auth.ErrInvalidIdentity):
@@ -342,10 +357,17 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	// request has been read and the difference is known.
 	sessionTicket, claims, err := s.mintFor(ticket.AccountID(account.ID), world)
 	if err != nil {
-		// The account already exists at this point, and that is not a failure to undo:
-		// an account is idempotent, so the player retries and gets the same one with a
-		// ticket. Reachable only through internal/ticket refusing to sign, which is this
-		// service's own mistake and not the request's — hence a 500.
+		// The account already exists at this point and is not undone: an account is
+		// idempotent, so a *later* sign-in gets the same one with a ticket.
+		//
+		// **What this comment used to claim is that "the player retries", and they
+		// cannot** (#126). The retry it had in mind is the same request again, and
+		// `Redeem` above has already spent the state and the authorization code — so
+		// replaying it answers `sign_in_not_found`, every time. The way through is a
+		// whole new sign-in, and the operator's job in the meantime is the log line
+		// below: this is reachable only through internal/ticket refusing to sign, which
+		// is this service's own configuration and not the request's — a clock at or
+		// before the epoch is the way it actually happens — hence a 500.
 		s.log.Error("a session ticket could not be minted", "error", err, "account_id", account.ID.String())
 		s.refuse(w, http.StatusInternalServerError, errTicketUnavailable)
 		return
@@ -396,9 +418,9 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 // to make impossible.
 func (s *service) mintFor(account ticket.AccountID, world ticket.WorldID) (ticket.Ticket, ticket.Claims, error) {
 	if world.IsZero() {
-		return s.keys.MintAccountTicket(account, time.Now())
+		return s.keys.MintAccountTicket(account, s.clock())
 	}
-	return s.keys.Mint(account, world, time.Now())
+	return s.keys.Mint(account, world, s.clock())
 }
 
 // errorResponse is the shape every refusal takes.

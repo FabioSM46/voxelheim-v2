@@ -185,7 +185,7 @@ Run from within the worktree, for **every** workspace the diff touches (determin
 
 | Workspace | Gate command |
 | --------- | ------------ |
-| `server/` | `cd server && test -z "$(gofmt -l .)" && go vet ./... && golangci-lint run && go build ./... && go test ./...` |
+| `server/` | `cd server && test -z "$(gofmt -l .)" && go vet ./... && golangci-lint run && go build ./... && GOARCH=386 go build ./... && GOARCH=arm go build ./... && go test ./...` |
 | `client/` | `cd client && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --workspace --locked && cargo test --workspace --locked` |
 | `schemas/` | `bash scripts/check-schemas.sh`, then regenerate the committed bindings and run the **server and client gates too** — a contract change rebuilds both consumers (this mirrors `scripts/changed-areas.sh`, which fans a schemas change out to all three CI jobs) |
 
