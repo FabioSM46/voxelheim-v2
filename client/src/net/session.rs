@@ -53,9 +53,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::codec::{
-    self, ActionRefused, InventoryState, MineProgress, PLAYER_TOKEN_LEN, PlayerToken,
-    SessionParams, SessionTicket, Snapshot, WorldUpdate,
+    self, ActionRefused, CharacterList, InventoryState, MineProgress, PLAYER_TOKEN_LEN,
+    PlayerToken, SessionParams, SessionTicket, Snapshot, WorldUpdate,
 };
+
 use super::frame::{self, FrameDecoder};
 use super::handshake::{Handshake, Transition};
 use super::tickets;
@@ -82,6 +83,14 @@ const READ_BUFFER_SIZE: usize = 8 * 1024;
 /// Where identity files live under the data directory, one file per server.
 pub(super) const IDENTITY_DIR: &[&str] = &["voxelheim", "identity"];
 
+/// Where the last character played on each server is remembered, one file per server.
+///
+/// Beside the identity files rather than in them, because the two are different kinds of
+/// thing: an identity token is a bearer credential this client presents, and a character
+/// id is a number the server minted, listed to this account, and will re-check on every
+/// selection. Sharing a file would mean one format holding both.
+pub(super) const CHARACTER_DIR: &[&str] = &["voxelheim", "characters"];
+
 /// The XDG base directory for per-user data, when it is set to an absolute path.
 const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 
@@ -97,12 +106,36 @@ static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// What the ECS can tell the net thread.
 ///
-/// One variant today. It is sent by `Drop` on the ECS side rather than by a
-/// system, because "the app is going away" is the only instruction this issue
-/// has to give.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`Self::Disconnect`] is sent by `Drop` on the ECS side rather than by a system,
+/// because "the app is going away" is an instruction a system may not be around to give.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum NetCommand {
     Disconnect,
+    /// Which character this session plays, as the player chose it.
+    ///
+    /// **It travels as a command rather than as a frame, and that is what keeps one
+    /// writer on this socket.** Every other client message the ECS originates goes
+    /// through the outbound channel to the writer thread; this one is written by *this*
+    /// thread, which is the only writer until the welcome — the same arrangement the
+    /// hello already has, extended over the phase between them. It also keeps the encode
+    /// beside the hello's, and it is what lets the handshake be told that a choice went
+    /// out ([`Handshake::chose`]).
+    Choose(Choice),
+}
+
+/// What a player chose on the character screen.
+///
+/// The net-thread half of `net::ChooseCharacter`: the same two answers without Bevy's
+/// `Message` derive, because no Bevy type appears below `net/mod.rs`. The mapping is
+/// four lines in `net/mod.rs`, the same trade [`SessionEvent::Established`]'s `bool`
+/// makes for `net::Identity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Choice {
+    /// Play the character this id names. It is one the server minted and listed, which
+    /// is the one kind of identifier a client may echo back.
+    Play(u64),
+    /// Make one and play it. Creation and selection are one step in this contract.
+    Create(codec::CreateCharacterRequest),
 }
 
 /// What the net thread tells the ECS.
@@ -116,6 +149,21 @@ pub(super) enum NetCommand {
 pub(super) enum SessionEvent {
     /// The socket is up and `ClientHello` is on the wire.
     Handshaking,
+    /// The characters this account owns on this world, and which of them this client
+    /// played here last.
+    ///
+    /// **The answer to the hello, and the phase a person is inside.** Nothing happens
+    /// next until the ECS answers with a [`NetCommand::Choose`], which is what the
+    /// character screen writes and what this thread turns into a frame.
+    ///
+    /// `played_before` is read from this client's own file rather than from anything the
+    /// server said — it is a convenience, not a claim, and a stale id simply matches no
+    /// row. See [`ChosenCharacter`].
+    Characters {
+        list: CharacterList,
+        played_before: Option<u64>,
+    },
+
     /// A validated `ServerWelcome` arrived.
     ///
     /// `returning` says whether the token in it is the one this client presented,
@@ -294,6 +342,15 @@ pub(super) struct Target {
     /// verifies nothing and still says so, and a `Listed` mismatch is still refused
     /// inside the handshake, before this file is opened and before a byte is sent.
     pub(super) ticket: Option<PathBuf>,
+    /// Where this client's per-server files live, when a caller names the directory
+    /// rather than leaving it to the environment.
+    ///
+    /// **`None` in every shipped launch**, where the answer is the XDG data directory and
+    /// nothing may choose otherwise: a client that let something else name it would be a
+    /// client whose files could be put anywhere. The tests in `net/mod.rs` set it so that
+    /// what a session writes lands in a scratch directory rather than in the developer's
+    /// own — the same reason `identity_override` exists, one file over.
+    pub(super) data_home: Option<PathBuf>,
     pub(super) transport: Transport,
 }
 
@@ -315,6 +372,7 @@ pub(super) fn run(
         player_name,
         identity_override,
         ticket,
+        data_home,
         transport,
     } = target;
 
@@ -360,7 +418,10 @@ pub(super) fn run(
     // A missing file is a first connection rather than a failure, and so is an unreadable
     // one: the server mints a fresh identity either way, and refusing over it would turn
     // a lost file into a lost game.
-    let env = Environment::read();
+    let env = match data_home {
+        Some(path) => Environment::rooted_at(&path),
+        None => Environment::read(),
+    };
     let (identity, complaint) = match expected {
         tls::Expectation::Listed(_) => IdentityFile::open(&addr, identity_override, &env),
         tls::Expectation::Unlisted => (IdentityFile::forgetful(), None),
@@ -415,39 +476,26 @@ pub(super) fn run(
         return;
     }
 
-    // Only now does a second writer exist. The handshake above was written from this
-    // thread, before the writer thread was started, so the two never overlap — which is
-    // the whole of "one reader and one writer per connection", the only arrangement the
-    // server's transport.Conn promises to survive and the shape this side copies.
-    //
-    // `try_clone` gives the writer its own handle to the same socket, so this thread can
-    // block on a read while that one blocks on a channel. Without a second handle one of
-    // them would have to poll.
-    match stream.try_clone() {
-        Ok(writer) => {
-            // Detached rather than joined: the thread ends when the ECS drops its sender,
-            // and app teardown must not wait on a socket. See write_loop.
-            if let Err(err) = thread::Builder::new()
-                .name("voxelheim-net-writer".to_owned())
-                .spawn(move || write_loop(writer, outbound))
-            {
-                let _ = events.send(SessionEvent::Refused(format!(
-                    "cannot start the writer thread for {addr}: {err}"
-                )));
-                return;
-            }
-        }
-        Err(err) => {
-            // Nothing this client can do about it, and a session that cannot send input
-            // is not a session: a player would watch a world they could not move in.
-            let _ = events.send(SessionEvent::Refused(format!(
-                "cannot open a writer for {addr}: {err}"
-            )));
-            return;
-        }
-    }
+    // Which character this client played here last, read on the thread that blocks and
+    // for the reason both other files are read here. It is a preselection and nothing
+    // else — see [`ChosenCharacter`].
+    let chosen = ChosenCharacter::open(&addr, &env);
 
-    if let Some(ending) = pump(&mut stream, &addr, &events, &commands, &identity) {
+    // **No writer thread yet, and that is what keeps one writer on this socket.** The
+    // hello was written from this thread and so is the character choice that follows it;
+    // the second writer starts when the welcome arrives, which is the first moment the
+    // ECS has anything to send. `transport.Conn` on the server promises to survive one
+    // reader and one writer and nothing more, and this is that shape held through a
+    // handshake that now has a person in the middle of it.
+    if let Some(ending) = pump(Connection {
+        stream: &mut stream,
+        addr: &addr,
+        events: &events,
+        commands: &commands,
+        outbound,
+        identity: &identity,
+        chosen: &chosen,
+    }) {
         let _ = events.send(ending);
     }
 }
@@ -469,6 +517,15 @@ impl Environment {
         Self {
             xdg_data_home: std::env::var(XDG_DATA_HOME).ok(),
             home: std::env::var(HOME).ok(),
+        }
+    }
+
+    /// An environment whose data directory is `path`, whatever this process was started
+    /// with. See [`Target::data_home`] for who names one and why.
+    pub(super) fn rooted_at(path: &Path) -> Self {
+        Self {
+            xdg_data_home: Some(path.to_string_lossy().into_owned()),
+            home: None,
         }
     }
 }
@@ -661,6 +718,20 @@ pub(super) fn default_identity_path(addr: &str, env: &Environment) -> Option<Pat
     Some(path)
 }
 
+/// Where the character last played on `addr` is remembered:
+/// `$XDG_DATA_HOME/voxelheim/characters/<address>`.
+///
+/// One file per server address, for the reason the identity file has one: a character id
+/// is minted per world, and the id that names Eivor on one server names somebody else's
+/// character on another. The address is reduced to a file name by the same function, so
+/// the two files for one server are named alike.
+pub(super) fn chosen_character_path(addr: &str, env: &Environment) -> Option<PathBuf> {
+    let mut path = data_home(env)?;
+    path.extend(CHARACTER_DIR);
+    path.push(identity_file_name(addr)?);
+    Some(path)
+}
+
 /// The XDG data directory, or `None` when the environment names none.
 ///
 /// A relative `XDG_DATA_HOME` is ignored rather than resolved, which is what the
@@ -734,6 +805,79 @@ pub(super) fn identity_file_name(addr: &str) -> Option<String> {
         return None;
     }
     Some(name)
+}
+
+/// The character this client last played on one server, so the screen can preselect it.
+///
+/// **A convenience and never a claim.** What it holds is a number the *server* minted and
+/// listed to this account, written down after that server welcomed a session on it. The
+/// screen matches it against the list the server just sent and preselects the row it
+/// finds; an id that matches nothing — a character on another account, a file from an
+/// older launch, anything at all — simply preselects nothing. Nothing is decided from it
+/// and nothing is sent from it.
+///
+/// It is deliberately **not** gated on the certificate expectation the way the identity
+/// file is. The rule there is about a bearer credential — see [`Target::ticket`] for the
+/// two shapes — and this is not one: the id goes nowhere on the wire except back to the
+/// server that issued it, which re-reads its own store before it means anything.
+///
+/// **A creation writes nothing, and the reason is on the wire.** `ServerWelcome` carries
+/// an `entity_id`, which names a body for one session, and no `character_id` — so a
+/// client that has just created a character cannot know the id the server minted for it.
+/// The next connection lists it like any other and the screen preselects the first row;
+/// selecting it once is what teaches this file its id.
+#[derive(Debug, Default)]
+struct ChosenCharacter {
+    path: Option<PathBuf>,
+    /// What the file held when the session started, and what the screen preselects.
+    played_before: Option<u64>,
+}
+
+impl ChosenCharacter {
+    /// Reads whatever is remembered for `addr`.
+    ///
+    /// Every failure is "nothing is remembered": a missing file is the ordinary first
+    /// visit, and one that cannot be read or does not hold a number costs a preselection
+    /// and nothing else. There is deliberately no complaint for the log — unlike the
+    /// identity file, where an unreadable one costs a player their character, the worst
+    /// outcome here is one extra keypress.
+    fn open(addr: &str, env: &Environment) -> Self {
+        let Some(path) = chosen_character_path(addr, env) else {
+            return Self::default();
+        };
+        let played_before = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            // Zero names no character anywhere in this contract, so a file holding one
+            // is a file holding nothing.
+            .filter(|id| *id != 0);
+        Self {
+            path: Some(path),
+            played_before,
+        }
+    }
+
+    /// Writes `character` down as the one this client played here, unless it already is.
+    ///
+    /// Answers a line for the log when the write failed, and `None` otherwise — including
+    /// when there was nothing to do. A failure costs the *next* launch a preselection,
+    /// which is why it is a warning rather than anything louder.
+    #[must_use = "a failed write is only reported through the value this returns"]
+    fn remember(&self, character: u64) -> Option<String> {
+        if self.played_before == Some(character) {
+            return None;
+        }
+        let path = self.path.as_ref()?;
+        write_atomically(path, character.to_string().as_bytes())
+            .err()
+            .map(|err| {
+                format!(
+                    "cannot remember which character was played, in {}: {err}; the next launch \
+                     will preselect nothing",
+                    path.display()
+                )
+            })
+    }
 }
 
 /// Why there is no token to present, when there was supposed to be one.
@@ -901,24 +1045,92 @@ fn write_loop(mut stream: Wire, outbound: Receiver<Vec<u8>>) {
     }
 }
 
+/// Everything one connection's read loop works with.
+///
+/// A struct rather than seven parameters, and for the reason [`Target`] is one: what a
+/// reviewer has to see together is that this is one socket, its two channels, the file a
+/// token may be written to and the one a character id may be written to — and that the
+/// outbound channel is *held here* until the welcome rather than handed to a writer at
+/// connect time.
+struct Connection<'a> {
+    stream: &'a mut Wire,
+    addr: &'a str,
+    events: &'a Sender<SessionEvent>,
+    commands: &'a Receiver<NetCommand>,
+    /// Handed to the writer thread when the welcome arrives, and owned here until then.
+    /// See [`pump`] for why that is where it goes rather than at connect.
+    outbound: Receiver<Vec<u8>>,
+    identity: &'a IdentityFile,
+    chosen: &'a ChosenCharacter,
+}
+
 /// Reads until the session ends.
 ///
 /// Returns the event that describes the ending, or `None` when the ECS asked to
 /// stop — in that case there is nobody left to tell.
-fn pump(
-    stream: &mut Wire,
-    addr: &str,
-    events: &Sender<SessionEvent>,
-    commands: &Receiver<NetCommand>,
-    identity: &IdentityFile,
-) -> Option<SessionEvent> {
+///
+/// **It writes as well as reads, and only until the welcome.** The character choice is
+/// written from this thread, so through the whole handshake there is exactly one writer
+/// on this socket; the writer thread starts on the welcome, which is the first moment the
+/// ECS has anything to send. That is `transport.Conn`'s "one reader and one writer per
+/// connection" held across a phase that waits for a person.
+fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
+    let Connection {
+        stream,
+        addr,
+        events,
+        commands,
+        outbound,
+        identity,
+        chosen,
+    } = conn;
+
     let mut decoder = FrameDecoder::new();
     let mut handshake = Handshake::new();
     let mut buffer = vec![0u8; READ_BUFFER_SIZE];
+    // Taken by the welcome, which is where the writer thread starts.
+    let mut outbound = Some(outbound);
+    // Which character the choice named, kept so the welcome can write it down. `None`
+    // after a creation, and that is the wire's shape rather than an omission: a welcome
+    // names an entity and no character, so a client that has just made one cannot know
+    // the id the server minted. See [`ChosenCharacter`].
+    let mut playing: Option<u64> = None;
 
     loop {
-        if shutdown_requested(commands) {
-            return None;
+        // Every command that has arrived rather than the first, because two can be
+        // waiting: a loop that took one per read would answer the second up to
+        // READ_TIMEOUT later, which on the character screen is a click that appears to
+        // have done nothing. Stopping wins whenever it is among them.
+        loop {
+            match commands.try_recv() {
+                // A dropped sender means the app is shutting down, which is the same
+                // instruction arriving less politely.
+                Ok(NetCommand::Disconnect) | Err(TryRecvError::Disconnected) => return None,
+                Ok(NetCommand::Choose(choice)) => {
+                    let frame = match &choice {
+                        Choice::Play(character) => {
+                            codec::encode_select_character_request(*character)
+                        }
+                        Choice::Create(request) => codec::encode_create_character_request(request),
+                    };
+                    if let Err(err) = frame::write_frame(stream, &frame) {
+                        return Some(transport_failure(
+                            &handshake,
+                            addr,
+                            &format!("sending the character choice failed: {err}"),
+                        ));
+                    }
+                    // Recorded only once the frame is on the wire, which is what makes
+                    // `Unchosen` mean what it says: a welcome is refused until a question
+                    // has actually been asked.
+                    handshake.chose();
+                    playing = match choice {
+                        Choice::Play(character) => Some(character),
+                        Choice::Create(_) => None,
+                    };
+                }
+                Err(TryRecvError::Empty) => break,
+            }
         }
 
         match stream.read(&mut buffer) {
@@ -960,9 +1172,57 @@ fn pump(
             };
 
             match handshake.apply(message) {
+                Ok(Transition::Characters(list)) => {
+                    events
+                        .send(SessionEvent::Characters {
+                            list,
+                            played_before: chosen.played_before,
+                        })
+                        .ok()?;
+                }
                 Ok(Transition::Established(params)) => {
+                    // **The writer thread, started before the ECS is told there is a
+                    // session** — which is the ordering that matters, because the frame
+                    // after that event is input. `try_clone` gives it its own handle to
+                    // the same socket, so this thread can block on a read while that one
+                    // blocks on a channel; without a second handle one of them would have
+                    // to poll.
+                    //
+                    // Detached rather than joined: the thread ends when the ECS drops its
+                    // sender, and app teardown must not wait on a socket. See write_loop.
+                    if let Some(outbound) = outbound.take() {
+                        let writer = match stream.try_clone() {
+                            Ok(writer) => writer,
+                            Err(err) => {
+                                // A session that cannot send input is not a session: a
+                                // player would watch a world they could not move in. It
+                                // is a refusal rather than an ending because no world has
+                                // been drawn yet — the welcome has not reached the ECS.
+                                return Some(SessionEvent::Refused(format!(
+                                    "cannot open a writer for {addr}: {err}"
+                                )));
+                            }
+                        };
+                        if let Err(err) = thread::Builder::new()
+                            .name("voxelheim-net-writer".to_owned())
+                            .spawn(move || write_loop(writer, outbound))
+                        {
+                            return Some(SessionEvent::Refused(format!(
+                                "cannot start the writer thread for {addr}: {err}"
+                            )));
+                        }
+                    }
+
                     let (returning, complaint) = identity.store(params.player_token);
                     if let Some(complaint) = complaint {
+                        events.send(SessionEvent::Warning(complaint)).ok()?;
+                    }
+                    // The server took the choice, so this is the character to come back
+                    // to. Written here rather than where the choice was sent, because a
+                    // refused selection is not one this client played.
+                    if let Some(character) = playing
+                        && let Some(complaint) = chosen.remember(character)
+                    {
                         events.send(SessionEvent::Warning(complaint)).ok()?;
                     }
                     // The flag only means something when there is a file behind it.
@@ -1004,16 +1264,6 @@ fn pump(
                 Err(err) => return Some(protocol_failure(&handshake, addr, &err.to_string())),
             }
         }
-    }
-}
-
-/// Whether the ECS has asked the thread to stop, either explicitly or by going
-/// away. A dropped `Sender` means the app is shutting down, which is the same
-/// instruction arriving less politely.
-fn shutdown_requested(commands: &Receiver<NetCommand>) -> bool {
-    match commands.try_recv() {
-        Ok(NetCommand::Disconnect) | Err(TryRecvError::Disconnected) => true,
-        Err(TryRecvError::Empty) => false,
     }
 }
 
@@ -1111,10 +1361,7 @@ impl Scratch {
     /// from the same environment this one does, and a second scratch directory
     /// would be a second thing to keep right.
     pub(super) fn environment(&self) -> Environment {
-        Environment {
-            xdg_data_home: Some(self.0.to_string_lossy().into_owned()),
-            home: None,
-        }
+        Environment::rooted_at(&self.0)
     }
 }
 
@@ -1553,6 +1800,156 @@ mod tests {
                 .expect("the derived path is still nameable")
                 .exists(),
             "the per-server file was never touched"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Which character was played
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn a_server_never_played_on_preselects_nothing() {
+        let scratch = Scratch::new("chosen-first");
+        let chosen = ChosenCharacter::open("a.example:1", &scratch.environment());
+
+        assert_eq!(chosen.played_before, None, "an ordinary first visit");
+        assert!(
+            chosen.path.is_some(),
+            "and one that knows where to write when a character is played"
+        );
+    }
+
+    #[test]
+    fn the_character_written_down_is_the_one_the_next_session_reads() {
+        let scratch = Scratch::new("chosen-round-trip");
+        let env = scratch.environment();
+
+        let chosen = ChosenCharacter::open("a.example:1", &env);
+        assert_eq!(chosen.remember(900), None, "a writable directory");
+
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).played_before,
+            Some(900)
+        );
+        // And a second character played replaces the first, rather than adding to it.
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).remember(901),
+            None
+        );
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).played_before,
+            Some(901)
+        );
+    }
+
+    #[test]
+    fn one_servers_character_never_reaches_another_servers_file() {
+        // The ids are minted per world: 900 on one server names somebody else's
+        // character on the next, so a shared file would preselect a stranger.
+        let scratch = Scratch::new("chosen-per-server");
+        let env = scratch.environment();
+
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).remember(900),
+            None
+        );
+
+        assert_eq!(
+            ChosenCharacter::open("b.example:1", &env).played_before,
+            None,
+            "the other server was never played on"
+        );
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).played_before,
+            Some(900)
+        );
+    }
+
+    #[test]
+    fn a_file_that_names_no_character_preselects_nothing() {
+        // Every shape a file can take that is not an id, and all of them cost exactly
+        // one keypress: there is no complaint, and the session runs.
+        let scratch = Scratch::new("chosen-rubbish");
+        let env = scratch.environment();
+        let path = chosen_character_path("a.example:1", &env).expect("a path to write to");
+        fs::create_dir_all(path.parent().expect("a parent directory"))
+            .expect("a writable scratch directory");
+
+        for contents in ["", "   ", "not a number", "-1", "0", "12.5", "9\n9"] {
+            fs::write(&path, contents).expect("a writable file");
+            assert_eq!(
+                ChosenCharacter::open("a.example:1", &env).played_before,
+                None,
+                "{contents:?} names no character"
+            );
+        }
+
+        // Trailing whitespace does not, which is what makes the file editable by hand.
+        fs::write(&path, "900\n").expect("a writable file");
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).played_before,
+            Some(900)
+        );
+    }
+
+    #[test]
+    fn the_character_already_written_down_is_not_written_again() {
+        // The same character played twice is the ordinary case, and rewriting the file
+        // every session would be a write per launch for a value that never changes.
+        let scratch = Scratch::new("chosen-unchanged");
+        let env = scratch.environment();
+        let path = chosen_character_path("a.example:1", &env).expect("a path to write to");
+
+        assert_eq!(
+            ChosenCharacter::open("a.example:1", &env).remember(900),
+            None
+        );
+        let chosen = ChosenCharacter::open("a.example:1", &env);
+        fs::remove_file(&path).expect("the file this session read");
+
+        assert_eq!(
+            chosen.remember(900),
+            None,
+            "nothing to say and nothing to do"
+        );
+        assert!(
+            !path.exists(),
+            "the file was not rewritten, which is the whole of the check"
+        );
+    }
+
+    #[test]
+    fn a_character_that_cannot_be_written_down_costs_a_preselection_and_says_so() {
+        let scratch = Scratch::new("chosen-blocked");
+        let env = scratch.environment();
+        let path = chosen_character_path("a.example:1", &env).expect("a path to write to");
+        fs::create_dir_all(&path).expect("a directory standing where the file goes");
+
+        let complaint = ChosenCharacter::open("a.example:1", &env)
+            .remember(900)
+            .expect("a write that cannot land is reported");
+        assert!(
+            complaint.contains(&path.display().to_string()),
+            "the line names the file: {complaint}"
+        );
+        assert!(
+            !complaint.contains("900"),
+            "and not the id, which would be noise: {complaint}"
+        );
+    }
+
+    #[test]
+    fn an_address_with_nowhere_to_write_still_plays() {
+        // No XDG, no HOME. Unlike the identity file — which costs a character when it
+        // cannot be written — this one costs a keypress, so it does not even complain.
+        let chosen = ChosenCharacter::open("a.example:1", &Environment::default());
+
+        assert_eq!(chosen.path, None);
+        assert_eq!(chosen.played_before, None);
+        assert_eq!(
+            chosen.remember(900),
+            None,
+            "nowhere to write is not a failure"
         );
     }
 

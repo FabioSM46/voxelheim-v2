@@ -45,18 +45,26 @@ pub const SESSION_TICKET_LEN: usize = 96;
 /// other, so a player can be visible for a frame or two before the message describing
 /// them lands. An `Appearance` that *did* arrive and broke an invariant is refused
 /// instead — the client may not invent what the server actually described.
-// Reserved ahead of the screen that uses it, the way `EditAction::Break` is kept
-// ahead of nothing: Protocol V7 lands the vocabulary and the character-select screen
-// is a separate issue. Every one of these is exercised by this module's own tests, so
-// it is unused rather than untested.
+///
+/// Built through [`Appearance::new`] like every other appearance in this build, which is
+/// what makes "the placeholder is a legal appearance" a compile error rather than a
+/// sentence: the `Err` arm below cannot be reached, and the constructor is what says so.
+// Still reserved ahead of its reader, and the reader is now named: nothing *draws* an
+// entity's appearance until the issue that gives players a body worth colouring, which is
+// the one place a placeholder for "it has not arrived yet" can be used. The character
+// screen this issue adds never needs one — every appearance it draws is either one the
+// server listed or one the player is choosing.
 #[allow(dead_code)]
-pub const PLACEHOLDER_APPEARANCE: Appearance = Appearance {
-    skin_color: 0x0080_8080,
-    shirt_color: 0x0080_8080,
-    trousers_color: 0x0080_8080,
-    shoes_color: 0x0080_8080,
-    hair_model: HairModel::Shaved,
-    hair_color: 0x0080_8080,
+pub const PLACEHOLDER_APPEARANCE: Appearance = match Appearance::new(
+    0x0080_8080,
+    0x0080_8080,
+    0x0080_8080,
+    0x0080_8080,
+    HairModel::Shaved,
+    0x0080_8080,
+) {
+    Ok(appearance) => appearance,
+    Err(_) => panic!("the placeholder is not an appearance this contract allows"),
 };
 
 /// Initial builder capacity for the client's small intent messages. A hello,
@@ -515,6 +523,32 @@ pub enum HairModel {
 }
 
 impl HairModel {
+    /// Every model a character may wear, in the order the contract declares them.
+    ///
+    /// A hand-written list, for the reason `ItemShape::ALL` is one: no stable Rust
+    /// enumerates an enum's variants. What it is *for* is the screen that offers a
+    /// choice — a model missing from here is a model no player can pick, which is a
+    /// gap a sweep can catch rather than a build failure the compiler could.
+    pub const ALL: [Self; 5] = [
+        Self::Shaved,
+        Self::Cropped,
+        Self::Braided,
+        Self::Loose,
+        Self::Topknot,
+    ];
+
+    /// What a player reads on the control that chooses it. Display text, and the one
+    /// place this client spells a hair model.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shaved => "SHAVED",
+            Self::Cropped => "CROPPED",
+            Self::Braided => "BRAIDED",
+            Self::Loose => "LOOSE",
+            Self::Topknot => "TOPKNOT",
+        }
+    }
+
     fn from_wire(value: fb::HairModel) -> Option<Self> {
         match value {
             fb::HairModel::Shaved => Some(Self::Shaved),
@@ -528,7 +562,6 @@ impl HairModel {
 
     /// The wire member. Total, because the `Unknown` the contract fails closed on is
     /// unrepresentable here.
-    #[allow(dead_code)]
     fn wire(self) -> fb::HairModel {
         match self {
             Self::Shaved => fb::HairModel::Shaved,
@@ -542,23 +575,14 @@ impl HairModel {
 
 /// What a character looks like: four worn colours, a hair model and its colour.
 ///
-/// **Validated on the way in, which is a narrower claim than the one this comment
-/// used to make.** Every appearance produced by [`decode`] came off a wire that had
-/// its reserved high byte checked and its hair model named — that much is enforced by
-/// [`appearance`], and it is what the client renders. What is *not* enforced is
-/// construction: the fields are public, so a value built inside this crate can hold a
-/// colour the contract forbids, and [`encode_create_character_request`] would put it
-/// on the wire. Saying otherwise was the whole of the defect #97's review found, and
-/// the honest fix is to say what holds rather than to assert what does not.
-///
-/// Two things keep that from mattering yet, and both expire. Nothing in this build
-/// constructs one except this module and its tests — there is no character-creation
-/// screen — and the server refuses an appearance it dislikes before storing it, which
-/// `schemas/common.fbs` now states as an obligation rather than leaving to inference.
-/// **When a screen does construct one (#108), the validation moves here**: private
-/// fields behind a fallible constructor, so the type carries its invariant the way
-/// [`RecipeId`] carries "never `Unknown`" — by making the other states
-/// unrepresentable rather than by promising nobody will reach them.
+/// **It cannot hold a value this contract forbids, and that is what changed with the
+/// screen that builds one.** The fields were public while nothing outside this module
+/// constructed an appearance; the doc then said so in as many words and named this issue
+/// as the moment the promise would have to become a property. It is one now:
+/// [`Appearance::new`] is the only way in from outside, it refuses a colour with bits
+/// outside `0x00RRGGBB`, and the hair model cannot be `Unknown` because [`HairModel`] has
+/// no such variant. So [`encode_create_character_request`] always writes a legal
+/// appearance, and it needs no caveat to say so.
 ///
 /// The client renders these and never substitutes a default of its own — the one
 /// documented placeholder is [`PLACEHOLDER_APPEARANCE`], and it is for an appearance
@@ -569,12 +593,110 @@ impl HairModel {
 /// anywhere on this wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Appearance {
-    pub skin_color: u32,
-    pub shirt_color: u32,
-    pub trousers_color: u32,
-    pub shoes_color: u32,
-    pub hair_model: HairModel,
-    pub hair_color: u32,
+    skin_color: u32,
+    shirt_color: u32,
+    trousers_color: u32,
+    shoes_color: u32,
+    hair_model: HairModel,
+    hair_color: u32,
+}
+
+/// The one way an [`Appearance`] is refused: a colour outside `0x00RRGGBB`.
+///
+/// It names the field rather than only the value, because both readers need that. The
+/// decoder turns it into [`DecodeError::AppearanceColorReserved`], which is a sentence an
+/// operator reads about a *server*; the character screen cannot produce one at all, since
+/// every colour it offers is a constant this build compiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForbiddenColor {
+    pub field: &'static str,
+    pub value: u32,
+}
+
+impl Appearance {
+    /// The bits a colour on this wire may use: `0x00RRGGBB`, with the top eight
+    /// reserved and required to be zero.
+    const COLOR_CHANNELS: u32 = 0x00FF_FFFF;
+
+    /// Builds one, or names the colour that is not one this contract allows.
+    ///
+    /// **The single constructor, and the reason it is fallible is the reason it exists.**
+    /// A `const fn`, so [`PLACEHOLDER_APPEARANCE`] goes through it and a palette entry
+    /// could too; and total over the hair model, because the wire's `Unknown` has no
+    /// variant here.
+    ///
+    /// **Absence is deliberately not a failure**, and it is not a question this
+    /// constructor can even be asked: a table scalar equal to its default is not written
+    /// at all, so an absent colour and a chosen black are the same bytes — refusing
+    /// absence would refuse a character wearing black shoes, and would make decode
+    /// correctness depend on the sender's builder settings. `schemas/common.fbs` carries
+    /// the whole argument.
+    pub const fn new(
+        skin_color: u32,
+        shirt_color: u32,
+        trousers_color: u32,
+        shoes_color: u32,
+        hair_model: HairModel,
+        hair_color: u32,
+    ) -> Result<Self, ForbiddenColor> {
+        // One check per colour, spelled once: a `const fn` cannot take a closure, and a
+        // fifth colour added without a check is exactly what this shape prevents.
+        let checked = [
+            ("skin_color", skin_color),
+            ("shirt_color", shirt_color),
+            ("trousers_color", trousers_color),
+            ("shoes_color", shoes_color),
+            ("hair_color", hair_color),
+        ];
+        let mut i = 0;
+        while i < checked.len() {
+            let (field, value) = checked[i];
+            if value & !Self::COLOR_CHANNELS != 0 {
+                return Err(ForbiddenColor { field, value });
+            }
+            i += 1;
+        }
+
+        Ok(Self {
+            skin_color,
+            shirt_color,
+            trousers_color,
+            shoes_color,
+            hair_model,
+            hair_color,
+        })
+    }
+
+    /// Skin, and the colour the hands take with it.
+    pub const fn skin_color(self) -> u32 {
+        self.skin_color
+    }
+
+    /// The shirt, tunic or coat covering the torso.
+    pub const fn shirt_color(self) -> u32 {
+        self.shirt_color
+    }
+
+    /// The trousers, breeches or leggings covering the legs.
+    pub const fn trousers_color(self) -> u32 {
+        self.trousers_color
+    }
+
+    /// Footwear.
+    pub const fn shoes_color(self) -> u32 {
+        self.shoes_color
+    }
+
+    /// Which hair model this character wears.
+    pub const fn hair_model(self) -> HairModel {
+        self.hair_model
+    }
+
+    /// The hair's colour, read whatever the model is: a shaved head still has stubble,
+    /// and how much of the colour a model shows is the renderer's decision.
+    pub const fn hair_color(self) -> u32 {
+        self.hair_color
+    }
 }
 
 /// One character an account owns on this world, as `ServerCharacterList` lists it.
@@ -627,7 +749,6 @@ pub struct PlayerAppearance {
 /// The name is untrusted text the *server* judges — an unacceptable one is
 /// `RejectReason::CHARACTER_NAME_REFUSED`, a refusal with a reply — so nothing here
 /// checks it. The appearance is already validated, because it is an [`Appearance`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateCharacterRequest {
     pub name: String,
@@ -1842,29 +1963,28 @@ fn appearance(
 ) -> Result<Appearance, DecodeError> {
     let value = value.ok_or(DecodeError::MissingAppearance { at })?;
 
-    // The reserved high byte, checked once per colour through one closure so a fifth
-    // colour cannot be added with the check forgotten.
-    //
-    // Presence is deliberately not checked, and `schemas/common.fbs` carries the
-    // reasoning: a table scalar equal to its default is not written at all, and black
-    // is a legal colour — so an absent `skin_color` and a chosen `0x000000` are the
-    // same bytes, and refusing absence would refuse black shoes.
-    let color = |field: &'static str, raw: u32| -> Result<u32, DecodeError> {
-        if raw & 0xFF00_0000 == 0 {
-            Ok(raw)
-        } else {
-            Err(DecodeError::AppearanceColorReserved { field, value: raw })
-        }
-    };
+    // The hair model first, because it is the one field the constructor cannot judge:
+    // `Unknown` is the wire's fail-closed member and this side has no variant for it, so
+    // an appearance carrying one never becomes a value at all.
+    let hair_model = HairModel::from_wire(value.hair_model())
+        .ok_or(DecodeError::UnknownHairModel(value.hair_model().0))?;
 
-    Ok(Appearance {
-        skin_color: color("skin_color", value.skin_color())?,
-        shirt_color: color("shirt_color", value.shirt_color())?,
-        trousers_color: color("trousers_color", value.trousers_color())?,
-        shoes_color: color("shoes_color", value.shoes_color())?,
-        hair_model: HairModel::from_wire(value.hair_model())
-            .ok_or(DecodeError::UnknownHairModel(value.hair_model().0))?,
-        hair_color: color("hair_color", value.hair_color())?,
+    // And the colours through the one constructor, rather than a second copy of its
+    // rule. Presence is deliberately not checked, and `schemas/common.fbs` carries the
+    // reasoning: a table scalar equal to its default is not written at all, and black is
+    // a legal colour — so an absent `skin_color` and a chosen `0x000000` are the same
+    // bytes, and refusing absence would refuse black shoes.
+    Appearance::new(
+        value.skin_color(),
+        value.shirt_color(),
+        value.trousers_color(),
+        value.shoes_color(),
+        hair_model,
+        value.hair_color(),
+    )
+    .map_err(|refused| DecodeError::AppearanceColorReserved {
+        field: refused.field,
+        value: refused.value,
     })
 }
 
@@ -2520,7 +2640,6 @@ pub fn encode_client_hello(
 /// The id is one the server minted and sent in a `ServerCharacterList`, which is the
 /// one kind of identifier a client may echo back. Whether it names a character this
 /// account owns is re-read server-side, so nothing here validates it.
-#[allow(dead_code)]
 pub fn encode_select_character_request(character_id: u64) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
 
@@ -2545,7 +2664,6 @@ pub fn encode_select_character_request(character_id: u64) -> Vec<u8> {
 ///
 /// The appearance needs no such caveat: an [`Appearance`] cannot be constructed holding
 /// a colour or a hair model the contract forbids, so this always writes a legal one.
-#[allow(dead_code)]
 pub fn encode_create_character_request(request: &CreateCharacterRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
 
@@ -2572,7 +2690,6 @@ pub fn encode_create_character_request(request: &CreateCharacterRequest) -> Vec<
 ///
 /// Must be called while no other table is open: a nested table is reached through an
 /// offset and has to be finished before its parent starts.
-#[allow(dead_code)]
 fn encode_appearance<'b>(
     builder: &mut FlatBufferBuilder<'b>,
     appearance: Appearance,
@@ -2580,12 +2697,12 @@ fn encode_appearance<'b>(
     fb::Appearance::create(
         builder,
         &fb::AppearanceArgs {
-            skin_color: appearance.skin_color,
-            shirt_color: appearance.shirt_color,
-            trousers_color: appearance.trousers_color,
-            shoes_color: appearance.shoes_color,
-            hair_model: appearance.hair_model.wire(),
-            hair_color: appearance.hair_color,
+            skin_color: appearance.skin_color(),
+            shirt_color: appearance.shirt_color(),
+            trousers_color: appearance.trousers_color(),
+            shoes_color: appearance.shoes_color(),
+            hair_model: appearance.hair_model().wire(),
+            hair_color: appearance.hair_color(),
         },
     )
 }
@@ -4391,15 +4508,25 @@ mod tests {
     /// A legal appearance, matching [`AppearanceWire::default`] field for field. Every
     /// value is distinct so a transposition shows up as a wrong colour rather than an
     /// equal one.
+    ///
+    /// Built through [`Appearance::new`] rather than as a struct literal, which these
+    /// tests could still write: the constructor is the only door every other module has,
+    /// so a fixture that went around it would be testing a value no caller can make.
     fn an_appearance() -> Appearance {
-        Appearance {
-            skin_color: 0x00E3_C4A0,
-            shirt_color: 0x004A_5D3B,
-            trousers_color: 0x002B_2118,
-            shoes_color: 0x0055_3311,
-            hair_model: HairModel::Braided,
-            hair_color: 0x00B0_7A32,
-        }
+        an_appearance_wearing(HairModel::Braided)
+    }
+
+    /// The same face under a different hair model.
+    fn an_appearance_wearing(hair_model: HairModel) -> Appearance {
+        Appearance::new(
+            0x00E3_C4A0,
+            0x004A_5D3B,
+            0x002B_2118,
+            0x0055_3311,
+            hair_model,
+            0x00B0_7A32,
+        )
+        .expect("every colour is inside the contract's range")
     }
 
     /// Reads the ticket off a hello this module encoded.
@@ -4493,10 +4620,7 @@ mod tests {
                     CharacterSummary {
                         character_id: 7,
                         name: "Sigrún".to_owned(),
-                        appearance: Appearance {
-                            hair_model: HairModel::Shaved,
-                            ..an_appearance()
-                        },
+                        appearance: an_appearance_wearing(HairModel::Shaved),
                     },
                 ],
                 max_characters: 5,
@@ -4743,6 +4867,53 @@ mod tests {
         }
     }
 
+    /// The same rule on the way *out*: an appearance carrying a reserved byte cannot be
+    /// built, so no encoder has to check for one.
+    ///
+    /// **This is why the fields are private.** The character screen composes a colour
+    /// from a palette and the decoder composes one from the wire, and both reach the
+    /// same constructor — a struct literal would be a second way in, checked nowhere.
+    /// The refusal names the field and carries the value, because the one caller that
+    /// can hit it is a screen that has to say which choice it could not take.
+    #[test]
+    fn an_appearance_carrying_a_reserved_byte_cannot_be_built() {
+        let legal = an_appearance();
+        let colours = [
+            ("skin_color", legal.skin_color()),
+            ("shirt_color", legal.shirt_color()),
+            ("trousers_color", legal.trousers_color()),
+            ("shoes_color", legal.shoes_color()),
+            ("hair_color", legal.hair_color()),
+        ];
+
+        for (index, (field, value)) in colours.iter().enumerate() {
+            let mut given = colours.map(|(_, colour)| colour);
+            given[index] = value | 0xAB00_0000;
+            let refused = Appearance::new(
+                given[0],
+                given[1],
+                given[2],
+                given[3],
+                HairModel::Braided,
+                given[4],
+            )
+            .expect_err("a reserved byte is set");
+
+            assert_eq!(refused.field, *field);
+            assert_eq!(refused.value, given[index], "the value the caller offered");
+        }
+
+        // And the legal one keeps every colour it was given, in the field it was given
+        // for: a constructor that validated correctly and transposed two arguments would
+        // pass every check above.
+        assert_eq!(legal.skin_color(), 0x00E3_C4A0);
+        assert_eq!(legal.shirt_color(), 0x004A_5D3B);
+        assert_eq!(legal.trousers_color(), 0x002B_2118);
+        assert_eq!(legal.shoes_color(), 0x0055_3311);
+        assert_eq!(legal.hair_model(), HairModel::Braided);
+        assert_eq!(legal.hair_color(), 0x00B0_7A32);
+    }
+
     /// `Unknown` is the absent-field case and a member past the end is a server one
     /// contract ahead. Both are refused, because `schemas/common.fbs` says the client
     /// renders what the player chose and invents no default.
@@ -4782,12 +4953,12 @@ mod tests {
     #[test]
     fn the_placeholder_is_itself_a_legal_appearance() {
         let wire = AppearanceWire {
-            skin_color: PLACEHOLDER_APPEARANCE.skin_color,
-            shirt_color: PLACEHOLDER_APPEARANCE.shirt_color,
-            trousers_color: PLACEHOLDER_APPEARANCE.trousers_color,
-            shoes_color: PLACEHOLDER_APPEARANCE.shoes_color,
-            hair_model: PLACEHOLDER_APPEARANCE.hair_model.wire(),
-            hair_color: PLACEHOLDER_APPEARANCE.hair_color,
+            skin_color: PLACEHOLDER_APPEARANCE.skin_color(),
+            shirt_color: PLACEHOLDER_APPEARANCE.shirt_color(),
+            trousers_color: PLACEHOLDER_APPEARANCE.trousers_color(),
+            shoes_color: PLACEHOLDER_APPEARANCE.shoes_color(),
+            hair_model: PLACEHOLDER_APPEARANCE.hair_model().wire(),
+            hair_color: PLACEHOLDER_APPEARANCE.hair_color(),
         };
 
         assert_eq!(
@@ -4836,7 +5007,7 @@ mod tests {
                 .expect("the payload is a CreateCharacterRequest");
             assert_eq!(payload.name(), Some(name));
             let appearance = payload.appearance().expect("the request carries a face");
-            assert_eq!(appearance.skin_color(), an_appearance().skin_color);
+            assert_eq!(appearance.skin_color(), an_appearance().skin_color());
             assert_eq!(appearance.hair_model(), fb::HairModel::Braided);
 
             assert_eq!(

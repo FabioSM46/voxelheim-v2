@@ -41,7 +41,7 @@ use bevy::prelude::*;
 
 use crate::net::{AccountService, DEFAULT_PLAYER_NAME, NetPlugin, ServerListPlugin, SignInPlugin};
 use crate::player::PlayerPlugin;
-use crate::ui::UiPlugin;
+use crate::ui::{PlayAs, UiPlugin};
 use crate::world::WorldPlugin;
 
 /// Where the client connects when neither an address nor an account service says
@@ -101,7 +101,8 @@ Options:
   -s, --server    the same address as ADDRESS, named explicitly
   -w, --world     which world to ask for a ticket for, with --server. Only with
                   --server: from the list, the row you click names the world.
-  -n, --name      the display name announced to the server
+  -n, --name      the character to play, created if this account has none
+                  wearing it. Without it the character screen asks.
   -i, --identity  file holding this server's identity token
   -h, --help      print this and exit
 
@@ -137,6 +138,13 @@ There are three ways to launch this and they are not interchangeable.
 
 The name defaults to voxelheim; with neither an account service nor an address,
 the address defaults to 127.0.0.1:7777.
+
+Who goes in is chosen after the server answers, on a screen that lists this
+account's characters on that world and offers to make another when there is
+room. --name skips that screen: it asks for the character wearing that name and
+has one created under it when this account holds none, which is what the server
+used to do with the name a hello carried. The server decides either way -- a
+name it refuses is refused with --name too.
 
 Sign-ins are kept under $XDG_DATA_HOME/voxelheim, falling back to
 $HOME/.local/share: account/<service> for the ticket the server list is read
@@ -183,6 +191,7 @@ fn run(start: Start) -> AppExit {
     let Start {
         server_addr,
         player_name,
+        chosen_character,
         identity_path,
         account_service,
         world,
@@ -221,6 +230,13 @@ fn run(start: Start) -> AppExit {
     // draws through it. See the module comment in player/camera.rs.
     .add_plugins(PlayerPlugin)
     .add_plugins(UiPlugin);
+
+    // After the plugin, which initialises the launch-named-nobody default: a launch that
+    // named somebody replaces it, and the character screen answers itself. See
+    // `ui::PlayAs` for why `--name` is what says who.
+    if let Some(character) = chosen_character {
+        app.insert_resource(PlayAs::named(character));
+    }
 
     // Built only when there is a service to sign in against, which is what makes the
     // login screen absent rather than broken on a client that has none. See
@@ -278,6 +294,13 @@ struct Start {
     /// A display name. Never an identity: the token is that, and the server mints
     /// it.
     player_name: String,
+    /// The character to ask for, when `--name` or `VOXELHEIM_NAME` named one.
+    ///
+    /// `None` is the ordinary launch, where the character screen waits for a person.
+    /// It is separate from [`Self::player_name`] because that one is never absent —
+    /// it falls back to [`DEFAULT_PLAYER_NAME`] — and a default is not a request:
+    /// a client that asked to play "voxelheim" would create a character nobody named.
+    chosen_character: Option<String>,
     /// `--identity`, which replaces the per-server file outright. `None` leaves
     /// the choice to `net/session.rs`, which is the only code that knows where a
     /// token belongs.
@@ -390,8 +413,12 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
     // turn `VOXELHEIM_SERVER=` into a connection failure with no clue, and
     // `VOXELHEIM_NAME=` into a nameless player.
     let given_addr = server_addr.or_else(|| exported(env.server_addr.as_deref()));
-    let name = player_name
-        .or_else(|| exported(env.player_name.as_deref()))
+    // Given rather than defaulted, because the two mean different things below: the
+    // display name always has a value, and the character to ask for exists only when
+    // somebody actually named one.
+    let given_name = player_name.or_else(|| exported(env.player_name.as_deref()));
+    let name = given_name
+        .clone()
         .unwrap_or_else(|| DEFAULT_PLAYER_NAME.to_owned());
     // The path is trimmed like everything else here. A file name with a leading or
     // trailing space is legal on Unix and is therefore information being thrown away
@@ -485,6 +512,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
     Ok(Launch::Connect(Start {
         server_addr: addr,
         player_name: name.trim().to_owned(),
+        chosen_character: given_name.map(|name| name.trim().to_owned()),
         identity_path: identity,
         account_service: account,
         world,
@@ -825,6 +853,7 @@ mod tests {
             Start {
                 server_addr: Some("norse.example:7777".to_owned()),
                 player_name: "thora".to_owned(),
+                chosen_character: Some("thora".to_owned()),
                 identity_path: Some(PathBuf::from("/tmp/one")),
                 account_service: None,
                 world: None,
@@ -866,6 +895,45 @@ mod tests {
             assert!(
                 USAGE.contains(mentioned),
                 "the usage text omits {mentioned}"
+            );
+        }
+    }
+
+    /// **A name given is a character asked for; a name defaulted is not.**
+    ///
+    /// The two travel together and mean different things: the hello's display name
+    /// always has a value, and the request only exists when somebody named one. A
+    /// launch that asked to play [`DEFAULT_PLAYER_NAME`] would have a character called
+    /// "voxelheim" created for it on every fresh world.
+    #[test]
+    fn only_a_name_that_was_given_asks_for_a_character() {
+        let launched = |raw: &[&str], env: Option<&str>| {
+            start(
+                raw,
+                &LaunchEnv {
+                    player_name: env.map(str::to_owned),
+                    ..LaunchEnv::default()
+                },
+            )
+            .expect("a legal command line")
+        };
+
+        let defaulted = launched(&["norse.example"], None);
+        assert_eq!(defaulted.player_name, DEFAULT_PLAYER_NAME);
+        assert_eq!(
+            defaulted.chosen_character, None,
+            "nobody was named, so the screen asks"
+        );
+
+        for start in [
+            launched(&["norse.example", "--name", "  thora  "], None),
+            launched(&["norse.example", "--name=thora"], None),
+            launched(&["norse.example"], Some("thora")),
+        ] {
+            assert_eq!(start.chosen_character.as_deref(), Some("thora"));
+            assert_eq!(
+                start.player_name, "thora",
+                "the same name still reaches the hello"
             );
         }
     }

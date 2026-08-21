@@ -414,6 +414,12 @@ fn describe(
         ConnectionState::Idle => "No server chosen".to_owned(),
         ConnectionState::Connecting => format!("Connecting to {addr}..."),
         ConnectionState::Handshaking => format!("Handshaking with {addr}..."),
+        // Named apart from the line above it, because they are waiting for different
+        // things: a handshake is waiting for the server, and this is waiting for the
+        // player. A status line that said "Handshaking" over a character screen would be
+        // telling somebody their game had stalled while it held a control they had not
+        // pressed yet.
+        ConnectionState::Choosing => format!("Choosing a character on {addr}"),
         ConnectionState::Connected => match session {
             Some(Session(params)) => format!(
                 "Connected to {addr} | {} | entity {} | seed {} | {} Hz | chunk {} | view {}",

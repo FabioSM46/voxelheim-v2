@@ -45,6 +45,7 @@ keeps meaning "everything the client is".
 | Module | Owns | Must not |
 | ------ | ---- | -------- |
 | `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service`, the development address, `--world`, `--name` and `--identity` | contain game or network logic, or admit a combination of address, service and world that is not one of the three launches on `Start` |
+| `player/appearance.rs` | which part of a body each of the six appearance fields covers, and where each part sits in fractions of the collision box | hold a size of its own, or become a second answer for either renderer |
 | `net/mod.rs` | `NetPlugin`, `SignInPlugin`, `ServerListPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState`/`ServerList` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
 | `net/codec.rs` | FlatBuffers encode/decode, contract limits, `ServerWelcome` validation | know about connections |
@@ -78,6 +79,7 @@ keeps meaning "everything the client is".
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory | reach into another module's internals, or grow a health bar |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
+| `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 The layout deliberately mirrors the server's packages — `frame.rs` ↔ `internal/transport`,
@@ -153,6 +155,10 @@ Rules that hold on this boundary:
   system that writes to a socket is a frame that can stall on a network. The handshake is written
   from the reader thread before the writer thread is started, so there are never two writers at
   once — which is the only arrangement `transport.Conn` promises to survive on the far side.
+  **The character phase is what makes "before" load-bearing rather than incidental**: the reader
+  thread now waits in the middle of the handshake for a person to choose, and the choice reaches
+  it as a `NetCommand`, so the writer thread is still started at `Established` and the frame that
+  answers the list is still written by the one thread that wrote the hello.
 - **The outbound channel is bounded and lossy, and the other two are not.** It is the only channel
   the ECS *produces* into, and a producer that cannot block has to be able to drop. What waits
   there is input, and an input frame describes the controls *now*: by the time a deep queue
@@ -774,6 +780,15 @@ what stays per-grid is the border, which is the only thing they genuinely disagr
 does — `combat.rs` routes on the ids it knows, and what an item can do is the server's registry. A
 wrong icon draws the wrong picture and has no other effect available to it.
 
+**A body is the same shape of answer, and `player/appearance.rs` is where it is decided once.**
+Six colours cross the wire and five parts wear them; the table says which part takes which field
+and where each part sits, in fractions of the collision box rather than in metres — the box is the
+server's, and a character with more hair is not a taller character. `ui/character.rs` draws those
+parts flat as `bevy_ui` nodes for the preview, exactly as `ui/icon.rs` draws an `ItemShape`, and
+the issue that gives players bodies in the world builds meshes from the same table. Two tables
+would be two answers to "what does a shirt colour cover", and the first thing two answers do is
+disagree.
+
 ## Conventions that are not obvious from the code
 
 - **`net/codec.rs` is the only place untrusted bytes are read.** It copies every field it needs
@@ -1091,6 +1106,67 @@ screen whose whole content is one button is a button nobody can press. `Escape` 
 login screen is deliberately not dismissible, and `show_menu` is the other half, so the pause menu
 is not drawn underneath.
 
+## Choosing who goes in
+
+**The handshake has a phase in the middle of it now, and it is the one this client spends waiting
+for a person.** `ClientHello` is answered with `ServerCharacterList` — this account's characters on
+that world, and how many it may hold — and the world arrives only after a `ServerWelcome` that
+answers a choice. `net/handshake.rs` models it as `AwaitingCharacters → Choosing → AwaitingWelcome
+→ Established`, so a welcome that overtakes a selection is a protocol error with a name rather than
+a spawn nobody asked for, and a second list is one too.
+
+The pieces, and the boundary each stays on:
+
+- `net/handshake.rs` holds the phase and its admission rules. `Handshake::chose` is what moves
+  `Choosing → AwaitingWelcome`, called by the session thread in the moment it writes the frame —
+  which is what makes "a welcome before a choice" a thing this state machine can *see*.
+- `net/session.rs` owns the socket. The choice reaches it as `NetCommand::Choose`, and the
+  selection or creation frame is written by the session thread, from the same thread that wrote
+  the hello. **The writer thread starts at `Established` and not before**, which is the whole
+  reason the command exists: one writer per connection is a rule this handshake would otherwise
+  break by waiting for a person in the middle of it.
+- `net/mod.rs` carries `CharacterChoice` — the list, the limit, the preselection and whether the
+  answer has gone out — and turns one `ChooseCharacter` message into one command. `answered` is
+  what makes a double press harmless: a second `SelectCharacterRequest` on a welcomed session is a
+  protocol error that closes it.
+- `ui/character.rs` draws the rows, the creation draft, the palettes and the live preview, and
+  writes `ChooseCharacter`. It never touches a socket, the same way the login screen and the
+  server list never do.
+
+**Nothing here decides anything, and the name is the case worth stating.** Whether a name may be
+worn is the server's rule; `CHARACTER_NAME_TAKEN` and `CHARACTER_NAME_REFUSED` are its two
+different answers, they arrive as a `ServerReject` that ends the session, and the screen renders
+what came back. A client that guessed at either would be holding an opinion about a world it can
+only see part of — and a refused creation keeps the draft, so coming back is a click rather than a
+redo.
+
+**The colours are stated rather than picked freely.** `ui/character.rs` holds one table per field
+with the reasoning beside it: what a Norse dyer could reach, which is why there is no free colour
+picker and no magenta. Every entry is checked at compile time against the `0x00RRGGBB` the contract
+carries, so a palette entry the server would refuse is a build failure. `Appearance` itself has
+private fields and one constructor — `net/codec.rs` — so the decoder and the screen reach the same
+door, and there is no second way to build one that nothing checked.
+
+**Which character was played here is remembered, and it is a convenience rather than a claim.**
+`$XDG_DATA_HOME/voxelheim/characters/<address>` holds one id, written after the server welcomes a
+session on it, and the screen preselects the row that matches — one file per server, for the reason
+the identity file has one: an id is minted per world. Anything unreadable, absent or matching
+nothing in the list preselects nothing and costs exactly one keypress, which is why it is not
+gated on the certificate expectation the way the identity file is: nothing is decided from it and
+it goes back only to the server that issued it. **A creation is deliberately not remembered** —
+`ServerWelcome` names an entity and no character, so a client that has just made one cannot know
+the id the server minted for it; the next launch lists it and selecting it once is what teaches the
+file.
+
+**`--name` answers the phase without a person, and it is the sentence a hello used to carry.**
+Before V7 the server read `ClientHello.player_name` and settled a character from it; V7 moved that
+decision onto the wire and left the field carrying nothing anybody reads. `ui::PlayAs` is the same
+sentence in the new grammar: with a name given, the screen asks to play the listed character
+wearing it, or to create one under it when the account holds none, wearing the starting appearance.
+It is a request like any other — the server refuses a name it would refuse from the screen — and it
+is what lets `scripts/interop-check.sh` reach a world at all, since no unattended check can press a
+key. A launch that named nobody waits, which is every player's launch.
+
 ## Generated bindings
 
 Committed, never hand-edited, regenerated with the flatc release pinned in `.flatc-version` at
@@ -1148,7 +1224,7 @@ cargo run -- 192.0.2.5:7000                  # the same, at an explicit address
 cargo run -- --server norse.example         # bare host gets port 7777
 VOXELHEIM_SERVER=192.0.2.5:7000 cargo run    # lower precedence than the CLI
 cargo run -- --world midgard                # VOXELHEIM_WORLD is the fallback
-cargo run -- --name thora                   # display name; VOXELHEIM_NAME is the fallback
+cargo run -- --name thora                   # play thora, or create her; VOXELHEIM_NAME is the fallback
 cargo run -- --identity /tmp/second         # a second character on one server
 cargo run -- --help
 ```
@@ -1338,8 +1414,12 @@ Recorded here so the next reader does not mistake them for oversights:
 - **The two stacks are checked meeting, but by hand and not by CI — and the gap that leaves is
   what #154 fell into.** `scripts/interop-check.sh` drives the real client against the real server
   over TLS: the documented development command reaching a world, a hello with no account refused
-  in the server's own words, a ticket for one world refused by a server running another, and a
-  stored identity never presented to a server nothing stated a certificate for. It mints its own
+  in the server's own words, a ticket for one world refused by a server running another, a stored
+  identity never presented to a server nothing stated a certificate for, and — since #108 — the
+  character phase itself: an empty list answered with a creation on the first launch, and the
+  character that made answered with a selection on the second (check 6). Every client it starts
+  passes `--name`, because the screen otherwise waits for a person and `timeout` is what would
+  answer it. It mints its own
   ticket with a key it generated and gives the server the public half as `-ticket-key`, because a
   real sign-in needs a Discord application and a browser; the account service is the only thing it
   stands in for.
@@ -1393,6 +1473,15 @@ Recorded here so the next reader does not mistake them for oversights:
   `TcpListener::bind` takes one address, and a browser may connect to the other. Naming the
   literal address in the service's `-discord-redirect-uri` avoids it entirely, which is what its
   own default does.
+- **A character cannot be deleted or renamed, from here or at all.** The contract has no message
+  for either — `schemas/handshake.fbs` reserves a list, a selection and a creation — so a roster
+  that is full is full, and `--name` naming nobody on one says so and leaves the screen up. The
+  server's store is where a deletion would have to start.
+- **The preview is flat `bevy_ui` nodes, not the body the world draws.** Both read the same table
+  in `player/appearance.rs`, which is what keeps them one answer, but a rectangle stack seen
+  head-on is not a mesh seen from a camera. The issue that gives players bodies is where the second
+  renderer arrives; until then the preview is honest about the colours and approximate about
+  everything else.
 - **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
   says so and `--account-service` pointed somewhere else is a different file.
 - **No reconnect, backoff or session resumption.** A refused or dropped connection is reported
