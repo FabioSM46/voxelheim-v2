@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -388,6 +390,119 @@ func TestAnUnreadableSigningKeyRefusesBeforeThePortIsBound(t *testing.T) {
 	if bytes.Equal(after, before) {
 		t.Fatal("the test did not manage to damage the key it meant to")
 	}
+}
+
+// **A start that is going to be refused writes nothing at all** — not the signing key,
+// and not even the directory it was pointed at.
+//
+// The key is the half that costs something. `internal/ticket` has no revocation, so a
+// pair minted into a directory an operator mistyped stays valid for as long as the file
+// exists, and it is a file nobody will remember to delete — the operator fixes the flag,
+// starts again against the directory they meant, and that start mints a *second* pair
+// while the first sits where it was left. The directory is the tidier half of the same
+// rule: a start that cannot succeed has no business creating a tree nobody asked for.
+//
+// The cases are the ways a configuration can be wrong that the service itself decides —
+// every shape of unusable Discord redirect URI, and a registration key file that is not
+// there. Each one refuses *after* the point the storage used to be opened at, which is
+// what made this a bug rather than a preference.
+func TestARefusedStartCreatesNothing(t *testing.T) {
+	t.Parallel()
+
+	missingKeyFile := filepath.Join(t.TempDir(), "not-here")
+
+	cases := map[string]func(*options){
+		"a redirect URI that is not a URL": func(o *options) {
+			o.discordClientID = "111"
+			o.discordRedirectURI = "://not a url"
+		},
+		"a redirect URI that names no host": func(o *options) {
+			o.discordClientID = "111"
+			o.discordRedirectURI = "discord.example/callback"
+		},
+		"a redirect URI that is not http or https": func(o *options) {
+			o.discordClientID = "111"
+			o.discordRedirectURI = "ftp://discord.example/callback"
+		},
+		// A client id with no redirect URI at all. An empty client id is the other
+		// thing entirely — "not configured", which starts — so the id is set here.
+		"a client id with no redirect URI": func(o *options) {
+			o.discordClientID = "111"
+			o.discordRedirectURI = ""
+		},
+		"a registration key file that is not there": func(o *options) {
+			o.registrationKeyFile = missingKeyFile
+		},
+	}
+
+	for name, misconfigure := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := validOptions(t)
+			misconfigure(&opts)
+
+			if err := run(context.Background(), opts, discard()); err == nil {
+				t.Fatal("run started with a configuration it cannot act on")
+			}
+
+			// The key pair first, and named rather than inferred from the directory:
+			// this is the assertion the issue is about, and a failure should say which
+			// half of an unrevokable credential was written.
+			for _, key := range []string{ticket.SigningKeyFileName, ticket.VerifyingKeyFileName} {
+				if _, err := os.Stat(filepath.Join(opts.authDir, key)); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the refused start left %s behind", key)
+				}
+			}
+			// And nothing else either. The directory did not exist when run was called,
+			// so anything here at all was created by a start that then refused.
+			if _, err := os.Stat(opts.authDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the refused start created %s, holding %v", opts.authDir, entryNames(t, opts.authDir))
+			}
+		})
+	}
+}
+
+// The other half of the sentence above: a configuration nothing refuses **does** mint the
+// pair. Without this, `TestARefusedStartCreatesNothing` would pass just as well against a
+// service that had stopped minting altogether — the point is that the two outcomes differ,
+// and before the configuration pass was hoisted above the storage they did not.
+func TestAnAcceptedStartMintsTheSigningKey(t *testing.T) {
+	t.Parallel()
+
+	// Already cancelled, so serve stops as soon as it starts: what is under test is
+	// everything run does before it serves.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	opts := validOptions(t)
+	opts.discordClientID = "111"
+	opts.discordRedirectURI = defaultDiscordRedirectURI
+
+	if err := run(ctx, opts, discard()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, key := range []string{ticket.SigningKeyFileName, ticket.VerifyingKeyFileName} {
+		if _, err := os.Stat(filepath.Join(opts.authDir, key)); err != nil {
+			t.Errorf("an accepted start left no %s: %v", key, err)
+		}
+	}
+}
+
+// entryNames is what a directory holds, for a failure message that says what was created
+// rather than only that something was.
+func entryNames(t *testing.T, dir string) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{"<unreadable: " + err.Error() + ">"}
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 func TestNewLogger(t *testing.T) {
