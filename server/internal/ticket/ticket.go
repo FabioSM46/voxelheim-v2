@@ -35,6 +35,29 @@
 // a protocol version bump. A second version number here would be a second thing to keep
 // in step with the first.
 //
+// # Two kinds of ticket, told apart by one value
+//
+// A ticket whose world id is zero names **no world**: an *account ticket*, which says
+// only "the account service knows who this is". Every other ticket is world-scoped and
+// says "this account may play on that one world".
+//
+// The account ticket exists because the trust chain closed in a circle without it. A
+// player needs a ticket to read the server list, needs to name a world to be minted one,
+// and the list is what tells them which worlds exist. So `POST /v1/signin/discord/finish`
+// mints an account ticket when the request names no world, and the server-list endpoint
+// takes either kind — it only needs to know which account is asking.
+//
+// **The zero id is safe to spend on this because [WorldIDFor] cannot produce it**, so
+// the two kinds can never be confused for one another. And the boundary that matters is
+// unmoved: [Verify] is what a game server calls, it is handed that server's own world,
+// and an account ticket names a different one — so it is refused there exactly as a
+// ticket for somebody else's world is. Nothing a game server does admits an account
+// ticket; [VerifyAnyWorld] is the account service's own check and says so.
+//
+// Minting one is deliberate rather than incidental: [Pair.Mint] still refuses a zero
+// world, and [Pair.MintAccountTicket] is the only way to ask for one. A forgotten field
+// is a refusal, never a credential of a shape nobody meant to issue.
+//
 // # This package is a leaf, deliberately
 //
 // It imports internal/world for the five record helpers that package exports for the
@@ -231,14 +254,26 @@ func (id AccountID) IsZero() bool { return id == AccountID{} }
 //
 // Derived from a name rather than chosen, so that two configurations agreeing on a
 // string agree on the id without anybody copying a blob between them. See [WorldIDFor].
+//
+// **The zero id is the one exception, and it reads "this ticket names no world".** See
+// [Pair.MintAccountTicket] for what that is for, and [WorldID.IsZero] for why the value
+// is safe to spend on it.
 type WorldID [WorldIDSize]byte
 
 // String is the id in lowercase hex: 24 characters. Not a secret — it is a digest of a
 // name an operator publishes — so it is safe in a log and in an error.
 func (w WorldID) String() string { return hex.EncodeToString(w[:]) }
 
-// IsZero reports the one world id [WorldIDFor] does not produce, which is what a caller
-// gets from `var w WorldID` and what [Mint] refuses.
+// IsZero reports the world id that names no world: what a caller gets from
+// `var w WorldID`, what [Pair.Mint] refuses, and what [Pair.MintAccountTicket] produces
+// deliberately.
+//
+// **[WorldIDFor] never produces it, and that is the property the account ticket rests
+// on.** A name that hashed to the zero id would be a world whose tickets every verifier
+// read as world-less; the id is 96 bits of SHA-256, so it does not happen, and
+// TestAWorldIDIsTheNameAndNothingElse pins that rather than leaving it an assumption.
+// The consequence is that the two states cannot be confused: a world-scoped ticket
+// always names a real world, and an account ticket always names none.
 func (w WorldID) IsZero() bool { return w == WorldID{} }
 
 // WorldIDFor is the world id a world's name resolves to.
@@ -295,7 +330,14 @@ type Claims struct {
 	// Account is who the ticket is for.
 	Account AccountID
 
-	// World is the world it is for, and no other.
+	// World is the world it is for, and no other — or the zero id, which is an
+	// **account ticket**: a ticket that names no world at all.
+	//
+	// The two are told apart with [WorldID.IsZero] and nothing else, because
+	// [WorldIDFor] cannot produce the zero id. [Verify] refuses an account ticket for
+	// any world a game server could be configured with, which is what makes the second
+	// state safe to add: it is a credential for talking to the account service, never
+	// one for joining a game.
 	World WorldID
 
 	// ExpiresAt is the moment it stops being good for anything, to the second and in
@@ -330,8 +372,34 @@ type Ticket [Size]byte
 // readability hex buys elsewhere in this repository buys nothing here.
 func (t Ticket) Encode() string { return base64.RawURLEncoding.EncodeToString(t[:]) }
 
+// EncodedSize is how many characters [Ticket.Encode] produces: 128, and never anything
+// else, because [Size] is fixed and unpadded base64url has no other length for it.
+//
+// Exported because it is the whole shape of a bearer credential arriving in an
+// `Authorization` header, and the one thing about that credential a reader can settle
+// before doing any work on it. The formula is spelled out rather than computed because a
+// const cannot call [encoding/base64.Encoding.EncodedLen]; the two are pinned to each
+// other by a test, which is where the arithmetic is checked rather than trusted.
+const EncodedSize = (Size*8 + 5) / 6
+
 // Decode reads a ticket back from [Ticket.Encode], refusing anything that is not one.
 func Decode(encoded string) (Ticket, error) {
+	// **The length is refused before anything is decoded**, which is an ordering rather
+	// than an extra rule: a ticket is exactly [EncodedSize] characters, so every input
+	// this turns away is one the decode below would have turned away anyway.
+	//
+	// The ordering is what matters. A ticket is presented as a bearer credential in an
+	// `Authorization` header by a caller nobody has authenticated yet — the credential has
+	// to be read to be refused — and a header is as long as whoever sent it chose, up to
+	// net/http's MaxHeaderBytes, which is a megabyte by default. Decoding first would
+	// spend a base64 pass and three quarters of a megabyte of allocation on learning what
+	// a comparison knows immediately. It is the argument cmd/voxelheim-auth's
+	// maxRegistrationRequestBytes makes about a request body, one field earlier.
+	if len(encoded) != EncodedSize {
+		// The length is named and the input is not, for the reason below.
+		return Ticket{}, fmt.Errorf("ticket: an encoded ticket is exactly %d characters, got %d",
+			EncodedSize, len(encoded))
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		// The input is not echoed. It is a bearer credential, and an error message
@@ -379,15 +447,21 @@ func (t Ticket) MarshalJSON() ([]byte, error) { return []byte(`"` + redactedTick
 //
 // The refusals are at the *write*, not only at the read, for the reason internal/auth
 // refuses an account it could not read back: signing something this build would reject
-// is the single failure that looks like a success until somebody presents it.
+// is the single failure that looks like a success until somebody presents it. Which is
+// why the set of refusals here is exactly [decodeBody]'s — the two halves of a format
+// that disagree about what a ticket is are worse than either half's rule alone.
+//
+// **A zero world is not one of them, and the asymmetry is deliberate.** A body naming no
+// world is a legal account ticket, so refusing it here would be refusing something this
+// build reads back happily. What must not happen is a zero world arriving by *accident*
+// — a caller that forgot the field — and that is a rule about the minting API rather
+// than about the format, so it lives in [Pair.Mint] where the caller is. There is no way
+// to reach this function without going through one of the two mints.
 func encodeBody(c Claims) ([]byte, error) {
 	if c.Account.IsZero() {
 		// The one id a mint cannot produce. Signed, it would make every ticket that
 		// reached this line name the same nobody.
 		return nil, fmt.Errorf("%w: it names no account", ErrUnmintable)
-	}
-	if c.World.IsZero() {
-		return nil, fmt.Errorf("%w: it names no world", ErrUnmintable)
 	}
 	unix := c.ExpiresAt.Unix()
 	if unix <= 0 || unix > maxExpiresAtUnix {
@@ -407,20 +481,22 @@ func encodeBody(c Claims) ([]byte, error) {
 // decodeBody reads a body's claims back.
 //
 // Called only after the signature has been checked, which is what makes it safe to build
-// a value from these bytes at all. It still refuses the two ids [encodeBody] refuses:
-// the halves of a format that disagree about what a ticket is are worse than either
-// half's rule alone.
+// a value from these bytes at all. It refuses exactly what [encodeBody] refuses — the
+// zero account id, and nothing else — because the halves of a format that disagree about
+// what a ticket is are worse than either half's rule alone.
+//
+// **A zero world is read rather than refused**, and it is the only field here whose
+// meaning depends on the reader: it is an account ticket, which [Verify] turns away from
+// every world and [VerifyAnyWorld] admits. Refusing it here would make the account
+// ticket unreadable by the service that mints it.
 func decodeBody(body []byte) (Claims, error) {
 	c := Claims{
 		Account:   AccountID(body[offAccount : offAccount+AccountIDSize]),
 		World:     WorldID(body[offWorld : offWorld+WorldIDSize]),
 		ExpiresAt: time.Unix(int64(binary.LittleEndian.Uint32(body[offExpires:offExpires+expiresAtSize])), 0).UTC(),
 	}
-	switch {
-	case c.Account.IsZero():
+	if c.Account.IsZero() {
 		return Claims{}, fmt.Errorf("%w: it names no account", ErrMalformedBody)
-	case c.World.IsZero():
-		return Claims{}, fmt.Errorf("%w: it names no world", ErrMalformedBody)
 	}
 	return c, nil
 }

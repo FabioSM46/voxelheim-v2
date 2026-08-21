@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/registry"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
@@ -36,6 +37,23 @@ func newKeys(t *testing.T) *ticket.Pair {
 		t.Fatalf("ticket.LoadOrCreate: %v", err)
 	}
 	return keys
+}
+
+// newServers is a registry in a directory belonging to this test.
+//
+// Every service these tests build gets one, for the reason every one gets a key pair: a
+// service without a registry is a state that cannot exist, because run returns before
+// constructing the service if the directory cannot be opened. The registration *key* is
+// deliberately not set here — that one really is optional, and a service without it is the
+// deployment nobody has given a key to yet.
+func newServers(t *testing.T) *registry.Store {
+	t.Helper()
+
+	servers, err := registry.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("registry.OpenStore: %v", err)
+	}
+	return servers
 }
 
 // validOptions is a configuration every field of which passes validate. The cases
@@ -108,7 +126,7 @@ func TestOptionsValidateReportsTheValueGiven(t *testing.T) {
 func TestTheRouteTableIsTheWholeSurface(t *testing.T) {
 	t.Parallel()
 
-	svc := &service{log: discard(), keys: newKeys(t)}
+	svc := &service{log: discard(), keys: newKeys(t), servers: newServers(t)}
 	table := svc.routes()
 	if len(table) == 0 {
 		t.Fatal("the route table is empty; this test would pass by describing nothing")
@@ -140,7 +158,7 @@ func TestHealthAnswersThatTheProcessIsUp(t *testing.T) {
 	t.Parallel()
 
 	rec := httptest.NewRecorder()
-	newMux((&service{log: discard(), keys: newKeys(t)}).routes()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	newMux((&service{log: discard(), keys: newKeys(t), servers: newServers(t)}).routes()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("GET /healthz answered %d, want 200", rec.Code)
@@ -159,7 +177,7 @@ func TestHealthAnswersThatTheProcessIsUp(t *testing.T) {
 func TestHealthAnswersTheMethodsItsPatternDeclares(t *testing.T) {
 	t.Parallel()
 
-	mux := newMux((&service{log: discard(), keys: newKeys(t)}).routes())
+	mux := newMux((&service{log: discard(), keys: newKeys(t), servers: newServers(t)}).routes())
 
 	for method, want := range map[string]int{
 		http.MethodGet:    http.StatusOK,
@@ -192,7 +210,7 @@ func TestServeAnswersUntilTheContextEnds(t *testing.T) {
 	defer cancel()
 
 	stopped := make(chan error, 1)
-	go func() { stopped <- (&service{log: discard(), keys: newKeys(t)}).serve(ctx, ln) }()
+	go func() { stopped <- (&service{log: discard(), keys: newKeys(t), servers: newServers(t)}).serve(ctx, ln) }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("http://" + addr + "/healthz")

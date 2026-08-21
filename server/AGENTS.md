@@ -31,6 +31,7 @@ validation to get wrong.
 | `internal/auth` | the account store under `<auth-dir>/accounts/`: who a person is, never how they prove it | be imported by anything but `cmd/voxelheim-auth` |
 | `internal/discord` | the Discord sign-in: OAuth 2.0 Authorization Code with PKCE, and the sign-ins in flight | import anything of ours, or keep anything the provider hands it |
 | `internal/ticket` | the Ed25519 signing pair beside the accounts, what a session ticket says, and the offline check a game server makes with the public half | import anything of ours but `internal/world`, or offer any way to read the private key |
+| `internal/registry` | the registered game servers under `<auth-dir>/servers/`: name, address, certificate fingerprint, and when each was last heard from | be imported by anything but `cmd/voxelheim-auth`, or import anything of ours but `internal/world` and `internal/ticket` |
 | `gen/` | flatc output | be hand-edited, ever |
 
 The dependency direction is one-way: `game` and `session` depend on `protocol`, `transport` and
@@ -1226,6 +1227,101 @@ import, which is what shapes almost every rule below.
   every game server holding a copy by hand; rotating would need a way to publish two keys and a
   window in which both verify. Deleting the pair is the whole of the ceremony today, and it costs
   every ticket in flight.
+
+## The list that ends the trust chain
+
+`internal/registry` holds the registered game servers and `cmd/voxelheim-auth/servers.go` is
+the two endpoints in front of it: `POST /v1/servers` to register, `GET /v1/servers` to read
+the list. It is where trust on first use stops being how a player decides who a server is.
+
+- **The chain, stated once.** The client knows the account service by construction — it is
+  compiled in. The account service knows the game servers because an operator registered
+  them. Therefore a client can verify a game server it has never met, against a fingerprint
+  it was told rather than one it guessed. The fingerprint exchanged by hand that #83 left as
+  the only manual step disappears here.
+- **The fingerprint is `certs.Fingerprint`'s number and nothing else computes it.** A
+  registration carries it as text, `internal/registry` checks that it is a well-formed
+  SHA-256 digest in lowercase hex, and the list serves it back verbatim. A second way of
+  arriving at the number is a second number to disagree with the first, and the one an
+  operator reads out of `voxelheimd`'s `certificate_sha256=…` startup line has to be the one
+  a client compares. Uppercase is refused rather than folded, for the reason a provider name
+  and a world name are: one value with two spellings is one value that eventually gets
+  compared before it reaches the folding.
+- **Two credentials, and neither is the other.** Registration presents an operator-configured
+  key; the list presents a session ticket. Anybody able to register could put their own
+  address in the list under a name players trust — and that is a *better* attack than the one
+  this list replaces, because the client would believe the answer. Anybody able to read it
+  without a ticket would have a public directory of people's home addresses.
+- **These are the only two routes in this service that answer 401**, and `signin.go` says in
+  as many words that none of its own does. That is not a contradiction: it declines the status
+  because it has no authentication scheme to name, and inventing one to justify a header would
+  be inventing one. Here `Bearer` is what the request actually carries, so
+  `WWW-Authenticate: Bearer` is true and the 401 says what a 400 could not.
+- **The registration key is read from a file or from the environment, never from a flag**, and
+  `registry.Key` keeps only its SHA-256 — so "the key is never logged" is a property of the
+  type rather than a rule every call site remembers. A flag would be visible in `ps` to every
+  user on the machine. The two sources are mutually exclusive rather than ordered, because a
+  precedence rule is something an operator has to remember and one who has set both has
+  already made a mistake worth being told about. A key under `registry.MinKeyBytes` is refused
+  at startup; there is no rate limit and none is coming, so the key's length is the whole of
+  the bound on guessing.
+- **A re-registration replaces the record, which is the point rather than a convenience.** The
+  address the list serves is the one the server last announced, so a home connection that gets
+  a new address overnight is invisible to players. Nothing in a record survives a
+  registration, because every field of it came from the announcement.
+- **A server that stops announcing is shown offline, never dropped** — `registry.OfflineAfter`,
+  five minutes, exported because the announcing side must read it rather than pick a second
+  number. Dropping it would make a server that is briefly unreachable look like one nobody
+  ever registered, and an empty list is what a player concludes the whole game is broken from.
+- **The address is the one value in this service that never reaches a log.** It locates
+  somebody's house, which is the reason the list is behind a credential at all, and a value
+  that must not be published must not be in a log line either. Every other field is logged and
+  quoted back on purpose: registration is authenticated, so the text is the operator's own,
+  and naming the field that was wrong is the difference between a mistake they can fix and one
+  they have to guess at. That is the deliberate opposite of the sign-in routes' rule, and the
+  reason is that their caller is unauthenticated and this one is not.
+- **A damaged record fails the whole list and is repaired by the next announcement.** Skipping
+  it would make a server silently vanish — the player sees a shorter list and nobody is told
+  anything — and unlike `auth.Store`, this store *can* heal, because the announcer holds every
+  field and is restating all of them. So `List` reports and `Register` overwrites, and the two
+  opposite answers are the same rule applied where each caller stands.
+- **The server name is the world name.** One string does both jobs, which is what closes the
+  chain: the client reads a name out of the list and hands that name to
+  `POST /v1/signin/discord/finish`. `registry.Server.Validate` asks `ticket.WorldIDFor` rather
+  than restating its rule, so a name this store accepts is always one a ticket can be minted
+  for — a registry that accepted a name the ticket service would not is a server a player can
+  see and cannot join.
+- Deliberately not here: withdrawing a server (deleting the file is the ceremony), any
+  moderation, player counts, and any probe of a registered address. Nothing in this service
+  dials anybody; `Online` reports only that a server said something lately.
+
+### An account ticket names no world
+
+`ticket.Mint` refuses a zero `WorldID` and `finish` required a `world`, which closed the chain
+in a circle: a player needs a ticket to read the list, needs to name a world to be minted one,
+and the list is what tells them the worlds exist. **A zero `WorldID` is now the account
+ticket** — "this ticket names no world".
+
+- `POST /v1/signin/discord/finish` accepts a body whose `world` is absent or empty and mints
+  an account ticket. A *named* world that this service will not issue for is still
+  `world_not_named`; empty means "no world", and `" "` is an attempt at one that failed.
+- **The zero id is safe to spend on this because `WorldIDFor` never produces it**, so the two
+  kinds cannot be confused. `TestAWorldIDIsTheNameAndNothingElse` pins that rather than
+  leaving it an assumption.
+- **`ticket.Verify` is unchanged and still refuses a ticket whose world is not the one asked
+  for, so a game server rejects an account ticket** — for every world it could be configured
+  with, including the misconfiguration of having none.
+  `TestAnAccountTicketNamesNoWorldAndIsRefusedByEveryGameServer` is that property, and it is
+  the one to break a change on.
+- **Minting one is a different method, not a sentinel argument.** `Mint` still refuses a zero
+  world; `Pair.MintAccountTicket` is how one is asked for on purpose. The zero value is what a
+  caller gets from a forgotten field, and the difference between "I meant no world" and "I
+  forgot the world" cannot be recovered from the argument — so it is carried by which function
+  was called, where it cannot be lost.
+- `ticket.VerifyAnyWorld` is the account service's own check and **a game server must never
+  call it**. Its one caller is the list endpoint, which needs to know only which account is
+  asking. It accepts either kind, so somebody already holding a world ticket does not have to
+  sign in again to read the list.
 
 ## Generated bindings
 

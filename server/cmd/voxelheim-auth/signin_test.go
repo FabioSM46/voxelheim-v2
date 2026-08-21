@@ -22,6 +22,7 @@ import (
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/discord"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/registry"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
@@ -57,7 +58,25 @@ func signInService(t *testing.T, fake *fakeDiscord, log *slog.Logger) (*service,
 	if err != nil {
 		t.Fatalf("discord.New: %v", err)
 	}
-	return &service{log: log, keys: keys, signin: &signIn{flow: flow, accounts: accounts}}, accounts.Dir()
+	// The registry too, beside the accounts exactly as the service keeps them. A service
+	// built without one is a shape `run` cannot produce, and the chain these tests are
+	// ultimately about — sign in, read the list, join what it names — needs both halves in
+	// one service to be driven at all.
+	servers, err := registry.OpenStore(authDir)
+	if err != nil {
+		t.Fatalf("registry.OpenStore: %v", err)
+	}
+	key, err := registry.ParseKey(fixtureKey)
+	if err != nil {
+		t.Fatalf("registry.ParseKey: %v", err)
+	}
+	return &service{
+		log:             log,
+		keys:            keys,
+		signin:          &signIn{flow: flow, accounts: accounts},
+		servers:         servers,
+		registrationKey: &key,
+	}, accounts.Dir()
 }
 
 // authDirOf is the directory the accounts directory sits in: the one -auth-dir names,
@@ -465,7 +484,7 @@ func TestACodeTheProviderRefusesIsARefusalOfItsOwn(t *testing.T) {
 func TestTheSignInRoutesSayWhenTheyAreNotConfigured(t *testing.T) {
 	t.Parallel()
 
-	svc := &service{log: discard(), keys: newKeys(t)}
+	svc := &service{log: discard(), keys: newKeys(t), servers: newServers(t)}
 
 	for _, path := range []string{"/v1/signin/discord/start", "/v1/signin/discord/finish"} {
 		rec := call(t, svc, http.MethodPost, path, `{"state":"a","code":"b"}`)
@@ -700,11 +719,18 @@ func TestATicketIsRefusedByAWorldItWasNotIssuedFor(t *testing.T) {
 func TestASignInThatNamesNoUsableWorldIsRefusedBeforeTheProviderIsAsked(t *testing.T) {
 	t.Parallel()
 
+	// **"" is deliberately not in this table any more**: naming no world at all mints an
+	// account ticket now, and TestASignInThatNamesNoWorldMintsAnAccountTicket is where that
+	// lives. Every entry here is an *attempt* at a world that failed, which is a different
+	// thing to be told — and quietly treating one as "no world" would hand somebody a
+	// ticket they cannot join anything with and no reason why.
 	for name, world := range map[string]string{
-		"no world at all":  "",
 		"a capital letter": "Midgard",
 		"a path traversal": "../../etc",
 		"a name too long":  strings.Repeat("a", ticket.MaxWorldNameBytes+1),
+		"whitespace only":  " ",
+		"an underscore":    "mid_gard",
+		"a trailing space": "midgard ",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -935,4 +961,144 @@ func seedOnDisk(t *testing.T, authDir string, published ed25519.PublicKey) []byt
 		t.Fatal("the bytes this test took for the seed do not rebuild the published key; it is looking at the wrong thing")
 	}
 	return seed
+}
+
+// **A sign-in that names no world mints an account ticket**, and this is the whole of the
+// contract decision this issue turns on.
+//
+// Without it the trust chain closed in a circle: a player needs a ticket to read the server
+// list, needs to name a world to be minted one, and the list is what tells them which worlds
+// exist. Naming no world is how they get in the door.
+//
+// The ticket is verified with the key this service *publishes*, because that is the only copy
+// anybody else ever has, and a test reaching into the service would be checking that a value
+// equals itself.
+func TestASignInThatNamesNoWorldMintsAnAccountTicket(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, _ := signInService(t, fake, discard())
+
+	begun := start(t, svc)
+	code := fake.issue(t, begun.AuthorizeURL)
+
+	// The field left out of the body entirely, which is the shape a client that has never
+	// seen a world name sends.
+	body, err := json.Marshal(map[string]string{
+		"state":         begun.State,
+		"code":          code,
+		"finish_secret": begun.FinishSecret,
+	})
+	if err != nil {
+		t.Fatalf("building the finish request: %v", err)
+	}
+	rec := call(t, svc, http.MethodPost, "/v1/signin/discord/finish", string(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a sign-in naming no world answered %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var answer finishResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("reading the finish response: %v", err)
+	}
+	minted, err := ticket.Decode(answer.SessionTicket)
+	if err != nil {
+		t.Fatalf("the ticket in the response is not a ticket: %v", err)
+	}
+
+	key := publishedKey(t, svc)
+	claims, err := ticket.VerifyAnyWorld(key, minted[:], time.Now())
+	if err != nil {
+		t.Fatalf("the account ticket was refused by the key this service publishes: %v", err)
+	}
+	if !claims.World.IsZero() {
+		t.Errorf("an account ticket names world %s, want no world", claims.World)
+	}
+	if got := claims.Account.String(); got != answer.AccountID {
+		t.Errorf("the ticket names account %s and the response names %s", got, answer.AccountID)
+	}
+
+	// **And no game server accepts it**, which is the property that makes issuing one safe.
+	// A game server calls ticket.Verify with its own world; an account ticket names a
+	// different one and is refused there exactly as somebody else's world ticket would be.
+	for _, world := range []string{fixtureWorld, fixtureOtherWorld} {
+		if _, err := ticket.Verify(key, minted[:], worldID(t, world), time.Now()); !errors.Is(err, ticket.ErrWrongWorld) {
+			t.Errorf("the world %q answered %v, want ErrWrongWorld", world, err)
+		}
+	}
+}
+
+// An empty `world` is the same as an absent one — both are "no world" — and neither is the
+// refusal a *named* world that this service will not issue for gets.
+func TestAnEmptyWorldIsTheSameAsAnAbsentOne(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, _ := signInService(t, fake, discard())
+
+	begun := start(t, svc)
+	code := fake.issue(t, begun.AuthorizeURL)
+
+	rec := finishFor(t, svc, begun.State, code, begun.FinishSecret, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf(`a sign-in with "world":"" answered %d: %s`, rec.Code, rec.Body.String())
+	}
+	var answer finishResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("reading the finish response: %v", err)
+	}
+	minted, err := ticket.Decode(answer.SessionTicket)
+	if err != nil {
+		t.Fatalf("the ticket in the response is not a ticket: %v", err)
+	}
+	claims, err := ticket.VerifyAnyWorld(publishedKey(t, svc), minted[:], time.Now())
+	if err != nil {
+		t.Fatalf("the ticket was refused: %v", err)
+	}
+	if !claims.World.IsZero() {
+		t.Errorf(`"world":"" minted a ticket for world %s, want no world`, claims.World)
+	}
+}
+
+// A world-scoped sign-in still logs which world it was for, and an account sign-in says so
+// without logging a world id of twenty-four zeros. A field whose value sometimes means "not
+// applicable" is a field somebody eventually greps for and matches on.
+func TestTheSignInLogSaysWhichKindOfTicketWasIssued(t *testing.T) {
+	t.Parallel()
+
+	for name, world := range map[string]string{
+		"a world sign-in":    fixtureWorld,
+		"an account sign-in": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var out bytes.Buffer
+			fake := newFakeDiscord(t)
+			svc, _ := signInService(t, fake, slog.New(slog.NewTextHandler(&out, nil)))
+
+			begun := start(t, svc)
+			code := fake.issue(t, begun.AuthorizeURL)
+			if rec := finishFor(t, svc, begun.State, code, begun.FinishSecret, world); rec.Code != http.StatusOK {
+				t.Fatalf("the sign-in answered %d: %s", rec.Code, rec.Body.String())
+			}
+
+			logged := out.String()
+			if world == "" {
+				if !strings.Contains(logged, "ticket_scope=account") {
+					t.Errorf("the log does not say an account ticket was issued: %s", logged)
+				}
+				if strings.Contains(logged, "world_id=") {
+					t.Errorf("an account sign-in logged a world id: %s", logged)
+				}
+				return
+			}
+			if !strings.Contains(logged, "ticket_scope=world") {
+				t.Errorf("the log does not say a world ticket was issued: %s", logged)
+			}
+			if !strings.Contains(logged, worldID(t, fixtureWorld).String()) {
+				t.Errorf("the log does not say which world the sign-in issued a ticket for: %s", logged)
+			}
+		})
+	}
 }
