@@ -271,6 +271,44 @@ pub(super) fn post_json(
     read_response(&mut stream, authority)
 }
 
+/// Sends one authenticated `GET` and reads the whole answer.
+///
+/// A function of its own rather than a flag on [`post_json`], because `credential` is
+/// a bearer token and everything that touches one should be readable at a glance. It
+/// reaches exactly one line of the request and nothing else: **no error below names
+/// it, and none may**, which is the rule this module already keeps for a body.
+///
+/// `timeout` bounds each of the three phases — connect, write, read — which is the
+/// granularity `TcpStream` offers.
+pub(super) fn get_json(
+    authority: &str,
+    path: &str,
+    credential: &str,
+    timeout: Duration,
+) -> Result<Response, String> {
+    let mut stream = connect(authority, timeout)?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|err| format!("cannot configure the connection to {authority}: {err}"))?;
+
+    let request = format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {authority}\r\n\
+         User-Agent: voxelheim-client\r\n\
+         Accept: application/json\r\n\
+         Authorization: Bearer {credential}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|err| format!("cannot send a request to {authority}: {err}"))?;
+
+    read_response(&mut stream, authority)
+}
+
 /// Connects to the first address that answers, within `timeout`.
 ///
 /// The same shape as `session::connect`, and for the same reason: a name can

@@ -44,16 +44,18 @@ keeps meaning "everything the client is".
 
 | Module | Owns | Must not |
 | ------ | ---- | -------- |
-| `main.rs` | the Bevy app, plugin registration, CLI/env parsing of the address, `--name` and `--identity` | contain game or network logic |
-| `net/mod.rs` | `NetPlugin`, `SignInPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
+| `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service`, the development address, `--name` and `--identity` | contain game or network logic, or let an account service and an address be given together |
+| `net/mod.rs` | `NetPlugin`, `SignInPlugin`, `ServerListPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState`/`ServerList` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
 | `net/codec.rs` | FlatBuffers encode/decode, contract limits, `ServerWelcome` validation | know about connections |
 | `net/handshake.rs` | the handshake state machine and its admission rules | do I/O, or hold a clock |
-| `net/session.rs` | one connection's lifetime; the only code that blocks; the per-server identity file, read before the hello and written after the welcome | mention a Bevy type |
+| `net/session.rs` | one connection's lifetime; the only code that blocks; the per-server identity file, opened only for a server the list named | mention a Bevy type, or open an identity file for an unlisted server |
 | `net/signin.rs` | one sign-in attempt: the two POSTs, the browser, and the loopback listener that catches the redirect | mention a Bevy type, hold a PKCE verifier, or put `finish_secret` in a URL |
-| `net/tickets.rs` | the cached ticket — its file, its mode, its expiry, and the base64url the service answers in | parse a ticket's body, or decide anything from one |
+| `net/servers.rs` | one read of the server list: the ticket it presents, the rows it validates, and the address and fingerprint it keeps out of the ECS | shorten a list it could not read whole, answer a failure with an empty list, or expose an address |
+| `net/tls.rs` | the encrypted transport, the certificate check and the two shapes of expectation | write a fingerprint anywhere, or offer a way past a refusal |
+| `net/tickets.rs` | the cached ticket — its file, its mode, its expiry, and the base64url the service answers in and reads back | parse a ticket's body, or decide anything from one |
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, plus URL and query shapes | grow into a general HTTP client, or quote a body in an error |
-| `net/json.rs` | reading the account service's JSON and the RFC 3339 timestamps inside it | quote its input in an error, or read a nested value |
+| `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the six chunks a mesh is culled against | mesh, or spawn anything |
 | `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, one entity per chunk | mesh on the main schedule, or own a camera or a light |
@@ -75,6 +77,7 @@ keeps meaning "everything the client is".
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory | reach into another module's internals, or grow a health bar |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
+| `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 The layout deliberately mirrors the server's packages — `frame.rs` ↔ `internal/transport`,
@@ -889,48 +892,97 @@ that owns a socket.
   connection" needs no code: there is no unencrypted connection to present one over. The one
   seam is `session::Transport::Plaintext`, which exists under `cfg(test)` and nowhere else, so
   the guarantee is enforced by the compiler in every build a player runs.
-- **Trust on first use, pinned per server address.** There is no domain name and no issuer, so
-  web PKI has nothing to attest and the default verifier has nothing to check — the alternative
-  to pinning is not "safer validation", it is none. The client records the SHA-256 of the
-  certificate the first time it connects to an address and refuses any other one after that.
-- **A stored identity is never presented to a server that was never pinned.** The vulnerable
-  connection is the first one, and the tempting thing to say is that it carries nothing worth
-  taking — a client with no identity file presents an empty token and is minted a new character.
-  That is only true of a client that has never played there. **Every player carried over from
-  the plaintext transport has an identity file and no pin**, so their first connection after the
-  upgrade would have accepted any certificate and then handed it the identity: the weak moment
-  and the valuable moment overlapped for exactly the people with the most to lose. That
-  connection is refused instead, with a message naming the pin file and the two ways out — write
-  the fingerprint the operator reads off their server log into it, or delete the identity beside
-  it and join as a new character, which pins safely because a new character has nothing to
-  present.
-- **A token is only ever kept beside a pin.** A first connection whose fingerprint could not be
-  written down does not store the identity it was granted either. Otherwise the next connection
-  would hold a token with no pin — and be refused by the rule above, locking the player out of a
-  character the previous session had just made.
-- **What a changed fingerprint means, and what happens.** It is refused, with a message naming
-  the address, the file and both fingerprints — and no bypass flag, no prompt. The two things it
-  can mean are "the operator moved the world without `server-key.pem`" and "somebody is standing
-  between you and that server", and nothing on this side can tell them apart. Clearing it is
-  deleting the pin file by hand, which is a deliberate act taken after asking the operator for
-  the fingerprint their server logs at startup.
-- **A pin that cannot be read is not a pin.** An unreadable or malformed pin file is an error,
-  never "no pin": reading it as absent would silently re-pin whatever answered the next
-  connection, which is exactly the substitution the file exists to catch.
-- **The pin is a second fact about the same server, in a second file.** Its path is the identity
-  file's own with `.pin` after it, so `--identity` moves both — including to somewhere writable
-  when the default data directory is not — and the atomic write is `session.rs`'s, reused rather
-  than copied. Two characters against one server keep two pins of one fingerprint: redundant,
-  harmless, and each verified on its own. A separate file rather than a field inside the identity file, because that
-  file is exactly 32 raw bytes: giving it a format would make every file already on disk the
-  wrong length, which the reader correctly treats as "not a token" and answers by starting a new
-  character. Adding encryption is not a reason to take everybody's character away.
+- **The expectation comes from the server list, and trust on first use is gone.** There is no
+  domain name and no issuer, so web PKI has nothing to attest and the default verifier has
+  nothing to check — the alternative to checking a fingerprint is not "safer validation", it is
+  none. What the client checks is the `certificate_sha256` the account service's list carried for
+  that server, read on every launch and never written down.
+
+  This client used to record whatever certificate answered a first connection and compare against
+  that afterwards, in a `.pin` file beside the identity. **That file, its reader and its writer
+  are removed rather than left as a fallback**, and the removal is the point: two ways to decide
+  who a server is means the weaker one decides whenever the stronger is unavailable, and "the
+  list could not be read" is exactly the moment an attacker would like the weaker one reached
+  for. An unreadable list is a screen with a retry on it and no address at all.
+- **A stored identity is never presented to a server nobody stated a certificate for.** The rule
+  predates the list and had to survive it, so it is now structural rather than a check.
+  `tls::Expectation` has two shapes: `Listed(fingerprint)`, built only by `net/servers.rs` from a
+  row of the list, and `Unlisted`, which carries nothing because nothing stated anything.
+  `session::run` opens the identity file on the first and on nothing else — so **the variant that
+  omits the fingerprint is the variant that omits the credential**, and there is no ordering to
+  get right and no flag to forget. `net/mod.rs` pins it from the wire in both directions: the
+  same file and the same token is presented to a listed server and is not presented to an
+  unlisted one.
+- **`Unlisted` is `--server`, and it is the development path.** An address typed on the command
+  line is in no list, so the session is encrypted and unauthenticated, presents no identity and
+  stores none — which means a new character every launch. It is never what a failed list read
+  falls back to; the two cannot be confused, because `main.rs` refuses `--server` and
+  `--account-service` together rather than letting one silently win. The usage text says so in
+  the words a player reads.
+- **What a fingerprint that does not match means, and what happens.** It is refused inside the
+  handshake, before a byte of this protocol is sent, with a message naming the address, both
+  fingerprints and **the list** as the source of the expectation — and no bypass flag, no prompt.
+  The two things it can mean are "the operator moved the world without `server-key.pem` and never
+  re-registered it" and "somebody is standing between you and that server", and nothing on this
+  side can tell them apart. There is deliberately nothing here to clear: the remedy is on the
+  other side of the list, where whoever runs the server reads the fingerprint out of its own
+  `certificate_sha256=…` startup line and registers that. Naming the list rather than a file is
+  the one thing this message had to change — a player told "a file says X" goes and edits the
+  file, which was the old bypass wearing a remedy's clothes.
+- **A row this client cannot verify a server against takes the whole list down.** `net/servers.rs`
+  refuses a list holding a `certificate_sha256` that is not a digest, rather than dropping that
+  row: a row dropped quietly is a server a player is told does not exist. The account service
+  validates the field at registration, so a malformed one means the two sides disagree about the
+  shape of the list — which is exactly what a refusal should surface.
 - **The signature check is still rustls's.** Pinning replaces *identity* validation, not the
   proof that the peer holds the key it presented; without `verify_tls13_signature` the handshake
   would accept a certificate copied off the wire by anyone who had watched one.
 - **Nothing here implements cryptography.** The fingerprint's SHA-256 comes from the crypto
   provider's own cipher suites — rustls exposes each suite's hash — rather than from a fourth
   crate or from a hand-rolled digest.
+- **The chain ends at the account service, and the code says so.** `AccountService` in
+  `net/signin.rs` carries the paragraph, because a reader should not have to infer the root of
+  trust from four modules. One URL is named at launch and everything follows from it: the ticket
+  is signed by its key, the list is read from it, and every fingerprint this client verifies a
+  server against came out of that list. **What is fixed by construction is that there is exactly
+  one of them and nothing can introduce a second** — it is parsed in `main.rs`, inserted into
+  `SignInSettings`, and read from there by both the sign-in and the list; no server can add a
+  source at runtime and there is no pin file left to be a second opinion.
+
+  **What is deliberately not claimed is that the hop to it is authenticated.** It is plain HTTP,
+  and `AccountService::parse` refuses `https` rather than downgrading silently, because verifying
+  a web PKI certificate needs a root store this client does not carry. So the anchor is only as
+  good as the network between this process and that service, and an account service belongs on a
+  loopback address or a private network. That gap is **#131**; nothing here closes it and nothing
+  written here should be read as saying it is closed.
+
+## The server list, and why an empty one is a claim
+
+`net/servers.rs` reads `GET /v1/servers` on its own thread, once per read, presenting the cached
+ticket as `Authorization: Bearer …`. The ticket is read from its file **on that thread** and never
+reaches the ECS — the same fence a session's identity file sits behind.
+
+The list answers two questions and the second is the security half: where a server is, read fresh
+every launch so a server that moved is followed without anybody being told; and which certificate
+to expect there.
+
+**`ServerList` has three variants and no fourth for "empty", deliberately.** `Ready(vec![])` is a
+true statement — no server has registered — and it is a different fact from `Unavailable`, which
+is "nobody could be asked". Collapsing them would put an empty list in front of a player whose
+network is down, and an empty list reads as *no servers exist*. `ui/servers.rs` draws the second
+as a line saying the login service could not be reached, with a retry beside it, and draws no rows
+at all.
+
+An expired or unusable ticket is a third answer again: it puts the login screen back up rather
+than offering a retry that would fail the same way, which is the distinction the account service
+split `ticket_expired` out of `unauthorized` to make possible.
+
+**`ui` never learns an address.** `ListedServer` exposes a name, a display name and whether the
+service has heard from that server recently; the address and the fingerprint have no public
+accessor, its `Debug` redacts the address, and a click writes `ConnectRequest { name }` for the
+network boundary to resolve. An address locates somebody's house, which is why the account
+service keeps the list behind a credential in the first place, and a screenshot of a panel is not
+a place for one.
 
 ## Signing in, once
 
@@ -962,7 +1014,8 @@ list's job.
 carries a state and a line of text. The ticket lives on the sign-in thread for the length of one
 attempt and after that only in the cache — so there is no resource for a `{:?}` to find, and no name
 outside `net` anything could start deciding from. That is the fence `PlayerToken` already sits
-behind. The server list reads the cache, exactly as a session reads the identity file.
+behind. The server list read is the one thing that presents a ticket, and it does so on its own
+thread, reading the cache — exactly as a session reads the identity file.
 
 **Where the listener binds is the account service's decision, not this client's.** The redirect URI
 is registered with the provider, so `net/signin.rs` reads it out of the `redirect_uri` inside the
@@ -990,10 +1043,13 @@ path without this attempt's `state` — including a query that will not decode �
 the wait carries on.
 
 **Four hand-rolled readers, and the dependency budget is why.** `net/http.rs` and `net/json.rs`
-carry an HTTP/1.1 client, a URL splitter, percent-decoding, a flat-object JSON reader and an RFC
-3339 parser; `net/tickets.rs` carries a base64url decoder. Every one is narrow on purpose and none
-is a general facility — the JSON reader refuses nesting rather than skipping it, and the base64url
-decoder knows one alphabet and one length. **No error in any of them quotes its input**, because a
+carry an HTTP/1.1 client, a URL splitter, percent-decoding, a JSON reader and an RFC 3339 parser;
+`net/tickets.rs` carries a base64url codec. Every one is narrow on purpose and none is a general
+facility — the base64url codec knows one alphabet and one length, and the JSON reader admits
+exactly one nested shape, an array of flat objects, because that is what `GET /v1/servers`
+answers with. `Depth` in `net/json.rs` is that rule written as a value rather than as care: an
+array is a legal value at the outer level and no value at all inside a row, so a reader that
+started recursing would stop compiling rather than quietly growing. **No error in any of them quotes its input**, because a
 `finish` request carries an authorization code and its response carries a ticket, so a diagnostic
 built from those bytes is a diagnostic that can carry one into a log. That is the rule
 `signin.go` keeps on the other side.
@@ -1054,18 +1110,27 @@ for any contract diff — so regenerate here and in the server in the same PR.
 ## Running it
 
 ```bash
-cargo run --release                          # 127.0.0.1:7777
-cargo run -- 192.0.2.5:7000                  # explicit address
+cargo run --release -- --account-service http://127.0.0.1:7780   # sign in, then pick a server
+cargo run --release                          # development: 127.0.0.1:7777
+cargo run -- 192.0.2.5:7000                  # development: an explicit address
 cargo run -- --server norse.example         # bare host gets port 7777
 VOXELHEIM_SERVER=192.0.2.5:7000 cargo run    # lower precedence than the CLI
 cargo run -- --name thora                   # display name; VOXELHEIM_NAME is the fallback
 cargo run -- --identity /tmp/second         # a second character on one server
-cargo run -- --account-service http://127.0.0.1:7780   # sign in with Discord
 cargo run -- --help
 ```
 
+**The first line is the path a player takes and the rest are the development one, which is not a
+style preference.** With `--account-service` the addresses come from that service's list, each
+carrying the certificate to expect at it; with an address instead, nothing states what to expect
+there, so the session presents no identity and keeps none — a new character every launch. Giving
+both is a usage error rather than a silent precedence rule, because which one won would decide
+whether the certificate was verified against anything.
+
 A server has to be listening for any of that to reach one — `go run ./cmd/voxelheimd` from
-`server/`, whose own "Running it" section has the flags.
+`server/`, whose own "Running it" section has the flags. The account-service line additionally
+needs a `voxelheim-auth` with a Discord application configured, and a `voxelheimd` that has
+registered itself with it; `server/cmd/voxelheim-auth` documents both halves.
 
 **`--release` is in the first line for a reason.** A debug build of a Bevy renderer is slow
 enough that the frame rate reads as a bug in the mesher, and the gates below are the only place
@@ -1088,35 +1153,36 @@ is why `ui/status.rs` can test what a player would read without opening a window
 
 ### When it refuses to connect
 
-The refusal is the certificate pin doing its job, and it names the file it is talking about. See
-"The session is encrypted, and that is not a setting" above for why there is no bypass flag; the
-operational half is short:
+The refusal is the certificate check doing its job, and it names the **server list** as the source
+of what it expected. See "The session is encrypted, and that is not a setting" above for why there
+is no bypass flag and nothing on this side to clear; the operational half is short.
 
-- **A fingerprint that changed** — the server was pointed at a new world directory, or is running
-  `-world-dir ""` and mints a new certificate every start. Development hits the second one most.
-- **An identity with no pin** — a character made against a server from before pinning. The stored
-  token is not presented to an unverified certificate, so this is refused on the *first*
-  connection rather than a later one.
-
-Whoever runs the server reads the fingerprint out of its startup line
-(`certificate_sha256=…`) and writes that one line into the pin file the refusal names:
+A server presenting a certificate the list does not carry has been moved or rebuilt without its
+`server-key.pem` — a `voxelheimd` running `-world-dir ""` mints a new one every start, which is
+what development hits most — or something is standing between the client and it. Nothing here can
+tell those apart, so the remedy is deliberately on the other side of the list:
 
 ```bash
-printf '%s\n' "<certificate_sha256 from the server log>" \
-  > "${XDG_DATA_HOME:-$HOME/.local/share}/voxelheim/identity/127.0.0.1_7777.pin"
+# on the machine running voxelheimd, out of its startup line
+grep -o 'certificate_sha256=[a-f0-9]*' <the server's log>
+# then register that server again, so the list carries the new number
+curl -sS -X POST http://<account service>/v1/servers \
+  -H "Authorization: Bearer <registration key>" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"<world>","address":"<host:port>","certificate_sha256":"<the number above>"}'
 ```
 
-Writing it in is the remedy for both cases, and the only one that keeps the character. Deleting a
-file instead is narrower than it looks, because the two are checked independently —
-`ConnectError::Unverified` comes from the guard before the handshake, `ConnectError::Substituted`
-from the verifier during it:
+Until the list and the server agree, this client will not connect, and that is the whole design:
+there is no file a player can edit to make the refusal go away, because a file a player can edit
+is a file an attacker can talk them into editing.
 
-- Deleting the *identity* file answers the second case and only the second: with nothing to
-  present, the first connection pins safely. It does nothing about a fingerprint that changed —
-  `read_pin` still returns the old one and `PinnedServer` still refuses it.
-- Deleting the *pin* is what addresses a changed fingerprint, and it re-pins whatever answers
-  next, so it is right only when you already know why the fingerprint changed. With an identity
-  file still beside it that is the second case again; delete both to join as a new character.
+Two refusals that are *not* that one and are easy to mistake for it:
+
+- **"The login service could not be reached."** The account service did not answer, so there is no
+  list — not an empty one. The screen offers a retry and nothing else; check that
+  `--account-service` names a service that is up.
+- **"No server has registered with this account service yet."** The list was read and is genuinely
+  empty. Nothing is wrong with this client; a server has to register before it appears.
 
 ### Who the client comes back as
 
@@ -1126,7 +1192,12 @@ in the next `ClientHello` to **that** server. One file per server address —
 a token is meaningful only to the server that minted it: presenting server A's token to server
 B makes a new character on B, and B's answer must not land in A's file.
 
-Four rules hold that down, and they are all in `net/session.rs`:
+Five rules hold that down, and they are all in `net/session.rs`:
+
+- **There is no identity file at all on a connection nobody stated a certificate for.** `run`
+  opens one for `tls::Expectation::Listed` and hands the other variant an `IdentityFile` that
+  presents nothing and keeps nothing. See "The session is encrypted, and that is not a setting"
+  for why this is the shape of the two variants rather than a check before the hello.
 
 - **The token is never logged, printed or shown, at any level.** It is a bearer credential —
   whatever holds one *is* that player — so `PlayerToken` writes its own `Debug` and prints
@@ -1202,18 +1273,31 @@ tests is the helper.
 
 Recorded here so the next reader does not mistake them for oversights:
 
-- **A first connection is trusted, and there is no out-of-band way to check it.** Trust on
-  first use is what pinning is, and its one weak moment is the connection that establishes the
-  pin. Nothing here lets a player type in a fingerprint an operator gave them beforehand, so a
-  first connection through a hostile network pins whatever answered it. What limits the damage
-  is that a first connection carries no token to steal — see the section above — and what would
-  close it is a way to state the expected fingerprint before connecting. That is its own issue.
-- **The two stacks are checked meeting, but by hand and not by CI.** `scripts/interop-check.sh`
-  drives the real client against the real server: a first connection established and pinned, a
-  reconnect returning as the same character, a substituted certificate refused before anything
-  is sent, and a stored identity never presented to a server that was never pinned. It is not in CI because the client opens a window and needs a display, and
-  because the Go and Rust gates run in separate jobs with separate toolchains — no job has both
-  binaries. **Run it after touching `internal/transport`, `internal/certs` or `net/tls.rs`.**
+- **`--server` reaches a server nothing can verify, and it is the development path.** An address
+  typed on the command line is in no list, so no fingerprint states what to expect there and the
+  session is encrypted but unauthenticated. What keeps that from being a hole is that the same
+  variant presents no identity and stores none — see "The session is encrypted, and that is not a
+  setting" — so a client on this path has nothing to hand to whoever answered, at the cost of a
+  new character every launch. There is no way to *state* an expected fingerprint on the command
+  line either: adding one would be a second source of truth beside the list, which is the thing
+  #107 removed. A developer who needs a returning character runs an account service.
+- **This is a client-side check and the account service is a single point of trust.** Everything
+  this client verifies traces back to the one `--account-service` URL: whoever controls that
+  service, or the registration key that writes to its registry, chooses which certificate the
+  client will accept for a given name. That is the trust chain ending somewhere, which it must,
+  and it is why the registration endpoint is behind a key and the list is behind a ticket. What
+  the connection to that service is *not* is authenticated — see the plain-HTTP gap below.
+- **The two stacks are checked meeting, but by hand and not by CI, and #107 narrowed what it can
+  check.** `scripts/interop-check.sh` drives the real client against the real server over TLS:
+  a session established and encrypted, and a stored identity never presented to a server nothing
+  stated a certificate for. What it can no longer check end to end is the refusal, because the
+  expectation now comes from an account service's list rather than from a file the script could
+  write — standing one up would mean a Discord application and a browser. That assertion moved to
+  `net/tls.rs`'s own tests, where the expectation is a value; what the script still owns is the
+  half no unit test on either side can see. It is not in CI because the client opens a window and
+  needs a display, and because the Go and Rust gates run in separate jobs with separate
+  toolchains — no job has both binaries. **Run it after touching `internal/transport`,
+  `internal/certs` or `net/tls.rs`.**
 
   It is worth saying what that script caught the first time it ran, because it is the argument
   for keeping it: every unit test on both sides passed while the client discarded whatever one
@@ -1240,10 +1324,12 @@ Recorded here so the next reader does not mistake them for oversights:
   what exists; what it means operationally is that the account service belongs on a loopback
   address or behind a private network until the crate discussion happens. It deserves its own
   issue rather than a drive-by.
-- **A sign-in caches an account ticket and nothing presents one yet.** `ClientHello.session_ticket`
-  is still `None` in `net/session.rs`: a ticket that names no world cannot join a world — the game
-  server would answer `ErrWrongWorld` — and the screen that turns an account ticket into a world
-  ticket is the server list. That is #107, and it reads the cache.
+- **A sign-in caches an account ticket and nothing presents one to a *game* server yet.** The
+  ticket is what reads the server list, which is what #107 added; `ClientHello.session_ticket` is
+  still `None` in `net/session.rs`, because joining needs a ticket minted for the world being
+  joined and this client holds one that names no world. A game server answers `ErrWrongWorld` to
+  an account ticket, correctly. Turning one into the other is the next step and is not this
+  issue's: the session still identifies a player by the per-server token, exactly as before.
 - **The loopback listener binds a fixed port, so two clients cannot sign in at once.** The port is
   the account service's `redirect_uri`, which the provider requires to match exactly; a second
   client signing in at the same moment finds the port taken and says so. The refusal names it.
@@ -1288,8 +1374,11 @@ Recorded here so the next reader does not mistake them for oversights:
   which is exactly the design that issue owes.
 - **No texture atlas, no UVs.** `palette.rs` is the whole material system: a colour per block id,
   carried as vertex colours. Art assets are a later issue.
-- **One connection per process, opened when the plugin is built.** There is no lobby, no server
-  browser and no way to change the address without restarting.
+- **The list is a list and not a browser.** No favourites, no sorting, no player counts and no
+  ping column; "online" is the account service saying it heard from that server recently, not a
+  probe, and the screen says as much rather than implying reachability it did not measure. The
+  list is read when the sign-in completes and when the retry is pressed — there is no automatic
+  refresh, so a server that comes up while the panel is open appears on the next press.
 - **Interpolation holds the last position for ever when a server goes quiet.** There is no timeout
   that fades an entity out, and none that says "this session is stale": a quiet server is a
   legitimate state, and the read timeout in `session.rs` is a poll interval rather than a session

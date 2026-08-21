@@ -11,52 +11,54 @@
 //! unencrypted connection" needs no code: there is no unencrypted connection to
 //! present one over.
 //!
-//! ## Trust on first use, and the rule that keeps its weak spot empty
+//! ## The expectation comes from the list
 //!
 //! A Voxelheim server has no domain name and no issuer, so web PKI has nothing to
 //! attest and the default verifier has nothing to check. What this client checks
-//! instead is a fingerprint it recorded the first time it connected to that address.
+//! instead is a fingerprint it was **told to expect before it dialled**: the server
+//! list carries a `certificate_sha256` for every server in it, and the account
+//! service is where that number comes from.
 //!
-//! The known weakness of trust on first use is that first connection, and the tempting
-//! thing to say is that it carries nothing worth taking — a client with no identity
-//! file presents an empty token and the server mints a new character. **That is only
-//! true of a client that has never played there**, and it was written here as though it
-//! were true of all of them. Every player carried over from the plaintext transport has
-//! an identity file and no pin, so their first connection after the upgrade would have
-//! been a first use that accepted any certificate and then handed it the identity. The
-//! weak moment and the valuable moment overlapped for exactly the people who had the
-//! most to lose. (Found by the review on PR #165, and worth leaving written down: the
-//! sentence was plausible, and being plausible is how it survived being wrong.)
+//! **Trust on first use is gone, and its removal is the point.** This file used to
+//! record whatever certificate answered the first connection to an address and compare
+//! against that afterwards, which left one connection per server — the first — willing
+//! to accept anybody. Leaving that path beside this one would not have been a safety
+//! net: two ways to decide who a server is means the weaker one decides whenever the
+//! stronger is unavailable, and "the list could not be read" is precisely when an
+//! attacker would like the weaker one reached for. So there is no pin file, no reader
+//! for one, and no code path anywhere that writes a fingerprint down.
 //!
-//! So the overlap is removed rather than asserted away: [`TlsWire::connect`] refuses a
-//! connection that holds an identity for a server it has never pinned. What remains at
-//! the weak moment is a client with nothing to present, which is the case the original
-//! sentence described.
+//! ## Why a stored identity is still never presented to an unverified server
 //!
-//! ## A second fact about the same server
+//! That rule predates the list and has to survive it. An identity token is a bearer
+//! credential; handing one to whoever answers an address is the theft the encryption
+//! exists to prevent, performed by the client itself.
 //!
-//! The pin lives beside the identity file: same directory, same address-sanitising
-//! rule, same atomic write, all reused from [`super::session`] rather than copied. A
-//! separate file rather than a second field in the identity file, and that is the one
-//! deliberate deviation: the identity file is exactly 32 raw bytes, so giving it a
-//! format would make every file already on disk the wrong length — which
-//! [`super::session::read_identity`] correctly reads as "not a token" and answers by
-//! starting a new character. Adding encryption is not a reason to take everybody's
-//! character away.
+//! It now holds **structurally** rather than by a check. [`Expectation`] has two
+//! shapes: [`Expectation::Listed`], which carries the fingerprint the list stated, and
+//! [`Expectation::Unlisted`], which carries nothing because nothing stated anything.
+//! [`super::session::run`] reads and writes the identity file only on the first, so the
+//! one path that cannot verify a server is the same path that has no credential to
+//! lose. There is no ordering to get right and no flag to forget — the type that omits
+//! the fingerprint is the type that omits the identity.
 //!
-//! ## What a changed fingerprint means, and what happens
+//! [`Expectation::Unlisted`] is reachable only from `--server`, the development path,
+//! and it is **never** what an unreadable list falls back to: a list that cannot be
+//! read is a screen with a retry on it, and no address at all.
 //!
-//! It is refused, with a message naming the address, the file, and both fingerprints.
-//! There is no bypass flag and no prompt: the two things it can mean are "the operator
-//! moved the world without `server-key.pem`" and "somebody is standing between you and
-//! that server", and no client can tell them apart. Clearing it is deleting the pin
-//! file by hand, which is a deliberate act a person takes after asking the operator for
-//! the fingerprint the server logs at startup.
+//! ## What a fingerprint that does not match means, and what happens
+//!
+//! It is refused, with a message naming the address, both fingerprints, and the list as
+//! the source of the expectation. There is no bypass flag and no prompt: the two things
+//! it can mean are "the operator moved the world without `server-key.pem` and never
+//! re-registered it" and "somebody is standing between you and that server", and no
+//! client can tell them apart. The fix is on the other side of the list — whoever runs
+//! the server reads the fingerprint out of its own startup line and registers *that* —
+//! which is a deliberate act taken by somebody who knows why the certificate changed.
 
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,13 +68,8 @@ use rustls::crypto::{CryptoProvider, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme};
 
-use super::session::write_atomically;
-
-/// How a pin file is named, beside the identity file it shares a directory with.
-const PIN_SUFFIX: &str = ".pin";
-
 /// A SHA-256 digest as lowercase hex.
-const FINGERPRINT_CHARS: usize = 64;
+pub(super) const FINGERPRINT_CHARS: usize = 64;
 
 /// The name this client puts in SNI and hands the verifier.
 ///
@@ -84,69 +81,42 @@ const FINGERPRINT_CHARS: usize = 64;
 /// pair.
 const SERVER_NAME: &str = "voxelheim";
 
-/// Where this client keeps the fingerprint it pinned for one server: the identity
-/// file's own path with `.pin` after it.
+/// What this client expects the server's certificate to be, and where that came from.
 ///
-/// **Derived from the identity path rather than re-derived from the address**, which
-/// is what makes "beside the identity file" true rather than merely usually true.
-/// `--identity` relocates the file outright — that is how one machine runs two
-/// characters against one server, and how a player puts it somewhere writable — and a
-/// pin that stayed behind in the default directory would be the one thing the flag did
-/// not move. It would also fail exactly where the flag is most needed: a data directory
-/// this client cannot write to.
+/// **The two shapes are not two policies.** One carries a fingerprint somebody stated
+/// in advance; the other carries nothing because nobody stated anything, and it exists
+/// only because `--server` names an address that is in no list. Neither is a fallback
+/// for the other: an unreadable list produces a retry screen, never an
+/// [`Expectation::Unlisted`] connection to an address the list would have carried.
 ///
-/// Two characters against one server therefore keep two pins of the same fingerprint.
-/// Redundant and harmless: each is verified independently, and a certificate is a fact
-/// about the server rather than about who is playing.
-pub fn pin_path(identity: &Path) -> PathBuf {
-    let mut name = identity.as_os_str().to_owned();
-    name.push(PIN_SUFFIX);
-    PathBuf::from(name)
+/// The type is also where "a stored identity is never presented to an unverified
+/// server" is enforced. `session::run` opens the identity file on
+/// [`Expectation::Listed`] and on nothing else, so the variant that omits the
+/// fingerprint is the variant that omits the credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Expectation {
+    /// The fingerprint the server list carried for this server, as lowercase hex.
+    /// Built only by [`super::servers`], which validates its shape at the boundary.
+    Listed(String),
+    /// `--server`: an address in no list, so there is nothing to check the certificate
+    /// against. The session is encrypted and unauthenticated, and it presents no
+    /// identity — see the module comment. Development only.
+    Unlisted,
 }
 
-/// Reads the pinned fingerprint for a server.
+/// Reads a fingerprint the way this client will compare it: lowercase hex, exactly
+/// [`FINGERPRINT_CHARS`] characters, and nothing else accepted.
 ///
-/// Three answers, and the middle one is the point: pinned, never seen, or unreadable. A
-/// file that exists and holds something that is not a fingerprint is an **error**, never
-/// "no pin" — reading it as absent would silently re-pin whatever answered the next
-/// connection, which is exactly the substitution the pin exists to catch.
-pub fn read_pin(path: &Path) -> Result<Option<String>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(format!(
-                "cannot read the pinned certificate in {}: {err}. Refusing to connect: a pin \
-                 that cannot be read is not a pin, and connecting anyway is what an attacker \
-                 would want.",
-                path.display()
-            ));
-        }
-    };
-
-    let pin = text.trim();
-    if pin.len() == FINGERPRINT_CHARS && pin.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Ok(Some(pin.to_ascii_lowercase()));
-    }
-    Err(format!(
-        "{} does not hold a certificate fingerprint ({} characters, expected {FINGERPRINT_CHARS} \
-         hexadecimal ones). Refusing to connect. Delete the file to pin this server again.",
-        path.display(),
-        pin.len()
-    ))
-}
-
-/// Records `fingerprint` as this server's, atomically.
-fn write_pin(path: &Path, fingerprint: &str) -> Result<(), String> {
-    let mut contents = String::with_capacity(FINGERPRINT_CHARS + 1);
-    contents.push_str(fingerprint);
-    contents.push('\n');
-    write_atomically(path, contents.as_bytes()).map_err(|err| {
-        format!(
-            "cannot pin the server's certificate in {}: {err}",
-            path.display()
-        )
-    })
+/// Case is folded because the number travels through a log line, a registration and a
+/// JSON document before it gets here, and a comparison that failed on case would fail
+/// as a substituted certificate — the one refusal a player must not be shown wrongly.
+/// Anything that is not a digest is `None`: a list entry this client cannot verify a
+/// server against is not a server it can offer, and guessing at a short one would be
+/// inventing an expectation.
+pub(super) fn parse_fingerprint(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    (raw.len() == FINGERPRINT_CHARS && raw.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| raw.to_ascii_lowercase())
 }
 
 /// The SHA-256 the server logs, computed the same way on this side.
@@ -180,13 +150,13 @@ fn fingerprint_of(provider: &CryptoProvider, certificate: &CertificateDer<'_>) -
 /// security and provides none. What it does check is the one fact that distinguishes
 /// this server from anybody else claiming to be it.
 ///
-/// `observed` exists because the answer is needed *after* the handshake: on a first
-/// connection there is nothing to compare against, and the fingerprint that was
-/// presented is what gets written down — but only once the handshake as a whole has
-/// succeeded, so a half-completed connection cannot pin anything.
+/// `observed` exists because the answer is needed *after* the handshake: rustls
+/// reports a rejected certificate as a handshake failure like any other, and the
+/// message a player reads has to name what was presented as well as what was wanted.
+/// It is recorded, never stored: nothing in this client writes a fingerprint anywhere.
 #[derive(Debug)]
 struct PinnedServer {
-    expected: Option<String>,
+    expected: Expectation,
     observed: Mutex<Option<String>>,
     provider: Arc<CryptoProvider>,
 }
@@ -219,13 +189,22 @@ impl ServerCertVerifier for PinnedServer {
         }
 
         match &self.expected {
-            // First use. Accepted here and pinned by the caller once the handshake has
-            // finished — see the module comment for why this moment is the safe one.
-            None => Ok(ServerCertVerified::assertion()),
-            Some(pinned) if *pinned == presented => Ok(ServerCertVerified::assertion()),
-            Some(_) => Err(rustls::Error::General(
-                "the server presented a certificate that is not the pinned one".to_owned(),
+            Expectation::Listed(listed) if *listed == presented => {
+                Ok(ServerCertVerified::assertion())
+            }
+            // **The whole of this file's job.** Refused inside the handshake rather
+            // than reported after it: an accepted handshake is a session, and a
+            // session is where a credential would go.
+            Expectation::Listed(_) => Err(rustls::Error::General(
+                "the server presented a certificate that is not the one the server list carried"
+                    .to_owned(),
             )),
+            // Nothing stated what to expect, so there is nothing to compare against and
+            // this accepts what it was shown. It is reachable only from `--server`, and
+            // it is safe only because that path presents no identity and stores nothing
+            // — see [`Expectation`]. It is not a fallback for a list that could not be
+            // read, and must never become one.
+            Expectation::Unlisted => Ok(ServerCertVerified::assertion()),
         }
     }
 
@@ -269,43 +248,22 @@ impl ServerCertVerifier for PinnedServer {
     }
 }
 
-/// What this connection could say about the server's certificate afterwards.
-///
-/// The session needs the distinction because it decides whether a stored token may be
-/// presented and whether a granted one may be kept — see [`TlsWire::connect`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pinning {
-    /// A fingerprint was already on file and the server matched it.
-    Verified,
-    /// A first connection: nothing to compare against, and what was presented is now
-    /// on file for the next one.
-    PinnedNow,
-    /// A first connection whose fingerprint could not be written down. The session is
-    /// encrypted, but nothing about this server was remembered.
-    Unrecorded,
-}
-
 /// Why a connection was not made.
 #[derive(Debug)]
-pub enum ConnectError {
+pub(super) enum ConnectError {
     /// The socket or the handshake failed for an ordinary reason.
     Failed(String),
-    /// The server presented a certificate that is not the pinned one. Its own variant
-    /// because it is the one failure a player must not treat as a network glitch.
+    /// The server presented a certificate that is not the one the list carried. Its own
+    /// variant because it is the one failure a player must not treat as a network
+    /// glitch and retry through.
     Substituted(String),
-    /// This client holds an identity for the server but has never verified its
-    /// certificate, so presenting that identity would mean handing it to whoever
-    /// answered. Its own variant for the same reason: it is a decision, not a glitch.
-    Unverified(String),
 }
 
 impl ConnectError {
     /// What to show the player.
-    pub fn message(self) -> String {
+    pub(super) fn message(self) -> String {
         match self {
-            Self::Failed(message) | Self::Substituted(message) | Self::Unverified(message) => {
-                message
-            }
+            Self::Failed(message) | Self::Substituted(message) => message,
         }
     }
 }
@@ -345,53 +303,22 @@ pub struct TlsWire {
 }
 
 impl TlsWire {
-    /// Connects, verifies the pin, and pins on a first connection.
+    /// Connects and checks the certificate against what `expected` says to expect.
     ///
     /// `handshake_timeout` bounds the whole handshake; the caller sets its own read
     /// timeout afterwards for the poll loop.
-    pub fn connect(
+    ///
+    /// **Nothing is written down, on any path.** The expectation arrives from the
+    /// caller and the fingerprint that was presented leaves only in a refusal message,
+    /// which is what "trust on first use is gone" means concretely: there is no file
+    /// for a later connection to compare against, so there is no first connection that
+    /// decides anything.
+    pub(super) fn connect(
         sock: TcpStream,
         addr: &str,
-        pin_file: Option<&Path>,
-        holds_identity: bool,
+        expected: &Expectation,
         handshake_timeout: Duration,
-    ) -> Result<(Self, Pinning, Option<String>), ConnectError> {
-        let Some(pin_file) = pin_file else {
-            return Err(ConnectError::Failed(format!(
-                "no file can be named to pin {addr}'s certificate in, so this connection could \
-                 not be verified now or remembered for next time. Set VOXELHEIM_IDENTITY or \
-                 --identity to choose one."
-            )));
-        };
-
-        let expected = read_pin(pin_file).map_err(ConnectError::Failed)?;
-
-        // **The upgrade case, and it is the one this whole file exists for.** A player
-        // who has been on this server before holds a token for it; if no fingerprint is
-        // on file, this client has never verified who answers at that address. Going on
-        // would mean accepting whatever certificate arrives and then handing it the
-        // identity — which is precisely the theft the encryption is here to prevent,
-        // performed by the client itself. Every player carried over from the plaintext
-        // transport is in exactly this state on their first connection after the
-        // upgrade, so it is the common case rather than an exotic one.
-        //
-        // Refused rather than downgraded to "connect without the token": that would
-        // pin whatever answered and leave the *next* connection presenting the identity
-        // to it, which delays the exposure by one session and calls it safety. The
-        // remedy is in the message and it is a real one — the pin file is plain hex a
-        // person can write, and the fingerprint to write into it is the one the server
-        // prints at startup.
-        if holds_identity && expected.is_none() {
-            return Err(ConnectError::Unverified(format!(
-                "refusing to connect to {addr}: this client holds an identity for that server but \
-                 has never verified its certificate, and presenting the identity now would hand \
-                 it to whoever answered.\n\nAsk whoever runs the server for the fingerprint it \
-                 logs when it starts, and write it into {} as one line. Or delete the identity \
-                 file beside it to join as a new character, which pins the certificate safely \
-                 because a new character has nothing to present.",
-                pin_file.display()
-            )));
-        }
+    ) -> Result<Self, ConnectError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let verifier = Arc::new(PinnedServer {
             expected: expected.clone(),
@@ -428,66 +355,19 @@ impl TlsWire {
 
         if let Err(err) = conn.complete_io(&mut sock) {
             let observed = verifier.observed.lock().ok().and_then(|slot| slot.clone());
-            return Err(refusal(
-                addr,
-                pin_file,
-                expected.as_deref(),
-                observed.as_deref(),
-                &err,
-            ));
+            return Err(refusal(addr, expected, observed.as_deref(), &err));
         }
-
-        let observed = verifier
-            .observed
-            .lock()
-            .map_err(|_| {
-                ConnectError::Failed("the certificate verifier's state is poisoned".to_owned())
-            })?
-            .clone();
-
-        // Pinned only now: a handshake that failed for any other reason must not leave a
-        // fingerprint behind for the next connection to compare against.
-        let mut complaint = None;
-        let pinning = if expected.is_some() {
-            Pinning::Verified
-        } else {
-            match observed.as_deref().map(|f| (f, write_pin(pin_file, f))) {
-                Some((_, Ok(()))) => Pinning::PinnedNow,
-                Some((_, Err(err))) => {
-                    // Not fatal, and the asymmetry is deliberate: this session is
-                    // already encrypted, and the caller has been told there is no
-                    // identity to lose — a token is only stored beside a pin, so a
-                    // connection that could not pin never had one to present. What is
-                    // lost is memory, which is worth a warning rather than a refusal.
-                    complaint = Some(format!(
-                        "{err}. This session is encrypted, but the certificate could not be \
-                         remembered — so this is a new character, and the next connection to \
-                         {addr} will be one too."
-                    ));
-                    Pinning::Unrecorded
-                }
-                // Unreachable: the verifier records what it hashed before it decides, and
-                // a handshake that got here decided yes. Answered as unrecorded rather
-                // than assumed, because the cost of being wrong is a token stored against
-                // a server nobody checked.
-                None => Pinning::Unrecorded,
-            }
-        };
 
         let send = sock.try_clone().map_err(|err| {
             ConnectError::Failed(format!("cannot open a writer for {addr}: {err}"))
         })?;
 
-        Ok((
-            Self {
-                sock,
-                send: Arc::new(Mutex::new(send)),
-                conn: Arc::new(Mutex::new(conn)),
-                pending: Vec::new(),
-            },
-            pinning,
-            complaint,
-        ))
+        Ok(Self {
+            sock,
+            send: Arc::new(Mutex::new(send)),
+            conn: Arc::new(Mutex::new(conn)),
+            pending: Vec::new(),
+        })
     }
 
     /// A second handle for the writer thread: its own socket, the same TLS state.
@@ -665,26 +545,31 @@ const CIPHERTEXT_CHUNK: usize = 20 * 1024;
 ///
 /// A substituted certificate gets its own text and its own variant, because it is the
 /// one failure a player must not read as a network glitch and retry through. It names
-/// both fingerprints and the file, and it offers no bypass: the fix is to ask the
-/// operator for the fingerprint their server logs at startup, and then either recognise
-/// it or not.
+/// both fingerprints and **says where the expectation came from**, which is the one
+/// thing this message had to change when the pin file went away: a player who is told
+/// "the list says X" knows who to ask, where a player told "a file says X" would go
+/// looking for the file and edit it.
+///
+/// It offers no bypass, and there is deliberately nothing on this side to offer. The
+/// remedy is on the server's side of the list — its operator reads the fingerprint out
+/// of the startup line and registers that — so the only thing a player can do here is
+/// ask them, which is what the text says.
 fn refusal(
     addr: &str,
-    pin_file: &Path,
-    expected: Option<&str>,
+    expected: &Expectation,
     observed: Option<&str>,
     err: &io::Error,
 ) -> ConnectError {
     match (expected, observed) {
-        (Some(expected), Some(observed)) if expected != observed => {
+        (Expectation::Listed(listed), Some(observed)) if listed != observed => {
             ConnectError::Substituted(format!(
                 "refusing to connect to {addr}: it presented a different certificate than the one \
-             pinned for it.\n  pinned:    {expected}\n  presented: {observed}\n\nThis means either \
-             that the server was moved or rebuilt without its key, or that something is standing \
-             between you and it — and nothing here can tell those apart. Ask whoever runs the \
-             server for the fingerprint it logs when it starts. If it matches what was presented, \
-             delete {} and connect again to pin the new one.",
-                pin_file.display()
+                 the server list carries for it.\n  the list says: {listed}\n  it presented:   \
+                 {observed}\n\nThis means either that the server was moved or rebuilt without its \
+                 key and never re-registered, or that something is standing between you and it — \
+                 and nothing here can tell those apart. Ask whoever runs the server for the \
+                 fingerprint it logs when it starts; if it is the one presented, they need to \
+                 register it again before this client will connect."
             ))
         }
         _ => ConnectError::Failed(format!(
@@ -697,7 +582,7 @@ fn refusal(
 mod tests {
     use super::*;
     use rustls::pki_types::UnixTime;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     /// A stand-in for a server's certificate.
     ///
@@ -708,12 +593,18 @@ mod tests {
         CertificateDer::from(bytes)
     }
 
-    fn verifier(expected: Option<&str>) -> PinnedServer {
+    fn verifier(expected: Expectation) -> PinnedServer {
         PinnedServer {
-            expected: expected.map(str::to_owned),
+            expected,
             observed: Mutex::new(None),
             provider: Arc::new(rustls::crypto::ring::default_provider()),
         }
+    }
+
+    /// What the list would carry for a server presenting `cert`.
+    fn listed(cert: &CertificateDer<'_>) -> Expectation {
+        let provider = rustls::crypto::ring::default_provider();
+        Expectation::Listed(fingerprint_of(&provider, cert).expect("a SHA-256 suite"))
     }
 
     fn verify(pinned: &PinnedServer, cert: &CertificateDer<'_>) -> Result<(), rustls::Error> {
@@ -723,9 +614,9 @@ mod tests {
             .map(|_| ())
     }
 
-    /// The fingerprint has to be the number the *server* prints, or a player comparing
-    /// the two is comparing nothing. Pinned against an independently computed digest
-    /// rather than against whatever this function returns.
+    /// The fingerprint has to be the number the *server* prints and the account service
+    /// records, or a player comparing them is comparing nothing. Pinned against an
+    /// independently computed digest rather than against whatever this function returns.
     #[test]
     fn the_fingerprint_is_the_sha256_of_the_certificate() {
         let provider = rustls::crypto::ring::default_provider();
@@ -739,46 +630,25 @@ mod tests {
         assert_eq!(got.len(), FINGERPRINT_CHARS);
     }
 
-    /// First use: nothing to compare against, so the certificate is accepted and what it
-    /// hashed to is recorded for the caller to write down.
+    /// The number the list carried, accepted — and silently. A check that complained
+    /// about a match would train players to ignore it.
     #[test]
-    fn a_first_connection_pins_what_it_was_shown() {
-        let pinned = verifier(None);
-        verify(&pinned, &certificate(b"first")).expect("a first connection is accepted");
-
-        let observed = pinned.observed.lock().expect("not poisoned").clone();
-        let provider = rustls::crypto::ring::default_provider();
-        assert_eq!(
-            observed,
-            fingerprint_of(&provider, &certificate(b"first")),
-            "a first connection did not record what it was shown"
-        );
+    fn the_certificate_the_list_named_is_accepted() {
+        let cert = certificate(b"the real server");
+        verify(&verifier(listed(&cert)), &cert).expect("the listed certificate is accepted");
     }
 
-    /// The same server on a later connection: accepted, and silently — a pin that
-    /// complained about a match would train players to ignore it.
+    /// **The whole point, and the direction that has to fail.** A server presenting
+    /// anything other than what the list carried is refused *inside* the handshake
+    /// rather than reported after it — an accepted handshake is a session, and a session
+    /// is where a credential would go.
     #[test]
-    fn the_pinned_certificate_is_accepted_again() {
-        let provider = rustls::crypto::ring::default_provider();
-        let cert = certificate(b"same server");
-        let pin = fingerprint_of(&provider, &cert).expect("a SHA-256 suite");
-
-        verify(&verifier(Some(&pin)), &cert).expect("the pinned certificate is accepted");
-    }
-
-    /// **The whole point.** A different certificate on an address that has one pinned is
-    /// refused, and refused inside the handshake rather than reported afterwards — an
-    /// accepted handshake is a session, and a session is where the token goes.
-    #[test]
-    fn a_substituted_certificate_is_refused() {
-        let provider = rustls::crypto::ring::default_provider();
-        let pin = fingerprint_of(&provider, &certificate(b"the real server")).expect("a suite");
-
-        let pinned = verifier(Some(&pin));
+    fn a_certificate_the_list_did_not_name_is_refused() {
+        let pinned = verifier(listed(&certificate(b"the real server")));
         let err = verify(&pinned, &certificate(b"somebody else"))
             .expect_err("a substituted certificate was accepted");
         assert!(
-            format!("{err}").contains("not the pinned one"),
+            format!("{err}").contains("not the one the server list carried"),
             "the refusal does not say what happened: {err}"
         );
 
@@ -790,100 +660,67 @@ mod tests {
         );
     }
 
-    /// A pin file round-trips, and the file is exactly what a person would edit by hand:
-    /// one lowercase hex line. Clearing a pin is deleting it, so it has to be readable.
+    /// The development path: nothing stated an expectation, so there is nothing to
+    /// compare against and the certificate is accepted. What makes that safe is not
+    /// here — it is `session::run`, which opens no identity file on this variant.
     #[test]
-    fn a_pin_round_trips_through_the_file() {
-        let dir = tempdir();
-        let path = dir.join("127.0.0.1_7777.pin");
-        let fingerprint = "9e4f5406e744a2ae653fc46e62f4ce168b59d1b53785d002c73ce3386d35f01b";
-
-        write_pin(&path, fingerprint).expect("the pin is written");
-        assert_eq!(
-            read_pin(&path).expect("the pin is readable"),
-            Some(fingerprint.to_owned())
-        );
-
-        let contents = std::fs::read_to_string(&path).expect("readable");
-        assert_eq!(
-            contents,
-            format!("{fingerprint}\n"),
-            "the file is not one plain line"
-        );
+    fn an_unlisted_server_has_nothing_to_check_against() {
+        let pinned = verifier(Expectation::Unlisted);
+        verify(&pinned, &certificate(b"whatever answered"))
+            .expect("an unlisted server is not verified at all");
     }
 
-    /// Whitespace and case are forgiven, because the file is meant to be edited by hand
-    /// and a fingerprint copied out of a log arrives however the terminal left it.
+    /// The list's number arrives through a log line, a registration and a JSON document,
+    /// so it is read in whatever case and whatever surrounding whitespace it survived —
+    /// and anything that is not a digest is refused rather than guessed at. A short or
+    /// malformed one is not an expectation, and a list entry carrying one is not a
+    /// server this client can offer.
     #[test]
-    fn a_hand_edited_pin_is_read_as_written() {
-        let dir = tempdir();
-        let path = dir.join("hand-edited.pin");
-        let fingerprint = "9E4F5406E744A2AE653FC46E62F4CE168B59D1B53785D002C73CE3386D35F01B";
-        std::fs::write(&path, format!("  {fingerprint}  \n\n")).expect("written");
-
+    fn a_fingerprint_is_read_only_when_it_is_one() {
+        let digest = "9E4F5406E744A2AE653FC46E62F4CE168B59D1B53785D002C73CE3386D35F01B";
         assert_eq!(
-            read_pin(&path).expect("readable"),
-            Some(fingerprint.to_ascii_lowercase())
+            parse_fingerprint(&format!("  {digest}\n")),
+            Some(digest.to_ascii_lowercase())
         );
-    }
 
-    /// An address nobody has connected to has no pin, and that is a first connection
-    /// rather than a failure.
-    #[test]
-    fn an_unvisited_server_has_no_pin() {
-        let dir = tempdir();
-        assert_eq!(read_pin(&dir.join("never-seen.pin")), Ok(None));
-    }
-
-    /// **A pin that cannot be read is not a pin.** Reading a damaged file as "no pin"
-    /// would re-pin whatever answered the next connection, which is precisely the
-    /// substitution the file exists to catch — so every shape of damage is an error.
-    #[test]
-    fn a_damaged_pin_refuses_rather_than_re_pinning() {
-        let dir = tempdir();
-
-        let damage: [(&str, &str); 4] = [
-            ("empty", ""),
-            ("too short", "9e4f5406"),
-            ("not hexadecimal", &"z".repeat(FINGERPRINT_CHARS)),
-            ("a whole certificate", "-----BEGIN CERTIFICATE-----"),
-        ];
-
-        for (name, contents) in damage {
-            let path = dir.join(format!("{name}.pin"));
-            std::fs::write(&path, contents).expect("written");
-            assert!(
-                read_pin(&path).is_err(),
-                "a {name} pin file was not refused"
-            );
+        for refused in [
+            "",
+            "9e4f5406",
+            &"z".repeat(FINGERPRINT_CHARS),
+            &"a".repeat(FINGERPRINT_CHARS + 1),
+            "-----BEGIN CERTIFICATE-----",
+        ] {
+            assert_eq!(parse_fingerprint(refused), None, "{refused}");
         }
     }
 
-    /// The refusal names the address, the file and both fingerprints, and offers no
-    /// bypass — the two things a changed certificate can mean are indistinguishable from
-    /// here, so the only honest next step is asking the operator.
+    /// The refusal names the address, both fingerprints and **the list** as the source
+    /// of the expectation, and offers no bypass: the two things a changed certificate
+    /// can mean are indistinguishable from here, so the only honest next step is asking
+    /// whoever runs the server.
     #[test]
     fn the_refusal_tells_a_player_what_to_do() {
         let err = refusal(
-            "example:7777",
-            Path::new("/data/voxelheim/identity/example_7777.pin"),
-            Some("aaaa"),
+            "server.example:7777",
+            &Expectation::Listed("aaaa".to_owned()),
             Some("bbbb"),
             &io::Error::other("handshake failed"),
         );
         assert!(matches!(err, ConnectError::Substituted(_)));
 
         let message = err.message();
-        for expected in [
-            "example:7777",
-            "aaaa",
-            "bbbb",
-            "/data/voxelheim/identity/example_7777.pin",
-            "delete",
-        ] {
+        for expected in ["server.example:7777", "aaaa", "bbbb", "the server list"] {
             assert!(
-                message.to_lowercase().contains(&expected.to_lowercase()),
+                message.contains(expected),
                 "the refusal never mentions {expected}: {message}"
+            );
+        }
+        // No bypass is offered, and none exists to offer. The words a player would go
+        // looking for are the ones that must not be there.
+        for absent in ["delete", "--", "anyway", "ignore"] {
+            assert!(
+                !message.to_lowercase().contains(absent),
+                "the refusal offers a way past itself with {absent:?}: {message}"
             );
         }
     }
@@ -893,128 +730,56 @@ mod tests {
     /// indistinguishable from a flaky network.
     #[test]
     fn an_ordinary_failure_is_not_reported_as_a_substitution() {
-        let err = refusal(
-            "example:7777",
-            Path::new("/tmp/example.pin"),
-            Some("aaaa"),
+        let matched = refusal(
+            "server.example:7777",
+            &Expectation::Listed("aaaa".to_owned()),
             Some("aaaa"),
             &io::Error::other("connection reset"),
         );
-        assert!(matches!(err, ConnectError::Failed(_)));
+        assert!(matches!(matched, ConnectError::Failed(_)));
 
         let unreachable = refusal(
-            "example:7777",
-            Path::new("/tmp/example.pin"),
-            None,
+            "server.example:7777",
+            &Expectation::Listed("aaaa".to_owned()),
             None,
             &io::Error::other("connection refused"),
         );
         assert!(matches!(unreachable, ConnectError::Failed(_)));
-    }
 
-    /// The pin sits beside the identity file, under its own name — including when
-    /// `--identity` has moved that file somewhere the default derivation would never
-    /// have looked. One derivation rather than two that have to agree.
-    #[test]
-    fn the_pin_follows_the_identity_it_protects() {
-        for identity in [
-            "/fixture-root/.local/share/voxelheim/identity/127.0.0.1_7777",
-            "/somewhere/else/entirely/second-character",
-        ] {
-            let identity = Path::new(identity);
-            let pin = pin_path(identity);
-
-            assert_eq!(
-                pin.parent(),
-                identity.parent(),
-                "the pin left the identity's directory"
-            );
-            assert_eq!(
-                pin.file_name().expect("a name").to_string_lossy(),
-                format!(
-                    "{}{PIN_SUFFIX}",
-                    identity.file_name().expect("a name").to_string_lossy()
-                ),
-                "the pin does not take the identity file's own name"
-            );
-        }
-    }
-
-    /// **The upgrade case, refused.** A player carried over from the plaintext transport
-    /// holds a token and no pin, and going on would accept any certificate and then hand
-    /// it the identity. Refused before a single byte is sent — the check runs on the pin
-    /// file, ahead of the handshake, so the peer never even learns what was wanted.
-    #[test]
-    fn an_identity_with_no_pin_refuses_before_the_handshake() {
-        let dir = tempdir();
-        let pin = dir.join("upgraded.pin");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-        let addr = listener.local_addr().expect("its address").to_string();
-        let sock = std::net::TcpStream::connect(&addr).expect("connect");
-
-        let err = TlsWire::connect(sock, &addr, Some(&pin), true, Duration::from_millis(200))
-            .err()
-            .expect("an unpinned server was accepted while holding an identity");
-
-        assert!(
-            matches!(err, ConnectError::Unverified(_)),
-            "the refusal is not the one a player has to act on: {err:?}"
+        // And an unlisted server never produces a substitution, because it never had an
+        // expectation to substitute for.
+        let unlisted = refusal(
+            "server.example:7777",
+            &Expectation::Unlisted,
+            Some("bbbb"),
+            &io::Error::other("connection reset"),
         );
-        let message = err.message();
-        for expected in [
-            addr.as_str(),
-            &pin.display().to_string(),
-            "delete the identity",
-        ] {
-            assert!(
-                message.contains(expected),
-                "the refusal never mentions {expected}: {message}"
-            );
-        }
-
-        // Nothing was written, so a later connection is still a clean first use.
-        assert!(!pin.exists(), "a refused connection pinned something");
+        assert!(matches!(unlisted, ConnectError::Failed(_)));
     }
 
-    /// The same server, the same missing pin, and **no** stored identity: allowed to
-    /// proceed, because a client with nothing to present has nothing to lose. This is
-    /// what makes the rule above a rule about the token rather than about the pin.
+    /// **Refused before a byte is sent.** The listener accepts the socket and says
+    /// nothing back, so the only thing that can end this handshake is the verifier — and
+    /// the assertion is that it ends as a substitution rather than as a timeout, which
+    /// is what "the peer never learns what was wanted" looks like from this side.
     #[test]
-    fn a_first_connection_with_no_identity_is_allowed_to_proceed() {
-        let dir = tempdir();
-        let pin = dir.join("fresh.pin");
-        // A listener that accepts and says nothing: the handshake cannot finish, so what
-        // is asserted is only *which* way it failed.
+    fn a_server_that_is_not_the_listed_one_is_refused_during_the_handshake() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = listener.local_addr().expect("its address").to_string();
         let sock = std::net::TcpStream::connect(&addr).expect("connect");
 
-        let err = TlsWire::connect(sock, &addr, Some(&pin), false, Duration::from_millis(200))
+        // A fingerprint no certificate will ever hash to, so whatever answers is wrong.
+        let expected = Expectation::Listed("0".repeat(FINGERPRINT_CHARS));
+        let err = TlsWire::connect(sock, &addr, &expected, Duration::from_millis(200))
             .err()
             .expect("a silent peer completed a handshake");
 
+        // The peer said nothing at all, so this is a handshake that could not finish
+        // rather than a certificate that was rejected — the same answer the old
+        // no-identity case gave, and the reason `Substituted` needs a *presented*
+        // fingerprint to be reported at all.
         assert!(
             matches!(err, ConnectError::Failed(_)),
-            "a first connection with no identity was refused as unverified: {err:?}"
+            "a peer that presented no certificate was reported as a substitution: {err:?}"
         );
-    }
-
-    /// A directory that only this test uses, removed when the process ends.
-    ///
-    /// Hand-rolled rather than `tempfile`, which would be a fourth dependency for eleven
-    /// lines. Unique by process and clock, and the tests here never collide because each
-    /// names its own files inside it.
-    fn tempdir() -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "voxelheim-tls-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&path).expect("a temporary directory");
-        path
     }
 }

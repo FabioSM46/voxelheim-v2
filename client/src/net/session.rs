@@ -22,6 +22,15 @@
 //! on B, and must not overwrite what A issued. `--identity` overrides the path
 //! outright, which is how one machine runs two characters against one server.
 //!
+//! **There is no identity file at all on a connection nobody stated an expectation
+//! for.** [`run`] opens one only for [`tls::Expectation::Listed`] — a server the list
+//! carried a certificate fingerprint for — because handing a bearer credential to
+//! whoever answers an address is the theft the encryption exists to prevent, performed
+//! by the client itself. `--server` is the other variant and it is the development
+//! path: encrypted, unverified, and a new character every time. That is not a check
+//! placed before the hello; it is the shape of the two variants, so there is no
+//! ordering to get wrong.
+//!
 //! Nothing here decides anything from a token. It is read, presented, and stored;
 //! every consequence of it belongs to the server.
 
@@ -233,6 +242,24 @@ impl Write for Wire {
     }
 }
 
+/// Which server a session is against, and everything the launch decided about it.
+///
+/// **The address and the expectation travel together and always have**, which is the
+/// point of grouping them rather than passing five parameters: a caller cannot name one
+/// without naming the other, so there is no shape of this struct in which a server is
+/// dialled with nobody having said what certificate to expect there. See
+/// [`tls::Expectation`] for what the two variants of that answer mean.
+pub(super) struct Target {
+    pub(super) addr: String,
+    pub(super) expected: tls::Expectation,
+    pub(super) player_name: String,
+    /// `--identity`, which replaces the per-server derivation outright. Read only when
+    /// `expected` is [`tls::Expectation::Listed`], because that is the only session
+    /// that presents anything.
+    pub(super) identity_override: Option<PathBuf>,
+    pub(super) transport: Transport,
+}
+
 /// Runs one connection from connect to close.
 ///
 /// Returns when the session ends or when the ECS drops its end of the channels.
@@ -240,14 +267,19 @@ impl Write for Wire {
 /// never panics, because a panicking net thread would take down a client that
 /// could otherwise have shown the player what went wrong.
 pub(super) fn run(
-    addr: String,
-    player_name: String,
-    identity_override: Option<PathBuf>,
-    transport: Transport,
+    target: Target,
     events: Sender<SessionEvent>,
     commands: Receiver<NetCommand>,
     outbound: Receiver<Vec<u8>>,
 ) {
+    let Target {
+        addr,
+        expected,
+        player_name,
+        identity_override,
+        transport,
+    } = target;
+
     let socket = match connect(&addr) {
         Ok(socket) => socket,
         Err(err) => {
@@ -260,37 +292,34 @@ pub(super) fn run(
     // never comes. Best effort: a socket that refuses the option still works.
     let _ = socket.set_nodelay(true);
 
-    // The TLS handshake, before anything is said and before the identity file is even
-    // read: there is no plaintext path, so a session that cannot be encrypted is a
-    // session that does not happen. A substituted certificate is refused here, and the
-    // message it carries is the one thing on this path a player has to read rather than
-    // retry through.
-    // **Before the TLS handshake, not after it**, which is the ordering the upgrade case
-    // forced. Whether this client already holds an identity for the address decides
-    // whether an unpinned certificate may be accepted at all, and the pin belongs beside
-    // whatever file that identity actually lives in — including one `--identity` moved.
+    // **The identity file is opened only for a server the list named**, and that is the
+    // whole of "a stored identity is never presented to an unverified server". It is not
+    // a check placed before the hello — it is which variant is in hand, so there is no
+    // ordering to get wrong and nothing to forget. `Unlisted` is `--server`, the
+    // development path: encrypted, unverified, and therefore holding nothing to lose.
+    //
     // A missing file is a first connection rather than a failure, and so is an unreadable
     // one: the server mints a fresh identity either way, and refusing over it would turn
     // a lost file into a lost game.
     let env = Environment::read();
-    let (identity, complaint) = IdentityFile::open(&addr, identity_override, &env);
+    let (identity, complaint) = match expected {
+        tls::Expectation::Listed(_) => IdentityFile::open(&addr, identity_override, &env),
+        tls::Expectation::Unlisted => (IdentityFile::forgetful(), None),
+    };
     if let Some(complaint) = complaint
         && events.send(SessionEvent::Warning(complaint)).is_err()
     {
         return;
     }
 
-    let (mut stream, pinning, pin_complaint) = match transport {
+    // The TLS handshake, before anything is said: there is no plaintext path, so a
+    // session that cannot be encrypted is a session that does not happen. A certificate
+    // that is not the one the list carried is refused here, and the message it carries is
+    // the one thing on this path a player has to read rather than retry through.
+    let mut stream = match transport {
         Transport::Encrypted => {
-            let pin_file = identity.path.as_deref().map(tls::pin_path);
-            match tls::TlsWire::connect(
-                socket,
-                &addr,
-                pin_file.as_deref(),
-                identity.presented.is_some(),
-                CONNECT_TIMEOUT,
-            ) {
-                Ok((wire, pinning, complaint)) => (Wire::Tls(wire), pinning, complaint),
+            match tls::TlsWire::connect(socket, &addr, &expected, CONNECT_TIMEOUT) {
+                Ok(wire) => Wire::Tls(wire),
                 Err(err) => {
                     let _ = events.send(SessionEvent::Refused(err.message()));
                     return;
@@ -298,25 +327,8 @@ pub(super) fn run(
             }
         }
         #[cfg(test)]
-        Transport::Plaintext => (Wire::Plain(socket), tls::Pinning::Verified, None),
+        Transport::Plaintext => Wire::Plain(socket),
     };
-
-    // **A token is only ever kept beside a pin.** A connection that could not write the
-    // fingerprint down cannot recognise this server next time, so keeping the identity it
-    // grants would leave a stored token with nothing to verify the server against — and
-    // the next connection would be refused as unverified, locking the player out of a
-    // character this one just created. Forgetting both is the pair that stays consistent.
-    let identity = if pinning == tls::Pinning::Unrecorded {
-        IdentityFile::forgetful()
-    } else {
-        identity
-    };
-
-    if let Some(complaint) = pin_complaint
-        && events.send(SessionEvent::Warning(complaint)).is_err()
-    {
-        return;
-    }
 
     if let Err(err) = stream.set_read_timeout(Some(READ_TIMEOUT)) {
         let _ = events.send(SessionEvent::Refused(format!(
@@ -481,10 +493,12 @@ impl IdentityFile {
 
     /// An identity file that will neither present anything nor keep anything.
     ///
-    /// What a session gets when its certificate could not be pinned. Not the same as
-    /// "no file could be named" even though it behaves identically: the file may be
-    /// perfectly writable, and the *next* connection — which may pin successfully — will
-    /// use it. This session simply declines to add to it.
+    /// What a session against an **unlisted** server gets. Not the same as "no file
+    /// could be named" even though it behaves identically: a file could be named
+    /// perfectly well, and this session declines to look at it — because nothing stated
+    /// which certificate to expect, so there is nobody verified to present a credential
+    /// to. It is the whole of that rule, and it is a value rather than a branch: the
+    /// path that cannot verify is handed an identity file with nothing in it.
     fn forgetful() -> Self {
         Self::default()
     }
@@ -695,13 +709,13 @@ fn write_identity(path: &Path, token: PlayerToken) -> Result<(), String> {
 
 /// Replaces `path` with `bytes`, or leaves it exactly as it was.
 ///
-/// Split out of [`write_identity`] when the certificate pin arrived beside it. Two files
-/// in one directory, written the same way, is one discipline; a second copy of this
-/// function would be a second discipline the first time either was edited.
+/// Split out of [`write_identity`] so the cached ticket in [`super::tickets`] is written
+/// the same way. Two credentials under one data directory, written the same way, is one
+/// discipline; a second copy of this function would be a second discipline the first
+/// time either was edited.
 ///
-/// The mode is `0600` on Unix for both, and for the same reason it always was: the
-/// identity file is a bearer credential, and the pin file is what stands between a
-/// player and somebody else's server — a pin an attacker can rewrite is not a pin.
+/// The mode is `0600` on Unix for both, and for the same reason: each is a bearer
+/// credential — whoever can read one *is* the player or the account it names.
 pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
