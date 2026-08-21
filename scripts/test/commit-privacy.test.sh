@@ -179,6 +179,36 @@ if [ "$CHECK_STATUS" -ne 0 ]; then
 fi
 grep -Fq '3 commit(s) use GitHub noreply' <<< "$CHECK_OUTPUT"
 
+# The co-author trailer an agent's harness appends is approved. Placed after the range
+# case deliberately: the violating commit below must not land between that case's base
+# and its head, or it would fail on a violation the range was written to exclude.
+commit_as_noreply -m "chore: probe the agent co-author trailer
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+coauthor_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$clean_commit" "$coauthor_commit"
+if [ "$CHECK_STATUS" -ne 0 ]; then
+  echo "expected the agent co-author trailer to pass, got $CHECK_STATUS" >&2
+  echo "$CHECK_OUTPUT" >&2
+  exit 1
+fi
+
+# And the address beside it on the same domain is not approved. The rule is the literal
+# address rather than the domain, because a no-reply is only harmless when it belongs to
+# a service everybody can already see.
+other_anthropic="someone""@""anthropic.com"
+commit_as_noreply -m "chore: probe a second address on the approved address's domain
+
+Reported-by: ${other_anthropic}"
+domain_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$coauthor_commit" "$domain_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected an unapproved address on the same domain to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq 'message contains a non-public email address' <<< "$CHECK_OUTPUT"
+assert_absent "$other_anthropic" "the rejected email"
+
 # An empty range still exits as it did before the message scan existed.
 run_check "$clean_commit" "$clean_commit"
 if [ "$CHECK_STATUS" -ne 2 ]; then
