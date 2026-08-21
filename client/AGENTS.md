@@ -45,11 +45,15 @@ keeps meaning "everything the client is".
 | Module | Owns | Must not |
 | ------ | ---- | -------- |
 | `main.rs` | the Bevy app, plugin registration, CLI/env parsing of the address, `--name` and `--identity` | contain game or network logic |
-| `net/mod.rs` | `NetPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
+| `net/mod.rs` | `NetPlugin`, `SignInPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
 | `net/codec.rs` | FlatBuffers encode/decode, contract limits, `ServerWelcome` validation | know about connections |
 | `net/handshake.rs` | the handshake state machine and its admission rules | do I/O, or hold a clock |
 | `net/session.rs` | one connection's lifetime; the only code that blocks; the per-server identity file, read before the hello and written after the welcome | mention a Bevy type |
+| `net/signin.rs` | one sign-in attempt: the two POSTs, the browser, and the loopback listener that catches the redirect | mention a Bevy type, hold a PKCE verifier, or put `finish_secret` in a URL |
+| `net/tickets.rs` | the cached ticket — its file, its mode, its expiry, and the base64url the service answers in | parse a ticket's body, or decide anything from one |
+| `net/http.rs` | the smallest HTTP/1.1 the account service needs, plus URL and query shapes | grow into a general HTTP client, or quote a body in an error |
+| `net/json.rs` | reading the account service's JSON and the RFC 3339 timestamps inside it | quote its input in an error, or read a nested value |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the six chunks a mesh is culled against | mesh, or spawn anything |
 | `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, one entity per chunk | mesh on the main schedule, or own a camera or a light |
@@ -70,6 +74,7 @@ keeps meaning "everything the client is".
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory | reach into another module's internals, or grow a health bar |
+| `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 The layout deliberately mirrors the server's packages — `frame.rs` ↔ `internal/transport`,
@@ -808,6 +813,12 @@ architecture. A fourth needs a discussion before a commit — in particular ther
 async runtime and no networking framework here, by design: `std::net` plus `std::sync::mpsc` on
 one thread is the whole netcode substrate, and it is enough.
 
+That budget is also why signing in brought no crate with it: opening a browser is `xdg-open`
+through `std::process::Command`, the loopback listener is `std::net`, and the HTTP, JSON,
+base64url and RFC 3339 readers are the narrow hand-rolled ones listed above. The one thing it
+genuinely costs is **`https` to the account service**, which is refused rather than downgraded —
+see "Known gaps".
+
 **`rustls` is the third, and the discussion the rule asks for is on the record.** Fabio decided
 it on 2026-08-20 (issue #157) over the alternative of leaving the wire in the clear and
 documenting a WireGuard or VPN deployment. The reasoning is the part worth keeping: a tunnel
@@ -921,6 +932,79 @@ that owns a socket.
   provider's own cipher suites — rustls exposes each suite's hash — rather than from a fourth
   crate or from a hand-rolled digest.
 
+## Signing in, once
+
+`net::SignInPlugin` is built **only when `--account-service` names one**, and that is the
+conservative half of the feature rather than a limitation: an account service is something an
+operator runs and this client cannot invent one, so with no service there is no login screen, no
+`SignInState`, and no behaviour change at all. It mirrors `newSignIn` on the other side, which
+answers 503 rather than refusing to start.
+
+**The three values this client handles are `state`, `finish_secret` and the ticket.** `state` is
+public and travels through the browser. `finish_secret` is private, lives in memory for the length
+of one attempt, and never enters a URL, a file or a log — it exists because the provider's redirect
+carries `code` and `state` in the *same* URL, so a secret that went through the browser would
+protect nothing. The ticket is private and is cached at mode `0600`.
+
+**The PKCE verifier is not one of them**, and that is the correction #122 made: the account service
+mints it and the account service redeems the code, because PKCE requires the redeemer to hold the
+verifier. It never exists on this machine and nothing here talks to Discord's token endpoint. There
+is no client secret in the binary either.
+
+**A sign-in asks for an *account* ticket — one that names no world.** The `finish` body carries
+`state`, `code` and `finish_secret` and deliberately no `world` field at all, which is the same
+"absent rather than empty" encoding `encode_client_hello` uses for a token nobody holds. A ticket
+that names no world is what a player signs in with before they have chosen one, and it is what the
+server list reads; a *world* ticket is what joining needs, and choosing the world is the server
+list's job.
+
+**Nothing about a ticket reaches the ECS.** `SignInState` is the whole of what leaves `net`, and it
+carries a state and a line of text. The ticket lives on the sign-in thread for the length of one
+attempt and after that only in the cache — so there is no resource for a `{:?}` to find, and no name
+outside `net` anything could start deciding from. That is the fence `PlayerToken` already sits
+behind. The server list reads the cache, exactly as a session reads the identity file.
+
+**Where the listener binds is the account service's decision, not this client's.** The redirect URI
+is registered with the provider, so `net/signin.rs` reads it out of the `redirect_uri` inside the
+authorize URL and binds *that* — after checking it is loopback and plain HTTP, and refusing
+otherwise. A listener on a port of its own choosing would be a listener the browser never reaches —
+**including the one the kernel would choose.** A redirect URI naming port 0 is refused rather than
+bound: the browser is sent to the literal `redirect_uri`, so an ephemeral port is a port nothing was
+told about, and binding one turns a misconfiguration into a wait that runs to the deadline with
+nothing to say.
+
+**The tab is told what actually happened.** The listener holds the browser's connection until
+`finish` has answered, then renders a page saying the sign-in worked or that it did not. Answering
+"it worked" the moment the redirect landed would be wrong exactly when it mattered, and a tab left
+saying nothing is how a player concludes the game is broken. The pages are self-contained — no
+image, no script, no font, no request to anywhere.
+
+**The `state` is compared twice, and the two comparisons answer different questions.** Before
+anything is sent to `finish`, because a `code` may be redeemed once and forwarding a redirect that
+belongs to a different attempt would spend somebody else's sign-in. And in the accept loop, because
+the redirect port and path are registered configuration — public and identical on every machine — so
+any page a player has open can issue a request to them. Ending the wait on the path alone would let
+an `<img>` tag abort a sign-in: the listener would be gone before the real redirect arrived. Nothing
+is stolen either way; what the second check protects is the attempt itself. Anything reaching that
+path without this attempt's `state` — including a query that will not decode — is answered `400` and
+the wait carries on.
+
+**Four hand-rolled readers, and the dependency budget is why.** `net/http.rs` and `net/json.rs`
+carry an HTTP/1.1 client, a URL splitter, percent-decoding, a flat-object JSON reader and an RFC
+3339 parser; `net/tickets.rs` carries a base64url decoder. Every one is narrow on purpose and none
+is a general facility — the JSON reader refuses nesting rather than skipping it, and the base64url
+decoder knows one alphabet and one length. **No error in any of them quotes its input**, because a
+`finish` request carries an authorization code and its response carries a ticket, so a diagnostic
+built from those bytes is a diagnostic that can carry one into a log. That is the rule
+`signin.go` keeps on the other side.
+
+**The login screen owns the input while it is up.** `choose_input_mode` forces `InputMode::Menu`
+and `sync_cursor` releases the pointer, because the game is running behind the overlay and a click
+meant for the one control must not also reach the world — and a locked, invisible cursor over a
+screen whose whole content is one button is a button nobody can press. `Escape` cannot leave it: a
+login screen is deliberately not dismissible, and `show_menu` is the other half, so the pause menu
+is not drawn underneath.
+
 ## Generated bindings
 
 Committed, never hand-edited, regenerated with the flatc release pinned in `.flatc-version` at
@@ -976,6 +1060,7 @@ cargo run -- --server norse.example         # bare host gets port 7777
 VOXELHEIM_SERVER=192.0.2.5:7000 cargo run    # lower precedence than the CLI
 cargo run -- --name thora                   # display name; VOXELHEIM_NAME is the fallback
 cargo run -- --identity /tmp/second         # a second character on one server
+cargo run -- --account-service http://127.0.0.1:7780   # sign in with Discord
 cargo run -- --help
 ```
 
@@ -1146,6 +1231,28 @@ Recorded here so the next reader does not mistake them for oversights:
   the second reddens CI with `Package 'wayland-client' ... not found` — and it will still build
   fine on your machine, which is the trap. It deserves its own issue rather than a drive-by.
 
+- **The account service is reached over plain HTTP, and `https` is refused rather than
+  downgraded.** Verifying a web PKI certificate needs a root store, and `rustls` is taken here
+  without one — `webpki-roots` or `rustls-native-certs` would be a fourth crate. So
+  `AccountService::parse` turns an `https://` URL away with a message saying why, because a client
+  that silently spoke plaintext to a URL that said `https` would be the worst of the three
+  outcomes. `voxelheim-auth` serves plain HTTP today (`srv.Serve(ln)`, no TLS), so this matches
+  what exists; what it means operationally is that the account service belongs on a loopback
+  address or behind a private network until the crate discussion happens. It deserves its own
+  issue rather than a drive-by.
+- **A sign-in caches an account ticket and nothing presents one yet.** `ClientHello.session_ticket`
+  is still `None` in `net/session.rs`: a ticket that names no world cannot join a world — the game
+  server would answer `ErrWrongWorld` — and the screen that turns an account ticket into a world
+  ticket is the server list. That is #107, and it reads the cache.
+- **The loopback listener binds a fixed port, so two clients cannot sign in at once.** The port is
+  the account service's `redirect_uri`, which the provider requires to match exactly; a second
+  client signing in at the same moment finds the port taken and says so. The refusal names it.
+- **A redirect URI naming `localhost` binds whichever of `::1` and `127.0.0.1` resolves first.**
+  `TcpListener::bind` takes one address, and a browser may connect to the other. Naming the
+  literal address in the service's `-discord-redirect-uri` avoids it entirely, which is what its
+  own default does.
+- **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
+  says so and `--account-service` pointed somewhere else is a different file.
 - **No reconnect, backoff or session resumption.** A refused or dropped connection is reported
   and stays reported. `Reject` carries the reject code's name for display; a reconnect policy is
   the thing that would want to branch on the numeric code, and it can widen that struct.

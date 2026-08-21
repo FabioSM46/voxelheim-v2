@@ -325,10 +325,14 @@ pub(super) fn run(
         return;
     }
 
-    // `None` for the ticket: V7's identity comes from an account service this build
-    // does not have yet, so this client presents the V6 token it holds and no account.
-    // `schemas/handshake.fbs` reads an absent ticket as "no account presented", which
-    // is a legal hello rather than a malformed one.
+    // `None` for the ticket, and it stays `None` after #106. Signing in caches an
+    // *account* ticket — one whose world id is all zero, meaning "this ticket names
+    // no world" — and a game server refuses one of those with `ErrWrongWorld`,
+    // correctly: joining needs a ticket for the world being joined, and choosing
+    // the world is the server list's job. So this presents the V6 token it holds
+    // and no account until #107 has a world to name. `schemas/handshake.fbs` reads
+    // an absent ticket as "no account presented", which is a legal hello rather
+    // than a malformed one.
     let hello = codec::encode_client_hello(&player_name, identity.presented, None);
     if let Err(err) = frame::write_frame(&mut stream, &hello) {
         let _ = events.send(SessionEvent::Refused(format!(
@@ -978,7 +982,11 @@ impl Scratch {
     }
 
     /// An environment whose data directory is this scratch directory.
-    fn environment(&self) -> Environment {
+    ///
+    /// `pub(super)` because the ticket cache in `net/tickets.rs` derives its path
+    /// from the same environment this one does, and a second scratch directory
+    /// would be a second thing to keep right.
+    pub(super) fn environment(&self) -> Environment {
         Environment {
             xdg_data_home: Some(self.0.to_string_lossy().into_owned()),
             home: None,

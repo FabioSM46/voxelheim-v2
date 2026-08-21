@@ -2,8 +2,9 @@
 
 use bevy::prelude::*;
 
+use super::login::login_is_up;
 use super::set_mode;
-use crate::net::{DisconnectRequest, Session};
+use crate::net::{DisconnectRequest, Session, SignInState};
 use crate::player::InputMode;
 
 pub(super) struct MenuPlugin;
@@ -116,9 +117,15 @@ fn spawn_button(parent: &mut ChildSpawnerCommands<'_>, action: MenuAction, label
 fn show_menu(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
+    sign_in: Option<Res<SignInState>>,
     mut roots: Query<&mut Visibility, With<MenuRoot>>,
 ) {
-    let next = if *mode == InputMode::Menu && session.is_some() {
+    // The login screen puts the input mode in `Menu` to take a click away from the
+    // world, and this is the other half of that: the pause menu is not what that
+    // mode is about while a player has not signed in, and drawing it underneath
+    // would be two panels for one state.
+    let next = if *mode == InputMode::Menu && session.is_some() && !login_is_up(sign_in.as_deref())
+    {
         Visibility::Visible
     } else {
         Visibility::Hidden

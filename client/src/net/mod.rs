@@ -38,7 +38,11 @@
 mod codec;
 mod frame;
 mod handshake;
+mod http;
+mod json;
 mod session;
+mod signin;
+mod tickets;
 mod tls;
 
 use std::path::PathBuf;
@@ -69,6 +73,8 @@ pub use codec::{
     encode_repair_request,
 };
 use session::{NetCommand, SessionEvent};
+pub use signin::AccountService;
+use signin::{SignInCommand, SignInEvent};
 
 /// How many frames may wait for the writer thread before the ECS starts dropping them.
 ///
@@ -703,6 +709,266 @@ fn disconnect_on_request(
     commands.remove_resource::<Outbound>();
     commands.remove_resource::<Session>();
     commands.remove_resource::<Identity>();
+}
+
+/// Where a sign-in has got to, and the only thing about one that leaves this
+/// module.
+///
+/// **The ticket itself deliberately never reaches the ECS.** It lives for the
+/// length of one attempt on the sign-in thread and then only in the cache, at mode
+/// `0600` — so there is no resource holding a bearer credential for a `{:?}`
+/// somewhere to find, and no name outside `net` that could start deciding from
+/// one. The screen that presents a ticket is the server list, and that is #107;
+/// it reads the cache, which is the store, exactly as the identity file is.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub enum SignInState {
+    /// There is no live ticket. `reason` is a line for the player when something
+    /// specific happened — an expiry, a refusal — and `None` when nothing has
+    /// happened yet, which is a first launch.
+    SignedOut { reason: Option<String> },
+    /// A browser tab is open and this client is waiting on its loopback listener.
+    Waiting,
+    /// A live ticket is held, so nothing asks the player for anything.
+    SignedIn,
+}
+
+/// What the login screen shows when the cache held a ticket that had run out.
+///
+/// A sentence rather than a date, because rendering one would mean this client
+/// carrying a calendar to print with — and *when* it expired is not what the player
+/// needs to know, only that it did and what to do about it.
+const TICKET_EXPIRED: &str = "Your last sign-in has expired. Sign in again to play.";
+
+/// The login screen asking for a sign-in.
+///
+/// A message rather than a direct call, for the reason [`DisconnectRequest`] is
+/// one: `ui` may ask, and only the network boundary may open a socket.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignInRequest;
+
+/// Everything an attempt needs, kept because there can be more than one of them:
+/// a refused sign-in leaves the player on the login screen with the control still
+/// live.
+#[derive(Resource, Clone)]
+struct SignInSettings {
+    service: signin::AccountService,
+    /// `None` when no file could be named to keep a ticket in. A sign-in still
+    /// works; it is simply forgotten at the end of the launch.
+    ticket_path: Option<PathBuf>,
+    browser: signin::Browser,
+}
+
+/// The ECS end of a running attempt's channels.
+///
+/// Present exactly while there is a sign-in thread, which is what makes "is one
+/// already running" a question about a resource rather than a flag somebody has to
+/// remember to clear. The `Mutex` is the type obligation [`NetLink`] documents and
+/// nothing ever contends it.
+#[derive(Resource)]
+struct SignInLink(Mutex<SignInChannels>);
+
+struct SignInChannels {
+    events: Receiver<SignInEvent>,
+    commands: Sender<SignInCommand>,
+}
+
+impl Drop for SignInChannels {
+    /// Dropping the ECS end is how the app says "stop", exactly as it is for the
+    /// session thread: the explicit command is noticed on the listener's next poll
+    /// and the channel closing says the same thing to a thread that looks between
+    /// the two.
+    fn drop(&mut self) {
+        let _ = self.commands.send(SignInCommand::Cancel);
+    }
+}
+
+/// Signs this client in, and keeps the ticket that proves it did.
+///
+/// **Built only when an account service is configured**, which is deliberate and is
+/// the conservative half of this feature: with no `--account-service` there is no
+/// login screen, no sign-in state and no behaviour change at all. An account
+/// service is something an operator runs and this client cannot invent one, so the
+/// shape mirrors `newSignIn` on the other side — the feature says what is missing
+/// rather than being silently absent.
+pub struct SignInPlugin {
+    service: signin::AccountService,
+    ticket_path: Option<PathBuf>,
+    browser: signin::Browser,
+}
+
+impl SignInPlugin {
+    /// Signs in against `service`, keeping the ticket in the file this client
+    /// derives for it.
+    pub fn new(service: AccountService) -> Self {
+        Self {
+            service,
+            ticket_path: None,
+            browser: signin::Browser::System,
+        }
+    }
+
+    /// Keeps the ticket in `path` rather than in the derived file.
+    ///
+    /// Test-only today. It is the same seam `--identity` is for the identity file,
+    /// and it exists here so the cache can be driven without a home directory.
+    #[cfg(test)]
+    fn with_ticket_path(mut self, path: PathBuf) -> Self {
+        self.ticket_path = Some(path);
+        self
+    }
+
+    /// Records the authorize URL instead of opening a browser at it. See
+    /// [`signin::Browser`] for why the seam cannot be reached from a shipped
+    /// client.
+    #[cfg(test)]
+    fn with_captured_browser(mut self, browser: Sender<String>) -> Self {
+        self.browser = signin::Browser::Captured(browser);
+        self
+    }
+}
+
+impl Plugin for SignInPlugin {
+    fn build(&self, app: &mut App) {
+        // The cache is read here rather than in a system, and `Plugin::build` is
+        // the right place for it: it is one bounded read of at most a hundred
+        // bytes, it happens once, before a schedule exists — and doing it in a
+        // Startup system instead would mean either blocking a frame on a file or
+        // spending a frame with the login screen up before anyone knows whether it
+        // should be. The rule this respects is "a Bevy *system* never blocks".
+        let ticket_path = self.ticket_path.clone().or_else(|| {
+            tickets::default_ticket_path(self.service.authority(), &session::Environment::read())
+        });
+
+        let (state, complaint) = match ticket_path.as_deref() {
+            Some(path) => {
+                let (cached, complaint) = tickets::read(path);
+                let state = match cached {
+                    Some(cached) if cached.is_live(tickets::now_unix()) => SignInState::SignedIn,
+                    Some(_) => SignInState::SignedOut {
+                        reason: Some(TICKET_EXPIRED.to_owned()),
+                    },
+                    None => SignInState::SignedOut { reason: None },
+                };
+                (state, complaint)
+            }
+            None => (
+                SignInState::SignedOut { reason: None },
+                Some(format!(
+                    "no file could be named to keep a sign-in for {} in: every launch will need \
+                     the browser again.",
+                    self.service
+                )),
+            ),
+        };
+        if let Some(complaint) = complaint {
+            warn!("{complaint}");
+        }
+
+        app.insert_resource(state)
+            .insert_resource(SignInSettings {
+                service: self.service.clone(),
+                ticket_path,
+                browser: self.browser.clone(),
+            })
+            .add_message::<SignInRequest>()
+            .add_systems(Update, (start_sign_in, drain_sign_in_events).chain());
+    }
+}
+
+/// Starts one attempt when the login screen asks and nothing is already running.
+fn start_sign_in(
+    mut requests: MessageReader<SignInRequest>,
+    mut state: ResMut<SignInState>,
+    settings: Res<SignInSettings>,
+    mut commands: Commands,
+) {
+    // Consume the whole frame's batch: several presses are one sign-in, not one
+    // replayed across later frames. The same rule `disconnect_on_request` keeps.
+    if requests.read().count() == 0 {
+        return;
+    }
+    // `Waiting` is the guard rather than the resource below, because a `Commands`
+    // insert lands at the next sync point and a second press in the meantime would
+    // otherwise open a second tab and bind the same port twice.
+    if !matches!(*state, SignInState::SignedOut { .. }) {
+        return;
+    }
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
+    let service = settings.service.clone();
+    let ticket_path = settings.ticket_path.clone();
+    let browser = settings.browser.clone();
+
+    match thread::Builder::new()
+        .name("voxelheim-signin".to_owned())
+        .spawn(move || signin::run(service, ticket_path, browser, event_tx, command_rx))
+    {
+        // Detached, as the session thread is: the app must never wait on a socket
+        // to shut down, and dropping the ECS end of the channels is what stops it.
+        Ok(_detached) => {
+            *state = SignInState::Waiting;
+            commands.insert_resource(SignInLink(Mutex::new(SignInChannels {
+                events: event_rx,
+                commands: command_tx,
+            })));
+        }
+        // Not a panic: a client that cannot start a thread can still say so and
+        // leave the control live.
+        Err(err) => {
+            error!("the sign-in thread would not start: {err}");
+            *state = SignInState::SignedOut {
+                reason: Some(format!("this client could not start a sign-in: {err}")),
+            };
+        }
+    }
+}
+
+/// Publishes whatever the sign-in thread has said, without ever waiting for it.
+fn drain_sign_in_events(
+    link: Option<ResMut<SignInLink>>,
+    mut state: ResMut<SignInState>,
+    mut commands: Commands,
+) {
+    let Some(mut link) = link else {
+        return;
+    };
+    let channels = match link.0.get_mut() {
+        Ok(channels) => channels,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    loop {
+        match channels.events.try_recv() {
+            Ok(SignInEvent::Warning(text)) => warn!("{text}"),
+            Ok(SignInEvent::Completed) => {
+                *state = SignInState::SignedIn;
+                commands.remove_resource::<SignInLink>();
+                return;
+            }
+            Ok(SignInEvent::Refused(reason)) => {
+                *state = SignInState::SignedOut {
+                    reason: Some(reason),
+                };
+                commands.remove_resource::<SignInLink>();
+                return;
+            }
+            Err(TryRecvError::Empty) => return,
+            // The thread ended without saying how, which `signin::run` has no path
+            // to do — it always sends one terminal event. Handled anyway, because
+            // a login screen stuck on "waiting" for ever is the one outcome a
+            // player cannot act on.
+            Err(TryRecvError::Disconnected) => {
+                if *state == SignInState::Waiting {
+                    *state = SignInState::SignedOut {
+                        reason: Some("the sign-in stopped without saying why.".to_owned()),
+                    };
+                }
+                commands.remove_resource::<SignInLink>();
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1713,5 +1979,221 @@ mod tests {
              is silent"
         );
         assert_eq!(state(&app), ConnectionState::Disconnected);
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+    use crate::net::codec::{SESSION_TICKET_LEN, SessionTicket};
+    use crate::net::session::Scratch;
+    use crate::net::tickets::{self, CachedTicket};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    /// A loopback port nothing is listening on, so `start` fails fast and
+    /// deterministically. Binding and dropping is the only way to be sure a port is
+    /// free rather than guessing at a number another test might be using.
+    fn closed_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener.local_addr().expect("an address").port();
+        drop(listener);
+        port
+    }
+
+    fn app_at(authority: &str, path: PathBuf) -> (App, Receiver<String>) {
+        let service =
+            AccountService::parse(&format!("http://{authority}")).expect("an account service URL");
+        let (browser_tx, browser_rx) = mpsc::channel();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(
+            SignInPlugin::new(service)
+                .with_ticket_path(path)
+                .with_captured_browser(browser_tx),
+        );
+        (app, browser_rx)
+    }
+
+    /// An app pointed at a port nothing is listening on, which is what every test
+    /// that never presses the control wants.
+    fn app_with(path: PathBuf) -> (App, Receiver<String>) {
+        app_at(&format!("127.0.0.1:{}", closed_port()), path)
+    }
+
+    fn state(app: &App) -> SignInState {
+        app.world().resource::<SignInState>().clone()
+    }
+
+    #[test]
+    fn a_live_cached_ticket_signs_in_with_no_browser() {
+        let scratch = Scratch::new("plugin-live");
+        let path = scratch.join("service");
+        let live = tickets::now_unix() + 3600;
+        tickets::write(
+            &path,
+            CachedTicket::new(SessionTicket::from_bytes([0x5a; SESSION_TICKET_LEN]), live),
+        )
+        .expect("a cached ticket");
+
+        let (mut app, browser) = app_with(path);
+        app.update();
+
+        assert_eq!(state(&app), SignInState::SignedIn);
+        assert!(
+            browser.try_recv().is_err(),
+            "a live ticket must open no browser at all"
+        );
+    }
+
+    #[test]
+    fn an_expired_ticket_goes_back_to_the_login_screen_with_a_line_saying_why() {
+        let scratch = Scratch::new("plugin-expired");
+        let path = scratch.join("service");
+        tickets::write(
+            &path,
+            CachedTicket::new(
+                SessionTicket::from_bytes([0x5a; SESSION_TICKET_LEN]),
+                tickets::now_unix() - 1,
+            ),
+        )
+        .expect("a cached ticket");
+
+        let (mut app, _browser) = app_with(path);
+        app.update();
+
+        match state(&app) {
+            SignInState::SignedOut { reason: Some(line) } => {
+                assert!(line.contains("expired"), "{line}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_first_launch_asks_without_explaining_anything() {
+        // `None` rather than a sentence: nothing has gone wrong, and a reason on a
+        // first launch would be a client apologising for its own default.
+        let scratch = Scratch::new("plugin-first");
+        let (mut app, _browser) = app_with(scratch.join("service"));
+        app.update();
+        assert_eq!(state(&app), SignInState::SignedOut { reason: None });
+    }
+
+    #[test]
+    fn a_cache_that_is_not_a_ticket_is_a_first_launch_too() {
+        let scratch = Scratch::new("plugin-garbage");
+        let path = scratch.join("service");
+        std::fs::write(&path, b"not a ticket").expect("a scratch file");
+
+        let (mut app, _browser) = app_with(path);
+        app.update();
+        assert_eq!(state(&app), SignInState::SignedOut { reason: None });
+    }
+
+    #[test]
+    fn pressing_the_control_says_a_tab_is_opening() {
+        // Pointed at a service that accepts and then says nothing, so the attempt
+        // is genuinely in flight while this asserts. **A closed port raced**, and
+        // the race is worth writing down: Bevy inserts a sync point between two
+        // chained systems, so a `Connection refused` could be reported and drained
+        // in the very frame the press was made — which is correct behaviour and an
+        // untestable assertion.
+        let stalled = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let authority = stalled.local_addr().expect("an address").to_string();
+        let scratch = Scratch::new("plugin-waiting");
+        let (mut app, _browser) = app_at(&authority, scratch.join("service"));
+        app.update();
+
+        app.world_mut().write_message(SignInRequest);
+        app.update();
+
+        assert_eq!(state(&app), SignInState::Waiting);
+        assert!(
+            app.world().get_resource::<SignInLink>().is_some(),
+            "an attempt is running"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_service_leaves_the_screen_up_with_a_reason() {
+        let scratch = Scratch::new("plugin-press");
+        let path = scratch.join("service");
+        let (mut app, browser) = app_with(path.clone());
+        app.update();
+        assert_eq!(state(&app), SignInState::SignedOut { reason: None });
+
+        app.world_mut().write_message(SignInRequest);
+
+        // What matters is that the attempt comes back to the login screen with a
+        // reason rather than staying on "waiting" for ever.
+        let mut settled = None;
+        for _ in 0..200 {
+            app.update();
+            if let SignInState::SignedOut { reason: Some(line) } = state(&app) {
+                settled = Some(line);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let reason = settled.expect("the attempt reports why it failed");
+        assert!(reason.contains("127.0.0.1"), "{reason}");
+        assert!(
+            browser.try_recv().is_err(),
+            "no browser opens when the account service cannot be reached"
+        );
+        assert_eq!(tickets::read(&path).0, None, "and nothing is cached");
+
+        // The control is live again: the resource that says an attempt is running
+        // is gone, so another press starts another one.
+        assert!(app.world().get_resource::<SignInLink>().is_none());
+    }
+
+    #[test]
+    fn a_second_press_while_an_attempt_is_running_starts_nothing() {
+        // Asserted against the guard rather than against a running thread, and
+        // deliberately: a test that pressed twice against a real attempt would be
+        // racing whatever that attempt did next — which is exactly how the first
+        // version of this test failed, on a `Connection refused` that arrived
+        // between the two presses.
+        let scratch = Scratch::new("plugin-twice");
+        let (mut app, browser) = app_with(scratch.join("service"));
+        app.update();
+
+        *app.world_mut().resource_mut::<SignInState>() = SignInState::Waiting;
+        app.world_mut().write_message(SignInRequest);
+        app.update();
+
+        assert_eq!(state(&app), SignInState::Waiting);
+        assert!(
+            app.world().get_resource::<SignInLink>().is_none(),
+            "no second attempt was started"
+        );
+        assert!(browser.try_recv().is_err(), "and no second tab was opened");
+    }
+
+    #[test]
+    fn a_refusal_never_carries_a_credential_into_the_state_the_ui_reads() {
+        // `SignInState` is the one thing about a sign-in that leaves this module,
+        // and the login screen renders it verbatim. Its `Debug` is what a log line
+        // or an assertion failure would print.
+        let scratch = Scratch::new("plugin-quiet");
+        let (mut app, _browser) = app_with(scratch.join("service"));
+        app.update();
+        app.world_mut().write_message(SignInRequest);
+        for _ in 0..200 {
+            app.update();
+            if matches!(state(&app), SignInState::SignedOut { reason: Some(_) }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let printed = format!("{:?}", state(&app));
+        for forbidden in ["ticket", "secret", "code="] {
+            assert!(
+                !printed.to_ascii_lowercase().contains(forbidden),
+                "{forbidden} appears in {printed}"
+            );
+        }
     }
 }
