@@ -602,9 +602,13 @@ func (e *announceError) Error() string { return e.reason + ": " + e.detail }
 // cmd/voxelheim-auth answers with**, and nothing from the transport error reaches it verbatim:
 // net/http wraps every failure in a *url.Error whose message is the URL it was given, which is
 // the one string an operator may have written a password into. Unwrapping it to the inner
-// error is what keeps -account-service's userinfo inside this process, and it is why
-// tickets.go's spelling — which wraps the *url.Error whole — is not copied here: that one runs
-// once at startup, this one runs for the life of the server.
+// error is what keeps -account-service's userinfo inside this process.
+//
+// tickets.go strips it the same way now, with this file's helper. It used to wrap the
+// *url.Error whole, excused here on the grounds that it runs once at startup while this runs
+// for the life of the server — which was never the mitigation it sounded like. A start that
+// refuses is exactly the log an operator pastes into a ticket, and net/http's own masking
+// keeps the username, so a token in that position survived every refusal (#151).
 func (a *announcer) post(ctx context.Context) (registration, error) {
 	body, err := json.Marshal(announcement{
 		Name:              a.name,
