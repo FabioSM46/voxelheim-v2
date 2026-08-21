@@ -19,6 +19,7 @@ validation to get wrong.
 | Package | Owns | Must not |
 | ------- | ---- | -------- |
 | `cmd/voxelheimd` | flags, logger, listener wiring, signal handling, shutdown | contain game logic |
+| `cmd/voxelheim-auth` | the account service: its own flags, HTTP route table, port and directory | know anything about the game — it imports no package the simulation uses |
 | `internal/transport` | framing, TCP, TLS, the `Transport`/`Conn` interfaces | know what a frame means |
 | `internal/protocol` | FlatBuffers encode/decode, contract limits | know about connections |
 | `internal/session` | one connection's lifetime, handshake admission, entity ids, the one-session-per-identity claim | decide gameplay outcomes |
@@ -27,6 +28,7 @@ validation to get wrong.
 | `internal/identity` | what a player token is, what a player id is, and the one-way hash between them | import anything of ours |
 | `internal/certs` | the server's own TLS certificate: generated once, kept under the world directory | implement any cryptography |
 | `internal/persist` | the player store under `<world-dir>/players/`, the camp in `<world-dir>/structures.bin`, and the world's time of day in `<world-dir>/clock.bin` | be imported by `game` |
+| `internal/auth` | the account store under `<auth-dir>/accounts/`: who a person is, never how they prove it | be imported by anything but `cmd/voxelheim-auth` |
 | `gen/` | flatc output | be hand-edited, ever |
 
 The dependency direction is one-way: `game` and `session` depend on `protocol`, `transport` and
@@ -1003,6 +1005,75 @@ flush are wired in `cmd/voxelheimd/main.go`.
   against a nil store rather than a branch at each call site.
 
 
+## The account service, and why it is a second command
+
+`cmd/voxelheim-auth` keeps who the people playing here are. It ships from this module and
+shares nothing else with the game server: not a port, not a directory, not a package the
+simulation uses.
+
+- **A second command rather than a second workspace.** A top-level `auth/` would need its own
+  CI job, its own `AGENTS.md`, a rule in `scripts/changed-areas.sh`, an entry in `ci-gate`'s
+  selector audit and a row in `scripts/test/gate-tables.test.sh`. That is pipeline construction
+  for no benefit at this scale, and it would fork the store discipline `internal/world` and
+  `internal/persist` already share.
+- **`cmd/voxelheimd` must not import `internal/auth`, and nothing else may either.** They are
+  separate trust domains that happen to ship together, and the moment the simulation can open
+  the accounts directory, "the account service holds the accounts" stops being true. It is a
+  test rather than a sentence: `internal/auth/imports_test.go` parses every Go file under
+  `server/` and asserts that the only importer is `cmd/voxelheim-auth` — stated the strong way
+  round, so the transitive question never arises, because a package that never holds this one
+  cannot pass it on. Its other half asserts the reverse direction: `internal/auth` imports
+  `internal/world` and nothing else of ours, for the five record helpers and for nothing more.
+  Both fail closed — a walk that found no files is a failure, not an empty set that passes.
+- **No credential is kept, so there is none to leak.** An account is an internal id, the provider
+  identity it was created from, a display name and a created-at time. Whatever a provider hands
+  over to show that somebody is who they say they are is checked by the flow that receives it
+  and then dropped. A leaked accounts directory is an embarrassment rather than a way in, and
+  that is a property of the format instead of a rule somebody has to keep remembering.
+- **The store judges its keys, and nothing but its keys.** `internal/persist` deliberately judges
+  no contents, because `internal/game` owns what a life may say. There is no such layer above
+  `internal/auth`, so the line is drawn elsewhere: between keys and description. A provider
+  identity and an account id are refused if they are not ones this build would write — on the way
+  in *and* on the way out, because a format whose two halves disagree about what an account is
+  has two definitions. A display name and a timestamp describe rather than find, and are written
+  down as given.
+- **An unreadable record is never an absent one**, and here that rule has teeth. Reported as "no
+  such account", a damaged file mints a *second* account for a person who already has one: they
+  sign in successfully, find none of their characters, and the new account's first write lands on
+  the record nobody could read. `Store.Ensure` therefore stops on the error rather than minting,
+  and the damaged file is left exactly where it is.
+- **There is no ephemeral mode, which is the deliberate difference from every store under the
+  world directory.** A nil `world.Store`, `persist.Store` or `persist.ClockStore` is a world an
+  operator chose not to keep, and losing an evening's digging is a trade somebody can knowingly
+  take. An account nobody kept is a person who cannot get back in, so there is no nil `auth.Store`
+  at all: `-auth-dir ""` is a refusal at startup rather than a store that quietly writes nowhere.
+- **The file name is a hash of the provider identity, never the identity.** A provider subject is
+  a third party's text and may hold a slash, a NUL, a `..` or four hundred characters of anything;
+  a digest is fixed-length hex, and the directory listing is not a roster of provider ids either.
+  The identity is written *into* the record as well, so a file copied onto another identity's path
+  is caught rather than answered — `internal/world` writes a chunk's coordinate into its file for
+  the same reason, and `internal/persist` cannot, because its name is the hash of a secret and
+  there is nothing in the record to compare against. The NUL between the two halves of the hashed
+  input is load-bearing: without it `("disc", "ordX")` and `("discord", "X")` share a file, which
+  is two people sharing an account.
+- **The HTTP surface is a table, and the table is the whole surface.** `routes()` is the one place
+  a pattern is registered, and the method is part of the pattern — Go's own `ServeMux` has
+  understood `GET /healthz` since 1.22, so a wrong method is a 405 from the mux rather than the
+  first four lines of every handler. `TestTheRouteTableIsTheWholeSurface` drives the mux and
+  checks that what answers is exactly what is listed, `/debug/pprof/` included, which is what
+  would answer if this had drifted onto `http.DefaultServeMux`.
+- **`/healthz` reports liveness, not readiness, and touches no disk.** A health endpoint that
+  stats the accounts directory on every probe turns a monitoring interval into disk load and lets
+  a slow filesystem report a healthy service as dead. What could go wrong with the storage is
+  asked once, at startup, where it refuses to bind instead of answering probes — which is why
+  "this process is up" is the whole of what this can honestly claim.
+- **Flags are validated before they are narrowed**, the rule `-tick-rate` keeps one binary over.
+  The listen port is the case that shows it: a port is a `uint16` by the time anything binds it,
+  so `-listen 127.0.0.1:99999` fails at startup quoting the number the operator typed, rather
+  than becoming a silent 33465. A named port is refused too — `:htpt` is a typo far more often
+  than it is a service name, and a machine whose `/etc/services` differs is a machine where the
+  same flag binds somewhere else.
+
 ## Generated bindings
 
 Committed, never hand-edited, regenerated with the flatc release pinned in `.flatc-version` at the
@@ -1224,3 +1295,12 @@ Recorded here so the next reader does not mistake them for oversights:
   Placement retains the older behaviour in which the editor's own view is not consulted: a
   neighbouring edit may be applied while its `BlockUpdate` reaches only sessions that hold the
   chunk.
+- **An account can be found by its provider identity and by nothing else.** That is the only
+  lookup the account service can perform today: the flow that will call it arrives holding a
+  provider identity. Finding an account by its `auth.AccountID` — which is what the rest of the
+  game will carry — needs a second index, and it lands with the thing that needs it.
+- **`auth.Store.Ensure` is exclusive within one process and not between two.** Its mutex is what
+  stops two concurrent requests for one person minting two accounts; two account-service
+  processes over one accounts directory would still race, and a mutex cannot reach that. One
+  service owns its directory, and the fix if that ever stops being true is a lock in the
+  filesystem rather than a wider lock in Go.
