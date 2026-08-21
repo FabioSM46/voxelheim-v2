@@ -4506,6 +4506,69 @@ mod tests {
         assert_eq!(absent, empty);
     }
 
+    /// A name that is not UTF-8 is refused before the accessor that would read it runs.
+    ///
+    /// The generated `name()` accessor is `from_utf8_unchecked`, so the verifier is the
+    /// only thing between a malicious frame and undefined behaviour. It holds — [`decode`]
+    /// goes through `root_as_envelope`, whose verifier runs `core::str::from_utf8` on every
+    /// string it visits — but it holds *invisibly*, by library behaviour a call site cannot
+    /// show, guarded only by the "never `root_as_envelope_unchecked`" convention and the
+    /// version pinned in `Cargo.lock`. #117's review asked for the property to be pinned
+    /// rather than left to those two, and it was right to: both are conventions, and a
+    /// convention is what a regression walks through.
+    ///
+    /// **The bytes are patched into a finished frame rather than built through
+    /// `from_utf8_unchecked`.** `client/Cargo.toml` records that hand-written client code
+    /// contains no `unsafe`, and there is none today — writing the first one to test a
+    /// safety property would spend more than the test is worth. Patching is the more
+    /// faithful fixture anyway: it is exactly the bytes a hostile peer puts on the wire,
+    /// and the replacement is the same length as what it replaces, so no offset moves.
+    #[test]
+    fn a_character_name_that_is_not_utf8_is_refused_before_the_accessor_runs() {
+        // Distinctive enough to appear once in a frame, and checked below rather than
+        // assumed. 0xC3 opens a two-byte sequence and 0x28 is not a continuation byte.
+        const NAME: &[u8] = b"Qxvz";
+        const NOT_UTF8: &[u8] = &[0xC3, 0x28];
+
+        let mut frame = encode_server_character_list(
+            Some(&[CharacterSummaryWire {
+                character_id: 9,
+                name: Some(String::from_utf8(NAME.to_vec()).expect("the fixture name is ascii")),
+                ..CharacterSummaryWire::default()
+            }]),
+            3,
+        );
+
+        // The frame this patches is a good one, which is what makes the refusal below a
+        // statement about the bytes rather than about the fixture.
+        assert!(
+            decode(&frame).is_ok(),
+            "the unpatched fixture is not a decodable frame"
+        );
+
+        let occurrences = frame.windows(NAME.len()).filter(|w| *w == NAME).count();
+        assert_eq!(occurrences, 1, "the fixture name is not uniquely locatable");
+        let at = frame
+            .windows(NAME.len())
+            .position(|window| window == NAME)
+            .expect("the name is in the frame it was encoded into");
+        frame[at..at + NOT_UTF8.len()].copy_from_slice(NOT_UTF8);
+
+        // The reason is pinned, not just the refusal. Patching bytes into a finished
+        // buffer could in principle break something else and be refused for a reason
+        // that has nothing to do with UTF-8 — which would leave this test passing while
+        // the property it exists for went unchecked. The verifier names the field:
+        // `Utf8 error for string in 136..140 ... while verifying table field \`name\``.
+        let refusal = decode(&frame);
+        let Err(DecodeError::Malformed(reason)) = &refusal else {
+            panic!("invalid UTF-8 in a name was not refused: {refusal:?}");
+        };
+        assert!(
+            reason.contains("Utf8") && reason.contains("name"),
+            "the frame was refused for something other than the name's encoding: {reason}"
+        );
+    }
+
     #[test]
     fn a_character_list_that_breaks_its_own_invariants_is_a_protocol_error() {
         let named = |id: u64, name: Option<&str>| CharacterSummaryWire {

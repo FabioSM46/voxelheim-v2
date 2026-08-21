@@ -86,17 +86,28 @@ enum HairModel : ubyte {
 /// this contract is a different case entirely — an entity whose `PlayerAppearance`
 /// has not arrived *yet*; see `player.fbs`.
 ///
-/// **An absent colour is deliberately not on that list, and the reason is written
-/// here so nobody adds it back.** A table scalar carries no presence bit: FlatBuffers
-/// writes no bytes for a field equal to its default, and `0x000000` — black — is a
-/// colour a player may legitimately choose. Absent and black are therefore the same
-/// bytes on the wire, so a decoder that refused absence would refuse a character
-/// wearing black shoes, and an encoder would have to be told to write defaults it
-/// otherwise omits. The claim this contract can keep is the narrower one: the wire
-/// could never distinguish an omitted colour from a chosen black one, exactly as it
-/// cannot distinguish a wrong colour from a right one. What a decoder *can* hold is
-/// that every value it accepts is one the peer could have meant — which is what the
-/// invariants below are.
+/// **An absent colour is deliberately not on that list, and this is the decode rule
+/// rather than merely a permission: an absent colour reads as black, `0x000000`.** A
+/// table scalar carries no presence bit — FlatBuffers writes no bytes for a field
+/// equal to its default — and black is a colour a player may legitimately choose, so
+/// absent and chosen-black are the same bytes on the wire. **A decoder must not treat
+/// an absent colour as an error, and a presence check must not be added.**
+///
+/// Refusing absence would refuse a character wearing black shoes, which is reason
+/// enough. The stronger reason is that it would make decode correctness depend on the
+/// *sender's builder settings*, which no decoder can see: a peer that forces defaults
+/// writes `0x000000` explicitly and passes such a check, while a peer that does not
+/// omits the field and fails it. Two conforming V7 servers would then produce frames
+/// this contract treated differently, on a difference that is an implementation
+/// detail of how each one built its buffer.
+///
+/// **Hair is the deliberate asymmetry, and it is why the rule above is written as a
+/// prohibition.** An absent `hair_model` reads as `HairModel.Unknown`, and that *is*
+/// a protocol error — because unlike black, `Unknown` is not a choice a player can
+/// make, so the zero value is distinguishable from every legal one. A colour has no
+/// such spare value. Nobody should reintroduce the colour check on the strength of
+/// hair failing closed; the two differ in what their default can mean, not in how
+/// carefully each is treated.
 ///
 /// **A table rather than a struct**, deliberately, and against the rule of thumb
 /// that fixed-size shapes are inlined. A struct can never gain, lose or reorder a
