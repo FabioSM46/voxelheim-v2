@@ -1025,6 +1025,58 @@ Two details in that recipe are load-bearing:
 A `schemas/**` change rebuilds both consumers — CI runs the `schemas`, `server` and `client` jobs
 for any contract diff — so regenerate here and in the client in the same PR.
 
+## Running it
+
+```bash
+go run ./cmd/voxelheimd                       # 127.0.0.1:7777, world kept in ./world
+go run ./cmd/voxelheimd -listen 0.0.0.0:7777  # reachable from another machine
+go run ./cmd/voxelheimd -listen 127.0.0.1:0   # a free port, printed in the listening line
+go run ./cmd/voxelheimd -seed 42              # a different world; the same seed is the same world
+go run ./cmd/voxelheimd -log-level debug -log-format json
+go run ./cmd/voxelheimd -h                    # every flag, with the default it actually holds
+```
+
+`-h` is the list, deliberately: the defaults are constants in `internal/game`, `internal/world`
+and `internal/session`, and a table here restating them would be a copy that drifts. What the
+flags decide is the part worth writing down.
+
+| Flag | Decides |
+| ---- | ------- |
+| `-listen` | the address to bind. A `:0` port binds a free one and the startup line names it |
+| `-seed` | the terrain. It is regenerated from the seed, never read from disk |
+| `-world-dir` | where edits, player records, the clock and the TLS key are kept. Empty runs an ephemeral world |
+| `-tick-rate` | authoritative simulation ticks per second (1..255) |
+| `-view-distance` | the chunk streaming radius, in chunks (0..16) |
+| `-handshake-timeout` | how long a new connection may say nothing before it is closed |
+| `-idle-timeout` | how long an admitted session may say nothing. Must be at least the handshake timeout |
+| `-log-level` | `debug`, `info`, `warn` or `error` |
+| `-log-format` | `text` or `json` |
+
+Every one of them is validated before it is narrowed — see `validate` in `cmd/voxelheimd/main.go`
+and the reasoning above it, which is the pattern any second command copies.
+
+### What the world directory holds, and the one thing that surprises people
+
+It is the default (`world`, resolved against the working directory, so `cd server && go run …`
+writes `server/world/` — git-ignored) and it holds four things: the chunk deltas players made, the
+player records, the clock, and **the server's TLS key**. The terrain itself is not in there; it is
+a function of `-seed`.
+
+That last item is why `-world-dir ""` costs more than the edits it discards. A server with
+nowhere to keep a key mints a new certificate on every start, and the client pins a fingerprint
+per address and refuses any other one — so an ephemeral server is a client that stops connecting
+after the first restart, which reads as a networking bug and is not one. The server says so in a
+startup warning, and the client's refusal names the pin file and both fingerprints. Whoever runs
+the server can read the real one out of the startup line:
+
+```
+level=INFO msg="listening with an encrypted session" certificate_sha256=…
+```
+
+Writing that value into the pin file the client names is the supported way through it; see
+"Running it" in `client/AGENTS.md`. In development, keeping the default world directory is the
+way it never comes up.
+
 ## Gates
 
 Run from `server/`, and all five before opening a PR:

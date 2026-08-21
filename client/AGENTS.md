@@ -970,7 +970,7 @@ for any contract diff — so regenerate here and in the server in the same PR.
 ## Running it
 
 ```bash
-cargo run                                   # 127.0.0.1:7777
+cargo run --release                          # 127.0.0.1:7777
 cargo run -- 192.0.2.5:7000                  # explicit address
 cargo run -- --server norse.example         # bare host gets port 7777
 VOXELHEIM_SERVER=192.0.2.5:7000 cargo run    # lower precedence than the CLI
@@ -978,6 +978,52 @@ cargo run -- --name thora                   # display name; VOXELHEIM_NAME is th
 cargo run -- --identity /tmp/second         # a second character on one server
 cargo run -- --help
 ```
+
+A server has to be listening for any of that to reach one — `go run ./cmd/voxelheimd` from
+`server/`, whose own "Running it" section has the flags.
+
+**`--release` is in the first line for a reason.** A debug build of a Bevy renderer is slow
+enough that the frame rate reads as a bug in the mesher, and the gates below are the only place
+a debug build is the right one.
+
+### Watching what it is doing
+
+Two channels, and neither needs a flag to exist.
+
+`RUST_LOG` selects what reaches the terminal — Bevy's `LogPlugin` reads it, so
+`RUST_LOG=info,voxelheim_client=debug` quiets the engine and keeps this crate. The session
+thread's own diagnostics arrive here: the welcome it accepted, the clock the server declared,
+and any refusal, which is logged rather than panicked over for the reason the status line exists.
+
+The three debug lines in the corner of the window are the other, and they are always drawn:
+the connection (and the refusal text, if the server sent one), the streamed world — chunks held,
+quads merged, last mesh duration — and where the **server** says the player is, which is the one
+number that says movement is working end to end. All three are pure functions of resources, which
+is why `ui/status.rs` can test what a player would read without opening a window.
+
+### When it refuses to connect
+
+The refusal is the certificate pin doing its job, and it names the file it is talking about. See
+"The session is encrypted, and that is not a setting" above for why there is no bypass flag; the
+operational half is short:
+
+- **A fingerprint that changed** — the server was pointed at a new world directory, or is running
+  `-world-dir ""` and mints a new certificate every start. Development hits the second one most.
+- **An identity with no pin** — a character made against a server from before pinning. The stored
+  token is not presented to an unverified certificate, so this is refused on the *first*
+  connection rather than a later one.
+
+Whoever runs the server reads the fingerprint out of its startup line
+(`certificate_sha256=…`) and writes that one line into the pin file the refusal names:
+
+```bash
+printf '%s\n' "<certificate_sha256 from the server log>" \
+  > "${XDG_DATA_HOME:-$HOME/.local/share}/voxelheim/identity/127.0.0.1_7777.pin"
+```
+
+Deleting the *identity* file instead joins as a new character, which pins safely because a new
+character has nothing to present. Deleting the *pin* re-pins whatever answers next, so it is
+right only when you already know why the fingerprint changed.
 
 ### Who the client comes back as
 
