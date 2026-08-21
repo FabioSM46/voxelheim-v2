@@ -39,13 +39,18 @@ use std::process::ExitCode;
 
 use bevy::prelude::*;
 
-use crate::net::{AccountService, DEFAULT_PLAYER_NAME, NetPlugin, SignInPlugin};
+use crate::net::{AccountService, DEFAULT_PLAYER_NAME, NetPlugin, ServerListPlugin, SignInPlugin};
 use crate::player::PlayerPlugin;
 use crate::ui::UiPlugin;
 use crate::world::WorldPlugin;
 
-/// Where the client connects when nothing says otherwise — the address
-/// `voxelheimd` listens on by default (`server/cmd/voxelheimd/main.go`).
+/// Where the client connects when neither an address nor an account service says
+/// otherwise — the address `voxelheimd` listens on by default
+/// (`server/cmd/voxelheimd/main.go`).
+///
+/// **It is the development default, not a player's.** A client with an account service
+/// takes every address out of the server list; this is what a client with no list at
+/// all falls back to, which is a developer with a `voxelheimd` running beside them.
 const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:7777";
 
 /// Appended when the address names a host with no port.
@@ -76,38 +81,55 @@ const USAGE: &str = "\
 Voxelheim client
 
 Usage:
+  voxelheim-client --account-service URL
   voxelheim-client [ADDRESS]
   voxelheim-client --server ADDRESS
   voxelheim-client --help
 
 Arguments:
-  ADDRESS         host:port of the server. A bare host gets port 7777.
+  ADDRESS         host:port of a server to develop against. A bare host gets
+                  port 7777.
 
 Options:
-  -s, --server    the same address, named explicitly
+  -a, --account-service
+                  URL of the account service to sign in against. The servers you
+                  can join come from its list; you never type an address.
+  -s, --server    the same address as ADDRESS, named explicitly
   -n, --name      the display name announced to the server
   -i, --identity  file holding this server's identity token
-  -a, --account-service
-                  URL of the account service to sign in against
   -h, --help      print this and exit
 
 Environment:
+  VOXELHEIM_ACCOUNT_SERVICE  used when --account-service is not given
   VOXELHEIM_SERVER           used when no address is given on the command line
   VOXELHEIM_NAME             used when --name is not given
   VOXELHEIM_IDENTITY         used when --identity is not given
-  VOXELHEIM_ACCOUNT_SERVICE  used when --account-service is not given
 
-The address defaults to 127.0.0.1:7777 and the name to voxelheim.
+There are two ways to reach a server and you give exactly one of them.
 
-Signing in is opt-in: with no --account-service there is no login screen. Given
-one, the game asks you to sign in with Discord once and keeps the ticket it
-answers with in $XDG_DATA_HOME/voxelheim/account/<service>. Deleting that file is
-how you sign out.
+  With --account-service, you sign in with Discord once and then pick a server
+  out of the list it answers with. The list carries each server's address and
+  the fingerprint of the certificate it presents, so the address is followed if
+  it moves and a server presenting anything else is refused before this client
+  sends a byte. There is no way past that refusal, by design: ask whoever runs
+  the server to register the fingerprint it logs at startup.
 
-Identity is remembered per server: without --identity the token this server
-issues is kept in $XDG_DATA_HOME/voxelheim/identity/<address>, falling back to
-$HOME/.local/share. Coming back with it resumes the same character; a token is
-only ever meaningful to the server that issued it.";
+  With an ADDRESS or --server, you connect straight to an address that is in no
+  list. This is the development path. Nothing states which certificate to expect
+  there, so the session is encrypted but unverified -- and for that reason it
+  presents no stored identity and keeps none, which means a new character every
+  time. Give an account service instead to play.
+
+The name defaults to voxelheim; with neither an account service nor an address,
+the address defaults to 127.0.0.1:7777.
+
+The sign-in is kept in $XDG_DATA_HOME/voxelheim/account/<service>, falling back
+to $HOME/.local/share. Deleting that file is how you sign out.
+
+Identity is remembered per server: without --identity the token a server issues
+is kept in $XDG_DATA_HOME/voxelheim/identity/<address>. Coming back with it
+resumes the same character; a token is only ever meaningful to the server that
+issued it, and is only ever presented to one whose certificate the list named.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -146,17 +168,28 @@ fn run(start: Start) -> AppExit {
         account_service,
     } = start;
 
+    // The address is not in the title on the list path, and cannot be: nothing has
+    // been chosen when the window opens. It is on the development path, where it was
+    // typed on the command line and is the one thing distinguishing two windows.
+    let title = match &server_addr {
+        Some(addr) => format!("Voxelheim - {addr}"),
+        None => "Voxelheim".to_owned(),
+    };
+
+    // Exactly one of the two, which `parse_launch` has already refused to let be both.
+    // `developing_against` dials at build; `listening` waits for a row to be clicked.
+    let net = match server_addr {
+        Some(addr) => NetPlugin::developing_against(addr),
+        None => NetPlugin::listening(),
+    };
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("Voxelheim - {server_addr}"),
-            ..default()
-        }),
+        primary_window: Some(Window { title, ..default() }),
         ..default()
     }))
     .add_plugins(
-        NetPlugin::new(server_addr)
-            .with_player_name(player_name)
+        net.with_player_name(player_name)
             .with_identity_path(identity_path),
     )
     .add_plugins(WorldPlugin)
@@ -166,10 +199,13 @@ fn run(start: Start) -> AppExit {
     .add_plugins(UiPlugin);
 
     // Built only when there is a service to sign in against, which is what makes the
-    // login screen absent rather than broken on a client that has none. See
-    // ACCOUNT_SERVICE_ENV.
+    // login screen and the server list absent rather than broken on a client that has
+    // none. See ACCOUNT_SERVICE_ENV. The two go together: the list is read with the
+    // ticket a sign-in caches, and `ServerListPlugin` reads the settings this one
+    // inserts rather than keeping a second idea of where this client signs in.
     if let Some(service) = account_service {
-        app.add_plugins(SignInPlugin::new(service));
+        app.add_plugins(SignInPlugin::new(service))
+            .add_plugins(ServerListPlugin);
     }
 
     app.run()
@@ -185,10 +221,17 @@ enum Launch {
 }
 
 /// Everything the app needs from the command line and the environment.
+///
+/// **Exactly one of `server_addr` and `account_service` is `Some`**, which
+/// [`parse_launch`] enforces rather than leaving to the reader: they are two answers to
+/// the same question — where does a server come from — and a client that had both would
+/// have to pick one silently. Which it picked would decide whether a certificate is
+/// verified, so it is a usage error instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Start {
-    /// Already carries a port.
-    server_addr: String,
+    /// The development address, already carrying a port. `Some` exactly when no
+    /// account service was given.
+    server_addr: Option<String>,
     /// A display name. Never an identity: the token is that, and the server mints
     /// it.
     player_name: String,
@@ -196,9 +239,9 @@ struct Start {
     /// the choice to `net/session.rs`, which is the only code that knows where a
     /// token belongs.
     identity_path: Option<PathBuf>,
-    /// `--account-service`, already parsed. `None` is a client with no sign-in at
-    /// all, which is the default and is not a degraded mode: it is what this
-    /// client was before #106.
+    /// `--account-service`, already parsed. `Some` is the path a player takes: the
+    /// login screen, then the server list, then a row that carries both the address
+    /// and the certificate to expect at it.
     account_service: Option<AccountService>,
 }
 
@@ -292,9 +335,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
     // An exported-but-empty variable is an unset one. Treating it as a value would
     // turn `VOXELHEIM_SERVER=` into a connection failure with no clue, and
     // `VOXELHEIM_NAME=` into a nameless player.
-    let addr = server_addr
-        .or_else(|| exported(env.server_addr.as_deref()))
-        .unwrap_or_else(|| DEFAULT_SERVER_ADDR.to_owned());
+    let given_addr = server_addr.or_else(|| exported(env.server_addr.as_deref()));
     let name = player_name
         .or_else(|| exported(env.player_name.as_deref()))
         .unwrap_or_else(|| DEFAULT_PLAYER_NAME.to_owned());
@@ -314,8 +355,30 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
         .map(|raw| AccountService::parse(raw.trim()))
         .transpose()?;
 
+    // **Two ways to reach a server, and exactly one of them per launch.** They are not
+    // a setting and an override: an account service means every address comes from its
+    // list, carrying the certificate to expect at it, while an address given here is in
+    // no list and can be verified against nothing. A client holding both would have to
+    // choose silently, and the choice decides whether the session is verified — so it
+    // is refused, the way an option given twice is, and for the same reason.
+    let addr = match (given_addr, &account) {
+        (Some(addr), Some(_)) => {
+            return Err(format!(
+                "both an account service and a server address were given ({}). The server \
+                 list is where addresses come from; --server names one that is in no list \
+                 and is the development path. Give one of the two.",
+                addr.trim()
+            ));
+        }
+        (Some(addr), None) => Some(with_default_port(addr.trim())),
+        // No service and no address: the development default, which is a `voxelheimd`
+        // running beside this one.
+        (None, None) => Some(DEFAULT_SERVER_ADDR.to_owned()),
+        (None, Some(_)) => None,
+    };
+
     Ok(Launch::Connect(Start {
-        server_addr: with_default_port(addr.trim()),
+        server_addr: addr,
         player_name: name.trim().to_owned(),
         identity_path: identity,
         account_service: account,
@@ -368,7 +431,11 @@ mod tests {
             server_addr: env.map(str::to_owned),
             ..LaunchEnv::default()
         };
-        start(raw, &env).map(|start| start.server_addr)
+        start(raw, &env).map(|start| {
+            start
+                .server_addr
+                .expect("no account service was given, so an address was resolved")
+        })
     }
 
     fn name(raw: &[&str], env: Option<&str>) -> Result<String, String> {
@@ -649,7 +716,7 @@ mod tests {
         assert_eq!(
             start,
             Start {
-                server_addr: "norse.example:7777".to_owned(),
+                server_addr: Some("norse.example:7777".to_owned()),
                 player_name: "thora".to_owned(),
                 identity_path: Some(PathBuf::from("/tmp/one")),
                 account_service: None,
@@ -681,12 +748,60 @@ mod tests {
             "VOXELHEIM_IDENTITY",
             "--account-service",
             "VOXELHEIM_ACCOUNT_SERVICE",
+            // The development path is documented as one, which is the acceptance
+            // criterion this line stands for: a player must not read `--server` as
+            // the ordinary way in.
+            "development path",
         ] {
             assert!(
                 USAGE.contains(mentioned),
                 "the usage text omits {mentioned}"
             );
         }
+    }
+
+    /// **The two ways to reach a server are two, not one with an override.** Given
+    /// both, a client would have to choose silently — and the choice decides whether
+    /// the certificate is verified against anything, which is not a decision to make
+    /// without saying so.
+    #[test]
+    fn an_account_service_and_an_address_together_are_a_usage_error() {
+        for both in [
+            vec![
+                "--account-service",
+                "http://127.0.0.1:7780",
+                "--server",
+                "server.example:7777",
+            ],
+            vec!["server.example:7777", "-a", "http://127.0.0.1:7780"],
+        ] {
+            let err = start(&both, &nothing()).expect_err("both were accepted");
+            assert!(err.contains("account service"), "{err}");
+            assert!(err.contains("--server"), "{err}");
+        }
+
+        // An exported address is the same conflict from the other direction: it is a
+        // value somebody set, and the refusal names it rather than quietly winning or
+        // quietly losing.
+        let err = start(
+            &["--account-service", "http://127.0.0.1:7780"],
+            &LaunchEnv {
+                server_addr: Some("server.example:7777".to_owned()),
+                ..LaunchEnv::default()
+            },
+        )
+        .expect_err("an exported address was accepted beside a service");
+        assert!(err.contains("server.example:7777"), "{err}");
+    }
+
+    /// With a service, the address is the list's to decide and this client resolves
+    /// none — not even the default, which would be an address nobody asked for.
+    #[test]
+    fn an_account_service_leaves_the_address_to_the_list() {
+        let launched = start(&["--account-service", "http://127.0.0.1:7780"], &nothing())
+            .expect("a service alone is a complete command line");
+        assert_eq!(launched.server_addr, None);
+        assert!(launched.account_service.is_some());
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod icon;
 mod inventory;
 mod login;
 mod menu;
+mod servers;
 mod status;
 
 use bevy::prelude::*;
@@ -16,7 +17,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use icon::StackIcon;
 
 use crate::net::{
-    ConnectionState, DisconnectRequest, InventoryStack, Session, SignInRequest, SignInState,
+    ConnectRequest, ConnectionState, DisconnectRequest, InventoryStack, RefreshServerList,
+    ServerList, Session, SignInRequest, SignInState,
 };
 use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals,
@@ -81,6 +83,11 @@ impl Plugin for UiPlugin {
             // and this is what keeps the login screen headlessly testable on its
             // own — the same reason the four above are here.
             .add_message::<SignInRequest>()
+            // The same reasoning for the server list's two: `net::NetPlugin` registers
+            // `ConnectRequest` and `net::ServerListPlugin` registers
+            // `RefreshServerList`, and neither is built in a headless UI test.
+            .add_message::<ConnectRequest>()
+            .add_message::<RefreshServerList>()
             .add_message::<AppExit>()
             .add_plugins((
                 crosshair::CrosshairPlugin,
@@ -89,6 +96,7 @@ impl Plugin for UiPlugin {
                 inventory::InventoryUiPlugin,
                 login::LoginPlugin,
                 menu::MenuPlugin,
+                servers::ServerListUiPlugin,
                 status::StatusUiPlugin,
             ));
 
@@ -133,23 +141,30 @@ fn choose_input_mode(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     session: Option<Res<Session>>,
     sign_in: Option<Res<SignInState>>,
+    list: Option<Res<ServerList>>,
+    state: Option<Res<ConnectionState>>,
     vitals: Res<SelfVitals>,
     mut mode: ResMut<InputMode>,
 ) {
-    // **The login screen owns the input while it is up.** The game is running
-    // behind it, so a click meant for the one control would otherwise also reach
-    // the world as a mining or attack intent. `Menu` is the mode that already
-    // means "this frame's input is not for the world", so this reuses the gate
-    // rather than adding a second one — and `Escape` cannot leave it, because a
-    // login screen is deliberately not dismissible.
-    if login::login_is_up(sign_in.as_deref()) {
+    // **The login screen and the server list own the input while either is up.** The
+    // game is running behind them, so a click meant for a control would otherwise also
+    // reach the world as a mining or attack intent. `Menu` is the mode that already
+    // means "this frame's input is not for the world", so this reuses the gate rather
+    // than adding a second one — and `Escape` cannot leave it, because neither screen
+    // is dismissible: the login screen has no "not now", and the server list is where
+    // a client with no session belongs.
+    let overlay_is_up = login::login_is_up(sign_in.as_deref())
+        || servers::server_list_is_up(list.as_deref(), state.as_deref(), sign_in.as_deref());
+    if overlay_is_up {
         set_mode(&mut mode, InputMode::Menu);
         return;
     }
-    // The frame it comes down, the player is playing rather than paused: they
+    // The frame either comes down, the player is playing rather than paused: they
     // never opened the pause menu, and leaving them in it would be this client
     // inventing a press they did not make.
-    if sign_in.is_some_and(|sign_in| sign_in.is_changed()) {
+    if sign_in.is_some_and(|sign_in| sign_in.is_changed())
+        || state.is_some_and(|state| state.is_changed())
+    {
         set_mode(&mut mode, InputMode::Playing);
     }
 
@@ -194,13 +209,18 @@ fn sync_cursor(
     mode: Res<InputMode>,
     state: Option<Res<ConnectionState>>,
     sign_in: Option<Res<SignInState>>,
+    list: Option<Res<ServerList>>,
     mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    // The pointer belongs to whatever is on top, and while the login screen is up
-    // that is a button. A locked, invisible cursor over a screen whose whole
-    // content is one control is a control nobody can press.
+    // The pointer belongs to whatever is on top, and while the login screen or the
+    // server list is up that is a button. A locked, invisible cursor over a screen
+    // whose whole content is controls is a screen nobody can press. The list is
+    // redundant with the `Connected` test below — the two are never up together — and
+    // it is named anyway, because "the pointer is released for every overlay" should
+    // be readable here rather than inferred from a state machine somewhere else.
     let playing = *mode == InputMode::Playing
         && !login::login_is_up(sign_in.as_deref())
+        && !servers::server_list_is_up(list.as_deref(), state.as_deref(), sign_in.as_deref())
         && state
             .as_deref()
             .is_some_and(|state| *state == ConnectionState::Connected);

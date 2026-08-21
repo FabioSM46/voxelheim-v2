@@ -82,12 +82,10 @@ impl CachedTicket {
 
     /// The ticket itself.
     ///
-    /// Nothing in this issue reads it — the screen that presents a ticket is the
-    /// server list, and that is #107 — so this exists for the writer and for the
-    /// tests that assert a round trip. It is `pub(super)` and no further, which is
+    /// One reader: [`super::servers::fetch`], which presents it to the account
+    /// service as a bearer credential. It is `pub(super)` and no further, which is
     /// the same fence `PlayerToken` sits behind: a name nothing outside `net` can
     /// spell is a name nothing outside `net` can start deciding from.
-    #[allow(dead_code)]
     pub(super) const fn ticket(&self) -> SessionTicket {
         self.ticket
     }
@@ -227,6 +225,42 @@ pub(super) fn decode_ticket(encoded: &str) -> Result<SessionTicket, String> {
     }
 
     Ok(SessionTicket::from_bytes(out))
+}
+
+/// The base64url alphabet, in the order its six-bit values run.
+const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// [`encode_ticket`] reads three bytes at a time and emits no padding, which is
+/// correct exactly while a ticket is a whole number of groups. Checked by the
+/// compiler rather than left to a comment, because the failure a shorter ticket
+/// would cause is an index out of bounds inside a credential path.
+const _: () = assert!(
+    SESSION_TICKET_LEN.is_multiple_of(3),
+    "a ticket must be a whole number of base64 groups"
+);
+
+/// Writes a ticket in the encoding the account service reads it back in: unpadded
+/// base64url, [`ENCODED_TICKET_LEN`] characters.
+///
+/// The inverse of [`decode_ticket`], and it exists because a cached ticket has to be
+/// presented again — `Authorization: Bearer <ticket>` is how the server list is read.
+/// [`SESSION_TICKET_LEN`] is a multiple of three, so every group is a full four
+/// characters and there is no padding case to get wrong.
+///
+/// **The result is a bearer credential.** It goes into one header and nowhere else:
+/// never a log line, never a URL, never an error.
+pub(super) fn encode_ticket(ticket: &SessionTicket) -> String {
+    let bytes = ticket.as_bytes();
+    let mut out = String::with_capacity(ENCODED_TICKET_LEN);
+    for group in bytes.chunks(3) {
+        let accumulator =
+            (u32::from(group[0]) << 16) | (u32::from(group[1]) << 8) | u32::from(group[2]);
+        for shift in [18, 12, 6, 0] {
+            let sextet = usize::try_from((accumulator >> shift) & 0x3F).unwrap_or(0);
+            out.push(char::from(BASE64URL[sextet]));
+        }
+    }
+    out
 }
 
 /// The six bits one base64url character stands for.

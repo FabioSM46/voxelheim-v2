@@ -213,7 +213,7 @@ const NO_PLAYER_YET: &str = "player -";
 
 fn refresh_status_text(
     state: Res<ConnectionState>,
-    address: Res<ServerAddress>,
+    address: Option<Res<ServerAddress>>,
     session: Option<Res<Session>>,
     identity: Option<Res<Identity>>,
     mut nodes: Query<&mut Text, With<StatusText>>,
@@ -222,7 +222,7 @@ fn refresh_status_text(
     // changes a handful of times in a session, and `Text` is a `String` that
     // would otherwise be reallocated every frame.
     let stale = state.is_changed()
-        || address.is_changed()
+        || address.as_ref().is_some_and(|address| address.is_changed())
         || session.as_ref().is_some_and(|session| session.is_changed())
         || identity
             .as_ref()
@@ -233,7 +233,7 @@ fn refresh_status_text(
 
     let line = describe(
         &state,
-        &address,
+        address.as_deref().map_or("", |address| address.0.as_str()),
         session.as_deref(),
         identity.as_deref().copied(),
     );
@@ -401,14 +401,17 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
 /// ASCII only, deliberately: the embedded fallback font is the whole font stack
 /// here, and a glyph it lacks would render as nothing — which on a status line is
 /// the one failure mode that hides the message it exists to show.
+/// `addr` is empty exactly while [`ConnectionState::Idle`] is the state: no server has
+/// been chosen, so there is no address to name — which is the one arm below that does
+/// not use it.
 fn describe(
     state: &ConnectionState,
-    address: &ServerAddress,
+    addr: &str,
     session: Option<&Session>,
     identity: Option<Identity>,
 ) -> String {
-    let addr = &address.0;
     match state {
+        ConnectionState::Idle => "No server chosen".to_owned(),
         ConnectionState::Connecting => format!("Connecting to {addr}..."),
         ConnectionState::Handshaking => format!("Handshaking with {addr}..."),
         ConnectionState::Connected => match session {
@@ -570,8 +573,11 @@ mod tests {
         }
     }
 
-    fn address() -> ServerAddress {
-        ServerAddress("127.0.0.1:7777".to_owned())
+    /// The address a session was opened against. A `&str` rather than the resource,
+    /// because `describe` takes the string: it is absent before a server is chosen, and
+    /// an `Option<Res<_>>` collapses to `""` at the one call site that reads it.
+    fn address() -> &'static str {
+        "127.0.0.1:7777"
     }
 
     fn session() -> Session {
@@ -596,7 +602,7 @@ mod tests {
             ConnectionState::Handshaking,
             ConnectionState::Disconnected,
         ] {
-            let line = describe(&state, &address(), None, None);
+            let line = describe(&state, address(), None, None);
             assert!(line.contains("127.0.0.1:7777"), "{state:?} -> {line}");
         }
     }
@@ -605,7 +611,7 @@ mod tests {
     fn a_connected_line_shows_the_servers_answers() {
         let line = describe(
             &ConnectionState::Connected,
-            &address(),
+            address(),
             Some(&session()),
             Some(Identity::New),
         );
@@ -624,7 +630,7 @@ mod tests {
             &ConnectionState::Rejected {
                 reason: reason.to_owned(),
             },
-            &address(),
+            address(),
             None,
             None,
         );
@@ -654,7 +660,7 @@ mod tests {
         // act on: close the other session, or launch with a different --identity. The
         // code itself is not lost — net/mod.rs logs the reason verbatim — but the
         // screen gets the sentence.
-        let line = describe(&refused("ALREADY_CONNECTED", ""), &address(), None, None);
+        let line = describe(&refused("ALREADY_CONNECTED", ""), address(), None, None);
         assert_eq!(
             line,
             "Cannot play: this identity is already connected to 127.0.0.1:7777"
@@ -668,7 +674,7 @@ mod tests {
         // server ever names *which* session holds the identity, a player reads it.
         let line = describe(
             &refused("ALREADY_CONNECTED", "playing from 192.0.2.5 since 19:04"),
-            &address(),
+            address(),
             None,
             None,
         );
@@ -715,7 +721,7 @@ mod tests {
                 &ConnectionState::Rejected {
                     reason: reason.to_owned(),
                 },
-                &address(),
+                address(),
                 None,
                 None,
             );
@@ -731,7 +737,7 @@ mod tests {
         // deserves to know which of the two happened.
         let returning = describe(
             &ConnectionState::Connected,
-            &address(),
+            address(),
             Some(&session()),
             Some(Identity::Returning),
         );
@@ -740,7 +746,7 @@ mod tests {
 
         let new = describe(
             &ConnectionState::Connected,
-            &address(),
+            address(),
             Some(&session()),
             Some(Identity::New),
         );
@@ -760,7 +766,7 @@ mod tests {
         for identity in [None, Some(Identity::Returning), Some(Identity::New)] {
             let line = describe(
                 &ConnectionState::Connected,
-                &address(),
+                address(),
                 Some(&session()),
                 identity,
             );
@@ -769,31 +775,46 @@ mod tests {
         }
     }
 
+    /// Before a server is chosen there is no address, and the line says so rather
+    /// than claiming a connection to nowhere. It is the one arm that never reads the
+    /// address, which is what lets the resource be absent until a session starts.
+    #[test]
+    fn no_server_chosen_names_no_address() {
+        let line = describe(&ConnectionState::Idle, "", None, None);
+        assert_eq!(line, "No server chosen");
+        // And it is the same line whatever an address would have been, because it does
+        // not read one.
+        assert_eq!(
+            describe(&ConnectionState::Idle, address(), None, None),
+            line
+        );
+    }
+
     #[test]
     fn every_line_is_ascii() {
         // The embedded fallback font is the entire font stack; a character it
         // lacks would silently blank the message.
         let lines = [
-            describe(&ConnectionState::Connecting, &address(), None, None),
-            describe(&ConnectionState::Handshaking, &address(), None, None),
+            describe(&ConnectionState::Connecting, address(), None, None),
+            describe(&ConnectionState::Handshaking, address(), None, None),
             describe(
                 &ConnectionState::Connected,
-                &address(),
+                address(),
                 Some(&session()),
                 Some(Identity::New),
             ),
             describe(
                 &ConnectionState::Connected,
-                &address(),
+                address(),
                 Some(&session()),
                 Some(Identity::Returning),
             ),
-            describe(&ConnectionState::Connected, &address(), None, None),
+            describe(&ConnectionState::Connected, address(), None, None),
             describe(
                 &ConnectionState::Rejected {
                     reason: "SERVER_FULL".to_owned(),
                 },
-                &address(),
+                address(),
                 None,
                 None,
             ),
@@ -801,11 +822,12 @@ mod tests {
                 &ConnectionState::Rejected {
                     reason: "ALREADY_CONNECTED".to_owned(),
                 },
-                &address(),
+                address(),
                 None,
                 None,
             ),
-            describe(&ConnectionState::Disconnected, &address(), None, None),
+            describe(&ConnectionState::Disconnected, address(), None, None),
+            describe(&ConnectionState::Idle, "", None, None),
             describe_world(&MeshStats::default()),
             describe_world(&meshing_stats()),
             describe_player(&PlayerStats::default()),
@@ -1058,7 +1080,7 @@ mod tests {
     fn headless_ui(state: ConnectionState) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
-            .insert_resource(address())
+            .insert_resource(ServerAddress(address().to_owned()))
             .insert_resource(state)
             .add_plugins(StatusUiPlugin);
         app

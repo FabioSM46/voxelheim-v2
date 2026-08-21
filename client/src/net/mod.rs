@@ -40,6 +40,7 @@ mod frame;
 mod handshake;
 mod http;
 mod json;
+mod servers;
 mod session;
 mod signin;
 mod tickets;
@@ -72,6 +73,8 @@ pub use codec::{
     encode_place_structure_request, encode_player_input, encode_remove_structure_request,
     encode_repair_request,
 };
+pub use servers::ListedServer;
+use servers::ServerListEvent;
 use session::{NetCommand, SessionEvent};
 pub use signin::AccountService;
 use signin::{SignInCommand, SignInEvent};
@@ -96,7 +99,7 @@ pub const DEFAULT_PLAYER_NAME: &str = "voxelheim";
 /// Where the connection has got to. The status text is a rendering of this and
 /// nothing else.
 ///
-/// Two of the five variants are terminal-with-a-reason and terminal-without-one,
+/// Two of the six variants are terminal-with-a-reason and terminal-without-one,
 /// and the difference is worth stating: [`Self::Rejected`] means *there is no
 /// session and here is why* — a `ServerReject`, an unreachable address, or a peer
 /// that turned out not to speak this protocol. [`Self::Disconnected`] means a
@@ -104,6 +107,15 @@ pub const DEFAULT_PLAYER_NAME: &str = "voxelheim";
 /// detail belongs in the log.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
+    /// No server has been chosen, so nothing has been dialled. The state a client
+    /// with an account service starts in and the one the server list is up over.
+    ///
+    /// It exists because the address stopped being a launch setting: a client that
+    /// reads its servers from a list has no socket to open until somebody clicks one,
+    /// and calling that `Connecting` would have the status line claim an attempt that
+    /// nothing had made. There is no [`ServerAddress`] while this is the state, for the
+    /// same reason.
+    Idle,
     /// Opening the socket.
     Connecting,
     /// The socket is up and `ClientHello` is on the wire.
@@ -149,8 +161,14 @@ pub enum Identity {
     New,
 }
 
-/// The address the client was told to connect to. Read by the UI so the status
-/// line can name it; the net thread has its own copy.
+/// The address this client dialled. Read by the UI so the status line can name it;
+/// the net thread has its own copy.
+///
+/// **Present exactly while a session has been started**, which is why the status line
+/// takes it as an `Option`: before a server is chosen there is no address, and a
+/// resource holding an empty string would be this client inventing one. Inserted
+/// beside [`ConnectionState::Connecting`] and left in place afterwards, so
+/// "Disconnected from …" still has a name to use.
 #[derive(Resource, Debug, Clone)]
 pub struct ServerAddress(pub String);
 
@@ -374,9 +392,32 @@ impl Outbound {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DrainNetwork;
 
+/// The list screen asking to join the server it names.
+///
+/// **A name, not an address.** `ui` renders the list and asks by the registry's own
+/// name for a server; turning that into an address and a certificate to expect is the
+/// network boundary's job, and a UI that could name an address is a UI that could put
+/// one on screen or into a log. The same rule [`DisconnectRequest`] follows: `ui` may
+/// ask, only this module may open a socket.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct ConnectRequest {
+    pub name: String,
+}
+
 /// Owns the socket thread and publishes what it reports.
+///
+/// **The address is no longer a launch setting**, which is the shape change this
+/// plugin carries. A client with an account service starts at
+/// [`ConnectionState::Idle`], with no socket and no [`ServerAddress`], and connects
+/// when a [`ConnectRequest`] names a server the list carried — address and expected
+/// certificate together, from the same row, so there is no way to dial one without the
+/// other. `--server` is the other way in and it is the development path: an address
+/// that is in no list, dialled at startup, with nothing to verify it against and
+/// therefore no identity presented. See [`tls::Expectation`].
 pub struct NetPlugin {
-    server_addr: String,
+    /// What to dial when the app is built, and what to expect there. `None` waits for
+    /// the list, which is what a player's client does.
+    startup: Option<(String, tls::Expectation)>,
     player_name: String,
     identity_path: Option<PathBuf>,
     /// Which transport the session thread builds.
@@ -388,14 +429,50 @@ pub struct NetPlugin {
 }
 
 impl NetPlugin {
-    /// Connects to `server_addr` when the app is built, as [`DEFAULT_PLAYER_NAME`]
-    /// and with the identity file this client keeps for that address.
-    pub fn new(server_addr: impl Into<String>) -> Self {
+    /// Waits for a [`ConnectRequest`] naming a server out of the list.
+    ///
+    /// The shape a player's client is built in: nothing is dialled until somebody
+    /// clicks a row, and the row carries the fingerprint the session is verified
+    /// against.
+    pub fn listening() -> Self {
         Self {
-            server_addr: server_addr.into(),
+            startup: None,
             player_name: DEFAULT_PLAYER_NAME.to_owned(),
             identity_path: None,
             transport: session::Transport::Encrypted,
+        }
+    }
+
+    /// Dials `server_addr` when the app is built, with nothing to verify it against.
+    ///
+    /// **`--server`, and it is the development path.** An address given on the command
+    /// line is in no list, so nothing states which certificate to expect there: the
+    /// session is encrypted and unauthenticated, and it presents no identity and stores
+    /// none, which is what keeps "a stored identity is never presented to an unverified
+    /// server" true. Every launch on this path is a new character.
+    pub fn developing_against(server_addr: impl Into<String>) -> Self {
+        Self {
+            startup: Some((server_addr.into(), tls::Expectation::Unlisted)),
+            ..Self::listening()
+        }
+    }
+
+    /// Dials `server_addr` at build with the expectation a list row would have carried.
+    ///
+    /// **Test-only, and it is the shape [`connect_on_request`] produces** — an address
+    /// and a fingerprint out of one row — reached without a list so the tests below can
+    /// drive the whole thread-and-channel boundary against a stub server. It is what
+    /// they need, because it is the variant that reads and writes the identity file;
+    /// the fingerprint itself is never looked at, since these tests run over
+    /// [`session::Transport::Plaintext`] and a plaintext session has no certificate.
+    #[cfg(test)]
+    fn as_if_listed(server_addr: impl Into<String>) -> Self {
+        Self {
+            startup: Some((
+                server_addr.into(),
+                tls::Expectation::Listed("0".repeat(tls::FINGERPRINT_CHARS)),
+            )),
+            ..Self::listening()
         }
     }
 
@@ -429,67 +506,184 @@ impl NetPlugin {
 
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ServerAddress(self.server_addr.clone()))
-            .init_resource::<WorldInbox>()
+        // One value, published for the connect system and used here for the
+        // development path: two constructions of the same three settings would be two
+        // things to keep in step, and the one that drifted would be the one a player
+        // never exercises.
+        let settings = SessionSettings {
+            player_name: self.player_name.clone(),
+            identity_path: self.identity_path.clone(),
+            transport: self.transport,
+        };
+
+        app.init_resource::<WorldInbox>()
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<RefusalInbox>()
-            .add_message::<DisconnectRequest>();
-
-        let (event_tx, event_rx) = mpsc::channel();
-        let (command_tx, command_rx) = mpsc::channel();
-        // Bounded, unlike the other two: this is the only channel the ECS *produces* into,
-        // and a producer that cannot block has to be able to drop. See OUTBOUND_QUEUE.
-        let (outbound_tx, outbound_rx) = mpsc::sync_channel(OUTBOUND_QUEUE);
-        let addr = self.server_addr.clone();
-        let player_name = self.player_name.clone();
-        let identity_path = self.identity_path.clone();
-        let transport = self.transport;
-
-        let spawned = thread::Builder::new()
-            .name("voxelheim-net".to_owned())
-            .spawn(move || {
-                session::run(
-                    addr,
-                    player_name,
-                    identity_path,
-                    transport,
-                    event_tx,
-                    command_rx,
-                    outbound_rx,
+            .insert_resource(settings.clone())
+            .add_message::<DisconnectRequest>()
+            .add_message::<ConnectRequest>()
+            // Registered whether or not a session exists yet, which is the whole
+            // point: the connect system is what makes one. Each of the three reads
+            // the link as an `Option`, so a client with no session is a client
+            // whose systems return immediately rather than one missing them.
+            .add_systems(
+                Update,
+                (
+                    connect_on_request,
+                    drain_session_events.in_set(DrainNetwork),
+                    disconnect_on_request.after(DrainNetwork),
                 )
-            });
+                    .chain(),
+            );
 
-        match spawned {
-            // The handle is dropped, detaching the thread. Joining it would mean
-            // blocking app teardown on a socket; the command channel closing is
-            // what tells it to stop, and it wakes to notice within one read
-            // timeout.
-            Ok(_detached) => {
+        let Some((addr, expected)) = self.startup.clone() else {
+            // The list decides, and it has not been read yet. No socket, no address.
+            app.insert_resource(ConnectionState::Idle);
+            return;
+        };
+
+        // `--server`: dialled now, and with `Unlisted` because nothing named a
+        // certificate to expect at an address somebody typed.
+        match start_session(&addr, expected, &settings) {
+            Ok((link, outbound)) => {
                 app.insert_resource(ConnectionState::Connecting)
-                    .insert_resource(NetLink(Mutex::new(Channels {
-                        events: event_rx,
-                        commands: command_tx,
-                    })))
-                    .insert_resource(Outbound(Mutex::new(outbound_tx)))
-                    .add_systems(
-                        Update,
-                        (
-                            drain_session_events.in_set(DrainNetwork),
-                            disconnect_on_request.after(DrainNetwork),
-                        ),
-                    );
+                    .insert_resource(ServerAddress(addr))
+                    .insert_resource(link)
+                    .insert_resource(outbound);
             }
             // Not a panic: a client that cannot start a thread can still tell the
             // player so, and "no panic, no silent exit" has no exception for
             // failures that are nobody's fault.
             Err(err) => {
                 error!("the network thread would not start: {err}");
-                app.insert_resource(ConnectionState::Rejected {
-                    reason: format!("cannot start the network thread: {err}"),
-                });
+                app.insert_resource(ConnectionState::Rejected { reason: err })
+                    .insert_resource(ServerAddress(addr));
             }
+        }
+    }
+}
+
+/// Everything a session needs that does not come from the row that was clicked.
+///
+/// A resource because the connect system runs long after the plugin was built, and
+/// these three are the settings the launch decided rather than the list.
+#[derive(Resource, Clone)]
+struct SessionSettings {
+    player_name: String,
+    identity_path: Option<PathBuf>,
+    transport: session::Transport,
+}
+
+/// Starts the net thread and hands back the two ECS-side resources it needs.
+///
+/// One function for both callers — the development path at build time and
+/// [`connect_on_request`] at run time — so a session is started exactly one way. The
+/// handle is dropped, detaching the thread: joining it would mean blocking app teardown
+/// on a socket, and the command channel closing is what tells it to stop.
+fn start_session(
+    addr: &str,
+    expected: tls::Expectation,
+    settings: &SessionSettings,
+) -> Result<(NetLink, Outbound), String> {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (command_tx, command_rx) = mpsc::channel();
+    // Bounded, unlike the other two: this is the only channel the ECS *produces* into,
+    // and a producer that cannot block has to be able to drop. See OUTBOUND_QUEUE.
+    let (outbound_tx, outbound_rx) = mpsc::sync_channel(OUTBOUND_QUEUE);
+
+    let addr = addr.to_owned();
+    let player_name = settings.player_name.clone();
+    let identity_path = settings.identity_path.clone();
+    let transport = settings.transport;
+
+    thread::Builder::new()
+        .name("voxelheim-net".to_owned())
+        .spawn(move || {
+            session::run(
+                session::Target {
+                    addr,
+                    expected,
+                    player_name,
+                    identity_override: identity_path,
+                    transport,
+                },
+                event_tx,
+                command_rx,
+                outbound_rx,
+            )
+        })
+        .map_err(|err| format!("cannot start the network thread: {err}"))?;
+
+    Ok((
+        NetLink(Mutex::new(Channels {
+            events: event_rx,
+            commands: command_tx,
+        })),
+        Outbound(Mutex::new(outbound_tx)),
+    ))
+}
+
+/// Opens a session against the server a [`ConnectRequest`] named.
+///
+/// **The address and the fingerprint come out of the same row**, which is what makes
+/// "the certificate is verified against what the list carried" structural rather than a
+/// pair of values somebody has to keep together. A request naming a server that is not
+/// in the list this client holds is refused rather than guessed at: there is nothing to
+/// verify such a server against, and a name is not an address.
+fn connect_on_request(
+    mut requests: MessageReader<ConnectRequest>,
+    list: Option<Res<ServerList>>,
+    settings: Res<SessionSettings>,
+    mut state: ResMut<ConnectionState>,
+    mut commands: Commands,
+) {
+    // The last of the batch wins, and the whole batch is consumed: several clicks in
+    // one frame are one connection, not one replayed across later frames. The same
+    // rule `disconnect_on_request` and `start_sign_in` keep.
+    let Some(request) = requests.read().last().cloned() else {
+        return;
+    };
+
+    // Only from a standing start. A click that arrives while a session is live or
+    // being opened is a click the list screen was not showing a button for.
+    if !matches!(
+        *state,
+        ConnectionState::Idle | ConnectionState::Rejected { .. } | ConnectionState::Disconnected
+    ) {
+        return;
+    }
+
+    let chosen = match list.as_deref() {
+        Some(ServerList::Ready(servers)) => {
+            servers.iter().find(|server| server.name() == request.name)
+        }
+        _ => None,
+    };
+    let Some(chosen) = chosen else {
+        // Reachable only if the list changed under the screen between the click and
+        // this system. Reported rather than ignored: a button that does nothing is the
+        // one outcome a player cannot act on.
+        warn!("a server was chosen that is not in the list this client holds");
+        *state = ConnectionState::Rejected {
+            reason: "that server is no longer in the list. Refresh it and try again.".to_owned(),
+        };
+        return;
+    };
+
+    match start_session(chosen.address(), chosen.expectation(), &settings) {
+        Ok((link, outbound)) => {
+            // Set here rather than through `Commands`, so the state is already
+            // `Connecting` by the time the link it describes exists.
+            *state = ConnectionState::Connecting;
+            commands.insert_resource(ServerAddress(chosen.address().to_owned()));
+            commands.insert_resource(link);
+            commands.insert_resource(outbound);
+        }
+        Err(err) => {
+            error!("the network thread would not start: {err}");
+            *state = ConnectionState::Rejected { reason: err };
         }
     }
 }
@@ -543,10 +737,16 @@ struct Inboxes<'w> {
 /// schedule and must return whether the network had anything to say or not.
 fn drain_session_events(
     mut commands: Commands,
-    mut link: ResMut<NetLink>,
+    link: Option<ResMut<NetLink>>,
     mut state: ResMut<ConnectionState>,
     mut inboxes: Inboxes<'_>,
 ) {
+    // Absent until a server has been chosen, which is the ordinary state of a client
+    // sitting on the login screen or the server list. Nothing to drain, and nothing
+    // about that is a failure.
+    let Some(mut link) = link else {
+        return;
+    };
     // `get_mut` rather than `lock`: `ResMut` is already exclusive, so there is no
     // lock to take. Poisoning is recovered from rather than propagated — nothing
     // here panics while holding it, and a client that stopped reading its socket
@@ -657,10 +857,15 @@ fn drain_session_events(
                 // change-detection filter forever. `Rejected` is excluded for a
                 // second reason on top of that — it carries the reason the player
                 // is reading, and overwriting it with a bare `Disconnected` would
-                // throw that away.
+                // throw that away. `Idle` joins them, and is the one addition that
+                // is not about a session that ended: a link cannot exist while no
+                // server has been chosen, so reaching here in that state would mean
+                // reporting a disconnection from a server nobody dialled.
                 if !matches!(
                     *state,
-                    ConnectionState::Rejected { .. } | ConnectionState::Disconnected
+                    ConnectionState::Idle
+                        | ConnectionState::Rejected { .. }
+                        | ConnectionState::Disconnected
                 ) {
                     *state = ConnectionState::Disconnected;
                     // Inside the guard, so this stays idempotent along with the
@@ -683,7 +888,7 @@ fn drain_session_events(
 fn disconnect_on_request(
     mut requests: MessageReader<DisconnectRequest>,
     mut commands: Commands,
-    mut link: ResMut<NetLink>,
+    link: Option<ResMut<NetLink>>,
     mut state: ResMut<ConnectionState>,
 ) {
     // Consume the whole frame's batch. Several UI producers asking to disconnect still
@@ -691,6 +896,11 @@ fn disconnect_on_request(
     if requests.read().count() == 0 {
         return;
     }
+    // No link is no session, which is the state being asked for. The messages are
+    // still consumed above, so nothing replays into a session opened later.
+    let Some(mut link) = link else {
+        return;
+    };
 
     let channels = match link.0.get_mut() {
         Ok(channels) => channels,
@@ -718,8 +928,9 @@ fn disconnect_on_request(
 /// length of one attempt on the sign-in thread and then only in the cache, at mode
 /// `0600` — so there is no resource holding a bearer credential for a `{:?}`
 /// somewhere to find, and no name outside `net` that could start deciding from
-/// one. The screen that presents a ticket is the server list, and that is #107;
-/// it reads the cache, which is the store, exactly as the identity file is.
+/// one. The one thing that presents a ticket is the server list read, and it happens
+/// on its own thread which reads the cache — exactly as a session reads the identity
+/// file.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub enum SignInState {
     /// There is no live ticket. `reason` is a line for the player when something
@@ -971,6 +1182,170 @@ fn drain_sign_in_events(
     }
 }
 
+/// The servers this client may join, as the list screen reads them.
+///
+/// **There is no fourth variant for "empty", and that is the design.** An empty
+/// [`Self::Ready`] is a true statement — no server has registered with the account
+/// service — and it is a different thing from [`Self::Unavailable`], which is "nobody
+/// could be asked". Collapsing the two would put an empty list in front of a player
+/// whose network is down, and an empty list reads as *no servers exist*. The screen
+/// renders the second as a line and a retry, never as a list.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub enum ServerList {
+    /// A read is in flight, or is about to be started.
+    Loading,
+    /// What the account service answered, in its order.
+    Ready(Vec<ListedServer>),
+    /// The list could not be read. `reason` is the line a player reads, and the
+    /// screen offers a retry beside it.
+    Unavailable(String),
+}
+
+/// The list screen asking for the list again.
+///
+/// A message rather than a direct call, for the reason [`SignInRequest`] is one: `ui`
+/// may ask, and only the network boundary may open a socket.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefreshServerList;
+
+/// The ECS end of a running list read.
+///
+/// Present exactly while there is a thread reading, which is what makes "is one already
+/// running" a question about a resource rather than a flag somebody has to remember to
+/// clear — the same shape [`SignInLink`] has. One-way: the read is a single bounded
+/// request, so there is no command to send it, and dropping this end simply leaves a
+/// thread that finishes and finds nobody listening.
+#[derive(Resource)]
+struct ServerListLink(Mutex<Receiver<ServerListEvent>>);
+
+/// Reads the server list, and keeps it current enough to click.
+///
+/// **Built only when an account service is configured**, beside [`SignInPlugin`] and
+/// for the same reason: an account service is something an operator runs, and with none
+/// there is no list, no login screen and no behaviour change at all. It reads
+/// [`SignInSettings`], which that plugin inserts, rather than keeping a second idea of
+/// where this client signs in.
+pub struct ServerListPlugin;
+
+impl Plugin for ServerListPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(ServerList::Loading)
+            .add_message::<RefreshServerList>()
+            .add_systems(Update, (read_server_list, drain_server_list_events).chain());
+    }
+}
+
+/// Starts a read when there is a live ticket and nothing to show, or when asked.
+fn read_server_list(
+    mut requests: MessageReader<RefreshServerList>,
+    settings: Option<Res<SignInSettings>>,
+    sign_in: Option<Res<SignInState>>,
+    mut list: ResMut<ServerList>,
+    link: Option<Res<ServerListLink>>,
+    mut commands: Commands,
+) {
+    // Consume the whole frame's batch: several presses of the retry are one read.
+    let asked = requests.read().count() > 0;
+
+    // A read is already in flight. The messages are consumed above regardless, so a
+    // press during a read is absorbed rather than queued into a second one.
+    if link.is_some() {
+        return;
+    }
+    // Nothing to read the list with. The login screen is up and owns the answer.
+    // `Option` because a headless test may build this plugin on its own; in the app
+    // `SignInPlugin` is what inserts the state, and the two are added together.
+    if sign_in.as_deref() != Some(&SignInState::SignedIn) {
+        return;
+    }
+    if asked {
+        // Back to `Loading` first, so the screen stops showing the failure it is
+        // retrying past while the retry is in flight.
+        *list = ServerList::Loading;
+    } else if !matches!(*list, ServerList::Loading) {
+        return;
+    }
+
+    // Absent only in a test that built this plugin without the sign-in one. A read
+    // needs somewhere to read from, so there is nothing to do and nothing to claim.
+    let Some(settings) = settings else {
+        return;
+    };
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let service = settings.service.clone();
+    let ticket_path = settings.ticket_path.clone();
+
+    match thread::Builder::new()
+        .name("voxelheim-servers".to_owned())
+        .spawn(move || servers::run(service, ticket_path, &event_tx))
+    {
+        // Detached, as the other two threads are: the app must never wait on a socket
+        // to shut down, and dropping the ECS end of the channel is what stops it.
+        Ok(_detached) => commands.insert_resource(ServerListLink(Mutex::new(event_rx))),
+        // Not a panic, and not an empty list either: a client that cannot start a
+        // thread says so and leaves the retry live.
+        Err(err) => {
+            error!("the server list thread would not start: {err}");
+            *list = ServerList::Unavailable(format!(
+                "this client could not start reading the server list: {err}"
+            ));
+        }
+    }
+}
+
+/// Publishes whatever the list thread said, without ever waiting for it.
+fn drain_server_list_events(
+    link: Option<ResMut<ServerListLink>>,
+    mut list: ResMut<ServerList>,
+    sign_in: Option<ResMut<SignInState>>,
+    mut commands: Commands,
+) {
+    let Some(mut link) = link else {
+        return;
+    };
+    let events = match link.0.get_mut() {
+        Ok(events) => events,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    match events.try_recv() {
+        Ok(ServerListEvent::Ready(servers)) => {
+            info!("the server list holds {} servers", servers.len());
+            *list = ServerList::Ready(servers);
+        }
+        Ok(ServerListEvent::Unavailable(reason)) => {
+            warn!("the server list could not be read: {reason}");
+            *list = ServerList::Unavailable(reason);
+        }
+        // The credential, not the network. Answered by sending the player back to the
+        // login screen rather than by a retry that would fail the same way — and the
+        // list returns to `Loading`, so signing in again reads it without a press.
+        Ok(ServerListEvent::SignedOut(reason)) => {
+            if let Some(mut sign_in) = sign_in {
+                *sign_in = SignInState::SignedOut {
+                    reason: Some(reason),
+                };
+            }
+            *list = ServerList::Loading;
+        }
+        Err(TryRecvError::Empty) => return,
+        // The thread ended without saying how, which `servers::run` has no path to do:
+        // it always sends one event. Handled anyway, because a list screen stuck on
+        // "loading" for ever is the one outcome a player cannot act on.
+        Err(TryRecvError::Disconnected) => {
+            if matches!(*list, ServerList::Loading) {
+                *list = ServerList::Unavailable(
+                    "reading the server list stopped without saying why.".to_owned(),
+                );
+            }
+        }
+    }
+    // Reached on every terminal answer: one read, one thread, and the resource going
+    // away is what lets the next retry start one.
+    commands.remove_resource::<ServerListLink>();
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -1097,7 +1472,7 @@ mod tests {
     fn headless_with_identity(addr: &str, identity: &std::path::Path) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(
-            NetPlugin::new(addr)
+            NetPlugin::as_if_listed(addr)
                 .over_plaintext()
                 .with_identity_path(Some(identity.to_path_buf())),
         );
@@ -1269,6 +1644,160 @@ mod tests {
         );
     }
 
+    /// **The rule the pin file used to enforce, now enforced by the type.** A session
+    /// against a server nothing named a certificate for presents no stored identity —
+    /// not because a check refuses it, but because that variant never opens the file.
+    ///
+    /// Asserted on the wire rather than on a flag: the hello is the only place a token
+    /// could cross, and the file beside it is proof the token was there to be sent.
+    #[test]
+    fn an_unlisted_server_is_never_shown_the_identity_this_client_holds() {
+        let scratch = Scratch::new("net-unlisted");
+        let identity = scratch.join("identity");
+        std::fs::write(&identity, [0x11; PLAYER_TOKEN_LEN]).expect("a writable directory");
+
+        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+            &WelcomeWire::default(),
+        )]));
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(
+            NetPlugin::developing_against(&addr)
+                .over_plaintext()
+                .with_identity_path(Some(identity.clone())),
+        );
+        pump_until(&mut app, "Connected", |app| {
+            state(app) == ConnectionState::Connected
+        });
+
+        // And nothing is kept either, so the *next* launch cannot be a returning
+        // session holding a token no verified server ever issued.
+        assert_eq!(
+            std::fs::read(&identity).expect("the file is still there"),
+            vec![0x11; PLAYER_TOKEN_LEN],
+            "an unlisted session wrote the welcome's token over the identity file"
+        );
+
+        drop(app);
+        let sent = stub.join().expect("the stub thread must not panic");
+        let hello = sent.first().expect("the client says hello first");
+        assert_eq!(
+            presented_token(hello),
+            None,
+            "a stored identity reached a server nothing stated a certificate for"
+        );
+    }
+
+    /// The control for the test above, and it is what makes it mean anything: the very
+    /// same file, the same stub and the same token *is* presented when the expectation
+    /// came from a list. Without this, "no token on the wire" could be a client that
+    /// never reads an identity file at all.
+    #[test]
+    fn a_listed_server_is_shown_the_identity_the_unlisted_one_was_not() {
+        let scratch = Scratch::new("net-listed-control");
+        let identity = scratch.join("identity");
+        std::fs::write(&identity, [0x11; PLAYER_TOKEN_LEN]).expect("a writable directory");
+
+        let (addr, stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+            &WelcomeWire::default(),
+        )]));
+
+        let mut app = headless_with_identity(&addr, &identity);
+        pump_until(&mut app, "Connected", |app| {
+            state(app) == ConnectionState::Connected
+        });
+
+        drop(app);
+        let sent = stub.join().expect("the stub thread must not panic");
+        let hello = sent.first().expect("the client says hello first");
+        assert_eq!(
+            presented_token(hello),
+            Some(vec![0x11; PLAYER_TOKEN_LEN]),
+            "a server the list named was not shown the identity this client holds"
+        );
+    }
+
+    /// A client that takes its servers from a list opens nothing until a row is
+    /// clicked. There is no address to name and no socket to have failed.
+    #[test]
+    fn a_client_waiting_for_the_list_dials_nothing() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(NetPlugin::listening().over_plaintext());
+        app.update();
+
+        let world = app.world();
+        assert_eq!(*world.resource::<ConnectionState>(), ConnectionState::Idle);
+        assert!(
+            !world.contains_resource::<NetLink>(),
+            "a client with no chosen server started a network thread"
+        );
+        assert!(
+            !world.contains_resource::<ServerAddress>(),
+            "a client with no chosen server named an address"
+        );
+    }
+
+    /// **Clicking a row is what opens a session, and the row is what it is opened
+    /// against.** The address the session dials is the row's — the half of "the address
+    /// comes from the list on every launch" that this module owns.
+    #[test]
+    fn a_connect_request_dials_the_server_the_row_named() {
+        let (addr, _stub) = spawn_stub(Reply::Frames(vec![encode_server_welcome(
+            &WelcomeWire::default(),
+        )]));
+
+        let scratch = Scratch::new("net-clicked");
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(
+                NetPlugin::listening()
+                    .over_plaintext()
+                    .with_identity_path(Some(scratch.join("identity"))),
+            )
+            .insert_resource(ServerList::Ready(vec![ListedServer::for_a_test(
+                "midgard", &addr, true,
+            )]));
+        app.update();
+
+        app.world_mut().write_message(ConnectRequest {
+            name: "midgard".to_owned(),
+        });
+        pump_until(&mut app, "Connected", |app| {
+            state(app) == ConnectionState::Connected
+        });
+
+        assert_eq!(app.world().resource::<ServerAddress>().0, addr);
+    }
+
+    /// A name that is not in the list this client holds is refused rather than guessed
+    /// at. There is nothing to verify such a server against, and a name is not an
+    /// address.
+    #[test]
+    fn a_connect_request_naming_nothing_in_the_list_opens_no_socket() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(NetPlugin::listening().over_plaintext())
+            .insert_resource(ServerList::Ready(Vec::new()));
+        app.update();
+
+        app.world_mut().write_message(ConnectRequest {
+            name: "somewhere-else".to_owned(),
+        });
+        app.update();
+        app.update();
+
+        assert!(
+            matches!(state(&app), ConnectionState::Rejected { .. }),
+            "a server nobody listed was dialled: {:?}",
+            state(&app)
+        );
+        assert!(
+            !app.world().contains_resource::<NetLink>(),
+            "a network thread was started for a server that is in no list"
+        );
+    }
+
     #[test]
     fn a_server_that_answers_with_a_different_token_makes_a_new_character() {
         // What happens when a token is presented to a server that never issued it —
@@ -1363,7 +1892,7 @@ mod tests {
         let scratch = Scratch::new("net-named");
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(
-            NetPlugin::new(&addr)
+            NetPlugin::as_if_listed(&addr)
                 .over_plaintext()
                 .with_player_name("thora")
                 .with_identity_path(Some(scratch.join("identity"))),
@@ -1705,7 +2234,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
             .add_plugins(
-                NetPlugin::new(&addr)
+                NetPlugin::as_if_listed(&addr)
                     .over_plaintext()
                     .with_identity_path(Some(scratch.join("identity"))),
             )
@@ -2195,5 +2724,198 @@ mod sign_in_tests {
                 "{forbidden} appears in {printed}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod server_list_tests {
+    use super::*;
+    use crate::net::codec::{SESSION_TICKET_LEN, SessionTicket};
+    use crate::net::session::Scratch;
+    use crate::net::tickets::{self, CachedTicket};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    /// How long a test will pump before giving up on a read that goes to a closed
+    /// port. Generous because it covers a loaded CI runner, and irrelevant to runtime
+    /// because a refused connection answers in microseconds.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// A loopback port nothing is listening on, so the read fails fast and
+    /// deterministically. Binding and dropping is the only way to be sure a port is
+    /// free rather than guessing at a number another test might be using.
+    fn closed_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let port = listener.local_addr().expect("an address").port();
+        drop(listener);
+        port
+    }
+
+    /// An app with a live cached sign-in, pointed at an account service that is not
+    /// there. Both plugins, because that is how they are built in `main.rs`: the list
+    /// reads the settings the sign-in inserts.
+    fn signed_in_app(scratch: &Scratch) -> App {
+        let path = scratch.join("service");
+        tickets::write(
+            &path,
+            CachedTicket::new(
+                SessionTicket::from_bytes([0x5a; SESSION_TICKET_LEN]),
+                tickets::now_unix() + 3600,
+            ),
+        )
+        .expect("a cached ticket");
+
+        let service = AccountService::parse(&format!("http://127.0.0.1:{}", closed_port()))
+            .expect("an account service URL");
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(SignInPlugin::new(service).with_ticket_path(path))
+            .add_plugins(ServerListPlugin);
+        app
+    }
+
+    fn list(app: &App) -> ServerList {
+        app.world().resource::<ServerList>().clone()
+    }
+
+    fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            app.update();
+            if done(app) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("timed out waiting for {what}; the list is {:?}", list(app));
+    }
+
+    /// **The acceptance criterion this whole module exists for.** An account service
+    /// that cannot be reached produces a line and a retry — never `Ready(vec![])`,
+    /// which the screen would draw as an empty list and a player would read as "no
+    /// servers exist".
+    #[test]
+    fn an_unreachable_account_service_is_never_an_empty_list() {
+        let scratch = Scratch::new("list-unreachable");
+        let mut app = signed_in_app(&scratch);
+
+        pump_until(&mut app, "the read to fail", |app| {
+            matches!(list(app), ServerList::Unavailable(_))
+        });
+
+        match list(&app) {
+            ServerList::Unavailable(reason) => assert!(!reason.is_empty(), "a silent refusal"),
+            other => panic!("an unreachable service answered {other:?}"),
+        }
+    }
+
+    /// The retry starts another read, which is what makes the button on the screen a
+    /// button rather than a decoration.
+    #[test]
+    fn the_retry_asks_again() {
+        let scratch = Scratch::new("list-retry");
+        let mut app = signed_in_app(&scratch);
+        pump_until(&mut app, "the first read to fail", |app| {
+            matches!(list(app), ServerList::Unavailable(_))
+        });
+
+        // A listener that accepts the connection and then says nothing, so the second
+        // read is still in flight when the assertion runs. Against the closed port
+        // above it would start and finish inside one frame, and "the retry started a
+        // read" would be a race rather than an assertion.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let authority = listener.local_addr().expect("an address").to_string();
+        app.world_mut().resource_mut::<SignInSettings>().service =
+            AccountService::parse(&format!("http://{authority}")).expect("an account service URL");
+
+        app.world_mut().write_message(RefreshServerList);
+        app.update();
+
+        assert!(
+            app.world().contains_resource::<ServerListLink>(),
+            "the retry started no read"
+        );
+        assert_eq!(
+            list(&app),
+            ServerList::Loading,
+            "the screen kept showing the failure it was retrying past"
+        );
+    }
+
+    /// Nothing is read until there is a sign-in to read it with. A client sitting on
+    /// the login screen has no ticket to present, and asking anyway would spend a
+    /// socket to be told so.
+    #[test]
+    fn no_read_happens_before_the_sign_in() {
+        let scratch = Scratch::new("list-signed-out");
+        // No cached ticket at all, so `SignInPlugin` starts signed out.
+        let service = AccountService::parse(&format!("http://127.0.0.1:{}", closed_port()))
+            .expect("an account service URL");
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(SignInPlugin::new(service).with_ticket_path(scratch.join("service")))
+            .add_plugins(ServerListPlugin);
+
+        for _ in 0..5 {
+            app.update();
+        }
+
+        assert_eq!(list(&app), ServerList::Loading);
+        assert!(
+            !app.world().contains_resource::<ServerListLink>(),
+            "a list was read with no sign-in to read it with"
+        );
+    }
+
+    /// A ticket the account service will not accept sends the player back to the login
+    /// screen rather than leaving a retry that cannot work — and the list goes back to
+    /// `Loading`, so signing in again reads it without a press.
+    #[test]
+    fn a_ticket_that_will_not_do_puts_the_login_screen_back_up() {
+        let scratch = Scratch::new("list-signed-out-mid");
+        let mut app = signed_in_app(&scratch);
+        app.update();
+
+        // Delivered as the list thread would, which is the seam a real refusal
+        // arrives through: what is under test is the ECS half.
+        let (events, receiver) = mpsc::channel();
+        events
+            .send(ServerListEvent::SignedOut("sign in again".to_owned()))
+            .expect("the receiver is held below");
+        app.world_mut()
+            .insert_resource(ServerListLink(Mutex::new(receiver)));
+        app.update();
+
+        assert_eq!(list(&app), ServerList::Loading);
+        assert!(
+            matches!(
+                app.world().resource::<SignInState>(),
+                SignInState::SignedOut { reason: Some(_) }
+            ),
+            "an unusable ticket left the client claiming to be signed in"
+        );
+    }
+
+    /// An account service that answers with nothing is a list with nothing in it, and
+    /// that is a different resource state from one that could not be read.
+    #[test]
+    fn an_empty_answer_is_a_ready_list_rather_than_a_failure() {
+        let scratch = Scratch::new("list-empty");
+        let mut app = signed_in_app(&scratch);
+        app.update();
+
+        let (events, receiver) = mpsc::channel();
+        events
+            .send(ServerListEvent::Ready(Vec::new()))
+            .expect("the receiver is held below");
+        app.world_mut()
+            .insert_resource(ServerListLink(Mutex::new(receiver)));
+        app.update();
+
+        assert_eq!(list(&app), ServerList::Ready(Vec::new()));
+        assert!(
+            !app.world().contains_resource::<ServerListLink>(),
+            "a finished read left its link behind, so no retry could start another"
+        );
     }
 }

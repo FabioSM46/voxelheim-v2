@@ -110,10 +110,27 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// Where this client signs in.
+/// Where this client signs in, and **where its trust chain ends**.
 ///
-/// Parsed once, on the command line, so a mistyped URL is a usage error before a
-/// window opens rather than a refusal on a login screen.
+/// Every certificate this client will accept for a game server came out of the list
+/// this service answered with, and the ticket that read that list was signed by this
+/// service's key. Nothing else in the client is an authority about who a server is —
+/// there is no pin file any more, no second list, and no way to add a source at
+/// runtime. Trust has to bottom out somewhere; this is the somewhere, and it is worth
+/// being explicit rather than leaving a reader to infer it from four modules.
+///
+/// **What is fixed by construction is that there is exactly one of these, chosen once
+/// at launch.** It is parsed in `main.rs` before a window opens — so a mistyped URL is a
+/// usage error rather than a refusal on a login screen — inserted into `SignInSettings`,
+/// and read from there by both the sign-in and the list. A second one cannot be
+/// introduced by anything a server says.
+///
+/// **What is deliberately *not* claimed is that the hop to it is authenticated.** It is
+/// plain HTTP: [`Self::parse`] refuses `https` rather than downgrading silently, because
+/// verifying a web PKI certificate needs a root store this client does not carry. So the
+/// anchor is only as good as the network between this process and that service, and an
+/// account service belongs on a loopback address or a private network until that
+/// changes. That gap is tracked as **#131** and nothing here closes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountService {
     authority: String,
@@ -164,6 +181,13 @@ impl AccountService {
     /// connects to.
     pub(super) fn authority(&self) -> &str {
         &self.authority
+    }
+
+    /// The path this service is served under, with no trailing `/`. Read by
+    /// [`super::servers`], which adds its own route to it rather than keeping a second
+    /// idea of where this service lives.
+    pub(super) fn prefix(&self) -> &str {
+        &self.prefix
     }
 
     fn start_path(&self) -> String {

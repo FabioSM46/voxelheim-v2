@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Drives the real client against the real server over TLS, and checks the three
-# things neither side's own tests can see.
+# Drives the real client against the real server over TLS, and checks the things
+# neither side's own tests can see.
 #
 # **This is not in CI, and the reason is worth knowing before anyone tries to put it
 # there.** The client is a Bevy application and opens a window, so it needs a display;
@@ -11,6 +11,22 @@
 # client fed rustls a socket read and discarded whatever one `read_tls` call did not
 # take, which desynchronised the record stream the moment a read carried more than one
 # TLS record.
+#
+# **What it checks got narrower when trust on first use was removed, and the reason is
+# worth stating rather than leaving as a shorter script.** The client used to pin the
+# first certificate it saw into a file, so this script could read that file, delete it,
+# swap the server's key and watch the refusal happen — all of it on disk, all of it
+# reachable from bash. The expected fingerprint now comes from an account service's
+# server list, and standing one of those up needs a Discord application and a browser.
+# So the *refusal* is asserted in `client/src/net/tls.rs`'s own tests, where the
+# expectation is a value and the check is the one line under test; what stays here is
+# the half no unit test on either side can reach — a real handshake between the two
+# real stacks — plus the property that survived the pin file: an address in no list is
+# never shown the identity this client holds.
+#
+# The client is run with `--server`, which is the development path: no list, no
+# expectation, and therefore no identity presented. That is the behaviour under test in
+# check 2, not a limitation of the script.
 #
 # Run it after touching internal/transport, internal/certs, or client/src/net/tls.rs.
 #
@@ -44,12 +60,6 @@ start_server() {
   fail "the server did not start; see $1"
 }
 
-stop_server() {
-  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
-  wait "$SERVER_PID" 2>/dev/null || true
-  SERVER_PID=""
-}
-
 run_client() {
   XDG_DATA_HOME="$WORK/clientdata" timeout 15 \
     "$REPO_ROOT/client/target/debug/voxelheim-client" \
@@ -62,7 +72,12 @@ echo "building both sides..."
 
 mkdir -p "$WORK/world" "$WORK/clientdata"
 
-# ---- 1. a first connection is encrypted, admitted, and pins what it saw ----
+# ---- 1. a connection is encrypted, admitted, and speaks the protocol ----
+#
+# The check that found the record-layer bug, and the reason this script exists. A
+# session that establishes and then keeps running is the whole assertion: the world
+# starts streaming immediately afterwards, which is what fills one socket read with
+# several TLS records.
 start_server "$WORK/server1.log"
 FINGERPRINT=$(grep -o 'certificate_sha256=[a-f0-9]*' "$WORK/server1.log" | head -1 | cut -d= -f2)
 [ -n "$FINGERPRINT" ] || fail "the server logged no certificate fingerprint"
@@ -72,60 +87,48 @@ grep -q "session established" "$WORK/client1.log" \
   || fail "the client never established a session; see $WORK/client1.log"
 grep -qi "decrypt\|protocol error" "$WORK/client1.log" \
   && fail "the session established and then broke; see $WORK/client1.log"
-pass "a first connection is established over TLS"
+pass "a connection is established over TLS and the record stream survives it"
 
-PIN_FILE="$WORK/clientdata/voxelheim/identity/127.0.0.1_$PORT.pin"
-[ -f "$PIN_FILE" ] || fail "no pin was written to $PIN_FILE"
-PINNED=$(tr -d '[:space:]' <"$PIN_FILE")
-[ "$PINNED" = "$FINGERPRINT" ] \
-  || fail "the client pinned $PINNED but the server announced $FINGERPRINT"
-pass "the client pinned the fingerprint the server logged"
+# ---- 2. nothing was written down, and nothing was presented ----
+#
+# **The property that replaced the pin file.** `--server` names an address that is in
+# no list, so nothing states which certificate to expect there — and the client
+# therefore presents no identity and keeps none. Checked on disk, because the identity
+# file is where a token would have to be kept for a later launch to present it, and
+# checked for a pin file too: that path is removed, not merely unused, so anything
+# writing one back is a regression this script should catch.
+IDENTITY_DIR="$WORK/clientdata/voxelheim/identity"
+if [ -d "$IDENTITY_DIR" ]; then
+  STRAY=$(find "$IDENTITY_DIR" -type f | head -5)
+  [ -z "$STRAY" ] \
+    || fail "an unlisted session wrote credentials to disk: $STRAY"
+fi
+grep -q "a returning character" "$WORK/client1.log" \
+  && fail "an unlisted session presented a stored identity"
+pass "an address in no list is shown no identity and leaves nothing behind"
 
-# ---- 2. the identity survives, under encryption ----
+# ---- 3. a second launch is a new character, not a remembered one ----
+#
+# The same statement from the other side, and the one that would have caught a pin
+# file quietly coming back: with nothing written down, the second launch cannot be a
+# returning session however the first one went.
 run_client "$WORK/client2.log"
+grep -q "session established" "$WORK/client2.log" \
+  || fail "the second launch never established a session; see $WORK/client2.log"
 grep -q "a returning character" "$WORK/client2.log" \
-  || fail "a reconnect did not come back as the same player; see $WORK/client2.log"
-pass "a reconnect returns as the same character"
+  && fail "a second unlisted launch came back as the same character"
+pass "a second launch on the development path is a new character"
 
-# ---- 3. a substituted certificate is refused, and no token is presented ----
-stop_server
-rm -f "$WORK/world/server-cert.pem" "$WORK/world/server-key.pem"
-start_server "$WORK/server2.log"
-NEW_FINGERPRINT=$(grep -o 'certificate_sha256=[a-f0-9]*' "$WORK/server2.log" | head -1 | cut -d= -f2)
-[ "$NEW_FINGERPRINT" != "$FINGERPRINT" ] \
-  || fail "the server presented the same certificate after its key was deleted"
-
-run_client "$WORK/client3.log"
-grep -q "different certificate than the one pinned" "$WORK/client3.log" \
-  || fail "a substituted certificate was not refused; see $WORK/client3.log"
-grep -q "session established" "$WORK/client3.log" \
-  && fail "a session was established against a substituted certificate"
-grep -q "tls: handshake failure" "$WORK/server2.log" \
-  || fail "the server did not see the handshake refused, so the client may have said something first"
-pass "a substituted certificate is refused before anything is sent"
-
-# ---- 4. an identity with no pin is refused, and nothing is sent ----
-# The upgrade case: every player carried over from the plaintext transport has an
-# identity file and no pin. Simulated by deleting the pin and keeping the identity,
-# which is exactly the state such a player is in on their first connection.
-stop_server
-start_server "$WORK/server3.log"
-rm -f "$PIN_FILE"
-
-run_client "$WORK/client4.log"
-grep -q "has never verified its certificate" "$WORK/client4.log" \
-  || fail "an identity was presented to a server that had never been pinned; see $WORK/client4.log"
-grep -q "session established" "$WORK/client4.log" \
-  && fail "a session was established while holding an unverified identity"
-# The TCP connection is made before the pin is read — the socket is what the handshake
-# runs over — so "connection accepted" is expected and proves nothing either way. What
-# must never appear is a session that got past the handshake, because that is the only
-# point at which a token would have crossed the wire.
-grep -q "session admitted" "$WORK/server3.log" \
-  && fail "the server admitted a session the client should have refused to open"
-[ -f "$PIN_FILE" ] \
-  && fail "a refused connection pinned the certificate anyway"
-pass "an identity is never presented to a server that was never pinned"
+# ---- 4. the fingerprint the server announces is the one a list would carry ----
+#
+# Not a client assertion at all — it is the join between the two halves. The number in
+# the server's startup line is what an operator registers with the account service, and
+# what `client/src/net/tls.rs` then compares a certificate against. A digest of the
+# wrong shape here would be a list nothing could verify against, refused whole by
+# `net/servers.rs`.
+[ "${#FINGERPRINT}" -eq 64 ] && [ -z "${FINGERPRINT//[0-9a-f]/}" ] \
+  || fail "the server announced a fingerprint that is not 64 lowercase hex characters"
+pass "the server announces a fingerprint of the shape the registry and the client agree on"
 
 echo
-echo "interop: 5/5"
+echo "interop: 4/4"

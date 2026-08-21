@@ -9,11 +9,17 @@
 //! **Strict rather than tolerant, and that is the design.** A scanner that hunted
 //! for `"state"` and took the next string would be a quarter of the size and would
 //! be fooled by an escaped quote, a nested object, or a field whose name happens to
-//! contain another field's name. [`parse_object`] instead reads a *flat* object —
-//! string, number, boolean and null values, no arrays and no nesting — and refuses
-//! anything else. Nothing the account service answers with is nested, so the shape
-//! this refuses is a shape that would mean the service had changed; a refusal says
-//! so, where a scanner would quietly return the wrong field.
+//! contain another field's name. [`parse_object`] instead reads an object whose
+//! values are strings, numbers, booleans, nulls, or **one array of flat objects** —
+//! and refuses everything else. A refusal is the honest answer to a shape the account
+//! service does not produce, where a scanner would quietly return the wrong field.
+//!
+//! **The array goes exactly one level deep, and the server list is why it exists at
+//! all.** `GET /v1/servers` answers `{"servers":[{…},{…}],…}`, so a reader that
+//! refused every array could not read the one document this client most needs. What
+//! it deliberately is not is a general recursive reader: an array may hold flat
+//! objects and nothing else — no numbers, no strings, no second array — because the
+//! moment it could, the rest of this client would start relying on it.
 //!
 //! **No error here ever quotes its input.** A `finish` response carries a bearer
 //! credential and a `finish` request carries an authorization code, so a message
@@ -37,6 +43,10 @@ pub(super) enum Value {
     Number(String),
     Bool(bool),
     Null,
+    /// An array of flat objects, which is the one nested shape this reader admits.
+    /// The server list is its only producer, and an empty array is a legal value:
+    /// `[]` is what a registry with nothing in it answers.
+    Objects(Vec<Fields>),
 }
 
 /// A flat JSON object, in the order its fields arrived.
@@ -69,6 +79,33 @@ impl Fields {
         }
     }
 
+    /// The boolean at `key`, or a refusal naming the key.
+    ///
+    /// Absent is a refusal rather than `false`: the one caller asks whether a server
+    /// is online, and reading a field the service stopped sending as "no" would take
+    /// every server off the list with nothing to explain it.
+    pub(super) fn boolean(&self, key: &str) -> Result<bool, String> {
+        match self.get(key) {
+            Some(Value::Bool(value)) => Ok(*value),
+            Some(_) => Err(format!(
+                "the account service answered a non-boolean `{key}`"
+            )),
+            None => Err(format!("the account service answered no `{key}`")),
+        }
+    }
+
+    /// The array of objects at `key`, or a refusal naming the key.
+    ///
+    /// An empty array is a legal answer and is returned as one — a registry nobody
+    /// has registered with says `[]`, and that is "no servers", not a fault.
+    pub(super) fn objects(&self, key: &str) -> Result<&[Fields], String> {
+        match self.get(key) {
+            Some(Value::Objects(entries)) => Ok(entries),
+            Some(_) => Err(format!("the account service answered a non-list `{key}`")),
+            None => Err(format!("the account service answered no `{key}`")),
+        }
+    }
+
     fn get(&self, key: &str) -> Option<&Value> {
         self.0
             .iter()
@@ -77,48 +114,32 @@ impl Fields {
     }
 }
 
-/// Reads a flat JSON object, refusing everything else.
+/// Reads one JSON object, refusing everything the account service does not send.
 pub(super) fn parse_object(input: &str) -> Result<Fields, String> {
     let mut reader = Reader::new(input.as_bytes());
     reader.whitespace();
-    reader.expect(b'{')?;
-    let mut fields: Vec<(String, Value)> = Vec::new();
-
-    reader.whitespace();
-    if reader.peek() == Some(b'}') {
-        reader.step();
-    } else {
-        loop {
-            reader.whitespace();
-            let key = reader.string()?;
-            reader.whitespace();
-            reader.expect(b':')?;
-            reader.whitespace();
-            let value = reader.value()?;
-            if fields.iter().any(|(name, _)| *name == key) {
-                // Refused rather than last-one-wins, for the reason `main.rs`
-                // refuses an option given twice: two values for one name means one
-                // of them is not what was meant, and choosing silently is how the
-                // wrong one gets used.
-                return Err(format!(
-                    "the account service answered `{key}` twice in one object"
-                ));
-            }
-            fields.push((key, value));
-            reader.whitespace();
-            match reader.next() {
-                Some(b',') => continue,
-                Some(b'}') => break,
-                _ => return Err(NOT_AN_OBJECT.to_owned()),
-            }
-        }
-    }
+    let fields = reader.object(Depth::Outer)?;
 
     reader.whitespace();
     if !reader.finished() {
         return Err(NOT_AN_OBJECT.to_owned());
     }
-    Ok(Fields(fields))
+    Ok(fields)
+}
+
+/// Which of the two levels this reader admits it is on.
+///
+/// **The whole of the nesting rule, expressed as a value rather than as care.** An
+/// array is a legal value at [`Depth::Outer`] and no value at all at
+/// [`Depth::Inner`], so "one array of flat objects, and nothing deeper" is checked by
+/// the same code that reads the shape rather than by a comment asking a later reader
+/// to keep it true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    /// The response body itself. Its values may include one array of objects.
+    Outer,
+    /// An object inside that array. Every value here is a scalar.
+    Inner,
 }
 
 /// A cursor over the body's bytes.
@@ -166,17 +187,88 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn value(&mut self) -> Result<Value, String> {
+    fn value(&mut self, depth: Depth) -> Result<Value, String> {
         match self.peek() {
             Some(b'"') => self.string().map(Value::Str),
             Some(b't') => self.literal(b"true").map(|()| Value::Bool(true)),
             Some(b'f') => self.literal(b"false").map(|()| Value::Bool(false)),
             Some(b'n') => self.literal(b"null").map(|()| Value::Null),
             Some(b'-' | b'0'..=b'9') => self.number().map(Value::Number),
+            // One level, and only from the outside: an array inside an array or an
+            // object inside a list entry is refused here rather than read, which is
+            // what keeps this from becoming a general JSON reader.
+            Some(b'[') if depth == Depth::Outer => self.objects().map(Value::Objects),
             // Refused rather than skipped. Stepping over a structure this reader
             // does not understand is exactly how it would go on to misread the
             // field after it.
             _ => Err(NOT_AN_OBJECT.to_owned()),
+        }
+    }
+
+    /// One JSON object's `{ … }`, with every value read at `depth`.
+    fn object(&mut self, depth: Depth) -> Result<Fields, String> {
+        self.expect(b'{')?;
+        let mut fields: Vec<(String, Value)> = Vec::new();
+
+        self.whitespace();
+        if self.peek() == Some(b'}') {
+            self.step();
+            return Ok(Fields(fields));
+        }
+
+        loop {
+            self.whitespace();
+            let key = self.string()?;
+            self.whitespace();
+            self.expect(b':')?;
+            self.whitespace();
+            let value = self.value(depth)?;
+            if fields.iter().any(|(name, _)| *name == key) {
+                // Refused rather than last-one-wins, for the reason `main.rs`
+                // refuses an option given twice: two values for one name means one
+                // of them is not what was meant, and choosing silently is how the
+                // wrong one gets used.
+                return Err(format!(
+                    "the account service answered `{key}` twice in one object"
+                ));
+            }
+            fields.push((key, value));
+            self.whitespace();
+            match self.next() {
+                Some(b',') => continue,
+                Some(b'}') => return Ok(Fields(fields)),
+                _ => return Err(NOT_AN_OBJECT.to_owned()),
+            }
+        }
+    }
+
+    /// An array whose every element is a flat object.
+    ///
+    /// `[]` is legal and is how a registry with nothing in it answers. Anything else
+    /// between the brackets — a string, a number, a nested array — is refused, so the
+    /// caller never has to ask what kind of element it got.
+    fn objects(&mut self) -> Result<Vec<Fields>, String> {
+        self.expect(b'[')?;
+        let mut entries = Vec::new();
+
+        self.whitespace();
+        if self.peek() == Some(b']') {
+            self.step();
+            return Ok(entries);
+        }
+
+        loop {
+            self.whitespace();
+            if self.peek() != Some(b'{') {
+                return Err(NOT_AN_OBJECT.to_owned());
+            }
+            entries.push(self.object(Depth::Inner)?);
+            self.whitespace();
+            match self.next() {
+                Some(b',') => continue,
+                Some(b']') => return Ok(entries),
+                _ => return Err(NOT_AN_OBJECT.to_owned()),
+            }
         }
     }
 
@@ -565,9 +657,73 @@ mod tests {
     #[test]
     fn nesting_is_refused_rather_than_skipped() {
         // The refusal is the point: a reader that stepped over a value it does not
-        // understand is a reader that can go on to return the wrong field.
+        // understand is a reader that can go on to return the wrong field. One shape
+        // is admitted — an array of flat objects, which is the server list — and every
+        // other one, including a bare object, is not.
         assert!(parse_object(r#"{"a":{"b":1},"c":"d"}"#).is_err());
         assert!(parse_object(r#"{"a":[1,2],"c":"d"}"#).is_err());
+        assert!(parse_object(r#"{"a":["x"],"c":"d"}"#).is_err());
+        assert!(parse_object(r#"{"a":[[{"b":1}]],"c":"d"}"#).is_err());
+    }
+
+    /// The server list's shape, read as the one array this reader admits: a row per
+    /// object, in order, each read with the same accessors a flat body is.
+    #[test]
+    fn an_array_of_objects_is_read_one_level_deep() {
+        let fields = parsed(
+            r#"{"servers":[{"name":"midgard","online":true},{"name":"asgard","online":false}],"offline_after_seconds":90}"#,
+        );
+
+        let rows = fields.objects("servers").expect("a list");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].string("name"), Ok("midgard"));
+        assert_eq!(rows[0].boolean("online"), Ok(true));
+        assert_eq!(rows[1].string("name"), Ok("asgard"));
+        assert_eq!(rows[1].boolean("online"), Ok(false));
+        assert_eq!(
+            fields.get("offline_after_seconds"),
+            Some(&Value::Number("90".to_owned()))
+        );
+    }
+
+    /// `[]` is the answer a registry with nothing in it gives, and it parses to a list
+    /// with nothing in it rather than to an error — the distinction the whole server
+    /// list screen rests on.
+    #[test]
+    fn an_empty_array_is_an_empty_list() {
+        let fields = parsed(r#"{"servers":[]}"#);
+        assert_eq!(fields.objects("servers"), Ok(&[][..]));
+    }
+
+    /// **The nesting rule goes exactly one level, and a row inside the array is flat.**
+    /// An array inside a row is refused rather than read, which is what stops this from
+    /// growing into a general JSON reader by accident.
+    #[test]
+    fn a_row_inside_the_array_may_not_nest_again() {
+        assert!(parse_object(r#"{"servers":[{"tags":["a"]}]}"#).is_err());
+        assert!(parse_object(r#"{"servers":[{"meta":{"a":1}}]}"#).is_err());
+    }
+
+    /// Asking for the wrong shape names the key and nothing else, which is the rule
+    /// every accessor here keeps: the input is never echoed.
+    #[test]
+    fn a_list_accessor_refuses_a_value_that_is_not_one() {
+        let fields = parsed(r#"{"servers":"none"}"#);
+        let err = fields
+            .objects("servers")
+            .expect_err("a string is not a list");
+        assert!(err.contains("servers"), "{err}");
+        assert!(!err.contains("none"), "{err}");
+
+        let err = fields
+            .boolean("servers")
+            .expect_err("a string is not a bool");
+        assert!(err.contains("servers"), "{err}");
+        assert!(!err.contains("none"), "{err}");
+        assert!(
+            parsed("{}").boolean("online").is_err(),
+            "an absent field must not read as false"
+        );
     }
 
     #[test]
