@@ -1215,6 +1215,23 @@ import, which is what shapes almost every rule below.
 - **There is no version field in the body**, and that is an argument rather than an omission: a
   ticket is only ever presented in a `ClientHello`, which carries `protocol_version` beside it,
   and the contract already says changing the length, the scheme or the split is a version bump.
+- **A signature says what it is a signature of, and the tag is in the digest rather than in the
+  body** (#138). What a mint signs is `SHA-256(ticketBodyDomain ‖ body)`, not the body — so the
+  key's guarantee is "the account service signed this *ticket*" instead of the weaker "signed
+  these 32 bytes", and a second 32-byte object this pair ever signs cannot be presented at a
+  handshake and decoded as an account, a world and an expiry. `worldIDDomain` is the same idea one
+  layer down, applied to a digest; this is the worse of the two failures, because a digest
+  collision needs luck and a second signed object needs only somebody adding a feature. The domain
+  goes in front of the hash because the body has no room to spare: a tag inside the 32 would have
+  to come out of the world id (96 bits, and 64 is not comfortably out of reach) or the expiry
+  (already argued down to four bytes), whereas a prefix to a hash costs nothing and leaves
+  `ClientHello.session_ticket` at 96. **The cost is that every ticket minted before it stops
+  verifying**, and there is no revocation to soften that: deploying this is one sign-in for
+  everybody connected. It is refused as `ErrNotATicket` rather than `ErrBadSignature`, so what an
+  operator reads is the transition rather than a key mismatch that is not there — the same carve-out
+  `ErrVerifierWorld` got from `ErrWrongWorld`. That branch recognises the undomained shape only; an
+  object under a *sibling* domain is `ErrBadSignature`, which is honest, because nothing here knows
+  that domain.
 - **`internal/ticket` is a leaf, and it has to be.** The game server imports it in order to
   verify, so anything reachable from it is reachable from the simulation — an import of
   `internal/auth` would put the accounts directory back inside the trust domain it was split out

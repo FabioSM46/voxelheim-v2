@@ -29,6 +29,12 @@ import (
 // for somewhere else, and this ticket has run out. Only the last of the three is
 // something waiting will not fix.
 //
+// **[ErrNotATicket] is a fourth, and it is addressed to an operator rather than to a
+// player**: bytes this service's own key signed that are not a ticket. A player can do
+// nothing with the distinction and somebody reading a log can — it is the difference
+// between a key that does not match and a ticket minted before [ticketBodyDomain]
+// existed, and only one of those is something to go and fix.
+//
 // **The two configuration answers are sentinels of their own for a different reason**:
 // [ErrPublicKeySize] and [ErrVerifierWorld] are not about the ticket at all, and neither
 // is anything to tell a player. They are what an operator reads, and they have to be
@@ -166,15 +172,34 @@ func checkExpiry(claims Claims, now time.Time) error {
 // It answers nothing about time and nothing about which world: those are decisions about
 // a ticket that is already known to be genuine, and they belong to the caller that knows
 // which question it is asking.
+//
+// **What is checked is not the body but [signedMessage] of it** — the body under
+// [ticketBodyDomain] — so that a good signature means "this key signed a ticket" rather
+// than "this key signed these [BodySize] bytes". The body itself is still every byte the
+// wire carries and every byte the claims are read from; the domain is in the digest and
+// never on the wire.
 func verifySigned(pub ed25519.PublicKey, raw []byte) (Claims, error) {
 	if len(raw) != Size {
 		return Claims{}, fmt.Errorf("%w, got %d", ErrTicketSize, len(raw))
 	}
-	if !ed25519.Verify(pub, raw[:BodySize], raw[BodySize:]) {
+	body, signature := raw[:BodySize], raw[BodySize:]
+	if !ed25519.Verify(pub, signedMessage(body), signature) {
+		// **The second check admits nothing and answers a different question.** Both
+		// branches refuse; what differs is what an operator is told, and reporting a
+		// ticket minted before the signing domain existed as "not signed by that key"
+		// sends somebody looking for a key mismatch that is not there. See
+		// [ErrNotATicket], which is also where the deployment note lives.
+		//
+		// It runs only after the real check has failed, so a genuine ticket still costs
+		// exactly one verification and only a refusal costs two — a bound that matters
+		// because this is reached from a handshake, before anybody is authenticated.
+		if ed25519.Verify(pub, body, signature) {
+			return Claims{}, ErrNotATicket
+		}
 		// The bytes are never quoted back. A signature that did not check out is still
 		// somebody's bearer credential — a ticket copied from a real session and edited
 		// is the case this branch exists for — and an error message reaches a log.
 		return Claims{}, ErrBadSignature
 	}
-	return decodeBody(raw[:BodySize])
+	return decodeBody(body)
 }

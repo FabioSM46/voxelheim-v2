@@ -35,6 +35,33 @@
 // a protocol version bump. A second version number here would be a second thing to keep
 // in step with the first.
 //
+// # What the signature covers, and why the body is not all of it
+//
+// The bytes on the wire are the body, and what a mint signs is
+// SHA-256([ticketBodyDomain] ‖ body). So the key's guarantee is "the account service
+// signed this **ticket**" rather than the weaker "the account service signed these
+// [BodySize] bytes" — and the difference is the whole of what stops a second 32-byte
+// object this pair ever signs from being presented here and read as a ticket. Nothing
+// signs a second object today, which is precisely what made this cheap to close now and
+// expensive later (#138).
+//
+// **The domain is in front of the digest rather than inside the body, because the body
+// has no room and the digest is free.** A tag inside [BodySize] bytes would have to be
+// paid for out of the world id or out of the expiry, and both numbers have arguments
+// attached: the world id is a truncated digest at 96 bits because 64 is not comfortably
+// out of reach for a second preimage (see [WorldIDSize]), and the expiry is already
+// argued down to four bytes (see expiresAtSize). A prefix to a hash is paid for out of
+// neither, and [Size] is still exactly what `ClientHello.session_ticket` carries.
+//
+// **Every ticket minted before this existed stops verifying, and there is no revocation
+// to soften it.** That is the honest description rather than a caveat: a ticket signed
+// over the bare body is refused from the instant this deploys, whoever is holding it and
+// however much life it had left. It is [ErrNotATicket] rather than [ErrBadSignature], so
+// what an operator reads is the transition rather than a key mismatch that is not there.
+// A deployment across a live fleet is therefore one sign-in for everybody connected —
+// acceptable here because nothing is deployed, and stated so that nobody has to discover
+// it.
+//
 // # Two kinds of ticket, told apart by one value
 //
 // A ticket whose world id is zero names **no world**: an *account ticket*, which says
@@ -216,6 +243,29 @@ const MaxWorldNameBytes = 64
 // never be confused with the name.
 const worldIDDomain = "voxelheim/world-id/v1\x00"
 
+// ticketBodyDomain says what a signature made with this service's key is a signature
+// *of*, so that verifying one answers "this is a ticket" and not merely "this key signed
+// these [BodySize] bytes".
+//
+// **[worldIDDomain] one line up is the same idea applied to a digest, and this is the
+// worse of the two failures.** A digest collision needs luck. A second 32-byte object
+// signed with this pair needs only somebody adding a feature — a key-rotation
+// announcement, a world record, anything — and without a domain its signature would pass
+// [Verify] and be decoded as an account, a world and an expiry, because "this key signed
+// these bytes" is the whole of what an Ed25519 check answers.
+//
+// Versioned in the shape worldIDDomain is versioned, so that changing what a signature
+// covers is a new domain rather than a silent reinterpretation of the old one. The NUL is
+// kept for the same consistency and is honestly doing less work here than it does there:
+// a world name is variable-length and could otherwise run into its prefix, whereas a body
+// is a fixed [BodySize] bytes, so this concatenation is unambiguous with or without it.
+// It costs nothing and it is what the first *variable*-length sibling domain will need.
+//
+// **A sibling is a new constant, never a suffix on this one.** Two domains that share a
+// prefix are two domains, and the property being bought is that no other object hashed
+// for any other purpose in this repository can produce this digest.
+const ticketBodyDomain = "voxelheim/ticket-body/v1\x00"
+
 // redactedTicket is what a [Ticket] renders as, whichever formatter reaches it.
 const redactedTicket = "ticket.Ticket(redacted)"
 
@@ -246,6 +296,27 @@ var (
 	// ErrBadSignature reports a ticket nobody holding this key signed: tampered with,
 	// signed by a different service, or invented.
 	ErrBadSignature = errors.New("ticket: the ticket is not signed by that key")
+
+	// ErrNotATicket reports bytes this service's own key signed that are not a ticket.
+	//
+	// **A different answer from [ErrBadSignature] because they are different things to
+	// tell an operator**: "this is not ours" against "this is ours, and it is not a
+	// ticket". Collapsing the two sends somebody hunting a key mismatch that is not
+	// there, which is the mistake [ErrVerifierWorld] was carved out of [ErrWrongWorld]
+	// to stop one field over.
+	//
+	// A ticket's signature covers [ticketBodyDomain] and the body. This refusal is what a
+	// signature covering the **bare body** gets — exactly the shape this service minted
+	// before the domain existed (#138) — so it is also the deployment note made legible:
+	// there is no revocation, every ticket in flight stopped verifying the moment the
+	// domain arrived, and this is the sentence a game server logs about one.
+	//
+	// **It recognises one shape and does not claim to recognise every non-ticket.** An
+	// object signed under a *sibling* domain answers ErrBadSignature, because nothing
+	// here knows that domain and "not this one" is the whole of what can be said about
+	// it. That is the correct refusal and the reason the domain is what defends the key
+	// rather than this branch: this one is a diagnostic, the domain is the boundary.
+	ErrNotATicket = errors.New("ticket: those bytes are signed by that key, but not as a ticket")
 
 	// ErrWrongWorld reports a ticket issued for another world. The signature is good;
 	// the ticket is simply not for here.
@@ -495,6 +566,29 @@ func (t Ticket) LogValue() slog.Value { return slog.StringValue(redactedTicket) 
 // deliberately serialised converts it through [Ticket.Encode] into a plain string field,
 // so redacting the default costs that path nothing.
 func (t Ticket) MarshalJSON() ([]byte, error) { return []byte(`"` + redactedTicket + `"`), nil }
+
+// signedMessage is what an Ed25519 signature in this package is actually computed over:
+// [ticketBodyDomain], then the body, hashed.
+//
+// **One function rather than the same two lines at each call site**, because the mint and
+// the verifier disagreeing about this is not a bug either of them could notice on its own
+// — it is a service minting tickets that nothing accepts, and the tests for each half
+// would stay green. It is [encodeBody] and [decodeBody]'s rule one layer down: the halves
+// of a format that disagree about what a ticket is are worse than either half's rule
+// alone.
+//
+// **Not a prehash for the signature's sake.** Ed25519 hashes its own input, so this buys
+// no cryptography; what it buys is a place to put the domain that is not the body, since
+// the body's width is fixed by the wire format. The digest is [sha256.Size] bytes and
+// none of them are transmitted — [Size] is unmoved.
+//
+// The concatenation allocates, as [WorldIDFor]'s does and for the same reason: this runs
+// once per mint and once per join, which is not a budget worth complicating a function
+// this load-bearing for.
+func signedMessage(body []byte) []byte {
+	digest := sha256.Sum256(append([]byte(ticketBodyDomain), body...))
+	return digest[:]
+}
 
 // encodeBody lays a ticket's claims out, refusing anything this service will not sign.
 //
