@@ -218,7 +218,7 @@ fn tooltip_bundle() -> impl Bundle {
 
 /// Builds one row per mirrored recipe, once.
 ///
-/// The rows are static because the mirror is: four recipes, in the order the table
+/// The rows are static because the mirror is: one row per recipe, in the order the table
 /// declares them, with no session parameter to size them against and nothing to rebuild
 /// when a server state arrives. Only the `held/needed` labels and the enabled colours
 /// change, and [`refresh_recipe_rows`] owns both.
@@ -906,30 +906,40 @@ mod tests {
             .collect()
     }
 
+    /// One row per mirrored recipe, each headed by what it makes.
+    ///
+    /// Swept over [`RECIPES`] rather than over a count and four names typed here. The
+    /// mirror gained two rows in #113 and this panel needed no edit to draw them, which is
+    /// the property worth pinning: a recipe reaches the screen by being in the mirror, and
+    /// the mirror is swept against the contract in `player::crafting`'s own tests.
     #[test]
-    fn the_panel_lists_the_four_recipes_with_their_costs_and_products() {
+    fn the_panel_lists_every_mirrored_recipe_with_its_cost_and_product() {
         let mut app = app();
         app.update();
 
         let world = app.world_mut();
         let mut query = world.query::<&CraftRow>();
         let rows: Vec<RecipeId> = query.iter(world).map(|row| row.0.id).collect();
-        assert_eq!(rows.len(), 4, "the panel drew a different number of rows");
-        for recipe in [
-            RecipeId::Forge,
-            RecipeId::IronSword,
-            RecipeId::SharpeningStone,
-            RecipeId::Tent,
-        ] {
-            assert!(rows.contains(&recipe), "{recipe:?} has no row");
+        assert_eq!(
+            rows.len(),
+            RECIPES.len(),
+            "the panel drew a different number of rows than the mirror holds"
+        );
+        for recipe in RECIPES {
+            assert!(rows.contains(&recipe.id), "{:?} has no row", recipe.id);
         }
 
         // Each row is headed by what it makes, which is the product half of the mirror.
+        // Read through the display registry rather than through `recipe_heading`, so this
+        // is the panel answering to the item table and not to the function that filled it.
+        // The count suffix that function appends is its own business, which is why this
+        // asks how the heading starts.
         let mut titles = world.query::<(&CraftTitle, &Text)>();
         let headings: Vec<String> = titles.iter(world).map(|(_, text)| text.0.clone()).collect();
-        for product in ["FORGE", "IRON SWORD", "SHARPENING STONE", "TENT"] {
+        for recipe in RECIPES {
+            let product = item_label(recipe.product.item_id).to_uppercase();
             assert!(
-                headings.iter().any(|heading| heading == product),
+                headings.iter().any(|heading| heading.starts_with(&product)),
                 "no row is headed {product}: {headings:?}"
             );
         }
