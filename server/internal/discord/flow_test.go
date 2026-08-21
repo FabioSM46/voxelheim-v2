@@ -33,7 +33,7 @@ func signIn(t *testing.T, flow *Flow, fake *fakeDiscord) (Identity, error) {
 		t.Fatalf("Begin: %v", err)
 	}
 	state, code := fake.issue(t, start)
-	return flow.Redeem(context.Background(), state, code)
+	return flow.Redeem(context.Background(), state, code, start.FinishSecret)
 }
 
 // RFC 7636 appendix B, which is the only independent check available on the
@@ -250,7 +250,7 @@ func TestAnUnknownStateIsRefusedWithoutCallingTheProvider(t *testing.T) {
 	fake.mu.Unlock()
 
 	flow := newFlow(t, fake.config())
-	_, err := flow.Redeem(context.Background(), Secret("a state nobody minted"), Secret("a code"))
+	_, err := flow.Redeem(context.Background(), Secret("a state nobody minted"), Secret("a code"), Secret("a finish secret"))
 	if !errors.Is(err, ErrNoSuchSignIn) {
 		t.Errorf("an unknown state gave %v, want ErrNoSuchSignIn", err)
 	}
@@ -272,23 +272,103 @@ func TestAnAbsentStateOrCodeIsRefused(t *testing.T) {
 
 	for name, call := range map[string]func() error{
 		"no state": func() error {
-			_, err := flow.Redeem(context.Background(), "", Secret("a code"))
+			_, err := flow.Redeem(context.Background(), "", Secret("a code"), start.FinishSecret)
 			return err
 		},
 		"no code": func() error {
-			_, err := flow.Redeem(context.Background(), start.State, "")
+			_, err := flow.Redeem(context.Background(), start.State, "", start.FinishSecret)
+			return err
+		},
+		"no finish secret": func() error {
+			_, err := flow.Redeem(context.Background(), start.State, Secret("a code"), "")
 			return err
 		},
 	} {
-		if err := call(); !errors.Is(err, ErrNoSuchSignIn) {
-			t.Errorf("%s gave %v, want ErrNoSuchSignIn", name, err)
+		// ErrMalformedRequest and not ErrNoSuchSignIn, which is what this test asserted
+		// while its own doc comment said the opposite — the inconsistency #122's review
+		// found. Nothing has been looked up at this point, so "no sign-in is waiting for
+		// that state" is a claim the code is in no position to make.
+		if err := call(); !errors.Is(err, ErrMalformedRequest) {
+			t.Errorf("%s gave %v, want ErrMalformedRequest", name, err)
 		}
 	}
 
 	// The sign-in that was begun is still there: a malformed request must not spend
 	// somebody else's pending sign-in, and must not spend its own either.
 	if flow.Pending() != 1 {
-		t.Errorf("%d sign-ins are pending after two malformed requests, want 1", flow.Pending())
+		t.Errorf("%d sign-ins are pending after three malformed requests, want 1", flow.Pending())
+	}
+}
+
+// **The state is not a bearer credential**, which is the hole #122's review found and
+// this test is what closes it.
+//
+// The provider's redirect carries `code` and `state` in one URL, so everything that can
+// read that URL — a process watching the loopback callback, browser history, a referer
+// header — holds both. The PKCE verifier living on this side protects the *code*: it
+// cannot be exchanged by anybody who does not also hold the verifier, and only this
+// process does. It does nothing whatever about a stolen state, because before the fix
+// the client presented no secret of its own, so `code + state` was the entire price of
+// completing somebody else's sign-in as them.
+//
+// The second half of this test is the half that is easy to leave out. A wrong secret is
+// refused **without spending the pending sign-in**: consuming it would let the same
+// observer who cannot take the account destroy it instead, turning a takeover into a
+// denial. Leaving it standing is safe for the reason guessing is hopeless — the secret
+// is 32 bytes from crypto/rand — and it is what lets the client that started the
+// sign-in still finish it.
+func TestAStolenStateAndCodeCannotFinishSomebodyElsesSignIn(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	flow := newFlow(t, fake.config())
+
+	start, err := flow.Begin()
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	state, code := fake.issue(t, start)
+
+	// Everything the redirect URL carried, and nothing else.
+	if _, err := flow.Redeem(context.Background(), state, code, Secret("a secret nobody issued")); !errors.Is(err, ErrNoSuchSignIn) {
+		t.Errorf("a redemption without the finish secret gave %v, want ErrNoSuchSignIn", err)
+	}
+	if flow.Pending() != 1 {
+		t.Fatalf("%d sign-ins are pending after a refused redemption, want the one it could not take", flow.Pending())
+	}
+
+	// And the client that started it is unaffected.
+	if _, err := flow.Redeem(context.Background(), state, code, start.FinishSecret); err != nil {
+		t.Errorf("the sign-in could not be finished by the client that began it: %v", err)
+	}
+}
+
+// The state and the finish secret are different values, minted independently.
+//
+// Worth pinning because the cheap way to write the fix above is to hand the client back
+// something derived from the state, and a derivation the client can compute is one an
+// attacker holding the state can compute too.
+func TestTheFinishSecretIsNotTheState(t *testing.T) {
+	t.Parallel()
+
+	flow := newFlow(t, newFakeDiscord(t).config())
+
+	seen := make(map[Secret]struct{})
+	for range 8 {
+		start, err := flow.Begin()
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		if start.FinishSecret == start.State {
+			t.Fatal("the finish secret is the state, so the redirect URL carries both")
+		}
+		if start.FinishSecret.IsEmpty() {
+			t.Fatal("the finish secret is empty")
+		}
+		if _, repeated := seen[start.FinishSecret]; repeated {
+			t.Fatal("two sign-ins were given the same finish secret")
+		}
+		seen[start.FinishSecret] = struct{}{}
 	}
 }
 
@@ -307,7 +387,7 @@ func TestACodeIsRedeemedOnce(t *testing.T) {
 	}
 	state, code := fake.issue(t, start)
 
-	if _, err := flow.Redeem(context.Background(), state, code); err != nil {
+	if _, err := flow.Redeem(context.Background(), state, code, start.FinishSecret); err != nil {
 		t.Fatalf("the first redemption: %v", err)
 	}
 
@@ -320,7 +400,7 @@ func TestACodeIsRedeemedOnce(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	if _, err := flow.Redeem(context.Background(), state, code); !errors.Is(err, ErrNoSuchSignIn) {
+	if _, err := flow.Redeem(context.Background(), state, code, start.FinishSecret); !errors.Is(err, ErrNoSuchSignIn) {
 		t.Errorf("the second redemption gave %v, want ErrNoSuchSignIn", err)
 	}
 	if calls != 0 {
@@ -349,7 +429,7 @@ func TestAnExpiredSignInIsRefused(t *testing.T) {
 
 	flow.now = func() time.Time { return base.Add(2 * time.Minute) }
 
-	if _, err := flow.Redeem(context.Background(), state, code); !errors.Is(err, ErrNoSuchSignIn) {
+	if _, err := flow.Redeem(context.Background(), state, code, start.FinishSecret); !errors.Is(err, ErrNoSuchSignIn) {
 		t.Errorf("an expired sign-in gave %v, want ErrNoSuchSignIn", err)
 	}
 	if flow.Pending() != 0 {
@@ -380,7 +460,7 @@ func TestAMismatchedVerifierIsRefused(t *testing.T) {
 	flow.pending[state] = held
 	flow.mu.Unlock()
 
-	if _, err := flow.Redeem(context.Background(), state, code); !errors.Is(err, ErrRejected) {
+	if _, err := flow.Redeem(context.Background(), state, code, start.FinishSecret); !errors.Is(err, ErrRejected) {
 		t.Errorf("a mismatched verifier gave %v, want ErrRejected", err)
 	}
 }
@@ -521,7 +601,7 @@ func TestAnUnreachableProviderIsARefusal(t *testing.T) {
 
 	fake.server.Close()
 
-	if _, err := flow.Redeem(context.Background(), state, code); !errors.Is(err, ErrProviderUnavailable) {
+	if _, err := flow.Redeem(context.Background(), state, code, start.FinishSecret); !errors.Is(err, ErrProviderUnavailable) {
 		t.Errorf("an unreachable provider gave %v, want ErrProviderUnavailable", err)
 	}
 }
@@ -638,6 +718,18 @@ func TestNewRefusesAConfigurationItCouldNotActOn(t *testing.T) {
 		"an identity URL with no scheme":                    func(c *Config) { c.IdentityURL = "discord.com/api/users/@me" },
 		"an authorize URL with no scheme":                   func(c *Config) { c.AuthorizeURL = "discord.com/oauth2/authorize" },
 		"an endpoint with a scheme net/http cannot send to": func(c *Config) { c.TokenURL = "ftp://discord.com/token" },
+		// The redirect URI is checked exactly as the three endpoints are, which it was
+		// not until #122's review: a bare url.Parse accepts a relative reference, so a
+		// configuration that could only fail at the first sign-in — when the provider
+		// refuses an unusable redirect_uri — used to start a service.
+		"a redirect URI with no scheme": func(c *Config) { c.RedirectURI = "127.0.0.1:7780/discord/callback" },
+		"a redirect URI with no host":   func(c *Config) { c.RedirectURI = "http:///discord/callback" },
+		"a redirect URI that is not one": func(c *Config) {
+			c.RedirectURI = "://not a url"
+		},
+		"a redirect URI a browser cannot be sent to": func(c *Config) {
+			c.RedirectURI = "ftp://127.0.0.1/discord/callback"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -687,7 +779,7 @@ func TestConcurrentSignInsDoNotTreadOnEachOther(t *testing.T) {
 				return
 			}
 			state, code := fake.issue(t, start)
-			_, err = flow.Redeem(context.Background(), state, code)
+			_, err = flow.Redeem(context.Background(), state, code, start.FinishSecret)
 			done <- err
 		}()
 	}

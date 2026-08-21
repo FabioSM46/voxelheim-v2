@@ -96,8 +96,16 @@ const (
 )
 
 // startResponse is what a client needs to open a browser and come back.
+//
+// **`finish_secret` is the field that must never be put in a URL.** It is what proves
+// the caller finishing a sign-in is the one that started it, and it works only for as
+// long as it stays out of the browser: the redirect the provider sends back carries
+// `code` and `state` together, so anything that can read that URL already holds both.
+// A client keeps this in memory and presents it to `finish`. See
+// [discord.Start.FinishSecret].
 type startResponse struct {
 	State        string    `json:"state"`
+	FinishSecret string    `json:"finish_secret"`
 	AuthorizeURL string    `json:"authorize_url"`
 	ExpiresAt    time.Time `json:"expires_at"`
 }
@@ -111,6 +119,9 @@ type startResponse struct {
 type finishRequest struct {
 	State discord.Secret `json:"state"`
 	Code  discord.Secret `json:"code"`
+	// FinishSecret is the one field here the loopback listener did not catch: the
+	// client held it from `start`. Without it, `state` was a bearer credential.
+	FinishSecret discord.Secret `json:"finish_secret"`
 }
 
 // finishResponse is who the client now is. An account id and a display name, and no
@@ -149,9 +160,10 @@ func (s *service) signInStart(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, startResponse{
-		// Revealed exactly once, here, because the state has to reach the client or the
-		// flow cannot work. Everywhere else it stays inside discord.Secret.
+		// Revealed exactly once, here, because both have to reach the client or the flow
+		// cannot work. Everywhere else they stay inside discord.Secret.
 		State:        start.State.Reveal(),
+		FinishSecret: start.FinishSecret.Reveal(),
 		AuthorizeURL: start.AuthorizeURL,
 		ExpiresAt:    start.ExpiresAt,
 	})
@@ -181,8 +193,15 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	who, err := s.signin.flow.Redeem(r.Context(), req.State, req.Code)
+	who, err := s.signin.flow.Redeem(r.Context(), req.State, req.Code, req.FinishSecret)
 	switch {
+	case errors.Is(err, discord.ErrMalformedRequest):
+		// A field is missing, which is not the same as a sign-in that cannot be found:
+		// nothing was looked up, so answering `sign_in_not_found` would state something
+		// this service does not know. The two were one answer until #122's review.
+		s.log.Info("a sign-in was refused", "reason", "the redemption is missing a field")
+		s.refuse(w, http.StatusBadRequest, errMalformedRequest)
+		return
 	case errors.Is(err, discord.ErrNoSuchSignIn):
 		s.log.Info("a sign-in was refused", "reason", "no sign-in is waiting for that state")
 		s.refuse(w, http.StatusBadRequest, errSignInNotFound)

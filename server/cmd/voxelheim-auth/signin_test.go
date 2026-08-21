@@ -75,11 +75,16 @@ func start(t *testing.T, svc *service) startResponse {
 	return answer
 }
 
-// finish runs the finish endpoint with a state and a code.
-func finish(t *testing.T, svc *service, state, code string) *httptest.ResponseRecorder {
+// finish runs the finish endpoint with a state, a code and the secret `start` answered
+// with. The secret is the one field the browser never carried; see startResponse.
+func finish(t *testing.T, svc *service, state, code, finishSecret string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	body, err := json.Marshal(map[string]string{"state": state, "code": code})
+	body, err := json.Marshal(map[string]string{
+		"state":         state,
+		"code":          code,
+		"finish_secret": finishSecret,
+	})
 	if err != nil {
 		t.Fatalf("building the finish request: %v", err)
 	}
@@ -92,7 +97,7 @@ func signInOnce(t *testing.T, svc *service, fake *fakeDiscord) finishResponse {
 	t.Helper()
 
 	begun := start(t, svc)
-	rec := finish(t, svc, begun.State, fake.issue(t, begun.AuthorizeURL))
+	rec := finish(t, svc, begun.State, fake.issue(t, begun.AuthorizeURL), begun.FinishSecret)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /finish answered %d: %s", rec.Code, rec.Body.String())
 	}
@@ -240,7 +245,7 @@ func TestAStateThisServiceDidNotMintIsRefused(t *testing.T) {
 	begun := start(t, svc)
 	code := fake.issue(t, begun.AuthorizeURL)
 
-	rec := finish(t, svc, "a state nobody minted", code)
+	rec := finish(t, svc, "a state nobody minted", code, "a finish secret")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("an unknown state answered %d, want 400", rec.Code)
 	}
@@ -249,6 +254,48 @@ func TestAStateThisServiceDidNotMintIsRefused(t *testing.T) {
 	}
 	if files := accountFiles(t, accountsDir); len(files) != 0 {
 		t.Errorf("a refused sign-in left %d account records behind", len(files))
+	}
+}
+
+// The endpoint half of the state-is-not-a-bearer-credential rule, and the two refusals
+// it answers with are deliberately different codes.
+//
+// A body with no `finish_secret` is `malformed_request`: nothing was looked up, so this
+// service cannot say whether that sign-in exists. A body with the *wrong* secret is
+// `sign_in_not_found`, the same answer an unknown state gets, because an answer that
+// distinguished them would tell whoever is guessing that the state half is right.
+func TestFinishingWithoutTheSecretIsRefusedAndTheSignInSurvives(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeDiscord(t)
+	svc, accountsDir := signInService(t, fake, discard())
+
+	begun := start(t, svc)
+	code := fake.issue(t, begun.AuthorizeURL)
+
+	missing := finish(t, svc, begun.State, code, "")
+	if missing.Code != http.StatusBadRequest {
+		t.Errorf("a redemption with no finish secret answered %d, want 400", missing.Code)
+	}
+	if got := refusalCode(t, missing); got != errMalformedRequest {
+		t.Errorf("a redemption with no finish secret answered %q, want %q", got, errMalformedRequest)
+	}
+
+	wrong := finish(t, svc, begun.State, code, "a secret nobody issued")
+	if wrong.Code != http.StatusBadRequest {
+		t.Errorf("a redemption with the wrong finish secret answered %d, want 400", wrong.Code)
+	}
+	if got := refusalCode(t, wrong); got != errSignInNotFound {
+		t.Errorf("a redemption with the wrong finish secret answered %q, want %q", got, errSignInNotFound)
+	}
+
+	// Neither refusal minted anything, and neither spent the sign-in: the client that
+	// started it still finishes.
+	if files := accountFiles(t, accountsDir); len(files) != 0 {
+		t.Errorf("%d account records exist after two refusals, want none", len(files))
+	}
+	if rec := finish(t, svc, begun.State, code, begun.FinishSecret); rec.Code != http.StatusOK {
+		t.Fatalf("the sign-in that began this test answered %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -264,11 +311,11 @@ func TestASignInCanOnlyBeFinishedOnce(t *testing.T) {
 	begun := start(t, svc)
 	code := fake.issue(t, begun.AuthorizeURL)
 
-	if rec := finish(t, svc, begun.State, code); rec.Code != http.StatusOK {
+	if rec := finish(t, svc, begun.State, code, begun.FinishSecret); rec.Code != http.StatusOK {
 		t.Fatalf("the first finish answered %d: %s", rec.Code, rec.Body.String())
 	}
 
-	rec := finish(t, svc, begun.State, code)
+	rec := finish(t, svc, begun.State, code, begun.FinishSecret)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("a replayed sign-in answered %d, want 400", rec.Code)
 	}
@@ -333,7 +380,7 @@ func TestAProviderThatIsNotThereIsARefusalAndNotAnAccount(t *testing.T) {
 	code := fake.issue(t, begun.AuthorizeURL)
 	fake.server.Close()
 
-	rec := finish(t, svc, begun.State, code)
+	rec := finish(t, svc, begun.State, code, begun.FinishSecret)
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("an unreachable provider answered %d, want 502", rec.Code)
 	}
@@ -355,7 +402,7 @@ func TestACodeTheProviderRefusesIsARefusalOfItsOwn(t *testing.T) {
 
 	begun := start(t, svc)
 
-	rec := finish(t, svc, begun.State, "a code the provider never issued")
+	rec := finish(t, svc, begun.State, "a code the provider never issued", begun.FinishSecret)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("a refused code answered %d, want 400", rec.Code)
 	}
@@ -474,14 +521,14 @@ func TestNothingFromTheProviderReachesTheLog(t *testing.T) {
 			// exercised in one capture.
 			begun := start(t, svc)
 			code := fake.issue(t, begun.AuthorizeURL)
-			if rec := finish(t, svc, begun.State, code); rec.Code != http.StatusOK {
+			if rec := finish(t, svc, begun.State, code, begun.FinishSecret); rec.Code != http.StatusOK {
 				t.Fatalf("the sign-in answered %d: %s", rec.Code, rec.Body.String())
 			}
 			account := signInOnce(t, svc, fake)
 
-			finish(t, svc, begun.State, code)                          // a replayed sign-in
-			finish(t, svc, "a state nobody minted", code)              // an unknown state
-			call(t, svc, http.MethodPost, "/v1/signin/discord/finish", // a body that is not JSON
+			finish(t, svc, begun.State, code, begun.FinishSecret)            // a replayed sign-in
+			finish(t, svc, "a state nobody minted", code, "a finish secret") // an unknown state
+			call(t, svc, http.MethodPost, "/v1/signin/discord/finish",       // a body that is not JSON
 				`{"state":"`+begun.State+`","code":"`+code+`"`)
 
 			logged := out.String()

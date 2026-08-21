@@ -38,7 +38,8 @@
 //
 // # A refusal, never a half-succeeded sign-in
 //
-// Every way this can fail is one of four sentinels — [ErrNoSuchSignIn], [ErrRejected],
+// Every way this can fail is one of five sentinels — [ErrMalformedRequest],
+// [ErrNoSuchSignIn], [ErrRejected],
 // [ErrProviderUnavailable], [ErrTooManyPending] — and none of them returns an
 // identity. A provider that is unreachable, slow or answering an error is the third
 // one; the caller has nothing to key an account on and mints nothing.
@@ -116,6 +117,13 @@ var (
 	// getting warmer.
 	ErrNoSuchSignIn = errors.New("discord: no sign-in is waiting for that state")
 
+	// ErrMalformedRequest reports a redemption that is missing a field, which is a
+	// different thing from one whose state cannot be found: nothing was looked up, so
+	// nothing can be said about whether that sign-in exists. Kept apart because the
+	// caller answers the two differently and because [Redeem]'s own comment promised
+	// the distinction while the code collapsed it (found in review on #122).
+	ErrMalformedRequest = errors.New("discord: the redemption is missing a field")
+
 	// ErrRejected reports that Discord refused the authorization code — it was wrong,
 	// it has been used, it has expired, or the PKCE verifier does not match the
 	// challenge the authorize call carried.
@@ -184,6 +192,20 @@ type Start struct {
 	// to the verifier that was minted for it.
 	State Secret
 
+	// FinishSecret is what proves the caller redeeming this sign-in is the one that
+	// started it, and **it is deliberately the one value here that never travels
+	// through the browser**.
+	//
+	// Without it the state was a bearer credential, which is the hole the review on
+	// #122 found. The provider's redirect carries `code` and `state` in one URL, so
+	// anything that observes that URL — a process watching the loopback callback,
+	// browser history, a referer — held everything `finish` asked for. The verifier
+	// living on this side is what makes the exchange safe from a stolen *code*; it does
+	// nothing about a stolen *state*, because the client presented no secret of its
+	// own. This is that secret: minted here, answered to the caller of `start`, and
+	// required by `finish`.
+	FinishSecret Secret
+
 	// AuthorizeURL is where the browser goes.
 	AuthorizeURL string
 
@@ -217,7 +239,9 @@ type Flow struct {
 
 // pendingSignIn is one sign-in waiting for its authorization code.
 type pendingSignIn struct {
-	verifier  Secret
+	verifier Secret
+	// finish is compared against what the redeemer presents. See [Start.FinishSecret].
+	finish    Secret
 	expiresAt time.Time
 }
 
@@ -233,8 +257,13 @@ func New(cfg Config) (*Flow, error) {
 	if strings.TrimSpace(cfg.RedirectURI) == "" {
 		return nil, errors.New("discord: the redirect URI must be named; it is where the provider sends the browser back to")
 	}
-	if _, err := url.Parse(cfg.RedirectURI); err != nil {
-		return nil, fmt.Errorf("discord: the redirect URI %q is not a URL: %w", cfg.RedirectURI, err)
+	// Through `endpoint` rather than a bare url.Parse, which accepts a relative
+	// reference: `discord.example/callback` parses cleanly and names no host, so a
+	// configuration that can only fail at the *first sign-in* — when the provider
+	// refuses an unusable redirect_uri — passed this check. The comment above says
+	// misconfiguration is decided here, and now it is (found in review on #122).
+	if _, err := endpoint("redirect URI", cfg.RedirectURI); err != nil {
+		return nil, err
 	}
 
 	cfg.AuthorizeURL = orDefault(cfg.AuthorizeURL, DefaultAuthorizeURL)

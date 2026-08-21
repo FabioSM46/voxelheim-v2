@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -34,9 +35,15 @@ func (f *Flow) Begin() (Start, error) {
 	if err != nil {
 		return Start{}, fmt.Errorf("discord: minting the PKCE verifier: %w", err)
 	}
+	// The third secret, and the only one of the three that neither goes to the provider
+	// nor comes back through the browser. See [Start.FinishSecret].
+	finish, err := f.mintSecret()
+	if err != nil {
+		return Start{}, fmt.Errorf("discord: minting the finish secret: %w", err)
+	}
 
 	expiresAt := f.now().Add(f.cfg.TTL).UTC()
-	if err := f.remember(state, verifier, expiresAt); err != nil {
+	if err := f.remember(state, verifier, finish, expiresAt); err != nil {
 		return Start{}, err
 	}
 
@@ -54,7 +61,12 @@ func (f *Flow) Begin() (Start, error) {
 	query.Set("code_challenge_method", "S256")
 	authorize.RawQuery = query.Encode()
 
-	return Start{State: state, AuthorizeURL: authorize.String(), ExpiresAt: expiresAt}, nil
+	return Start{
+		State:        state,
+		FinishSecret: finish,
+		AuthorizeURL: authorize.String(),
+		ExpiresAt:    expiresAt,
+	}, nil
 }
 
 // Redeem finishes a sign-in and answers with who the provider says this is.
@@ -70,14 +82,22 @@ func (f *Flow) Begin() (Start, error) {
 // A code this service never issued a state for is [ErrNoSuchSignIn] and reaches no
 // network at all, so an unknown state cannot be used to make this service issue
 // requests.
-func (f *Flow) Redeem(ctx context.Context, state, code Secret) (Identity, error) {
-	if state.IsEmpty() || code.IsEmpty() {
+//
+// **finish is what makes the state something other than a bearer credential**, and it
+// is required for the reason [Start.FinishSecret] records: `code` and `state` arrive
+// together in the provider's redirect, so whoever sees that URL holds both. A redeemer
+// must also hold the secret this service answered `start` with, which never entered a
+// browser.
+func (f *Flow) Redeem(ctx context.Context, state, code, finish Secret) (Identity, error) {
+	if state.IsEmpty() || code.IsEmpty() || finish.IsEmpty() {
 		// Not ErrNoSuchSignIn: an absent field is a malformed request rather than a
 		// sign-in that cannot be found, and the caller answers the two differently.
-		return Identity{}, fmt.Errorf("%w: the state and the code must both be present", ErrNoSuchSignIn)
+		// Nothing is looked up here, so nothing is known about whether that state
+		// exists — saying "no such sign-in" would be a claim this branch cannot make.
+		return Identity{}, fmt.Errorf("%w: the state, the code and the finish secret must all be present", ErrMalformedRequest)
 	}
 
-	verifier, err := f.consume(state)
+	verifier, err := f.consume(state, finish)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -124,7 +144,7 @@ func challengeFor(verifier Secret) string {
 // grows: a service nobody is signing in to needs no goroutine ticking over an empty
 // map, and one that is busy sweeps on every request. The cap is checked after the
 // sweep, so a table full of expired entries is not a refusal.
-func (f *Flow) remember(state, verifier Secret, expiresAt time.Time) error {
+func (f *Flow) remember(state, verifier, finish Secret, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -138,26 +158,40 @@ func (f *Flow) remember(state, verifier Secret, expiresAt time.Time) error {
 		return fmt.Errorf("%w: %d are already waiting", ErrTooManyPending, len(f.pending))
 	}
 
-	f.pending[state] = pendingSignIn{verifier: verifier, expiresAt: expiresAt}
+	f.pending[state] = pendingSignIn{verifier: verifier, finish: finish, expiresAt: expiresAt}
 	return nil
 }
 
 // consume takes the verifier a state names, removing it, and refuses a state that is
-// unknown or expired.
+// unknown, expired, or presented without the secret that started it.
+//
+// **The whole of it happens under one lock**, which is what keeps "a code may be
+// redeemed once" true: a lookup, a comparison and a removal split across three
+// acquisitions would let two requests carrying the same state both find the verifier.
 //
 // **Removed whether or not it had expired**, so that a state cannot be used twice even
-// by racing its own expiry.
+// by racing its own expiry — but *not* removed when the finish secret is wrong, and
+// that asymmetry is deliberate. Consuming on a mismatch would hand anyone who saw the
+// redirect URL a way to destroy a sign-in they cannot complete, which is the same
+// attacker the secret exists to stop, achieving a denial instead of a takeover. It is
+// safe to leave it: guessing 32 bytes is not something a retry budget helps with.
 //
-// Nothing here compares a state byte by byte — the state is a map key and the lookup
-// is the whole of the check — which is why there is no constant-time comparison to get
-// right. It is the same shape internal/identity resolves a token in: hash it, look
-// *that* up, never compare.
-func (f *Flow) consume(state Secret) (Secret, error) {
+// The state itself is still never compared byte by byte — it is a map key, the shape
+// internal/identity resolves a token in. The finish secret is compared, so it is
+// compared in constant time: it is the one value here an attacker holds a guess at.
+func (f *Flow) consume(state, finish Secret) (Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	held, found := f.pending[state]
 	if !found {
+		return "", ErrNoSuchSignIn
+	}
+
+	if subtle.ConstantTimeCompare([]byte(held.finish.Reveal()), []byte(finish.Reveal())) != 1 {
+		// The same answer as an unknown state, deliberately, and for the reason
+		// [ErrNoSuchSignIn] gives: an error that said "that state is real, your secret
+		// is not" tells whoever is guessing which guesses are getting warmer.
 		return "", ErrNoSuchSignIn
 	}
 	delete(f.pending, state)
