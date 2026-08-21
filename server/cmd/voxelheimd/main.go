@@ -61,18 +61,22 @@ func main() {
 }
 
 type options struct {
-	listen           string
-	seed             int64
-	worldDir         string
-	worldName        string
-	accountService   string
-	ticketKey        string
-	tickRate         uint
-	viewDistance     uint
-	handshakeTimeout time.Duration
-	idleTimeout      time.Duration
-	logLevel         string
-	logFormat        string
+	listen         string
+	seed           int64
+	worldDir       string
+	worldName      string
+	accountService string
+	ticketKey      string
+	// Where this server tells the account service it can be reached, and the file its
+	// registration key is read from. The key itself is never a flag — see announce.go.
+	announceAddress     string
+	registrationKeyFile string
+	tickRate            uint
+	viewDistance        uint
+	handshakeTimeout    time.Duration
+	idleTimeout         time.Duration
+	logLevel            string
+	logFormat           string
 }
 
 func parseFlags() options {
@@ -97,6 +101,15 @@ func parseFlags() options {
 		"the account service's Ed25519 public key in hex, as GET "+ticketKeyPath+" publishes it and as that "+
 			"service prints it at startup. Use it instead of -account-service when the key is copied by hand "+
 			"rather than fetched. Exactly one of the two is required")
+	flag.StringVar(&opts.announceAddress, "announce-address", "",
+		"the address players dial this server at, as host:port, announced to -account-service so it appears in the "+
+			"list they choose from. **Separate from -listen**: a server bound to 0.0.0.0 has to announce something a "+
+			"player can actually reach, and only its operator knows what that is. Announcing is off unless this, "+
+			"-account-service and a registration key are all given, and a failed announce is never fatal")
+	flag.StringVar(&opts.registrationKeyFile, "registration-key-file", "",
+		"a file holding the registration key this server announces with. The key itself is never a flag — a flag "+
+			"value is visible in `ps` to every user on this machine and lands in shell history — so it comes from "+
+			"this file or from "+registrationKeyEnv+", and never from both")
 	flag.UintVar(&opts.tickRate, "tick-rate", game.DefaultTickRate, "authoritative simulation ticks per second (1..255)")
 	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
 	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
@@ -236,10 +249,19 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return err
 	}
 
-	tr, err := listen(opts, log)
+	tr, fingerprint, err := listen(opts, log)
 	if err != nil {
 		return err
 	}
+
+	// Telling the list where home is, if an operator asked for it. Built here because this
+	// is where the fingerprint above is in hand, and it is the same number the startup line
+	// carries and a client will demand — there is one source for it, never two.
+	//
+	// **This can refuse to announce and can never refuse to start.** A nil announcer is a
+	// server that keeps every player it has and simply does not appear in the list; see
+	// newAnnouncer, which says so in one startup line.
+	announce := newAnnouncer(opts, fingerprint, log)
 
 	// Built before the simulation because the simulation is handed its identity source:
 	// players are named by the registry as connections arrive, and every other entity —
@@ -297,6 +319,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		clock:      clock,
 		sim:        sim,
 		saveEvery:  world.DefaultSaveInterval,
+		announce:   announce,
 		log:        log,
 	}
 
@@ -358,7 +381,13 @@ func openWorld(opts options, seed int64, log *slog.Logger) (*world.Cache, error)
 // compares against a refusal, and an operator who cannot produce it on demand cannot
 // answer the one question a refused client asks. It gives nothing away — it is a hash of
 // a certificate the server hands to everyone who connects.
-func listen(opts options, log *slog.Logger) (transport.Transport, error) {
+//
+// **It is returned as well as logged**, because the announcer sends it to the account
+// service and a client now takes its expectation from that list rather than from a pinned
+// file. One certificate, one digest, one function that computes it: the number an operator
+// reads in the line below, the number in the list, and the number a client demands are the
+// same string or the whole chain is a server nobody can join.
+func listen(opts options, log *slog.Logger) (transport.Transport, string, error) {
 	var (
 		cert tls.Certificate
 		err  error
@@ -374,16 +403,20 @@ func listen(opts options, log *slog.Logger) (transport.Transport, error) {
 		cert, err = certs.LoadOrCreate(opts.worldDir)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("preparing the server certificate: %w", err)
+		return nil, "", fmt.Errorf("preparing the server certificate: %w", err)
 	}
 
 	fingerprint, err := certs.Fingerprint(cert)
 	if err != nil {
-		return nil, fmt.Errorf("reading the server certificate: %w", err)
+		return nil, "", fmt.Errorf("reading the server certificate: %w", err)
 	}
 	log.Info("listening with an encrypted session", "certificate_sha256", fingerprint)
 
-	return transport.ListenTLS(opts.listen, cert)
+	tr, err := transport.ListenTLS(opts.listen, cert)
+	if err != nil {
+		return nil, "", err
+	}
+	return tr, fingerprint, nil
 }
 
 // openPlayers opens the player store under the same -world-dir, or answers nil for
@@ -556,6 +589,12 @@ type server struct {
 	// shorten it so the loop can be observed without waiting on the real one.
 	saveEvery time.Duration
 
+	// announce tells the account service where this server is, or is nil when nobody asked
+	// it to. Nil is the ordinary state — a LAN game, a test, an operator who has registered
+	// nothing — and its loop returns at once, which is the shape a nil player store already
+	// uses here.
+	announce *announcer
+
 	log *slog.Logger
 }
 
@@ -651,6 +690,19 @@ func (s *server) run(ctx context.Context) {
 		defer workers.Done()
 		if err := s.saveClockLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Error("the clock autosave loop stopped", "error", err)
+		}
+	}()
+
+	// Telling the account service where this server is, on the same worker discipline as the
+	// autosaves above: it ends on ctx, it is waited for in shutdown, and a pass that fails is
+	// logged and retried rather than escalated. **A nil announcer's loop returns at once**,
+	// which is what makes "nobody configured this" cost one function call rather than a
+	// branch at this call site.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.announce.loop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the announce loop stopped", "error", err)
 		}
 	}()
 
