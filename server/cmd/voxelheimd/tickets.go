@@ -132,6 +132,10 @@ func openVerifier(ctx context.Context, opts options, log *slog.Logger) (*session
 }
 
 // ticketKey answers the account service's public key and where it came from.
+//
+// "Where" is the *redacted* spelling of the endpoint. This string exists in order to be
+// logged, and `-account-service` is a flag value that may carry userinfo, so the one
+// thing it must not be is the address verbatim.
 func ticketKey(ctx context.Context, opts options, log *slog.Logger) (ed25519.PublicKey, string, error) {
 	if err := opts.validateTicketKeySource(); err != nil {
 		return nil, "", err
@@ -146,7 +150,7 @@ func ticketKey(ctx context.Context, opts options, log *slog.Logger) (ed25519.Pub
 		return nil, "", err
 	}
 	key, err := fetchTicketKey(ctx, base, log)
-	return key, base.JoinPath(ticketKeyPath).String(), err
+	return key, base.JoinPath(ticketKeyPath).Redacted(), err
 }
 
 // parseTicketKey reads a public key an operator or an endpoint stated in hex.
@@ -215,8 +219,16 @@ func fetchTicketKey(ctx context.Context, base *url.URL, log *slog.Logger) (ed255
 	ctx, cancel := context.WithTimeout(ctx, fetchTicketKeyTimeout)
 	defer cancel()
 
-	endpoint := base.JoinPath(ticketKeyPath).String()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	// Requested in full and named redacted, and the split is the point. The request
+	// needs whatever userinfo the operator wrote into `-account-service`, because that
+	// is how a password gets to a service that wants one; every message this server
+	// writes about the address is the `Redacted` spelling, because that is how the
+	// password stops here. Same call the warning above already made, applied to the one
+	// string that is both a target and a thing to write down.
+	target := base.JoinPath(ticketKeyPath)
+	endpoint := target.Redacted()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, err)
 	}
@@ -226,14 +238,19 @@ func fetchTicketKey(ctx context.Context, base *url.URL, log *slog.Logger) (ed255
 	if err != nil {
 		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, err)
 	}
-	defer func() {
-		// Drained before closing so the connection can be reused — a habit rather than
-		// a need for a request made once — and both results discarded, because a
-		// failure to tidy up after a response already read is not a reason to refuse to
-		// start.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxTicketKeyResponseBytes))
-		_ = resp.Body.Close()
-	}()
+	// Closed, not drained. Draining a response before closing it is what keeps its
+	// connection reusable, and there is no second request to reuse one for: this
+	// function is the last thing on the whole admission path that touches the network,
+	// which is the property `openVerifier` exists to establish. On the success path the
+	// body is read to EOF below anyway, so the drain never bought the reuse there
+	// either — it only ever ran on a path already returning an error.
+	//
+	// **And on those paths it cost the entire startup budget.** The deadline above
+	// bounds a body read, so a service that advertises a length and then goes quiet
+	// could not hang this call — but the drain would sit on it until that deadline
+	// fired, copying nothing to io.Discard while an operator waited, and then refuse to
+	// start with the message it already had ten seconds earlier.
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		// The status and nothing from the body: whatever answered is not known to be

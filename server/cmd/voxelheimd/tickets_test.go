@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -287,6 +289,77 @@ func TestTheStartupLineNamesTheKeyAndTheWorld(t *testing.T) {
 	}
 }
 
+// A password written into -account-service reaches neither a log line nor a refusal.
+//
+// An address is a flag value, and a flag value can carry userinfo: nothing about
+// `http://ops:<secret>@accounts.example` is malformed, so nothing refuses it, and the
+// credential is then inside a string this server writes down twice — once as the startup
+// line's `ticket_key_source`, once inside every message naming the endpoint it failed to
+// read. `url.URL.Redacted` is the call the plaintext warning already made; what this pins
+// is that every other spelling of the address goes through it too.
+//
+// Both directions are here on purpose. The startup line is the one the review found, and
+// a refusal is the path an operator is *more* likely to paste somewhere, because a server
+// that came up cleanly gives nobody a reason to copy its log.
+func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
+	t.Parallel()
+
+	const password = "not-a-real-password"
+
+	withPassword := func(t *testing.T, raw string) string {
+		t.Helper()
+
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", raw, err)
+		}
+		parsed.User = url.UserPassword("ops", password)
+		return parsed.String()
+	}
+
+	t.Run("the startup line", func(t *testing.T) {
+		t.Parallel()
+
+		service := accountService(t, publishedKey(), http.StatusOK)
+
+		var logged strings.Builder
+		log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		if _, err := openVerifier(context.Background(), options{
+			worldName:      testWorldName,
+			accountService: withPassword(t, service.URL),
+		}, log); err != nil {
+			t.Fatalf("openVerifier: %v", err)
+		}
+
+		if strings.Contains(logged.String(), password) {
+			t.Error("the password from -account-service was written to the startup log")
+		}
+		if !strings.Contains(logged.String(), ticketKeyPath) {
+			t.Error("the startup log no longer names the endpoint the key was read from")
+		}
+	})
+
+	t.Run("a refusal", func(t *testing.T) {
+		t.Parallel()
+
+		service := accountService(t, publishedKey(), http.StatusInternalServerError)
+
+		_, err := openVerifier(context.Background(), options{
+			worldName:      testWorldName,
+			accountService: withPassword(t, service.URL),
+		}, discard())
+		if err == nil {
+			t.Fatal("a key was read from a service that answered 500")
+		}
+		if strings.Contains(err.Error(), password) {
+			t.Error("the password from -account-service is inside the refusal")
+		}
+		if !strings.Contains(err.Error(), ticketKeyPath) {
+			t.Error("the refusal no longer names the endpoint it could not read")
+		}
+	})
+}
+
 // A key copied by hand is read the same way whichever case it was written in, because
 // it is decoded to bytes rather than compared as text.
 //
@@ -346,5 +419,68 @@ func TestTheKeyFetchIsBounded(t *testing.T) {
 	}
 	if fetchTicketKeyTimeout > time.Minute {
 		t.Errorf("the fetch waits up to %s, which is longer than anybody watches a start", fetchTicketKeyTimeout)
+	}
+}
+
+// A service that advertises a body and then goes quiet costs the start nothing.
+//
+// The deadline on the request bounds a body read, so this was never the hang it looks
+// like — but a response left unread on the way out is still a response somebody has to
+// stop waiting for, and draining one for tidiness meant sitting on that deadline to copy
+// nothing to io.Discard. The response is closed rather than drained, so the refusal an
+// operator gets is the one the status line already justified, at the moment it arrived
+// rather than a fetch budget later.
+func TestAStallingAccountServiceDoesNotCostTheStartBudget(t *testing.T) {
+	t.Parallel()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	// Closed before the listener is, because cleanups run in reverse: the handler below
+	// is parked on it, and a handler still parked is a connection that will not close.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				_, _ = c.Read(make([]byte, 4096))
+				// A refusal, a length far past anything a key response may be, and then
+				// nothing whatsoever until this test is over.
+				_, _ = io.WriteString(c, "HTTP/1.1 500 Internal Server Error\r\n"+
+					"Content-Type: application/json\r\nContent-Length: 1000000\r\n\r\n")
+				<-release
+			}(conn)
+		}
+	}()
+
+	// Generous beside the microseconds this takes and far under fetchTicketKeyTimeout,
+	// so what a failure here means is that the drain came back, not that the machine is
+	// slow.
+	const patience = 2 * time.Second
+
+	base := mustParseService(t, "http://"+listener.Addr().String())
+	refused := make(chan error, 1)
+	go func() {
+		_, ferr := fetchTicketKey(context.Background(), base, discard())
+		refused <- ferr
+	}()
+
+	select {
+	case ferr := <-refused:
+		if ferr == nil {
+			t.Fatal("a key was read from a service that answered 500 and then sent no body")
+		}
+	case <-time.After(patience):
+		t.Fatalf("the fetch was still waiting on a silent body after %s, which is the start "+
+			"budget spent on a response nobody reads", patience)
 	}
 }
