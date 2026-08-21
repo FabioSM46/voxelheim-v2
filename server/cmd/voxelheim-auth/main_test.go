@@ -442,7 +442,22 @@ func TestARefusedStartCreatesNothing(t *testing.T) {
 			opts := validOptions(t)
 			misconfigure(&opts)
 
-			if err := run(context.Background(), opts, discard()); err == nil {
+			// **A cancelled context, so that a case which stops being a refusal fails
+			// this test instead of hanging it.** `run` blocks until its context ends
+			// once it has bound a port, so a misconfiguration that is one day accepted
+			// — or a case added here that never was one — would take the whole suite
+			// with it, and a suite that hangs says nothing about what broke. Cancelled
+			// up front, `run` returns either the refusal this asserts or `nil`, and
+			// `nil` is a failure with a sentence attached.
+			//
+			// Found in review on #141. The fix was reported as landed there and did
+			// not: it was reverted by the cleanup of its own verification probe and
+			// only the neighbouring comment reached develop, so the commit message on
+			// 63a638c claims more than that commit carries.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			if err := run(ctx, opts, discard()); err == nil {
 				t.Fatal("run started with a configuration it cannot act on")
 			}
 
