@@ -91,7 +91,7 @@ jobs:
           chmod +x scripts/gh-automation.sh
 
           # Get all open, non-draft PRs
-          PR_LIST=$(gh pr list --state open --json number --jq '.[].number' --repo "${GITHUB_REPOSITORY:-FabioSM46/voxelheim}")
+          PR_LIST=$(gh pr list --state open --json number --jq '.[].number' --repo "$GITHUB_REPOSITORY")
 
           if [ -z "$PR_LIST" ]; then
             echo "No open PRs found"
@@ -145,17 +145,22 @@ jobs:
               bash scripts/gh-automation.sh pr-label "$pr" add "READY TO MERGE"
               bash scripts/gh-automation.sh pr-label "$pr" remove "needs-review"
               bash scripts/gh-automation.sh pr-label "$pr" remove "needs-work"
-            elif [ "$CI_FAILING" != "0" ] || [ "$CHANGES_REQUESTED" != "0" ]; then
+            # `needs-work` asserts a real failure, so only a positive count may
+            # select it. -1 and empty are fail-closed sentinels: they block READY
+            # TO MERGE, but they do not prove that CI failed or a review requested
+            # changes. Those states fall through to needs-review below.
+            elif [[ "$CI_FAILING" =~ ^[1-9][0-9]*$ ]] || [[ "$CHANGES_REQUESTED" =~ ^[1-9][0-9]*$ ]]; then
               echo "  [ACTION] CI failing or changes requested → adding needs-work"
               bash scripts/gh-automation.sh pr-label "$pr" add "needs-work"
               bash scripts/gh-automation.sh pr-label "$pr" remove "needs-review"
               bash scripts/gh-automation.sh pr-label "$pr" remove "READY TO MERGE"
-            elif [ "$CI_PENDING" != "0" ] || [ "$UNRESOLVED" != "0" ] || [ "$DEEPSEEK_UNREAD" != "0" ] || [ "$CHECKS_MISSING" != "0" ] || [ "$REQUIRED_CHECK_STATE" != "SUCCESS" ] || [ "$MERGEABLE" != "MERGEABLE" ]; then
-              # Missing checks and merge conflicts belong in THIS branch, not needs-work:
-              # nothing has failed, the work simply has not run yet. Without them a
-              # conflicting PR scores 0 on every count, matches no branch, and falls
-              # through to "Unknown state — no label changes", silently keeping a stale
-              # label (clinic-deck #317).
+            else
+              # Every other non-ready state belongs here. That includes pending
+              # work, unresolved threads, missing checks, merge conflicts, an
+              # unfinished DeepSeek review, and every unreadable sentinel. Keeping
+              # this as the final branch means a new readiness condition cannot fall
+              # through to "no label changes" and silently retain stale READY TO
+              # MERGE or needs-work state.
               #
               # Unread DeepSeek body findings belong here for the same reason and with an
               # extra edge: unlike every other DeepSeek signal, this one is NOT monotonic.
@@ -167,7 +172,5 @@ jobs:
               bash scripts/gh-automation.sh pr-label "$pr" add "needs-review"
               bash scripts/gh-automation.sh pr-label "$pr" remove "needs-work"
               bash scripts/gh-automation.sh pr-label "$pr" remove "READY TO MERGE"
-            else
-              echo "  [INFO] Unknown state — no label changes"
             fi
           done

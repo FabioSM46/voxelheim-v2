@@ -15,6 +15,7 @@ WORKFLOW="${REPO_ROOT}/.github/workflows/iteration-lifecycle.yml"
 source "$SCRIPT"
 # The sourced helper enables -e; failure paths below are assertions.
 set +e
+REPO="example/repository"
 
 pass=0
 fail=0
