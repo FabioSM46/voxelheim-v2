@@ -175,11 +175,11 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // and nothing else. Bumping ProtocolVersion.Current for that would refuse every peer
 // already on the wire in exchange for a message they were never going to read — so the
 // number is asserted here rather than left to whoever edits the list below.
-func TestProtocolV6KeepsEveryUnionTagAndStaysAtSix(t *testing.T) {
+func TestProtocolV7AppendsFourTagsAndMovesToSeven(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 6 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 6", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 7 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 7", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -202,6 +202,10 @@ func TestProtocolV6KeepsEveryUnionTagAndStaysAtSix(t *testing.T) {
 		vnet.PayloadPlaceStructureRequest,
 		vnet.PayloadRemoveStructureRequest,
 		vnet.PayloadActionRefused,
+		vnet.PayloadServerCharacterList,
+		vnet.PayloadSelectCharacterRequest,
+		vnet.PayloadCreateCharacterRequest,
+		vnet.PayloadPlayerAppearance,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -210,11 +214,13 @@ func TestProtocolV6KeepsEveryUnionTagAndStaysAtSix(t *testing.T) {
 	}
 
 	// Membership, not just ordering. A swing is still answered by the next snapshot and
-	// nothing else, and so is a craft and a repair; a *refused* placement is now answered
-	// by ActionRefused, and an accepted one is not — there is still no acknowledgement
+	// nothing else, and so is a craft and a repair; a *refused* placement is answered by
+	// ActionRefused, and an accepted one is not — there is still no acknowledgement
 	// payload anywhere in this contract, and the size of the union is the only place that
-	// claim can be checked. NONE is the implicit zero member every FlatBuffers union
-	// carries.
+	// claim can be checked. V7's four are the handshake's new phase and the appearance
+	// that rides beside it, and none of them acknowledges anything either: a character is
+	// chosen and the answer is ServerWelcome. NONE is the implicit zero member every
+	// FlatBuffers union carries.
 	if got := len(vnet.EnumNamesPayload); got != len(want)+1 {
 		t.Errorf("Payload has %d members, want %d plus NONE — a new member needs a decision, not a test edit", got, len(want))
 	}
@@ -2040,5 +2046,499 @@ func TestDecodeIsTotalOverADamagedRepairRequest(t *testing.T) {
 		damaged := bytes.Clone(valid)
 		damaged[i] ^= 0xFF
 		_, _ = Decode(damaged)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protocol V7 — the session ticket, the character phase, and the face
+// ---------------------------------------------------------------------------
+
+// anAppearance is a complete, legal-looking appearance for the round-trip tests.
+// Every field is distinct so a transposition shows up as a wrong value rather than
+// as an equal one.
+func anAppearance() Appearance {
+	return Appearance{
+		SkinColor:     0x00E3C4A0,
+		ShirtColor:    0x004A5D3B,
+		TrousersColor: 0x002B2118,
+		ShoesColor:    0x00553311,
+		HairModel:     vnet.HairModelBraided,
+		HairColor:     0x00B07A32,
+	}
+}
+
+// TestClientHelloRoundTripsATicketOfAnyLength is the ticket's half of
+// TestClientHelloRoundTripsATokenOfAnyLength, and it is deliberately the same shape.
+//
+// The contract says a session_ticket is absent, empty or exactly SessionTicketLen
+// bytes and that anything else is RejectReason.BAD_REQUEST. That is a refusal with a
+// *reply*, so it belongs to the handshake and not to this package: a decoder that
+// shortened it to an error would close the connection with nothing said.
+// session.Identities.Resolve is where the length is judged, and
+// TestAWrongLengthTicketIsRefusedBeforeAnythingIsLookedUp is where that is pinned.
+func TestClientHelloRoundTripsATicketOfAnyLength(t *testing.T) {
+	t.Parallel()
+
+	sizes := map[string]int{
+		"no ticket at all": 0,
+		"a whole ticket":   SessionTicketLen,
+		// The lengths the handshake refuses. They have to decode for that refusal to be
+		// reachable at all: a frame that would not parse could only be answered with a
+		// closed connection.
+		"one byte":              1,
+		"one byte short":        SessionTicketLen - 1,
+		"one byte too many":     SessionTicketLen + 1,
+		"a token-length ticket": 32,
+	}
+
+	for name, size := range sizes {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			ticket := make([]byte, size)
+			for i := range ticket {
+				ticket[i] = byte(i + 1)
+			}
+
+			msg, err := Decode(EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", ticket))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if msg.ClientHello == nil {
+				t.Fatal("ClientHello payload is nil")
+			}
+			if got := msg.ClientHello.SessionTicket; !bytes.Equal(got, ticket) {
+				t.Errorf("SessionTicket = %d bytes, want the %d given, byte for byte", len(got), size)
+			}
+		})
+	}
+}
+
+// The two ways of saying "I present no account" are the same thing on the wire and
+// must stay the same thing here — the rule player_token already follows one field up.
+func TestAnAbsentAndAnEmptyTicketAreTheSame(t *testing.T) {
+	t.Parallel()
+
+	absent, err := Decode(EncodeClientHello(vnet.ProtocolVersionCurrent, "Eivor"))
+	if err != nil {
+		t.Fatalf("Decode of a hello with no ticket: %v", err)
+	}
+	empty, err := Decode(EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", []byte{}))
+	if err != nil {
+		t.Fatalf("Decode of a hello with an empty ticket: %v", err)
+	}
+
+	if len(absent.ClientHello.SessionTicket) != 0 || len(empty.ClientHello.SessionTicket) != 0 {
+		t.Errorf("absent is %d bytes and empty is %d; both must be zero-length",
+			len(absent.ClientHello.SessionTicket), len(empty.ClientHello.SessionTicket))
+	}
+}
+
+// A hello may carry both fields, and the two must not be confused for one another: a
+// V6 peer writes only the token, a V7 peer writes only the ticket, and a peer in
+// between writes both.
+func TestAHelloCarriesTheTokenAndTheTicketApart(t *testing.T) {
+	t.Parallel()
+
+	token := bytes.Repeat([]byte{0xA1}, 32)
+	ticket := bytes.Repeat([]byte{0xB2}, SessionTicketLen)
+
+	msg, err := Decode(EncodeClientHelloFull(vnet.ProtocolVersionCurrent, "Eivor", token, ticket))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got := msg.ClientHello.PlayerToken; !bytes.Equal(got, token) {
+		t.Errorf("PlayerToken = %d bytes, want the 32 given", len(got))
+	}
+	if got := msg.ClientHello.SessionTicket; !bytes.Equal(got, ticket) {
+		t.Errorf("SessionTicket = %d bytes, want the %d given", len(got), SessionTicketLen)
+	}
+}
+
+// The decoded ticket must not be a view over the frame, for the reason the token must
+// not be: Decode is the one place untrusted bytes are read, and a live view handed to
+// a caller moves the recover it depends on away from the code that needs it.
+func TestTheDecodedTicketDoesNotAliasTheFrame(t *testing.T) {
+	t.Parallel()
+
+	ticket := make([]byte, SessionTicketLen)
+	for i := range ticket {
+		ticket[i] = byte(i)
+	}
+	frame := EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", ticket)
+
+	msg, err := Decode(frame)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	decoded := msg.ClientHello.SessionTicket
+
+	for i := range frame {
+		frame[i] = 0
+	}
+	if !bytes.Equal(decoded, ticket) {
+		t.Error("the decoded ticket changed when the frame was overwritten; it aliases the buffer")
+	}
+}
+
+// V7's members sit where they were appended and the enums they were appended to did
+// not move. The value is an integer on the wire: a renumbered RejectReason relabels
+// every refusal already written to a log, and a renumbered HairModel puts a different
+// head on every character already stored.
+func TestV7AppendsWithoutMovingWhatCameBefore(t *testing.T) {
+	t.Parallel()
+
+	for name, pair := range map[string][2]byte{
+		// The three the contract had before V7, restated so a renumbering fails here.
+		"RejectReason.PROTOCOL_MISMATCH": {byte(vnet.RejectReasonPROTOCOL_MISMATCH), 0},
+		"RejectReason.SERVER_FULL":       {byte(vnet.RejectReasonSERVER_FULL), 1},
+		"RejectReason.BAD_REQUEST":       {byte(vnet.RejectReasonBAD_REQUEST), 2},
+		"RejectReason.ALREADY_CONNECTED": {byte(vnet.RejectReasonALREADY_CONNECTED), 3},
+		// Appended after ALREADY_CONNECTED = 3.
+		"RejectReason.CHARACTER_NAME_TAKEN":    {byte(vnet.RejectReasonCHARACTER_NAME_TAKEN), 4},
+		"RejectReason.CHARACTER_NAME_REFUSED":  {byte(vnet.RejectReasonCHARACTER_NAME_REFUSED), 5},
+		"RejectReason.CHARACTER_LIMIT_REACHED": {byte(vnet.RejectReasonCHARACTER_LIMIT_REACHED), 6},
+		// New in V7, and the zero member is the one that matters: an Appearance with no
+		// hair model must fail closed rather than read as a head somebody chose.
+		"HairModel.Unknown": {byte(vnet.HairModelUnknown), 0},
+		"HairModel.Shaved":  {byte(vnet.HairModelShaved), 1},
+		"HairModel.Cropped": {byte(vnet.HairModelCropped), 2},
+		"HairModel.Braided": {byte(vnet.HairModelBraided), 3},
+		"HairModel.Loose":   {byte(vnet.HairModelLoose), 4},
+		"HairModel.Topknot": {byte(vnet.HairModelTopknot), 5},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
+		}
+	}
+
+	// Membership, in the shape the Payload union is checked in: a member added without
+	// a decision fails here rather than reaching the wire.
+	for name, pair := range map[string][2]int{
+		"RejectReason": {len(vnet.EnumNamesRejectReason), 7},
+		"HairModel":    {len(vnet.EnumNamesHairModel), 6},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])
+		}
+	}
+}
+
+// EntityState is a struct, so its size is the stride of the entity array in every
+// snapshot — the most frequently sent payload in the game. V7 gave every player an
+// appearance and put none of it here; this is what catches somebody quietly adding a
+// field later, which a FlatBuffers struct can never take back.
+//
+// Measured from the encoded frame rather than read from a constant: the stride is
+// baked into the generated accessor, so two adjacent elements are the only place the
+// number can be observed rather than restated.
+func TestEntityStateIsStillFortyBytesOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	frame := EncodeEntitySnapshot(EntitySnapshot{
+		Tick: 1,
+		Entities: []EntityState{
+			{EntityID: 1, Pos: [3]float32{1, 2, 3}},
+			{EntityID: 2, Pos: [3]float32{4, 5, 6}},
+		},
+		Vitals: PlayerVitals{Health: 10, MaxHealth: 10, LifeState: vnet.LifeStateAlive},
+	})
+
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	table := payloadTable(t, env)
+	var snapshot vnet.EntitySnapshot
+	snapshot.Init(table.Bytes, table.Pos)
+
+	var first, second vnet.EntityState
+	if !snapshot.Entities(&first, 0) || !snapshot.Entities(&second, 1) {
+		t.Fatal("the snapshot does not carry the two entities it was given")
+	}
+	if got := int(second.Table().Pos - first.Table().Pos); got != 40 {
+		t.Errorf("EntityState is %d bytes inlined, want 40 — appearance belongs in PlayerAppearance, not here", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// V7 — the character phase
+// ---------------------------------------------------------------------------
+
+func TestServerCharacterListRoundTripsEveryCharacter(t *testing.T) {
+	t.Parallel()
+
+	want := CharacterList{
+		Characters: []CharacterSummary{
+			{CharacterID: 900, Name: "Eivor", Appearance: anAppearance()},
+			{CharacterID: 7, Name: "Sigrún", Appearance: Appearance{
+				SkinColor: 1, ShirtColor: 2, TrousersColor: 3, ShoesColor: 4,
+				HairModel: vnet.HairModelShaved, HairColor: 5,
+			}},
+		},
+		MaxCharacters: 5,
+	}
+
+	frame := EncodeServerCharacterList(want)
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	if got := env.PayloadType(); got != vnet.PayloadServerCharacterList {
+		t.Fatalf("PayloadType = %s, want %s", got, vnet.PayloadServerCharacterList)
+	}
+	table := payloadTable(t, env)
+	var list vnet.ServerCharacterList
+	list.Init(table.Bytes, table.Pos)
+
+	if got := int(list.MaxCharacters()); got != int(want.MaxCharacters) {
+		t.Errorf("MaxCharacters = %d, want %d", got, want.MaxCharacters)
+	}
+	if got := list.CharactersLength(); got != len(want.Characters) {
+		t.Fatalf("CharactersLength = %d, want %d", got, len(want.Characters))
+	}
+
+	// In order: the server chose the order and the wire must not reshuffle it.
+	for i, character := range want.Characters {
+		var summary vnet.CharacterSummary
+		if !list.Characters(&summary, i) {
+			t.Fatalf("character %d is absent", i)
+		}
+		if got := summary.CharacterId(); got != character.CharacterID {
+			t.Errorf("character %d id = %d, want %d", i, got, character.CharacterID)
+		}
+		if got := string(summary.Name()); got != character.Name {
+			t.Errorf("character %d name = %q, want %q", i, got, character.Name)
+		}
+		appearance := summary.Appearance(nil)
+		if appearance == nil {
+			t.Fatalf("character %d carries no appearance", i)
+		}
+		if got := decodeAppearance(appearance); got != character.Appearance {
+			t.Errorf("character %d appearance = %+v, want %+v", i, got, character.Appearance)
+		}
+	}
+}
+
+// An account with no characters here is a legal and expected answer, not a refusal:
+// it says the only way forward is a CreateCharacterRequest. The vector is present and
+// empty rather than absent, so a server's frames have the same shape either way.
+func TestAnEmptyCharacterListIsStillACharacterList(t *testing.T) {
+	t.Parallel()
+
+	frame := EncodeServerCharacterList(CharacterList{MaxCharacters: 3})
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	table := payloadTable(t, env)
+	var list vnet.ServerCharacterList
+	list.Init(table.Bytes, table.Pos)
+
+	if got := list.CharactersLength(); got != 0 {
+		t.Errorf("CharactersLength = %d, want 0", got)
+	}
+	// Present and empty rather than absent: the field offset is there, so a reader
+	// that asks for the vector gets one of length zero instead of a missing field.
+	listTable := list.Table()
+	if o := listTable.Offset(4); o == 0 {
+		t.Error("the characters vector was omitted; an empty list still carries one")
+	}
+	if got := int(list.MaxCharacters()); got != 3 {
+		t.Errorf("MaxCharacters = %d, want 3", got)
+	}
+}
+
+func TestPlayerAppearanceCarriesTheEntityAndTheFace(t *testing.T) {
+	t.Parallel()
+
+	want := PlayerAppearance{EntityID: 4242, Appearance: anAppearance(), HasAppearance: true}
+
+	frame := EncodePlayerAppearance(want)
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	if got := env.PayloadType(); got != vnet.PayloadPlayerAppearance {
+		t.Fatalf("PayloadType = %s, want %s", got, vnet.PayloadPlayerAppearance)
+	}
+	table := payloadTable(t, env)
+	var payload vnet.PlayerAppearance
+	payload.Init(table.Bytes, table.Pos)
+
+	if got := payload.EntityId(); got != want.EntityID {
+		t.Errorf("EntityId = %d, want %d", got, want.EntityID)
+	}
+	appearance := payload.Appearance(nil)
+	if appearance == nil {
+		t.Fatal("PlayerAppearance carries no appearance")
+	}
+	if got := decodeAppearance(appearance); got != want.Appearance {
+		t.Errorf("Appearance = %+v, want %+v", got, want.Appearance)
+	}
+}
+
+// The encoder honours HasAppearance so a test can build the frame a client has to
+// refuse. An absent appearance reads as a null table, never as an appearance of zeros
+// — the same reasoning that keeps an absent BlockCoord from reading as the origin.
+func TestAPlayerAppearanceWithNoAppearanceIsAbsentRatherThanBlack(t *testing.T) {
+	t.Parallel()
+
+	frame := EncodePlayerAppearance(PlayerAppearance{EntityID: 1})
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	table := payloadTable(t, env)
+	var payload vnet.PlayerAppearance
+	payload.Init(table.Bytes, table.Pos)
+
+	if got := payload.Appearance(nil); got != nil {
+		t.Error("an omitted appearance came back as a table")
+	}
+}
+
+func TestSelectCharacterRequestRoundTripsItsID(t *testing.T) {
+	t.Parallel()
+
+	// Ids the handshake has to refuse are round-tripped too: zero names no character
+	// anywhere in this contract, and a refusal that cannot be built cannot be tested.
+	for name, id := range map[string]uint64{
+		"a character the account owns": 900,
+		"the reserved zero":            0,
+		"an id nobody has":             1 << 62,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			msg, err := Decode(EncodeSelectCharacterRequest(SelectCharacterRequest{CharacterID: id}))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if msg.Kind != vnet.PayloadSelectCharacterRequest {
+				t.Fatalf("Kind = %s, want %s", msg.Kind, vnet.PayloadSelectCharacterRequest)
+			}
+			if msg.SelectCharacter == nil {
+				t.Fatal("SelectCharacterRequest payload is nil")
+			}
+			if got := msg.SelectCharacter.CharacterID; got != id {
+				t.Errorf("CharacterID = %d, want %d", got, id)
+			}
+		})
+	}
+}
+
+func TestCreateCharacterRequestRoundTripsANameAndAFace(t *testing.T) {
+	t.Parallel()
+
+	want := CreateCharacterRequest{Name: "Sigrún", Appearance: anAppearance(), HasAppearance: true}
+
+	msg, err := Decode(EncodeCreateCharacterRequest(want))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if msg.Kind != vnet.PayloadCreateCharacterRequest {
+		t.Fatalf("Kind = %s, want %s", msg.Kind, vnet.PayloadCreateCharacterRequest)
+	}
+	if msg.CreateCharacter == nil {
+		t.Fatal("CreateCharacterRequest payload is nil")
+	}
+	if got := *msg.CreateCharacter; got != want {
+		t.Errorf("CreateCharacterRequest = %+v, want %+v", got, want)
+	}
+}
+
+// A name is a decision and an appearance is a framing question, and the difference is
+// the whole of the split schemas/handshake.fbs documents.
+//
+// A name the server will not accept — the empty string included — is carried through
+// so the handshake can answer CHARACTER_NAME_REFUSED, which is a refusal with a reply.
+// An absent appearance is a request that failed to say what it is asking for, and
+// there is no reply that could make sense of it.
+func TestACreateCharacterRequestCarriesNamesTheHandshakeMustRefuse(t *testing.T) {
+	t.Parallel()
+
+	for name, value := range map[string]string{
+		"the empty name":   "",
+		"a name of spaces": "   ",
+		"a very long name": string(bytes.Repeat([]byte("a"), 4096)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			msg, err := Decode(EncodeCreateCharacterRequest(CreateCharacterRequest{
+				Name: value, Appearance: anAppearance(), HasAppearance: true,
+			}))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if got := msg.CreateCharacter.Name; got != value {
+				t.Errorf("Name = %q, want %q", got, value)
+			}
+		})
+	}
+}
+
+func TestACreateCharacterRequestWithoutAnAppearanceIsMalformed(t *testing.T) {
+	t.Parallel()
+
+	frame := EncodeCreateCharacterRequest(CreateCharacterRequest{Name: "Eivor"})
+	if _, err := Decode(frame); !errors.Is(err, ErrMalformed) {
+		t.Errorf("Decode returned %v, want an error wrapping ErrMalformed", err)
+	}
+}
+
+// An appearance carrying values the contract forbids is carried rather than refused —
+// the division of labour every other enum-bearing request in this package follows. A
+// reserved high byte and an Unknown hair model are decisions, and a decoder that
+// refused them would close a connection whose framing is perfectly readable.
+func TestForbiddenAppearanceValuesAreCarriedRatherThanRejected(t *testing.T) {
+	t.Parallel()
+
+	want := Appearance{
+		SkinColor: 0xFF000000, ShirtColor: 0xDEADBEEF,
+		HairModel: vnet.HairModel(200), HairColor: 0x80FFFFFF,
+	}
+
+	msg, err := Decode(EncodeCreateCharacterRequest(CreateCharacterRequest{
+		Name: "Eivor", Appearance: want, HasAppearance: true,
+	}))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got := msg.CreateCharacter.Appearance; got != want {
+		t.Errorf("Appearance = %+v, want %+v", got, want)
+	}
+}
+
+// A union tag naming a payload the envelope does not carry is a frame that lies about
+// itself, and V7's two client payloads are no exception.
+func TestTheCharacterRequestTagsWithoutPayloadsAreMalformed(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []vnet.Payload{vnet.PayloadSelectCharacterRequest, vnet.PayloadCreateCharacterRequest} {
+		t.Run(kind.String(), func(t *testing.T) {
+			t.Parallel()
+			b := flatbuffers.NewBuilder(64)
+			vnet.EnvelopeStart(b)
+			vnet.EnvelopeAddPayloadType(b, kind)
+			env := vnet.EnvelopeEnd(b)
+			vnet.FinishEnvelopeBuffer(b, env)
+			if _, err := Decode(b.FinishedBytes()); !errors.Is(err, ErrMalformed) {
+				t.Errorf("Decode returned %v, want an error wrapping ErrMalformed", err)
+			}
+		})
+	}
+}
+
+// Decode is total over damage anywhere in the two character requests: every
+// truncation and every flipped byte either decodes or errors, and none panics.
+func TestDecodeIsTotalOverDamagedCharacterRequests(t *testing.T) {
+	t.Parallel()
+
+	frames := map[string][]byte{
+		"SelectCharacterRequest": EncodeSelectCharacterRequest(SelectCharacterRequest{CharacterID: 900}),
+		"CreateCharacterRequest": EncodeCreateCharacterRequest(CreateCharacterRequest{
+			Name: "Eivor", Appearance: anAppearance(), HasAppearance: true,
+		}),
+	}
+
+	for name, frame := range frames {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			for cut := range frame {
+				_, _ = Decode(frame[:cut])
+			}
+			for i := range frame {
+				damaged := bytes.Clone(frame)
+				damaged[i] ^= 0xFF
+				_, _ = Decode(damaged)
+			}
+		})
 	}
 }

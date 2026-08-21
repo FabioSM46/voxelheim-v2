@@ -325,7 +325,11 @@ pub(super) fn run(
         return;
     }
 
-    let hello = codec::encode_client_hello(&player_name, identity.presented);
+    // `None` for the ticket: V7's identity comes from an account service this build
+    // does not have yet, so this client presents the V6 token it holds and no account.
+    // `schemas/handshake.fbs` reads an absent ticket as "no account presented", which
+    // is a legal hello rather than a malformed one.
+    let hello = codec::encode_client_hello(&player_name, identity.presented, None);
     if let Err(err) = frame::write_frame(&mut stream, &hello) {
         let _ = events.send(SessionEvent::Refused(format!(
             "cannot send the handshake to {addr}: {err}"

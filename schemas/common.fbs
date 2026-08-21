@@ -22,7 +22,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 6
+  Current = 7
 }
 
 /// A position, velocity or direction in world space, measured in blocks.
@@ -46,4 +46,88 @@ struct ChunkCoord {
   cx: int;
   cy: int;
   cz: int;
+}
+
+/// Which hair a character wears, as a model this client is expected to have.
+///
+/// A vocabulary rather than a description: the server stores the member and never
+/// draws anything, and the client maps it to a mesh. That is why hair is a member
+/// here and every other part of an `Appearance` is a colour — a colour is a value
+/// both sides can carry without agreeing on any asset, and a shape is not.
+///
+/// Zero member for the reason every enum in this contract has one: FlatBuffers
+/// decodes an absent scalar as zero, and `Appearance` is explicitly a thing the
+/// client may not invent a default for. An appearance carrying no hair model must
+/// therefore fail closed rather than read as a bald head somebody did not choose.
+///
+/// **Members are appended, never inserted or renumbered**, exactly as `MobKind`'s
+/// and `RecipeID`'s are: the value is an integer on the wire, so a renumbering
+/// would silently put a different head on every character already stored.
+///
+/// The five below are reserved before anything depends on them, which is the call
+/// `StructureKind.Campfire` and `RefusedAction` both record: agreeing on a number
+/// is cheap now and expensive once a character store holds it.
+enum HairModel : ubyte {
+  Unknown = 0,
+  Shaved = 1,
+  Cropped = 2,
+  Braided = 3,
+  Loose = 4,
+  Topknot = 5
+}
+
+/// What a character looks like: four worn colours, a hair model, and its colour.
+///
+/// **Authoritative, and the client never invents a default.** Every value here was
+/// chosen by the player and stored by the server; a client that substituted its own
+/// colour for a missing one would draw somebody the server never described. An
+/// absent `Appearance`, an absent colour and an `Unknown` hair model are therefore
+/// all protocol errors at the decode boundary, not opportunities to guess. The one
+/// documented placeholder in this contract is a different case entirely — an entity
+/// whose `PlayerAppearance` has not arrived *yet*; see `player.fbs`.
+///
+/// **A table rather than a struct**, deliberately, and against the rule of thumb
+/// that fixed-size shapes are inlined. A struct can never gain, lose or reorder a
+/// field, and this shape is the least settled in the contract: beards, faces, body
+/// types and worn equipment are all things a later issue adds. It is also not hot —
+/// see `PlayerAppearance` in `player.fbs`, which is why appearance is a message of
+/// its own rather than a field of `EntityState`.
+///
+/// **Colour encoding — stated once, here, and authoritative for every colour on
+/// this wire.** Each colour is one `uint` holding `0x00RRGGBB`: eight bits per
+/// channel, sRGB, non-linear, with the most significant eight bits **reserved and
+/// required to be zero**. There is no alpha — a character is opaque — and there is
+/// no second encoding anywhere in this contract, so neither side needs a conversion
+/// rule to agree on. A client whose renderer wants linear values converts on the way
+/// in; that is a rendering detail and not a property of the wire.
+///
+/// Decoder invariants, in both directions:
+///   - every colour's top eight bits are zero. Refused rather than masked: a set
+///     high byte means the peer is encoding something this build does not know
+///     about, and masking it would show a colour nobody chose while hiding the
+///     disagreement — the reasoning `ServerWelcome`'s world clock records, where a
+///     repair a decoder invents is a different answer from the server's
+///   - `hair_model` is a known member and never `Unknown`
+///   - the table itself is present wherever it is referenced
+table Appearance {
+  /// Skin.
+  skin_color: uint;
+
+  /// The shirt, tunic or coat covering the torso.
+  shirt_color: uint;
+
+  /// The trousers, breeches or leggings covering the legs.
+  trousers_color: uint;
+
+  /// Footwear.
+  shoes_color: uint;
+
+  /// Which hair model the character wears. Never `Unknown` in a value the server
+  /// emits or accepts.
+  hair_model: HairModel;
+
+  /// The hair's colour, in the same encoding as the four above. Read whatever the
+  /// model is: a shaved head still has stubble, and the client decides how much of
+  /// the colour a given model shows.
+  hair_color: uint;
 }

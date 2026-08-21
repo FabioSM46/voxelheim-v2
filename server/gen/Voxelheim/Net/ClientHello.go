@@ -9,12 +9,22 @@ import (
 // / First message on every connection.
 // /
 // / The client announces the protocol version it was built against, a display
-// / name, and — from V5 — an identity token this server issued to it earlier.
-// / The token is the one thing a client presents and the server verifies;
-// / everything else is still assigned by the server in the reply. Position,
-// / health, inventory and structures are read from the server's own store for
-// / whatever identity the handshake settles on, and no client→server message
-// / carries any of them, before or after this change.
+// / name, and — from V7 — a signed session ticket naming the account it is
+// / connecting as. The ticket is the one thing a client presents and the server
+// / verifies; everything else is still assigned by the server in the reply.
+// / Position, health, inventory and structures are read from the server's own
+// / store for whatever identity the handshake settles on, and no client→server
+// / message carries any of them, before or after this change.
+// /
+// / **What changed at V7 is where identity comes from, not what a client may
+// / state.** Through V6 the presented value was `player_token`, 32 bytes this
+// / server itself minted and handed back in an earlier `ServerWelcome` — so an
+// / identity existed only on the server that issued it, and a player owned nothing
+// / beyond a file on their own disk. A session ticket is signed by an account
+// / service instead, which is what lets one account be recognised by a server that
+// / has never seen it. Presenting either one is still a *claim* and never a
+// / statement: rule 4 in `schemas/AGENTS.md` is unchanged, and the server decides
+// / whether the claim is honoured.
 type ClientHello struct {
 	_tab flatbuffers.Table
 }
@@ -86,6 +96,18 @@ func (rcv *ClientHello) PlayerName() []byte {
 
 // / Display name. Untrusted, non-unique, and never used as an identifier —
 // / the server assigns `ServerWelcome.entity_id` for that.
+// / **Retired at V7.** A V7 server ignores this field and settles identity from
+// / `session_ticket` below.
+// /
+// / The field stays exactly where it is, because tags never move: removing it
+// / would renumber nothing today and would reserve a hole for ever, and a peer
+// / built against V5 or V6 still writes it. A V7 server reads past it; a V7 client
+// / has no reason to write it. Everything below this paragraph describes what the
+// / field meant while it was live, and it is kept rather than deleted because a
+// / server still resolving identity from it is speaking the **V6** handshake —
+// / which is what every consumer in this repository speaks until the account
+// / service lands. See the retirement note in this file's header.
+// /
 // / An identity token this server issued in an earlier `ServerWelcome`,
 // / presented to resume the identity it names. Absent or empty on a first
 // / connection to this server.
@@ -153,6 +175,18 @@ func (rcv *ClientHello) PlayerTokenBytes() []byte {
 	return nil
 }
 
+// / **Retired at V7.** A V7 server ignores this field and settles identity from
+// / `session_ticket` below.
+// /
+// / The field stays exactly where it is, because tags never move: removing it
+// / would renumber nothing today and would reserve a hole for ever, and a peer
+// / built against V5 or V6 still writes it. A V7 server reads past it; a V7 client
+// / has no reason to write it. Everything below this paragraph describes what the
+// / field meant while it was live, and it is kept rather than deleted because a
+// / server still resolving identity from it is speaking the **V6** handshake —
+// / which is what every consumer in this repository speaks until the account
+// / service lands. See the retirement note in this file's header.
+// /
 // / An identity token this server issued in an earlier `ServerWelcome`,
 // / presented to resume the identity it names. Absent or empty on a first
 // / connection to this server.
@@ -204,8 +238,118 @@ func (rcv *ClientHello) MutatePlayerToken(j int, n byte) bool {
 	return false
 }
 
+// / The signed ticket naming the account this client is connecting as. **The
+// / identity half of a V7 handshake**, and the field that retires
+// / `player_token` above.
+// /
+// / Opaque here, deliberately: what is inside a ticket, who signs it and how long
+// / it is good for belong to the account service that issues it, and this contract
+// / neither parses it nor knows the signing key. What the contract fixes is its
+// / **size**, because a wrong-length ticket has to be refused before anything is
+// / looked up, and a length is the one property a decoder can check without
+// / knowing what a ticket says.
+// /
+// / **Decoder invariant.** Absent or empty, or **exactly 96 bytes**. Any other
+// / length is refused with `RejectReason.BAD_REQUEST` — a wrong-length ticket is a
+// / malformed request, decided before any account is looked up and before any
+// / signature is checked, and the handshake is the one place a refusal has a reply
+// / payload to say so in. This is deliberately the same three-way rule
+// / `player_token` carried, and the middle case means the same thing it did: a
+// / client that presents no ticket is claiming no account. Whether such a session
+// / is admitted at all is the server's admission policy and not a framing question
+// / — exactly as a `day_length_ticks` of zero is a legal announcement about a
+// / server rather than a malformed welcome.
+// /
+// / **Why 96.** A ticket is 32 bytes of body — the same width as the identity it
+// / names, and as the token it replaces — followed by a 64-byte detached Ed25519
+// / signature over that body. Neither half is read here; the split is written down
+// / so the number is a consequence of something rather than a constant somebody
+// / picked. Changing the length, the signature scheme or the split is a protocol
+// / version bump, for the reason any other change to a fixed wire shape is.
+// /
+// / **A bearer credential, exactly as `player_token` was, and protected by the
+// / same thing.** Whatever can read this field can make the claim it carries. A
+// / signature proves who *issued* the ticket, not who is presenting it, so being
+// / signed buys nothing against a copy taken off the wire. The two exposures a
+// / wire format closes by itself are closed the same way — never logged, never
+// / displayed, on either side — and the third, the wire, is closed by encrypting
+// / the session and by nothing a schema can say. This server's only configuration
+// / is encrypted. See `player_token` above for the full argument, which applies to
+// / this field unchanged.
+func (rcv *ClientHello) SessionTicket(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *ClientHello) SessionTicketLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *ClientHello) SessionTicketBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+// / The signed ticket naming the account this client is connecting as. **The
+// / identity half of a V7 handshake**, and the field that retires
+// / `player_token` above.
+// /
+// / Opaque here, deliberately: what is inside a ticket, who signs it and how long
+// / it is good for belong to the account service that issues it, and this contract
+// / neither parses it nor knows the signing key. What the contract fixes is its
+// / **size**, because a wrong-length ticket has to be refused before anything is
+// / looked up, and a length is the one property a decoder can check without
+// / knowing what a ticket says.
+// /
+// / **Decoder invariant.** Absent or empty, or **exactly 96 bytes**. Any other
+// / length is refused with `RejectReason.BAD_REQUEST` — a wrong-length ticket is a
+// / malformed request, decided before any account is looked up and before any
+// / signature is checked, and the handshake is the one place a refusal has a reply
+// / payload to say so in. This is deliberately the same three-way rule
+// / `player_token` carried, and the middle case means the same thing it did: a
+// / client that presents no ticket is claiming no account. Whether such a session
+// / is admitted at all is the server's admission policy and not a framing question
+// / — exactly as a `day_length_ticks` of zero is a legal announcement about a
+// / server rather than a malformed welcome.
+// /
+// / **Why 96.** A ticket is 32 bytes of body — the same width as the identity it
+// / names, and as the token it replaces — followed by a 64-byte detached Ed25519
+// / signature over that body. Neither half is read here; the split is written down
+// / so the number is a consequence of something rather than a constant somebody
+// / picked. Changing the length, the signature scheme or the split is a protocol
+// / version bump, for the reason any other change to a fixed wire shape is.
+// /
+// / **A bearer credential, exactly as `player_token` was, and protected by the
+// / same thing.** Whatever can read this field can make the claim it carries. A
+// / signature proves who *issued* the ticket, not who is presenting it, so being
+// / signed buys nothing against a copy taken off the wire. The two exposures a
+// / wire format closes by itself are closed the same way — never logged, never
+// / displayed, on either side — and the third, the wire, is closed by encrypting
+// / the session and by nothing a schema can say. This server's only configuration
+// / is encrypted. See `player_token` above for the full argument, which applies to
+// / this field unchanged.
+func (rcv *ClientHello) MutateSessionTicket(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
 func ClientHelloStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func ClientHelloAddProtocolVersion(builder *flatbuffers.Builder, protocolVersion ProtocolVersion) {
 	builder.PrependUint16Slot(0, uint16(protocolVersion), 0)
@@ -217,6 +361,12 @@ func ClientHelloAddPlayerToken(builder *flatbuffers.Builder, playerToken flatbuf
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(playerToken), 0)
 }
 func ClientHelloStartPlayerTokenVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func ClientHelloAddSessionTicket(builder *flatbuffers.Builder, sessionTicket flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(sessionTicket), 0)
+}
+func ClientHelloStartSessionTicketVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(1, numElems, 1)
 }
 func ClientHelloEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

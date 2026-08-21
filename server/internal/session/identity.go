@@ -137,9 +137,12 @@ func NewIdentities(store *persist.Store, log *slog.Logger) *Identities {
 //
 // The order is the contract's, and each step is a different kind of answer:
 //
-//  1. A token of any length but 0 or 32 is BAD_REQUEST. Decided first, before any
-//     identity is looked up, because it is a malformed request rather than a claim
-//     that failed.
+//  0. A session ticket of any length but 0 or 96 is BAD_REQUEST. Decided before
+//     everything, including the token rule below, because it is the only step here
+//     that does not look anything up — see the block comment on the check itself.
+//  1. A token of any length but 0 or 32 is BAD_REQUEST. Decided first among the token
+//     rules, before any identity is looked up, because it is a malformed request
+//     rather than a claim that failed.
 //  2. An empty token is a first connection: mint.
 //  3. A 32-byte token whose hash the store knows resumes that identity, and the
 //     welcome carries the token back unchanged.
@@ -156,6 +159,30 @@ func (i *Identities) Resolve(hello *protocol.ClientHello) (Resolved, error) {
 	if hello == nil {
 		// Unreachable: Serve resolves only a message that decoded as a hello.
 		return Resolved{}, errors.New("session: no hello to resolve an identity from")
+	}
+
+	// The framing half of V7's identity, and the whole of what this server does with a
+	// ticket today.
+	//
+	// A wrong-length ticket is a malformed request and is refused here, before any
+	// identity is looked up and before any signature could be checked — which is the
+	// order schemas/handshake.fbs states, and the only part of it that can be honoured
+	// without an account service to verify against. Everything after this line is still
+	// the V6 rule: this server resolves identity from PlayerToken, which is what a V6
+	// handshake is, and adopting ticket identity is a separate issue.
+	//
+	// Absent and empty are one zero-length slice and both mean "no account presented",
+	// so a client that has no ticket — which is every client in this repository today —
+	// passes straight through.
+	if n := len(hello.SessionTicket); n != 0 && n != protocol.SessionTicketLen {
+		return Resolved{}, &Refused{
+			Reason: vnet.RejectReasonBAD_REQUEST,
+			// The length and nothing else, for the reason the token refusal below says
+			// so: a ticket is a bearer credential, and a detail carrying any of its
+			// bytes would put one in a log the first time this was investigated.
+			Detail: fmt.Sprintf("session_ticket must be absent, empty or %d bytes, got %d",
+				protocol.SessionTicketLen, n),
+		}
 	}
 
 	var (

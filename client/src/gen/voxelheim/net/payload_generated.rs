@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 20;
+pub const ENUM_MAX_PAYLOAD: u8 = 24;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 21] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 25] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -39,6 +39,10 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 21] = [
     Payload::PlaceStructureRequest,
     Payload::RemoveStructureRequest,
     Payload::ActionRefused,
+    Payload::ServerCharacterList,
+    Payload::SelectCharacterRequest,
+    Payload::CreateCharacterRequest,
+    Payload::PlayerAppearance,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -86,9 +90,13 @@ impl Payload {
     /// no name for and drops it, so an older client loses the refusal feedback and
     /// nothing else. See `ActionRefused` in `player.fbs`.
     pub const ActionRefused: Self = Self(20);
+    pub const ServerCharacterList: Self = Self(21);
+    pub const SelectCharacterRequest: Self = Self(22);
+    pub const CreateCharacterRequest: Self = Self(23);
+    pub const PlayerAppearance: Self = Self(24);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 20;
+    pub const ENUM_MAX: u8 = 24;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -111,6 +119,10 @@ impl Payload {
         Self::PlaceStructureRequest,
         Self::RemoveStructureRequest,
         Self::ActionRefused,
+        Self::ServerCharacterList,
+        Self::SelectCharacterRequest,
+        Self::CreateCharacterRequest,
+        Self::PlayerAppearance,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -136,6 +148,10 @@ impl Payload {
             Self::PlaceStructureRequest => Some("PlaceStructureRequest"),
             Self::RemoveStructureRequest => Some("RemoveStructureRequest"),
             Self::ActionRefused => Some("ActionRefused"),
+            Self::ServerCharacterList => Some("ServerCharacterList"),
+            Self::SelectCharacterRequest => Some("SelectCharacterRequest"),
+            Self::CreateCharacterRequest => Some("CreateCharacterRequest"),
+            Self::PlayerAppearance => Some("PlayerAppearance"),
             _ => None,
         }
     }

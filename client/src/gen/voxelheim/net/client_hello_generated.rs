@@ -8,12 +8,22 @@ pub enum ClientHelloOffset {}
 /// First message on every connection.
 ///
 /// The client announces the protocol version it was built against, a display
-/// name, and — from V5 — an identity token this server issued to it earlier.
-/// The token is the one thing a client presents and the server verifies;
-/// everything else is still assigned by the server in the reply. Position,
-/// health, inventory and structures are read from the server's own store for
-/// whatever identity the handshake settles on, and no client→server message
-/// carries any of them, before or after this change.
+/// name, and — from V7 — a signed session ticket naming the account it is
+/// connecting as. The ticket is the one thing a client presents and the server
+/// verifies; everything else is still assigned by the server in the reply.
+/// Position, health, inventory and structures are read from the server's own
+/// store for whatever identity the handshake settles on, and no client→server
+/// message carries any of them, before or after this change.
+///
+/// **What changed at V7 is where identity comes from, not what a client may
+/// state.** Through V6 the presented value was `player_token`, 32 bytes this
+/// server itself minted and handed back in an earlier `ServerWelcome` — so an
+/// identity existed only on the server that issued it, and a player owned nothing
+/// beyond a file on their own disk. A session ticket is signed by an account
+/// service instead, which is what lets one account be recognised by a server that
+/// has never seen it. Presenting either one is still a *claim* and never a
+/// statement: rule 4 in `schemas/AGENTS.md` is unchanged, and the server decides
+/// whether the claim is honoured.
 pub struct ClientHello<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -32,6 +42,7 @@ impl<'a> ClientHello<'a> {
     pub const VT_PROTOCOL_VERSION: ::flatbuffers::VOffsetT = 4;
     pub const VT_PLAYER_NAME: ::flatbuffers::VOffsetT = 6;
     pub const VT_PLAYER_TOKEN: ::flatbuffers::VOffsetT = 8;
+    pub const VT_SESSION_TICKET: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -48,6 +59,9 @@ impl<'a> ClientHello<'a> {
         args: &'args ClientHelloArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<ClientHello<'bldr>> {
         let mut builder = ClientHelloBuilder::new(_fbb);
+        if let Some(x) = args.session_ticket {
+            builder.add_session_ticket(x);
+        }
         if let Some(x) = args.player_token {
             builder.add_player_token(x);
         }
@@ -90,6 +104,18 @@ impl<'a> ClientHello<'a> {
                 .get::<::flatbuffers::ForwardsUOffset<&str>>(ClientHello::VT_PLAYER_NAME, None)
         }
     }
+    /// **Retired at V7.** A V7 server ignores this field and settles identity from
+    /// `session_ticket` below.
+    ///
+    /// The field stays exactly where it is, because tags never move: removing it
+    /// would renumber nothing today and would reserve a hole for ever, and a peer
+    /// built against V5 or V6 still writes it. A V7 server reads past it; a V7 client
+    /// has no reason to write it. Everything below this paragraph describes what the
+    /// field meant while it was live, and it is kept rather than deleted because a
+    /// server still resolving identity from it is speaking the **V6** handshake —
+    /// which is what every consumer in this repository speaks until the account
+    /// service lands. See the retirement note in this file's header.
+    ///
     /// An identity token this server issued in an earlier `ServerWelcome`,
     /// presented to resume the identity it names. Absent or empty on a first
     /// connection to this server.
@@ -145,6 +171,57 @@ impl<'a> ClientHello<'a> {
                 )
         }
     }
+    /// The signed ticket naming the account this client is connecting as. **The
+    /// identity half of a V7 handshake**, and the field that retires
+    /// `player_token` above.
+    ///
+    /// Opaque here, deliberately: what is inside a ticket, who signs it and how long
+    /// it is good for belong to the account service that issues it, and this contract
+    /// neither parses it nor knows the signing key. What the contract fixes is its
+    /// **size**, because a wrong-length ticket has to be refused before anything is
+    /// looked up, and a length is the one property a decoder can check without
+    /// knowing what a ticket says.
+    ///
+    /// **Decoder invariant.** Absent or empty, or **exactly 96 bytes**. Any other
+    /// length is refused with `RejectReason.BAD_REQUEST` — a wrong-length ticket is a
+    /// malformed request, decided before any account is looked up and before any
+    /// signature is checked, and the handshake is the one place a refusal has a reply
+    /// payload to say so in. This is deliberately the same three-way rule
+    /// `player_token` carried, and the middle case means the same thing it did: a
+    /// client that presents no ticket is claiming no account. Whether such a session
+    /// is admitted at all is the server's admission policy and not a framing question
+    /// — exactly as a `day_length_ticks` of zero is a legal announcement about a
+    /// server rather than a malformed welcome.
+    ///
+    /// **Why 96.** A ticket is 32 bytes of body — the same width as the identity it
+    /// names, and as the token it replaces — followed by a 64-byte detached Ed25519
+    /// signature over that body. Neither half is read here; the split is written down
+    /// so the number is a consequence of something rather than a constant somebody
+    /// picked. Changing the length, the signature scheme or the split is a protocol
+    /// version bump, for the reason any other change to a fixed wire shape is.
+    ///
+    /// **A bearer credential, exactly as `player_token` was, and protected by the
+    /// same thing.** Whatever can read this field can make the claim it carries. A
+    /// signature proves who *issued* the ticket, not who is presenting it, so being
+    /// signed buys nothing against a copy taken off the wire. The two exposures a
+    /// wire format closes by itself are closed the same way — never logged, never
+    /// displayed, on either side — and the third, the wire, is closed by encrypting
+    /// the session and by nothing a schema can say. This server's only configuration
+    /// is encrypted. See `player_token` above for the full argument, which applies to
+    /// this field unchanged.
+    #[inline]
+    pub fn session_ticket(&self) -> Option<::flatbuffers::Vector<'a, u8>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u8>>>(
+                    ClientHello::VT_SESSION_TICKET,
+                    None,
+                )
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for ClientHello<'_> {
@@ -165,6 +242,11 @@ impl ::flatbuffers::Verifiable for ClientHello<'_> {
                 Self::VT_PLAYER_TOKEN,
                 false,
             )?
+            .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u8>>>(
+                "session_ticket",
+                Self::VT_SESSION_TICKET,
+                false,
+            )?
             .finish();
         Ok(())
     }
@@ -173,6 +255,7 @@ pub struct ClientHelloArgs<'a> {
     pub protocol_version: ProtocolVersion,
     pub player_name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub player_token: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
+    pub session_ticket: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u8>>>,
 }
 impl<'a> Default for ClientHelloArgs<'a> {
     #[inline]
@@ -181,6 +264,7 @@ impl<'a> Default for ClientHelloArgs<'a> {
             protocol_version: ProtocolVersion::Unknown,
             player_name: None,
             player_token: None,
+            session_ticket: None,
         }
     }
 }
@@ -216,6 +300,16 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ClientHelloBuilder<'a, 'b, A>
         );
     }
     #[inline]
+    pub fn add_session_ticket(
+        &mut self,
+        session_ticket: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u8>>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            ClientHello::VT_SESSION_TICKET,
+            session_ticket,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> ClientHelloBuilder<'a, 'b, A> {
@@ -238,6 +332,7 @@ impl ::core::fmt::Debug for ClientHello<'_> {
         ds.field("protocol_version", &self.protocol_version());
         ds.field("player_name", &self.player_name());
         ds.field("player_token", &self.player_token());
+        ds.field("session_ticket", &self.session_ticket());
         ds.finish()
     }
 }

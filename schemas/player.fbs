@@ -465,6 +465,13 @@ table ActionRefused {
 /// would poison the client's interpolation and, through the entity's transform,
 /// its renderer. The server must never emit one, and the client validates rather
 /// than assuming it never does.
+///
+/// **V7 added an appearance to every player and added nothing here.** What a
+/// character looks like travels in `PlayerAppearance` at the bottom of this file;
+/// the argument for keeping it out of this struct is written there, beside the
+/// message that carries it instead. Four fields, unchanged since V1, and the
+/// encoded size of this struct is pinned by a test on both sides — which is what
+/// catches somebody quietly adding a fifth.
 struct EntityState {
   entity_id: ulong;
   pos: Vec3;
@@ -807,4 +814,51 @@ table InventoryState {
   /// Maximum durability per slot, slot-indexed. Zero means the slot's contents do not
   /// wear out at all, which is every resource and every empty slot.
   max_durability: [ushort];
+}
+
+/// What one player entity looks like. **Server -> client, and static per character.**
+///
+/// Sent once, when a player enters this session's view, and cached by the client
+/// against the entity id for as long as the entity is known. It is not resent every
+/// tick and it is not part of a snapshot.
+///
+/// **Why this is a message and not a field of `EntityState`.** `EntityState` is a
+/// struct, so a snapshot's entity list is a flat inlined array — the most frequently
+/// sent payload in the game, once per visible entity per tick. Five colours and a
+/// hair model are *static per character*: they are chosen once, at creation, and then
+/// never change for the life of that character. Putting them in the hot struct would
+/// pay for them at the tick rate, for every visible player, for ever, to carry a
+/// value that is identical in every frame. It would also make `EntityState` a
+/// different size, and a struct's field list can never be taken back.
+///
+/// **An appearance for an entity the client has never seen is not an error.** The two
+/// streams are not ordered against each other: appearance is sent per entity as it
+/// comes into view, snapshots are sent per tick, and either can arrive first. A
+/// client that refused an appearance for an unknown id would drop exactly the
+/// message it is about to need, and one that refused a *snapshot* naming an entity it
+/// has no appearance for would refuse the ordinary case. So both are legal, in both
+/// orders, and a receiver holds whichever half arrived first.
+///
+/// **The documented placeholder.** An entity the client can see but has no appearance
+/// for yet is drawn in a **neutral grey** — every colour `0x808080` and
+/// `HairModel.Shaved` — and redrawn as soon as the appearance arrives. That is a
+/// rendering rule, not a decoding default: it applies only to an appearance that has
+/// not arrived, never to one that arrived incomplete. An `Appearance` that is present
+/// but breaks an invariant is refused, exactly as `common.fbs` says, because the
+/// client may not invent what the server did describe.
+///
+/// Decoder invariants:
+///   - `entity_id` is never 0, which names no entity anywhere in this contract
+///   - `appearance` is present and satisfies every invariant `Appearance` documents
+///   - nothing here is required to name an entity in any snapshot, in either
+///     direction; see above
+table PlayerAppearance {
+  /// The entity this appearance belongs to, matching `EntityState.entity_id` in the
+  /// snapshots that carry that entity. A session's own appearance arrives the same
+  /// way as everyone else's — `ServerWelcome.entity_id` is how it recognises itself.
+  entity_id: ulong;
+
+  /// What that player looks like. See `Appearance` in `common.fbs`, which is
+  /// authoritative for the colour encoding.
+  appearance: Appearance;
 }

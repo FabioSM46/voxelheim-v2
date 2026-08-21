@@ -24,20 +24,43 @@ const (
 	/// log, and a peer built against an older version reads this value as a member
 	/// it has no name for.
 	RejectReasonALREADY_CONNECTED RejectReason = 3
+	/// The name in a `CreateCharacterRequest` is already worn by a character on this
+	/// world. Distinct from `CHARACTER_NAME_REFUSED`: this name is perfectly
+	/// acceptable and somebody else has it, so the player retries with another and
+	/// the client can say which of the two happened.
+	RejectReasonCHARACTER_NAME_TAKEN RejectReason = 4
+	/// The server will not accept the name at all — too long, too short, characters
+	/// it does not allow, or a name reserved for something else. What the rule *is*
+	/// belongs to the server and is deliberately not stated here; `ServerReject.detail`
+	/// is where a server says which rule was broken, and it is display text that is
+	/// never parsed.
+	RejectReasonCHARACTER_NAME_REFUSED RejectReason = 5
+	/// This account already holds as many characters as this world allows, and the
+	/// creation would be one more. The limit itself arrives in
+	/// `ServerCharacterList.max_characters`, so a client that read the list knows this
+	/// refusal is coming — which is what makes it a bug report rather than news when
+	/// it arrives anyway.
+	RejectReasonCHARACTER_LIMIT_REACHED RejectReason = 6
 )
 
 var EnumNamesRejectReason = map[RejectReason]string{
-	RejectReasonPROTOCOL_MISMATCH: "PROTOCOL_MISMATCH",
-	RejectReasonSERVER_FULL:       "SERVER_FULL",
-	RejectReasonBAD_REQUEST:       "BAD_REQUEST",
-	RejectReasonALREADY_CONNECTED: "ALREADY_CONNECTED",
+	RejectReasonPROTOCOL_MISMATCH:       "PROTOCOL_MISMATCH",
+	RejectReasonSERVER_FULL:             "SERVER_FULL",
+	RejectReasonBAD_REQUEST:             "BAD_REQUEST",
+	RejectReasonALREADY_CONNECTED:       "ALREADY_CONNECTED",
+	RejectReasonCHARACTER_NAME_TAKEN:    "CHARACTER_NAME_TAKEN",
+	RejectReasonCHARACTER_NAME_REFUSED:  "CHARACTER_NAME_REFUSED",
+	RejectReasonCHARACTER_LIMIT_REACHED: "CHARACTER_LIMIT_REACHED",
 }
 
 var EnumValuesRejectReason = map[string]RejectReason{
-	"PROTOCOL_MISMATCH": RejectReasonPROTOCOL_MISMATCH,
-	"SERVER_FULL":       RejectReasonSERVER_FULL,
-	"BAD_REQUEST":       RejectReasonBAD_REQUEST,
-	"ALREADY_CONNECTED": RejectReasonALREADY_CONNECTED,
+	"PROTOCOL_MISMATCH":       RejectReasonPROTOCOL_MISMATCH,
+	"SERVER_FULL":             RejectReasonSERVER_FULL,
+	"BAD_REQUEST":             RejectReasonBAD_REQUEST,
+	"ALREADY_CONNECTED":       RejectReasonALREADY_CONNECTED,
+	"CHARACTER_NAME_TAKEN":    RejectReasonCHARACTER_NAME_TAKEN,
+	"CHARACTER_NAME_REFUSED":  RejectReasonCHARACTER_NAME_REFUSED,
+	"CHARACTER_LIMIT_REACHED": RejectReasonCHARACTER_LIMIT_REACHED,
 }
 
 func (v RejectReason) String() string {

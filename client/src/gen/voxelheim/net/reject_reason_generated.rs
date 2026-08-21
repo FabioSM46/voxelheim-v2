@@ -11,17 +11,20 @@ pub const ENUM_MIN_REJECT_REASON: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REJECT_REASON: u8 = 3;
+pub const ENUM_MAX_REJECT_REASON: u8 = 6;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REJECT_REASON: [RejectReason; 4] = [
+pub const ENUM_VALUES_REJECT_REASON: [RejectReason; 7] = [
     RejectReason::PROTOCOL_MISMATCH,
     RejectReason::SERVER_FULL,
     RejectReason::BAD_REQUEST,
     RejectReason::ALREADY_CONNECTED,
+    RejectReason::CHARACTER_NAME_TAKEN,
+    RejectReason::CHARACTER_NAME_REFUSED,
+    RejectReason::CHARACTER_LIMIT_REACHED,
 ];
 
 /// Why the server refused a connection.
@@ -46,14 +49,34 @@ impl RejectReason {
     /// log, and a peer built against an older version reads this value as a member
     /// it has no name for.
     pub const ALREADY_CONNECTED: Self = Self(3);
+    /// The name in a `CreateCharacterRequest` is already worn by a character on this
+    /// world. Distinct from `CHARACTER_NAME_REFUSED`: this name is perfectly
+    /// acceptable and somebody else has it, so the player retries with another and
+    /// the client can say which of the two happened.
+    pub const CHARACTER_NAME_TAKEN: Self = Self(4);
+    /// The server will not accept the name at all — too long, too short, characters
+    /// it does not allow, or a name reserved for something else. What the rule *is*
+    /// belongs to the server and is deliberately not stated here; `ServerReject.detail`
+    /// is where a server says which rule was broken, and it is display text that is
+    /// never parsed.
+    pub const CHARACTER_NAME_REFUSED: Self = Self(5);
+    /// This account already holds as many characters as this world allows, and the
+    /// creation would be one more. The limit itself arrives in
+    /// `ServerCharacterList.max_characters`, so a client that read the list knows this
+    /// refusal is coming — which is what makes it a bug report rather than news when
+    /// it arrives anyway.
+    pub const CHARACTER_LIMIT_REACHED: Self = Self(6);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 3;
+    pub const ENUM_MAX: u8 = 6;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::PROTOCOL_MISMATCH,
         Self::SERVER_FULL,
         Self::BAD_REQUEST,
         Self::ALREADY_CONNECTED,
+        Self::CHARACTER_NAME_TAKEN,
+        Self::CHARACTER_NAME_REFUSED,
+        Self::CHARACTER_LIMIT_REACHED,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -62,6 +85,9 @@ impl RejectReason {
             Self::SERVER_FULL => Some("SERVER_FULL"),
             Self::BAD_REQUEST => Some("BAD_REQUEST"),
             Self::ALREADY_CONNECTED => Some("ALREADY_CONNECTED"),
+            Self::CHARACTER_NAME_TAKEN => Some("CHARACTER_NAME_TAKEN"),
+            Self::CHARACTER_NAME_REFUSED => Some("CHARACTER_NAME_REFUSED"),
+            Self::CHARACTER_LIMIT_REACHED => Some("CHARACTER_LIMIT_REACHED"),
             _ => None,
         }
     }

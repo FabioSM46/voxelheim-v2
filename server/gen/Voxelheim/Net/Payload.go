@@ -46,7 +46,11 @@ const (
 	/// *for*. A peer built against V6 as it shipped reads this tag as a payload it has
 	/// no name for and drops it, so an older client loses the refusal feedback and
 	/// nothing else. See `ActionRefused` in `player.fbs`.
-	PayloadActionRefused Payload = 20
+	PayloadActionRefused          Payload = 20
+	PayloadServerCharacterList    Payload = 21
+	PayloadSelectCharacterRequest Payload = 22
+	PayloadCreateCharacterRequest Payload = 23
+	PayloadPlayerAppearance       Payload = 24
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -71,6 +75,10 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadPlaceStructureRequest:  "PlaceStructureRequest",
 	PayloadRemoveStructureRequest: "RemoveStructureRequest",
 	PayloadActionRefused:          "ActionRefused",
+	PayloadServerCharacterList:    "ServerCharacterList",
+	PayloadSelectCharacterRequest: "SelectCharacterRequest",
+	PayloadCreateCharacterRequest: "CreateCharacterRequest",
+	PayloadPlayerAppearance:       "PlayerAppearance",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -95,6 +103,10 @@ var EnumValuesPayload = map[string]Payload{
 	"PlaceStructureRequest":  PayloadPlaceStructureRequest,
 	"RemoveStructureRequest": PayloadRemoveStructureRequest,
 	"ActionRefused":          PayloadActionRefused,
+	"ServerCharacterList":    PayloadServerCharacterList,
+	"SelectCharacterRequest": PayloadSelectCharacterRequest,
+	"CreateCharacterRequest": PayloadCreateCharacterRequest,
+	"PlayerAppearance":       PayloadPlayerAppearance,
 }
 
 func (v Payload) String() string {

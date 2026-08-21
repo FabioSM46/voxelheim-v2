@@ -11,10 +11,10 @@ is specific to the contract.
 
 | File | Holds |
 | ---- | ----- |
-| `common.fbs` | `ProtocolVersion`, `Vec3`, `ChunkCoord` — included by everything else |
-| `handshake.fbs` | `ClientHello`, `ServerWelcome`, `ServerReject`, `RejectReason` |
+| `common.fbs` | `ProtocolVersion`, `Vec3`, `ChunkCoord`, `Appearance`, `HairModel` — included by everything else |
+| `handshake.fbs` | `ClientHello`, `ServerWelcome`, `ServerReject`, `RejectReason`; from V7 also `ServerCharacterList`, `CharacterSummary`, `SelectCharacterRequest`, `CreateCharacterRequest` |
 | `world.fbs` | `ChunkData`, `ChunkUnload`, `ChunkResendRequest` — voxel streaming; `BlockCoord`, `EditAction`, `BlockEditRequest`, `BlockUpdate` — voxel edits |
-| `player.fbs` | `PlayerInput`, mining/inventory-move/attack intent, `EntityState`, item drops, `MobState`, `PlayerVitals`, `EntitySnapshot`, `InventoryState` |
+| `player.fbs` | `PlayerInput`, mining/inventory-move/attack intent, `EntityState`, item drops, `MobState`, `PlayerVitals`, `EntitySnapshot`, `InventoryState`, `PlayerAppearance` |
 | `envelope.fbs` | `Payload` union, `Envelope` root type, `file_identifier` |
 
 Every file declares `namespace Voxelheim.Net;` and includes by plain relative path, so each one
@@ -32,6 +32,15 @@ union switch to keep exhaustive.
   `EntityState` are structs so that snapshots and coordinates are inlined instead of reached
   through an offset. A struct can never gain, lose, or reorder a field — that is the price of
   inlining, and it is why only genuinely settled shapes are structs.
+
+  **`Appearance` is the case that shows both halves of the rule.** It is fixed-size and would
+  inline perfectly, and it is a table anyway: it is not hot — sent once per character rather
+  than once per entity per tick — and it is the least settled shape in the contract, because
+  beards, faces and worn equipment are all things a later issue adds. Its home is a message of
+  its own for the same reason: `EntityState` is inlined into every snapshot, so five static
+  colours put there would be paid for at the tick rate for ever. The argument is written beside
+  `PlayerAppearance` in `player.fbs`, and both sides pin `EntityState`'s encoded size at 40
+  bytes so that a later field cannot be added to it quietly.
 - **Bulk voxel data is a flat scalar vector**, never a vector of tables: a table per run would
   cost an offset each, and a terrain chunk holds thousands of runs.
 - Document invariants in the schema itself. A decoder facing untrusted input needs to know that

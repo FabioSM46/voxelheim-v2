@@ -35,6 +35,16 @@ const (
 	// HotbarSlots is the leading subset of InventorySlots the client may select
 	// with its hotbar.
 	HotbarSlots uint8 = 9
+
+	// SessionTicketLen is the exact length of a ClientHello.session_ticket, from V7:
+	// a 32-byte body and a 64-byte detached signature over it. schemas/handshake.fbs
+	// is authoritative for what the two halves are; nothing here reads either.
+	//
+	// It lives beside the four above because it is the same kind of number — a
+	// contract limit the schema states in prose and cannot enforce, which both sides
+	// have to agree on. Whether a ticket of some *other* length is a refusal is not
+	// decided here; see ClientHello.SessionTicket.
+	SessionTicketLen = 96
 )
 
 // ErrMalformed marks a frame that is not a decodable Envelope. Every malformed
@@ -60,6 +70,8 @@ type Message struct {
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
 	Repair             *RepairRequest
+	SelectCharacter    *SelectCharacterRequest
+	CreateCharacter    *CreateCharacterRequest
 }
 
 // ClientHello is a decoded handshake request.
@@ -81,6 +93,20 @@ type ClientHello struct {
 	// Absent and empty both arrive as a zero-length slice, which is what the contract
 	// says they are: a first connection to this server.
 	PlayerToken []byte
+
+	// SessionTicket is the signed ticket the client presents, copied verbatim —
+	// length included, and contents never inspected. **The identity half of a V7
+	// handshake**, and what retires PlayerToken above.
+	//
+	// The length rule is a handshake decision for exactly the reason PlayerToken's
+	// is, and the same house rule applies: the contract says absent, empty, or
+	// exactly SessionTicketLen bytes, and anything else is RejectReason.BAD_REQUEST
+	// — a refusal with a *reply*, which a decoder that shortened it to an error
+	// would turn into a closed connection with nothing said.
+	//
+	// Absent and empty both arrive as a zero-length slice, which is what the
+	// contract says they are: a client presenting no account.
+	SessionTicket []byte
 }
 
 // PlayerInput is one tick's worth of decoded intent.
@@ -474,6 +500,124 @@ type ItemDropState struct {
 	Count    uint16
 }
 
+// Appearance is what one character looks like: four worn colours, a hair model and
+// its colour.
+//
+// Copied out verbatim in both directions, colours whose reserved high byte is set
+// included, and an Unknown hair model included. The house rule AttackRequest.Slot
+// records: this package owns the envelope, and what a value *means* is the caller's
+// decision. schemas/common.fbs states the invariants; the character store and the
+// creation screen are where they are enforced, and both are separate issues.
+//
+// Each colour is 0x00RRGGBB — eight bits per channel, sRGB, the top eight bits
+// reserved and zero. There is exactly one colour encoding on this wire and this is
+// it; see schemas/common.fbs, which is authoritative.
+type Appearance struct {
+	SkinColor     uint32
+	ShirtColor    uint32
+	TrousersColor uint32
+	ShoesColor    uint32
+	HairModel     vnet.HairModel
+	HairColor     uint32
+}
+
+// CharacterSummary is one character an account owns on this world, as
+// ServerCharacterList lists it.
+//
+// Enough to draw a row in a character-select screen and nothing else. There is no
+// position, no health and no inventory: those are read from the server's own store
+// once a character has been chosen, and a list that carried them would hand out
+// state before an identity was settled.
+type CharacterSummary struct {
+	// CharacterID is server-minted and outlives every session the character has.
+	// **Not an entity id** — that names a body in a running simulation and is
+	// forgotten when the session ends. Welcome.EntityID is what the chosen character
+	// becomes once it is in the world.
+	CharacterID uint64
+
+	// Name is display text: shown, never parsed, never an identifier.
+	Name string
+
+	Appearance Appearance
+}
+
+// CharacterList is every character an account owns on this world, plus the limit.
+//
+// Server to client, and the second message of a V7 handshake. An empty Characters is
+// a legal and expected answer — a new account, or one that has never played here —
+// and it is not a refusal: it says the only way forward is a CreateCharacterRequest.
+type CharacterList struct {
+	Characters []CharacterSummary
+
+	// MaxCharacters is how many characters this account may hold on this world,
+	// including the ones above. Sent rather than hardcoded, for the reason every other
+	// limit in Welcome is: the number belongs to the server.
+	MaxCharacters uint8
+}
+
+// SelectCharacterRequest is one decoded choice of an existing character.
+// **Client to server, and a claim rather than a statement.**
+//
+// It names an id the server minted and sent, which is the one kind of identifier a
+// client may echo back — the rule RemoveStructureRequest already follows. Whether the
+// id names a character *this account* owns is re-read from the server's own store, so
+// naming somebody else's gains nothing.
+//
+// CharacterID is deliberately not validated here, exactly as RemoveStructureRequest's
+// StructureID is not: whether an id names a character this account may play is a
+// decision the handshake makes against a store this package cannot see.
+type SelectCharacterRequest struct {
+	CharacterID uint64
+}
+
+// CreateCharacterRequest is one decoded attempt to make a new character.
+// **Client to server, and intent only.**
+//
+// A name and a face, which is everything a player chooses about a character and
+// nothing a player decides about the world. There is no character id — an id is
+// minted by the server when a character comes into existence — and no position, no
+// health and no inventory.
+//
+// The two fields are treated differently on purpose, and schemas/handshake.fbs says
+// why. Name is copied verbatim, the empty string included: what names a server
+// accepts is a decision, answered with RejectReason.CHARACTER_NAME_REFUSED, which is
+// a refusal with a reply where a decode error would close the connection with nothing
+// said. An absent Appearance is not that — it is a request that failed to say what it
+// is asking for — so Decode refuses it, exactly as it refuses a MineRequest with no
+// position.
+type CreateCharacterRequest struct {
+	Name string
+
+	Appearance Appearance
+
+	// HasAppearance is false only for a frame that carried no appearance table at
+	// all. Decode never returns one — it refuses that frame — and the field exists so
+	// [EncodeCreateCharacterRequest] can *build* the input that has to be refused.
+	HasAppearance bool
+}
+
+// PlayerAppearance is what one player entity looks like. **Server to client, and
+// static per character.**
+//
+// Sent once, when a player enters a session's view, and cached by the client against
+// the entity id. It is deliberately not a field of EntityState: that is a struct
+// inlined into every snapshot, and five colours and a hair model never change for the
+// life of a character, so carrying them there would pay for them at the tick rate for
+// ever. schemas/player.fbs holds the full argument, beside the message.
+//
+// The server never decodes one — receiving it is a client sending a payload only a
+// server sends, which the session refuses as a protocol error — so there is no field
+// for it in Message.
+type PlayerAppearance struct {
+	EntityID uint64
+
+	Appearance Appearance
+
+	// HasAppearance is honoured by the encoder so a test can build the frame a client
+	// must refuse, exactly as ActionRefused.HasAnchor is. The server always sets it.
+	HasAppearance bool
+}
+
 // Welcome is the authoritative answer to an accepted handshake.
 type Welcome struct {
 	EntityID       uint64
@@ -562,6 +706,11 @@ func Decode(frame []byte) (msg Message, err error) {
 			// answers nil for an absent vector, which is the same zero length an empty
 			// one has — and the contract treats the two the same.
 			PlayerToken: bytes.Clone(hello.PlayerTokenBytes()),
+			// Cloned for the same reason and read the same way: absent and empty are
+			// one zero-length slice, and the contract treats them the same. The
+			// contents are never inspected here — a ticket is opaque to this package,
+			// and even its length is somebody else's decision.
+			SessionTicket: bytes.Clone(hello.SessionTicketBytes()),
 		}
 
 	case vnet.PayloadPlayerInput:
@@ -746,9 +895,68 @@ func Decode(frame []byte) (msg Message, err error) {
 			TargetSlot: request.TargetSlot(),
 			ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadSelectCharacterRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.SelectCharacterRequest
+		request.Init(table.Bytes, table.Pos)
+
+		// Copied straight through, zero and unknown ids included. Whether an id names a
+		// character this account may play is a decision the handshake makes against a
+		// store this package cannot see.
+		msg.SelectCharacter = &SelectCharacterRequest{CharacterID: request.CharacterId()}
+
+	case vnet.PayloadCreateCharacterRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.CreateCharacterRequest
+		request.Init(table.Bytes, table.Pos)
+
+		create := &CreateCharacterRequest{
+			// Untrusted display text: copied, never used as a key, and never judged
+			// here. An empty or unacceptable name is CHARACTER_NAME_REFUSED, which is a
+			// refusal with a reply.
+			Name: string(request.Name()),
+		}
+		// The accessor returns nil for an absent table field, and it must not escape
+		// this function either way: it is a view over bytes a client chose, and the
+		// recover above is the only thing standing between a bad offset and a panic in a
+		// goroutine holding a socket.
+		if appearance := request.Appearance(nil); appearance != nil {
+			create.Appearance, create.HasAppearance = decodeAppearance(appearance), true
+		} else {
+			return Message{}, fmt.Errorf("%w: CreateCharacterRequest appearance is absent", ErrMalformed)
+		}
+		msg.CreateCharacter = create
 	}
 
 	return msg, nil
+}
+
+// decodeAppearance copies one appearance out of the buffer.
+//
+// Verbatim, colours whose reserved high byte is set and an Unknown hair model
+// included: schemas/common.fbs documents both as invariants, and neither is a framing
+// question. This package owns the envelope; refusing a colour here would close a
+// connection whose framing is perfectly readable.
+//
+// Takes the accessor rather than returning one, for the reason every other field in
+// Decode is copied: an accessor is a view over bytes a client chose, and letting one
+// escape would move the recover away from the code that needs it.
+func decodeAppearance(a *vnet.Appearance) Appearance {
+	return Appearance{
+		SkinColor:     a.SkinColor(),
+		ShirtColor:    a.ShirtColor(),
+		TrousersColor: a.TrousersColor(),
+		ShoesColor:    a.ShoesColor(),
+		HairModel:     a.HairModel(),
+		HairColor:     a.HairColor(),
+	}
 }
 
 // unionPayload unwraps the union payload the envelope's tag promised.
@@ -811,36 +1019,190 @@ func EncodeServerReject(reason vnet.RejectReason, detail string) []byte {
 }
 
 // EncodeClientHello builds a handshake request from a client that presents no
-// identity token: its first connection to this server.
+// identity at all: no V6 token and no V7 ticket.
 //
 // The server never sends one; it exists so tests can produce the input the server
 // parses, without hand-rolling a second encoder that could drift from this one —
-// which is also why this is one line over [EncodeClientHelloWithToken] rather than a
-// second builder. There is one encoder for this message and there are two ways to
+// which is also why this is one line over [EncodeClientHelloFull] rather than a
+// second builder. There is one encoder for this message and there are three ways to
 // call it.
 func EncodeClientHello(version vnet.ProtocolVersion, playerName string) []byte {
-	return EncodeClientHelloWithToken(version, playerName, nil)
+	return EncodeClientHelloFull(version, playerName, nil, nil)
 }
 
-// EncodeClientHelloWithToken builds a handshake request that presents token.
-//
-// token is written verbatim, whatever its length: the wrong-length case is one the
-// server has to refuse, so the encoder a test refuses it with has to be able to
-// produce it.
+// EncodeClientHelloWithToken builds a handshake request that presents token — the V6
+// shape, which a V7 server ignores. See schemas/handshake.fbs.
 func EncodeClientHelloWithToken(version vnet.ProtocolVersion, playerName string, token []byte) []byte {
-	b := flatbuffers.NewBuilder(128)
+	return EncodeClientHelloFull(version, playerName, token, nil)
+}
+
+// EncodeClientHelloWithTicket builds a handshake request that presents ticket — the
+// V7 shape.
+func EncodeClientHelloWithTicket(version vnet.ProtocolVersion, playerName string, ticket []byte) []byte {
+	return EncodeClientHelloFull(version, playerName, nil, ticket)
+}
+
+// EncodeClientHelloFull builds a handshake request presenting both fields, either of
+// which may be nil.
+//
+// Both are written verbatim, whatever their length: the wrong-length case is one the
+// server has to refuse, so the encoder a test refuses it with has to be able to
+// produce it. A nil slice and an empty one both encode as a present, zero-length
+// vector, which the contract reads as "nothing presented" — the same answer an absent
+// field gives.
+func EncodeClientHelloFull(version vnet.ProtocolVersion, playerName string, token, ticket []byte) []byte {
+	b := flatbuffers.NewBuilder(256)
 
 	// Strings and vectors must exist before the table that references them opens.
 	nameOffset := b.CreateString(playerName)
 	tokenOffset := b.CreateByteVector(token)
+	ticketOffset := b.CreateByteVector(ticket)
 
 	vnet.ClientHelloStart(b)
 	vnet.ClientHelloAddProtocolVersion(b, version)
 	vnet.ClientHelloAddPlayerName(b, nameOffset)
 	vnet.ClientHelloAddPlayerToken(b, tokenOffset)
+	vnet.ClientHelloAddSessionTicket(b, ticketOffset)
 	hello := vnet.ClientHelloEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadClientHello, hello)
+}
+
+// EncodeServerCharacterList builds the answer to a hello the server is willing to
+// continue with: every character this account owns on this world, and the limit.
+//
+// Nothing is re-validated on the way out, exactly as nothing is in
+// [EncodeEntitySnapshot]: the summaries come from the server's own store, which is
+// the only thing that produces them.
+//
+// An empty list encodes a present, zero-length vector rather than omitting the field.
+// Both decode the same way and both are a legal answer — a new account, or one that
+// has never played here — but emitting the shape the contract describes keeps a
+// server's frames identical whether or not it happens to have characters to name.
+func EncodeServerCharacterList(list CharacterList) []byte {
+	// A summary is a table with a string and a nested table, so each costs a handful
+	// of offsets besides its fields. Sizing up front avoids repeated growth of a
+	// buffer whose shape is known.
+	b := flatbuffers.NewBuilder(len(list.Characters)*96 + 128)
+
+	// Every string and every table a vector points at must be finished before that
+	// vector opens — so the names come first, then the appearances, then the summaries
+	// that reference both, and only then the vector carrying their offsets.
+	summaryOffsets := make([]flatbuffers.UOffsetT, len(list.Characters))
+	for i, character := range list.Characters {
+		nameOffset := b.CreateString(character.Name)
+		appearanceOffset := encodeAppearance(b, character.Appearance)
+
+		vnet.CharacterSummaryStart(b)
+		vnet.CharacterSummaryAddCharacterId(b, character.CharacterID)
+		vnet.CharacterSummaryAddName(b, nameOffset)
+		vnet.CharacterSummaryAddAppearance(b, appearanceOffset)
+		summaryOffsets[i] = vnet.CharacterSummaryEnd(b)
+	}
+
+	vnet.ServerCharacterListStartCharactersVector(b, len(summaryOffsets))
+	for i := len(summaryOffsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(summaryOffsets[i])
+	}
+	charactersOffset := b.EndVector(len(summaryOffsets))
+
+	vnet.ServerCharacterListStart(b)
+	vnet.ServerCharacterListAddCharacters(b, charactersOffset)
+	vnet.ServerCharacterListAddMaxCharacters(b, list.MaxCharacters)
+	built := vnet.ServerCharacterListEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadServerCharacterList, built)
+}
+
+// EncodePlayerAppearance builds the message that tells a session what one player
+// looks like.
+//
+// Sent once, when that player enters view. HasAppearance is honoured rather than
+// assumed, because "a message with no appearance" is one of the inputs a client has to
+// refuse and there would otherwise be no way to build it.
+func EncodePlayerAppearance(p PlayerAppearance) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	// A nested table must be finished before the table that references it opens —
+	// unlike a struct, which is written inline while its parent is open.
+	var appearanceOffset flatbuffers.UOffsetT
+	if p.HasAppearance {
+		appearanceOffset = encodeAppearance(b, p.Appearance)
+	}
+
+	vnet.PlayerAppearanceStart(b)
+	vnet.PlayerAppearanceAddEntityId(b, p.EntityID)
+	if p.HasAppearance {
+		vnet.PlayerAppearanceAddAppearance(b, appearanceOffset)
+	}
+	built := vnet.PlayerAppearanceEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadPlayerAppearance, built)
+}
+
+// EncodeSelectCharacterRequest builds one choice of an existing character. The server
+// never sends one, so this exists for the reason [EncodeAttackRequest] does: the tests
+// need the bytes a client produces, and a second encoder written by hand could drift
+// from this one.
+//
+// The id is written verbatim, zero and unknown ids included: both are refusals the
+// handshake has to make and a test has to be able to send.
+func EncodeSelectCharacterRequest(r SelectCharacterRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.SelectCharacterRequestStart(b)
+	vnet.SelectCharacterRequestAddCharacterId(b, r.CharacterID)
+	request := vnet.SelectCharacterRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadSelectCharacterRequest, request)
+}
+
+// EncodeCreateCharacterRequest builds one attempt to make a character, for the same
+// reason.
+//
+// Nothing is validated on the way out. An empty name and a name no server would accept
+// are both inputs the handshake must refuse politely; an absent appearance is the one
+// the *decoder* must refuse, and HasAppearance is honoured so a test can build it.
+func EncodeCreateCharacterRequest(r CreateCharacterRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	// A string and a nested table must both exist before the table that references
+	// them opens.
+	nameOffset := b.CreateString(r.Name)
+	var appearanceOffset flatbuffers.UOffsetT
+	if r.HasAppearance {
+		appearanceOffset = encodeAppearance(b, r.Appearance)
+	}
+
+	vnet.CreateCharacterRequestStart(b)
+	vnet.CreateCharacterRequestAddName(b, nameOffset)
+	if r.HasAppearance {
+		vnet.CreateCharacterRequestAddAppearance(b, appearanceOffset)
+	}
+	request := vnet.CreateCharacterRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadCreateCharacterRequest, request)
+}
+
+// encodeAppearance writes one appearance table and returns its offset.
+//
+// It must be called while no other table is open, because a nested table is reached
+// through an offset and has to be finished before its parent starts — the rule every
+// vector in this file already obeys, and the one difference between an Appearance and
+// the Vec3 beside it in a snapshot.
+//
+// Values are written verbatim, a set reserved high byte and an Unknown hair model
+// included: those are refusals somebody else makes, and a test has to be able to build
+// the frame they refuse.
+func encodeAppearance(b *flatbuffers.Builder, a Appearance) flatbuffers.UOffsetT {
+	vnet.AppearanceStart(b)
+	vnet.AppearanceAddSkinColor(b, a.SkinColor)
+	vnet.AppearanceAddShirtColor(b, a.ShirtColor)
+	vnet.AppearanceAddTrousersColor(b, a.TrousersColor)
+	vnet.AppearanceAddShoesColor(b, a.ShoesColor)
+	vnet.AppearanceAddHairModel(b, a.HairModel)
+	vnet.AppearanceAddHairColor(b, a.HairColor)
+	return vnet.AppearanceEnd(b)
 }
 
 // ChunkCoord is a chunk address, in chunk units.

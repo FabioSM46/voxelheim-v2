@@ -52,7 +52,26 @@ union Payload {
   /// *for*. A peer built against V6 as it shipped reads this tag as a payload it has
   /// no name for and drops it, so an older client loses the refusal feedback and
   /// nothing else. See `ActionRefused` in `player.fbs`.
-  ActionRefused           // 20
+  ActionRefused,          // 20
+
+  // -- V7. Appended, like everything above them, so the tags of 1..20 are untouched.
+  //
+  //    **These four do carry a version bump, and `ActionRefused` did not.** The
+  //    difference is not the number of members added, it is what an older peer loses
+  //    by dropping them. A dropped `ActionRefused` costs a player one explanation.
+  //    Three of these four are the handshake itself: a V6 client dropping
+  //    `ServerCharacterList` never chooses a character and never receives a welcome,
+  //    so it waits for ever on a phase it has no name for. That is precisely the
+  //    "discovered as a decode error mid-session" failure `ProtocolVersion` exists to
+  //    turn into a clean refusal at the handshake.
+  //
+  //    The first three are the new handshake phase, in the order it runs; the fourth
+  //    is the in-world half. See `handshake.fbs` and `player.fbs`.
+
+  ServerCharacterList,    // 21
+  SelectCharacterRequest, // 22
+  CreateCharacterRequest, // 23
+  PlayerAppearance        // 24
 }
 
 table Envelope {

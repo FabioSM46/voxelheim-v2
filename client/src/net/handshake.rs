@@ -68,6 +68,13 @@ pub enum HandshakeError {
     Repeated(&'static str),
     /// A payload only a client sends, arriving from the server.
     WrongDirection(&'static str),
+    /// A handshake-phase payload arriving on a session that already has a welcome.
+    ///
+    /// The mirror of [`Self::Premature`] rather than a second name for it, and distinct
+    /// from [`Self::Repeated`], which is a *second* welcome or reject.
+    /// `ServerCharacterList` before the welcome is exactly on time from V7; after the
+    /// welcome the server is answering a phase this session has already left.
+    OutOfPhase(&'static str),
     /// Inventory pair count must match the value announced in ServerWelcome.
     InventorySlots { expected: u8, got: usize },
     /// A snapshot's `tick_of_day` is at or beyond the day length announced in
@@ -91,6 +98,12 @@ impl fmt::Display for HandshakeError {
             Self::Repeated(kind) => write!(f, "second {kind} on an established session"),
             Self::WrongDirection(kind) => {
                 write!(f, "server sent {kind}, which only a client sends")
+            }
+            Self::OutOfPhase(kind) => {
+                write!(
+                    f,
+                    "{kind} belongs to the handshake and this session is past it"
+                )
             }
             Self::InventorySlots { expected, got } => write!(
                 f,
@@ -182,6 +195,23 @@ impl Handshake {
             (Phase::AwaitingWelcome, Message::ActionRefused(_)) => {
                 Err(HandshakeError::Premature("ActionRefused"))
             }
+            // On time from V7, and dropped rather than refused because this build has
+            // no character-select screen — that is a separate issue, and the vocabulary
+            // landing before the screen is the whole point of a contract-only change.
+            // A server that speaks V7's handshake will wait for a selection this client
+            // never sends; a server that speaks V6's sends a welcome and nothing here
+            // is reached at all. Refusing would disconnect a peer that is merely ahead,
+            // which is what `Transition::Ignored` exists to avoid.
+            (Phase::AwaitingWelcome, Message::CharacterList(_)) => {
+                Ok(Transition::Ignored("ServerCharacterList"))
+            }
+            // An appearance names an entity id, and `ServerWelcome.entity_id` is how
+            // this session learns which one is its own — so an appearance that precedes
+            // the welcome describes somebody nobody can identify. Refused for the reason
+            // a snapshot is.
+            (Phase::AwaitingWelcome, Message::PlayerAppearance(_)) => {
+                Err(HandshakeError::Premature("PlayerAppearance"))
+            }
 
             (Phase::Established, Message::Welcome(_)) => {
                 Err(HandshakeError::Repeated("ServerWelcome"))
@@ -234,6 +264,19 @@ impl Handshake {
             (Phase::Established, Message::ActionRefused(refused)) => {
                 Ok(Transition::ActionRefused(refused))
             }
+            // The character phase is over: this session has a character, because it has
+            // a welcome. A list arriving now is a server that has lost track of where
+            // the handshake is, and there is no way to resynchronise one of those.
+            (Phase::Established, Message::CharacterList(_)) => {
+                Err(HandshakeError::OutOfPhase("ServerCharacterList"))
+            }
+            // Admitted because a session exists, and carried no further: the appearance
+            // is decoded and validated here, and nothing draws one until the issue that
+            // gives players a body worth colouring. `MineProgress` spent Protocol V2 in
+            // exactly this state.
+            (Phase::Established, Message::PlayerAppearance(_)) => {
+                Ok(Transition::Ignored("PlayerAppearance"))
+            }
         }
     }
 }
@@ -254,7 +297,8 @@ fn world_payload_name(update: &WorldUpdate) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::super::codec::{
-        ActionRefused, BlockCoord, ChunkCoord, InventoryStack, MineProgress,
+        ActionRefused, BlockCoord, CharacterList, ChunkCoord, InventoryStack, MineProgress,
+        PLACEHOLDER_APPEARANCE, PlayerAppearance,
     };
     use super::*;
 
@@ -703,5 +747,101 @@ mod tests {
             handshake.apply(Message::Reject(reject())),
             Err(HandshakeError::Repeated("ServerReject"))
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V7 — the character phase, and what this build does with it
+    // -----------------------------------------------------------------------
+
+    fn character_list() -> CharacterList {
+        CharacterList {
+            characters: Vec::new(),
+            max_characters: 3,
+        }
+    }
+
+    fn player_appearance() -> PlayerAppearance {
+        PlayerAppearance {
+            entity_id: 1,
+            appearance: PLACEHOLDER_APPEARANCE,
+        }
+    }
+
+    /// A character list before the welcome is **on time** from V7, and this build drops
+    /// it rather than refusing: it has no character-select screen yet, and disconnecting
+    /// a peer that is merely ahead is what `Transition::Ignored` exists to avoid.
+    ///
+    /// The consequence is deliberate and worth stating: against a server that speaks
+    /// V7's handshake this session then waits for a welcome that will not come, because
+    /// nothing here sends a selection. Against the servers in this repository, which
+    /// still speak V6's handshake, nothing reaches this arm at all.
+    #[test]
+    fn a_character_list_before_the_welcome_is_dropped_rather_than_refused() {
+        let mut handshake = Handshake::new();
+
+        assert_eq!(
+            handshake.apply(Message::CharacterList(character_list())),
+            Ok(Transition::Ignored("ServerCharacterList"))
+        );
+        assert_eq!(handshake.phase(), Phase::AwaitingWelcome);
+    }
+
+    /// After the welcome the character phase is over: this session has a character,
+    /// because it has a welcome.
+    #[test]
+    fn a_character_list_after_the_welcome_ends_the_connection() {
+        let mut handshake = Handshake::new();
+        let _ = handshake.apply(Message::Welcome(params()));
+
+        assert_eq!(
+            handshake.apply(Message::CharacterList(character_list())),
+            Err(HandshakeError::OutOfPhase("ServerCharacterList"))
+        );
+    }
+
+    /// An appearance names an entity id, and `ServerWelcome.entity_id` is how a session
+    /// learns which one is its own — so one that precedes the welcome describes somebody
+    /// nobody can identify. Refused for the reason a snapshot is.
+    #[test]
+    fn an_appearance_before_the_welcome_ends_the_connection() {
+        let mut handshake = Handshake::new();
+
+        assert_eq!(
+            handshake.apply(Message::PlayerAppearance(player_appearance())),
+            Err(HandshakeError::Premature("PlayerAppearance"))
+        );
+    }
+
+    /// Admitted on a session and carried no further: validated at the decode boundary,
+    /// drawn by nobody until the issue that gives players a body worth colouring.
+    #[test]
+    fn an_appearance_after_the_welcome_is_admitted_and_dropped() {
+        let mut handshake = Handshake::new();
+        let _ = handshake.apply(Message::Welcome(params()));
+
+        assert_eq!(
+            handshake.apply(Message::PlayerAppearance(player_appearance())),
+            Ok(Transition::Ignored("PlayerAppearance"))
+        );
+    }
+
+    /// Direction beats phase, and it has to: a payload only a client sends is wrong
+    /// wherever it turns up, and saying so is more useful than "out of phase".
+    #[test]
+    fn the_character_requests_are_refused_for_their_direction_in_either_phase() {
+        for kind in ["SelectCharacterRequest", "CreateCharacterRequest"] {
+            let mut fresh = Handshake::new();
+            assert_eq!(
+                fresh.apply(Message::ClientOnly(kind)),
+                Err(HandshakeError::WrongDirection(kind))
+            );
+
+            let mut established = Handshake::new();
+            let _ = established.apply(Message::Welcome(params()));
+            assert_eq!(
+                established.apply(Message::ClientOnly(kind)),
+                Err(HandshakeError::WrongDirection(kind))
+            );
+        }
     }
 }

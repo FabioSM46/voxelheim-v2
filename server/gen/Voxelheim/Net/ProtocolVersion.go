@@ -19,7 +19,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 6
+	ProtocolVersionCurrent ProtocolVersion = 7
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{
