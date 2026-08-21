@@ -512,11 +512,15 @@ func TestNewSignInSeparatesUnconfiguredFromMisconfigured(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	unconfigured, err := newSignIn(options{}, accounts, slog.New(slog.NewTextHandler(&out, nil)))
+	unconfigured, err := newSignIn(options{}, slog.New(slog.NewTextHandler(&out, nil)))
 	if err != nil {
 		t.Fatalf("an unconfigured service refused to start: %v", err)
 	}
-	if unconfigured != nil {
+	// Read through the wiring step rather than off the config, because that is what
+	// `run` does with it and what has to answer nil: a service whose signin field is
+	// non-nil answers its sign-in routes, and one built from a deployment with no
+	// Discord application would answer them with a nil flow.
+	if unconfigured.withAccounts(accounts) != nil {
 		t.Error("a service with no client id was given a sign-in flow")
 	}
 	if !strings.Contains(out.String(), "-discord-client-id") {
@@ -524,7 +528,7 @@ func TestNewSignInSeparatesUnconfiguredFromMisconfigured(t *testing.T) {
 	}
 
 	misconfigured := options{discordClientID: "111", discordRedirectURI: "://not a url"}
-	if _, err := newSignIn(misconfigured, accounts, discard()); err == nil {
+	if _, err := newSignIn(misconfigured, discard()); err == nil {
 		t.Error("a redirect URI that is not a URL was accepted")
 	}
 }

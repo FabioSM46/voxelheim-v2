@@ -32,15 +32,49 @@ const defaultDiscordRedirectURI = "http://127.0.0.1:7780/discord/callback"
 // account exists and internal/auth never learns that Discord does, which is what keeps
 // the provider flow testable against an httptest.Server and the account store testable
 // against a directory.
+//
+// **[signInConfig.withAccounts] is the only thing that builds one**, and it takes the
+// store as an argument, so a signIn holding a flow and no store is not a value this
+// package can produce. It used to be: the configuration pass built one with a nil store
+// and `run` assigned the field a few lines later (#143).
 type signIn struct {
 	flow     *discord.Flow
 	accounts *auth.Store
 }
 
-// newSignIn builds the sign-in flow, or reports that this deployment has not been
-// given one.
+// signInConfig is a Discord sign-in that has been configured and not yet wired: the
+// provider flow, and no field for an account store, because where this is built there
+// is not one yet.
 //
-// **A nil flow and a nil error is "not configured", and it is a deliberate state
+// **It is a second type rather than a second state of the first**, and that is the whole
+// of what it is for. Everything an operator can get wrong has to be answered before this
+// service creates anything — a start that is going to be refused must refuse before it
+// writes (#136, #141) — and checking the Discord configuration *means* constructing the
+// flow, because discord.New is the only thing that knows which redirect URIs are
+// unusable and restating its rules in [options.validate] would be a second
+// implementation of them. The store is opened after that pass, so the flow and the store
+// become available at different moments, and no amount of reordering closes that gap:
+// it is the gap the configuration-first rule buys.
+//
+// What used to bridge it was `newSignIn(opts, nil, log)` and an assignment to the field
+// afterwards — a nil argument the compiler knew nothing about, one dereference away from
+// a nil-pointer panic at startup rather than a build failure. Bridging it with two types
+// costs one struct and makes the half-built value unrepresentable, which a nil check
+// inside newSignIn would not have: that would only have turned the panic into a refusal.
+//
+// **A zero signInConfig is "this deployment has no Discord application"** — the
+// deliberate state [newSignIn] describes — and it wires to no sign-in at all.
+type signInConfig struct {
+	// flow is what discord.New accepted, and nil when there is nothing to configure.
+	// It is the only thing this pass can produce: an account store is not a value an
+	// operator configures, it is a directory this service opens later.
+	flow *discord.Flow
+}
+
+// newSignIn checks the Discord configuration, or reports that this deployment has not
+// been given one.
+//
+// **A zero config and a nil error is "not configured", and it is a deliberate state
 // rather than an oversight.** A Discord application is something an operator registers
 // and this service cannot invent; refusing to start without one would mean the account
 // service could not run at all until somebody had — including in every test that is
@@ -48,17 +82,22 @@ type signIn struct {
 // answer 503 until a client id is given, which is a service that says what is missing
 // rather than one that is silently absent.
 //
+// **It takes no account store, and that is the point of the split**: this function
+// validates, and [signInConfig.withAccounts] wires. Nothing it returns can reach a
+// request, so there is no window in which a sign-in exists that would fail at the first
+// finish — the window is not kept short, it is gone.
+//
 // The rest of the checking is discord.New's rather than options.validate's, and
 // deliberately: a redirect URI is not a value that gets narrowed on its way to being
 // used, so the rule that puts -listen's range check in validate does not reach it — and
 // restating discord.New's refusals there would be a second implementation of them. The
 // ordering property validate buys is kept instead by calling this before the listener is
 // bound, which TestASignInThatCannotBeConfiguredRefusesBeforeThePortIsBound pins.
-func newSignIn(opts options, accounts *auth.Store, log *slog.Logger) (*signIn, error) {
+func newSignIn(opts options, log *slog.Logger) (signInConfig, error) {
 	if strings.TrimSpace(opts.discordClientID) == "" {
 		log.Warn("Discord sign-in is not configured; its routes will refuse every request",
 			"flag", "-discord-client-id")
-		return nil, nil
+		return signInConfig{}, nil
 	}
 
 	flow, err := discord.New(discord.Config{
@@ -66,10 +105,24 @@ func newSignIn(opts options, accounts *auth.Store, log *slog.Logger) (*signIn, e
 		RedirectURI: opts.discordRedirectURI,
 	})
 	if err != nil {
-		return nil, err
+		return signInConfig{}, err
 	}
 	log.Info("Discord sign-in configured", "provider", discord.Provider, "redirect_uri", opts.discordRedirectURI)
-	return &signIn{flow: flow, accounts: accounts}, nil
+	return signInConfig{flow: flow}, nil
+}
+
+// withAccounts hands the configured flow the store it records accounts through, and is
+// the whole of the wiring step.
+//
+// **Nil means this deployment has no Discord application**, which is exactly the nil
+// [service.signin] already carries and the state its routes answer 503 from. A
+// configured deployment gets a signIn built in one expression, with both halves, from a
+// value that never had a field for the store to be missing from.
+func (c signInConfig) withAccounts(accounts *auth.Store) *signIn {
+	if c.flow == nil {
+		return nil
+	}
+	return &signIn{flow: c.flow, accounts: accounts}
 }
 
 // The error vocabulary this service answers refusals with, and the status each carries.
