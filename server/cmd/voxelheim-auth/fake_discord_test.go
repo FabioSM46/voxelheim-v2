@@ -148,3 +148,14 @@ func writeFakeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
+
+// spentCode reports whether a code has been redeemed at this provider.
+//
+// It is how a test asserts that a refusal never reached the network at all — which is
+// the property the world check depends on, since an authorization code may be redeemed
+// once and a refusal after the redemption would have spent somebody's sign-in.
+func (f *fakeDiscord) spentCode(code string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spent[code]
+}

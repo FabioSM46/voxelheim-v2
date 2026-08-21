@@ -15,9 +15,28 @@ import (
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
 func discard() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// newKeys is a ticket signing pair in a directory belonging to this test.
+//
+// Generated at run time, never committed: a key pair checked into a public repository is
+// a key pair somebody eventually signs a real ticket with.
+//
+// Every service these tests build gets one, because a service without one is a state
+// that cannot exist — run returns before constructing the service if the pair cannot be
+// read, which is what lets the handlers dereference it without a guard.
+func newKeys(t *testing.T) *ticket.Pair {
+	t.Helper()
+
+	keys, err := ticket.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("ticket.LoadOrCreate: %v", err)
+	}
+	return keys
+}
 
 // validOptions is a configuration every field of which passes validate. The cases
 // below mutate the single field under test rather than building a literal each time:
@@ -89,7 +108,7 @@ func TestOptionsValidateReportsTheValueGiven(t *testing.T) {
 func TestTheRouteTableIsTheWholeSurface(t *testing.T) {
 	t.Parallel()
 
-	svc := &service{log: discard()}
+	svc := &service{log: discard(), keys: newKeys(t)}
 	table := svc.routes()
 	if len(table) == 0 {
 		t.Fatal("the route table is empty; this test would pass by describing nothing")
@@ -121,7 +140,7 @@ func TestHealthAnswersThatTheProcessIsUp(t *testing.T) {
 	t.Parallel()
 
 	rec := httptest.NewRecorder()
-	newMux((&service{log: discard()}).routes()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	newMux((&service{log: discard(), keys: newKeys(t)}).routes()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("GET /healthz answered %d, want 200", rec.Code)
@@ -140,7 +159,7 @@ func TestHealthAnswersThatTheProcessIsUp(t *testing.T) {
 func TestHealthAnswersTheMethodsItsPatternDeclares(t *testing.T) {
 	t.Parallel()
 
-	mux := newMux((&service{log: discard()}).routes())
+	mux := newMux((&service{log: discard(), keys: newKeys(t)}).routes())
 
 	for method, want := range map[string]int{
 		http.MethodGet:    http.StatusOK,
@@ -173,7 +192,7 @@ func TestServeAnswersUntilTheContextEnds(t *testing.T) {
 	defer cancel()
 
 	stopped := make(chan error, 1)
-	go func() { stopped <- (&service{log: discard()}).serve(ctx, ln) }()
+	go func() { stopped <- (&service{log: discard(), keys: newKeys(t)}).serve(ctx, ln) }()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get("http://" + addr + "/healthz")
@@ -275,10 +294,81 @@ func TestTheStartupLogNamesTheStoreAndItsFormatVersion(t *testing.T) {
 		fmt.Sprintf("format_version=%d", auth.StoreVersion),
 		"voxelheim-auth listening",
 		"addr=",
+		// **The public key is logged deliberately**, because an operator has to read it
+		// off this line in order to give it to a game server. It is the one half that
+		// may be here; TestNothingOfTheSigningKeyReachesTheLog is the other side of
+		// that sentence.
+		"ticket signing key ready",
+		"algorithm=" + ticket.Algorithm,
+		"public_key=",
+		"ticket_lifetime=",
 	} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("the startup log does not carry %q", want)
 		}
+	}
+
+	// The key it printed is the key the pair on disk holds, rather than a placeholder
+	// that happens to be 64 characters.
+	keys, err := ticket.LoadOrCreate(opts.authDir)
+	if err != nil {
+		t.Fatalf("reading back the pair run created: %v", err)
+	}
+	if !strings.Contains(logged, keys.PublicHex()) {
+		t.Error("the startup log does not carry the public key of the pair it kept")
+	}
+}
+
+// **An unreadable key pair refuses before the port is bound**, in the order the store
+// already does — and refusing at all is the point: regenerating over a damaged pair
+// would invalidate every ticket in flight and every copy a game server had stored, and
+// nobody would find out until a player was turned away.
+//
+// The listen address is one this test is already holding, so the ordering is what the
+// assertion reads: reaching net.Listen would fail on the address instead.
+func TestAnUnreadableSigningKeyRefusesBeforeThePortIsBound(t *testing.T) {
+	t.Parallel()
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+
+	opts := validOptions(t)
+	opts.listen = held.Addr().String()
+
+	// A first start, so there is a real pair to damage.
+	if _, err := ticket.LoadOrCreate(opts.authDir); err != nil {
+		t.Fatalf("ticket.LoadOrCreate: %v", err)
+	}
+	damaged := filepath.Join(opts.authDir, ticket.SigningKeyFileName)
+	before, err := os.ReadFile(damaged)
+	if err != nil {
+		t.Fatalf("reading the signing key: %v", err)
+	}
+	if err := os.WriteFile(damaged, []byte("not a key"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err = run(context.Background(), opts, discard())
+	if err == nil {
+		t.Fatal("run started with a signing key it cannot read")
+	}
+	if !strings.Contains(err.Error(), "opening the ticket signing key") {
+		t.Errorf("run failed with %q, which is not the key pair refusing; the port was bound first", err)
+	}
+	// And nothing was written over: an operator can still restore the pair beside what
+	// is there.
+	after, err := os.ReadFile(damaged)
+	if err != nil {
+		t.Fatalf("reading the damaged key again: %v", err)
+	}
+	if string(after) != "not a key" {
+		t.Error("the unreadable signing key was replaced with a fresh one")
+	}
+	if bytes.Equal(after, before) {
+		t.Fatal("the test did not manage to damage the key it meant to")
 	}
 }
 

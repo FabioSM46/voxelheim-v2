@@ -10,6 +10,7 @@ import (
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/discord"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
 // maxSignInRequestBytes bounds the finish request's body.
@@ -93,6 +94,19 @@ const (
 	errTooManySignIns      = "too_many_sign_ins"
 	errAccountUnavailable  = "account_unavailable"
 	errSignInCouldNotStart = "sign_in_could_not_start"
+
+	// A sign-in that names no world this service can issue a ticket for. Its own code
+	// rather than errMalformedRequest, for the reason the whole vocabulary exists: the
+	// two are different things for a client to be told. "Your JSON was unreadable" sends
+	// somebody looking at their encoder; "the world you named is not one I will sign
+	// for" sends them to look at their configuration, which is where the mistake is.
+	errWorldNotNamed = "world_not_named"
+
+	// A ticket that could not be minted. Reachable only through internal/ticket refusing
+	// to sign — a clock far outside the range the format holds, or an account id this
+	// service should not have produced — so it is a 500 and not a 400: nothing about the
+	// request caused it.
+	errTicketUnavailable = "ticket_unavailable"
 )
 
 // startResponse is what a client needs to open a browser and come back.
@@ -122,15 +136,47 @@ type finishRequest struct {
 	// FinishSecret is the one field here the loopback listener did not catch: the
 	// client held it from `start`. Without it, `state` was a bearer credential.
 	FinishSecret discord.Secret `json:"finish_secret"`
+
+	// World is the world this sign-in wants a ticket for, and it is required.
+	//
+	// **A ticket is minted here because there is nowhere else it could be.** A separate
+	// endpoint would need the caller to prove who they are, and the only thing that ever
+	// proved that is the authorization code this request is spending — a credential that
+	// outlived the sign-in so a ticket could be asked for later is exactly the refresh
+	// token this design does not have. So the world has to be named up front, and a
+	// player who wants to join a second world signs in again.
+	//
+	// Not a [discord.Secret]: a world name is an identifier an operator publishes to
+	// everybody who might play there, and treating it as a secret would only make it
+	// harder to put in the log line that says which world a sign-in was for.
+	World string `json:"world"`
 }
 
-// finishResponse is who the client now is. An account id and a display name, and no
-// credential of any kind — this service issues no ticket yet, and the issue that does
-// brings its own field.
+// finishResponse is who the client now is, and the credential it plays with.
+//
+// **`session_ticket` is a bearer credential and the last one this flow hands out.**
+// Whatever holds those bytes is that account on that world until they expire — a
+// signature proves who issued a ticket, not who is presenting it — so the schema's rule
+// applies to it here exactly as it does on the wire: never logged, never displayed. It
+// leaves [ticket.Ticket] through the one named method that exists for the purpose, which
+// is what keeps every other route out of it.
 type finishResponse struct {
 	AccountID   string `json:"account_id"`
 	DisplayName string `json:"display_name"`
 	Created     bool   `json:"created"`
+
+	// SessionTicket is the ticket, unpadded base64url, to be presented verbatim as
+	// `ClientHello.session_ticket` after the client has decoded it.
+	SessionTicket string `json:"session_ticket"`
+
+	// TicketExpiresAt is when it stops working, so a client can say so rather than
+	// discovering it at a handshake. Read from what was actually signed rather than
+	// computed a second time from the lifetime.
+	//
+	// **There is no revocation, so this is the only way a ticket ever ends.** A client
+	// that has lost one cannot cancel it; it can only sign in again for a new one and
+	// wait for the old one to run out.
+	TicketExpiresAt time.Time `json:"ticket_expires_at"`
 }
 
 // signInStart begins a sign-in and answers with where to send the browser.
@@ -169,12 +215,19 @@ func (s *service) signInStart(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// signInFinish redeems an authorization code and answers with the account behind it.
+// signInFinish redeems an authorization code and answers with the account behind it and
+// a ticket it can join with.
 //
-// The order is the whole of the rule this endpoint exists to keep: the provider is
-// asked first and the account store second, so an account is created only after
-// somebody has actually proved who they are. There is no path here on which a refusal
-// leaves an account behind.
+// The order is the whole of the rule this endpoint exists to keep: the world is checked
+// first, the provider is asked second and the account store third, so an account is
+// created only after somebody has actually proved who they are. There is no path here on
+// which a refusal leaves an account behind.
+//
+// **The world is checked before the provider is called, and that ordering is not
+// tidiness.** An authorization code may be redeemed once; refusing after the redemption
+// would spend somebody's code — and mint them an account — for a mistake this service
+// could see in the request body without asking anybody anything, leaving them to start
+// the whole sign-in again.
 func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	if s.signin == nil {
 		s.refuse(w, http.StatusServiceUnavailable, errNotConfigured)
@@ -190,6 +243,16 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 		// The refusal code the client is given already says what went wrong.
 		s.log.Info("a sign-in request could not be read")
 		s.refuse(w, http.StatusBadRequest, errMalformedRequest)
+		return
+	}
+
+	world, err := ticket.WorldIDFor(req.World)
+	if err != nil {
+		// **The name is not quoted back into the log**, and internal/ticket does not
+		// quote it into the error either. It is text from an unauthenticated request
+		// body, and a log line that echoes one is a log line an attacker writes.
+		s.log.Info("a sign-in was refused", "reason", "the request does not name a world a ticket can be issued for")
+		s.refuse(w, http.StatusBadRequest, errWorldNotNamed)
 		return
 	}
 
@@ -241,16 +304,43 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The conversion is the seam between the two packages, and it is the only thing
+	// holding their two sixteen-byte ids together: internal/ticket keeps its own so that
+	// the game server can import it without reaching the accounts, and this line stops
+	// compiling if either width ever moves.
+	sessionTicket, claims, err := s.keys.Mint(ticket.AccountID(account.ID), world, time.Now())
+	if err != nil {
+		// The account already exists at this point, and that is not a failure to undo:
+		// an account is idempotent, so the player retries and gets the same one with a
+		// ticket. Reachable only through internal/ticket refusing to sign, which is this
+		// service's own mistake and not the request's — hence a 500.
+		s.log.Error("a session ticket could not be minted", "error", err, "account_id", account.ID.String())
+		s.refuse(w, http.StatusInternalServerError, errTicketUnavailable)
+		return
+	}
+
 	// The account id is safe to log by construction: it is minted at random and derived
 	// from nothing about the person, so it names them here without describing them. The
 	// display name is deliberately absent — it is personal data, and nothing needs it in
-	// a log.
-	s.log.Info("sign-in completed", "provider", discord.Provider, "account_id", account.ID.String(), "created", created)
+	// a log. The world id is the digest of a name this service already validated, so it
+	// is neither personal nor attacker-chosen text; the ticket itself is a bearer
+	// credential and is not here at all.
+	s.log.Info("sign-in completed",
+		"provider", discord.Provider,
+		"account_id", account.ID.String(),
+		"created", created,
+		"world_id", claims.World.String(),
+		"ticket_expires_at", claims.ExpiresAt)
 
 	s.writeJSON(w, http.StatusOK, finishResponse{
 		AccountID:   account.ID.String(),
 		DisplayName: account.DisplayName,
 		Created:     created,
+		// Encoded exactly once, here, because the ticket has to reach the client or
+		// there was no point minting it. Everywhere else it stays inside ticket.Ticket,
+		// which redacts itself through fmt, %#v, log/slog and encoding/json alike.
+		SessionTicket:   sessionTicket.Encode(),
+		TicketExpiresAt: claims.ExpiresAt,
 	})
 }
 

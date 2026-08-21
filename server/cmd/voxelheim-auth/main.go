@@ -12,8 +12,17 @@
 // or in anything shipped to a player. internal/discord runs that flow and internal/auth
 // records what it produces; signin.go is the one file that joins them.
 //
-// What this command deliberately does not do yet: issue any ticket, or hold any signing
-// key. Both are their own issue, and each arrives with the route that needs it.
+// A finished sign-in hands back a **session ticket**: a short-lived, signed statement
+// that this account may play on one named world, which the game server checks against a
+// public key it read from this service once and kept. That is the whole point of the
+// shape — the game server verifies a signature instead of asking permission, so this
+// service being unreachable does not stop a game running on a machine that is perfectly
+// fine. internal/ticket holds the key pair and mints; tickets.go publishes the public
+// half.
+//
+// What this command deliberately still does not do: withdraw a ticket before it
+// expires. There is no revocation and none is planned — ticket.Lifetime is the whole of
+// the answer, and the reasoning is written down beside the number.
 package main
 
 import (
@@ -34,6 +43,7 @@ import (
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
 
 // The HTTP server's own deadlines, and the reason they are constants rather than
@@ -184,6 +194,25 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	}
 	log.Info("account store opened", "accounts_dir", accounts.Dir(), "format_version", auth.StoreVersion)
 
+	// Beside the accounts, and before the listener for the same reason they are: a key
+	// pair that cannot be read is a configuration this service cannot act on, and the
+	// refusal is the point — regenerating over an unreadable pair would invalidate every
+	// ticket in flight and every copy a game server has stored.
+	keys, err := ticket.LoadOrCreate(opts.authDir)
+	if err != nil {
+		return fmt.Errorf("opening the ticket signing key: %w", err)
+	}
+	// **The public key is logged deliberately, and it is the only half that is.** An
+	// operator has to be able to read it in order to give it to a game server, and a
+	// value nobody can find is a value somebody copies out of the wrong place. The
+	// private half cannot reach this line: ticket.Pair renders as its public key and
+	// ticket.SigningKey redacts itself through every formatter there is.
+	log.Info("ticket signing key ready",
+		"algorithm", ticket.Algorithm,
+		"public_key", keys.PublicHex(),
+		"ticket_lifetime", ticket.Lifetime,
+		"format_version", ticket.KeyStoreVersion)
+
 	// Before the listener as well, and for the reason the store is: a redirect URI that
 	// is not a URL is a configuration this service cannot act on, and discovering it
 	// after the port is bound and the probes are answering is worse.
@@ -197,7 +226,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("listening on %s: %w", opts.listen, err)
 	}
 
-	svc := &service{log: log, signin: signin}
+	svc := &service{log: log, keys: keys, signin: signin}
 
 	// The address the listener actually bound rather than the one that was asked for,
 	// which is the only way `-listen 127.0.0.1:0` tells anybody where it went.
@@ -211,6 +240,13 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 // over a listener the test owns instead of only through a signal and a real port.
 type service struct {
 	log *slog.Logger
+
+	// keys is the ticket signing key pair, and unlike signin below it is **never nil on
+	// a service that is running**: run returns before building this value if the pair
+	// cannot be read. There is no "tickets are not configured" mode to answer, because
+	// there is nothing for an operator to configure — the pair is generated on first
+	// start and kept.
+	keys *ticket.Pair
 
 	// signin is the Discord sign-in, and nil when this deployment has not been given a
 	// Discord application. The routes exist either way — see newSignIn.
@@ -238,6 +274,7 @@ type route struct {
 func (s *service) routes() []route {
 	return []route{
 		{pattern: "GET /healthz", handler: s.health},
+		{pattern: "GET /v1/ticket-key", handler: s.ticketKey},
 		{pattern: "POST /v1/signin/discord/start", handler: s.signInStart},
 		{pattern: "POST /v1/signin/discord/finish", handler: s.signInFinish},
 	}
