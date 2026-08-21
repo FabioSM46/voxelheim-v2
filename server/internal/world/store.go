@@ -1,0 +1,647 @@
+package world
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"hash/crc32"
+	"io/fs"
+	"log/slog"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"time"
+)
+
+// Persistence for the edit layer, and only for the edit layer.
+//
+// # What is stored, and what deliberately is not
+//
+// **Deltas only. The generated base is never written.** Generate is a pure function of
+// (seed, coord), so the base is something this process can always recompute — storing it
+// would be caching a computation at the price of the one property the GDD's Fimbulvetr
+// storm needs, which is being able to tell a voxel a player placed from a voxel the
+// generator produced. On disk that distinction is structural: a stored file *is* the
+// delta list, so restoring an unprotected chunk to its original state stays "delete the
+// deltas" rather than "diff two worlds". It is also what makes the format small — a chunk
+// nobody has touched costs zero bytes, and a shelter costs a few hundred.
+//
+// # One file per chunk
+//
+// A chunk's edits live in their own file, named for its coordinate. It is the simplest
+// thing that works: a save touches exactly the chunk that changed, a load reads exactly
+// the chunk being composed, and the atomic-rename trick below needs no reasoning about
+// neighbours sharing a file.
+//
+// A region format — many chunks packed into one file, as Minecraft's .mca does — is the
+// known optimisation, and it is deliberately not here. It trades this file's whole
+// correctness argument for fewer inodes, and nothing has yet measured that the inodes
+// hurt: the interesting number is how many *edited* chunks a real world accumulates, and
+// this format is what will produce it. Optimise when that measurement exists, not before.
+//
+// # Atomicity
+//
+// Every write goes to a temporary file in the destination directory, is flushed, and is
+// then renamed over the destination. Rename is atomic within a filesystem, so a crash
+// leaves either the previous file or the new one and never a half-written one. Writing
+// in place would leave a truncated file that parses as a shorter edit list — which is to
+// say, as a shelter with some of its walls back.
+//
+// # Versioning
+//
+// Both file kinds carry a magic number and a format version, and a reader refuses
+// anything it does not recognise. The point is not migration (there is one version, and
+// building tooling for it would be inventing work); the point is that a later change can
+// *refuse* an old file rather than misread it as the format it happens to resemble.
+
+// StoreVersion is the on-disk format version.
+//
+// Bump it for any change to the layouts below, including one that only adds a field: a
+// reader of an older build must refuse a newer file rather than parse a prefix of it.
+const StoreVersion uint32 = 1
+
+// DefaultWorldDir is where voxelheimd stores a world when the operator names no other
+// directory.
+const DefaultWorldDir = "world"
+
+// DefaultSaveInterval is how often the autosave loop writes the chunks that changed.
+//
+// It is a coalescing window rather than a deadline: an edit is durable at the next tick
+// of this interval, and a chunk edited fifty times in between is written once. Short
+// enough that a crash costs seconds of digging, long enough that a player hammering the
+// break key does not turn into a file write per block.
+const DefaultSaveInterval = 5 * time.Second
+
+// ErrSeedMismatch reports that a world directory was created by a different seed.
+//
+// Refusing is the whole point: the stored deltas name voxels by index inside a chunk, and
+// those indices only mean anything against the terrain the recorded seed generates. Loading
+// them onto another seed's terrain would not fail, it would quietly produce a world that is
+// half one landscape and half another's edits.
+var ErrSeedMismatch = errors.New("world: the stored world was created with a different seed")
+
+// ErrWorldgenMismatch reports that a world directory was written by a build whose terrain
+// generator differs from this one's.
+//
+// The seed's twin, and it exists for the same reason. Only deltas are stored, so opening a
+// world means replaying edits onto a base recomputed from the seed — and the seed alone does
+// not pin that base, the generator does too. See [WorldgenVersion].
+var ErrWorldgenMismatch = errors.New("world: the stored world was written by a different terrain generator")
+
+// ErrCorruptStore reports a file under the world directory that cannot be read as what it
+// claims to be: a bad magic number, an unknown format version, a length that disagrees
+// with its own header, a failed checksum, or an edit naming a voxel outside a chunk.
+//
+// It is an error rather than a fallback to the generated terrain on purpose. "Read it as
+// terrain" is the one answer that silently discards what a player built; a refusal keeps
+// the file for an operator to look at.
+var ErrCorruptStore = errors.New("world: stored data is corrupt")
+
+// On-disk layout, little-endian throughout.
+//
+//	world.bin      magic[4] version:u32 worldgen:u32 seed:i64 crc32:u32       = 24 bytes
+//	chunks/c.X.Y.Z.vxd
+//	               magic[4] version:u32 x:i32 y:i32 z:i32 count:u32
+//	               count × (index:u32 block:u16)
+//	               crc32:u32
+//
+// The chunk coordinate is written into the file as well as into its name, so a file that
+// has been renamed or copied into the wrong place is caught rather than applied to the
+// wrong chunk. The checksum covers everything before it and catches the corruption a
+// length check cannot: a flipped bit inside an otherwise well-formed record.
+const (
+	worldFileName = "world.bin"
+	chunkDirName  = "chunks"
+	chunkFileExt  = ".vxd"
+	tempFileGlob  = "*.tmp*"
+
+	worldFileSize = 4 + 4 + 4 + 8 + 4
+
+	chunkHeaderSize = 4 + 4 + 4 + 4 + 4 + 4
+	chunkEntrySize  = 4 + 2
+
+	// maxChunkFileSize is what a chunk file can be when every voxel in it has been
+	// edited. Checked before the file is read, because the alternative is letting a
+	// corrupt length field decide how much memory to allocate.
+	maxChunkFileSize = chunkHeaderSize + ChunkVolume*chunkEntrySize + ChecksumSize
+)
+
+var (
+	worldMagic = [4]byte{'V', 'X', 'H', 'W'}
+	chunkMagic = [4]byte{'V', 'X', 'H', 'D'}
+)
+
+// The record discipline the two layouts above share, exported so that a second
+// store under the world directory obeys it rather than reimplementing it.
+//
+// internal/persist is the first: it keeps one file per player identity and needs
+// exactly this — a magic number it chooses, a format version it owns, a trailing
+// CRC, and the temporary-file-and-rename write. Copying those four into another
+// package would be four more places for the same bug, and the one that matters is
+// silent: a store that forgets the rename leaves half-written records that parse.
+//
+// What is deliberately *not* shared is the version number. Each store passes its
+// own to [CheckHeader], because the player record and the delta record change for
+// unrelated reasons — one shared counter would make a chunk-format bump refuse
+// every player file, and the reverse.
+const (
+	// HeaderSize is the magic number and the format version: the prefix every
+	// record in this directory starts with.
+	HeaderSize = 4 + 4
+
+	// ChecksumSize is the CRC-32 every record ends with.
+	ChecksumSize = 4
+)
+
+// Store is one world's directory on disk.
+//
+// It is pure I/O: it holds no edits of its own, knows nothing about which chunks are
+// resident, and none of its methods block on anything but the filesystem. The bookkeeping
+// of *which* chunks still need writing belongs to the Cache, which is what learns about
+// an edit.
+//
+// Safe for concurrent use — every method touches a distinct path, and the Cache
+// serialises the writes to any one of them.
+type Store struct {
+	dir      string
+	chunkDir string
+	seed     int64
+}
+
+// OpenStore opens the world directory at dir for seed, creating it if it is not there.
+//
+// An existing world is only opened when its recorded seed is the one given: a mismatch is
+// ErrSeedMismatch and the caller is expected to refuse to start. This is the first thing
+// voxelheimd does with the operator's flags, before it binds a port, because a server that
+// has already accepted a connection is a worse place to discover the world is not the one
+// the operator meant.
+func OpenStore(dir string, seed int64) (*Store, error) {
+	if dir == "" {
+		return nil, errors.New("world: the world directory must be named")
+	}
+
+	chunkDir := filepath.Join(dir, chunkDirName)
+	if err := os.MkdirAll(chunkDir, 0o755); err != nil {
+		return nil, fmt.Errorf("world: creating %s: %w", chunkDir, err)
+	}
+
+	s := &Store{dir: dir, chunkDir: chunkDir, seed: seed}
+	if err := s.checkWorldFile(); err != nil {
+		return nil, err
+	}
+	s.sweepTemporaries()
+	return s, nil
+}
+
+// Dir is the world directory this store writes to.
+func (s *Store) Dir() string { return s.dir }
+
+// Seed is the seed the stored world was created with, which OpenStore has already proved
+// is the seed the server is running.
+func (s *Store) Seed() int64 { return s.seed }
+
+// checkWorldFile reads the world file, or writes it when this directory is new.
+//
+// Two comparisons, not one, because two things have to hold before a stored delta may be
+// replayed: the seed, and the generator the seed is fed to. Either mismatch is a refusal.
+func (s *Store) checkWorldFile() error {
+	path := filepath.Join(s.dir, worldFileName)
+
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return WriteAtomic(path, encodeWorldFile(s.seed))
+	case err != nil:
+		return fmt.Errorf("world: reading %s: %w", path, err)
+	}
+
+	stored, worldgen, err := decodeWorldFile(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if stored != s.seed {
+		return fmt.Errorf("%w: %s holds seed %d, the server is running seed %d",
+			ErrSeedMismatch, s.dir, stored, s.seed)
+	}
+	if worldgen != WorldgenVersion {
+		return fmt.Errorf("%w: %s was written by worldgen version %d, this build generates version %d",
+			ErrWorldgenMismatch, s.dir, worldgen, WorldgenVersion)
+	}
+	return nil
+}
+
+// sweepTemporaries removes the temporary files a crash mid-write leaves behind.
+//
+// They are inert — a reader only ever opens an exact chunk path, and a temporary name
+// never is one — so this is housekeeping rather than correctness, and a failure to sweep
+// is not a reason to refuse to start a world that is otherwise readable.
+func (s *Store) sweepTemporaries() {
+	// Both directories, because WriteAtomic puts the temporary beside the file it is
+	// replacing and the world file does not live under chunks/. Sweeping only the chunk
+	// directory left `world.bin.tmp*` behind for the life of the world, which is a small
+	// leak and a large contradiction of the sentence above.
+	for _, dir := range []string{s.dir, s.chunkDir} {
+		SweepTemporaries(dir)
+	}
+}
+
+// SweepTemporaries removes the temporary files a crash mid-[WriteAtomic] left in dir.
+//
+// Exported for the same reason the framing helpers are: a second store under the world
+// directory writes through WriteAtomic and therefore inherits its leftovers. Best
+// effort, and silent about failures, because a temporary file is inert — a reader only
+// ever opens an exact record path, and a temporary name never is one.
+func SweepTemporaries(dir string) {
+	leftovers, err := filepath.Glob(filepath.Join(dir, tempFileGlob))
+	if err != nil {
+		return
+	}
+	for _, path := range leftovers {
+		_ = os.Remove(path)
+	}
+}
+
+// chunkPath is where one chunk's edits live. The coordinate is in the name so a directory
+// listing is readable, and in the file so a misplaced one is caught.
+func (s *Store) chunkPath(coord Coord) string {
+	return filepath.Join(s.chunkDir, fmt.Sprintf("c.%d.%d.%d%s", coord.X, coord.Y, coord.Z, chunkFileExt))
+}
+
+// LoadChunk reads the edits stored for coord.
+//
+// A chunk nobody has edited has no file, and that is not an error: it returns a nil map,
+// which is exactly "the generated base is the whole truth here". Anything else that stops
+// the file being read is an error, because the alternative — an empty map — is the same
+// value as "no edits" and would hand a player the terrain their shelter used to be.
+func (s *Store) LoadChunk(coord Coord) (map[int]Block, error) {
+	path := s.chunkPath(coord)
+
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("world: reading %s: %w", path, err)
+	}
+	// Before the read, not after: a file this large is not one this format wrote, and
+	// finding that out by allocating it is how a corrupt directory becomes an OOM.
+	if info.Size() > maxChunkFileSize {
+		return nil, fmt.Errorf("%w: %s is %d bytes, more than the %d a chunk can need",
+			ErrCorruptStore, path, info.Size(), maxChunkFileSize)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("world: reading %s: %w", path, err)
+	}
+
+	edits, err := decodeChunkFile(coord, data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return edits, nil
+}
+
+// SaveChunk writes the edits recorded for coord, atomically.
+//
+// An empty set writes nothing and removes nothing: Deltas never forgets an edit, so a
+// chunk with no edits has never been saved either, and creating an empty file for it would
+// spend an inode saying what the file's absence already says.
+func (s *Store) SaveChunk(coord Coord, edits map[int]Block) error {
+	if len(edits) == 0 {
+		return nil
+	}
+
+	encoded, err := encodeChunkFile(coord, edits)
+	if err != nil {
+		return err
+	}
+	return WriteAtomic(s.chunkPath(coord), encoded)
+}
+
+// WriteAtomic replaces path with data, or leaves it exactly as it was.
+//
+// Temporary file, flush, rename — in that order, and the temporary file is created *in
+// the destination directory* because rename is only atomic within one filesystem. The
+// flush is what makes the rename mean something: without it the directory entry can reach
+// the disk ahead of the bytes it points at.
+//
+// A failure anywhere removes the temporary file and returns; the destination has not been
+// opened, so whatever it held is still what it holds.
+func WriteAtomic(path string, data []byte) (err error) {
+	dir, base := filepath.Dir(path), filepath.Base(path)
+
+	// The suffix keeps a temporary file from ever being named like a chunk file, so a
+	// crash cannot leave something a reader would open.
+	tmp, err := os.CreateTemp(dir, base+".tmp")
+	if err != nil {
+		return fmt.Errorf("world: creating a temporary file in %s: %w", dir, err)
+	}
+	name := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(name)
+		}
+	}()
+
+	if _, err = tmp.Write(data); err != nil {
+		return fmt.Errorf("world: writing %s: %w", name, err)
+	}
+	if err = tmp.Sync(); err != nil {
+		return fmt.Errorf("world: flushing %s: %w", name, err)
+	}
+	if err = tmp.Close(); err != nil {
+		return fmt.Errorf("world: closing %s: %w", name, err)
+	}
+	if err = os.Rename(name, path); err != nil {
+		return fmt.Errorf("world: renaming %s onto %s: %w", name, path, err)
+	}
+	return nil
+}
+
+func encodeWorldFile(seed int64) []byte {
+	buf := make([]byte, worldFileSize)
+	copy(buf[0:4], worldMagic[:])
+	binary.LittleEndian.PutUint32(buf[4:8], StoreVersion)
+	binary.LittleEndian.PutUint32(buf[8:12], WorldgenVersion)
+	binary.LittleEndian.PutUint64(buf[12:20], uint64(seed))
+	PutChecksum(buf)
+	return buf
+}
+
+// decodeWorldFile returns the seed and the worldgen version the directory was written
+// with. Both are the caller's to compare; neither is checked here, because a mismatch is a
+// refusal to start rather than a corrupt file.
+func decodeWorldFile(data []byte) (int64, uint32, error) {
+	if len(data) != worldFileSize {
+		return 0, 0, fmt.Errorf("%w: the world file is %d bytes, want %d", ErrCorruptStore, len(data), worldFileSize)
+	}
+	if err := CheckHeader(data, worldMagic, StoreVersion); err != nil {
+		return 0, 0, err
+	}
+	if err := CheckChecksum(data); err != nil {
+		return 0, 0, err
+	}
+	return int64(binary.LittleEndian.Uint64(data[12:20])), binary.LittleEndian.Uint32(data[8:12]), nil
+}
+
+// encodeChunkFile serialises one chunk's edits.
+//
+// Sorted by index, so the same edits always produce the same bytes: a save that rewrites
+// an unchanged chunk leaves an identical file, and a test can compare two saves without
+// depending on Go's randomised map iteration.
+func encodeChunkFile(coord Coord, edits map[int]Block) ([]byte, error) {
+	indices := slices.Sorted(maps.Keys(edits))
+
+	buf := make([]byte, chunkHeaderSize+len(indices)*chunkEntrySize+ChecksumSize)
+	copy(buf[0:4], chunkMagic[:])
+	binary.LittleEndian.PutUint32(buf[4:8], StoreVersion)
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(coord.X))
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(coord.Y))
+	binary.LittleEndian.PutUint32(buf[16:20], uint32(coord.Z))
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(len(indices)))
+
+	at := chunkHeaderSize
+	for _, index := range indices {
+		if index < 0 || index >= ChunkVolume {
+			// Unreachable through Deltas.Record, whose callers derive the index from
+			// Local. Refused rather than truncated into the field, because a value that
+			// cannot be written back correctly must not be written at all.
+			return nil, fmt.Errorf("world: chunk %+v holds an edit at voxel %d, outside 0..%d", coord, index, ChunkVolume-1)
+		}
+		binary.LittleEndian.PutUint32(buf[at:at+4], uint32(index))
+		binary.LittleEndian.PutUint16(buf[at+4:at+6], uint16(edits[index]))
+		at += chunkEntrySize
+	}
+
+	PutChecksum(buf)
+	return buf, nil
+}
+
+// decodeChunkFile parses one chunk's edits, refusing anything it cannot read exactly.
+//
+// want is the coordinate the caller asked for; the file has to agree, which is what makes
+// a file copied to the wrong name a refusal rather than someone else's shelter.
+func decodeChunkFile(want Coord, data []byte) (map[int]Block, error) {
+	if len(data) < chunkHeaderSize+ChecksumSize {
+		return nil, fmt.Errorf("%w: %d bytes is shorter than an empty chunk record", ErrCorruptStore, len(data))
+	}
+	if err := CheckHeader(data, chunkMagic, StoreVersion); err != nil {
+		return nil, err
+	}
+	if err := CheckChecksum(data); err != nil {
+		return nil, err
+	}
+
+	got := Coord{
+		X: int32(binary.LittleEndian.Uint32(data[8:12])),
+		Y: int32(binary.LittleEndian.Uint32(data[12:16])),
+		Z: int32(binary.LittleEndian.Uint32(data[16:20])),
+	}
+	if got != want {
+		return nil, fmt.Errorf("%w: the record is for chunk %+v, not %+v", ErrCorruptStore, got, want)
+	}
+
+	// The count is checked against the length the file actually has before it is used to
+	// size anything. A truncated file fails here — which is the case this whole check
+	// exists for, because a shorter edit list is a perfectly plausible one.
+	count := uint64(binary.LittleEndian.Uint32(data[20:24]))
+	if want := uint64(chunkHeaderSize) + count*chunkEntrySize + ChecksumSize; want != uint64(len(data)) {
+		return nil, fmt.Errorf("%w: the record claims %d edits, which needs %d bytes, but the file is %d",
+			ErrCorruptStore, count, want, len(data))
+	}
+
+	edits := make(map[int]Block, count)
+	at := chunkHeaderSize
+	for range count {
+		index := binary.LittleEndian.Uint32(data[at : at+4])
+		if index >= ChunkVolume {
+			return nil, fmt.Errorf("%w: an edit names voxel %d, outside 0..%d", ErrCorruptStore, index, ChunkVolume-1)
+		}
+		edits[int(index)] = Block(binary.LittleEndian.Uint16(data[at+4 : at+6]))
+		at += chunkEntrySize
+	}
+	return edits, nil
+}
+
+// CheckHeader validates the magic number and the format version a record claims.
+//
+// The version check is the reason the field exists: a build that does not know a layout
+// says so, instead of reading the bytes it recognises and guessing at the rest. want is
+// the caller's own version rather than a package constant, so two stores under this
+// directory can version independently — see the [HeaderSize] block.
+//
+// The length guard is not redundant with the callers that already have one. This is
+// exported, so the next caller may not, and a short slice here would be an index panic
+// rather than the refusal every other malformed record gets.
+func CheckHeader(data []byte, magic [4]byte, want uint32) error {
+	if len(data) < HeaderSize {
+		return fmt.Errorf("%w: %d bytes cannot hold a %d-byte record header", ErrCorruptStore, len(data), HeaderSize)
+	}
+	if [4]byte(data[0:4]) != magic {
+		return fmt.Errorf("%w: %q is not a %q record", ErrCorruptStore, data[0:4], magic[:])
+	}
+	if version := binary.LittleEndian.Uint32(data[4:8]); version != want {
+		return fmt.Errorf("%w: format version %d, this build reads version %d",
+			ErrCorruptStore, version, want)
+	}
+	return nil
+}
+
+// CheckChecksum verifies the trailing CRC over everything before it. It catches what a
+// length check cannot: a flipped bit inside a record whose shape is still valid.
+func CheckChecksum(data []byte) error {
+	if len(data) < ChecksumSize {
+		return fmt.Errorf("%w: %d bytes cannot hold a %d-byte checksum", ErrCorruptStore, len(data), ChecksumSize)
+	}
+	body := data[:len(data)-ChecksumSize]
+	stored := binary.LittleEndian.Uint32(data[len(data)-ChecksumSize:])
+	if got := checksum(body); got != stored {
+		return fmt.Errorf("%w: checksum %#08x, the record says %#08x", ErrCorruptStore, got, stored)
+	}
+	return nil
+}
+
+// PutChecksum writes the CRC of everything before it into buf's last four bytes.
+func PutChecksum(buf []byte) {
+	binary.LittleEndian.PutUint32(buf[len(buf)-ChecksumSize:], checksum(buf[:len(buf)-ChecksumSize]))
+}
+
+// checksum is CRC-32 (IEEE). Integrity, not authenticity: it catches a bad sector and a
+// truncated write, and it is not trying to catch anybody. Nothing under the world
+// directory crosses a trust boundary — it is the server's own state on the server's own
+// disk — so a cryptographic hash here would cost every save and defend against nothing
+// that is not already game over.
+func checksum(body []byte) uint32 { return crc32.ChecksumIEEE(body) }
+
+// --- the Cache's half: which chunks still need writing, and when they are written ---
+
+// markDirty records that coord has edits the store does not have yet.
+//
+// Called from Apply with composeMu held, so it must not block on anything: it takes one
+// mutex that is never held across a write, and does a map insert under it.
+func (c *Cache) markDirty(coord Coord) {
+	if c.store == nil {
+		return
+	}
+	c.dirtyMu.Lock()
+	c.dirty[coord] = struct{}{}
+	c.dirtyMu.Unlock()
+}
+
+// takeDirty removes and returns the chunks awaiting a write.
+//
+// Clearing *before* the snapshot is taken, rather than after, is the ordering that cannot
+// lose an edit. An edit landing in between re-marks the chunk, so the worst case is
+// writing it twice — the same bytes. The other order has a window in which an edit is in
+// neither the file being written nor the set of chunks still to write, and that edit is
+// simply gone at the next restart.
+func (c *Cache) takeDirty() []Coord {
+	c.dirtyMu.Lock()
+	defer c.dirtyMu.Unlock()
+
+	if len(c.dirty) == 0 {
+		return nil
+	}
+	coords := slices.Collect(maps.Keys(c.dirty))
+	clear(c.dirty)
+	return coords
+}
+
+// Flush writes every chunk whose edits the store does not have yet, and returns once they
+// are on disk.
+//
+// **It takes neither composeMu nor mu**, which is what "saving does not block the tick
+// loop or a session's read path" means concretely: while a save runs, collision keeps
+// reading resident chunks, sessions keep being handed them, and edits keep being applied.
+// The only lock a save shares with an edit is the delta layer's own, and it is held for
+// the length of a map copy.
+//
+// Saves are serialised against each other, so two Flushes can never race a stale snapshot
+// onto a fresher one. A chunk whose write fails goes back into the dirty set and is
+// retried by the next save, and its error is returned so a caller can say so.
+func (c *Cache) Flush() error {
+	if c.store == nil {
+		return nil
+	}
+
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+
+	var errs []error
+	for _, coord := range c.takeDirty() {
+		if err := c.store.SaveChunk(coord, c.deltas.Snapshot(coord)); err != nil {
+			c.markDirty(coord)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// SaveLoop writes the chunks that have changed, every interval, until ctx ends.
+//
+// It returns ctx.Err() on cancellation and does not stop for a failed write: a full disk
+// is a reason to shout, not a reason for a server to quietly stop saving for the rest of
+// its life. The chunk stays dirty, so the next pass — and the final flush at shutdown —
+// tries again.
+//
+// The final flush is *not* here. This loop is a worker like any other; shutdown waits for
+// it to exit and then flushes once, when no session can still be recording an edit.
+func (c *Cache) SaveLoop(ctx context.Context, every time.Duration, log *slog.Logger) error {
+	if c.store == nil {
+		return nil
+	}
+	if every <= 0 {
+		every = DefaultSaveInterval
+	}
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := c.Flush(); err != nil {
+				log.Error("saving the world failed; the chunks will be retried", "error", err)
+			}
+		}
+	}
+}
+
+// hydrate brings coord's stored edits into the delta layer, once, before the chunk is
+// composed for the first time.
+//
+// Called from Get with no lock held and inside the generation semaphore, so a burst of
+// chunk requests cannot turn into a burst of simultaneous reads.
+//
+// There is no separate "already hydrated" set: the delta layer already holding edits for a
+// coordinate *is* that record. The equivalence holds in one direction only, and it is the
+// direction that matters — memory is never behind disk, because disk is only ever written
+// from memory and Deltas never forgets an edit. So a chunk with edits in memory has
+// nothing to gain from a file, and a chunk with none has never been saved.
+//
+// That check is a fast path rather than a guarantee, which is why Restore is the one that
+// settles precedence. A chunk evicted while it was being generated leaves an orphaned
+// generation running beside the one that replaced it, so a slow read can still land after
+// an edit has been recorded through the newer entry. Restore refusing to overwrite is what
+// makes that harmless instead of a lost edit.
+func (c *Cache) hydrate(coord Coord) error {
+	if c.store == nil || c.deltas.Known(coord) {
+		return nil
+	}
+
+	stored, err := c.store.LoadChunk(coord)
+	if err != nil {
+		return err
+	}
+	c.deltas.Restore(coord, stored)
+	return nil
+}

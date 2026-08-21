@@ -1,0 +1,1506 @@
+//! The blocking half of the client's networking: everything that owns the socket.
+//!
+//! This module runs on its own `std::thread` and is the only code in the client
+//! that blocks. No Bevy type crosses the line — it speaks in [`SessionEvent`] and
+//! [`NetCommand`] over `std::sync::mpsc`, which is what lets the ECS side drain
+//! with `try_recv` and never wait for a network.
+//!
+//! It mirrors `internal/session` on the server: one connection's lifetime, the
+//! handshake that admits it, and no opinion whatsoever about what a message means
+//! for the world.
+//!
+//! ## The identity file
+//!
+//! One connection's lifetime has exactly two points where an identity matters: the
+//! token is read from a file just before the hello that presents it, and the one
+//! the welcome answers with is written back. Both are blocking file I/O, which is
+//! why they live on this thread and nowhere else — `codec` stays free of I/O, and
+//! `ui`, `player` and `world` never learn that a file exists.
+//!
+//! **One file per server address**, because a token means nothing to a server that
+//! did not mint it: presenting server A's token to server B makes a new character
+//! on B, and must not overwrite what A issued. `--identity` overrides the path
+//! outright, which is how one machine runs two characters against one server.
+//!
+//! Nothing here decides anything from a token. It is read, presented, and stored;
+//! every consequence of it belongs to the server.
+
+use std::fs;
+use std::io::{self, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use super::codec::{
+    self, ActionRefused, InventoryState, MineProgress, PLAYER_TOKEN_LEN, PlayerToken,
+    SessionParams, Snapshot, WorldUpdate,
+};
+use super::frame::{self, FrameDecoder};
+use super::handshake::{Handshake, Transition};
+use super::tls;
+
+/// How long a connect attempt may take before it counts as unreachable. Without
+/// it, a black-holed address parks the thread until the OS gives up, which on
+/// Linux is minutes of a status line that says "Connecting".
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a read blocks before the loop looks for a shutdown command.
+///
+/// Short enough that closing the window does not leave a thread parked on a
+/// socket nobody reads; long enough that an idle session costs five wakeups a
+/// second. This is a poll interval, not a session timeout: a quiet server is
+/// normal, and nothing here disconnects one.
+const READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Read buffer size. A handshake frame is tens of bytes; the frames that make
+/// this worth sizing arrive with chunk streaming, and are bounded by
+/// [`frame::MAX_FRAME_SIZE`] regardless.
+const READ_BUFFER_SIZE: usize = 8 * 1024;
+
+/// Where identity files live under the data directory, one file per server.
+pub(super) const IDENTITY_DIR: &[&str] = &["voxelheim", "identity"];
+
+/// The XDG base directory for per-user data, when it is set to an absolute path.
+const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
+
+/// The home directory, used when [`XDG_DATA_HOME`] says nothing usable.
+const HOME: &str = "HOME";
+
+/// The XDG default for `$XDG_DATA_HOME`, relative to [`HOME`].
+const DEFAULT_DATA_HOME: &[&str] = &[".local", "share"];
+
+/// Distinguishes one process's temporary identity file from another's, so two
+/// clients writing the same file at once cannot land on the same temporary name.
+static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// What the ECS can tell the net thread.
+///
+/// One variant today. It is sent by `Drop` on the ECS side rather than by a
+/// system, because "the app is going away" is the only instruction this issue
+/// has to give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NetCommand {
+    Disconnect,
+}
+
+/// What the net thread tells the ECS.
+///
+/// `Handshaking`, `World`, `Inventory`, and `MineProgress` are admitted messages,
+/// and `Warning` is a line for the log; all other variants terminate the session.
+/// The ECS maps them onto `ConnectionState`; the mapping lives there, and the
+/// naming here is deliberately about what *happened* rather than about what should
+/// be displayed.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SessionEvent {
+    /// The socket is up and `ClientHello` is on the wire.
+    Handshaking,
+    /// A validated `ServerWelcome` arrived.
+    ///
+    /// `returning` says whether the token in it is the one this client presented,
+    /// which is the only thing the client derives from a token and is derived for
+    /// the status line alone. It is not a gameplay answer: the server had already
+    /// settled the identity before it sent the welcome, and both values of this
+    /// flag describe a session that is equally established.
+    Established {
+        params: SessionParams,
+        returning: bool,
+    },
+    /// The server said something about the voxel world. Ordered with respect to
+    /// every other event on this channel, which is what lets an unload that
+    /// follows a load stay behind it.
+    World(WorldUpdate),
+    /// One tick of authoritative entity state, with the moment it arrived.
+    ///
+    /// The timestamp is taken **here**, where the bytes were decoded, rather than on the
+    /// frame that consumes it. Interpolation divides by the gap between two arrivals, so
+    /// a frame's worth of scheduling jitter in that number is a frame's worth of jitter
+    /// in every position on screen.
+    Snapshot { snapshot: Snapshot, at: Instant },
+    /// The player's complete authoritative inventory.
+    Inventory(InventoryState),
+    /// Authoritative progress for one mined voxel.
+    MineProgress(MineProgress),
+    /// The server refused an action, with the reason a player reads.
+    ///
+    /// Named apart from [`Self::Refused`] below, which means there is no session at all.
+    /// This one is an answer inside a session that continues.
+    ActionRefused(ActionRefused),
+    /// Something worth a line in the log happened, and the session continues.
+    ///
+    /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
+    /// `warn!`. Handing the text to the ECS keeps that boundary intact and makes
+    /// the warning a *value*, which is what lets a test read one back instead of
+    /// hoping a global logger was installed.
+    ///
+    /// Never carries a token: what is written here is written to a log.
+    Warning(String),
+    /// There is no session, and this is the reason a player needs to read:
+    /// a `ServerReject`, an unreachable server, or a peer that is not speaking
+    /// this protocol.
+    Refused(String),
+    /// A session that existed has ended. `Some` when something went wrong.
+    Ended(Option<String>),
+}
+
+/// Which transport a session is built on.
+///
+/// **`Encrypted` is the only variant a shipped client can name.** `Plaintext` exists
+/// under `cfg(test)` and nowhere else, so "this client cannot connect in the clear" is
+/// enforced by the compiler in every build a player runs rather than by a flag nobody
+/// sets or a sentence nobody reads.
+///
+/// The seam exists because the tests below stand a stub server on a real socket and
+/// drive the whole thread-and-channel boundary through it, and a rustls server needs a
+/// certificate — which this repository will not carry, because a private key committed
+/// as a fixture is still a private key, and cannot generate, because doing so needs a
+/// fourth crate the dependency rule forbids. What those tests are about is the
+/// handshake state machine, the channels and the ECS; the encryption has its own tests
+/// in [`super::tls`] and on the Go side, where a certificate exists to test it with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Transport {
+    #[default]
+    Encrypted,
+    #[cfg(test)]
+    Plaintext,
+}
+
+/// One connection, whichever way it is carried.
+///
+/// The client's counterpart to the server's `transport.Conn`, and it earns its keep the
+/// same way: everything below reads and writes without knowing which it has. Two
+/// handles onto one connection is the shape a session needs — a reader parked on a poll
+/// and a writer parked on a channel — and each variant provides it its own way.
+pub(super) enum Wire {
+    Tls(tls::TlsWire),
+    #[cfg(test)]
+    Plain(TcpStream),
+}
+
+impl Wire {
+    fn try_clone(&self) -> io::Result<Self> {
+        match self {
+            Self::Tls(wire) => wire.try_clone().map(Self::Tls),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.try_clone().map(Self::Plain),
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Tls(wire) => wire.set_read_timeout(timeout),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.set_read_timeout(timeout),
+        }
+    }
+
+    fn shutdown(&self) -> io::Result<()> {
+        match self {
+            Self::Tls(wire) => wire.shutdown(),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.shutdown(std::net::Shutdown::Both),
+        }
+    }
+}
+
+impl io::Read for Wire {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tls(wire) => wire.read(out),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.read(out),
+        }
+    }
+}
+
+impl Write for Wire {
+    fn write(&mut self, payload: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tls(wire) => wire.write(payload),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.write(payload),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tls(wire) => wire.flush(),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.flush(),
+        }
+    }
+}
+
+/// Runs one connection from connect to close.
+///
+/// Returns when the session ends or when the ECS drops its end of the channels.
+/// Every failure is reported as an event and then returned from — the thread
+/// never panics, because a panicking net thread would take down a client that
+/// could otherwise have shown the player what went wrong.
+pub(super) fn run(
+    addr: String,
+    player_name: String,
+    identity_override: Option<PathBuf>,
+    transport: Transport,
+    events: Sender<SessionEvent>,
+    commands: Receiver<NetCommand>,
+    outbound: Receiver<Vec<u8>>,
+) {
+    let socket = match connect(&addr) {
+        Ok(socket) => socket,
+        Err(err) => {
+            let _ = events.send(SessionEvent::Refused(format!("cannot reach {addr}: {err}")));
+            return;
+        }
+    };
+
+    // Nagle would hold the handshake back waiting for a second small write that
+    // never comes. Best effort: a socket that refuses the option still works.
+    let _ = socket.set_nodelay(true);
+
+    // The TLS handshake, before anything is said and before the identity file is even
+    // read: there is no plaintext path, so a session that cannot be encrypted is a
+    // session that does not happen. A substituted certificate is refused here, and the
+    // message it carries is the one thing on this path a player has to read rather than
+    // retry through.
+    // **Before the TLS handshake, not after it**, which is the ordering the upgrade case
+    // forced. Whether this client already holds an identity for the address decides
+    // whether an unpinned certificate may be accepted at all, and the pin belongs beside
+    // whatever file that identity actually lives in — including one `--identity` moved.
+    // A missing file is a first connection rather than a failure, and so is an unreadable
+    // one: the server mints a fresh identity either way, and refusing over it would turn
+    // a lost file into a lost game.
+    let env = Environment::read();
+    let (identity, complaint) = IdentityFile::open(&addr, identity_override, &env);
+    if let Some(complaint) = complaint
+        && events.send(SessionEvent::Warning(complaint)).is_err()
+    {
+        return;
+    }
+
+    let (mut stream, pinning, pin_complaint) = match transport {
+        Transport::Encrypted => {
+            let pin_file = identity.path.as_deref().map(tls::pin_path);
+            match tls::TlsWire::connect(
+                socket,
+                &addr,
+                pin_file.as_deref(),
+                identity.presented.is_some(),
+                CONNECT_TIMEOUT,
+            ) {
+                Ok((wire, pinning, complaint)) => (Wire::Tls(wire), pinning, complaint),
+                Err(err) => {
+                    let _ = events.send(SessionEvent::Refused(err.message()));
+                    return;
+                }
+            }
+        }
+        #[cfg(test)]
+        Transport::Plaintext => (Wire::Plain(socket), tls::Pinning::Verified, None),
+    };
+
+    // **A token is only ever kept beside a pin.** A connection that could not write the
+    // fingerprint down cannot recognise this server next time, so keeping the identity it
+    // grants would leave a stored token with nothing to verify the server against — and
+    // the next connection would be refused as unverified, locking the player out of a
+    // character this one just created. Forgetting both is the pair that stays consistent.
+    let identity = if pinning == tls::Pinning::Unrecorded {
+        IdentityFile::forgetful()
+    } else {
+        identity
+    };
+
+    if let Some(complaint) = pin_complaint
+        && events.send(SessionEvent::Warning(complaint)).is_err()
+    {
+        return;
+    }
+
+    if let Err(err) = stream.set_read_timeout(Some(READ_TIMEOUT)) {
+        let _ = events.send(SessionEvent::Refused(format!(
+            "cannot configure the socket to {addr}: {err}"
+        )));
+        return;
+    }
+
+    let hello = codec::encode_client_hello(&player_name, identity.presented);
+    if let Err(err) = frame::write_frame(&mut stream, &hello) {
+        let _ = events.send(SessionEvent::Refused(format!(
+            "cannot send the handshake to {addr}: {err}"
+        )));
+        return;
+    }
+
+    if events.send(SessionEvent::Handshaking).is_err() {
+        // The ECS is already gone; there is nobody to hand a session to.
+        return;
+    }
+
+    // Only now does a second writer exist. The handshake above was written from this
+    // thread, before the writer thread was started, so the two never overlap — which is
+    // the whole of "one reader and one writer per connection", the only arrangement the
+    // server's transport.Conn promises to survive and the shape this side copies.
+    //
+    // `try_clone` gives the writer its own handle to the same socket, so this thread can
+    // block on a read while that one blocks on a channel. Without a second handle one of
+    // them would have to poll.
+    match stream.try_clone() {
+        Ok(writer) => {
+            // Detached rather than joined: the thread ends when the ECS drops its sender,
+            // and app teardown must not wait on a socket. See write_loop.
+            if let Err(err) = thread::Builder::new()
+                .name("voxelheim-net-writer".to_owned())
+                .spawn(move || write_loop(writer, outbound))
+            {
+                let _ = events.send(SessionEvent::Refused(format!(
+                    "cannot start the writer thread for {addr}: {err}"
+                )));
+                return;
+            }
+        }
+        Err(err) => {
+            // Nothing this client can do about it, and a session that cannot send input
+            // is not a session: a player would watch a world they could not move in.
+            let _ = events.send(SessionEvent::Refused(format!(
+                "cannot open a writer for {addr}: {err}"
+            )));
+            return;
+        }
+    }
+
+    if let Some(ending) = pump(&mut stream, &addr, &events, &commands, &identity) {
+        let _ = events.send(ending);
+    }
+}
+
+/// The environment the default identity path is derived from.
+///
+/// Read once and passed as a value, so the derivation is testable without a
+/// process environment to mutate — which Rust 2024 makes `unsafe`, for the good
+/// reason that another thread may be reading it at the time.
+#[derive(Debug, Default)]
+pub(super) struct Environment {
+    xdg_data_home: Option<String>,
+    home: Option<String>,
+}
+
+impl Environment {
+    /// What this process was started with.
+    pub(super) fn read() -> Self {
+        Self {
+            xdg_data_home: std::env::var(XDG_DATA_HOME).ok(),
+            home: std::env::var(HOME).ok(),
+        }
+    }
+}
+
+/// The file this client keeps its identity for one server in, and what was in it.
+///
+/// `path` is `None` when no usable file could be named at all — an address that
+/// does not reduce to a safe file name, or an environment with neither
+/// `XDG_DATA_HOME` nor `HOME`. That is a session with no memory rather than an
+/// error: the handshake still works, the server still mints an identity, and the
+/// only loss is that the next connection starts a new character.
+#[derive(Debug, Default)]
+struct IdentityFile {
+    path: Option<PathBuf>,
+    /// The token to present in the hello. `None` is a first connection.
+    presented: Option<PlayerToken>,
+}
+
+impl IdentityFile {
+    /// Locates the file for `addr` and reads whatever is in it.
+    ///
+    /// `override_path` is `--identity` / `VOXELHEIM_IDENTITY`, which replaces the
+    /// per-server derivation outright — the way to run two characters against one
+    /// server, and the way to put the file anywhere this derivation would not.
+    ///
+    /// The second half of the pair is a line for the log, present exactly when
+    /// something was ignored. Returned rather than logged because this module has
+    /// no logger, and returned rather than swallowed because a client that
+    /// silently forgets who it is every launch is a bug that looks like a feature.
+    fn open(
+        addr: &str,
+        override_path: Option<PathBuf>,
+        env: &Environment,
+    ) -> (Self, Option<String>) {
+        let path = match override_path {
+            Some(path) => Some(path),
+            None => default_identity_path(addr, env),
+        };
+
+        let Some(path) = path else {
+            return (
+                Self::default(),
+                Some(format!(
+                    "no identity file could be named for {addr}: this session will be a new \
+                     character, and so will the next one. Set VOXELHEIM_IDENTITY or --identity \
+                     to choose a file."
+                )),
+            );
+        };
+
+        match read_identity(&path) {
+            Ok(presented) => (
+                Self {
+                    path: Some(path),
+                    presented,
+                },
+                None,
+            ),
+            // Ignored, and deliberately still `path`: the welcome's token replaces
+            // whatever was there, which is the only honest outcome once the bytes
+            // that were in it are not a token.
+            Err(Unreadable::NotAToken(complaint)) => (
+                Self {
+                    path: Some(path),
+                    presented: None,
+                },
+                Some(complaint),
+            ),
+            // The other direction, and the difference matters: these bytes were
+            // never *seen*. Overwriting them would rename a new token over a file
+            // that may still hold a perfectly good identity — a permission left
+            // behind by one `sudo` run, a transient I/O error — and the character it
+            // names would be gone with no way back. So the path is dropped: this
+            // session is a new character, the file is left exactly as it is, and a
+            // player who fixes the permission gets their character back.
+            Err(Unreadable::Inaccessible(complaint)) => (Self::default(), Some(complaint)),
+        }
+    }
+
+    /// An identity file that will neither present anything nor keep anything.
+    ///
+    /// What a session gets when its certificate could not be pinned. Not the same as
+    /// "no file could be named" even though it behaves identically: the file may be
+    /// perfectly writable, and the *next* connection — which may pin successfully — will
+    /// use it. This session simply declines to add to it.
+    fn forgetful() -> Self {
+        Self::default()
+    }
+
+    /// Settles the welcome's token against the one that was presented.
+    ///
+    /// Answers whether this is a returning session — the only thing the client
+    /// derives from a token, and it derives it for a line of status text — and
+    /// stores the token **only when it differs**. A returning player therefore
+    /// rewrites nothing, so an ordinary session touches the disk once, to read.
+    ///
+    /// A token that differs is always the one worth keeping, whatever the reason
+    /// it differs: a first connection, a token this server did not recognise, or a
+    /// server that re-issued. All three mean the file no longer names the identity
+    /// this session has, and the server is the only source of tokens there is.
+    ///
+    /// The second half of the pair is a line for the log, and a failed write is
+    /// only that: the session is already established, and losing the file costs
+    /// the *next* launch, not this one.
+    ///
+    /// A `bool` rather than the `net::Identity` enum the ECS publishes, and that is
+    /// the boundary rather than an oversight: `Identity` carries Bevy's `Resource`
+    /// derive, and no Bevy type appears below `net/mod.rs`. The enum is made there,
+    /// from this flag, which is the same trade every other value crossing this
+    /// channel makes.
+    #[must_use = "the second half is a failed write, and nothing else reports one"]
+    fn store(&self, granted: PlayerToken) -> (bool, Option<String>) {
+        if self.presented == Some(granted) {
+            return (true, None);
+        }
+
+        // A session with no file to write is still a session. `open` has already
+        // said so in the log; saying it again on every welcome would not help.
+        let Some(path) = &self.path else {
+            return (false, None);
+        };
+        (false, write_identity(path, granted).err())
+    }
+}
+
+/// Where the identity for `addr` is kept when nothing overrides it:
+/// `$XDG_DATA_HOME/voxelheim/identity/<address>`, or
+/// `$HOME/.local/share/voxelheim/identity/<address>`.
+///
+/// One file per server address, because a token is meaningful only to the server
+/// that minted it. Presenting server A's token to server B would not resume
+/// anything — B never issued it — and writing B's answer over A's file would cost
+/// the character on A to gain nothing on B.
+pub(super) fn default_identity_path(addr: &str, env: &Environment) -> Option<PathBuf> {
+    let mut path = data_home(env)?;
+    path.extend(IDENTITY_DIR);
+    path.push(identity_file_name(addr)?);
+    Some(path)
+}
+
+/// The XDG data directory, or `None` when the environment names none.
+///
+/// A relative `XDG_DATA_HOME` is ignored rather than resolved, which is what the
+/// XDG base directory specification says to do with one: resolving it against the
+/// working directory would put the identity file wherever the client happened to
+/// be launched from.
+pub(super) fn data_home(env: &Environment) -> Option<PathBuf> {
+    let xdg = env
+        .xdg_data_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
+    if let Some(xdg) = xdg {
+        return Some(xdg);
+    }
+
+    let home = env
+        .home
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut path = PathBuf::from(home);
+    path.extend(DEFAULT_DATA_HOME);
+    Some(path)
+}
+
+/// Reduces a server address to a file name, or refuses.
+///
+/// `:` becomes `_` and the brackets of an IPv6 literal are dropped, because
+/// neither survives being a path component everywhere this client runs. Every
+/// other character is either already safe or a reason to answer `None`: a
+/// separator, a `..`, or anything else that would make the address name a file
+/// somewhere other than where it was meant to. Refusing is safe — the caller
+/// treats it as "no identity file" — and inventing an escaping scheme would not
+/// be, because two addresses that escaped to one name would share a character.
+///
+/// Letters are folded to lower case, which is the one place two spellings are
+/// *meant* to land on one file. A host name is case-insensitive by the DNS
+/// specification and the hex of an IPv6 literal is case-insensitive too, so
+/// `MyServer:7777` and `myserver:7777` are one server — and without the fold they
+/// would be two identities, costing the character of a player who typed their own
+/// address with a different shift key. This is the collision the paragraph above
+/// refuses only because it is not one: the two names denote the same endpoint,
+/// where two escaped names denote different ones. Only ASCII is folded, and that
+/// is the whole alphabet this function admits.
+pub(super) fn identity_file_name(addr: &str) -> Option<String> {
+    let addr = addr.trim();
+    if addr.is_empty() {
+        return None;
+    }
+
+    let mut name = String::with_capacity(addr.len());
+    for character in addr.chars() {
+        match character {
+            // The brackets are punctuation around an IPv6 literal, not part of the
+            // address: `[::1]:7777` and `::1` port 7777 are the same server.
+            '[' | ']' => {}
+            ':' => name.push('_'),
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => {
+                name.push(character.to_ascii_lowercase());
+            }
+            _ => return None,
+        }
+    }
+
+    // `.` and `..` are directories, not names, and a file name made only of dots
+    // is one of those two or a near miss worth refusing anyway.
+    if name.is_empty() || name.chars().all(|character| character == '.') {
+        return None;
+    }
+    Some(name)
+}
+
+/// Why there is no token to present, when there was supposed to be one.
+///
+/// Two variants because the caller does two different things with them, and the
+/// difference is whether the bytes were *read*. A file whose contents are known not
+/// to be a token may be replaced; a file nobody could open may not, because nothing
+/// knows what is in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Unreadable {
+    /// The bytes were read and are not a token.
+    NotAToken(String),
+    /// The file could not be read at all.
+    Inaccessible(String),
+}
+
+impl Unreadable {
+    /// The line for the log, whichever of the two this is.
+    ///
+    /// Test-only: production reads the two variants apart, because the whole point
+    /// of the distinction is that they are handled differently.
+    #[cfg(test)]
+    fn complaint(self) -> String {
+        match self {
+            Self::NotAToken(complaint) | Self::Inaccessible(complaint) => complaint,
+        }
+    }
+}
+
+/// Reads the token in `path`, if there is one to read.
+///
+/// Four answers, and the differences between them are the whole rule: a file that is
+/// not there is a first connection (`Ok(None)`); a file holding exactly
+/// [`PLAYER_TOKEN_LEN`] bytes is an identity to present; a file holding anything
+/// else is [`Unreadable::NotAToken`]; and a file that will not open at all is
+/// [`Unreadable::Inaccessible`]. Every one of them still yields a session.
+///
+/// A wrong length is not repaired, because there is nothing to repair it to — the
+/// server is the only source of tokens, and it will mint a new one.
+fn read_identity(path: &Path) -> Result<Option<PlayerToken>, Unreadable> {
+    match fs::read(path) {
+        Ok(bytes) if bytes.len() == PLAYER_TOKEN_LEN => {
+            let mut token = [0u8; PLAYER_TOKEN_LEN];
+            token.copy_from_slice(&bytes);
+            Ok(Some(PlayerToken::from_bytes(token)))
+        }
+        // The length, never the bytes: this text goes to a log.
+        Ok(bytes) => Err(Unreadable::NotAToken(format!(
+            "the identity file {} holds {} bytes rather than {PLAYER_TOKEN_LEN}; ignoring it and \
+             joining as a new character",
+            path.display(),
+            bytes.len()
+        ))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(Unreadable::Inaccessible(format!(
+            "cannot read the identity file {}: {err}; joining as a new character, and leaving that \
+             file untouched in case it is still someone",
+            path.display()
+        ))),
+    }
+}
+
+/// Replaces `path` with `token`, or leaves it exactly as it was.
+///
+/// Temporary file, flush, rename — in that order, and the temporary file is
+/// created *in the destination directory*, because a rename is only atomic within
+/// one filesystem. The same shape as the server's `writeAtomic`, for the same
+/// reason: a crash mid-write would otherwise leave a truncated file, and a
+/// truncated identity file is a wrong-length token, which is to say a lost
+/// character.
+///
+/// Created `0600` on Unix. The file is a bearer credential — whoever can read it
+/// can be the player it names — so it is created with the mode it needs rather
+/// than widened by the umask and narrowed afterwards, which would leave a window
+/// where it was readable.
+fn write_identity(path: &Path, token: PlayerToken) -> Result<(), String> {
+    write_atomically(path, token.as_bytes())
+        .map_err(|err| format!("cannot store the identity in {}: {err}", path.display()))
+}
+
+/// Replaces `path` with `bytes`, or leaves it exactly as it was.
+///
+/// Split out of [`write_identity`] when the certificate pin arrived beside it. Two files
+/// in one directory, written the same way, is one discipline; a second copy of this
+/// function would be a second discipline the first time either was edited.
+///
+/// The mode is `0600` on Unix for both, and for the same reason it always was: the
+/// identity file is a bearer credential, and the pin file is what stands between a
+/// player and somebody else's server — a pin an attacker can rewrite is not a pin.
+pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} does not name a file", path.display()),
+        )
+    })?;
+    // Process, clock and counter. `create_new` below refuses to reuse a name, which
+    // is what guarantees the mode is the one this process chose rather than one a
+    // pre-planted file came with — so the name has to be unique against a *stale*
+    // temporary file too, left by a crash between creating one and renaming it. The
+    // pid alone is not: pids are recycled, and the counter restarts at zero with the
+    // process.
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let mut options = fs::OpenOptions::new();
+    // `create_new` rather than `create`: this process is then the one that made
+    // the file, so the mode below is the mode it has, and no leftover from an
+    // earlier crash can be written into with permissions it chose.
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let written = options
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            // The flush is what makes the rename mean something: without it the
+            // directory entry can reach the disk ahead of the bytes it points at.
+            file.sync_all()
+        })
+        .and_then(|()| fs::rename(&temporary, path));
+
+    written.inspect_err(|_| {
+        // A failure leaves nothing behind: the destination is untouched, and the
+        // temporary file goes with the attempt that created it.
+        let _ = fs::remove_file(&temporary);
+    })
+}
+
+/// Writes whatever the ECS hands it, until there is nobody left to hand it anything.
+///
+/// The mirror of the server's writer goroutine, and it ends the same two ways. The channel
+/// closing is the ordinary one: the ECS drops its sender when the session ends or the app
+/// goes away, `recv` returns an error, and this returns — dropping the last handle to the
+/// socket with it.
+///
+/// A failed write is the other. It shuts the socket down rather than reporting the error
+/// itself: that unblocks the reader, which is the thread that owns the session's story and
+/// will describe the ending in the terms the player is looking at. Two threads racing to
+/// explain one failure would give the ECS whichever arrived first.
+fn write_loop(mut stream: Wire, outbound: Receiver<Vec<u8>>) {
+    while let Ok(frame) = outbound.recv() {
+        if frame::write_frame(&mut stream, &frame).is_err() {
+            let _ = stream.shutdown();
+            return;
+        }
+    }
+}
+
+/// Reads until the session ends.
+///
+/// Returns the event that describes the ending, or `None` when the ECS asked to
+/// stop — in that case there is nobody left to tell.
+fn pump(
+    stream: &mut Wire,
+    addr: &str,
+    events: &Sender<SessionEvent>,
+    commands: &Receiver<NetCommand>,
+    identity: &IdentityFile,
+) -> Option<SessionEvent> {
+    let mut decoder = FrameDecoder::new();
+    let mut handshake = Handshake::new();
+    let mut buffer = vec![0u8; READ_BUFFER_SIZE];
+
+    loop {
+        if shutdown_requested(commands) {
+            return None;
+        }
+
+        match stream.read(&mut buffer) {
+            Ok(0) => return Some(peer_closed(&handshake, addr)),
+            Ok(read) => decoder.feed(&buffer[..read]),
+            // The read timeout expiring is how this loop stays responsive to
+            // shutdown; it is not an error. Unix reports it as WouldBlock and
+            // Windows as TimedOut.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Some(transport_failure(
+                    &handshake,
+                    addr,
+                    &format!("read failed: {err}"),
+                ));
+            }
+        }
+
+        loop {
+            let frame = match decoder.next_frame() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                // Framing we can no longer trust ends the connection: there is no
+                // way to resynchronise a stream whose boundaries are unknown.
+                Err(err) => return Some(protocol_failure(&handshake, addr, &err.to_string())),
+            };
+
+            let message = match codec::decode(&frame) {
+                Ok(message) => message,
+                Err(err) => return Some(protocol_failure(&handshake, addr, &err.to_string())),
+            };
+
+            match handshake.apply(message) {
+                Ok(Transition::Established(params)) => {
+                    let (returning, complaint) = identity.store(params.player_token);
+                    if let Some(complaint) = complaint {
+                        events.send(SessionEvent::Warning(complaint)).ok()?;
+                    }
+                    events
+                        .send(SessionEvent::Established { params, returning })
+                        .ok()?;
+                }
+                Ok(Transition::Refused(reject)) => {
+                    // `Reject::describe` owns this format, because `ui/status.rs`
+                    // reads the code back out of the string it produces.
+                    return Some(SessionEvent::Refused(reject.describe()));
+                }
+                Ok(Transition::World(update)) => {
+                    events.send(SessionEvent::World(update)).ok()?;
+                }
+                Ok(Transition::Snapshot(snapshot)) => {
+                    events
+                        .send(SessionEvent::Snapshot {
+                            snapshot,
+                            at: Instant::now(),
+                        })
+                        .ok()?;
+                }
+                Ok(Transition::Inventory(inventory)) => {
+                    events.send(SessionEvent::Inventory(inventory)).ok()?;
+                }
+                Ok(Transition::ActionRefused(refused)) => {
+                    events.send(SessionEvent::ActionRefused(refused)).ok()?;
+                }
+                Ok(Transition::MineProgress(progress)) => {
+                    events.send(SessionEvent::MineProgress(progress)).ok()?;
+                }
+                // Deliberately silent. A server→client payload this issue does
+                // not consume yet is not a problem worth a log line every tick;
+                // each one becomes real in its own issue.
+                Ok(Transition::Ignored(_)) => {}
+                Err(err) => return Some(protocol_failure(&handshake, addr, &err.to_string())),
+            }
+        }
+    }
+}
+
+/// Whether the ECS has asked the thread to stop, either explicitly or by going
+/// away. A dropped `Sender` means the app is shutting down, which is the same
+/// instruction arriving less politely.
+fn shutdown_requested(commands: &Receiver<NetCommand>) -> bool {
+    match commands.try_recv() {
+        Ok(NetCommand::Disconnect) | Err(TryRecvError::Disconnected) => true,
+        Err(TryRecvError::Empty) => false,
+    }
+}
+
+/// The peer closed cleanly. Before the welcome that is a refusal the player has
+/// to read; afterwards it is how sessions normally end.
+fn peer_closed(handshake: &Handshake, addr: &str) -> SessionEvent {
+    if handshake.established() {
+        SessionEvent::Ended(None)
+    } else {
+        SessionEvent::Refused(format!(
+            "{addr} closed the connection before answering the handshake"
+        ))
+    }
+}
+
+/// A peer broke the contract.
+///
+/// Before the welcome it is a refusal, because the player is looking at a status
+/// line and needs to know the game will not start and why. Afterwards it is an
+/// ending: there is a world on screen, and the detail belongs in the log.
+fn protocol_failure(handshake: &Handshake, addr: &str, detail: &str) -> SessionEvent {
+    if handshake.established() {
+        SessionEvent::Ended(Some(detail.to_owned()))
+    } else {
+        SessionEvent::Refused(format!(
+            "{addr} is not speaking the Voxelheim protocol: {detail}"
+        ))
+    }
+}
+
+/// The socket failed. Same reasoning as [`protocol_failure`], different cause.
+fn transport_failure(handshake: &Handshake, addr: &str, detail: &str) -> SessionEvent {
+    if handshake.established() {
+        SessionEvent::Ended(Some(detail.to_owned()))
+    } else {
+        SessionEvent::Refused(format!("{addr} {detail}"))
+    }
+}
+
+/// Connects to the first address that answers, within [`CONNECT_TIMEOUT`].
+///
+/// `to_socket_addrs` can yield several candidates for one name (IPv6 and IPv4,
+/// or a round-robin record), and `TcpStream::connect_timeout` takes exactly one —
+/// so the iteration is what keeps a timeout and name resolution compatible.
+fn connect(addr: &str) -> io::Result<TcpStream> {
+    let mut last_error = None;
+
+    for candidate in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&candidate, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "the address resolved to nothing",
+        )
+    }))
+}
+
+/// A directory of one test's own, removed when the test ends.
+///
+/// Hand-rolled because the dependency budget for this client is two crates and
+/// `tempfile` is not one of them (see `client/AGENTS.md`). The name carries the
+/// process id and a counter, so two tests running in parallel — which is what
+/// `cargo test` does by default — never share one.
+///
+/// It lives here rather than inside this module's tests because `net/mod.rs`'s
+/// tests need an identity file too, and two of these would be two things to keep
+/// right.
+#[cfg(test)]
+pub(super) struct Scratch(PathBuf);
+
+#[cfg(test)]
+impl Scratch {
+    pub(super) fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "voxelheim-{label}-{}-{}",
+            std::process::id(),
+            WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).expect("a scratch directory under the temp dir");
+        Self(path)
+    }
+
+    pub(super) fn join(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+
+    /// An environment whose data directory is this scratch directory.
+    fn environment(&self) -> Environment {
+        Environment {
+            xdg_data_home: Some(self.0.to_string_lossy().into_owned()),
+            home: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token(byte: u8) -> PlayerToken {
+        PlayerToken::from_bytes([byte; PLAYER_TOKEN_LEN])
+    }
+
+    // -------------------------------------------------------------------------
+    // Naming the file
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn an_address_becomes_a_safe_file_name() {
+        for (addr, expected) in [
+            ("127.0.0.1:7777", "127.0.0.1_7777"),
+            ("norse.example:9000", "norse.example_9000"),
+            ("localhost", "localhost"),
+            // The brackets are punctuation around the literal, not address.
+            ("[::1]:7777", "__1_7777"),
+            ("[fe80::1]:7777", "fe80__1_7777"),
+            ("host-name_2.example:1", "host-name_2.example_1"),
+            ("  127.0.0.1:7777  ", "127.0.0.1_7777"),
+        ] {
+            assert_eq!(
+                identity_file_name(addr).as_deref(),
+                Some(expected),
+                "{addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_that_is_not_a_safe_file_name_is_refused() {
+        // Refusing costs a session's memory; escaping would cost a character, since
+        // two addresses that escaped to one name would share one identity.
+        for addr in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "...",
+            "a/b:1",
+            "../../etc/passwd",
+            "a\\b:1",
+            "évora:1",
+            "star*:1",
+            "with space:1",
+            "new\nline:1",
+        ] {
+            assert_eq!(identity_file_name(addr), None, "{addr:?}");
+        }
+    }
+
+    #[test]
+    fn one_server_spelled_two_ways_is_one_identity() {
+        // A host name is case-insensitive, so every pair below names one server. A
+        // player who reaches it with a different shift key than last time must not
+        // arrive as a different character.
+        for (typed, expected) in [
+            ("MyServer:7777", "myserver_7777"),
+            ("NORSE.EXAMPLE:9000", "norse.example_9000"),
+            ("LocalHost", "localhost"),
+            // The hex of an IPv6 literal is case-insensitive too.
+            ("[FE80::1]:7777", "fe80__1_7777"),
+        ] {
+            assert_eq!(
+                identity_file_name(typed).as_deref(),
+                Some(expected),
+                "{typed}"
+            );
+        }
+
+        let env = Environment {
+            xdg_data_home: Some("/data".to_owned()),
+            home: None,
+        };
+        assert_eq!(
+            default_identity_path("MyServer:7777", &env),
+            default_identity_path("myserver:7777", &env),
+            "one server is one file however it was typed"
+        );
+    }
+
+    #[test]
+    fn two_servers_get_two_files_and_one_server_gets_one() {
+        let env = Environment {
+            xdg_data_home: Some("/data".to_owned()),
+            home: None,
+        };
+
+        let a = default_identity_path("a.example:7777", &env).expect("a legal address");
+        let b = default_identity_path("b.example:7777", &env).expect("a legal address");
+        let again = default_identity_path("a.example:7777", &env).expect("a legal address");
+
+        assert_ne!(a, b, "one file per server address is the whole rule");
+        assert_eq!(a, again, "and the same server is the same file every time");
+        assert_eq!(a, PathBuf::from("/data/voxelheim/identity/a.example_7777"));
+    }
+
+    #[test]
+    fn the_data_directory_is_xdg_then_home() {
+        let path = |xdg: Option<&str>, home: Option<&str>| {
+            default_identity_path(
+                "norse.example:9000",
+                &Environment {
+                    xdg_data_home: xdg.map(str::to_owned),
+                    home: home.map(str::to_owned),
+                },
+            )
+        };
+
+        assert_eq!(
+            path(Some("/data"), Some("/fixture-root")),
+            Some(PathBuf::from("/data/voxelheim/identity/norse.example_9000"))
+        );
+        assert_eq!(
+            path(None, Some("/fixture-root")),
+            Some(PathBuf::from(
+                "/fixture-root/.local/share/voxelheim/identity/norse.example_9000"
+            ))
+        );
+        // An exported-but-empty variable is an unset one, here as everywhere else.
+        assert_eq!(
+            path(Some("  "), Some("/fixture-root")),
+            Some(PathBuf::from(
+                "/fixture-root/.local/share/voxelheim/identity/norse.example_9000"
+            ))
+        );
+        // The XDG specification says to ignore a relative base directory rather
+        // than resolve it: resolving would put the file wherever the client was
+        // launched from.
+        assert_eq!(
+            path(Some("relative/data"), Some("/fixture-root")),
+            Some(PathBuf::from(
+                "/fixture-root/.local/share/voxelheim/identity/norse.example_9000"
+            ))
+        );
+        // Nowhere to put it. A session with no memory, not a failure.
+        assert_eq!(path(None, None), None);
+        assert_eq!(path(Some("relative"), None), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Reading and writing
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn an_absent_file_is_a_first_connection() {
+        let scratch = Scratch::new("absent");
+        assert_eq!(read_identity(&scratch.join("nothing-here")), Ok(None));
+    }
+
+    #[test]
+    fn a_token_round_trips_through_the_file() {
+        let scratch = Scratch::new("round-trip");
+        let path = scratch.join("identity");
+
+        write_identity(&path, token(0x5a)).expect("a fresh file in a fresh directory");
+        assert_eq!(read_identity(&path), Ok(Some(token(0x5a))));
+        assert_eq!(
+            fs::read(&path).expect("the file exists").len(),
+            PLAYER_TOKEN_LEN
+        );
+    }
+
+    #[test]
+    fn the_directory_is_created_on_the_way() {
+        // The first launch on a machine has neither the file nor the two
+        // directories above it.
+        let scratch = Scratch::new("mkdir");
+        let path = scratch
+            .join("voxelheim")
+            .join("identity")
+            .join("a.example_1");
+
+        write_identity(&path, token(1)).expect("the directories are made on the way");
+        assert_eq!(read_identity(&path), Ok(Some(token(1))));
+    }
+
+    #[test]
+    fn a_file_of_the_wrong_length_is_ignored_with_a_complaint() {
+        let scratch = Scratch::new("wrong-length");
+        let path = scratch.join("identity");
+
+        for len in [0, 7, PLAYER_TOKEN_LEN - 1, PLAYER_TOKEN_LEN + 1] {
+            fs::write(&path, vec![0x5a; len]).expect("a writable scratch directory");
+
+            let complaint = read_identity(&path)
+                .expect_err("that is not a token")
+                .complaint();
+            assert!(complaint.contains(&len.to_string()), "{complaint}");
+
+            // And the whole rule around it: ignored, still a first connection, and
+            // the path is kept so the welcome's token replaces what is there.
+            let (identity, reported) =
+                IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+            assert_eq!(identity.presented, None, "{len} bytes is not an identity");
+            assert_eq!(identity.path, Some(path.clone()));
+            assert_eq!(reported.as_deref(), Some(complaint.as_str()));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_file_is_a_first_connection_rather_than_a_failure() {
+        // A directory where the file should be: readable as an entry, not as bytes.
+        // Losing the file must never cost the session — the server mints a fresh
+        // identity, and refusing to connect would turn a lost file into a lost game.
+        let scratch = Scratch::new("unreadable");
+        let path = scratch.join("identity");
+        fs::create_dir(&path).expect("a directory in place of the file");
+
+        let (identity, complaint) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+
+        assert_eq!(identity.presented, None);
+        assert!(complaint.is_some(), "and it says so in the log");
+        assert_eq!(
+            identity.path, None,
+            "bytes nobody could read are not bytes to write over"
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_written_over() {
+        // The difference between the two kinds of unreadable, and the reason they are
+        // two: a wrong-length file has been *seen* not to be a token, so replacing it
+        // loses nothing. A file that would not open might still hold a good identity —
+        // a permission left behind by one `sudo` run, a transient I/O error — and
+        // renaming a fresh token over it would end that character with no way back.
+        let scratch = Scratch::new("untouchable");
+        let path = scratch.join("identity");
+        fs::create_dir(&path).expect("a directory in place of the file");
+
+        let (identity, _) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+        let (returning, complaint) = identity.store(token(7));
+
+        assert!(!returning, "nothing was presented, so nothing came back");
+        assert_eq!(complaint, None, "there was no write to fail");
+        assert!(
+            path.is_dir(),
+            "the file that could not be read is exactly as it was"
+        );
+    }
+
+    #[test]
+    fn an_address_with_nowhere_to_go_is_a_session_without_memory() {
+        // No override, no XDG, no HOME. The handshake still works; the only loss is
+        // that the next launch starts a new character, and the log says so.
+        let (identity, complaint) =
+            IdentityFile::open("a.example:1", None, &Environment::default());
+
+        assert_eq!(identity.path, None);
+        assert_eq!(identity.presented, None);
+        assert!(complaint.is_some(), "silently forgetting is the bug");
+
+        // And a welcome it cannot store is still a welcome.
+        let (returning, complaint) = identity.store(token(2));
+        assert!(!returning);
+        assert_eq!(complaint, None, "there is nothing new to say every time");
+    }
+
+    #[test]
+    fn a_write_leaves_no_temporary_file_behind() {
+        let scratch = Scratch::new("no-litter");
+        let path = scratch.join("identity");
+
+        write_identity(&path, token(1)).expect("a first write");
+        write_identity(&path, token(2)).expect("and a replacement");
+
+        let entries: Vec<_> = fs::read_dir(&scratch.0)
+            .expect("the scratch directory")
+            .map(|entry| entry.expect("a readable entry").file_name())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "temp and rename leaves one file: {entries:?}"
+        );
+        assert_eq!(read_identity(&path), Ok(Some(token(2))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_readable_by_nobody_else() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A bearer credential: whoever can read it can be the player it names. The
+        // assertion is that no group or other bit is set, rather than an exact
+        // 0600, because a umask can only ever take bits away from the mode the
+        // file was created with.
+        let scratch = Scratch::new("mode");
+        let path = scratch.join("identity");
+        write_identity(&path, token(3)).expect("a fresh file");
+
+        let mode = fs::metadata(&path)
+            .expect("the file exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "mode is {:o}", mode & 0o7777);
+        assert_ne!(mode & 0o400, 0, "and the owner can still read it");
+    }
+
+    // -------------------------------------------------------------------------
+    // What a welcome does to the file
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn an_unchanged_token_is_not_written_back() {
+        // Observed by removing the file after it has been read: a write would put
+        // it back, and the point is that there is no write at all.
+        let scratch = Scratch::new("unchanged");
+        let path = scratch.join("identity");
+        write_identity(&path, token(0x5a)).expect("a stored identity");
+
+        let (identity, complaint) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+        assert_eq!(identity.presented, Some(token(0x5a)));
+        assert_eq!(complaint, None);
+
+        fs::remove_file(&path).expect("the file is ours to remove");
+        let (returning, complaint) = identity.store(token(0x5a));
+
+        assert!(returning, "the server answered with what was presented");
+        assert_eq!(complaint, None);
+        assert!(
+            !path.exists(),
+            "an unchanged token must not be written back"
+        );
+    }
+
+    #[test]
+    fn a_token_that_differs_replaces_the_one_on_disk() {
+        let scratch = Scratch::new("replaced");
+        let path = scratch.join("identity");
+        write_identity(&path, token(1)).expect("a stored identity");
+
+        let (identity, _) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+        let (returning, complaint) = identity.store(token(2));
+
+        assert!(!returning, "a different token is a different character");
+        assert_eq!(complaint, None);
+        assert_eq!(read_identity(&path), Ok(Some(token(2))));
+    }
+
+    #[test]
+    fn a_first_connection_stores_what_the_welcome_carried() {
+        let scratch = Scratch::new("first");
+        let path = scratch.join("identity");
+
+        let (identity, complaint) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+        assert_eq!(identity.presented, None, "nothing to present yet");
+        assert_eq!(complaint, None, "and nothing to complain about");
+
+        let (returning, complaint) = identity.store(token(9));
+        assert!(!returning);
+        assert_eq!(complaint, None);
+        assert_eq!(read_identity(&path), Ok(Some(token(9))));
+    }
+
+    #[test]
+    fn one_servers_token_never_reaches_another_servers_file() {
+        // The reason the file is per-server, stated as the thing that would go wrong:
+        // A's token means nothing to B, so a connection to B is a new character there
+        // — and B's answer must not land in A's file, which still names a character A
+        // knows.
+        //
+        // What this pins is the second half, because it is the half that destroys
+        // something: B writes while A's file already exists beside it, and A's file
+        // comes back holding A's token. The first half is structural — B reads its own
+        // path, which is not A's — and `two_servers_get_two_files_and_one_server_gets_one`
+        // is where that is decided.
+        let scratch = Scratch::new("per-server");
+        let env = scratch.environment();
+
+        let (a, complaint) = IdentityFile::open("a.example:7777", None, &env);
+        assert_eq!(complaint, None);
+        assert_eq!(a.presented, None);
+        let _ = a.store(token(0xaa));
+        let a_path = a.path.clone().expect("A named a file");
+        assert!(a_path.exists(), "A's identity is on disk before B connects");
+
+        let (b, complaint) = IdentityFile::open("b.example:7777", None, &env);
+        assert_eq!(complaint, None);
+        assert_ne!(
+            a.path, b.path,
+            "one file per server address is the whole rule"
+        );
+        assert_eq!(
+            b.presented, None,
+            "B reads its own file, and there is nothing in it — A's token is not \
+             offered to a server that never minted it"
+        );
+        let _ = b.store(token(0xbb));
+
+        let b_path = b.path.expect("B named a file");
+        assert_eq!(
+            read_identity(&a_path),
+            Ok(Some(token(0xaa))),
+            "B's welcome must not have touched A's character"
+        );
+        assert_eq!(read_identity(&b_path), Ok(Some(token(0xbb))));
+    }
+
+    #[test]
+    fn an_override_replaces_the_per_server_file_outright() {
+        // How one machine runs two characters against one server.
+        let scratch = Scratch::new("override");
+        let chosen = scratch.join("second-character");
+
+        let (identity, complaint) = IdentityFile::open(
+            "a.example:7777",
+            Some(chosen.clone()),
+            &scratch.environment(),
+        );
+
+        assert_eq!(complaint, None);
+        assert_eq!(identity.path, Some(chosen.clone()));
+        let _ = identity.store(token(4));
+        assert_eq!(read_identity(&chosen), Ok(Some(token(4))));
+        assert!(
+            !default_identity_path("a.example:7777", &scratch.environment())
+                .expect("the derived path is still nameable")
+                .exists(),
+            "the per-server file was never touched"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Secrecy
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn nothing_the_identity_path_says_out_loud_carries_the_token() {
+        // Every line this module can produce, collected as a log would collect
+        // them, and then searched for the token in each shape it could take: raw
+        // bytes, hex, and the `{:?}` of a byte array. A bearer credential in a log
+        // file is the credential, and `schemas/handshake.fbs` asks for exactly
+        // this: never logged, never displayed.
+        let scratch = Scratch::new("secrecy");
+        let path = scratch.join("identity");
+        let secret = token(0x5a);
+        let mut log: Vec<String> = Vec::new();
+
+        let mut record = |complaint: Option<String>| {
+            if let Some(complaint) = complaint {
+                log.push(complaint);
+            }
+        };
+
+        // A first connection, then a stored token, then a returning one.
+        let (identity, complaint) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+        record(complaint);
+        let (_, complaint) = identity.store(secret);
+        record(complaint);
+
+        let (identity, complaint) =
+            IdentityFile::open("a.example:1", Some(path.clone()), &Environment::default());
+        record(complaint);
+        let (returning, complaint) = identity.store(secret);
+        record(complaint);
+        assert!(
+            returning,
+            "the round trip worked, which is what is being logged"
+        );
+
+        // A file that is not a token, an unreadable one, and a write that fails.
+        fs::write(&path, &secret.as_bytes()[..7]).expect("a writable directory");
+        record(read_identity(&path).err().map(Unreadable::complaint));
+        // A write whose directory cannot be made, and one whose destination is a
+        // directory: the two ways `write_identity` fails, and both name the path.
+        let wall = scratch.join("wall");
+        fs::write(&wall, b"not a directory").expect("a writable scratch directory");
+        record(write_identity(&wall.join("identity"), secret).err());
+        let blocked = scratch.join("blocked");
+        fs::create_dir(&blocked).expect("a directory in the file's place");
+        record(write_identity(&blocked, secret).err());
+        record(read_identity(&blocked).err().map(Unreadable::complaint));
+        assert!(
+            !log.is_empty(),
+            "the failures above must have said something"
+        );
+
+        // And everything the ECS is told, which is what actually reaches `warn!`.
+        for complaint in log.clone() {
+            log.push(format!("{:?}", SessionEvent::Warning(complaint)));
+        }
+        log.push(format!("{secret:?}"));
+        log.push(format!("{identity:?}"));
+
+        let hex: String = secret
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let debugged = format!("{:?}", secret.as_bytes());
+        for line in &log {
+            assert!(
+                !line
+                    .as_bytes()
+                    .windows(PLAYER_TOKEN_LEN)
+                    .any(|window| window == secret.as_bytes()),
+                "raw bytes in: {line}"
+            );
+            assert!(!line.contains(&hex), "hex in: {line}");
+            assert!(!line.contains(&debugged), "a debugged array in: {line}");
+            assert!(!line.contains("5a5a"), "any run of it in: {line}");
+            assert!(!line.contains("90, 90"), "any run of it in: {line}");
+        }
+    }
+}

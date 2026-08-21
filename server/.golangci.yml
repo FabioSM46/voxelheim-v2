@@ -1,0 +1,30 @@
+# golangci-lint configuration for the Voxelheim server.
+#
+# CI runs this through golangci/golangci-lint-action, pinned to the version in
+# .github/workflows/ci.yml. Locally, `golangci-lint run` from server/ uses it.
+#
+# The linter set is deliberately close to the default: a gate nobody can keep
+# green stops being a gate. errorlint is the one addition, because this codebase
+# leans on wrapped sentinel errors (transport.ErrFrameTooLarge,
+# protocol.ErrMalformed) and a `==` comparison against a wrapped error is exactly
+# the bug it catches.
+version: "2"
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - errorlint
+  exclusions:
+    # flatc output carries the standard "Code generated ... DO NOT EDIT." header.
+    # The path exclusion is belt-and-braces: generated bindings are regenerated,
+    # never fixed, so a finding there is noise by construction.
+    generated: lax
+    paths:
+      - gen/
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - gen/

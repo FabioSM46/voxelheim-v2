@@ -1,0 +1,6 @@
+interface:
+  display_name: "Process Pull Request"
+  short_description: "Resolve CI and review feedback on an open PR"
+  default_prompt: "Use $process-pr to address CI and review feedback on PR #42."
+policy:
+  allow_implicit_invocation: false

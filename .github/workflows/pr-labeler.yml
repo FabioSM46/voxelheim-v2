@@ -1,0 +1,173 @@
+name: PR Labeler
+
+# Labels open PRs from CI status + review state.
+# Frozen acceptance rule for READY TO MERGE:
+#   Add label only when: CI is green, no review requests changes,
+#   unresolved review thread count is zero, no DeepSeek review is holding unread
+#   findings in its body (cleared by the DEEPSEEK_REVIEW_READ label), and DeepSeek
+#   review is definitively finished (a clean verdict, rounds exhausted, or exempt via
+#   NO_DEEPSEEK_REVIEW).
+#
+# Event-driven, not polled. A label verdict can change when CI or the full
+# DeepSeek review finishes, so `workflow_run` listens to both. Whichever finishes
+# second performs the final relabel; this avoids leaving a clean verdict at
+# needs-review until the six-hour sweep when DeepSeek outlives CI (PR #14).
+# Every run still processes ALL open PRs, so any single firing repairs every
+# stale label, not just the triggering PR's.
+#
+# The sparse cron below is the safety net for the transitions that emit no
+# workflow_run: resolving the last review thread (GitHub has no webhook for
+# thread resolution) and a mergeable state GitHub recomputed after a base-branch
+# merge. Those flip on the next sweep — or immediately via workflow_dispatch /
+# `/process-pr`.
+#
+# Both triggers execute the DEFAULT branch's copy of this file (develop), and
+# neither attaches a check run to any PR's head SHA — so the labeler stays
+# invisible to pr-status-json's counts. There is deliberately NO `pull_request`
+# trigger: that would be the only mode that puts a `labeler` check on PR heads
+# (the red-check confusion behind clinic-deck #279), and the only verdict it
+# could ever reach mid-CI is "pending".
+
+on:
+  workflow_run:
+    # Matches ci.yml's `name:` field ("CI") — the NAME, not the filename. The
+    # two files drift independently and a mismatch has no error anywhere: this
+    # trigger just never fires and labels silently regress to sweep-only
+    # latency. Rename one, rename both.
+    workflows: [CI, DeepSeek PR Review]
+    types: [completed]
+  schedule:
+    - cron: '23 */6 * * *'   # Sweep for eventless transitions; minute offset dodges top-of-hour scheduler congestion
+  workflow_dispatch:          # Manual trigger — runs develop's copy (the default branch)
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  # Grants GITHUB_TOKEN — not the PAT — what the CI rollup read needs (see GH_CI_TOKEN
+  # below). `checks` covers the CheckRun rows (the CI jobs); `statuses` covers the
+  # StatusContext rows (external reporters); `actions` covers `checkSuite.workflowRun`,
+  # which `gh pr view --json statusCheckRollup` requests as part of the projection.
+  # All three are required — with `actions` missing the rollup resolves and then dies
+  # on that nested field ("Resource not accessible by integration …
+  # checkSuite.workflowRun"), which fails closed to -1 exactly like no access at all.
+  checks: read
+  statuses: read
+  actions: read
+
+jobs:
+  labeler:
+    # CI is PR-only. Superseded runs (conclusion: cancelled — their commit is no
+    # longer any PR's head) skip here before a runner boots. Base-branch merges can
+    # still change mergeability on OTHER PRs without an event; the sweep covers it.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.conclusion != 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Process open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GH_PIPELINE_TOKEN }}
+          # The CI rollup read — and only that read — runs under GITHUB_TOKEN instead.
+          # `statusCheckRollup` includes CheckRun rows, and a fine-grained PAT can never
+          # read those: the Checks API is GitHub-App-only, so there is no `Checks`
+          # permission to grant on GH_PIPELINE_TOKEN (it offers `Commit statuses`, which
+          # covers only the StatusContext half). GITHUB_TOKEN is an App installation
+          # token, so the `checks: read` above is enough. Everything else — labels,
+          # comments, cross-workflow dispatch — stays on the PAT, which GITHUB_TOKEN
+          # cannot do (its events do not trigger other workflows).
+          GH_CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # DeepSeek reviews are posted with the review workflow's GITHUB_TOKEN, so
+          # their author is github-actions[bot] — not the pipeline PAT's user. A
+          # wrong login here counts zero rounds and makes READY TO MERGE unreachable.
+          DEEPSEEK_BOT_USER: "github-actions[bot]"
+        run: |
+          chmod +x scripts/gh-automation.sh
+
+          # Get all open, non-draft PRs
+          PR_LIST=$(gh pr list --state open --json number --jq '.[].number' --repo "${GITHUB_REPOSITORY:-FabioSM46/voxelheim}")
+
+          if [ -z "$PR_LIST" ]; then
+            echo "No open PRs found"
+            exit 0
+          fi
+
+          for pr in $PR_LIST; do
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Processing PR #${pr}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            # Capture stdout ONLY. `pr-status-json` prints its JSON on stdout and its
+            # `[WARN] … failing closed` diagnostics on stderr; folding them together with
+            # `2>&1` prefixed those warnings onto the JSON and made every parse below fail.
+            # Leaving stderr unredirected still surfaces the warnings in this job log.
+            #
+            # The `|| { … }` is load-bearing, not defensive style: this step runs under
+            # `shell: bash -e`, where the exit status of `VAR=$(cmd)` is the status of the
+            # substitution — so a bare failing assignment aborts the whole step and every
+            # remaining PR goes unlabelled. That also made the old `if [ $? -ne 0 ]` guard
+            # unreachable: `-e` killed the step before `$?` could ever be tested.
+            STATUS=$(bash scripts/gh-automation.sh pr-status-json "$pr") || {
+              echo "  WARNING: Failed to get status for PR #${pr}, skipping (see stderr above)"
+              continue
+            }
+
+            echo "  Status: $STATUS"
+
+            # Same `-e` hazard, same remedy: an unparseable field must degrade this one PR,
+            # never abort the loop. An empty value is not a zero — it fails closed through
+            # the `!= "0"` branches below, matching the helper's own -1 contract.
+            READY=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['ready_to_merge'])" 2>/dev/null) || READY=""
+            CI_FAILING=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['ci_failing'])" 2>/dev/null) || CI_FAILING=""
+            CI_PENDING=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['ci_pending'])" 2>/dev/null) || CI_PENDING=""
+            UNRESOLVED=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['unresolved_threads'])" 2>/dev/null) || UNRESOLVED=""
+            CHANGES_REQUESTED=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['changes_requested'])" 2>/dev/null) || CHANGES_REQUESTED=""
+            # An empty default here would read as "nothing missing" / "mergeable" in the
+            # branches below. Both fail closed instead, matching every other field: the
+            # sentinels are values the ready/needs-review test treats as not-OK.
+            CHECKS_MISSING=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['checks_missing'])" 2>/dev/null) || CHECKS_MISSING="-1"
+            REQUIRED_CHECK_STATE=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['required_check_state'])" 2>/dev/null) || REQUIRED_CHECK_STATE="UNREADABLE"
+            MERGEABLE=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['mergeable'])" 2>/dev/null) || MERGEABLE="UNREADABLE"
+            DEEPSEEK_UNREAD=$(echo "$STATUS" | python3 -c "import sys,json; print(json.load(sys.stdin)['deepseek_unread_findings'])" 2>/dev/null) || DEEPSEEK_UNREAD="-1"
+
+            echo "  ready_to_merge=$READY  ci_failing=$CI_FAILING  ci_pending=$CI_PENDING  unresolved=$UNRESOLVED  changes_requested=$CHANGES_REQUESTED  checks_missing=$CHECKS_MISSING  required_check_state=$REQUIRED_CHECK_STATE  mergeable=$MERGEABLE  deepseek_unread=$DEEPSEEK_UNREAD"
+
+            # Idempotent label management using the helper
+            if [ "$READY" = "True" ]; then
+              echo "  [ACTION] Conditions met → adding READY TO MERGE"
+              bash scripts/gh-automation.sh pr-label "$pr" add "READY TO MERGE"
+              bash scripts/gh-automation.sh pr-label "$pr" remove "needs-review"
+              bash scripts/gh-automation.sh pr-label "$pr" remove "needs-work"
+            elif [ "$CI_FAILING" != "0" ] || [ "$CHANGES_REQUESTED" != "0" ]; then
+              echo "  [ACTION] CI failing or changes requested → adding needs-work"
+              bash scripts/gh-automation.sh pr-label "$pr" add "needs-work"
+              bash scripts/gh-automation.sh pr-label "$pr" remove "needs-review"
+              bash scripts/gh-automation.sh pr-label "$pr" remove "READY TO MERGE"
+            elif [ "$CI_PENDING" != "0" ] || [ "$UNRESOLVED" != "0" ] || [ "$DEEPSEEK_UNREAD" != "0" ] || [ "$CHECKS_MISSING" != "0" ] || [ "$REQUIRED_CHECK_STATE" != "SUCCESS" ] || [ "$MERGEABLE" != "MERGEABLE" ]; then
+              # Missing checks and merge conflicts belong in THIS branch, not needs-work:
+              # nothing has failed, the work simply has not run yet. Without them a
+              # conflicting PR scores 0 on every count, matches no branch, and falls
+              # through to "Unknown state — no label changes", silently keeping a stale
+              # label (clinic-deck #317).
+              #
+              # Unread DeepSeek body findings belong here for the same reason and with an
+              # extra edge: unlike every other DeepSeek signal, this one is NOT monotonic.
+              # A forced second review can put findings on a PR that already earned the
+              # label, so this branch is what takes READY TO MERGE back off. Left out,
+              # that PR would score 0 everywhere the branches look and fall through to
+              # "Unknown state", keeping a label the frozen rule no longer supports.
+              echo "  [ACTION] Waiting on checks or threads → ensuring needs-review"
+              bash scripts/gh-automation.sh pr-label "$pr" add "needs-review"
+              bash scripts/gh-automation.sh pr-label "$pr" remove "needs-work"
+              bash scripts/gh-automation.sh pr-label "$pr" remove "READY TO MERGE"
+            else
+              echo "  [INFO] Unknown state — no label changes"
+            fi
+          done

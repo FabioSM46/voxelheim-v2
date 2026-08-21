@@ -1,0 +1,855 @@
+// Command voxelheimd is the authoritative Voxelheim server.
+//
+// It accepts framed connections, admits the clients whose protocol version
+// matches, and runs the simulation at a fixed rate. Every gameplay decision is
+// made here; the client renders what this process says is true.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"math"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/FabioSM46/voxelheim-v2/server/internal/certs"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
+)
+
+// Accept-failure backoff. A transient listener error — the process is out of file
+// descriptors, a peer vanished between SYN and accept — must not end the accept
+// loop: a server that has stopped accepting while it keeps ticking is worse than
+// one that exited, because nothing about it looks broken. The backoff keeps a
+// persistent failure from becoming a hot loop that floods the log.
+const (
+	minAcceptBackoff = 50 * time.Millisecond
+	maxAcceptBackoff = time.Second
+)
+
+func main() {
+	opts := parseFlags()
+
+	log, err := newLogger(opts.logLevel, opts.logFormat)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "voxelheimd: %v\n", err)
+		os.Exit(2)
+	}
+
+	// NotifyContext turns the first SIGINT/SIGTERM into a cancelled context and
+	// leaves a second one lethal — a shutdown that hangs must still be killable.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, opts, log); err != nil {
+		log.Error("server stopped with an error", "error", err)
+		os.Exit(1)
+	}
+}
+
+type options struct {
+	listen           string
+	seed             int64
+	worldDir         string
+	tickRate         uint
+	viewDistance     uint
+	handshakeTimeout time.Duration
+	idleTimeout      time.Duration
+	logLevel         string
+	logFormat        string
+}
+
+func parseFlags() options {
+	var opts options
+
+	flag.StringVar(&opts.listen, "listen", "127.0.0.1:7777", "address to listen on; a :0 port binds a free one")
+	flag.Int64Var(&opts.seed, "seed", 1, "world seed; the same seed regenerates the same world")
+	flag.StringVar(&opts.worldDir, "world-dir", world.DefaultWorldDir,
+		"directory the world's edits and the players' records are stored in; empty runs an ephemeral world where "+
+			"nothing is kept — edits are lost on exit, no life is written, and a reconnect is a new player at the "+
+			"spawn even within the same process")
+	flag.UintVar(&opts.tickRate, "tick-rate", game.DefaultTickRate, "authoritative simulation ticks per second (1..255)")
+	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
+	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
+		"how long a new connection may say nothing before it is closed; it gets no reply, having sent nothing to reply to")
+	flag.DurationVar(&opts.idleTimeout, "idle-timeout", session.DefaultIdleTimeout,
+		"how long an admitted session may say nothing before it is closed; seconds are safe because the client sends "+
+			"PlayerInput every tick — standing still and dead included — so a healthy client is never silent for "+
+			"longer than one tick interval. Must be at least the handshake timeout")
+	flag.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
+	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
+	flag.Parse()
+
+	return opts
+}
+
+// validate checks the flags against the ranges they will be narrowed into.
+//
+// Checking the raw values is the whole point. Clamping first and validating the
+// clamped result is how `-tick-rate 1000` becomes a silent 255 Hz server, and how
+// an error message ends up quoting a number the operator never typed.
+func (o options) validate() error {
+	switch {
+	case o.tickRate < 1 || o.tickRate > math.MaxUint8:
+		return fmt.Errorf("tick rate must be in 1..%d, got %d", math.MaxUint8, o.tickRate)
+	case o.viewDistance > protocol.MaxViewDistance:
+		return fmt.Errorf("view distance must be at most %d, got %d", protocol.MaxViewDistance, o.viewDistance)
+	}
+
+	// Asked of the type that enforces it at runtime rather than restated here. Two
+	// copies of a rule are two rules the moment one of them is edited, and this one
+	// is a range the operator can type — exactly the kind that gets widened in the
+	// place nobody was reading.
+	if err := o.timeouts().Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// timeouts is the read-deadline policy these flags describe.
+func (o options) timeouts() session.Timeouts {
+	return session.Timeouts{Handshake: o.handshakeTimeout, Idle: o.idleTimeout}
+}
+
+func newLogger(level, format string) (*slog.Logger, error) {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("unknown log level %q", level)
+	}
+
+	handlerOpts := &slog.HandlerOptions{Level: lvl}
+	switch strings.ToLower(format) {
+	case "text":
+		return slog.New(slog.NewTextHandler(os.Stderr, handlerOpts)), nil
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, handlerOpts)), nil
+	default:
+		return nil, fmt.Errorf("unknown log format %q", format)
+	}
+}
+
+func run(ctx context.Context, opts options, log *slog.Logger) error {
+	if err := opts.validate(); err != nil {
+		return fmt.Errorf("invalid flags: %w", err)
+	}
+
+	cfg := session.Config{
+		WorldSeed: opts.seed,
+		// Narrowing is safe here: validate has already refused anything that would
+		// not survive the conversion.
+		TickRate:     uint8(opts.tickRate),
+		ChunkSize:    world.ChunkSize,
+		ViewDistance: uint8(opts.viewDistance),
+		// Derived from the terrain, never hardcoded: the surface at the spawn column
+		// depends on the seed, and a constant was wrong for the seeds that peaked
+		// above it.
+		Spawn: world.SpawnAt(opts.seed),
+	}
+	// options.validate covers what the operator can type; this covers the contract
+	// invariants from schemas/handshake.fbs for the fields that are not flag-derived.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// One cache per server, seeded once: every session streams from the same chunks,
+	// so a chunk two players can both see is generated once.
+	//
+	// Before the listener, deliberately. Opening the world is the last thing that can
+	// refuse this configuration — a directory recorded under another seed is a refusal to
+	// start, because loading its edits onto this seed's terrain would not fail, it would
+	// quietly serve half of one world and half of another's digging. A server that has
+	// already bound a port and accepted a client is a worse place to find that out.
+	chunks, err := openWorld(opts, cfg.WorldSeed, log)
+	if err != nil {
+		return err
+	}
+
+	// After openWorld and never before it: the seed and worldgen checks are what
+	// refuse a directory this server did not write, and a player record must not be
+	// created inside one that is about to be rejected.
+	players, err := openPlayers(opts, log)
+	if err != nil {
+		return err
+	}
+
+	camp, err := openStructures(opts, log)
+	if err != nil {
+		return err
+	}
+
+	clock, err := openClock(opts, log)
+	if err != nil {
+		return err
+	}
+
+	tr, err := listen(opts, log)
+	if err != nil {
+		return err
+	}
+
+	// Built before the simulation because the simulation is handed its identity source:
+	// players are named by the registry as connections arrive, and every other entity —
+	// an item on the ground, and in time whatever else the world owns — is named by the
+	// same counter, so no id ever means two things at once.
+	registry := session.NewRegistry()
+
+	// Who is live, one level up from the connections: entity ids name a session,
+	// identities outlive one. Built here rather than inside Serve because it is shared
+	// by every session — being the one place that knows an identity is already playing
+	// is the whole of what it does.
+	identities := session.NewIdentities(players, log)
+
+	// The simulation collides against exactly the chunks the sessions stream, read
+	// through Peek so that a tick never generates terrain — and edits the same chunks
+	// through the cache directly, because resolving an edit is allowed to wait for one.
+	// Two seams over one world: the reader that must never block, and the writer that may.
+	//
+	// The seed goes in beside them and generates nothing: it seeds the spawn director's
+	// one generator, so where the dark puts creatures is a property of this world rather
+	// than of this process. See game.NewSim.
+	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log)
+	if err != nil {
+		return fmt.Errorf("invalid simulation: %w", err)
+	}
+
+	// Before the listener is served and therefore before any session can be admitted,
+	// which is what puts the camp in the first snapshot a returning player receives
+	// rather than in the one after the first autosave.
+	restoreStructures(sim, camp, log)
+
+	// The world's time of day, in the same window and for the same reason: a returning
+	// player's *first* snapshot should carry the evening they logged off in, not the
+	// dawn a default would have handed them for one tick.
+	restoreClock(sim, clock, log)
+
+	// **Nothing places a mob here, and that absence is the feature.** This used to put
+	// one draugr at a seed-derived anchor, where it stood for as long as the server ran
+	// and where its replacement stood ten seconds after anyone killed it. The world is
+	// populated by the spawn director now, from inside the tick, around the players who
+	// are actually connected — so a server nobody has joined holds no creatures at all.
+
+	srv := &server{
+		tr:         tr,
+		registry:   registry,
+		identities: identities,
+		cfg:        cfg,
+		timeouts:   opts.timeouts(),
+		chunks:     chunks,
+		structures: camp,
+		clock:      clock,
+		sim:        sim,
+		saveEvery:  world.DefaultSaveInterval,
+		log:        log,
+	}
+
+	log.Info("voxelheimd listening",
+		"addr", tr.Addr(),
+		"tick_rate", cfg.TickRate,
+		"chunk_size", cfg.ChunkSize,
+		"view_distance", cfg.ViewDistance,
+		"world_seed", cfg.WorldSeed,
+		"world_dir", opts.worldDir,
+		"handshake_timeout", opts.handshakeTimeout.String(),
+		"idle_timeout", opts.idleTimeout.String(),
+	)
+
+	srv.run(ctx)
+	return nil
+}
+
+// openWorld builds the chunk cache, backed by the world directory unless the operator
+// asked for an ephemeral world.
+//
+// **Only the edits are stored, never the generated terrain.** The base is a pure function
+// of the seed, so writing it would be spending disk on something this process can always
+// recompute — and it would erase the one distinction the GDD's Fimbulvetr storm is built
+// on, which is knowing which voxels a player put there.
+func openWorld(opts options, seed int64, log *slog.Logger) (*world.Cache, error) {
+	if opts.worldDir == "" {
+		// Loud, because it is the mode in which an evening's digging disappears. Chosen
+		// explicitly by an empty -world-dir; the flag's default is a real directory.
+		log.Warn("no world directory; this world is ephemeral and every edit will be lost on exit")
+		return world.NewCache(seed, world.DefaultWorkers, world.DefaultCacheCapacity), nil
+	}
+
+	store, err := world.OpenStore(opts.worldDir, seed)
+	if err != nil {
+		return nil, fmt.Errorf("opening the world directory: %w", err)
+	}
+	log.Info("world directory opened", "world_dir", store.Dir(), "format_version", world.StoreVersion)
+
+	return world.NewPersistentCache(store, world.DefaultWorkers, world.DefaultCacheCapacity), nil
+}
+
+// listen starts the server's transport, which is encrypted and has no alternative.
+//
+// **There is no flag here, and that is the design rather than an omission.** An
+// identity token is a bearer credential: whatever can read one off the wire can come
+// back as that player. A switch that turned the encryption off would make that exposure
+// a configuration mistake somebody could make once and never notice — and the failure
+// mode of a plaintext session is silent, because nothing about it looks wrong from
+// either end. The only setting nobody can get wrong is the one that does not exist.
+//
+// The cost is stated where it lands: an operator keeps server-key.pem, and an ephemeral
+// world cannot, so every returning client is refused by its own pin until it clears it.
+// That is a refusal a person can see and act on, which is the whole trade — a visible
+// failure instead of an invisible exposure.
+//
+// **The fingerprint is logged at Info, on every start.** It is the number a player
+// compares against a refusal, and an operator who cannot produce it on demand cannot
+// answer the one question a refused client asks. It gives nothing away — it is a hash of
+// a certificate the server hands to everyone who connects.
+func listen(opts options, log *slog.Logger) (transport.Transport, error) {
+	var (
+		cert tls.Certificate
+		err  error
+	)
+	if opts.worldDir == "" {
+		cert, err = certs.Ephemeral()
+		// The second warning an ephemeral world earns, and it is not a repeat of
+		// openWorld's: that one is about edits, this one is about every returning
+		// player being refused by a pin they cannot match.
+		log.Warn("an ephemeral world cannot keep its TLS key, so this server presents a new certificate every start; " +
+			"clients that pinned an earlier one will refuse to reconnect until they clear the pin")
+	} else {
+		cert, err = certs.LoadOrCreate(opts.worldDir)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("preparing the server certificate: %w", err)
+	}
+
+	fingerprint, err := certs.Fingerprint(cert)
+	if err != nil {
+		return nil, fmt.Errorf("reading the server certificate: %w", err)
+	}
+	log.Info("listening with an encrypted session", "certificate_sha256", fingerprint)
+
+	return transport.ListenTLS(opts.listen, cert)
+}
+
+// openPlayers opens the player store under the same -world-dir, or answers nil for
+// an ephemeral world.
+//
+// Nil rather than a store that writes nowhere: every persistence path in this server
+// is a no-op against a nil store instead of a branch at each call site, and this is
+// the same shape openWorld above uses for the chunk cache. An ephemeral world still
+// mints tokens and still refuses a second session on one identity — those need no
+// disk — so the difference the operator chose is exactly the one they get.
+func openPlayers(opts options, log *slog.Logger) (*persist.Store, error) {
+	if opts.worldDir == "" {
+		// openWorld has already warned that this world is ephemeral; saying it twice
+		// would be a second warning about the same decision.
+		return nil, nil
+	}
+
+	store, err := persist.OpenStore(opts.worldDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening the player store: %w", err)
+	}
+	log.Info("player store opened", "players_dir", store.Dir(), "format_version", persist.StoreVersion)
+
+	return store, nil
+}
+
+// openStructures opens the structures file under the same -world-dir, or answers nil
+// for an ephemeral world.
+//
+// Nil rather than a store that writes nowhere, the shape openWorld and openPlayers
+// above both use. An ephemeral world still lets a player pitch a tent and respawn at
+// it; what it does not do is remember either after the process ends, which is exactly
+// the difference the operator chose.
+func openStructures(opts options, log *slog.Logger) (*persist.StructureStore, error) {
+	if opts.worldDir == "" {
+		// openWorld has already warned that this world is ephemeral.
+		return nil, nil
+	}
+
+	store, err := persist.OpenStructureStore(opts.worldDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening the structure store: %w", err)
+	}
+	log.Info("structure store opened", "structures_file", store.Path(), "format_version", persist.StructuresVersion)
+
+	return store, nil
+}
+
+// restoreStructures puts the stored camp back, or starts the world without one.
+//
+// **A failure here is logged and survived, never returned**, and the asymmetry with
+// openStructures above is deliberate. Not being able to *open* the world directory is a
+// configuration mistake and the server should refuse to start; a file inside it that
+// this build cannot read is a world that has lost its camp, and refusing to start would
+// take everything else — the terrain, every player record, the ability to log in at all
+// — hostage to it. The player store makes the same call one identity at a time.
+//
+// The unreadable file is left exactly where it is. Nothing rewrites it until something
+// dirties the camp, because a restore deliberately does not mark it dirty, so the
+// evidence outlives the start that could not use it.
+func restoreStructures(sim *game.Sim, store *persist.StructureStore, log *slog.Logger) {
+	stored, found, err := store.Load()
+	if err != nil {
+		log.Error("the stored structures could not be read; this world starts with none, and the file is kept",
+			"structures_file", store.Path(), "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+
+	camp := make([]game.Structure, len(stored))
+	for i, rec := range stored {
+		// The four fields, one at a time. game and persist do not import each other, so
+		// this loop is the mapping — the same job session does between persist.Record
+		// and game.Life, and here for the same reason.
+		camp[i] = game.Structure{
+			Kind:   rec.Kind,
+			Anchor: rec.Anchor,
+			Facing: rec.Facing,
+			Owner:  rec.Owner,
+		}
+	}
+
+	if err := sim.RestoreStructures(camp); err != nil {
+		log.Error("the stored structures were refused whole; this world starts with none, and the file is kept",
+			"structures_file", store.Path(), "structures", len(camp), "error", err)
+		return
+	}
+	log.Info("structures restored", "structures_file", store.Path(), "structures", len(camp))
+}
+
+// openClock opens the clock file under the same -world-dir, or answers nil for an
+// ephemeral world.
+//
+// Nil rather than a store that writes nowhere, the shape openWorld, openPlayers and
+// openStructures above all use. An ephemeral world still has a day and a night, and
+// they still arrive on time; what it does not do is remember where in the day it was,
+// which is exactly the difference the operator chose.
+func openClock(opts options, log *slog.Logger) (*persist.ClockStore, error) {
+	if opts.worldDir == "" {
+		// openWorld has already warned that this world is ephemeral.
+		return nil, nil
+	}
+
+	store, err := persist.OpenClockStore(opts.worldDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening the clock store: %w", err)
+	}
+	log.Info("clock store opened", "clock_file", store.Path(), "format_version", persist.ClockVersion)
+
+	return store, nil
+}
+
+// restoreClock puts the stored time of day back, or starts the world at first light.
+//
+// **restoreStructures' discipline, one number instead of a camp**, and the same three
+// answers. A file that is not there is a world that has not been played in, and that is
+// silence rather than a log line. A file that cannot be *read* — unreachable, wrong
+// magic, a version this build does not speak, a flipped byte under the checksum — and a
+// value that cannot be *true* — at or beyond the day length — are both logged at error
+// and both survived: the world starts at tick 0 and everything else about it still
+// works. Refusing to start over a clock would take the terrain, every player record and
+// the ability to log in at all hostage to sixteen bytes.
+//
+// **The unreadable file is left exactly where it is**, and unlike the structures file it
+// does not stay there long: the clock is rewritten on the next autosave pass, because
+// there is no dirty flag to hold it back — see saveClockLoop. The evidence therefore
+// survives the start that could not use it and no longer than that, which is the trade
+// a value that changes every tick forces. A corrupt clock costs a player one evening's
+// position in the day; a corrupt player record costs them a life, which is why that one
+// is quarantined under a timestamped name instead.
+func restoreClock(sim *game.Sim, store *persist.ClockStore, log *slog.Logger) {
+	stored, found, err := store.Load()
+	if err != nil {
+		log.Error("the stored clock could not be read; this world starts at first light",
+			"clock_file", store.Path(), "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+
+	// The range check belongs to game, which owns the day length; persist judges only
+	// what a file can be wrong about. A tick that cannot exist is refused rather than
+	// wrapped — see game.Sim.RestoreClock.
+	if err := sim.RestoreClock(stored); err != nil {
+		log.Error("the stored clock was refused; this world starts at first light",
+			"clock_file", store.Path(), "tick_of_day", stored, "error", err)
+		return
+	}
+	log.Info("clock restored", "clock_file", store.Path(), "tick_of_day", stored)
+}
+
+// server wires the transport, the session registry and the simulation loop
+// together. It is a type so that the shutdown ordering below can be tested with a
+// fake transport, instead of only through a signal and a real socket.
+type server struct {
+	tr         transport.Transport
+	registry   *session.Registry
+	identities *session.Identities
+	cfg        session.Config
+	timeouts   session.Timeouts
+	chunks     *world.Cache
+	structures *persist.StructureStore
+	clock      *persist.ClockStore
+	sim        *game.Sim
+
+	// saveEvery is the autosave interval. Zero means world.DefaultSaveInterval; tests
+	// shorten it so the loop can be observed without waiting on the real one.
+	saveEvery time.Duration
+
+	log *slog.Logger
+}
+
+// run serves until ctx ends, then shuts down and returns.
+func (s *server) run(ctx context.Context) {
+	// Two wait groups, because shutdown must wait on them in order: the accept
+	// loop first, everything it spawned second. See shutdown for why.
+	var (
+		accepting sync.WaitGroup
+		workers   sync.WaitGroup
+	)
+
+	// One heartbeat per simulated minute, at debug level: enough to see that the
+	// loop is alive without turning the log into a metronome.
+	heartbeatEvery := uint64(s.cfg.TickRate) * 60
+
+	loop, err := game.NewLoop(s.cfg.TickRate, game.SystemClock{}, s.log, func(tick uint64) {
+		// The whole simulation, and it runs whether or not anyone is connected: time
+		// in the world does not depend on who is watching. Every player is advanced
+		// from their intent and every session is handed what it can see — nothing here
+		// blocks, and nothing here generates terrain.
+		s.sim.Step(tick)
+
+		if tick%heartbeatEvery == 0 {
+			// Peek-only, never Get: the tick loop must not generate terrain, because a
+			// tick that waits on a chunk is a tick every connected player misses.
+			s.log.Debug("simulation heartbeat",
+				"tick", tick,
+				"sessions", s.registry.Count(),
+				"players", s.sim.Count(),
+				"drops", s.sim.DropCount(),
+				"chunks_resident", s.chunks.Len(),
+			)
+		}
+	})
+	if err != nil {
+		// Unreachable in practice: cfg.TickRate is validated before we get here.
+		// Logged rather than returned so a future refactor cannot turn a config
+		// mistake into a server that silently does not tick.
+		s.log.Error("tick loop not started", "error", err)
+	} else {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := loop.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				s.log.Error("tick loop failed", "error", err)
+			}
+		}()
+	}
+
+	// The autosave loop is a worker like the tick loop, and being one is what puts it in
+	// the shutdown ordering: workers.Wait() is what makes the final flush the only writer
+	// left. An ephemeral world's SaveLoop returns immediately.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.chunks.SaveLoop(ctx, s.saveEvery, s.log); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the world autosave loop stopped", "error", err)
+		}
+	}()
+
+	// The players' own autosave, beside the world's and on the same interval. A worker
+	// for the same reason, and with the same consequence: it stops before shutdown's
+	// final write, and every session's teardown has already written that session's
+	// record by then — which is why there is no final flush for players.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.savePlayersLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the player autosave loop stopped", "error", err)
+		}
+	}()
+
+	// The camp's own autosave, beside the world's and the players', on the same
+	// interval and a worker for the same reason. Unlike the players', this one *does*
+	// have a final flush in shutdown: a session's teardown writes that session's record,
+	// but nothing writes the camp when a player leaves — a structure outlives the
+	// session that placed it, which is the whole point of the file.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.saveStructuresLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the structure autosave loop stopped", "error", err)
+		}
+	}()
+
+	// The clock's own autosave, on the same interval and a worker for the same reason.
+	// It has a final flush in shutdown like the camp's, and for a stronger version of
+	// the same reason: nothing a session does writes the clock, because nothing a
+	// session does moves it — the tick loop is the only thing that ever has.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.saveClockLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the clock autosave loop stopped", "error", err)
+		}
+	}()
+
+	accepting.Add(1)
+	go func() {
+		defer accepting.Done()
+		s.acceptLoop(ctx, &workers)
+	}()
+
+	<-ctx.Done()
+	s.shutdown(&accepting, &workers)
+}
+
+// savePlayersLoop writes every connected player's life, every interval, until ctx ends.
+//
+// The players' counterpart to world.Cache.SaveLoop and deliberately the same shape,
+// including what it does about failure: a full disk is a reason to shout, not a reason
+// for a server to stop saving for the rest of its life, so a failed write is logged and
+// the next pass tries again. It returns ctx.Err() on cancellation.
+//
+// **What it exists for is the crash**, not the disconnect. Every clean end of a session
+// — a quit, an idle timeout, a shutdown — writes that session's record in Serve's
+// teardown, so this loop changes nothing about any of them. What it bounds is how much
+// of an evening a kill -9 can take: at most one interval.
+//
+// The capture and the write are separate, which is the discipline this file already
+// keeps for chunks. Sim.Records takes the simulation's lock, copies, and releases it;
+// every byte reaches the disk out here, with nothing held.
+func (s *server) savePlayersLoop(ctx context.Context) error {
+	every := s.saveEvery
+	if every <= 0 {
+		every = world.DefaultSaveInterval
+	}
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := s.identities.RememberAll(s.sim.Records()); err != nil {
+				s.log.Error("saving the connected players failed; they will be retried", "error", err)
+			}
+		}
+	}
+}
+
+// saveStructuresLoop writes the camp whenever it has changed, until ctx ends.
+//
+// world.Cache.SaveLoop's shape, including what it does about failure: a full disk is a
+// reason to shout, not a reason for a server to stop saving for the rest of its life,
+// so a failed write puts the camp back in the queue and the next pass — and the final
+// flush at shutdown — tries again. It returns ctx.Err() on cancellation.
+//
+// A pass over an unchanged camp costs one mutex and no I/O, which is what the dirty
+// flag buys: a world nobody is building in is not rewriting a byte-identical file every
+// five seconds for the life of the process.
+//
+// The capture and the write are separate here as everywhere else in this file:
+// Sim.TakeDirtyStructures takes the simulation's lock, copies, and releases it; every
+// byte reaches the disk out here with nothing held.
+func (s *server) saveStructuresLoop(ctx context.Context) error {
+	every := s.saveEvery
+	if every <= 0 {
+		every = world.DefaultSaveInterval
+	}
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s.flushStructures()
+		}
+	}
+}
+
+// flushStructures writes the camp if it has changed, and puts it back in the queue if
+// the write fails.
+//
+// The re-marking is the contract Sim.TakeDirtyStructures states and the one
+// world.Cache.Flush keeps for a chunk: taking the camp clears the flag, so a caller
+// that dropped a failed write would lose the change for good.
+func (s *server) flushStructures() {
+	camp, dirty := s.sim.TakeDirtyStructures()
+	if !dirty {
+		return
+	}
+
+	// The other direction of restoreStructures' loop, and the only other place the two
+	// four-field types meet. Both mappings live in this file because this is the one
+	// package that imports game and persist together.
+	records := make([]persist.StructureRecord, len(camp))
+	for i, held := range camp {
+		records[i] = persist.StructureRecord{
+			Kind:   held.Kind,
+			Anchor: held.Anchor,
+			Facing: held.Facing,
+			Owner:  held.Owner,
+		}
+	}
+
+	if err := s.structures.Save(records); err != nil {
+		s.sim.MarkStructuresDirty()
+		s.log.Error("saving the structures failed; they will be retried",
+			"structures_file", s.structures.Path(), "structures", len(camp), "error", err)
+	}
+}
+
+// saveClockLoop writes the world's time of day, every interval, until ctx ends.
+//
+// The camp's loop and the players', on the same interval, with the same answer to
+// failure: a full disk is a reason to shout, not a reason for a server to stop saving
+// for the rest of its life. It returns ctx.Err() on cancellation.
+//
+// **There is no dirty flag here, and the absence is the point.** The camp has one
+// because a world nobody is building in should cost no I/O at all; there is no such
+// thing as a world in which time is not passing, so a flag would be set on every pass
+// and would buy a comparison instead of a write. What the clock costs unconditionally
+// is sixteen bytes and a rename every five seconds.
+//
+// **A failed write is not re-marked either, for the same reason it needs no flag.** The
+// next pass reads the live clock, which is newer than the one that failed — so unlike a
+// camp, where the change is gone from the registry the moment it is taken, nothing here
+// is lost by dropping a failure on the floor. What a failed write costs is the ticks
+// between it and the next success, which is what the interval already bounds.
+func (s *server) saveClockLoop(ctx context.Context) error {
+	every := s.saveEvery
+	if every <= 0 {
+		every = world.DefaultSaveInterval
+	}
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s.flushClock()
+		}
+	}
+}
+
+// flushClock writes where the world's day has got to.
+//
+// The capture and the write are separate here as everywhere else in this file:
+// Sim.TickOfDay takes the simulation's lock, copies one number, and releases it; the
+// byte that reaches the disk does so with nothing held.
+func (s *server) flushClock() {
+	tickOfDay := s.sim.TickOfDay()
+	if err := s.clock.Save(tickOfDay); err != nil {
+		s.log.Error("saving the clock failed; it will be retried",
+			"clock_file", s.clock.Path(), "tick_of_day", tickOfDay, "error", err)
+	}
+}
+
+// shutdown stops the server in the only order that terminates.
+//
+// Closing the listener unblocks Accept, but an accept-loop iteration can already
+// be holding a connection it has not registered yet. Snapshotting the registry at
+// that moment would miss that connection: its session would start, block in
+// ReadFrame, and never be closed — so the final wait would never return, and a
+// client that connected and said nothing at exactly the wrong moment would hang
+// the shutdown for good.
+//
+// Waiting for the accept loop to exit before closing the registered connections
+// closes that window by construction: once the loop has returned, every connection
+// that exists is registered.
+//
+// The final save belongs at the end of that same sequence rather than after it. Edits
+// arrive on session goroutines and the autosave loop is a worker, so workers.Wait() is the
+// first moment at which the delta layer has stopped changing and nothing else is writing
+// to the world directory — which makes this one flush the last word on what the world
+// holds. Flushing any earlier races an edit into oblivion; flushing outside shutdown, from
+// main, would run after the process has already told itself it stopped.
+func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
+	s.log.Info("shutting down", "sessions", s.registry.Count())
+
+	if err := s.tr.Close(); err != nil {
+		s.log.Warn("closing the listener failed", "error", err)
+	}
+	accepting.Wait()
+	s.registry.CloseAll()
+	workers.Wait()
+
+	if err := s.chunks.Flush(); err != nil {
+		s.log.Error("saving the world failed; edits since the last autosave are lost", "error", err)
+	}
+	// The camp, in the same window and for the same reason: placement and removal arrive
+	// on session goroutines and the autosave loop is a worker, so workers.Wait() above is
+	// the first moment nothing else can still be changing it.
+	s.flushStructures()
+	// The clock, in the same window and for a stricter version of the same reason: the
+	// tick loop is the only thing that moves it and the tick loop is a worker, so after
+	// workers.Wait() the day has genuinely stopped and this write is the last word on
+	// where it stopped.
+	s.flushClock()
+
+	s.log.Info("voxelheimd stopped")
+}
+
+func (s *server) acceptLoop(ctx context.Context, workers *sync.WaitGroup) {
+	backoff := minAcceptBackoff
+
+	for {
+		conn, err := s.tr.Accept()
+		if err != nil {
+			if ctx.Err() != nil || transport.IsClosed(err) {
+				return
+			}
+
+			s.log.Warn("accept failed; retrying", "error", err, "retry_in", backoff.String())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, maxAcceptBackoff)
+			continue
+		}
+		backoff = minAcceptBackoff
+
+		entityID := s.registry.Add(conn)
+		sessionLog := s.log.With("entity_id", entityID, "remote_addr", conn.RemoteAddr())
+		sessionLog.Info("connection accepted")
+
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			defer s.registry.Remove(entityID)
+			defer func() {
+				if err := conn.Close(); err != nil {
+					sessionLog.Debug("closing connection failed", "error", err)
+				}
+			}()
+
+			if err := session.Serve(ctx, conn, s.cfg, s.timeouts, s.chunks, s.sim, s.registry, s.identities, entityID, sessionLog); err != nil {
+				sessionLog.Warn("session ended with an error", "error", err)
+			}
+		}()
+	}
+}

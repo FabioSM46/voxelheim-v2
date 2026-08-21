@@ -1,0 +1,233 @@
+// =============================================================================
+// world.fbs — voxel streaming and voxel edits.
+//
+// The server owns the world. It generates chunks, decides which ones a session
+// can see, and pushes them; the client never requests a chunk by coordinate and
+// never generates one locally.
+//
+// That same ownership governs changing the world. A client asks for an edit;
+// the server decides whether it happens and then describes the result. Nothing
+// in this file lets a client state that a block changed.
+// =============================================================================
+
+include "common.fbs";
+
+namespace Voxelheim.Net;
+
+/// One cubic chunk of voxels, run-length encoded.
+///
+/// **Voxel order** is x fastest, then z, then y:
+///
+///     index = (y * chunk_size + z) * chunk_size + x
+///
+/// This ordering is part of the wire contract, not an implementation detail:
+/// the server encodes in it and the client's mesher indexes in it. Changing it
+/// is a protocol version bump.
+///
+/// **Encoding**: `runs` is a flat vector of (block_id, run_length) pairs —
+/// `runs[2i]` is the block id and `runs[2i+1]` is how many consecutive voxels
+/// carry it, in the index order above. The pairs are flat rather than a vector
+/// of tables because a table per run would cost an offset each, and a terrain
+/// chunk holds thousands of runs.
+///
+/// Invariants a decoder must enforce on untrusted input:
+///   - `runs` has an even length
+///   - no run length is 0
+///   - the run lengths sum to exactly `chunk_size^3`
+///
+/// A single run can span an entire chunk while `chunk_size^3` fits in a
+/// `ushort` (32^3 = 32768 ≤ 65535). Raising `chunk_size` above 40 breaks that
+/// and requires widening the run length — and therefore a version bump.
+table ChunkData {
+  coord: ChunkCoord;
+  runs: [ushort];
+}
+
+/// The chunk has left the session's view distance. The client drops its copy
+/// and despawns its mesh; it does not keep a cache the server no longer
+/// considers visible.
+table ChunkUnload {
+  coord: ChunkCoord;
+}
+
+// -----------------------------------------------------------------------------
+// Editing the world.
+// -----------------------------------------------------------------------------
+
+/// One voxel's address in **world** coordinates, measured in blocks.
+///
+/// World coordinates rather than chunk-plus-local, deliberately. An edit is a
+/// point in the world; turning that point into a chunk and an index inside it is
+/// the server's job, and the server already owns that conversion. Sending a
+/// chunk coordinate plus a local offset would put a second copy of the same
+/// arithmetic on the untrusted side, and two copies can disagree — leaving the
+/// server to defend against the difference rather than simply perform the
+/// conversion once.
+///
+/// A struct, not a table: three ints, always present wherever it appears, and on
+/// the path of every edit. That is the argument that made `ChunkCoord` a struct,
+/// and the same price applies — a struct can never gain or reorder a field.
+/// Signed, because the world extends in both directions on all three axes, the
+/// vertical one included.
+///
+/// The width is the same `int` as `ChunkCoord`'s, and that is what keeps the two
+/// consistent: dividing any `int` block coordinate by a legal `chunk_size`
+/// (1..=40, per `ServerWelcome`) yields a value that still fits an `int`, so
+/// every voxel this type can address lives in a chunk `ChunkCoord` can address.
+struct BlockCoord {
+  x: int;
+  y: int;
+  z: int;
+}
+
+/// What a player is trying to do to a voxel.
+///
+/// Carries a zero member for the reason `ProtocolVersion.Unknown` exists:
+/// FlatBuffers decodes an absent scalar as zero, and this enum rides on a
+/// client→server message, so the zero value is the one that has to fail.
+/// (`RejectReason` needs no such member — the server writes it, and every value
+/// it can hold is a real answer.)
+enum EditAction : ubyte {
+  /// Never sent deliberately. A `BlockEditRequest` that omits `action` decodes
+  /// as this, and the server refuses it rather than guessing which of the two a
+  /// silent client meant.
+  Unknown = 0,
+
+  /// Reserved wire value for the direct break action withdrawn in protocol V2.
+  /// A client must use `MineRequest`; sending this value in a
+  /// `BlockEditRequest` is a protocol error. The numeric value remains reserved
+  /// because enum values are append-only and old frames still decode to it.
+  Break = 1,
+
+  /// Put the item held in `BlockEditRequest.slot` at `pos`.
+  Place = 2
+}
+
+/// A client asking for one voxel to change. **Intent, never outcome.**
+///
+/// The world's counterpart to `PlayerInput`: it says what the player is trying
+/// to do, and the server decides what actually happens. Reach, line of sight,
+/// whether the player is holding what they are placing, whether the chunk is
+/// protected — all of it is resolved server-side, and none of it is stated
+/// here. Breaking uses `MineRequest`, because the server must accumulate the
+/// target's hardness on its own tick. A field the client fills in is a field the
+/// server would only have to disbelieve.
+///
+/// **There is no rejection message, and that is the design rather than a gap in
+/// it.** A request the server refuses produces no `BlockUpdate`, no error
+/// payload, and no acknowledgement of any kind: the absence is the answer. So a
+/// client must never treat its own request as applied. It may predict the edit
+/// locally for feel, but the world it is entitled to believe in is the one the
+/// server has described, and a request that goes unanswered means the world did
+/// not change. There is deliberately no request id in this table, because there
+/// is no reply to correlate one with.
+///
+/// Invariants the server enforces on this untrusted input:
+///   - `pos` is a struct field, so an absent one decodes as null (Go) / `None`
+///     (Rust). Reject that. The origin is a real location, so treating a missing
+///     coordinate as (0, 0, 0) would silently edit the world at a point nobody
+///     named
+///   - `action` must be `Place`; both `Unknown` and the retired `Break` value are
+///     protocol errors
+///   - `slot` must be < `ServerWelcome.inventory_slots`. On `Place`, the server
+///     reads that slot from its authoritative inventory and the item there must
+///     name a block the server permits a player to place
+///   - `pos` is unbounded on the wire and bounded by the server. An edit beyond
+///     the player's reach, or inside a chunk this session was never sent, is
+///     refused — silently, like every other refusal
+table BlockEditRequest {
+  /// The voxel the player is aiming at, in world coordinates.
+  pos: BlockCoord;
+
+  /// Place only. `Unknown` and the reserved `Break` value fail closed; see the
+  /// invariants above.
+  action: EditAction;
+
+  /// The authoritative inventory slot to spend on a placement.
+  slot: ubyte;
+
+  /// The client's own tick counter, exactly as in `PlayerInput`: ordering and
+  /// staleness only. The server never trusts it as a clock, and never lets it
+  /// decide whether the edit was legal at the moment the client claims to have
+  /// sent it.
+  client_tick: uint;
+}
+
+/// One voxel is now this block. Server → client, and authoritative.
+///
+/// **One shape covers both directions of change.** A break is a placement of
+/// `Air` (block id 0), so there is no separate break message: two payloads
+/// differing only in which field is meaningful is how a union grows without
+/// reason, and the union is the thing both sides have to keep exhaustive.
+///
+/// This is a statement about the world rather than a reply to anyone. The server
+/// sends it to every session that can see `pos`, including the one that asked,
+/// and it is equally the message for a change no client requested at all —
+/// whatever the world later grows that moves blocks on its own is expected to
+/// reuse this shape rather than add another. A client that reads a `BlockUpdate`
+/// as "my edit succeeded" will be wrong the first time someone digs beside it;
+/// the only reading is "this voxel is now that block".
+///
+/// A `BlockUpdate` supersedes the voxel it names in whatever `ChunkData` the
+/// client already holds. Applying one to a chunk that has not arrived yet is not
+/// an error to report back — there is no back — so a client either buffers it
+/// until the chunk lands or drops it and trusts the `ChunkData` to arrive
+/// already edited.
+///
+/// Invariants a decoder must enforce:
+///   - `pos` absent decodes as null / `None`: a protocol error, not the origin
+///   - `block_id` indexes the client's block palette, and an id this client does
+///     not know is reachable whenever the server is the newer of the two. The
+///     lookup is bounds-checked and falls back to a placeholder — never an
+///     unchecked index into the palette, and never a dropped update
+table BlockUpdate {
+  /// The voxel that changed, in world coordinates.
+  pos: BlockCoord;
+
+  /// What stands there now. `Air` for a break.
+  block_id: ushort;
+}
+
+/// A client asking for one chunk it has lost to be sent again. **A request for
+/// data, never for an outcome.**
+///
+/// The counterpart to `BlockEditRequest` on the streaming half of this file, and
+/// the weaker of the two: an edit asks the server to change the world, this asks
+/// only for a copy of what the server has already decided the world is. Nothing
+/// here states what the chunk contains, and the server answers with the chunk it
+/// composes now rather than with the one the client remembers.
+///
+/// **Why the client can lose a chunk it is entitled to.** A client that cannot keep
+/// up with the stream drops a chunk rather than holding one it knows is wrong — an
+/// absent chunk is wrong nowhere, where a kept one accumulates every edit it had to
+/// refuse. What that leaves is a hole in the ground, and the ordinary recovery is
+/// slow in exactly the case that hurts: the server re-sends a chunk when the
+/// coordinate is missing at the next view diff, view diffs are driven by **chunk
+/// crossings**, and a player standing still crosses nothing. This message is what
+/// ends that wait, and it is the whole of what it does.
+///
+/// **There is no reply, no acknowledgement and no rejection**, exactly as for
+/// `BlockEditRequest`. An honoured request is answered by the `ChunkData` that
+/// follows; a refused one is answered by silence. So there is no request id here
+/// either — there is nothing to correlate one with — and a client must not treat a
+/// request as a promise: it may ask once for a chunk it dropped, and then wait for
+/// the world like anybody else.
+///
+/// Invariants the server enforces on this untrusted input:
+///   - `coord` is a struct field, so an absent one decodes as null (Go) / `None`
+///     (Rust). Reject that. Chunk (0, 0, 0) is a real chunk, so reading a missing
+///     coordinate as the origin would resend terrain nobody named
+///   - `coord` must be inside the requesting session's current view volume **and**
+///     currently recorded as delivered to that session. A coordinate the session
+///     does not hold is already on its way — the ordinary diff sends exactly the
+///     chunks it is missing — so the request has nothing to add and is refused
+///   - the request is **rate limited per session**, and the limit is the server's
+///     own arithmetic rather than the client's. A resend is a cache read and an
+///     encode in the cheap case; in the expensive one the server's chunk cache has
+///     since evicted the chunk and it is regenerated, under a semaphore every
+///     session shares. Trusting the client on what it asks for is not the same as
+///     trusting it on how often
+table ChunkResendRequest {
+  /// The chunk the client has lost and wants again.
+  coord: ChunkCoord;
+}

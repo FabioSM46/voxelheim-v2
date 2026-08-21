@@ -1,0 +1,6 @@
+interface:
+  display_name: "Develop GitHub Issue"
+  short_description: "Implement a GitHub issue into a reviewed PR"
+  default_prompt: "Use $dev-issue to implement GitHub issue #42 and open a PR."
+policy:
+  allow_implicit_invocation: false

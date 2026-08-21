@@ -1,0 +1,159 @@
+name: Warm the client cache
+
+# Every pull request was rebuilding the Rust client from scratch, and the reason was
+# where the caches lived rather than whether they existed:
+#
+#   refs/pull/122/merge   876MB   v0-rust-client-Linux-x64-e8b3ee54-e8fead3b
+#   refs/pull/121/merge   876MB   v0-rust-client-Linux-x64-e8b3ee54-e8fead3b
+#   refs/pull/120/merge   876MB   v0-rust-client-Linux-x64-e8b3ee54-e8fead3b
+#   refs/heads/develop     14MB   setup-python-…
+#
+# Identical keys, one 876 MB copy per pull request, and none of them readable by any
+# other pull request: a `pull_request` run writes its cache into `refs/pull/N/merge`,
+# which is a private scope. A branch may read its own caches and the **default
+# branch's**, and develop — the default branch — had no Rust cache at all, because
+# ci.yml runs on `pull_request` only and so never ran on a merge.
+#
+# Measured on one client job, the same branch, cache miss then hit:
+#
+#   Clippy   169s -> 7s
+#   Build    398s -> 27s
+#
+# Nine and a half minutes of compiling Bevy, against thirty-four seconds and a 61s
+# restore. This workflow exists to put one copy where every pull request can reach it.
+#
+# **It deliberately touches nothing in ci.yml's own logic.** Adding a `push` trigger
+# there would have run into two traps: `concurrency.group` is keyed on the pull
+# request number, so every push would share one group under `cancel-in-progress`, and
+# a cancelled job resolves to CANCELLED, which `pr-status-json` counts among its
+# failing conclusions; and `detect` enumerates changed files through
+# `pulls/<number>/files`, which does not exist on a push, so it would fail open and
+# emit a warning on every merge. A separate workflow has neither problem.
+
+on:
+  push:
+    branches: [develop]
+    # Path filters are safe **here** and are forbidden in ci.yml, and the difference
+    # is what audits the result. ci-gate audits ci.yml's jobs, so a path-filtered job
+    # there would leave it with no result to read; nothing audits this workflow, and
+    # it reports no check any pull request requires. It is a cache, not a gate.
+    paths:
+      - client/**
+      - .github/workflows/client-cache.yml
+      # ci.yml is in this list because the warm-up below runs the same cargo commands
+      # the client gate runs, so a merge that changes those commands has to rebuild
+      # the cache with them. The parity test is what forces the two files to be edited
+      # together; this entry is what makes the edit take effect on the branch every
+      # pull request actually reads its cache from.
+      - .github/workflows/ci.yml
+  # A cache GitHub has not been asked for in 7 days is deleted, and rust-cache puts the
+  # rustc version in its key — so a stable release with no client merge behind it
+  # strands develop's cache under a key nobody asks for any more, and every pull
+  # request goes cold until someone happens to merge client code. Neither case is
+  # exotic: Rust ships every six weeks, and a quiet week is just a quiet week.
+  #
+  # Three fires a week rather than one, because a weekly cron would be racing the very
+  # deadline it exists to beat. On a hit the run is a restore and three near-instant
+  # cargo invocations, so the cadence is close to free; what it buys is margin —
+  # GitHub drops scheduled runs under load, and at Mon/Wed/Fri one dropped run still
+  # leaves the longest gap at five days. That bound is pinned, not just asserted:
+  # scripts/test/client-cache-parity.test.sh recomputes it from these cron lines.
+  schedule:
+    - cron: '0 4 * * 1,3,5'
+  # So the first cache can be created without waiting for a client merge, and so a
+  # cache that ever goes bad can be rebuilt on demand.
+  workflow_dispatch:
+
+# One warm-up at a time, and never cancelled: a half-finished run saves nothing, and
+# the whole point of this workflow is the artifact it leaves behind.
+concurrency:
+  group: client-cache
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Named `client`, and it has to match ci.yml's client job in two places. The cache
+  # key — workspace, shared key, toolchain action — because a cache the gate cannot
+  # read is worth nothing. And the cargo commands, because a warm-up that compiles
+  # something else leaves the gate compiling the half it missed.
+  #
+  # Both of those used to be asserted right here and checked nowhere, which is the
+  # shape this repository has learned to distrust. scripts/test/client-cache-parity.test.sh
+  # now derives the expected commands from ci.yml rather than restating them, and the
+  # `automation` job runs it for any change under `.github/` — so these two files can
+  # only drift through a red gate.
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Detect workspace presence
+        id: ws
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f client/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "client/ is not scaffolded at this ref — nothing to warm."
+          fi
+
+      - name: Prefer the canonical Ubuntu archive over the Azure mirror
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        # The same repair ci.yml carries, and for the same reason: the hosted runner's
+        # mirrorlist reaches for azure.archive.ubuntu.com first, and when that host
+        # stops answering every index fetch waits out its timeout.
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+          fi
+
+      - name: Install Bevy system dependencies
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        timeout-minutes: 5
+        run: |
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            update
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          workspaces: client
+          shared-key: client-gates
+
+      # Clippy and the test binaries, not just a build. Each produces artifacts the
+      # others do not — clippy's checks carry their own metadata and `--all-targets`
+      # reaches the test harness — and a warm-up that skipped either would leave the
+      # pull request compiling the half it missed. `--no-run` because nothing here is
+      # a gate: ci.yml is what decides whether the client is correct, and running the
+      # suite twice would buy a slower merge and no answer.
+      - name: Warm clippy
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Warm the build and the test binaries
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          cargo build --workspace --locked
+          cargo test --workspace --locked --no-run

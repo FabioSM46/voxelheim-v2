@@ -1,0 +1,46 @@
+name: Iteration Lifecycle
+
+# Completion-driven, not calendar-driven. Closing any issue re-evaluates the
+# active iteration milestone — the open one with the lowest sequence, so further
+# iterations may be planned ahead; most runs are deliberate no-ops. When that
+# milestone reaches zero open issues the helper creates backlog refinement, and
+# closing that milestone-specific ceremony unlocks iteration planning.
+
+on:
+  issues:
+    types: [closed]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+# Two issues can close almost simultaneously. Serialize the state-machine runs
+# so both cannot observe "no ceremony exists" and create duplicates.
+concurrency:
+  group: iteration-lifecycle-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    # Only two kinds of issue close can move the state machine: an issue
+    # committed to the active milestone (its close can take open_issues to
+    # zero) and a ceremony issue (its close unlocks the next stage). Anything
+    # else — backlog grooming, duplicates, wontfixes — cannot change a single
+    # input the helper reads, so it skips before a runner boots.
+    # workflow_dispatch stays unconditional: it is the documented recovery path.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.issue.milestone != null ||
+      contains(github.event.issue.labels.*.name, 'ceremony')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Advance iteration lifecycle
+        env:
+          GH_TOKEN: ${{ secrets.GH_PIPELINE_TOKEN }}
+        run: bash scripts/gh-automation.sh iteration-advance

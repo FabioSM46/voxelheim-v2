@@ -1,0 +1,505 @@
+//! What one item id is called, what shape it is held in, and what colour it draws.
+//!
+//! One row per item, and every reader on this side goes through it: the view model in
+//! [`super::hands`] is built from the shape and the colour, `ui`'s pack and hotbar cells
+//! draw the colour, the recipe panel spells the name, and a hovered slot reports it.
+//!
+//! Before this module existed the three facts lived in two tables that did not hold the
+//! same items. `hands` owned the shape and the colour — the complete visual opinion, of
+//! which only the colour escaped the module — and `super::crafting` owned the name,
+//! because the recipe panel needed one first. So the names covered exactly what a recipe
+//! mentions: dirt, snow and the rusty sword had none at all, and no test could see that,
+//! because the only sweep over the names walked the recipes. A tooltip is the first reader
+//! that asks about every item a player can hold, which is what surfaced the gap.
+//!
+//! **This table is the sole authority on nothing.** `super::combat` reads item ids of its
+//! own to decide what a click asks for, `super::structures` reads its own to decide what a
+//! place press asks for, `super::inventory` reads one to decide which of two requests a
+//! cell click means, and the server reads its registry to decide what it grants. A wrong
+//! entry here draws the wrong shape, spells the wrong word, and cannot make an item do
+//! anything.
+
+use super::combat::ITEM_RUSTY_SWORD;
+use super::crafting::{ITEM_IRON_SWORD, ITEM_SHARPENING_STONE};
+use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
+use crate::world::palette;
+
+// Presentation-only item ids. The server registry remains the sole authority on whether
+// any of these can be placed and which block an action actually creates.
+//
+// These nine live here because no module *acts* on them — they are ids this client only
+// ever draws. The six that a module does act on stay where that module declares them:
+// the blade in `super::combat`, the three bundles in `super::structures`, the forge's two
+// products in `super::crafting`. The table below names them from there, because one
+// declaration read from several places cannot drift the way two declarations of the same
+// number can.
+pub(super) const ITEM_STONE: u16 = 1;
+pub(super) const ITEM_DIRT: u16 = 2;
+pub(super) const ITEM_SNOW: u16 = 3;
+pub(super) const ITEM_LOG: u16 = 4;
+pub(super) const ITEM_RAW_COAL: u16 = 5;
+pub(super) const ITEM_RAW_IRON: u16 = 6;
+
+/// What the dead leave behind, and what two pelts are worked into.
+///
+/// Presentation only, exactly as the six above are. The server's registry decides that a
+/// patch mends a blade and that a vargr leaves a pelt; nothing on this side routes a
+/// click or a key on any of these three, which is why they are declared here rather than
+/// in the module that would act on them.
+pub(super) const ITEM_BONE: u16 = 13;
+pub(super) const ITEM_VARGR_PELT: u16 = 14;
+pub(super) const ITEM_LEATHER_PATCH: u16 = 15;
+
+/// The shapes an item is drawn in.
+///
+/// Four variants and no "nothing": an empty hand is not an item's shape, so
+/// [`super::hands`] spells that `None` and this enum stays total over items. Which is what
+/// lets the sweep below assert a shape without also having to exclude a placeholder
+/// variant that every material-like item would legitimately share.
+///
+/// **One vocabulary, two renderers.** [`super::hands`] builds a mesh per variant for the
+/// held view model and `ui::icon` builds a flat picture per variant for a pack or hotbar
+/// cell. Both read the shape out of the row below rather than deciding one per surface, so
+/// what a player sees in a cell is what they see in their hand — and both match on this
+/// enum with no wildcard arm, so a fifth variant is drawn twice or it does not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemShape {
+    /// A cube: what a voxel looks like carried, and what a place press will ask for.
+    Block,
+    /// A stub of raw material — ore, fuel, a consumable.
+    Material,
+    /// Long, thin and unmistakably not a cube, so the thing that swings looks different
+    /// from the thing that places.
+    ///
+    /// **A shape is not a capability.** Drawing an item as a blade does not make the left
+    /// button swing it — `super::combat` routes on the ids it knows — and it could not,
+    /// because what a weapon is belongs to the server's registry.
+    Blade,
+    /// What a tent or a forge looks like carried. Its own shape, because the place press
+    /// means something different while one is in hand — a structure rather than a voxel —
+    /// and the hand is where a player sees which of the two they are about to ask for.
+    Bundle,
+}
+
+impl ItemShape {
+    /// Every shape, for the sweeps that must cover the whole vocabulary.
+    ///
+    /// **This list is not what makes a shape drawn — the compiler is.** Both renderers
+    /// match on [`ItemShape`] with no wildcard arm, so a fifth variant fails to build
+    /// until it has been given a mesh *and* a drawing; there is no branch for it to fall
+    /// through into a square. What the list buys is the other half, the one the name
+    /// sweep above established: a test that catches an arm filled in with a placeholder —
+    /// an empty drawing, or one copied from another shape.
+    ///
+    /// No stable Rust enumerates variants, so this array is written by hand and could in
+    /// principle fall behind the enum. That would cost a sweep some coverage and nothing
+    /// more, because the coverage that matters is the compiler's.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 4] = [Self::Block, Self::Material, Self::Blade, Self::Bundle];
+}
+
+/// Everything this client has an opinion about for one item id.
+///
+/// Three facts, all mandatory, which is the compiler's half of *every item has a complete
+/// entry*: a row cannot be written without a name, a shape and a colour. The sweep test
+/// below is the other half — it is what catches a row whose fields are filled in with a
+/// placeholder rather than left out.
+///
+/// **A field for a capability would not belong here.** What an item can do is the server's
+/// answer, and a client-side copy of it would be a cheat vector by construction. A later
+/// fact that is genuinely presentation — a drawn icon, a rarity tint — is a fourth field
+/// and needs no restructuring to add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ItemDisplay {
+    /// The wire id, from `server/internal/game/items.go`, which appends and never
+    /// renumbers.
+    pub(super) item_id: u16,
+    /// Lower case, because the recipe panel builds its headings from it — `ui/inventory.rs`
+    /// upper-cases the product to match the section titles beside it, and a tooltip prints
+    /// it as it stands.
+    pub(super) name: &'static str,
+    pub(super) shape: ItemShape,
+    /// The `world::palette` entry this item presents as.
+    ///
+    /// A palette entry rather than a colour, because `palette` is where a colour is
+    /// written down once. Item ids and block ids are two registries that agree only on
+    /// stone and dirt, so this column is a translation and never an identity: a log is
+    /// item 4 and draws as block [`palette::LOG`].
+    pub(super) palette_id: u16,
+}
+
+/// Every item id this client knows, in the order the server's registry appends them.
+///
+/// The order is load-bearing only as documentation; [`display`] searches by id. What the
+/// sweep does insist on is that the ids form the contiguous block an append-only registry
+/// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
+pub(super) const ITEMS: [ItemDisplay; 15] = [
+    ItemDisplay {
+        item_id: ITEM_STONE,
+        name: "stone",
+        shape: ItemShape::Block,
+        palette_id: palette::STONE,
+    },
+    ItemDisplay {
+        item_id: ITEM_DIRT,
+        name: "dirt",
+        shape: ItemShape::Block,
+        palette_id: palette::DIRT,
+    },
+    ItemDisplay {
+        item_id: ITEM_SNOW,
+        name: "snow",
+        shape: ItemShape::Block,
+        palette_id: palette::SNOW,
+    },
+    ItemDisplay {
+        item_id: ITEM_LOG,
+        name: "log",
+        shape: ItemShape::Block,
+        palette_id: palette::LOG,
+    },
+    ItemDisplay {
+        item_id: ITEM_RAW_COAL,
+        name: "coal",
+        shape: ItemShape::Material,
+        palette_id: palette::COAL_ORE,
+    },
+    ItemDisplay {
+        item_id: ITEM_RAW_IRON,
+        name: "raw iron",
+        shape: ItemShape::Material,
+        palette_id: palette::IRON_ORE,
+    },
+    // The starter blade. `super::combat` reads the same id to decide what a click asks
+    // for; the row here is only what it looks like and what it is called.
+    ItemDisplay {
+        item_id: ITEM_RUSTY_SWORD,
+        name: "rusty sword",
+        shape: ItemShape::Blade,
+        palette_id: palette::SNOW,
+    },
+    // The two items that plant an entity rather than a voxel. Iron for the forge, canvas
+    // for the tent, so a player can see which of the two they are carrying.
+    ItemDisplay {
+        item_id: ITEM_FORGE,
+        name: "forge",
+        shape: ItemShape::Bundle,
+        palette_id: palette::IRON_ORE,
+    },
+    ItemDisplay {
+        item_id: ITEM_TENT,
+        name: "tent",
+        shape: ItemShape::Bundle,
+        palette_id: palette::SNOW,
+    },
+    // The forge's two products. The iron blade is a `Blade` beside the rusty one, in iron
+    // rather than worn steel so the two are told apart in the hand as well as in the pack;
+    // the sharpening stone is a consumable and reads as raw material.
+    ItemDisplay {
+        item_id: ITEM_IRON_SWORD,
+        name: "iron sword",
+        shape: ItemShape::Blade,
+        palette_id: palette::IRON_ORE,
+    },
+    ItemDisplay {
+        item_id: ITEM_SHARPENING_STONE,
+        name: "sharpening stone",
+        shape: ItemShape::Material,
+        palette_id: palette::STONE,
+    },
+    // The third bundle, and the first whose point is the ground *around* it. A `Bundle`
+    // beside the tent and the forge because the place press means the same thing while
+    // one is in hand — a structure rather than a voxel — and firewood, because that is
+    // what a fire is carried as.
+    ItemDisplay {
+        item_id: ITEM_CAMPFIRE,
+        name: "campfire",
+        shape: ItemShape::Bundle,
+        palette_id: palette::LOG,
+    },
+    // What a hunt leaves, and what it is worked into. All three are `Material`, because
+    // that is what the shape vocabulary has for a thing you carry and spend — and because
+    // a shape is not a capability: drawing the patch as a `Blade` would not make the left
+    // button swing it, and drawing it as a `Bundle` would suggest a place press it has no
+    // answer for.
+    //
+    // Three different swatches, which is the whole of what stops them being three
+    // identical cells: bone-white for the bones, wet earth for a raw hide, and bark for
+    // one that has been worked. None of the three collides with an existing
+    // shape-and-colour pair.
+    ItemDisplay {
+        item_id: ITEM_BONE,
+        name: "bone",
+        shape: ItemShape::Material,
+        palette_id: palette::SNOW,
+    },
+    ItemDisplay {
+        item_id: ITEM_VARGR_PELT,
+        name: "vargr pelt",
+        shape: ItemShape::Material,
+        palette_id: palette::DIRT,
+    },
+    ItemDisplay {
+        item_id: ITEM_LEATHER_PATCH,
+        name: "leather patch",
+        shape: ItemShape::Material,
+        palette_id: palette::LOG,
+    },
+];
+
+/// The row one item id has, when this build has one.
+///
+/// `Option` rather than a total lookup, and it fails open in the only direction it can: an
+/// id with no row is a server one contract ahead, not a corrupt one, so each reader below
+/// supplies its own honest fallback rather than this function inventing a row.
+pub(super) fn display(item_id: u16) -> Option<&'static ItemDisplay> {
+    ITEMS.iter().find(|row| row.item_id == item_id)
+}
+
+/// The display name of one item id.
+///
+/// The fallback is reachable — an id this build has never heard of has no name to give —
+/// and it says so rather than guessing. `the_registry_names_every_item_id_this_client_declares`
+/// is what keeps it unreachable for every id this build *does* know.
+pub fn item_label(item_id: u16) -> &'static str {
+    display(item_id).map_or("unknown item", |row| row.name)
+}
+
+/// The palette entry one item id presents as, for the panels that draw a stack and for the
+/// material the held view model is built with.
+///
+/// The unknown fallback is the id itself, which reaches [`palette::linear_rgba`]'s loud
+/// placeholder for anything past the block palette — the honest answer to a version skew,
+/// rather than a plausible shade this module invented.
+pub(crate) fn item_palette_id(item_id: u16) -> u16 {
+    display(item_id).map_or(item_id, |row| row.palette_id)
+}
+
+/// The shape one item id is drawn in.
+///
+/// [`ItemShape::Material`] for an unknown id: a stub of *something* carryable is the least
+/// wrong guess, and the colour is already shouting about the skew, so the shape does not
+/// need a second placeholder to mean the same thing.
+pub(crate) fn item_shape(item_id: u16) -> ItemShape {
+    display(item_id).map_or(ItemShape::Material, |row| row.shape)
+}
+
+/// Every item id this build has a row for.
+///
+/// Test-only, and derived from [`ITEMS`] rather than listed beside it, so a sweep in
+/// another module cannot fall behind this table the way a second list would. `ui`'s cell
+/// tests use it to assert that every item a player can hold draws a picture, which is the
+/// same question [`every_known_item_has_a_name_a_shape_and_a_colour`] asks one layer down.
+#[cfg(test)]
+pub(crate) fn known_item_ids() -> impl Iterator<Item = u16> {
+    ITEMS.iter().map(|row| row.item_id)
+}
+
+/// Whether one row carries all three facts rather than a placeholder standing in for one.
+///
+/// The predicate the sweep applies, extracted so that
+/// `the_sweep_rejects_a_row_that_is_missing_a_fact` can assert the failure mode on a
+/// fixture instead of the sweep only ever being run against rows that pass. The shape
+/// column is absent from it deliberately: [`ItemShape`] has no unknown variant, so a row
+/// with no shape does not compile and there is nothing here left to check.
+#[cfg(test)]
+fn row_is_complete(row: &ItemDisplay) -> bool {
+    !row.name.is_empty()
+        && row.name != item_label(u16::MAX)
+        && palette::linear_rgba(row.palette_id) != palette::linear_rgba(u16::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An id no build will have a row for, used to exercise every fallback at once.
+    const NO_SUCH_ITEM: u16 = 4242;
+
+    /// The sweep this issue exists for: every known item, all three facts, no placeholders.
+    #[test]
+    fn every_known_item_has_a_name_a_shape_and_a_colour() {
+        for row in ITEMS {
+            assert!(
+                row_is_complete(&row),
+                "item {} has an incomplete display row: {row:?}",
+                row.item_id
+            );
+            // Each reader reaches this row rather than a second opinion of its own, which
+            // is the whole of what "one registry" buys.
+            assert_eq!(display(row.item_id), Some(&row), "item {}", row.item_id);
+            assert_eq!(item_label(row.item_id), row.name, "item {}", row.item_id);
+            assert_eq!(
+                item_palette_id(row.item_id),
+                row.palette_id,
+                "item {}",
+                row.item_id
+            );
+            assert_eq!(item_shape(row.item_id), row.shape, "item {}", row.item_id);
+        }
+
+        // The server's registry appends and never renumbers, so the ids it has issued are
+        // 1..N with no holes. Checking that catches a duplicated row and a row given an
+        // id nobody issued, neither of which any per-row assertion above can see.
+        let mut ids: Vec<u16> = ITEMS.iter().map(|row| row.item_id).collect();
+        ids.sort_unstable();
+        let expected: Vec<u16> = (1..=u16::try_from(ITEMS.len()).expect("a small table")).collect();
+        assert_eq!(
+            ids, expected,
+            "the registry's ids are not the contiguous block an append-only server issues"
+        );
+    }
+
+    /// The direction the table cannot check by itself.
+    ///
+    /// The ids the rest of the client spells out, gathered from the modules that declare
+    /// them. A sixteenth item added to `super::combat` or `super::structures` and not
+    /// added here is a slot that draws magenta and reads "unknown item"; this list is
+    /// where that is noticed. The length check is what stops the list going stale in the
+    /// other direction, so neither half can drift without the other failing.
+    #[test]
+    fn the_registry_names_every_item_id_this_client_declares() {
+        let declared = [
+            ITEM_STONE,
+            ITEM_DIRT,
+            ITEM_SNOW,
+            ITEM_LOG,
+            ITEM_RAW_COAL,
+            ITEM_RAW_IRON,
+            ITEM_RUSTY_SWORD,
+            ITEM_FORGE,
+            ITEM_TENT,
+            ITEM_IRON_SWORD,
+            ITEM_SHARPENING_STONE,
+            ITEM_CAMPFIRE,
+            ITEM_BONE,
+            ITEM_VARGR_PELT,
+            ITEM_LEATHER_PATCH,
+        ];
+        for item_id in declared {
+            assert!(
+                display(item_id).is_some(),
+                "item {item_id} is named by this client and has no display row"
+            );
+        }
+        assert_eq!(
+            ITEMS.len(),
+            declared.len(),
+            "the registry holds a row for an id nothing else declares, or this list is stale"
+        );
+    }
+
+    /// The three the recipe-driven name table could never have covered.
+    ///
+    /// Dirt and snow are placeable blocks no recipe mentions; the rusty sword is the item
+    /// a player starts holding. All three were "unknown item" before this registry, and a
+    /// tooltip is where that would have been read.
+    #[test]
+    fn the_three_items_no_recipe_mentions_are_named_too() {
+        assert_eq!(item_label(ITEM_DIRT), "dirt");
+        assert_eq!(item_label(ITEM_SNOW), "snow");
+        assert_eq!(item_label(ITEM_RUSTY_SWORD), "rusty sword");
+    }
+
+    /// The three a hunt puts in the pack, at the ids the server appended them at.
+    ///
+    /// The contiguity check in the sweep above is what says there is no hole behind 15;
+    /// this is what says the three rows are the *right* three, which no property of the
+    /// block can. `ui`'s cell sweep draws each of them from these same rows.
+    #[test]
+    fn what_a_hunt_leaves_is_named_and_drawn() {
+        for (item_id, name) in [
+            (ITEM_BONE, "bone"),
+            (ITEM_VARGR_PELT, "vargr pelt"),
+            (ITEM_LEATHER_PATCH, "leather patch"),
+        ] {
+            assert_eq!(item_label(item_id), name, "item {item_id}");
+            assert_eq!(item_shape(item_id), ItemShape::Material, "item {item_id}");
+            assert!(
+                display(item_id).is_some_and(row_is_complete),
+                "item {item_id} has an incomplete display row"
+            );
+        }
+
+        // The ids themselves, pinned: the server's registry appends and never renumbers,
+        // and a row under the wrong number draws somebody else's item in this pack.
+        assert_eq!(
+            [ITEM_BONE, ITEM_VARGR_PELT, ITEM_LEATHER_PATCH],
+            [13, 14, 15]
+        );
+
+        // And no two of them are the same cell. They share a shape, so the swatch is the
+        // only thing left to tell them apart, and a pack holding all three would
+        // otherwise be three slots a player has to count.
+        let swatch = |item_id| palette::linear_rgba(item_palette_id(item_id));
+        assert_ne!(swatch(ITEM_BONE), swatch(ITEM_VARGR_PELT));
+        assert_ne!(swatch(ITEM_BONE), swatch(ITEM_LEATHER_PATCH));
+        assert_ne!(swatch(ITEM_VARGR_PELT), swatch(ITEM_LEATHER_PATCH));
+    }
+
+    /// What an id with no row does in every reader, asserted rather than assumed.
+    ///
+    /// This is exactly the state a real item added to the client without a registry row
+    /// would be in, so it is worth knowing precisely: a name that says so, a carryable
+    /// shape, and the palette's loud placeholder instead of a plausible colour.
+    #[test]
+    fn an_item_with_no_row_falls_back_in_every_reader() {
+        assert_eq!(display(NO_SUCH_ITEM), None);
+        assert_eq!(item_label(NO_SUCH_ITEM), "unknown item");
+        assert_eq!(item_shape(NO_SUCH_ITEM), ItemShape::Material);
+        assert_eq!(item_palette_id(NO_SUCH_ITEM), NO_SUCH_ITEM);
+        assert_eq!(
+            palette::linear_rgba(item_palette_id(NO_SUCH_ITEM)),
+            palette::linear_rgba(u16::MAX),
+            "an unknown item drew a plausible colour instead of the placeholder"
+        );
+    }
+
+    /// The sweep's teeth, on fixtures rather than on the table that already passes.
+    ///
+    /// A test that only ever runs a predicate over rows which satisfy it proves the rows
+    /// and not the predicate. These three are the shapes a careless addition actually
+    /// takes: a row left with the fallback for a name, and a row given a palette entry no
+    /// colour answers to.
+    #[test]
+    fn the_sweep_rejects_a_row_that_is_missing_a_fact() {
+        let nameless = ItemDisplay {
+            item_id: NO_SUCH_ITEM,
+            name: "unknown item",
+            shape: ItemShape::Material,
+            palette_id: palette::STONE,
+        };
+        assert!(
+            !row_is_complete(&nameless),
+            "a row named after the fallback passed the sweep"
+        );
+
+        let unnamed = ItemDisplay {
+            name: "",
+            ..nameless
+        };
+        assert!(
+            !row_is_complete(&unnamed),
+            "a row with an empty name passed the sweep"
+        );
+
+        let colourless = ItemDisplay {
+            name: "mystery",
+            palette_id: u16::MAX,
+            ..nameless
+        };
+        assert!(
+            !row_is_complete(&colourless),
+            "a row whose colour is the unknown placeholder passed the sweep"
+        );
+
+        let complete = ItemDisplay {
+            name: "mystery",
+            ..nameless
+        };
+        assert!(
+            row_is_complete(&complete),
+            "a row carrying all three facts failed the sweep"
+        );
+    }
+}

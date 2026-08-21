@@ -1,0 +1,6 @@
+interface:
+  display_name: "Scrum Master"
+  short_description: "Run backlog, iteration, and feature ceremonies"
+  default_prompt: "Use $scrum-master to run backlog refinement for this repository."
+policy:
+  allow_implicit_invocation: false

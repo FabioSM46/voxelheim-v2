@@ -1,0 +1,810 @@
+// =============================================================================
+// player.fbs — input in, authoritative state out.
+//
+// This file is where the server-authoritative rule becomes a wire-level fact:
+// the client sends what the player is *trying* to do, and the server sends what
+// actually happened. There is deliberately no message in which a client states
+// its own position, so there is no such claim for the server to validate — or
+// to get wrong.
+// =============================================================================
+
+include "world.fbs";
+
+namespace Voxelheim.Net;
+
+/// One tick's worth of intent from a client.
+///
+/// Sent at `ServerWelcome.tick_rate`, not at the client's frame rate. The
+/// server clamps the axes and integrates them itself; a client that sends
+/// out-of-range values gains nothing.
+///
+/// **Decoder invariant: every float here must be finite.** This is a different
+/// requirement from the range clamp, and clamping cannot satisfy it. `NaN`
+/// compares false against every bound, so the usual `if v > 1 { v = 1 }` lets it
+/// through untouched, and it then propagates through the integrator into a
+/// position that stays `NaN` forever. The server rejects or zeroes non-finite
+/// components **before** any physics runs, treating them as the malformed input
+/// they are rather than as an extreme value.
+table PlayerInput {
+  /// The client's own tick counter. Used for ordering and staleness checks; the
+  /// server never trusts it as a clock.
+  client_tick: uint;
+
+  /// Strafe intent, -1 (left) to 1 (right). Clamped server-side.
+  move_x: float;
+
+  /// Forward intent, -1 (backward) to 1 (forward). Clamped server-side.
+  move_z: float;
+
+  /// Facing, in radians. Affects the direction the movement axes are applied
+  /// in, so the server needs it even though the camera is a client concern.
+  yaw: float;
+
+  /// Pitch, in radians. Carried for aiming; movement ignores it.
+  pitch: float;
+
+  /// Whether the jump control is held this tick. Whether a jump *happens* is
+  /// the server's decision (it owns ground contact).
+  jump: bool;
+}
+
+/// Starts, continues or cancels mining one voxel. Client -> server, and intent
+/// only: the server owns hardness, elapsed progress, completion and the item
+/// that breaking eventually yields.
+///
+/// There is no acknowledgement or rejection payload. A request the server
+/// refuses is silence, and an accepted request becomes visible only through the
+/// authoritative `MineProgress`, inventory and world state that follow.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `pos` absent decodes as null / `None`: a protocol error, never the origin
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table MineRequest {
+  /// The voxel whose mining control changed, in world coordinates.
+  pos: BlockCoord;
+
+  /// True while mining is active; false cancels mining at `pos`.
+  active: bool;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// Authoritative mining progress for one voxel. Server -> client.
+///
+/// Decoder invariants the client enforces:
+///   - `pos` absent decodes as null / `None`: a protocol error, never the origin
+///   - `progress` is a fraction of 255 (`0` is no progress, `255` is complete),
+///     never a tick count or a duration
+table MineProgress {
+  pos: BlockCoord;
+  progress: ubyte;
+}
+
+/// Moves up to `count` items between authoritative inventory slots. Client ->
+/// server, and intent only: the server decides whether any move is legal and
+/// sends a complete `InventoryState` when its answer changes the inventory.
+/// There is no acknowledgement or rejection payload.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `from` and `to` must each be < `ServerWelcome.inventory_slots`
+///   - `count == 0` is a protocol error; moving nothing is not an intent
+table InventoryMoveRequest {
+  from: ubyte;
+  to: ubyte;
+  count: ushort;
+}
+
+/// One swing of the held weapon. Client -> server, and intent only: the server owns
+/// reach, cone, cooldown, target selection, damage and every consequence of a hit.
+///
+/// **It names no victim.** There is no target id, no position, no aim vector, no
+/// damage and no result, because a message that let a client choose who it hit would
+/// be a cheat vector however carefully the server re-checked the choice. The server
+/// picks a target from the positions it already owns and from the latest aim it
+/// accepted on this session's tick-paced `PlayerInput` — which is also why aim is not
+/// repeated here. The movement frame carrying that tick is ordered ahead of the swing,
+/// and two claims to the same aim would be two claims to reconcile.
+///
+/// There is no acknowledgement payload and no damage-result payload. A refused swing
+/// is silence; an accepted one becomes visible only through the authoritative
+/// `EntitySnapshot`, `PlayerVitals` and `InventoryState` that follow.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `slot` is copied verbatim, out-of-range values included. Whether an
+///     authoritative slot holds a usable weapon is a decision, and decisions belong
+///     to the simulation: it refuses a bad slot silently rather than closing a
+///     connection whose framing is still perfectly readable.
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table AttackRequest {
+  /// The authoritative inventory slot this swing spends. The server reads what is
+  /// actually in that slot; naming an empty, resource or broken one gains nothing.
+  slot: ubyte;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// Which recipe a `CraftRequest` names.
+///
+/// The wire carries the recipe's *identity*; what it costs and what it produces is the
+/// server's table and is deliberately never sent, exactly as the item registry is not.
+/// A client mirrors a display-only copy so it can gray out a row it cannot afford, and a
+/// drift between the two copies can show a wrong label but can never create an item.
+///
+/// Zero member for the fail-closed reason `LifeState.Unknown` has one, and it matters
+/// more here than there: this enum rides on a client→server message, so the zero value
+/// is the one an omitted field produces and the one that has to be refused.
+///
+/// Members are **appended, never inserted**. The number is what the wire carries, so
+/// renumbering compiles perfectly on both sides and silently turns one recipe into
+/// another in every build already shipped — the same trap `Payload`'s union tags carry,
+/// with nothing but this sentence to catch it.
+enum RecipeID : ubyte {
+  Unknown = 0,
+  Forge = 1,
+  IronSword = 2,
+  SharpeningStone = 3,
+  Tent = 4,
+  Campfire = 5,
+  LeatherPatch = 6
+}
+
+/// A player trying to craft one recipe. Client -> server, and intent only.
+///
+/// It names no materials and no product: what a recipe consumes, what it yields, and
+/// whether the player is standing near the station it needs are all the server's, read
+/// from the authoritative inventory and the authoritative world. A message that let the
+/// client state its own ingredients would be a cheat vector however carefully the server
+/// re-checked them.
+///
+/// There is no acknowledgement and no rejection payload. A refused craft is silence; an
+/// accepted one becomes visible only through the complete `InventoryState` that follows.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `recipe` must be a known non-zero member; `Unknown` is the absent-field case and
+///     an unrecognised value is a client the server does not speak the recipes of. Both
+///     are refused silently rather than closing a connection whose framing is fine
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table CraftRequest {
+  recipe: RecipeID;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// A player trying to mend one carried item with one repair kit. Client -> server, and
+/// intent only.
+///
+/// Two slot indexes and nothing else: which item is a legal kit, which target can be
+/// worn at all, how much durability is restored and whether the target had room for it
+/// are the server's, read from the slots it already owns. There is no durability value
+/// on this message in either direction — a client that could state one could repair by
+/// asking.
+///
+/// There is no acknowledgement and no rejection payload. A refused repair is silence; an
+/// accepted one becomes visible only through the complete `InventoryState` that follows,
+/// whose slot-indexed durability vectors carry the new value.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - both indexes are copied verbatim, out-of-range values included, and refused by
+///     the simulation rather than by the framing — whether a slot holds a usable kit is
+///     a decision, and decisions belong to the server
+///   - `kit_slot == target_slot` is refused the same way: nothing mends itself
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table RepairRequest {
+  /// The authoritative inventory slot holding the repair kit this mend spends.
+  kit_slot: ubyte;
+
+  /// The authoritative inventory slot holding the item to mend.
+  target_slot: ubyte;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// Which way a placed structure faces.
+///
+/// Four compass members rather than a yaw in radians: a structure's footprint is a set
+/// of voxel cells, and a continuous angle would only ever be quantized to one of these
+/// before the cells could be computed. Quantizing on the client and validating the
+/// result is cheaper than quantizing on both sides and reconciling the difference.
+///
+/// Zero member for the same fail-closed reason as `RecipeID.Unknown`: it rides on a
+/// client→server message, and an omitted facing must be refused rather than read as
+/// north.
+enum Facing : ubyte {
+  Unknown = 0,
+  North = 1,
+  East = 2,
+  South = 3,
+  West = 4
+}
+
+/// A player trying to plant a structure in the world. Client -> server, and intent only.
+///
+/// The world's counterpart to `BlockEditRequest` for things that are entities rather
+/// than voxels. Reach, whether the named slot actually holds that structure, whether the
+/// footprint the facing implies is clear and supported, and whether the player is
+/// already allowed another one are all resolved server-side and none of it is stated
+/// here.
+///
+/// **It carries no structure id and no kind.** The kind follows from the item in `slot`,
+/// which the server reads from its own inventory, and the id is minted by the server
+/// when the structure comes into existence. A client that could name either could name
+/// one it does not own.
+///
+/// There is no acknowledgement and no rejection payload, and no local placement is
+/// entitled to appear: the structure exists when a snapshot says it does.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `anchor` is a struct field, so an absent one decodes as null (Go) / `None`
+///     (Rust). Reject that; the origin is a real location, not a default
+///   - `facing` must be a known non-zero member
+///   - `slot` must be < `ServerWelcome.inventory_slots`
+///   - `anchor` is unbounded on the wire and bounded by the server, under the same reach
+///     rule a block edit obeys
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table PlaceStructureRequest {
+  /// The authoritative inventory slot to spend on this placement.
+  slot: ubyte;
+
+  /// The voxel the structure is anchored at, in world coordinates. Which cells the
+  /// footprint then occupies is the server's arithmetic, exactly as turning a
+  /// `BlockEditRequest.pos` into a chunk and an index inside it is.
+  anchor: BlockCoord;
+
+  /// Which way the structure faces. The client quantizes its camera yaw to one of the
+  /// four members; the server validates the result like it validates the anchor.
+  facing: Facing;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// A player trying to take a placed structure back. Client -> server, and intent only.
+///
+/// It names an id the server minted and sent, which is the one kind of identifier a
+/// client may echo back: ownership, reach and whether the structure still stands are
+/// re-read from the authoritative registry, so naming someone else's — or one that
+/// collapsed a tick ago — gains nothing.
+///
+/// There is no acknowledgement and no rejection payload. A refused removal is silence;
+/// an accepted one becomes visible only through the snapshot that stops carrying the
+/// structure and the drop that appears where it stood.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `structure_id` is copied verbatim, zero and unknown ids included, and refused by
+///     the simulation: whether an id names a standing structure this player may remove
+///     is a decision, not a framing question
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table RemoveStructureRequest {
+  structure_id: ulong;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
+/// Which action a server refused, in an `ActionRefused`.
+///
+/// **Declared for every action that refuses in silence, not only the one that is
+/// answered today.** Placement is the only member a server currently sends; mining,
+/// block edits, crafting and repair all answer a refused request with a debug line no
+/// player will ever read, and each becomes real in its own issue. Reserving the members
+/// now is the call `StructureKind.Campfire` records: a member is an integer on the wire,
+/// so the cheap moment to agree on the number is before anything depends on it.
+///
+/// **`RemoveStructure` is deliberately absent, and its absence is a decision rather than
+/// an omission.** `RemoveStructureRequest` above says a refused removal is silence on
+/// purpose: a client that could tell "no such structure" from "not yours" from "too far
+/// away" could map somebody else's camp by asking for ids it does not have. A member
+/// here would be an invitation to close that gap on some later afternoon without seeing
+/// what it opens.
+///
+/// Zero member for the reason every enum in this contract has one: FlatBuffers decodes
+/// an absent scalar as zero, so a refusal that names no action must read as one nobody
+/// can act on rather than as a placement.
+enum RefusedAction : ubyte {
+  Unknown = 0,
+  PlaceStructure = 1,
+  MineBlock = 2,
+  EditBlock = 3,
+  Craft = 4,
+  Repair = 5
+}
+
+/// Why a server refused an action, in an `ActionRefused`.
+///
+/// **Not `RejectReason`.** That enum lives in `handshake.fbs` and answers a different
+/// question — why a *connection* was refused — and it is spelled in codes because it is
+/// logged verbatim and shown to the player as-is. These members are domain tokens like
+/// `Facing` and `StructureKind`: the receiving client turns each into a sentence, so
+/// nothing here is ever displayed as written.
+///
+/// **Two groups, split by value, and the split is part of the contract:**
+///
+///   - **`1 .. 63` — the world, or the player's own state, refused a request that was
+///     perfectly well formed.** There is nothing wrong with the peer that sent it: it
+///     asked a legal question and the answer was no. This is the half a player is told
+///     about, because it is the half they can do something about — step closer, find
+///     flatter ground, take the old tent down.
+///   - **`64 ..` — the request could not be honoured because of what it said.** An
+///     absent anchor, a facing no client may send, a slot outside the announced
+///     inventory. A correct client never produces one, so a receiver treats these as a
+///     defect in the build that sent it rather than as news for the player.
+///
+/// Keeping the two apart on the wire is what lets a client say "the ground here is air"
+/// to a player and "this build sent something the server could not read" to a log,
+/// without a table of exceptions on either side. Append inside the group a reason
+/// belongs to; a member is an integer on the wire and renumbering one relabels every
+/// refusal already sent.
+///
+/// Zero member for the usual reason, and it carries more weight here than most: an
+/// `ActionRefused` whose reason failed to decode must not read as a real refusal a
+/// client would then explain to somebody.
+enum RefusalReason : ubyte {
+  Unknown = 0,
+
+  // -- The world said no. A legal request, refused on its merits.
+
+  /// A cell the footprint needs is in terrain the server has not composed yet. Reads on
+  /// this path never generate, so the edge of loaded terrain is a refusal rather than a
+  /// wait.
+  GroundNotGenerated = 1,
+
+  /// A cell the footprint rests on is air. A structure needs something to stand on.
+  GroundIsAir = 2,
+
+  /// A cell the structure needs clear above its footprint is in terrain the server has
+  /// not composed yet. Distinct from `GroundNotGenerated` because the two answer
+  /// different questions about different cells — is the ground there, is the space
+  /// clear — and a validator that collapsed them would report the wrong cell.
+  SpaceNotGenerated = 3,
+
+  /// A block occupies space the structure needs.
+  SpaceBlocked = 4,
+
+  /// The target is further from the player than the server's reach allows, measured
+  /// against the position the *server* computed.
+  OutOfReach = 5,
+
+  /// The player is dead. The dead act on nothing.
+  PlayerIsDead = 6,
+
+  /// The named inventory slot holds nothing.
+  SlotEmpty = 7,
+
+  /// What the named slot holds is not something that can be used this way — an item
+  /// that plants no structure, for a placement. Not a malformed request: an inventory
+  /// that changed between the click and its arrival produces this honestly.
+  SlotUnusable = 8,
+
+  /// The named slot no longer holds the item the action was about, at the moment the
+  /// server came to spend it.
+  SlotChanged = 9,
+
+  /// The player's inventory was busy and the action was refused rather than made to
+  /// wait. Rare by construction and answered rather than hidden.
+  InventoryBusy = 10,
+
+  /// This player already has a tent standing. One tent to a player, because a tent is
+  /// where they come back to and two answers to that is a choice nobody made.
+  TentAlreadyPlaced = 11,
+
+  // -- The request said something no correct client sends. A defect in the peer.
+
+  /// The request carried no anchor at all. The origin is a real place, so an absent
+  /// struct field is refused rather than read as (0, 0, 0).
+  MalformedNoAnchor = 64,
+
+  /// The request named a facing no client may send: the absent-field zero, or a value
+  /// this contract has no member for.
+  MalformedFacing = 65,
+
+  /// The request named an inventory slot outside the count `ServerWelcome` announced.
+  MalformedSlot = 66,
+
+  /// The request resolved to something the server has no footprint, recipe or table
+  /// entry for. Unreachable from a correct client and from a correct server both, and
+  /// carried anyway: the alternative to a code is a refusal that looks like the world's.
+  MalformedKind = 67
+}
+
+/// The server's answer to an action it refused. Server -> client.
+///
+/// **The first message in this contract that says no to anything but a connection.**
+/// Every refused action before it was silence plus a line in a server log: the reason
+/// was computed, written down where no player could reach it, and thrown away. A
+/// placement that vanishes with no answer is indistinguishable from a lost packet, from
+/// a click that missed, and from a bug — and the one thing it is not indistinguishable
+/// from is a placement that worked, which is the only feedback the player had.
+///
+/// **It is not an acknowledgement, and there is still no acceptance payload.** A
+/// structure exists when a snapshot says it does; nothing here changes that, and a
+/// client must never treat the *absence* of an `ActionRefused` as a yes. This message
+/// carries one thing: the reason a thing that did not happen did not happen.
+///
+/// **Appending it is not a protocol break.** Union members are append-only, this is
+/// tag 20, and a peer built against an earlier contract reads an unknown tag as a
+/// payload it has no name for and drops it. So an older client loses the feedback and
+/// nothing else, which is why `ProtocolVersion.Current` does not move for this.
+///
+/// Decoder invariants:
+///   - `action` and `reason` are both read through their zero members: an absent or
+///     unrecognised value is `Unknown`, and a receiver shows a player nothing rather
+///     than inventing a sentence for a code it cannot read. It never fails the frame —
+///     a refusal is the least important message on the wire, and a decode error would
+///     end a session over one
+///   - `anchor` is absent whenever the refused request named no voxel, which includes
+///     every request that carried no anchor at all. Present or absent, never zero as a
+///     stand-in for absent
+table ActionRefused {
+  /// Which action was refused. Enough on its own to route the answer, because at most
+  /// one of a player's actions is in flight per press.
+  action: RefusedAction;
+
+  /// Why. The whole point of the message.
+  reason: RefusalReason;
+
+  /// The voxel the refused request named, when it named one — the anchor of a
+  /// placement, the target of a mine or a block edit. Absent for an action that names
+  /// no cell, and absent for a request whose anchor was the thing that was missing.
+  ///
+  /// Carried so a client can show the answer where the player was looking rather than
+  /// only in a line of text, and so a refusal that raced ahead of the player's aim is
+  /// recognisable as belonging to somewhere else.
+  anchor: BlockCoord;
+}
+
+/// One entity's authoritative state at a server tick.
+///
+/// A struct so that a snapshot's entity list is a flat, inlined array: this is
+/// the most frequently sent payload in the game.
+///
+/// The finite-float invariant runs in this direction too: a non-finite `pos`
+/// would poison the client's interpolation and, through the entity's transform,
+/// its renderer. The server must never emit one, and the client validates rather
+/// than assuming it never does.
+struct EntityState {
+  entity_id: ulong;
+  pos: Vec3;
+  vel: Vec3;
+  yaw: float;
+}
+
+/// One dropped item in the authoritative world snapshot.
+///
+/// A separate struct rather than a discriminant on `EntityState`: drops are not
+/// players, and adding fields to the hottest struct in the game would charge
+/// every player entity those bytes for ever. As with every FlatBuffers struct,
+/// this field list can never lose, reorder or change a field.
+///
+/// Decoder invariants:
+///   - every `pos` component is finite
+///   - `item_id` is never 0, which is reserved for no item
+///   - `count` is never 0; a drop with nothing in it is despawned, not sent
+///   - an `entity_id` never names both a player and a drop in one snapshot
+struct ItemDropState {
+  entity_id: ulong;
+  pos: Vec3;
+  item_id: ushort;
+  count: ushort;
+}
+
+/// Whether the server considers a player alive or dead.
+///
+/// A zero member for the reason `ProtocolVersion.Unknown` has one: FlatBuffers decodes
+/// an absent scalar as its type's zero value, so a `PlayerVitals` carrying no life
+/// state must fail closed rather than read as "alive".
+enum LifeState : ubyte {
+  Unknown = 0,
+  Alive = 1,
+  Dead = 2
+}
+
+/// What kind of creature a `MobState` describes.
+///
+/// Zero member for the same fail-closed reason as `LifeState`: an unknown kind is a
+/// contract the receiver does not speak, and drawing a default enemy in its place
+/// would put a creature in the world that the server never said was there.
+///
+/// Members are appended, never inserted, for the reason `RecipeID`'s are: a renumbering
+/// would draw one creature where the server said another, and no compiler would object.
+enum MobKind : ubyte {
+  Unknown = 0,
+  Draugr = 1,
+  Vargr = 2
+}
+
+/// What a mob is doing this tick, as the server's finite-state machine holds it.
+///
+/// Presentation reads this to telegraph an attack; it never advances it. The mob's
+/// action changes when the server says so and at no other moment. Zero member for the
+/// same fail-closed reason as `LifeState`.
+enum MobAction : ubyte {
+  Unknown = 0,
+
+  /// Standing at its anchor with no target.
+  Idle = 1,
+
+  /// Moving toward the target the server chose.
+  Chase = 2,
+
+  /// Committed to an attack that has not landed yet. This is the telegraph.
+  Windup = 3,
+
+  /// Cannot attack again until this expires. The server's answer to attack cadence.
+  Recovery = 4
+}
+
+/// The recipient's own health and life state, as the server holds them.
+///
+/// Per-recipient, and carried inside `EntitySnapshot` so that health arrives on the
+/// same superseding stream as every other authoritative fact. A dropped snapshot is
+/// harmless: the next one carries the complete answer, so there is nothing to merge
+/// and nothing to replay. There is no client -> server counterpart, for the same
+/// reason there is no client-sent position: what a player's health *is* is a gameplay
+/// outcome, and outcomes belong to the server.
+///
+/// Invariants a decoder must enforce, because a receiver divides by one of these and
+/// branches on another:
+///   - `max_health` is non-zero — a health bar drawn as `health / max_health` divides
+///     by it, and an honestly buggy server reaches that division as easily as a
+///     hostile one
+///   - `health` never exceeds `max_health`
+///   - `life_state` is a known non-zero member; `Unknown` is the absent-field case
+///   - an `Alive` player has positive health
+///   - only a `Dead` player may carry a non-zero `respawn_ticks`
+table PlayerVitals {
+  /// Current health, in the same units as `max_health`. Zero is legal and means the
+  /// player is dead — the server's transition to `Dead` is what makes it so, not the
+  /// number.
+  health: ushort;
+
+  /// Maximum health. Non-zero, always: it is the denominator of every health display.
+  max_health: ushort;
+
+  life_state: LifeState;
+
+  /// Server ticks remaining before the server respawns this player, counted at
+  /// `ServerWelcome.tick_rate`. Zero for a living player. **A count, never a
+  /// deadline**: the client converts it for display and holds the value unchanged
+  /// while snapshots are absent, exactly as it holds an entity's last position rather
+  /// than extrapolating one.
+  respawn_ticks: uint;
+
+  /// Whether the server is currently refusing damage to this player. The server owns
+  /// the timer; this is the answer, not a duration to run down locally.
+  invulnerable: bool;
+}
+
+/// One mob's authoritative state in a snapshot.
+///
+/// A **table**, deliberately, where players and drops are structs. A FlatBuffers
+/// struct can never gain, lose or reorder a field, and that price is only worth paying
+/// for a shape that has settled: `EntityState` is the player transform this game has
+/// been sending since V1. The first mob representation is not that, so it stays
+/// evolvable and pays an offset per mob for the privilege.
+///
+/// Mobs ride beside `EntitySnapshot.entities` rather than inside it for the reason
+/// `ItemDropState` does: adding a kind and a health to the hottest struct in the game
+/// would charge every player entity those bytes forever.
+///
+/// Invariants a decoder must enforce:
+///   - `entity_id` is non-zero and globally unique — one id never names a mob and a
+///     player, or a mob and a drop, or two mobs, in the same snapshot
+///   - `pos` and `vel` are present; an absent struct field decodes as null, and the
+///     origin is a real location rather than a default
+///   - every float is finite, in this direction too: a `NaN` position would pass
+///     through interpolation into a transform and never leave
+///   - `kind` and `action` are known non-zero members
+///   - `max_health` is non-zero and `health` never exceeds it
+table MobState {
+  entity_id: ulong;
+
+  kind: MobKind;
+
+  pos: Vec3;
+
+  /// Carried for diagnostics, exactly as `EntityState.vel` is: the client
+  /// interpolates between two positions rather than extrapolating from a velocity.
+  vel: Vec3;
+
+  /// Facing, in radians, wrapped by the server.
+  yaw: float;
+
+  health: ushort;
+
+  max_health: ushort;
+
+  action: MobAction;
+}
+
+/// What kind of thing a `StructureState` describes.
+///
+/// Zero member for the same fail-closed reason as `MobKind.Unknown`: an unrecognised
+/// kind is a contract the receiver does not speak, and drawing a default building in its
+/// place would put a shelter in the world the server never said was there.
+///
+/// Members are appended, never inserted, for the reason `RecipeID`'s are.
+enum StructureKind : ubyte {
+  Unknown = 0,
+  Tent = 1,
+  Forge = 2,
+  Campfire = 3
+}
+
+/// One placed structure's authoritative state in a snapshot.
+///
+/// **Structures are entities, not voxels.** They ride beside `EntitySnapshot.entities`
+/// rather than becoming blocks, so chunk data, the run-length palette and the edit layer
+/// are all untouched by a camp going up: a tent is not nine blocks the world has to
+/// remember, it is one thing the simulation owns.
+///
+/// A **table**, for exactly the reason `MobState` is one: a FlatBuffers struct can never
+/// gain, lose or reorder a field, and that price is only worth paying for a shape that
+/// has settled. The first structure representation is not that — health, damage state
+/// and per-kind detail are all plausible next fields — so it stays evolvable and pays an
+/// offset per structure for the privilege.
+///
+/// There is no position vector and no yaw here, unlike every other entity in this file.
+/// A structure sits on the voxel grid and faces one of four ways, so an anchor cell plus
+/// a `Facing` says everything about where it is; a float transform would invite an
+/// interpolator to move something that never moves.
+///
+/// Invariants a decoder must enforce:
+///   - `structure_id` is non-zero and globally unique — one id never names a structure
+///     and a player, or a structure and a drop, or a structure and a mob, in the same
+///     snapshot, and never two structures
+///   - `owner_entity_id` is the owner's **current** entity id while the owner has a live
+///     session, and `0` while the owner is offline. Zero is legal in this one field from
+///     protocol V5 on, and nowhere else. "Every structure was placed by somebody" is still
+///     true — but of a server-side identity that never crosses the wire, where an entity
+///     id is only that identity's handle for one session. The structure outlives the id
+///     that placed it, and gets an id again, not necessarily the same one, when its owner
+///     reconnects
+///   - `anchor` is present; an absent struct field decodes as null, and the origin is a
+///     real location rather than a default
+///   - `kind` and `facing` are known non-zero members
+table StructureState {
+  structure_id: ulong;
+
+  kind: StructureKind;
+
+  /// The voxel the structure is anchored at, in world coordinates — the same cell the
+  /// placing `PlaceStructureRequest` named. The footprint the rest of it occupies
+  /// follows from the kind and the facing, and both sides derive it the same way.
+  anchor: BlockCoord;
+
+  facing: Facing;
+
+  /// The entity id the owner holds right now, or `0` while the owner has no live session.
+  /// Carried so a session can tell its own camp from someone else's; it is not a
+  /// permission the client enforces, since removal is refused by the server and not by
+  /// the renderer.
+  ///
+  /// A session handle, not an identity. The server keys ownership by the identity behind
+  /// `ClientHello.player_token`, which never appears on the wire; this field is that
+  /// identity's current entity id, and `0` says it has none at the moment. So `0` does not
+  /// mean unowned, a value that changes does not mean the structure changed hands, and a
+  /// mapping from id to owner is good for this session only.
+  owner_entity_id: ulong;
+}
+
+/// The authoritative state of every entity a session can see, for one tick.
+///
+/// The client renders from these, interpolating between the two most recent. It
+/// does not correct them, rewind them, or override them with a local
+/// simulation.
+table EntitySnapshot {
+  /// The server tick this snapshot describes. Monotonic per session.
+  server_tick: uint;
+
+  entities: [EntityState];
+
+  /// Dropped items visible to this session. Empty when there are none; kept
+  /// separate from `entities` so the hot player struct remains unchanged.
+  drops: [ItemDropState];
+
+  /// Mobs visible to this session, under the same chunk-visibility rule the players
+  /// and drops above obey. Empty when there are none, and the newest snapshot is the
+  /// **complete** existence set: a mob the server stops sending has stopped existing
+  /// for this session, and the client despawns it rather than inferring a reason.
+  mobs: [MobState];
+
+  /// This recipient's own health and life state.
+  ///
+  /// `(required)`, and it is the only required field in this contract. The rest of a
+  /// snapshot describes what a session can *see*, which can legitimately be nothing;
+  /// vitals describe the player the snapshot is addressed to, and there is no such
+  /// thing as a session with no player.
+  ///
+  /// **The attribute is enforced on one side only, and it is worth knowing which.**
+  /// flatc's Rust output visits the field with its required flag set, so the
+  /// verifier `decode` runs refuses an absent one before any field of it is read.
+  /// flatc's **Go** output emits no such assertion — `EntitySnapshotEnd` is a bare
+  /// `EndObject` — so nothing stops a Go encoder from omitting it. What guarantees
+  /// the server never does is that there is exactly one snapshot encoder and vitals
+  /// are a plain field of the value it takes, so there is no call that can leave them
+  /// out; `TestEntitySnapshotAlwaysCarriesTheRecipientsVitals` is what says so.
+  self_vitals: PlayerVitals (required);
+
+  /// Structures visible to this session, under the same chunk-visibility rule the
+  /// entities, drops and mobs above obey. Empty when there are none, and the newest
+  /// snapshot is the **complete** existence set exactly as `mobs` is: a structure that
+  /// stops being sent has stopped existing for this session, and the client despawns it
+  /// rather than inferring a reason. Removed by its owner, collapsed under a broken
+  /// block, or simply out of view are the same fact on the wire, and none of the three
+  /// is a thing the client is entitled to distinguish.
+  structures: [StructureState];
+
+  /// The tick of the world's day this snapshot describes, when the server keeps a clock:
+  /// always less than `ServerWelcome.day_length_ticks`, and not read at all when that
+  /// value is zero.
+  ///
+  /// **The one field here that is not about an entity**, and it rides along rather than
+  /// arriving as a message of its own because it changes every tick and is read by the
+  /// same frame the entities are drawn from. A separate message would arrive on its own
+  /// schedule and put the sky a tick away from the world underneath it.
+  ///
+  /// A value at or beyond a declared `day_length_ticks` is a protocol error, never
+  /// wrapped and never clamped. The two numbers come from the same server in the same
+  /// session, so a disagreement between them is a bug reporting itself, and a receiver
+  /// that quietly repaired it would be hiding the only evidence.
+  tick_of_day: uint;
+}
+
+/// Everything the player is carrying, as the server holds it.
+///
+/// Sent whole whenever it changes: there is no delta form and no partial update,
+/// so the client replaces its copy rather than merging into it. The client never
+/// adds, removes, reorders or splits a stack on its own — what is in an
+/// inventory is a gameplay outcome, and outcomes belong to the server. There is
+/// no client→server counterpart to this message, for the same reason there is no
+/// client-sent position.
+///
+/// **Encoding**: `stacks` is a slot-indexed flat vector of `(item_id, count)`
+/// pairs — `stacks[2i]` is slot `i`'s item id and `stacks[2i+1]` is its count.
+/// It contains exactly `ServerWelcome.inventory_slots` pairs (therefore exactly
+/// twice that many `ushort` scalars). Flat rather than a vector of tables for the
+/// reason `ChunkData.runs` is flat: a table per slot costs an offset each, and
+/// this message is resent in full every time a single item moves.
+///
+/// Invariants a decoder must enforce:
+///   - `stacks` has an even length
+///   - its pair count is exactly `ServerWelcome.inventory_slots`; because that
+///     value is non-zero, an absent or empty vector is a protocol error
+///   - an empty slot is exactly `(0, 0)`: item id 0 is reserved for no item, and
+///     neither `(0, nonzero)` nor `(nonzero, 0)` is legal
+///   - an item id may appear in more than one slot; slot position, not item id,
+///     identifies a stack
+///
+/// **Durability rides in two parallel vectors rather than inside `stacks`.** The pair
+/// encoding above is append-only like every other field here, so it could not grow a
+/// third scalar per slot without changing the meaning of every index already on the
+/// wire. Two more slot-indexed vectors leave the existing pairs untouched, and they
+/// let a client draw a durability ratio without owning an item-stat registry: the
+/// maximum arrives beside the current value, so nothing has to be looked up.
+///
+/// Further invariants a decoder must enforce, for `durability[i]` and
+/// `max_durability[i]` describing slot `i`:
+///   - each vector holds exactly `ServerWelcome.inventory_slots` entries, the same
+///     count as `stacks` holds pairs
+///   - `(0, 0)` is a slot holding nothing, or holding something that does not wear
+///     out; a resource stack is always exactly this
+///   - otherwise `max_durability` is non-zero, `durability` is at most
+///     `max_durability`, the slot's item id is non-zero, and its count is exactly 1 —
+///     a durable item is a single whole item that never stacks or splits
+///   - a `durability` of zero under a non-zero `max_durability` is **legal** and means
+///     the item is worn out: unusable, still carried, still in its slot. Zero
+///     durability is not an empty slot and never becomes one
+table InventoryState {
+  stacks: [ushort];
+
+  /// Current durability per slot, slot-indexed. See the invariants above.
+  durability: [ushort];
+
+  /// Maximum durability per slot, slot-indexed. Zero means the slot's contents do not
+  /// wear out at all, which is every resource and every empty slot.
+  max_durability: [ushort];
+}

@@ -1,0 +1,807 @@
+package game
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"sync"
+	"testing"
+	"time"
+
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
+)
+
+// testWorldSeed is the world every simulation in this package's tests is built over.
+//
+// One value rather than a per-test one, because the seed decides what the spawn
+// director draws: a shared constant is what makes "the same world produces the same
+// creatures" something the whole package can rely on, and what lets spawn_test.go
+// assert exact positions.
+const testWorldSeed = 1337
+
+// vitalsHarness drives a simulation at a chosen tick rate, the way the loop does.
+//
+// The tick rate is a parameter because almost everything here is counted in ticks:
+// three seconds of death and two of protection have to be three and two seconds at any
+// rate an operator can set, and the safe-fall threshold exists because of what the
+// coarsest of them does to the integrator.
+type vitalsHarness struct {
+	t    *testing.T
+	sim  *Sim
+	tick uint64
+}
+
+func newVitalsHarness(t *testing.T, tickRate uint8, terrain Terrain) *vitalsHarness {
+	t.Helper()
+	return newVitalsHarnessAt(t, tickRate, terrain, 8)
+}
+
+// newVitalsHarnessAt is the same with a chosen view distance, for the visibility tests
+// that need the cube to be small enough to stand outside of.
+func newVitalsHarnessAt(t *testing.T, tickRate uint8, terrain Terrain, viewDistance uint8) *vitalsHarness {
+	t.Helper()
+
+	sim, err := NewSim(tickRate, viewDistance, testWorldSeed, terrain, refusedEdits{}, testEntityIDs(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	return &vitalsHarness{t: t, sim: sim}
+}
+
+func (h *vitalsHarness) join(entityID uint64, pos [3]float32) (*Player, *dropSink) {
+	h.t.Helper()
+
+	out := &dropSink{}
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, nil, out.deliver)
+	if err != nil {
+		h.t.Fatalf("Join: %v", err)
+	}
+	return player, out
+}
+
+func (h *vitalsHarness) step() {
+	h.tick++
+	h.sim.Step(h.tick)
+}
+
+func (h *vitalsHarness) advance(n int) {
+	for range n {
+		h.step()
+	}
+}
+
+// vitals is one player's authoritative vitals, read under the lock that owns them.
+func (h *vitalsHarness) vitals(p *Player) protocol.PlayerVitals {
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	return p.vitalsLocked()
+}
+
+// fallUntilLanded steps until the player is standing, and returns their vitals at that
+// moment. Stepping a fixed number of ticks instead is how a test stops discriminating:
+// a lethal landing is followed by a countdown and a respawn, and a health reading taken
+// afterwards is a full bar either way.
+func (h *vitalsHarness) fallUntilLanded(p *Player) protocol.PlayerVitals {
+	h.t.Helper()
+
+	for range 600 {
+		h.step()
+		h.sim.mu.Lock()
+		landed := p.onGround
+		h.sim.mu.Unlock()
+		if landed {
+			return h.vitals(p)
+		}
+	}
+	h.t.Fatal("the player never landed")
+	return protocol.PlayerVitals{}
+}
+
+func (h *vitalsHarness) position(p *Player) [3]float64 {
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	return p.pos
+}
+
+// hurt applies damage the way the simulation does, under the simulation's lock.
+func (h *vitalsHarness) hurt(p *Player, amount uint16) {
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	p.damageLocked(amount)
+}
+
+// ---------------------------------------------------------------------------
+// The formula
+// ---------------------------------------------------------------------------
+
+// Every boundary of the one deterministic formula, on the pure function rather than
+// through the integrator: what a fall of N blocks arrives at is the integrator's answer
+// and varies with the tick rate, while what an impact costs must not vary at all.
+func TestFallDamageIsAStepFunctionOfTheImpact(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		impact float64
+		want   uint16
+	}{
+		{impact: 0, want: 0},
+		{impact: 10, want: 0},
+		// The threshold itself is safe: "at or below" is the contract.
+		{impact: SafeFallSpeed, want: 0},
+		// And the first speed past it costs the smallest whole step.
+		{impact: SafeFallSpeed + 1, want: FallDamagePerSpeed},
+		// Floored, not rounded: most of a block per second over is still none of one.
+		{impact: SafeFallSpeed + 0.999, want: 0},
+		{impact: SafeFallSpeed + 1.999, want: FallDamagePerSpeed},
+		{impact: SafeFallSpeed + 10, want: 10 * FallDamagePerSpeed},
+		// Terminal velocity is fatal outright, which is what makes a long fall a death
+		// rather than a very bad landing.
+		{impact: TerminalFallSpeed, want: PlayerMaxHealth},
+		// And nothing past it can overflow the health it is subtracted from.
+		{impact: 1e9, want: PlayerMaxHealth},
+	} {
+		if got := fallDamage(tc.impact); got != tc.want {
+			t.Errorf("fallDamage(%v) = %d, want %d", tc.impact, got, tc.want)
+		}
+	}
+}
+
+// The acceptance criterion that fixed the threshold, checked against the integrator
+// rather than against the arithmetic that chose it.
+func TestNoJumpAndNoSpawnSettlementEverHurts(t *testing.T) {
+	t.Parallel()
+
+	// Every rate the flag accepts is 1..255; these are its ends and a spread between.
+	for _, rate := range []uint8{1, 2, 3, 5, 10, 20, 30, 60, 120, 255} {
+		t.Run("tick rate "+string(rune('0'+rate%10)), func(t *testing.T) {
+			terrain := dropTerrain{groundTop: 63}
+			h := newVitalsHarness(t, rate, terrain)
+			// The spawn the world helper produces: SpawnClearance blocks above the
+			// surface, which the player then falls through.
+			player, _ := h.join(1, [3]float32{0.5, float32(64 + world.SpawnClearance), 0.5})
+
+			// Long enough to settle at every rate, then long enough to jump and land.
+			h.advance(int(rate)*2 + 8)
+			if got := h.vitals(player).Health; got != PlayerMaxHealth {
+				t.Fatalf("the spawn settlement cost %d health at %d Hz", PlayerMaxHealth-got, rate)
+			}
+
+			if err := player.Submit(protocol.PlayerInput{ClientTick: 1, Jump: true}); err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			h.advance(int(rate)*2 + 8)
+			if got := h.vitals(player).Health; got != PlayerMaxHealth {
+				t.Errorf("a jump cost %d health at %d Hz", PlayerMaxHealth-got, rate)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Falling
+// ---------------------------------------------------------------------------
+
+// A fall long enough to pass the threshold takes health, and the amount is the formula's
+// rather than anything this test invents.
+func TestALongFallCostsHealth(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 104, 0.5})
+
+	vitals := h.fallUntilLanded(player)
+	if vitals.Health == PlayerMaxHealth {
+		t.Fatal("a forty-block fall cost nothing")
+	}
+	if vitals.LifeState != vnet.LifeStateAlive {
+		t.Fatalf("a forty-block fall was fatal: %+v", vitals)
+	}
+	if got := h.position(player)[1]; got < 63 {
+		t.Errorf("the player ended at y=%v, below the ground they landed on", got)
+	}
+}
+
+// The maximum-speed fall, which the formula makes fatal by construction.
+func TestAFallAtTerminalSpeedKills(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 400, 0.5})
+
+	// Until the landing, not for a fixed span: three hundred blocks at terminal speed is
+	// about six seconds, and a run long enough to be safe would also outlast the
+	// countdown and find the player alive again on the other side of a respawn.
+	var vitals protocol.PlayerVitals
+	for range 300 {
+		h.step()
+		if vitals = h.vitals(player); vitals.LifeState == vnet.LifeStateDead {
+			break
+		}
+	}
+	if vitals.LifeState != vnet.LifeStateDead {
+		t.Fatalf("a fall from 400 blocks left the player %+v", vitals)
+	}
+	if vitals.Health != 0 {
+		t.Errorf("a dead player has %d health, want 0", vitals.Health)
+	}
+}
+
+// The regression the collision's conservative reading would otherwise create: an absent
+// chunk is solid so a player does not fall out of a world that is still loading, and
+// that fiction must not also be a floor to break on.
+func TestLandingOnANonResidentChunkNeverHurts(t *testing.T) {
+	t.Parallel()
+
+	// Everything at or below the ground is present in the collision's eyes and absent to
+	// the resident read — exactly the state of a chunk that has not arrived.
+	terrain := dropTerrain{
+		groundTop: 63,
+		absent:    func(_, y, _ int64) bool { return y <= 63 },
+	}
+	h := newVitalsHarness(t, DefaultTickRate, terrain)
+	player, _ := h.join(1, [3]float32{0.5, 400, 0.5})
+
+	vitals := h.fallUntilLanded(player)
+	if vitals.Health != PlayerMaxHealth {
+		t.Errorf("waiting for terrain cost %d health", PlayerMaxHealth-vitals.Health)
+	}
+	if vitals.LifeState != vnet.LifeStateAlive {
+		t.Errorf("waiting for terrain was fatal: %+v", vitals)
+	}
+
+	// And the velocity was still cancelled, so the player is not holding the fall speed
+	// they would arrive with once the chunk lands.
+	h.sim.mu.Lock()
+	vertical := player.vel[1]
+	h.sim.mu.Unlock()
+	if vertical != 0 {
+		t.Errorf("the player kept %v blocks/s of fall speed against unloaded terrain", vertical)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Damage, death and the countdown
+// ---------------------------------------------------------------------------
+
+func TestDamageClampsAndRefusesTheCasesThatAreNotHits(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	// A hit for nothing is not a hit.
+	h.hurt(player, 0)
+	if got := h.vitals(player).Health; got != PlayerMaxHealth {
+		t.Errorf("zero damage took %d health", PlayerMaxHealth-got)
+	}
+
+	h.hurt(player, 30)
+	if got := h.vitals(player).Health; got != 70 {
+		t.Errorf("health is %d after 30 damage, want 70", got)
+	}
+
+	// Clamped at zero rather than wrapped, which is the whole reason the subtraction
+	// lives in one place: 200 from 70 in unsigned arithmetic is a very healthy player.
+	h.hurt(player, 200)
+	vitals := h.vitals(player)
+	if vitals.Health != 0 {
+		t.Errorf("health is %d after lethal damage, want 0", vitals.Health)
+	}
+	if vitals.LifeState != vnet.LifeStateDead {
+		t.Errorf("life state is %s, want Dead", vitals.LifeState)
+	}
+
+	// And the dead do not take damage again.
+	h.hurt(player, 10)
+	if got := h.vitals(player).RespawnTicks; got != h.sim.deathTicks {
+		t.Errorf("damaging a corpse restarted the countdown: %d, want %d", got, h.sim.deathTicks)
+	}
+}
+
+func TestDeathHappensOnceAndStopsEverythingInFlight(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	if err := player.Submit(protocol.PlayerInput{ClientTick: 1, MoveZ: 1, Yaw: 0.5}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	h.step()
+
+	h.sim.mu.Lock()
+	player.mining = &miningState{pos: [3]int32{1, 63, 0}, block: world.Stone, cost: 10}
+	player.mineReset = &miningReset{}
+	player.mineCompleting = true
+	player.damageLocked(PlayerMaxHealth)
+	// The transition is the event, and running it twice would restart the countdown and
+	// un-pay the durability penalty. Called directly rather than through a second lethal
+	// blow: damageLocked refuses to hurt the dead, so a second blow never reaches here
+	// and would leave dieLocked's own guard untested.
+	player.respawnTicks--
+	player.dieLocked()
+	player.damageLocked(PlayerMaxHealth)
+	state := struct {
+		respawnTicks   uint32
+		mining         *miningState
+		reset          *miningReset
+		completing     bool
+		velocity       [3]float64
+		intent         intent
+		minersRecorded int
+	}{
+		player.respawnTicks, player.mining, player.mineReset, player.mineCompleting,
+		player.vel, player.current, len(h.sim.minersByPos),
+	}
+	h.sim.mu.Unlock()
+
+	if state.respawnTicks != h.sim.deathTicks-1 {
+		t.Errorf("the countdown is %d, want the %d a second death did not reset",
+			state.respawnTicks, h.sim.deathTicks-1)
+	}
+	if state.mining != nil || state.reset != nil || state.completing {
+		t.Errorf("death left mining in flight: state=%v reset=%v completing=%v",
+			state.mining, state.reset, state.completing)
+	}
+	if state.minersRecorded != 0 {
+		t.Errorf("death left %d entries in the reverse mining index", state.minersRecorded)
+	}
+	if state.velocity != ([3]float64{}) {
+		t.Errorf("death left the velocity at %v", state.velocity)
+	}
+	if state.intent.moveX != 0 || state.intent.moveZ != 0 || state.intent.jump {
+		t.Errorf("death left movement intent %+v", state.intent)
+	}
+	if state.intent.yaw != 0.5 {
+		t.Errorf("death changed the facing to %v; a corpse faces where it fell", state.intent.yaw)
+	}
+}
+
+// The three seconds are three seconds, whatever Step is being called at.
+func TestTheDeathCountdownIsThreeSecondsAtEveryTickRate(t *testing.T) {
+	t.Parallel()
+
+	for _, rate := range []uint8{1, 5, 20, 60} {
+		t.Run("tick rate "+string(rune('0'+rate%10)), func(t *testing.T) {
+			h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.hurt(player, PlayerMaxHealth)
+
+			want := deathDurationTicks(rate)
+			if got := h.vitals(player).RespawnTicks; got != want {
+				t.Fatalf("the countdown starts at %d ticks, want %d", got, want)
+			}
+
+			// One tick short of the whole countdown: still dead, and the client still has
+			// a number to draw.
+			h.advance(int(want) - 1)
+			vitals := h.vitals(player)
+			if vitals.LifeState != vnet.LifeStateDead {
+				t.Fatalf("the player respawned %d ticks early", 1)
+			}
+			if vitals.RespawnTicks != 1 {
+				t.Errorf("the countdown reads %d with one tick left", vitals.RespawnTicks)
+			}
+
+			h.step()
+			if got := h.vitals(player).LifeState; got != vnet.LifeStateAlive {
+				t.Errorf("the player is %s after the full countdown, want Alive", got)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Respawn
+// ---------------------------------------------------------------------------
+
+func TestRespawnRestoresTheJoinSpawnAndGrantsProtection(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	spawn := [3]float32{0.5, 66, 0.5}
+	player, _ := h.join(1, spawn)
+
+	// Walk away first, so the respawn is a teleport rather than a coincidence.
+	if err := player.Submit(protocol.PlayerInput{ClientTick: 1, MoveZ: 1, Yaw: 0}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	h.advance(40)
+	if got := h.position(player); got[2] == float64(spawn[2]) {
+		t.Fatal("the player never left their spawn, so the teleport proves nothing")
+	}
+
+	h.hurt(player, PlayerMaxHealth)
+	h.advance(int(h.sim.deathTicks))
+
+	vitals := h.vitals(player)
+	if vitals.LifeState != vnet.LifeStateAlive {
+		t.Fatalf("the player is %s after the countdown", vitals.LifeState)
+	}
+	if vitals.Health != PlayerMaxHealth {
+		t.Errorf("the player respawned with %d health, want %d", vitals.Health, PlayerMaxHealth)
+	}
+	if vitals.RespawnTicks != 0 {
+		t.Errorf("a living player carries a countdown of %d", vitals.RespawnTicks)
+	}
+	if !vitals.Invulnerable {
+		t.Error("the respawn granted no protection")
+	}
+
+	// The spawn is the one Join was given, in every axis. The vertical settles by
+	// falling, which is the same landing every other fall is — so it is the horizontal
+	// pair that says the teleport happened.
+	pos := h.position(player)
+	if pos[0] != float64(spawn[0]) || pos[2] != float64(spawn[2]) {
+		t.Errorf("the player respawned at %v, want the join spawn %v", pos, spawn)
+	}
+}
+
+// Protection is spent by ticks and by nothing else — no wall clock, and no message from
+// the client.
+func TestRespawnProtectionExpiresFromTicks(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.hurt(player, PlayerMaxHealth)
+	h.advance(int(h.sim.deathTicks))
+
+	if !h.vitals(player).Invulnerable {
+		t.Fatal("the respawn granted no protection")
+	}
+
+	// Damage during protection is refused outright.
+	h.hurt(player, 50)
+	if got := h.vitals(player).Health; got != PlayerMaxHealth {
+		t.Errorf("a protected player lost %d health", PlayerMaxHealth-got)
+	}
+
+	h.advance(int(h.sim.protectionTicks) - 1)
+	if !h.vitals(player).Invulnerable {
+		t.Error("protection ended one tick early")
+	}
+	h.step()
+	if h.vitals(player).Invulnerable {
+		t.Error("protection outlasted its tick count")
+	}
+
+	h.hurt(player, 50)
+	if got := h.vitals(player).Health; got != 50 {
+		t.Errorf("health is %d once protection ended, want 50", got)
+	}
+}
+
+// A respawn is a teleport, and the streaming goroutine has to hear about it on the tick
+// it happens or the player stands in terrain nobody has sent them.
+func TestRespawnWakesChunkStreaming(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	spawn := [3]float32{0.5, 66, 0.5}
+	player, _ := h.join(1, spawn)
+
+	// Drain the spawn chunk Join published, so what arrives later is the respawn's.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := player.NextChunk(ctx); err != nil {
+		t.Fatalf("NextChunk: %v", err)
+	}
+
+	// Far enough to be a different chunk.
+	h.sim.mu.Lock()
+	player.pos = [3]float64{200.5, 64, 200.5}
+	player.chunk = chunkAt(player.pos)
+	h.sim.mu.Unlock()
+	h.step()
+
+	h.hurt(player, PlayerMaxHealth)
+	h.advance(int(h.sim.deathTicks))
+
+	coord, err := player.NextChunk(ctx)
+	if err != nil {
+		t.Fatalf("NextChunk after the respawn: %v", err)
+	}
+	if want := chunkAt([3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}); coord != want {
+		t.Errorf("the respawn published chunk %+v, want the spawn's %+v", coord, want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What the dead may not do
+// ---------------------------------------------------------------------------
+
+func TestTheDeadAreRefusedEveryIntent(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.hurt(player, PlayerMaxHealth)
+
+	if err := player.Submit(protocol.PlayerInput{ClientTick: 9, MoveZ: 1}); err == nil {
+		t.Error("a dead player's movement was accepted")
+	}
+	if err := player.Mine(protocol.MineRequest{Pos: [3]int32{1, 63, 0}, HasPos: true, Active: true, ClientTick: 9}, true); err == nil {
+		t.Error("a dead player's mining was accepted")
+	}
+	if _, err := player.Edit(context.Background(), protocol.BlockEditRequest{
+		Pos: [3]int32{1, 63, 0}, HasPos: true, Action: vnet.EditActionPlace, Slot: 0, ClientTick: 9,
+	}); err == nil {
+		t.Error("a dead player's placement was accepted")
+	}
+
+	// And a corpse does not drift, however many ticks pass.
+	before := h.position(player)
+	h.advance(10)
+	if after := h.position(player); after != before {
+		t.Errorf("a dead player moved from %v to %v", before, after)
+	}
+}
+
+// A new life resets both ordering guards, not just movement's.
+//
+// They are separate counters on purpose — movement and mining arrive on separate
+// messages with separate idle windows — and resetting one without the other is an
+// asymmetry rather than a safety: a client that restarts its counter on a new life would
+// have its walking accepted and its mining refused as stale until the count caught up.
+func TestANewLifeAcceptsAClientThatRestartedItsTickCounter(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	// A long-running session, then a death.
+	if err := player.Submit(protocol.PlayerInput{ClientTick: 9000, Yaw: 0}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := player.Mine(protocol.MineRequest{
+		Pos: [3]int32{1, 63, 0}, HasPos: true, Active: true, ClientTick: 9000,
+	}, true); err != nil {
+		t.Fatalf("Mine: %v", err)
+	}
+
+	h.hurt(player, PlayerMaxHealth)
+	h.advance(int(h.sim.deathTicks))
+	if got := h.vitals(player).LifeState; got != vnet.LifeStateAlive {
+		t.Fatalf("the player is %s after the countdown", got)
+	}
+
+	// A counter that started over. Both intents have to be accepted, or the two guards
+	// disagree about what a new life means.
+	if err := player.Submit(protocol.PlayerInput{ClientTick: 1, Yaw: 0}); err != nil {
+		t.Errorf("movement from a restarted counter was refused: %v", err)
+	}
+	if err := player.Mine(protocol.MineRequest{
+		Pos: [3]int32{1, 63, 0}, HasPos: true, Active: true, ClientTick: 1,
+	}, true); err != nil {
+		t.Errorf("mining from a restarted counter was refused: %v", err)
+	}
+}
+
+// A placement that was legal when it was asked for, by a player who died while its chunk
+// was being generated.
+//
+// The check before generation cannot see this: it runs before the wait. What refuses it
+// is the second one, in the guard the editor calls after the terrain is ready and before
+// the write — and the staged editor is what makes the window a test can stand inside
+// rather than a race to reproduce.
+func TestAPlacementIsRefusedWhenThePlayerDiesWhileItsChunkLoads(t *testing.T) {
+	t.Parallel()
+
+	editor := &stagedEditor{
+		generationStarted: make(chan struct{}),
+		finishGeneration:  make(chan struct{}),
+		guardAcquired:     make(chan struct{}),
+		finishWrite:       make(chan struct{}),
+		current:           world.Air,
+	}
+	sim, err := NewSim(DefaultTickRate, 1, testWorldSeed, emptyTerrain{}, editor, testEntityIDs(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	player, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, nil, func([]byte) bool { return true })
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	player.inventory.slots[0] = inventoryStack{item: ItemStone, count: 1}
+
+	result := make(chan error, 1)
+	go func() {
+		_, editErr := player.Edit(context.Background(), protocol.BlockEditRequest{
+			Pos: [3]int32{3, 200, 0}, HasPos: true, Action: vnet.EditActionPlace, Slot: 0,
+		})
+		result <- editErr
+	}()
+
+	awaitSignal(t, "generation to start", editor.generationStarted)
+
+	// The tick kills them while the chunk is still loading.
+	sim.mu.Lock()
+	player.damageLocked(PlayerMaxHealth)
+	sim.mu.Unlock()
+
+	close(editor.finishGeneration)
+
+	select {
+	case editErr := <-result:
+		if editErr == nil {
+			t.Fatal("a player who died mid-generation still placed their block")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the edit to be refused")
+	}
+
+	// And the slot was not spent on it.
+	if got := player.InventoryState().Stacks[0].Count; got != 1 {
+		t.Errorf("the refused placement left %d in slot 0, want the 1 it started with", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The durability penalty
+// ---------------------------------------------------------------------------
+
+func TestDeathSpendsDurabilityOnceAndKeepsEveryItem(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	player.inventory.mu.Lock()
+	player.inventory.slots[1] = stackOf(ItemStone, 40)
+	player.inventory.mu.Unlock()
+
+	h.hurt(player, PlayerMaxHealth)
+	h.step()
+
+	state := player.InventoryState()
+	wantSword := protocol.InventoryStack{
+		ItemID:        uint16(ItemRustySword),
+		Count:         1,
+		Durability:    wornByDeath(RustySwordMaxDurability),
+		MaxDurability: RustySwordMaxDurability,
+	}
+	if got := state.Stacks[0]; got != wantSword {
+		t.Errorf("slot 0 is %+v after one death, want %+v", got, wantSword)
+	}
+	wantStone := protocol.InventoryStack{ItemID: uint16(ItemStone), Count: 40}
+	if got := state.Stacks[1]; got != wantStone {
+		t.Errorf("death changed slot 1 to %+v, want the resources untouched %+v", got, wantStone)
+	}
+
+	// Every remaining tick of the countdown must not spend it again.
+	h.advance(int(h.sim.deathTicks))
+	if got := player.InventoryState().Stacks[0]; got != wantSword {
+		t.Errorf("slot 0 is %+v after the whole countdown, want the one penalty %+v", got, wantSword)
+	}
+
+	// A second death is a second penalty, though — the operation is per death, not once
+	// per session. Past the respawn protection first: damage during it is refused, and a
+	// blow that lands on nobody would leave this asserting the first penalty twice.
+	h.advance(int(h.sim.protectionTicks))
+	if h.vitals(player).Invulnerable {
+		t.Fatal("respawn protection outlasted its tick count, so the second blow lands on nothing")
+	}
+	h.hurt(player, PlayerMaxHealth)
+	h.step()
+	twice := wornByDeath(wornByDeath(RustySwordMaxDurability))
+	if got := player.InventoryState().Stacks[0].Durability; got != twice {
+		t.Errorf("durability is %d after two deaths, want %d", got, twice)
+	}
+}
+
+// The tick never waits for a session goroutine, and it never comes back from a death
+// without having paid for it.
+func TestAContendedInventoryDefersTheDeathPenaltyAndTheRespawn(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.hurt(player, PlayerMaxHealth)
+
+	// A session goroutine holding the inventory across the whole countdown.
+	player.inventory.mu.Lock()
+	h.advance(int(h.sim.deathTicks) + 5)
+
+	vitals := h.vitals(player)
+	if vitals.LifeState != vnet.LifeStateDead {
+		t.Errorf("the player respawned without paying the penalty: %+v", vitals)
+	}
+	if vitals.RespawnTicks != 0 {
+		t.Errorf("the countdown reads %d; it is a clock and should have run out", vitals.RespawnTicks)
+	}
+	player.inventory.mu.Unlock()
+
+	// The very next tick pays it and respawns.
+	h.step()
+	if got := h.vitals(player).LifeState; got != vnet.LifeStateAlive {
+		t.Errorf("the player is %s once the inventory was free, want Alive", got)
+	}
+	want := wornByDeath(RustySwordMaxDurability)
+	if got := player.InventoryState().Stacks[0].Durability; got != want {
+		t.Errorf("durability is %d, want the single penalty %d", got, want)
+	}
+}
+
+// Ticking while a session moves items is the shape that goes wrong under -race: the
+// tick takes the inventory lock without waiting, and a death lands somewhere in it.
+func TestDeathUnderConcurrentInventoryMovement(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Slot 0 holds the blade; moving it about is what a player rearranging their
+			// hotbar does while they are being killed.
+			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1})
+			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 5, To: 0, Count: 1})
+		}
+	}()
+
+	// Three deaths, each waited out rather than counted in ticks. Both halves of that
+	// are what the contention above breaks: the tick asks for the inventory with
+	// TryLock and never waits, so a penalty — and with it the respawn — can be deferred
+	// for as long as the goroutine keeps the lock busy. A fixed advance therefore ends
+	// somewhere unpredictable, and the next blow lands during respawn protection and is
+	// refused, leaving this counting two penalties for three deaths. It failed about one
+	// run in eight before it was written this way.
+	for death := range 3 {
+		for h.vitals(player).Invulnerable {
+			h.step()
+		}
+		h.hurt(player, PlayerMaxHealth)
+		if got := h.vitals(player).LifeState; got != vnet.LifeStateDead {
+			t.Fatalf("blow %d left the player %s", death+1, got)
+		}
+
+		alive := false
+		for range 5000 {
+			h.step()
+			if h.vitals(player).LifeState == vnet.LifeStateAlive {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			t.Fatalf("death %d never ended; the penalty was deferred for 5000 ticks", death+1)
+		}
+	}
+
+	close(stop)
+	wg.Wait()
+
+	if got := h.vitals(player).LifeState; got != vnet.LifeStateAlive {
+		t.Errorf("the player is %s after three deaths and their countdowns", got)
+	}
+	// Three deaths, three penalties, wherever the blade ended up.
+	want := wornByDeath(wornByDeath(wornByDeath(RustySwordMaxDurability)))
+	state := player.InventoryState()
+	found := false
+	for _, stack := range state.Stacks {
+		if stack.ItemID != uint16(ItemRustySword) {
+			continue
+		}
+		found = true
+		if stack.Durability != want {
+			t.Errorf("the blade is at %d durability, want %d for three deaths", stack.Durability, want)
+		}
+	}
+	if !found {
+		t.Error("the blade stopped existing")
+	}
+}

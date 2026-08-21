@@ -1,0 +1,49 @@
+// =============================================================================
+// common.fbs — primitives shared by every Voxelheim wire message.
+//
+// Included by every other contract file. Holds nothing that is specific to a
+// single message, so a change here is a change to the whole protocol: treat it
+// with the care that implies.
+// =============================================================================
+
+namespace Voxelheim.Net;
+
+/// Wire protocol version, checked during the handshake.
+///
+/// FlatBuffers has no constants, so the current version is exposed as an enum
+/// value that both generated APIs can read (`ProtocolVersionCurrent` in Go,
+/// `ProtocolVersion::Current` in Rust). Bump it whenever a message changes in a
+/// way an older peer cannot parse; a mismatch is rejected at the handshake
+/// rather than discovered as a decode error mid-session.
+enum ProtocolVersion : ushort {
+  /// Never sent deliberately. A FlatBuffers table field that is absent decodes
+  /// as its type's zero value, so this member exists to make that case fail
+  /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
+  /// is rejected, instead of defaulting to "whatever is current".
+  Unknown = 0,
+
+  Current = 6
+}
+
+/// A position, velocity or direction in world space, measured in blocks.
+///
+/// A struct, not a table: it is fixed-size, always present when used, and sits
+/// on the hot path (every entity in every snapshot carries two of them), so it
+/// must be inlined rather than reached through an offset.
+struct Vec3 {
+  x: float;
+  y: float;
+  z: float;
+}
+
+/// A chunk's address in chunk units. Multiply by `ServerWelcome.chunk_size` to
+/// get the world-space origin of the chunk's minimum corner.
+///
+/// Chunks are cubic and addressed on all three axes — the vertical axis is
+/// chunked like the others, so wards and world regeneration can reason about
+/// volumes rather than whole columns.
+struct ChunkCoord {
+  cx: int;
+  cy: int;
+  cz: int;
+}

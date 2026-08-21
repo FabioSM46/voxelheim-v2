@@ -1,0 +1,117 @@
+[workspace]
+# The root package is the only member today. Later crates (meshing, assets,
+# world streaming) get added here rather than becoming separate workspaces, so
+# `cargo <gate> --workspace` keeps meaning "everything the client is".
+resolver = "3"
+
+[package]
+name = "voxelheim-client"
+version = "0.1.0"
+edition = "2024"
+# Pinned in lockstep with rust-toolchain.toml. Bevy 0.19 needs >= 1.95.0, so the
+# floor is not decorative.
+rust-version = "1.97"
+description = "Voxelheim client — rendering, input and prediction for the authoritative Go server"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# Three dependencies, all GDD-level architecture. A fourth needs a discussion,
+# not a commit — see client/AGENTS.md.
+#
+# `default-features = false` plus an explicit list, because Bevy's `default`
+# feature is `2d + 3d + ui + audio`: it drags in glTF, PBR, animation, image
+# codecs and rodio, none of which this client uses yet, and audio additionally
+# needs ALSA headers at build time. The curated bundles below are Bevy's own
+# coherent feature sets, so this is a subset of a supported configuration rather
+# than a hand-rolled one:
+#   ui_api        -> default_app (async executor, asset, log, state, reflect) +
+#                    common_api (camera, color, image, mesh, text, window, png) +
+#                    bevy_ui
+#   ui_bevy_render-> bevy_render + bevy_core_pipeline + bevy_ui_render
+# `bevy_winit` + `x11` give a window on Linux; `default_font` gives the embedded
+# fallback font, so the status text needs no asset pipeline (explicitly out of
+# scope for this issue).
+#
+# The feature list is bounded by what CI's `client` job installs — read it from
+# .github/workflows/ci.yml, never from a local build succeeding, because a
+# developer desktop carries development headers a runner does not. Today that
+# budget is `libasound2-dev libudev-dev pkg-config`, and every feature here needs
+# *none* of them: nothing in this graph asks pkg-config for anything.
+#
+# `x11` and not `wayland`, deliberately. `x11` links nothing at build time —
+# winit reaches libX11 through `x11-dl`, which dlopens at runtime — whereas
+# `wayland` pulls `wayland-sys`, whose build script needs `wayland-client.pc`
+# from libwayland-dev. That package is not installed in CI and issue #6 puts that
+# job's setup out of scope, so the feature set matches the dependencies CI has
+# rather than the reverse. On a Wayland desktop the client runs through XWayland;
+# see "Known gaps" in client/AGENTS.md.
+# `bevy_pbr` is the one feature chunk rendering adds, and it is the smallest thing
+# that provides a lit 3D material: `StandardMaterial`, `MeshMaterial3d`,
+# `DirectionalLight`. `Camera3d`, `Mesh3d` and the mesh/material plumbing were
+# already here — `ui_bevy_render` brings `bevy_core_pipeline` and `common_api`
+# brings `bevy_mesh` + `bevy_material` — so this is a genuinely narrow addition
+# rather than the `3d_bevy_render` bundle, which would also drag in glTF,
+# animation, anti-aliasing and post-processing that nothing renders.
+#
+# Deliberately *not* `tonemapping_luts`. `Camera3d`'s default tonemapper is
+# `TonyMcMapface`, which needs a KTX2 LUT and would pull `ktx2` + `bevy_image/zstd`
+# into the graph for one texture; the camera in world/render.rs asks for
+# `Tonemapping::AcesFitted` instead, which is computed in the shader and needs no
+# asset at all. See "Toolchain and dependencies" in client/AGENTS.md.
+bevy = { version = "0.19.1", default-features = false, features = [
+    "bevy_pbr",
+    "bevy_winit",
+    "default_font",
+    "multi_threaded",
+    "ui_api",
+    "ui_bevy_render",
+    "x11",
+] }
+
+# Version-matched to the flatc release pinned in .flatc-version at the repo root.
+# The runtime and the generator move together; a mismatch is a decode bug that
+# only shows up on the wire.
+flatbuffers = "=25.12.19"
+
+# The third crate, and the discussion client/AGENTS.md asks for is on the record
+# rather than waived. **Fabio decided it on 2026-08-20** (issue #157), over the
+# alternative of leaving the wire in the clear and documenting a WireGuard or VPN
+# deployment, on the grounds that encryption in the binary is substantially more
+# solid than a tunnel. The reasoning is the part that generalises: a tunnel
+# protects only when every operator configures one correctly and every player
+# joins it, and it silently protects nothing when either does not happen.
+# Encryption in the transport protects by default, and its failure mode is a
+# refused connection rather than an unnoticed exposure. There is no flag to turn
+# it off on either side, for the same reason.
+#
+# The two halves are asymmetric and only this one costs anything: the server uses
+# crypto/tls from Go's standard library and server/go.mod still has a single
+# dependency.
+#
+# `ring` and not `aws-lc-rs`, with `default-features = false` so the choice is
+# stated rather than inherited — rustls's provider default has moved between
+# releases, and a crypto backend that changes under a toolchain upgrade is one
+# nobody reviewed. Both build here: `cc`, `gcc`, `cmake` and `perl` are present on
+# the ubuntu-latest runner image and on the development box, so neither would
+# change the apt list CI installs (`libasound2-dev libudev-dev pkg-config`).
+# `ring` is the lighter of the two — it needs `cc` alone, where `aws-lc-rs` also
+# wants cmake and perl — and the feature budget this file keeps says take the
+# lighter one. **Verified against the built tree, not against this paragraph**:
+# `cargo tree` shows `ring` and no `aws-lc-sys`.
+#
+# No `tls12`: both ends of this wire are ours, the server's floor is
+# `tls.VersionTLS13`, and there is no browser or legacy client to accommodate — so
+# 1.2 buys nothing and costs a negotiable downgrade. `logging` is off because
+# rustls would otherwise pull `log` to describe handshakes nothing here reads.
+#
+# `rustls::pki_types` re-exports what a custom verifier needs, so this stays one
+# crate rather than one plus `rustls-pki-types`.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+
+# No `[lints] unsafe_code = "forbid"`, deliberately: flatc's output is full of
+# `unsafe` accessor bodies, and a crate-level `forbid` cannot be relaxed by an
+# `#[allow]` on the generated module. The rule that matters is enforced by review
+# instead — hand-written client code contains no `unsafe`, and in particular
+# net/codec.rs uses the verifying `root_as_envelope`, never
+# `root_as_envelope_unchecked`.

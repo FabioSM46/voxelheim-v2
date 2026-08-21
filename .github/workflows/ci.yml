@@ -1,0 +1,441 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+# Every job starts read-only. Jobs that need more (the diff classifier) widen
+# their own token explicitly instead of inheriting a repository-level default.
+permissions:
+  contents: read
+
+# Supersede an in-flight run when new commits land on the same PR. CI validates the
+# merge ref before either protected branch accepts it; it does not repeat the same
+# matrix on the post-merge push.
+#
+# Scoped to pull_request events only, deliberately: a cancelled job resolves to
+# CANCELLED, and `pr-status-json` counts CANCELLED among its FAILING conclusions —
+# so a cancellation that landed on the PR's *current* head SHA would pin it at
+# needs-work with no way for the labeler to recover it (only a manual re-run clears
+# a terminal conclusion). A `synchronize` event always carries a NEW head SHA, so
+# the run being cancelled is always one for a commit that is no longer the head,
+# and whose checks are therefore never read.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Develop PRs are classified from the changed-file list. Main promotion PRs
+  # validate everything that EXISTS at the merge ref: the workspaces are scaffolded
+  # through this very pipeline, so pre-scaffold a workspace legitimately has nothing
+  # to verify. Jobs skip via job-level `if:` — NEVER via workflow- or job-level
+  # `paths:` filters — so every job still reports a result that `ci-gate` can audit.
+  #
+  # Every failure direction is open, and there are three of them:
+  #   * the classifier treats unrecognised paths and empty input as "run
+  #     everything" (scripts/changed-areas.sh, pinned by its tests);
+  #   * this step falls back to all-true when it cannot enumerate a develop PR diff
+  #     (API error or the pulls/files API's 3000-file truncation cap);
+  #   * the consumers test `!= 'false'`, so a missing or misspelled output —
+  #     including every output of this job after a crash — runs the job rather
+  #     than skipping it. A crashed `detect` therefore runs the full matrix AND
+  #     shows red, which blocks the label until someone looks.
+  #
+  # `detect` is audited by `ci-gate`; a failed classifier can never be hidden by
+  # successful workload jobs.
+  #
+  # `helpers` is the one output the classifier does NOT produce, and that is the
+  # entire point of it (clinic-deck #529): the `automation` job runs
+  # changed-areas.sh's own tests, so gating it on that classifier's output would
+  # let a classifier bug exempt itself from the tests that would have caught it.
+  # `helpers` is a plain grep over the raw changed-path list, computed below.
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      server: ${{ steps.classify.outputs.server }}
+      client: ${{ steps.classify.outputs.client }}
+      schemas: ${{ steps.classify.outputs.schemas }}
+      helpers: ${{ steps.classify.outputs.helpers }}
+    steps:
+      # Full checkout, not sparse: the main-promotion branch below reads workspace
+      # marker files from the tree.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reject publication privacy leaks
+        run: bash scripts/check-publication-privacy.sh
+      - name: Reject public commit email addresses
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check-commit-email-privacy.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: Classify changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+
+          if [ "$BASE_REF" = "main" ]; then
+            # Release promotion: complete validation of everything that exists.
+            # Existence is read from the merge ref itself, so a promotion can
+            # never narrow its matrix through a diff (ci-gate re-verifies this
+            # against its own checkout of the same ref).
+            server=false; client=false; schemas=false
+            [ -f server/go.mod ] && server=true
+            [ -f client/Cargo.toml ] && client=true
+            if [ -d schemas ] && [ -n "$(find schemas -name '*.fbs' -print -quit 2>/dev/null)" ]; then
+              schemas=true
+            fi
+            echo "Release promotion matrix: server=${server} client=${client} schemas=${schemas} helpers=true"
+            printf 'server=%s\nclient=%s\nschemas=%s\nhelpers=true\n' "$server" "$client" "$schemas" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          files=""
+          list_ok=false
+          # Both sides of a rename, deliberately: a file moved out of a workspace
+          # must still rebuild the workspace it left — its imports there just broke.
+          if files=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+              --paginate --jq '.[] | .filename, (.previous_filename // empty)'); then
+            # The files API hard-caps at 3000 entries and --paginate stops there
+            # silently. Lines over-count files (a rename emits two), which only errs
+            # toward failing open.
+            if [ "$(printf '%s\n' "$files" | grep -c .)" -lt 3000 ]; then
+              list_ok=true
+            fi
+          fi
+
+          if [ "$list_ok" = true ]; then
+            # An empty list still fails open — changed-areas.sh answers
+            # all-true to empty input, and its own crash fails this step, which
+            # the `!= 'false'` consumers below also read as "run everything".
+            printf '%s\n' "$files" | bash scripts/changed-areas.sh >> "$GITHUB_OUTPUT"
+            # Read from `$files`, never from the lines just written: the whole
+            # value of this flag is that it survives a classifier that has stopped
+            # recognising `scripts/**`. Same polarity as everything else here — it
+            # starts true and is flipped to false only by a non-empty list in which
+            # nothing matched, so an empty or unreadable list keeps the helper
+            # tests running.
+            #
+            # The three skill directories are in this list because
+            # agent-skills-sync.test.sh is what guards them being in step, and it
+            # lives in the job this flag selects. Without them, a PR that edits a
+            # canonical skill and forgets to regenerate its adapters matches
+            # nothing here, `automation` skips, and the one test that exists to
+            # catch exactly that never runs — which is how "CI fails when a
+            # committed adapter is stale" stops being true without anything
+            # turning red.
+            helpers=true
+            if [ -n "$files" ] &&
+               ! printf '%s\n' "$files" | grep -Eq '^(scripts|\.github|\.claude|\.agents|\.opencode)/'; then
+              helpers=false
+            fi
+            printf 'helpers=%s\n' "$helpers" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::detect: could not enumerate changed files for develop PR; failing open — all jobs run"
+            printf 'server=true\nclient=true\nschemas=true\nhelpers=true\n' >> "$GITHUB_OUTPUT"
+          fi
+
+  # Go backend gates. `!= 'false'`, not `== 'true'`: a job may skip only on a
+  # positive, well-formed "false". `!cancelled()` (rather than the implicit
+  # success()) keeps this evaluable when `detect` itself failed — outputs are then
+  # empty, `!= 'false'` holds, and the full matrix runs alongside detect's red
+  # check. Plain cancellation still skips, so the PR-supersede concurrency above
+  # keeps cancelling cheaply.
+  #
+  # The `present` guard exists because the fail-open paths (unrecognised file,
+  # unreadable diff) can select this job before server/ has been scaffolded.
+  # "Workspace absent at this ref" means there is genuinely nothing to verify, so
+  # the job succeeds with a notice; once server/go.mod exists the gates are
+  # unconditional.
+  server:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.outputs.server != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect workspace presence
+        id: ws
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f server/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "server/ is not scaffolded at this ref — nothing to verify."
+          fi
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Format check (gofmt)
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt violations:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - name: Vet
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: go vet ./...
+      # Both versions are pinned deliberately: the action major so its behaviour
+      # cannot change under us, and the linter itself so a new release cannot
+      # redden a PR that changed nothing. The config lives in server/.golangci.yml,
+      # and working-directory is an action input here because `defaults.run`
+      # applies to `run:` steps only, never to a `uses:` step.
+      - name: Lint (golangci-lint)
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.12.2
+          working-directory: server
+          verify: true
+      - name: Build
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: go build ./...
+      - name: Test
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: go test ./...
+
+  # Rust client gates. See the server job for the `!= 'false'` / `!cancelled()` /
+  # `present` reasoning. Bevy on Linux needs ALSA and udev development headers to
+  # compile; they are installed only when the workspace exists.
+  client:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.outputs.client != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect workspace presence
+        id: ws
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f client/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "client/ is not scaffolded at this ref — nothing to verify."
+          fi
+      - name: Prefer the canonical Ubuntu archive over the Azure mirror
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        # Every APT source on a hosted runner resolves through a mirrorlist, and
+        # azure.archive.ubuntu.com is the entry it reaches for first. When that
+        # host stops answering, every index fetch below waits out its timeout and
+        # the install expires with nothing fetched — three consecutive runs on PR
+        # #120, on a diff that touched no workflow and no dependency, while
+        # archive.ubuntu.com answered in the same logs.
+        #
+        # **Its own step, and that is not tidiness.** The step below is a pinned
+        # contract: scripts/test/client-ci-budget.test.sh asserts its run block is
+        # exactly the two bounded apt-get commands and nothing else, comments
+        # included. That pin is worth keeping exactly as strict as it is, so the
+        # repair goes beside it rather than inside it.
+        #
+        # **Repointed rather than deleted**, which is the safe half. The
+        # mirrorlist's shape belongs to the runner image: one URI per line today,
+        # and a line-wise delete silently does nothing if that ever becomes
+        # several to a line. Rewriting the host works on either shape and can
+        # never leave APT with no source at all, which would be a worse failure
+        # than the one being fixed. A repeated URI is the only cost, and the
+        # mirror method tolerates one.
+        #
+        # Matched on the host alone, so http and https both move and no other
+        # mirror in the file (security.ubuntu.com, ports.ubuntu.com) is touched.
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            echo "APT mirrors after repointing the Azure entry:"
+            cat /etc/apt/apt-mirrors.txt
+          fi
+      - name: Install Bevy system dependencies
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        # Bound both the whole step and each APT network operation: an
+        # unresponsive hosted-runner mirror must fail before consuming the
+        # separate budget reserved for the Rust gates.
+        timeout-minutes: 5
+        run: |
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            update
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          workspaces: client
+          # Named rather than derived, so this job and client-cache.yml provably
+          # write and read the same key. Without it the key takes a component from
+          # the job's own identity, and two workflows sharing a cache would be
+          # relying on their job names happening to match — which is true today and
+          # is not a thing either file says.
+          shared-key: client-gates
+      - name: Format check
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo fmt --all --check
+      - name: Clippy
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo build --workspace --locked
+      - name: Test
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo test --workspace --locked
+
+  # FlatBuffers contract validation. scripts/check-schemas.sh is the single source
+  # of truth for this gate (CI and /dev-issue run the same script); it compiles
+  # every .fbs for BOTH consumers. flatc is pinned by .flatc-version.
+  schemas:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.outputs.schemas != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect workspace presence
+        id: ws
+        run: |
+          if [ -d schemas ] && [ -n "$(find schemas -name '*.fbs' -print -quit 2>/dev/null)" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "schemas/ holds no .fbs contracts at this ref — nothing to verify."
+          fi
+      - name: Install pinned flatc
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          FLATC_VERSION="$(tr -d '[:space:]' < .flatc-version)"
+          curl -fsSL -o /tmp/flatc.zip \
+            "https://github.com/google/flatbuffers/releases/download/v${FLATC_VERSION}/Linux.flatc.binary.g++-13.zip"
+          unzip -o /tmp/flatc.zip -d /tmp/flatc-bin
+          sudo install -m 0755 /tmp/flatc-bin/flatc /usr/local/bin/flatc
+          flatc --version
+      # The formatters are part of generation, not a tidy-up, so the drift check in
+      # check-schemas.sh's phase 2 needs both consumers' toolchains — it runs the
+      # recipe schemas/AGENTS.md documents and asks git whether gen/ moved. Guarded
+      # on the marker file each one reads, so a pre-scaffold ref installs neither.
+      # Versions come from the same files the server and client jobs read, because a
+      # formatter one minor apart writes a different file and would report drift that
+      # is not there.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: ${{ steps.ws.outputs.present == 'true' && hashFiles('server/go.mod') != '' }}
+        with:
+          go-version-file: server/go.mod
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        if: ${{ steps.ws.outputs.present == 'true' && hashFiles('client/Cargo.toml') != '' }}
+        with:
+          components: rustfmt
+      - name: Validate contracts
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: bash scripts/check-schemas.sh
+
+  # The automation-helper suite: gh-automation.sh, the CI scripts, the labeler
+  # step, and deepseek_review.py all have their only CI coverage here. Selected by
+  # detect's classifier-independent `helpers` flag — see the detect job for why the
+  # classifier is not allowed to compute this selector for itself.
+  automation:
+    needs: detect
+    if: ${{ !cancelled() && needs.detect.outputs.helpers != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Automation helper tests
+        run: |
+          bash scripts/test/agent-skills-sync.test.sh
+          bash scripts/test/commit-email-privacy.test.sh
+          bash scripts/test/publication-privacy.test.sh
+          bash scripts/test/gh-automation-deepseek-rounds.test.sh
+          bash scripts/test/iteration-lifecycle.test.sh
+          bash scripts/test/pr-labeler-step.test.sh
+          bash scripts/test/pr-label-writes.test.sh
+          bash scripts/test/pr-status-frozen-rule.test.sh
+          bash scripts/test/pr-mergeable-retry.test.sh
+          bash scripts/test/changed-areas.test.sh
+          bash scripts/test/ci-gate.test.sh
+          bash scripts/test/deepseek-budget.test.sh
+          bash scripts/test/client-ci-budget.test.sh
+          bash scripts/test/client-cache-parity.test.sh
+          bash scripts/test/helpers-selector-docs.test.sh
+          bash scripts/test/gate-tables.test.sh
+          bash scripts/test/schema-bindings-drift.test.sh
+          bash scripts/test/actions-hardening.test.sh
+          # The reviewer script's own tests. They stub `github`/`openai`, so there
+          # is no network call and no API key involved.
+          python3 .github/scripts/test_deepseek_review.py
+
+  # The one stable check consumed by READY TO MERGE and branch protection. It is
+  # always created after the whole matrix reaches a terminal state. The helper
+  # accepts develop's explicitly skipped work and requires everything that exists
+  # to succeed on main; any missing or unexpected result fails closed.
+  ci_gate:
+    name: ci-gate
+    needs: [detect, server, client, schemas, automation]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      DETECT_RESULT: ${{ needs.detect.result }}
+      SERVER_SELECTED: ${{ needs.detect.outputs.server }}
+      SERVER_RESULT: ${{ needs.server.result }}
+      CLIENT_SELECTED: ${{ needs.detect.outputs.client }}
+      CLIENT_RESULT: ${{ needs.client.result }}
+      SCHEMAS_SELECTED: ${{ needs.detect.outputs.schemas }}
+      SCHEMAS_RESULT: ${{ needs.schemas.result }}
+      HELPERS_SELECTED: ${{ needs.detect.outputs.helpers }}
+      AUTOMATION_RESULT: ${{ needs.automation.result }}
+    steps:
+      # Full checkout: on main the gate re-derives workspace existence from its own
+      # copy of the same merge ref the workload jobs ran, so a lying detect step
+      # cannot narrow the release matrix.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Evaluate tiered CI policy
+        run: |
+          SERVER_EXISTS=false; CLIENT_EXISTS=false; SCHEMAS_EXIST=false
+          [ -f server/go.mod ] && SERVER_EXISTS=true
+          [ -f client/Cargo.toml ] && CLIENT_EXISTS=true
+          if [ -d schemas ] && [ -n "$(find schemas -name '*.fbs' -print -quit 2>/dev/null)" ]; then
+            SCHEMAS_EXIST=true
+          fi
+          export SERVER_EXISTS CLIENT_EXISTS SCHEMAS_EXIST
+          bash scripts/ci-gate.sh

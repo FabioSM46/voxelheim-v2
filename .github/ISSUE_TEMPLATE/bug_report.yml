@@ -1,0 +1,91 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+assignees: []
+body:
+  - type: dropdown
+    id: workspace
+    attributes:
+      label: Workspace
+      description: Which part of the monorepo is affected?
+      options:
+        - server (Go Backend)
+        - client (Rust Client)
+        - schemas (FlatBuffers Contracts)
+        - shared (Cross-cutting)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior you observed. Include exact error messages, panics, and stack traces.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened?
+      description: Describe the expected correct behavior — be specific enough that the AI can derive a test case.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Ordered steps. The AI agent will attempt to reproduce before fixing.
+      placeholder: |
+        1. Start the server with seed 1234
+        2. Connect a client and move to chunk (12, -3)
+        3. Break the voxel at (198, 64, -40)
+        4. Observe the lighting seam on the chunk border
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical_context
+    attributes:
+      label: Technical Context
+      description: |
+        **REQUIRED**. Error messages, logs, and exact code paths. The more specific, the faster the fix.
+      placeholder: |
+        Server log:
+        ```
+        panic: runtime error: index out of range [16] with length 16
+          voxelheim/server/internal/world.(*Chunk).Light
+        ```
+
+        Relevant files:
+        - server/internal/world/light.go (panic origin)
+        - server/internal/world/chunk.go (neighbor lookup — possible root cause)
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of Scope
+      description: |
+        **REQUIRED**. What this fix should NOT touch. Prevents scope creep during bug fixing.
+      placeholder: |
+        - Do NOT refactor the whole lighting system
+        - Do NOT change the chunk wire format
+        - Do NOT touch client-side mesh generation
+    validations:
+      required: true
+
+  - type: textarea
+    id: code_pointers
+    attributes:
+      label: Code Pointers
+      description: |
+        Exact file:line references the AI should inspect. Use format `path/to/file.go:42`.
+      placeholder: |
+        - server/internal/world/light.go:42 (error origin)
+        - server/internal/world/chunk.go:55 (neighbor index logic)
+    validations:
+      required: false

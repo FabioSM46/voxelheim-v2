@@ -1,0 +1,230 @@
+// =============================================================================
+// handshake.fbs — connection establishment.
+//
+// Exactly one exchange, always first on a connection: the client sends
+// ClientHello and the server answers with ServerWelcome or ServerReject. A
+// server that has answered with ServerReject closes the connection; a client
+// that receives anything else before ServerWelcome is talking to a peer that
+// does not speak this protocol.
+// =============================================================================
+
+include "common.fbs";
+
+namespace Voxelheim.Net;
+
+/// First message on every connection.
+///
+/// The client announces the protocol version it was built against, a display
+/// name, and — from V5 — an identity token this server issued to it earlier.
+/// The token is the one thing a client presents and the server verifies;
+/// everything else is still assigned by the server in the reply. Position,
+/// health, inventory and structures are read from the server's own store for
+/// whatever identity the handshake settles on, and no client→server message
+/// carries any of them, before or after this change.
+table ClientHello {
+  /// Must equal `ProtocolVersion.Current` as the server understands it.
+  ///
+  /// Typed as the enum rather than its underlying `ushort`: the wire layout is
+  /// identical, but both generated APIs then hand back a real type instead of a
+  /// bare integer that could be compared against anything. An absent field
+  /// decodes as `ProtocolVersion.Unknown`, which fails the check.
+  protocol_version: ProtocolVersion;
+
+  /// Display name. Untrusted, non-unique, and never used as an identifier —
+  /// the server assigns `ServerWelcome.entity_id` for that.
+  player_name: string;
+
+  /// An identity token this server issued in an earlier `ServerWelcome`,
+  /// presented to resume the identity it names. Absent or empty on a first
+  /// connection to this server.
+  ///
+  /// **Asking is not stating** — rule 4 in `schemas/AGENTS.md`, the line
+  /// `ChunkResendRequest` draws. Presenting a token *claims* an identity; it
+  /// does not establish one. The server decides whether the claim is honoured,
+  /// and everything about that identity — position, health, inventory,
+  /// structures — is read from the server's own store, never from this message
+  /// and never from any other client→server message. A token the server does
+  /// not recognise is not a refusal: the handshake proceeds as a first
+  /// connection and `ServerWelcome` carries a new token.
+  ///
+  /// **Decoder invariant.** Absent or empty, or **exactly 32 bytes**. Any other
+  /// length is refused with `RejectReason.BAD_REQUEST` — a wrong-length token
+  /// is a malformed request, decided before any identity is looked up, and the
+  /// handshake is the one place a refusal has a reply payload to say so in.
+  ///
+  /// **A bearer credential, and what protects it is the transport rather than
+  /// this contract.** Whatever can read this field can make the claim it
+  /// carries. Nothing about the field changes with the transport — the same 32
+  /// bytes, in the same place — so the exposure is a property of how the
+  /// connection was made and not of the message:
+  ///
+  ///   - **The server's only configuration is encrypted.** There is no
+  ///     plaintext listener and no flag to ask for one, so the field is not
+  ///     readable in transit. The client verifies the server against a
+  ///     certificate fingerprint it pinned, and refuses both a server that
+  ///     presents a different one and a server it has an identity for but has
+  ///     never pinned — so this field is never presented to a peer nobody
+  ///     checked.
+  ///   - **Plaintext**, for anything speaking this contract that is not this
+  ///     server: anyone positioned to watch a handshake — a shared network, any
+  ///     hop in between — can copy a token and come back as that player, and
+  ///     nothing in this contract prevents it. The wire format cannot close
+  ///     that; only the transport can.
+  ///
+  /// The secrecy rule is therefore stated for what it covers rather than as
+  /// secrecy in general: never logged, never displayed, on either side. Those
+  /// are the two exposures a wire format closes by itself, and they hold on
+  /// every transport. The third — the wire — is closed by encrypting the
+  /// session and by nothing a schema can say.
+  player_token: [ubyte];
+}
+
+/// Why the server refused a connection.
+///
+/// Wire-level error codes: they are logged verbatim on both sides and shown to
+/// the player as-is, which is why they read like codes rather than prose.
+enum RejectReason : ubyte {
+  PROTOCOL_MISMATCH = 0,
+  SERVER_FULL = 1,
+  BAD_REQUEST = 2,
+
+  /// The presented `ClientHello.player_token` names an identity that already
+  /// has a live session. Distinct from `SERVER_FULL`, which is about capacity:
+  /// this connection is refused however much room the server has, and a
+  /// different identity would have been accepted.
+  ///
+  /// Appended, never reordered — the code is an integer on the wire. Renumbering
+  /// the members above would silently relabel every refusal already written to a
+  /// log, and a peer built against an older version reads this value as a member
+  /// it has no name for.
+  ALREADY_CONNECTED = 3
+}
+
+/// The session is accepted. Every field here is authoritative and settles a
+/// parameter the client would otherwise have to guess or hardcode.
+///
+/// **Decoder invariants.** The client sizes buffers with these values and
+/// divides by some of them, so it validates them before use and treats a
+/// violation as a protocol error. A zero `tick_rate` or a wrong `chunk_size` is
+/// a division by zero or an allocation blowup, and an honestly buggy server
+/// reaches that state as easily as a hostile one — trusting the server on
+/// gameplay outcomes does not mean trusting it on array bounds:
+///
+///   - `spawn` components must be finite (no NaN, no infinity)
+///   - `tick_rate` must be >= 1
+///   - `chunk_size` must be in 1..=40, the ceiling imposed by the 16-bit RLE run
+///     length documented in `world.fbs`
+///   - `view_distance` must be in 0..=16: the streamed volume grows as
+///     `(2 * view_distance + 1)^3` chunks, so the bound is what keeps a single
+///     number from asking the client for gigabytes
+///   - `inventory_slots` and `hotbar_slots` must both be non-zero
+///   - `hotbar_slots` must be <= `inventory_slots`, because every hotbar slot is
+///     an inventory slot and indexing beyond the inventory is a protocol error
+///   - `player_token` must be present and exactly 32 bytes; an absent, empty or
+///     differently sized vector is a protocol error, rejected the way a zero
+///     `tick_rate` is
+///   - the world clock is either absent or complete. `day_length_ticks` of zero
+///     says this server keeps no clock and the two boundaries below it are not
+///     read at all; any other value requires
+///     `0 < night_start_ticks < night_end_ticks <= day_length_ticks`, and a
+///     welcome that breaks that ordering is refused rather than repaired
+table ServerWelcome {
+  /// Server-assigned identity for this player's entity. Appears in
+  /// `EntitySnapshot` so the client can tell itself apart from everyone else.
+  entity_id: ulong;
+
+  /// Where the server has placed the player **this session**: the join spawn
+  /// for an identity the server is seeing for the first time, the restored
+  /// position for one that is returning. Which of the two happened is not
+  /// something the client is told and not something it needs — the server
+  /// decided either way. The client does not choose this and does not get to
+  /// move itself there; it renders where the snapshots say.
+  spawn: Vec3;
+
+  /// Seed of the world's procedural generation. Sent for diagnostics and future
+  /// client-side tooling only: the client never generates terrain from it,
+  /// because the server's voxels are the only voxels that exist.
+  world_seed: long;
+
+  /// Authoritative simulation ticks per second. The client sends `PlayerInput`
+  /// at this rate rather than at its frame rate.
+  tick_rate: ubyte;
+
+  /// Edge length of a chunk in blocks. Chunks are cubic, so a chunk holds
+  /// `chunk_size^3` voxels. Announced once here instead of repeated in every
+  /// `ChunkData`.
+  chunk_size: ushort;
+
+  /// Chunk-streaming radius in chunks, centred on the chunk the server believes
+  /// the player is in.
+  view_distance: ubyte;
+
+  /// Number of slot pairs in every `InventoryState.stacks` vector this session
+  /// receives. The server currently announces 36.
+  inventory_slots: ubyte;
+
+  /// Leading inventory slots the player's hotbar can select. The server
+  /// currently announces 9.
+  hotbar_slots: ubyte;
+
+  /// The identity token for this session. The client stores it and presents it
+  /// as `ClientHello.player_token` on its next connection to **this** server.
+  ///
+  /// Present and exactly 32 bytes on every accepted handshake; a decoder treats
+  /// any other length as a protocol error, the way it treats a zero `tick_rate`.
+  ///
+  /// A client whose presented token the server did not recognise receives a
+  /// **new** token here rather than the value it sent: the server never adopts a
+  /// client-chosen value as an identity key, so every token in circulation is
+  /// one the server minted. A client whose token *was* recognised stores
+  /// whatever arrives here, which is not required to be the value it sent.
+  ///
+  /// The same bearer credential, carrying the same three exposures and closing
+  /// them the same way. Two are the wire format's own and hold on every
+  /// transport: never logged, never displayed, on either side. The third is the
+  /// wire itself, and it is closed by the transport rather than by anything a
+  /// schema can say — this server's only configuration is encrypted, so the
+  /// field is not readable in transit. See `ClientHello.player_token`.
+  player_token: [ubyte];
+
+  /// Length of one full day in server ticks, or **zero for a server that keeps no
+  /// clock at all**.
+  ///
+  /// Zero is not a degenerate day. It is the world as it was before V6, in which
+  /// time does not pass and a client draws whatever fixed sky it draws — a legal,
+  /// expected value, and the only one that makes the two boundaries below
+  /// meaningless. Every other value is a promise about
+  /// `EntitySnapshot.tick_of_day`, which is then always less than it.
+  ///
+  /// Ticks rather than seconds, for the reason every other duration on this wire
+  /// is in ticks: the simulation counts them, and integer arithmetic gives both
+  /// sides the same answer without a rounding rule to agree on.
+  day_length_ticks: uint;
+
+  /// The tick of the day at which night begins.
+  ///
+  /// Read only when `day_length_ticks` is non-zero, and then
+  /// `0 < night_start_ticks < night_end_ticks <= day_length_ticks`.
+  ///
+  /// **Sent rather than left for the client to derive.** A client could compute a
+  /// plausible dusk from constants of its own, and the night it drew would then be
+  /// its night rather than the server's — which is the night the server's own rules
+  /// are written against. There is one clock in this world and these are its
+  /// boundaries; a second opinion about them is a disagreement waiting to be seen
+  /// on screen.
+  night_start_ticks: uint;
+
+  /// The tick of the day at which night ends. Read under the same condition and the
+  /// same ordering as `night_start_ticks`, and equal to `day_length_ticks` for a
+  /// night that runs to the end of the day.
+  night_end_ticks: uint;
+}
+
+/// The session is refused. The connection closes immediately after this.
+table ServerReject {
+  reason: RejectReason;
+
+  /// Human-readable detail for logs and for the client's status text. Never
+  /// parsed — branch on `reason`, display `detail`.
+  detail: string;
+}

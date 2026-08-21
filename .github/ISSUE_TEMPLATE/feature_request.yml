@@ -1,0 +1,146 @@
+name: Feature Request
+description: Request a new feature or enhancement (structured for AI agent consumption)
+title: "[Feature]: "
+labels: ["feature", "needs-refinement"]
+assignees: []
+body:
+  - type: dropdown
+    id: workspace
+    attributes:
+      label: Workspace
+      description: Which part of the monorepo does this affect?
+      options:
+        - server (Go Backend)
+        - client (Rust Client)
+        - schemas (FlatBuffers Contracts)
+        - shared (Cross-cutting)
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      description: Determines the branch prefix and commit convention
+      options:
+        - feature (New capability)
+        - enhancement (Improve existing feature)
+        - refactor (Restructure, no behavior change)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How urgent is this?
+      options:
+        - high (Blocks other work)
+        - medium (Normal priority)
+        - low (Nice to have)
+      default: 1
+    validations:
+      required: true
+
+  - type: textarea
+    id: user_story
+    attributes:
+      label: User Story
+      description: Structured as "As a [role], I want [goal], so that [reason]". Be specific — the AI agent reads this literally.
+      placeholder: |
+        As a player exploring the open world
+        I want to deploy a tent on flat ground
+        So that I get a respawn point and shelter far from the village
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Checklist of testable conditions. Each item must be verifiable as pass/fail — no vague items like "it works well".
+      placeholder: |
+        - [ ] A tent item can be placed only on surfaces flatter than the threshold
+        - [ ] Placing a tent registers it as the player's active respawn point on the server
+        - [ ] Dying in the open world respawns the player at their tent when one exists
+        - [ ] The tent state survives a server restart
+    validations:
+      required: true
+
+  - type: textarea
+    id: technical_context
+    attributes:
+      label: Technical Context
+      description: |
+        **REQUIRED**. The AI agent uses this section as its primary implementation guide.
+        Include subsections: Files to Modify, Patterns to Follow, Constraints.
+      placeholder: |
+        ### Files to Modify
+        - schemas/player.fbs (add TentPlaced message)
+        - server/internal/world/respawn.go (respawn point resolution)
+        - client/src/gameplay/placement.rs (placement preview + request)
+
+        ### Patterns to Follow
+        - Placement validation follows the ward-stone placement flow in server/internal/world/wards.go
+        - Client sends intent, server validates and broadcasts the result
+
+        ### Constraints
+        - MUST be validated server-side (the client never decides placement legality)
+        - MUST NOT add new Go modules or crates without prior discussion
+        - MUST regenerate FlatBuffers bindings if schemas/ changes
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of Scope
+      description: |
+        **REQUIRED**. Explicitly list what this issue does NOT cover.
+        Prevents the AI agent from over-implementing or gold-plating.
+      placeholder: |
+        - Do NOT implement tent inventory/stash (separate issue)
+        - Do NOT touch the village respawn logic
+        - Do NOT change the dungeon respawn countdown
+        - Do NOT modify the chunk save format
+    validations:
+      required: true
+
+  - type: textarea
+    id: code_pointers
+    attributes:
+      label: Code Pointers
+      description: |
+        Exact file:line references to existing code the AI should read first.
+        Use format `path/to/file.go:42` for maximum precision. Not all lines, just the key entry points.
+      placeholder: |
+        - server/internal/world/respawn.go:30 (current respawn resolution)
+        - server/internal/world/wards.go:55 (placement validation pattern)
+        - client/src/gameplay/placement.rs:12 (placement preview system)
+        - schemas/player.fbs:8 (player state tables)
+    validations:
+      required: false
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Blocking issues, PRs, or configuration that must be completed first.
+      placeholder: |
+        - Requires #12 (player state persistence) to be merged first
+    validations:
+      required: false
+
+  - type: textarea
+    id: test_strategy
+    attributes:
+      label: Test Strategy
+      description: What to test, edge cases to cover, and how to verify correctness.
+      placeholder: |
+        - Unit test: placement validation accepts flat ground, rejects slopes
+        - Unit test: respawn resolution prefers tent over village
+        - Edge case: tent destroyed while owner is dead
+        - Edge case: placement request for a chunk that is not loaded
+    validations:
+      required: false

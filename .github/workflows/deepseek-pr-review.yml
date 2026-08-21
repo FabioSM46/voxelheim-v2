@@ -1,0 +1,124 @@
+name: DeepSeek PR Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+      event_name:
+        description: 'Event type (pull_request or pull_request_review_comment)'
+        required: false
+        type: string
+        default: 'pull_request'
+      measure_only:
+        description: 'Call and parse the reviewer without posting to GitHub'
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Keyed on the event as well as the PR: pull_request.number is populated for
+# BOTH pull_request and pull_request_review_comment, so a PR-only key put full
+# reviews and thread replies in one lane and let a reply cancel an in-flight
+# review (observed in clinic-deck on #260/#259). comment.id — empty for
+# non-comment events — additionally keeps concurrent replies from cancelling
+# each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.inputs.pr_number }}-${{ github.event.comment.id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # The anti-loop case, decided before a runner exists. `mode_reply` already exits on
+    # a comment the bot itself authored ("Skipping — comment author is the bot"), but by
+    # then the job has booted, checked out and pip-installed — a full billed minute to
+    # reach a foregone conclusion, on every review-comment event. A job-level `if`
+    # costs nothing when false.
+    #
+    # The login must match what `_resolve_bot_username` resolves to. Reviews are posted
+    # with this workflow's GITHUB_TOKEN, which cannot read /user, so that helper returns
+    # its `github-actions[bot]` default — the same value pr-labeler.yml passes as
+    # DEEPSEEK_BOT_USER. Change one, change all three.
+    if: >-
+      github.event_name != 'pull_request_review_comment' ||
+      github.event.comment.user.login != 'github-actions[bot]'
+    # Must stay ABOVE the request budget — DEEPSEEK_REQUEST_TIMEOUT_SECONDS x
+    # (DEEPSEEK_MAX_RETRIES + 1), currently 2700s x 2 = 90min — with an explicit
+    # 10-minute checkout/setup/posting margin. This lets the SDK's deadline fire first.
+    # When the job cap wins instead, the step is reported as `cancelled` with no output, and
+    # `pr-status-json` counts CANCELLED as a failing check, so the PR silently sticks
+    # at needs-work (clinic-deck #298: a 74k-char diff killed at an old 10-minute cap).
+    timeout-minutes: 100
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          # Needs a dependency file to key on, which is why the two packages live in
+          # requirements.txt rather than on the `pip install` line below.
+          cache: pip
+          cache-dependency-path: .github/scripts/requirements.txt
+
+      # Pinned, where this could resolve `openai PyGithub` to whatever was newest at
+      # run time. A review job is the wrong place to discover a new major: the failure
+      # arrives as an unrelated-looking traceback on someone's PR.
+      - name: Install dependencies
+        run: pip install --disable-pip-version-check -r .github/scripts/requirements.txt
+
+      - name: Run DeepSeek review
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number || github.event.pull_request.number || github.event.pull_request_review_comment.pull_request_number }}
+          EVENT_NAME: ${{ github.event.inputs.event_name || github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          MAX_ROUNDS: "1"
+          # Flash at maximum reasoning keeps review depth close to Pro while reducing
+          # API cost and the time this synchronous call occupies the Actions runner.
+          DEEPSEEK_MODEL: "deepseek-v4-flash"
+          DEEPSEEK_REASONING_EFFORT: "max"
+          # PR #80 spent 65,536 tokens entirely on reasoning for a 50,963-character /
+          # 13-file diff. A faithful measure-only replay then exhausted 131,072 too
+          # (530,226 reasoning chars, no verdict). 262,144 is the next power-of-two
+          # ceiling; the same replay then finished on its first attempt in 8m58s with
+          # 1,060 final chars / 35,966 completion tokens. 262,144 held until the diff
+          # cap was raised; a 600,000-char diff can reason far longer before it has a
+          # verdict, so this now sits at V4's documented 384K maximum — the ceiling the
+          # startup guard already allowed, not a new one. At the V4 Flash $0.28/M
+          # output-token rate, one fully used output costs about $0.108; two fully
+          # billed attempts cost at most about $0.215, excluding input.
+          DEEPSEEK_MAX_OUTPUT_TOKENS: "384000"
+          # One completion's deadline, and how many times it may be attempted. Their
+          # product is the budget, and it must stay below `timeout-minutes` above so
+          # the SDK raises a diagnosable timeout instead of the job cap killing the
+          # step silently. The single retry is for transient `Connection error`s,
+          # which fail fast and recover; a retried timeout costs the full budget and
+          # still ends in a readable error.
+          DEEPSEEK_REQUEST_TIMEOUT_SECONDS: "2700"
+          DEEPSEEK_MAX_RETRIES: "1"
+          # A manual dispatch is an explicit request for another pass, so it
+          # bypasses the cap. Automatic triggers never set this.
+          FORCE_REVIEW: ${{ github.event_name == 'workflow_dispatch' }}
+          # Empirical budget measurement can replay a real PR diff without
+          # creating a review, spending a round or changing merge-gate state.
+          MEASURE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.measure_only }}
+        run: python3 .github/scripts/deepseek_review.py

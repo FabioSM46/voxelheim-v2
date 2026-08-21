@@ -1,0 +1,66 @@
+// =============================================================================
+// envelope.fbs — the single root type on the wire.
+//
+// Every frame on a Voxelheim connection is exactly one Envelope. There is one
+// root type and one union, so both sides have exactly one decode entry point
+// and one switch to keep exhaustive.
+// =============================================================================
+
+include "handshake.fbs";
+include "world.fbs";
+include "player.fbs";
+
+namespace Voxelheim.Net;
+
+/// Every message that can cross the wire, in both directions.
+///
+/// Direction is a protocol rule rather than a type-system one: a peer that
+/// receives a payload it should never receive (a server receiving
+/// `ServerWelcome`, a client receiving `PlayerInput`) treats it as a protocol
+/// error and closes the connection.
+///
+/// Union members are append-only. Adding a member is backward compatible;
+/// reordering or removing one is a protocol version bump.
+///
+/// The tag each member carries is written beside it. FlatBuffers numbers union
+/// members implicitly, from 1, in declaration order — so a reordering compiles
+/// perfectly and silently changes the meaning of every frame already on the
+/// wire. It is the one mistake in this file no compiler can catch, and the
+/// comments are here so a reviewer can read the tags instead of counting them.
+union Payload {
+  ClientHello,      // 1
+  ServerWelcome,    // 2
+  ServerReject,     // 3
+  ChunkData,        // 4
+  ChunkUnload,      // 5
+  PlayerInput,      // 6
+  EntitySnapshot,   // 7
+  BlockEditRequest, // 8
+  BlockUpdate,      // 9
+  InventoryState,         // 10
+  ChunkResendRequest,     // 11
+  MineRequest,            // 12
+  MineProgress,           // 13
+  InventoryMoveRequest,   // 14
+  AttackRequest,          // 15
+  CraftRequest,           // 16
+  RepairRequest,          // 17
+  PlaceStructureRequest,  // 18
+  RemoveStructureRequest, // 19
+
+  /// Appended without a version bump, which is what the append-only rule above is
+  /// *for*. A peer built against V6 as it shipped reads this tag as a payload it has
+  /// no name for and drops it, so an older client loses the refusal feedback and
+  /// nothing else. See `ActionRefused` in `player.fbs`.
+  ActionRefused           // 20
+}
+
+table Envelope {
+  payload: Payload;
+}
+
+root_type Envelope;
+
+/// Four-byte tag at a fixed offset in every buffer. Cheap sanity check that a
+/// frame is a Voxelheim message at all, before any offset in it is trusted.
+file_identifier "VXLH";

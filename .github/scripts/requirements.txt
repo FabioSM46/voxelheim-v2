@@ -1,0 +1,8 @@
+# Pinned dependencies for .github/scripts/deepseek_review.py.
+#
+# Exists for two reasons: it is the cache key `actions/setup-python` needs to cache the
+# pip download (~10s a run), and it stops a review job from being the place where a new
+# openai major release is discovered. Versions are the ones the workflow was last
+# verified against.
+openai==2.50.0
+PyGithub==2.9.1
