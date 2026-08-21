@@ -1598,19 +1598,26 @@ player records, the clock, and **the server's TLS key**. The terrain itself is n
 a function of `-seed`.
 
 That last item is why `-world-dir ""` costs more than the edits it discards. A server with
-nowhere to keep a key mints a new certificate on every start, and the client pins a fingerprint
-per address and refuses any other one — so an ephemeral server is a client that stops connecting
-after the first restart, which reads as a networking bug and is not one. The server says so in a
-startup warning, and the client's refusal names the pin file and both fingerprints. Whoever runs
-the server can read the real one out of the startup line:
+nowhere to keep a key mints a new certificate on every start, and what a client will accept is
+stated by the server list rather than remembered from a first connection — so an ephemeral server
+is one whose registered fingerprint goes stale the moment it restarts. The server says so in a
+startup warning, and reads its own out of the startup line:
 
 ```
 level=INFO msg="listening with an encrypted session" certificate_sha256=…
 ```
 
-Writing that value into the pin file the client names is the supported way through it; see
-"Running it" in `client/AGENTS.md`. In development, keeping the default world directory is the
-way it never comes up.
+That value is what the server registers with the account service, and re-registering after a
+restart is what makes the new certificate acceptable — see "The list that ends the trust chain".
+In development, keeping the default world directory is the way it never comes up.
+
+**This paragraph used to say something else, and the correction is worth reading if you remember
+the old shape.** Until #150 the client kept a pin file per address, trusted on first use, and the
+documented way through a changed fingerprint was to write the new one into that file by hand.
+There is no such file now — `pin_path`, `read_pin` and `write_pin` are gone, deliberately, because
+two ways to decide who a server is means the weaker one decides whenever the stronger is
+unavailable. Any instruction that ends in "write the fingerprint into the pin file" is describing
+a mechanism that no longer exists.
 
 ## Gates
 
