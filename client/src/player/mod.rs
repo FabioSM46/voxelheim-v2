@@ -353,10 +353,12 @@ impl PlayerVisuals {
 /// can be. The key is the wire's `0x00RRGGBB`, so the value a server sent is the value
 /// this map is asked about — no rounding, and nothing to disagree about.
 ///
-/// Swept by [`apply_snapshots`] rather than grown for ever: a server is free to describe
-/// a colour nobody can choose, and sixteen million of them is a map. An entry dropped
-/// while a body still wears it costs nothing, because the body holds a strong handle to
-/// the material and the next one asking for that colour simply makes it again.
+/// Swept by [`apply_snapshots`] rather than grown for ever: a server is free to describe a
+/// colour nobody can choose, and sixteen million of them is a map. The sweep is triggered
+/// by this map being larger than the cached appearances could justify rather than by the
+/// cache changing size — see there for why the difference matters. An entry dropped while a
+/// body still wears it costs nothing, because the body holds a strong handle to the
+/// material and the next one asking for that colour simply makes it again.
 #[derive(Resource, Debug, Default)]
 struct BodyMaterials(HashMap<u32, Handle<StandardMaterial>>);
 
@@ -899,15 +901,24 @@ fn apply_snapshots(
     // own entry for the same reason, so the two agree without either being told. An entry
     // that has never had a body is the one case a snapshot cannot answer, and it is held
     // for [`APPEARANCE_GRACE`] and no longer.
-    let before = appearances.0.len();
     appearances.0.retain(|entity_id, described| {
         drawn.iter().any(|(visible, _)| visible == entity_id)
             || (!described.drawn && now.duration_since(described.at) < APPEARANCE_GRACE)
     });
 
-    // Only when something actually left, because the sweep is a scan of both maps and
-    // almost every frame has nothing to sweep.
-    if appearances.0.len() != before {
+    // **The palette is swept against what it could possibly need, not against whether the
+    // cache changed size.** Every cached appearance can justify one colour per part, plus
+    // the placeholder's; more than that and the map is certainly holding something nothing
+    // wears. A body that changes its clothes without leaving is the case a size comparison
+    // misses entirely — the cache is the same length afterwards, and the colour it stopped
+    // wearing stays for the rest of the session.
+    //
+    // One integer comparison per frame and a scan only when it fails, so the common frame
+    // costs nothing and the map is allowed a little slack before it is cleaned. What it is
+    // not allowed is to grow: the ceiling moves with the cache, and the cache is the size
+    // of a view.
+    let justified = (appearances.0.len() + 1) * BodyPart::IN_DRAWING_ORDER.len();
+    if wardrobe.palette.0.len() > justified {
         let live: HashSet<u32> = appearances
             .0
             .values()
@@ -934,18 +945,26 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
 
     let now = Instant::now();
     for message in arrived {
-        let drawn = appearances
-            .0
-            .get(&message.entity_id)
-            .is_some_and(|described| described.drawn);
-        appearances.0.insert(
-            message.entity_id,
-            Described {
-                appearance: message.appearance,
-                at: now,
-                drawn,
-            },
-        );
+        match appearances.0.get_mut(&message.entity_id) {
+            // **The newest description wins and the clock does not restart.** A server
+            // correcting itself is ordinary, so the appearance is replaced; `at` is not,
+            // because it is when this entity was *first* described with nothing to draw it
+            // on and that is what [`APPEARANCE_GRACE`] is a grace on. Refreshing it would
+            // hand the sender the bound: an entity that never appears in a snapshot, named
+            // again inside every window, would live for as long as the connection did, and
+            // a map of them would grow with it.
+            Some(described) => described.appearance = message.appearance,
+            None => {
+                appearances.0.insert(
+                    message.entity_id,
+                    Described {
+                        appearance: message.appearance,
+                        at: now,
+                        drawn: false,
+                    },
+                );
+            }
+        }
     }
 }
 

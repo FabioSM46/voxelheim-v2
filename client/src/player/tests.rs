@@ -526,6 +526,131 @@ fn an_entity_that_leaves_for_good_takes_its_appearance_with_it() {
 }
 
 #[test]
+fn describing_an_entity_again_does_not_restart_its_grace() {
+    // **The bound belongs to this client, not to whoever is sending.** `APPEARANCE_GRACE`
+    // is a grace on how long an appearance with nothing to draw it on is kept, measured
+    // from when the entity was *first* described. Restarting that clock on every message
+    // would hand the sender the bound: an entity that never appears in a snapshot, named
+    // again inside every window, would live for as long as the connection did — and a map
+    // of them would grow with it, which is the growth the grace exists to stop.
+    //
+    // The clock cannot be advanced from a test without spending real seconds, so what is
+    // asserted is the thing the expiry reads: that the timestamp did not move, and that the
+    // description did.
+    let mut app = headless_player();
+    let first = an_appearance(HairModel::Braided);
+    describe(&mut app, 99, first);
+    app.update();
+
+    let at = {
+        let cached = app.world().resource::<Appearances>();
+        let described = cached.0.get(&99).expect("the appearance was cached");
+        assert!(!described.drawn, "no snapshot has named this entity");
+        described.at
+    };
+
+    let second = an_appearance(HairModel::Loose);
+    describe(&mut app, 99, second);
+    app.update();
+
+    let cached = app.world().resource::<Appearances>();
+    let described = cached.0.get(&99).expect("the appearance is still cached");
+    assert_eq!(
+        described.at, at,
+        "a second description restarted the grace, so a sender can hold an entry for ever"
+    );
+    assert_eq!(
+        described.appearance, second,
+        "the newest description is the one kept; only the clock is not restarted"
+    );
+}
+
+#[test]
+fn a_body_changing_its_clothes_does_not_grow_the_palette_for_ever() {
+    // **A size comparison misses this one entirely.** The palette used to be swept only
+    // when the appearance cache changed length, and a body that changes what it is wearing
+    // without leaving keeps the cache exactly as long as it was — so every colour it
+    // stopped wearing stayed for the rest of the session.
+    //
+    // What is asserted is a ceiling rather than a number, and the ceiling carries one
+    // frame of slack on purpose. The sweep is a trigger, and triggers have hysteresis: it
+    // runs inside `apply_snapshots`, and `dress_bodies` adds the colours for the change it
+    // has just been told about *after* that — so the map is over its bound for exactly the
+    // frame between the two, by at most one body's worth of parts. Measured here it peaks
+    // at 13 where the cache justifies 12, and comes straight back down. What would fail is
+    // growth: unswept, forty changes of shirt leave forty-odd colours behind, and the
+    // ceiling below does not move with the number of changes.
+    let mut app = headless_player();
+    let start = Instant::now();
+    describe(&mut app, 99, an_appearance(HairModel::Braided));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+
+    for shirt in 0..40u32 {
+        let worn = Appearance::new(
+            A_SKIN,
+            0x0001_0000 * shirt + 0x0000_4020,
+            A_TROUSERS,
+            A_SHOES,
+            HairModel::Braided,
+            A_HAIR,
+        )
+        .expect("every colour is inside the contract's range");
+        describe(&mut app, 99, worn);
+        deliver(
+            &mut app,
+            2 + shirt,
+            vec![
+                state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+                state(99, [4.0, 64.0, 0.0], 0.0),
+            ],
+            start + INTERVAL * (1 + shirt),
+        );
+        app.update();
+
+        let cached = app.world().resource::<Appearances>().0.len();
+        let palette = app.world().resource::<BodyMaterials>().0.len();
+        let justified = (cached + 1) * BodyPart::IN_DRAWING_ORDER.len();
+        // One body is re-dressed per frame here, so one part-set is the whole slack.
+        let ceiling = justified + BodyPart::IN_DRAWING_ORDER.len();
+        assert!(
+            palette <= ceiling,
+            "after {} changes of shirt the palette holds {palette} colours, where {cached} \
+             cached appearances justify {justified} and one frame of slack allows {ceiling}",
+            shirt + 1,
+        );
+    }
+
+    // And it settles: a frame in which nobody changes anything sweeps the slack away, so
+    // the map ends where the cache says it should rather than a body's worth above it.
+    deliver(
+        &mut app,
+        100,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start + INTERVAL * 60,
+    );
+    app.update();
+
+    let cached = app.world().resource::<Appearances>().0.len();
+    let palette = app.world().resource::<BodyMaterials>().0.len();
+    assert!(
+        palette <= (cached + 1) * BodyPart::IN_DRAWING_ORDER.len(),
+        "the palette settled at {palette} colours for {cached} cached appearances"
+    );
+}
+
+#[test]
 fn the_end_of_a_session_forgets_every_body_it_drew() {
     // The mirror of the vitals: what the people in a session that has ended looked like is
     // not a fact about the next session, and a reconnect is described from scratch.
