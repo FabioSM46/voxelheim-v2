@@ -1222,18 +1222,34 @@ impl PlayAs {
 /// boundary in the frame it sends the frame, which is not necessarily this one, so the
 /// guard is local as well: a second `SelectCharacterRequest` after a welcome is a
 /// protocol error that ends the session, and this system must never be what causes one.
+///
+/// **And spent once the player has actually been in the world**, which is what #184 added.
+/// Leaving a world now lands back on its character screen, and a launch flag that answered
+/// that exchange too would send the player straight back in — a control that cannot be
+/// used. The line is drawn at a [`Session`] having existed rather than at the exchange
+/// number, because that is the same line #184 draws everywhere else: a refused creation
+/// ends the session without ever making one, and reconnecting after that still gets the
+/// launch's answer, which is what `a_second_exchange_is_answered_like_the_first` holds.
 fn answer_from_the_launch(
     choice: Option<Res<CharacterChoice>>,
     play_as: Res<PlayAs>,
+    session: Option<Res<Session>>,
     mut chosen: MessageWriter<ChooseCharacter>,
     mut asked: Local<bool>,
+    mut spent: Local<bool>,
 ) {
+    if session.is_some() {
+        *spent = true;
+    }
     let Some(choice) = choice else {
         // The exchange is over — established, refused or disconnected. The next one is a
-        // new question and gets a new answer.
+        // new question, and gets a new answer unless the launch's has been spent.
         *asked = false;
         return;
     };
+    if *spent {
+        return;
+    }
     let Some(wanted) = play_as.wanted() else {
         return;
     };
@@ -1846,10 +1862,16 @@ mod tests {
         app
     }
 
-    /// A session, which is what makes the character screen go down.
+    /// A session: what makes the character screen go down, and what spends the launch's
+    /// answer.
     ///
     /// The values are not read by anything under test here — what matters is that the
     /// resource exists, because its presence *is* "the world has arrived".
+    ///
+    /// One copy serving both. #181 and #184 each added their own, in different halves of
+    /// this module, and git merged the pair without a conflict to report — two definitions
+    /// of one name, in a tree that then did not compile. Worth knowing before adding a
+    /// third: a clean merge is not a compiling one.
     fn a_session() -> Session {
         Session(crate::net::SessionParams {
             clock: Default::default(),
@@ -2828,6 +2850,44 @@ mod tests {
         );
 
         assert_eq!(asked(&app), vec![]);
+    }
+
+    /// **A launch flag does not answer the screen a player asked to be on.**
+    ///
+    /// #184 made leaving a world land back on its character screen. `--name` answering
+    /// that exchange too would send the player straight back in — a control that cannot be
+    /// used. The line is a [`Session`] having existed, not the exchange number, which is
+    /// what keeps the retry below working: a refused creation ends the session without
+    /// ever making one.
+    #[test]
+    fn the_launch_does_not_answer_the_screen_a_player_left_a_world_for() {
+        let mut app = headless_playing_as(
+            CharacterChoice::for_a_test(vec![character(900, "Eivor")], 3),
+            "Eivor",
+        );
+        assert_eq!(asked(&app), vec![ChooseCharacter::Play(900)]);
+
+        // The world arrives, and then the player leaves it.
+        app.insert_resource(a_session());
+        app.update();
+        app.world_mut().remove_resource::<Session>();
+        app.world_mut().remove_resource::<CharacterChoice>();
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ChooseCharacter>>()
+            .clear();
+
+        app.world_mut().insert_resource(CharacterChoice::for_a_test(
+            vec![character(900, "Eivor")],
+            3,
+        ));
+        app.update();
+
+        assert_eq!(
+            asked(&app),
+            vec![],
+            "the launch answered the screen the player had just asked to be on"
+        );
     }
 
     /// The next exchange gets its own answer: a refused creation ends the session, and
