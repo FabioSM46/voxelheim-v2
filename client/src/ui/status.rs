@@ -608,13 +608,33 @@ mod tests {
 
     #[test]
     fn every_state_names_the_server() {
-        for state in [
-            ConnectionState::Connecting,
-            ConnectionState::Handshaking,
-            ConnectionState::Disconnected,
-        ] {
+        for state in ConnectionState::every() {
             let line = describe(&state, address(), None, None);
-            assert!(line.contains("127.0.0.1:7777"), "{state:?} -> {line}");
+            // Wildcard-free, so a state added to the enum arrives here as a build
+            // failure rather than as a line nobody checked. `Choosing` was the one that
+            // proved the point: it named the address from the day it was written, and
+            // this sweep would not have noticed if it had not.
+            let names_it = match state {
+                // No server has been chosen, so there is no address to name.
+                ConnectionState::Idle => false,
+                // The server's own sentence, and `refusal` rewrites exactly one shape of
+                // it — `ALREADY_CONNECTED`, which is meaningless without saying connected
+                // to *what*. Every other reason reaches the screen as the server wrote
+                // it, address or no address, which is the promise
+                // `a_rejection_shows_the_servers_reason_verbatim` holds. The reason used
+                // here is a bare string, so this is that case.
+                ConnectionState::Rejected { .. } => false,
+                ConnectionState::Connecting
+                | ConnectionState::Handshaking
+                | ConnectionState::Choosing
+                | ConnectionState::Connected
+                | ConnectionState::Disconnected => true,
+            };
+            assert_eq!(
+                line.contains("127.0.0.1:7777"),
+                names_it,
+                "{state:?} -> {line}"
+            );
         }
     }
 

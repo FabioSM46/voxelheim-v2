@@ -139,6 +139,41 @@ pub enum ConnectionState {
     Disconnected,
 }
 
+#[cfg(test)]
+impl ConnectionState {
+    /// Every state, for the sweeps that have to answer for all of them.
+    ///
+    /// One list rather than one per sweep. Two screens decide what they do from this
+    /// enum — the server list is up or down, the status line names the address or does
+    /// not — and each carried its own list of states to try. `Choosing` was added to the
+    /// enum in #160 and reached neither, so for two iterations both sweeps read as
+    /// exhaustive while leaving the one state this client spends waiting for a person
+    /// untested.
+    ///
+    /// **What pins it is `the_list_holds_every_state` below**, which sets a flag per
+    /// variant through a wildcard-free match. An eighth variant stops that match
+    /// compiling, the arm written for it indexes past the flags, and the only edit that
+    /// makes the assertion pass again is adding the state here — so the list cannot fall
+    /// behind the enum, and no number can be bumped to quieten it.
+    ///
+    /// That is a stronger pin than `HairModel::ALL` gets from the compiler alone, and it
+    /// is available for the reason the other one needs a contract: the variants are
+    /// nameable here, because `ConnectionState` is this client's own vocabulary.
+    pub(crate) fn every() -> Vec<Self> {
+        vec![
+            Self::Idle,
+            Self::Connecting,
+            Self::Handshaking,
+            Self::Choosing,
+            Self::Connected,
+            Self::Rejected {
+                reason: "refused".to_owned(),
+            },
+            Self::Disconnected,
+        ]
+    }
+}
+
 /// The authoritative session parameters, present exactly when
 /// [`ConnectionState::Connected`] has been reached.
 ///
@@ -1825,6 +1860,7 @@ fn drain_server_list_events(
 
 #[cfg(test)]
 mod tests {
+
     use std::io::{Read, Write};
 
     use std::net::{TcpListener, TcpStream};
@@ -1843,6 +1879,37 @@ mod tests {
     use super::session::Scratch;
     use super::*;
     use crate::wire::voxelheim::net as fb;
+
+    /// The list [`ConnectionState::every`] hands the sweeps holds every variant.
+    ///
+    /// **A flag per variant, not a count**, and the difference is the whole test: seven
+    /// values with `Rejected` missing and `Idle` written twice counts to seven and covers
+    /// six states. A `match` over the values proves every variant has an *arm*, never that
+    /// every variant is *present*.
+    ///
+    /// What the two together buy is a chain of forced edits that ends in the right place.
+    /// An eighth variant stops the match compiling; the arm the author writes indexes past
+    /// the array; growing the array makes `all` fail; and the only thing that satisfies it
+    /// is adding the state to `every`. Nothing here can be quietened by editing a number.
+    #[test]
+    fn the_list_holds_every_state() {
+        let mut seen = [false; 7];
+        for state in ConnectionState::every() {
+            match state {
+                ConnectionState::Idle => seen[0] = true,
+                ConnectionState::Connecting => seen[1] = true,
+                ConnectionState::Handshaking => seen[2] = true,
+                ConnectionState::Choosing => seen[3] = true,
+                ConnectionState::Connected => seen[4] = true,
+                ConnectionState::Rejected { .. } => seen[5] = true,
+                ConnectionState::Disconnected => seen[6] = true,
+            }
+        }
+        assert!(
+            seen.iter().all(|seen| *seen),
+            "`every` is missing a state: {seen:?}"
+        );
+    }
 
     /// How long a test will pump the app waiting for a state. Generous because it
     /// covers a loopback round trip on a loaded CI runner, and irrelevant to

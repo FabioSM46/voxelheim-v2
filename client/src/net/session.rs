@@ -1107,7 +1107,21 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
         // Every command that has arrived rather than the first, because two can be
         // waiting: a loop that took one per read would answer the second up to
         // READ_TIMEOUT later, which on the character screen is a click that appears to
-        // have done nothing. Stopping wins whenever it is among them.
+        // have done nothing.
+        //
+        // **In arrival order, with no priority among them.** This comment used to end
+        // "stopping wins whenever it is among them", which is true only of the outcome:
+        // a `Disconnect` anywhere in the queue does end the session, because the drain
+        // reaches it before the next read. It is not true of the commands ahead of it. A
+        // `Choose` queued first is encoded and written to the socket, and a
+        // `Choice::Create` that lands there mints a character on the server — for a
+        // player who has already asked to leave.
+        //
+        // Left as a FIFO deliberately. Draining into a buffer and answering a
+        // `Disconnect` first would change what this client *sends*, and the pair only
+        // arrives together in the window where the reader was blocked on READ_TIMEOUT
+        // with two frames of input behind it. If that becomes worth fixing it is a
+        // behaviour change with its own issue, not a comment's promise.
         loop {
             match commands.try_recv() {
                 // A dropped sender means the app is shutting down, which is the same

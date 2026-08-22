@@ -98,6 +98,16 @@ impl ItemShape {
     /// No stable Rust enumerates variants, so this array is written by hand and could in
     /// principle fall behind the enum. That would cost a sweep some coverage and nothing
     /// more, because the coverage that matters is the compiler's.
+    ///
+    /// **It cannot be pinned the way `net::codec::HairModel::ALL` now is, and the reason
+    /// is not effort.** That list is derived from `fb::HairModel::ENUM_VALUES` — flatc's
+    /// output, regenerated from the schema — so the contract answers what belongs in it.
+    /// [`ItemShape`] has no wire counterpart: it is this client's own vocabulary for how
+    /// to draw a thing, invented here and declared nowhere else, so there is nothing to
+    /// derive a list from and any pin would be this file agreeing with itself. What
+    /// stands in its place is the wildcard-free match above, which is the stronger
+    /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
+    /// same reason.
     #[cfg(test)]
     pub(crate) const ALL: [Self; 4] = [Self::Block, Self::Material, Self::Blade, Self::Bundle];
 }

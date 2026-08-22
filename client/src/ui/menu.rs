@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 use super::login::login_is_up;
 use super::set_mode;
+use super::{BUTTON, button_colour};
 use crate::net::{DisconnectRequest, Session, SignInState};
 use crate::player::InputMode;
 
@@ -25,10 +26,6 @@ enum MenuAction {
     Disconnect,
     Quit,
 }
-
-const BUTTON: Color = Color::srgb(0.16, 0.18, 0.22);
-const BUTTON_HOVERED: Color = Color::srgb(0.25, 0.29, 0.35);
-const BUTTON_PRESSED: Color = Color::srgb(0.42, 0.31, 0.15);
 
 type MenuButton<'a> = (&'a Interaction, &'a MenuAction, &'a mut BackgroundColor);
 type ChangedMenuButton = (Changed<Interaction>, With<Button>);
@@ -144,11 +141,7 @@ fn menu_actions(
     mut exit: MessageWriter<AppExit>,
 ) {
     for (interaction, action, mut colour) in &mut buttons {
-        colour.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON,
-        };
+        colour.0 = button_colour(interaction);
 
         if *interaction != Interaction::Pressed {
             continue;
