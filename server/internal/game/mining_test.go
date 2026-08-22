@@ -142,6 +142,17 @@ func activeMine(pos [3]int32, tick uint32) protocol.MineRequest {
 	return protocol.MineRequest{Pos: pos, HasPos: true, Active: true, ClientTick: tick}
 }
 
+// activeMineWith is the same request naming a slot, for the tool cases.
+//
+// `activeMine` above leaves it zero, which is a real hotbar slot and holds nothing in
+// these tests — so every existing case here goes on mining bare-handed without being
+// edited, which is what makes them still the bare-hand specification.
+func activeMineWith(pos [3]int32, tick uint32, slot uint8) protocol.MineRequest {
+	req := activeMine(pos, tick)
+	req.Slot = slot
+	return req
+}
+
 func awaitCompletion(t *testing.T, player *Player) MiningCompletion {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -164,7 +175,7 @@ func awaitCompletion(t *testing.T, player *Player) MiningCompletion {
 func stepToHardness(t *testing.T, sim *Sim, block world.Block) int {
 	t.Helper()
 
-	cost, breakable := sim.hardnessTicks(block)
+	cost, breakable := sim.hardnessTicks(block, ItemNone)
 	if !breakable {
 		t.Fatalf("block %d is not breakable, so there is no tick to step to", block)
 	}
@@ -181,7 +192,7 @@ func TestHardnessTableOrdersEveryBreakableBlockByHand(t *testing.T) {
 	blocks := []world.Block{world.Leaves, world.Grass, world.Dirt, world.Snow, world.Log, world.Stone, world.CoalOre, world.IronOre}
 	costs := make(map[world.Block]int, len(blocks))
 	for _, block := range blocks {
-		cost, ok := sim.hardnessTicks(block)
+		cost, ok := sim.hardnessTicks(block, ItemNone)
 		if !ok || cost < 1 {
 			t.Fatalf("block %d has cost %d, breakable %t", block, cost, ok)
 		}
@@ -197,7 +208,7 @@ func TestHardnessTableOrdersEveryBreakableBlockByHand(t *testing.T) {
 		t.Fatalf("hardness order is %+v", costs)
 	}
 	for _, block := range []world.Block{world.Air, 9, 0xffff} {
-		if cost, ok := sim.hardnessTicks(block); ok || cost != 0 {
+		if cost, ok := sim.hardnessTicks(block, ItemNone); ok || cost != 0 {
 			t.Errorf("block %d has cost %d, breakable %t; want no mining cost", block, cost, ok)
 		}
 	}
@@ -260,7 +271,7 @@ func TestMiningBreaksOnItsHardnessTickAndSendsNoCompletionProgress(t *testing.T)
 	// Read from the simulation rather than restated: the cost is a tuning number and a
 	// test that hardcoded it would have to be edited every time somebody retuned it — and
 	// would be asserting the number rather than the behaviour.
-	cost, breakable := sim.hardnessTicks(world.Leaves)
+	cost, breakable := sim.hardnessTicks(world.Leaves, ItemNone)
 	if !breakable || cost < 2 {
 		t.Fatalf("leaves cost %d ticks, breakable %t; this test needs at least two", cost, breakable)
 	}
@@ -341,7 +352,7 @@ func TestFakeClockLoopCompletesMiningOnHardnessTick(t *testing.T) {
 		t.Fatalf("Mine: %v", err)
 	}
 
-	cost, breakable := sim.hardnessTicks(world.Leaves)
+	cost, breakable := sim.hardnessTicks(world.Leaves, ItemNone)
 	if !breakable {
 		t.Fatal("leaves are not breakable, so there is no hardness tick to complete on")
 	}
@@ -379,7 +390,7 @@ func TestRequestSpamAdvancesOnlyOncePerServerTick(t *testing.T) {
 
 	target := [3]int32{3, 200, 0}
 	sim, player, _, out := newMiningPlayer(t, map[[3]int64]world.Block{mineTarget(target): world.Stone})
-	cost, breakable := sim.hardnessTicks(world.Stone)
+	cost, breakable := sim.hardnessTicks(world.Stone, ItemNone)
 	if !breakable {
 		t.Fatal("stone is not breakable, so there is no progress fraction to spam against")
 	}
@@ -752,7 +763,7 @@ func TestTwoPlayersHoldIndependentProgressAndTheFirstCompletionWins(t *testing.T
 		t.Fatalf("Join second: %v", err)
 	}
 
-	cost, breakable := sim.hardnessTicks(world.Leaves)
+	cost, breakable := sim.hardnessTicks(world.Leaves, ItemNone)
 	if !breakable {
 		t.Fatal("leaves are not breakable, so neither player can pay for one")
 	}
@@ -840,5 +851,232 @@ func TestConcurrentWorldEditAndMiningCompletionChooseOneOutcome(t *testing.T) {
 	}
 	if firstErr != nil && secondErr != nil {
 		t.Fatalf("both competing writes failed: %v and %v", firstErr, secondErr)
+	}
+}
+
+// TestTheRightToolIsFourTimesFasterAndTheWrongOneIsABareHand is the tool half of the
+// decision #178 opened.
+//
+// That issue raised every bare-hand time by four, on the argument that the old table had
+// been tuned for a player holding the right implement and was attached to the wrong hand.
+// This asserts the other half: the right tool divides the cost by [ToolSpeedFactor], and
+// **the wrong one is exactly a bare hand** — not a penalty, not a smaller bonus.
+//
+// Read off `hardnessTicks` rather than restated as tick counts, for the reason
+// `stepToHardness` above exists: a test that spelled the numbers would have to be edited
+// every time somebody retuned the table, and would be asserting the number instead of the
+// behaviour.
+func TestTheRightToolIsFourTimesFasterAndTheWrongOneIsABareHand(t *testing.T) {
+	t.Parallel()
+
+	sim, _, _, _ := newMiningPlayer(t, nil)
+	tools := []ItemID{ItemShovel, ItemPickaxe, ItemAxe}
+
+	for block := range handMiningTimes {
+		byHand, breakable := sim.hardnessTicks(block, ItemNone)
+		if !breakable {
+			t.Fatalf("block %d is in the hand table and is not breakable", block)
+		}
+
+		suited := 0
+		for _, tool := range tools {
+			cost, ok := sim.hardnessTicks(block, tool)
+			if !ok {
+				t.Fatalf("block %d stopped being breakable while holding %d", block, tool)
+			}
+			if !helpsWith(tool, block) {
+				// The whole of the wrong-tool rule: the same number a bare hand pays.
+				if cost != byHand {
+					t.Errorf("block %d with the wrong tool %d costs %d, a bare hand costs %d",
+						block, tool, cost, byHand)
+				}
+				continue
+			}
+			suited++
+			want := max((byHand+ToolSpeedFactor-1)/ToolSpeedFactor, 1)
+			if cost != want {
+				t.Errorf("block %d with tool %d costs %d, want %d (%d by hand, divided by %d)",
+					block, tool, cost, want, byHand, ToolSpeedFactor)
+			}
+			if cost >= byHand {
+				t.Errorf("block %d with its own tool costs %d, no better than the hand's %d",
+					block, cost, byHand)
+			}
+			if cost < 1 {
+				t.Errorf("block %d with tool %d became free", block, tool)
+			}
+		}
+
+		// Every block a hand can break has exactly one implement for it. The zero case is
+		// the one that would go unnoticed: a block added to handMiningTimes and forgotten
+		// in toolFamilies is merely unhelped, and this is what says so out loud.
+		if suited != 1 {
+			t.Errorf("block %d is suited by %d of the three implements, want exactly 1", block, suited)
+		}
+	}
+}
+
+// TestAnImplementIsNotAWeaponAndCarriesNoDamage pins the zero that says so.
+//
+// `meleeDamage` made "is this a weapon" a registry question rather than a list of item ids
+// in the combat code. A pickaxe is not a bad sword — it is not a sword — and the row's zero
+// is the whole of that statement.
+func TestAnImplementIsNotAWeaponAndCarriesNoDamage(t *testing.T) {
+	t.Parallel()
+
+	for _, tool := range []ItemID{ItemShovel, ItemPickaxe, ItemAxe} {
+		definition, registered := itemByID(tool)
+		if !registered {
+			t.Fatalf("item %d is not in the registry", tool)
+		}
+		if definition.meleeDamage != 0 {
+			t.Errorf("item %d does %d melee damage; an implement is not a weapon", tool, definition.meleeDamage)
+		}
+		if definition.repairRestore != 0 {
+			t.Errorf("item %d restores %d durability; an implement is not a repair kit", tool, definition.repairRestore)
+		}
+		// It wears out, like the blades do — and nothing in this game wears from *use*, so
+		// what this buys is that dying costs something. See #199.
+		if definition.maxDurability != ToolMaxDurability {
+			t.Errorf("item %d has %d durability, want %d", tool, definition.maxDurability, ToolMaxDurability)
+		}
+		if definition.maxStack != 1 {
+			t.Errorf("item %d stacks to %d; two implements are two objects with two amounts of wear left",
+				tool, definition.maxStack)
+		}
+	}
+}
+
+// TestMiningWithAPickaxeCostsAQuarterOfTheHandOnTheRealPath drives the whole path the
+// server actually takes, rather than calling hardnessTicks directly.
+//
+// **This is the test that would have caught the slot never arriving.** The multiplier
+// itself is pinned above; what this asserts is that the number the *request* produces is
+// the tool's — the request names a slot, the server reads its own inventory at that slot,
+// and the cost it sets is the quickened one. Break any link in that chain and the target
+// is set at hand speed with every other test still green.
+func TestMiningWithAPickaxeCostsAQuarterOfTheHandOnTheRealPath(t *testing.T) {
+	t.Parallel()
+
+	const toolSlot = 3
+	target := [3]int32{1, 199, 0}
+	sim, player, _, _ := newMiningPlayer(t, map[[3]int64]world.Block{
+		{1, 199, 0}: world.Stone,
+	})
+
+	byHand, ok := sim.hardnessTicks(world.Stone, ItemNone)
+	if !ok {
+		t.Fatal("stone is not breakable")
+	}
+
+	// Bare hands first: the same request, naming a slot that holds nothing.
+	if err := player.Mine(activeMineWith(target, 1, toolSlot), true); err != nil {
+		t.Fatalf("Mine with an empty slot: %v", err)
+	}
+	if got := player.mining.cost; got != byHand {
+		t.Errorf("an empty hand set a cost of %d, want the hand's %d", got, byHand)
+	}
+
+	// Now put a pickaxe in that slot and ask again.
+	player.inventory.mu.Lock()
+	player.inventory.slots[toolSlot] = stackOf(ItemPickaxe, 1)
+	player.inventory.mu.Unlock()
+
+	// A different target, because the same one is a refresh rather than a new judgement.
+	other := [3]int32{2, 199, 0}
+	sim.terrain.(*miningWorld).set(other, world.Stone)
+	if err := player.Mine(activeMineWith(other, 2, toolSlot), true); err != nil {
+		t.Fatalf("Mine with a pickaxe: %v", err)
+	}
+	want := max((byHand+ToolSpeedFactor-1)/ToolSpeedFactor, 1)
+	if got := player.mining.cost; got != want {
+		t.Errorf("a pickaxe set a cost of %d, want %d (%d by hand)", got, want, byHand)
+	}
+
+	// And the wrong implement is the hand again, from the same slot.
+	player.inventory.mu.Lock()
+	player.inventory.slots[toolSlot] = stackOf(ItemAxe, 1)
+	player.inventory.mu.Unlock()
+
+	third := [3]int32{3, 199, 0}
+	sim.terrain.(*miningWorld).set(third, world.Stone)
+	if err := player.Mine(activeMineWith(third, 3, toolSlot), true); err != nil {
+		t.Fatalf("Mine with an axe: %v", err)
+	}
+	if got := player.mining.cost; got != byHand {
+		t.Errorf("an axe on stone set a cost of %d, want the hand's %d", got, byHand)
+	}
+}
+
+// TestSwitchingToTheRightToolMidBlockAppliesImmediately is the review of #185's finding.
+//
+// The cost used to be set only when a *new* target was judged, so a player who started on
+// stone bare-handed and then selected the pickaxe without releasing the button went on
+// paying hand price until they re-targeted — while the client sent the new slot on every
+// tick. It is now re-read on every refresh.
+//
+// Progress is asserted alongside, because keeping it is what makes the change safe in both
+// directions rather than a refund.
+func TestSwitchingToTheRightToolMidBlockAppliesImmediately(t *testing.T) {
+	t.Parallel()
+
+	const toolSlot = 4
+	target := [3]int32{1, 199, 0}
+	sim, player, _, _ := newMiningPlayer(t, map[[3]int64]world.Block{
+		{1, 199, 0}: world.Stone,
+	})
+
+	byHand, ok := sim.hardnessTicks(world.Stone, ItemNone)
+	if !ok {
+		t.Fatal("stone is not breakable")
+	}
+
+	// Start bare-handed and pay a few ticks.
+	if err := player.Mine(activeMineWith(target, 1, toolSlot), true); err != nil {
+		t.Fatalf("Mine bare-handed: %v", err)
+	}
+	if player.mining.cost != byHand {
+		t.Fatalf("started at cost %d, want the hand's %d", player.mining.cost, byHand)
+	}
+	for tick := uint64(1); tick <= 3; tick++ {
+		sim.Step(tick)
+	}
+	paid := player.mining.progress
+	if paid == 0 {
+		t.Fatal("three ticks bought no progress, so there is nothing to carry across")
+	}
+
+	// Select the pickaxe and refresh the *same* target, which is what a client does on
+	// every tick while the button is held.
+	player.inventory.mu.Lock()
+	player.inventory.slots[toolSlot] = stackOf(ItemPickaxe, 1)
+	player.inventory.mu.Unlock()
+
+	if err := player.Mine(activeMineWith(target, 2, toolSlot), true); err != nil {
+		t.Fatalf("Mine after switching: %v", err)
+	}
+
+	want := max((byHand+ToolSpeedFactor-1)/ToolSpeedFactor, 1)
+	if got := player.mining.cost; got != want {
+		t.Errorf("after switching to the pickaxe the cost is %d, want %d", got, want)
+	}
+	if got := player.mining.progress; got != paid {
+		t.Errorf("switching tools changed progress from %d to %d; it must be kept", paid, got)
+	}
+
+	// And the other direction: putting the pickaxe away costs hand price again, still
+	// without a refund.
+	player.inventory.mu.Lock()
+	player.inventory.slots[toolSlot] = inventoryStack{}
+	player.inventory.mu.Unlock()
+
+	if err := player.Mine(activeMineWith(target, 3, toolSlot), true); err != nil {
+		t.Fatalf("Mine after putting it away: %v", err)
+	}
+	if got := player.mining.cost; got != byHand {
+		t.Errorf("after putting the tool away the cost is %d, want the hand's %d", got, byHand)
+	}
+	if got := player.mining.progress; got != paid {
+		t.Errorf("putting the tool away changed progress from %d to %d", paid, got)
 	}
 }

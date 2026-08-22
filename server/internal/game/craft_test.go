@@ -212,6 +212,23 @@ func TestTheRecipeTableIsTheSixAgreedRecipes(t *testing.T) {
 			ingredients: []ingredient{{ItemVargrPelt, 2}},
 			product:     ItemLeatherPatch, productCount: 1,
 		},
+
+		// The three implements, added by #185. One price, three times: that issue ruled
+		// out tiers, so a difference between them would be a ladder nobody chose. Cheaper
+		// than the blade the same forge makes, which is the ordering the recipe table's
+		// own comment argues for.
+		vnet.RecipeIDShovel: {
+			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
+			product:     ItemShovel, productCount: 1, station: vnet.StructureKindForge,
+		},
+		vnet.RecipeIDPickaxe: {
+			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
+			product:     ItemPickaxe, productCount: 1, station: vnet.StructureKindForge,
+		},
+		vnet.RecipeIDAxe: {
+			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
+			product:     ItemAxe, productCount: 1, station: vnet.StructureKindForge,
+		},
 	}
 
 	if len(recipeTable) != len(want) {

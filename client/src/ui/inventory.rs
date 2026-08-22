@@ -1385,13 +1385,22 @@ mod tests {
             .filter(|(_, colour)| colour.0 == RECIPE_STATION)
             .map(|(text, _)| text.0.clone())
             .collect();
+        // Counted off the mirror rather than spelled as a literal. It was two identical
+        // strings, and #185 made it five — a number this test had no opinion about and was
+        // asserting anyway. What it is actually for is that a station note appears exactly
+        // where a station is required, and that survives a sixth recipe.
+        let with_station = RECIPES
+            .iter()
+            .filter(|recipe| recipe.station.is_some())
+            .count();
         assert_eq!(
-            notes,
-            vec![
-                "requires a forge nearby".to_owned(),
-                "requires a forge nearby".to_owned()
-            ],
-            "exactly the two forge recipes carry the station note"
+            notes.len(),
+            with_station,
+            "every recipe needing a station carries the note, and nothing else does"
+        );
+        assert!(
+            notes.iter().all(|note| note == "requires a forge nearby"),
+            "a station note says something this test did not expect: {notes:?}"
         );
     }
 

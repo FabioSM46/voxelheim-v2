@@ -92,13 +92,106 @@ func handMiningTicksFor(tickRate uint8) map[world.Block]int {
 	return costs
 }
 
-// hardnessTicks is what one block costs this simulation to break by hand.
+// ToolSpeedFactor is how much faster the right implement is than a bare hand.
 //
-// Tools will multiply the returned cost; they do not need another state machine or
-// another table.
-func (s *Sim) hardnessTicks(block world.Block) (int, bool) {
+// **Not chosen here — inherited.** #178 raised every bare-hand time by four, on the
+// argument that the old table had been tuned by somebody feeling the game while holding
+// the right implement and was simply attached to the wrong hand. So this is the other half
+// of that one decision, and it lands mining back exactly where it already felt right
+// rather than somewhere new: dirt in three tenths of a second with a shovel, a log in six
+// with an axe.
+//
+// The two numbers are one decision and neither moves alone. If [handMiningTimes] is
+// retuned, this moves with it.
+const ToolSpeedFactor = 4
+
+// toolFamilies is which ground each implement is for.
+//
+// Here rather than in the item registry, and that is where the fact belongs: how fast a
+// block comes apart is something about *breaking a block*, not about the object in the
+// hand. The registry says a shovel is one to a slot and wears out; this says what it is
+// good for, beside the costs it divides.
+//
+// **A block absent from every family is one no implement helps with**, which is the
+// fail-closed direction and the one that matters: a block added to [handMiningTimes] and
+// forgotten here is merely unhelped, never accidentally four times faster.
+var toolFamilies = map[ItemID]map[world.Block]struct{}{
+	ItemShovel: {
+		world.Dirt:  {},
+		world.Grass: {},
+		world.Snow:  {},
+	},
+	ItemPickaxe: {
+		world.Stone:   {},
+		world.CoalOre: {},
+		world.IronOre: {},
+	},
+	ItemAxe: {
+		world.Log:    {},
+		world.Leaves: {},
+	},
+}
+
+// helpsWith reports whether item is the implement block is for.
+//
+// The one place that question is answered, so a second caller — a tool that also had a
+// durability cost, a block that two implements both suited — asks here rather than
+// growing a list of its own.
+func helpsWith(item ItemID, block world.Block) bool {
+	family, isTool := toolFamilies[item]
+	if !isTool {
+		return false
+	}
+	_, suited := family[block]
+	return suited
+}
+
+// heldItemLocked is what the named slot holds, or [ItemNone].
+//
+// **A slot this player cannot read is a bare hand**, and that is the fail-closed answer
+// rather than a refusal: the inventory lock is taken only if it is free — the same
+// `TryLock` an attack and a pickup take, for the reason recorded on
+// `armedWithSwordLocked` — so a contended tick must not turn into a refused mine. Mining
+// with the wrong implement is exactly a bare hand, so the worst this can cost is one
+// target set at hand speed by a player who was holding a shovel.
+//
+// The caller holds Sim.mu.
+func (p *Player) heldItemLocked(slot uint8) ItemID {
+	if !p.inventory.mu.TryLock() {
+		return ItemNone
+	}
+	defer p.inventory.mu.Unlock()
+
+	stack, ok := p.inventory.stackAtLocked(slot)
+	if !ok {
+		return ItemNone
+	}
+	return stack.item
+}
+
+// hardnessTicks is what one block costs this simulation to break with what is in `slot`.
+//
+// **The wrong implement is exactly a bare hand**, which is the whole rule: a pickaxe is
+// not a slightly worse shovel, and there is no penalty anywhere below for carrying the
+// wrong one. The bonus is a division of the hand's cost rather than a second table, so
+// there is one authoritative number per block and [ToolSpeedFactor] is the only thing that
+// reads differently.
+//
+// Rounded up and floored at one tick: a block whose hand cost is not divisible by four
+// must not become free, and a tick is the smallest amount of paying that exists.
+//
+// The slot is read from this player's own authoritative inventory. The request named which
+// slot, never what is in it — see `MineRequest.slot`.
+func (s *Sim) hardnessTicks(block world.Block, held ItemID) (int, bool) {
 	cost, breakable := s.hardness[block]
-	return cost, breakable
+	if !breakable {
+		return 0, false
+	}
+	if !helpsWith(held, block) {
+		return cost, true
+	}
+	quickened := (cost + ToolSpeedFactor - 1) / ToolSpeedFactor
+	return max(quickened, 1), true
 }
 
 // Mine accepts one refresh, target change or cancellation of mining intent.
@@ -152,6 +245,22 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 			return errors.New("the target chunk has not been delivered to this session")
 		}
 		p.mining.idleTicks = 0
+
+		// **The cost is re-read on every refresh, not only when a target is judged.**
+		// A player who starts on stone bare-handed and then selects the pickaxe without
+		// letting go of the button would otherwise go on paying hand price until they
+		// released and re-targeted — with the client faithfully sending the new slot the
+		// whole time. Found by the review of #185.
+		//
+		// Progress is untouched, and that is what makes this safe rather than exploitable
+		// in either direction: it is a count of ticks paid, so switching to the right
+		// implement makes the ticks already paid go further — up to finishing on the next
+		// one, which is the honest answer for somebody who has already paid more than the
+		// tool asks — and switching away from it leaves them owing more. Nothing is
+		// refunded and nothing is charged twice.
+		if cost, breakable := p.sim.hardnessTicks(p.mining.block, p.heldItemLocked(req.Slot)); breakable {
+			p.mining.cost = cost
+		}
 		return nil
 	}
 
@@ -175,7 +284,9 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 		// non-blocking seam the tick is forbidden to cross.
 		return errors.New("the target chunk is not resident")
 	}
-	cost, breakable := p.sim.hardnessTicks(block)
+	// What the player is mining with, read from this server's own inventory rather than
+	// from the request: the request named a slot and nothing else.
+	cost, breakable := p.sim.hardnessTicks(block, p.heldItemLocked(req.Slot))
 	if !breakable {
 		return fmt.Errorf("block %d at the target is not breakable", uint16(block))
 	}

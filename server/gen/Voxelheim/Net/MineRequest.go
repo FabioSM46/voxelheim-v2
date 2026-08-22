@@ -16,6 +16,7 @@ import (
 // /
 // / Decoder invariants the server enforces on this untrusted input:
 // /   - `pos` absent decodes as null / `None`: a protocol error, never the origin
+// /   - `slot` must be < `ServerWelcome.inventory_slots`
 // /   - `client_tick` is ordering and staleness only, never a trusted clock
 type MineRequest struct {
 	_tab flatbuffers.Table
@@ -95,8 +96,42 @@ func (rcv *MineRequest) MutateClientTick(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(8, n)
 }
 
+// / The authoritative inventory slot the player is mining with.
+// /
+// / **Which slot, never what is in it.** The server reads its own inventory to find
+// / the item and its own table to find what that item is worth against this block; a
+// / client that named a tool would be naming its own mining speed.
+// /
+// / Appended in V8, and this was the one action that named no slot — an attack, a
+// / placement and a repair all already do. Absent decodes as `0`, which is a real
+// / hotbar slot rather than a sentinel, and that is deliberate: a client too old to
+// / send one mines with slot zero rather than being refused, and mining with the wrong
+// / implement is exactly bare hands. There is nothing a stale client can gain here.
+func (rcv *MineRequest) Slot() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / The authoritative inventory slot the player is mining with.
+// /
+// / **Which slot, never what is in it.** The server reads its own inventory to find
+// / the item and its own table to find what that item is worth against this block; a
+// / client that named a tool would be naming its own mining speed.
+// /
+// / Appended in V8, and this was the one action that named no slot — an attack, a
+// / placement and a repair all already do. Absent decodes as `0`, which is a real
+// / hotbar slot rather than a sentinel, and that is deliberate: a client too old to
+// / send one mines with slot zero rather than being refused, and mining with the wrong
+// / implement is exactly bare hands. There is nothing a stale client can gain here.
+func (rcv *MineRequest) MutateSlot(n byte) bool {
+	return rcv._tab.MutateByteSlot(10, n)
+}
+
 func MineRequestStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func MineRequestAddPos(builder *flatbuffers.Builder, pos flatbuffers.UOffsetT) {
 	builder.PrependStructSlot(0, flatbuffers.UOffsetT(pos), 0)
@@ -106,6 +141,9 @@ func MineRequestAddActive(builder *flatbuffers.Builder, active bool) {
 }
 func MineRequestAddClientTick(builder *flatbuffers.Builder, clientTick uint32) {
 	builder.PrependUint32Slot(2, clientTick, 0)
+}
+func MineRequestAddSlot(builder *flatbuffers.Builder, slot byte) {
+	builder.PrependByteSlot(3, slot, 0)
 }
 func MineRequestEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

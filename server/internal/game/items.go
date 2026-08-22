@@ -51,6 +51,14 @@ const (
 	ItemBone
 	ItemVargrPelt
 	ItemLeatherPatch
+
+	// The first three items that are neither a weapon nor a resource: implements, each
+	// for one family of ground. Appended for the reason every id above was, and pinned by
+	// the same test: iota renumbers everything after an insertion, and the client mirrors
+	// these numbers to draw a held shape and an icon.
+	ItemShovel
+	ItemPickaxe
+	ItemAxe
 )
 
 // What each blade is worth, and the only copy of it.
@@ -73,6 +81,22 @@ const (
 	// where this one is worth the ore because it is worth *carrying*.
 	IronSwordMaxDurability uint16 = 200
 	IronSwordDamage        uint16 = 40
+
+	// What the three implements are worth, on the same terms the blades are: their own
+	// numbers, beside the registry, generalising to nothing.
+	//
+	// **Two hundred each, and they are all the same on purpose.** A blade's durability is
+	// a step in a progression — rusty to iron — and there is no such ladder here: one
+	// shovel, one pickaxe, one axe, which is what #185 decided when it ruled out tiers. A
+	// difference between them would be a difference nobody chose, and the first thing
+	// somebody would try to read a ladder into.
+	//
+	// The iron blade's 200 is the scale, and it is the right one to borrow: a tool costs
+	// ore like the blade does, and **nothing in this game wears from use** — death is the
+	// only wear there is — so what this number buys is how many deaths an implement
+	// survives rather than how many blocks it breaks. See #199, which is where that
+	// penalty is being narrowed to what a player has on them.
+	ToolMaxDurability uint16 = 200
 
 	// SharpeningStoneRestore is how much wear one stone gives back, and it sits here for
 	// the reason the numbers above do: it describes the *stone*, not the act of repairing.
@@ -210,6 +234,22 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// answer is what makes something a kit. See repairRestore's own comment, which
 	// described this row before it existed.
 	ItemLeatherPatch: {places: world.Air, maxStack: 8, repairRestore: LeatherPatchRestore},
+
+	// The three implements. Equipment on exactly the blades' terms: they place no block,
+	// one to a slot because two shovels are two objects with two different amounts of wear
+	// left, and their own durability.
+	//
+	// **No `meleeDamage`, and that zero is the row's only statement about combat.** A
+	// pickaxe is not a bad sword — it is not a sword — and the zero is what says so
+	// through the same registry question `meleeDamage` was made into, rather than through
+	// a list of ids somewhere in the combat path.
+	//
+	// Which ground each one is for is *not* here: that is `toolFamilies` in mining.go,
+	// beside the costs it multiplies, because a tool's speed is a fact about breaking a
+	// block rather than about the item.
+	ItemShovel:  {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
+	ItemPickaxe: {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
+	ItemAxe:     {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

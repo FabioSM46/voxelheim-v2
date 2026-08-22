@@ -123,6 +123,35 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		product:      ItemLeatherPatch,
 		productCount: 1,
 	},
+
+	// The three implements, and they are the same recipe three times on purpose: one raw
+	// iron, two logs, at the forge. #185 ruled out tiers — one shovel, one pickaxe, one
+	// axe — so a price that differed between them would be a ladder nobody chose, and the
+	// first thing somebody would try to read one into.
+	//
+	// **Cheaper than the blade, and that ordering is the point.** The sword is three iron,
+	// two coal and a log; a tool is one iron and two logs. The forge is what gates both,
+	// so the first thing a player makes after building one is the implement that makes
+	// building the *next* thing bearable — which is the whole argument for tools existing.
+	// A tool priced like a weapon would be a weapon nobody could afford to skip.
+	vnet.RecipeIDShovel: {
+		ingredients:  []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
+		product:      ItemShovel,
+		productCount: 1,
+		station:      vnet.StructureKindForge,
+	},
+	vnet.RecipeIDPickaxe: {
+		ingredients:  []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
+		product:      ItemPickaxe,
+		productCount: 1,
+		station:      vnet.StructureKindForge,
+	},
+	vnet.RecipeIDAxe: {
+		ingredients:  []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
+		product:      ItemAxe,
+		productCount: 1,
+		station:      vnet.StructureKindForge,
+	},
 }
 
 // craft spends a recipe's ingredients and inserts its product, or changes nothing.

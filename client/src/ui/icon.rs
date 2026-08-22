@@ -199,6 +199,48 @@ const BUNDLE: [IconPart; 3] = [
     },
 ];
 
+/// An implement: a haft up the cell with a head across the top of it.
+///
+/// The T is what tells it from [`BLADE`] at a glance — a blade is one tapering box, and
+/// this is a handle with weight on the end. The three implements share the drawing and are
+/// told apart by colour, which is the same answer three raw materials already get; giving
+/// each its own silhouette is #175's business.
+///
+/// Drawn head-last so it sits over the haft, which is the order these arrays mean.
+const TOOL: [IconPart; 3] = [
+    // The haft, up the middle and slightly right of centre so the head has somewhere to
+    // overhang.
+    IconPart {
+        left: 44.0,
+        top: 26.0,
+        width: 12.0,
+        height: 54.0,
+        radius: 6.0,
+        shade: -0.42,
+        ..IconPart::PLAIN
+    },
+    // The head, across the top.
+    IconPart {
+        left: 20.0,
+        top: 20.0,
+        width: 60.0,
+        height: 20.0,
+        radius: 6.0,
+        shade: 0.22,
+        ..IconPart::PLAIN
+    },
+    // And the lit edge along the head's top, which is what stops it reading as a flat bar.
+    IconPart {
+        left: 20.0,
+        top: 20.0,
+        width: 60.0,
+        height: 7.0,
+        radius: 6.0,
+        shade: 0.52,
+        ..IconPart::PLAIN
+    },
+];
+
 /// The rectangles one shape is drawn from, in the order they are stacked.
 ///
 /// **Exhaustive, with no wildcard arm.** A fifth [`ItemShape`] does not compile until it
@@ -212,6 +254,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Material => &MATERIAL,
         ItemShape::Blade => &BLADE,
         ItemShape::Bundle => &BUNDLE,
+        ItemShape::Tool => &TOOL,
     }
 }
 
