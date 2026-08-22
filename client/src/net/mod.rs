@@ -150,12 +150,15 @@ impl ConnectionState {
     /// exhaustive while leaving the one state this client spends waiting for a person
     /// untested.
     ///
-    /// **What pins it is `the_list_holds_every_state` below**, which matches with no
-    /// wildcard arm: an eighth variant stops the tests compiling. That forces the
-    /// question to be asked, not the answer to be right — nothing makes the new variant
-    /// appear in the array except the person the failure sends here. It is the same
-    /// limit `HairModel::ALL` has, and unlike that one there is no contract underneath
-    /// to derive the list from: `ConnectionState` is this client's own vocabulary.
+    /// **What pins it is `the_list_holds_every_state` below**, which sets a flag per
+    /// variant through a wildcard-free match. An eighth variant stops that match
+    /// compiling, the arm written for it indexes past the flags, and the only edit that
+    /// makes the assertion pass again is adding the state here — so the list cannot fall
+    /// behind the enum, and no number can be bumped to quieten it.
+    ///
+    /// That is a stronger pin than `HairModel::ALL` gets from the compiler alone, and it
+    /// is available for the reason the other one needs a contract: the variants are
+    /// nameable here, because `ConnectionState` is this client's own vocabulary.
     pub(crate) fn every() -> Vec<Self> {
         vec![
             Self::Idle,
@@ -1879,26 +1882,32 @@ mod tests {
 
     /// The list [`ConnectionState::every`] hands the sweeps holds every variant.
     ///
-    /// The `match` is the whole test: no wildcard arm, so an eighth state fails to
-    /// compile here. The count is what catches the other direction — an entry deleted
-    /// or written twice, which a `match` over the values cannot see.
+    /// **A flag per variant, not a count**, and the difference is the whole test: seven
+    /// values with `Rejected` missing and `Idle` written twice counts to seven and covers
+    /// six states. A `match` over the values proves every variant has an *arm*, never that
+    /// every variant is *present*.
+    ///
+    /// What the two together buy is a chain of forced edits that ends in the right place.
+    /// An eighth variant stops the match compiling; the arm the author writes indexes past
+    /// the array; growing the array makes `all` fail; and the only thing that satisfies it
+    /// is adding the state to `every`. Nothing here can be quietened by editing a number.
     #[test]
     fn the_list_holds_every_state() {
-        let mut counted = 0;
+        let mut seen = [false; 7];
         for state in ConnectionState::every() {
             match state {
-                ConnectionState::Idle
-                | ConnectionState::Connecting
-                | ConnectionState::Handshaking
-                | ConnectionState::Choosing
-                | ConnectionState::Connected
-                | ConnectionState::Rejected { .. }
-                | ConnectionState::Disconnected => counted += 1,
+                ConnectionState::Idle => seen[0] = true,
+                ConnectionState::Connecting => seen[1] = true,
+                ConnectionState::Handshaking => seen[2] = true,
+                ConnectionState::Choosing => seen[3] = true,
+                ConnectionState::Connected => seen[4] = true,
+                ConnectionState::Rejected { .. } => seen[5] = true,
+                ConnectionState::Disconnected => seen[6] = true,
             }
         }
-        assert_eq!(
-            counted, 7,
-            "a state was added to `every` twice, or dropped from it"
+        assert!(
+            seen.iter().all(|seen| *seen),
+            "`every` is missing a state: {seen:?}"
         );
     }
 

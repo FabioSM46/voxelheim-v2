@@ -1023,6 +1023,21 @@ fn rebuild_rows(
         };
     }
 
+    // **A row index can outlive the list it was chosen from.** The focus is set once per
+    // exchange, on `is_added` — but a second `ServerCharacterList` inside one exchange
+    // replaces the resource without re-adding it, so a shorter list leaves `draft.row`
+    // pointing past its end. Every reader then finds nothing there: no row is highlighted
+    // and Enter does nothing, silently.
+    //
+    // Clamped here rather than at each reader, which is what the review of #163 asked for
+    // and is the better half of the choice it offered. The three guards this issue removed
+    // defended against a list that cannot decode; this defends against an index that is
+    // genuinely stale, and it does it where the change is known instead of masking it at
+    // one of the places that reads it.
+    if draft.row >= offered.len() {
+        draft.row = offered.len().saturating_sub(1);
+    }
+
     if *drawn == offered {
         return;
     }
@@ -1137,6 +1152,9 @@ fn navigate(
             // three guards that used to be here (`len().max(1)`, `min(count - 1)`, and
             // an `is_empty` on Escape) each covered a state that cannot decode, and
             // together they made a reachable list look like the uncertain case.
+            //
+            // A row index *can* outlive its list, which is a different thing and a real
+            // one — `rebuild_rows` clamps it there, where the list changing is known.
             let count = offered.len();
             if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::Tab) {
                 draft.row = wrap(draft.row, 1, count);
@@ -1652,6 +1670,56 @@ mod tests {
             labels[2].contains('3'),
             "the row says what the limit is: {labels:?}"
         );
+    }
+
+    /// A shorter list moves the focus onto a row that exists.
+    ///
+    /// The focus is chosen once per exchange, and a second `ServerCharacterList` replaces
+    /// `CharacterChoice` without re-adding it — so nothing would move a row index that the
+    /// new list is too short for. Every reader takes it through `offered.get`, which
+    /// answers `None`: no row highlighted, and Enter silently doing nothing. Found by the
+    /// review of #163, which is also why the clamp is in `rebuild_rows` rather than back
+    /// where the removed guards were.
+    #[test]
+    fn a_shorter_list_pulls_the_focus_back_onto_a_row() {
+        let mut app = headless(CharacterChoice::for_a_test(
+            vec![
+                character(900, "Eivor"),
+                character(7, "Sigrun"),
+                character(11, "Ulf"),
+            ],
+            3,
+        ));
+        app.update();
+
+        // The last row of three, chosen with the arrow keys.
+        app.world_mut().resource_mut::<Draft>().row = 2;
+        app.update();
+        assert_eq!(focused(&mut app), Some(Row::Play(11)));
+
+        // The server sends a shorter list inside the same exchange.
+        app.insert_resource(CharacterChoice::for_a_test(
+            vec![character(900, "Eivor")],
+            3,
+        ));
+        app.update();
+
+        assert_eq!(
+            draft(&app).row,
+            1,
+            "the focus stayed past the end of the list it was chosen from"
+        );
+        assert_eq!(
+            focused(&mut app),
+            Some(Row::Create),
+            "nothing is focused, so Enter does nothing and no row is drawn lit"
+        );
+    }
+
+    /// The row the screen would act on, read the way `navigate` and `refresh_screen` do.
+    fn focused(app: &mut App) -> Option<Row> {
+        let choice = app.world().resource::<CharacterChoice>().clone();
+        rows(&choice).get(draft(app).row).copied()
     }
 
     /// The list this screen navigates is never empty, which is what let three guards go.
