@@ -426,6 +426,13 @@ struct Swatch {
 #[derive(Component)]
 struct HairLabel;
 
+/// The panel the preview is drawn on.
+///
+/// Marked because the boxes being its **children** is load-bearing rather than
+/// incidental: see [`a_box_behind_the_body_still_draws_over_the_panel`].
+#[derive(Component)]
+struct PreviewFrame;
+
 /// One box of the drawn body: which part it belongs to, and which of that part's boxes
 /// it is.
 ///
@@ -784,6 +791,7 @@ fn spawn_preview(parent: &mut ChildSpawnerCommands<'_>) {
         .with_children(|column| {
             column
                 .spawn((
+                    PreviewFrame,
                     Node {
                         width: Val::Px(PREVIEW_WIDTH),
                         height: Val::Px(height),
@@ -1429,6 +1437,13 @@ fn refresh_screen(
         // The painter's algorithm a flat projection needs and a depth buffer would not:
         // what faces the viewer is drawn over what is behind it. Millimetres, because
         // `ZIndex` is an integer and the smallest gap in the rig is half a notch.
+        //
+        // **A box behind the body gets a negative rank, and that does not hide it behind
+        // the panel.** `ZIndex` sorts a node among its *siblings* only: Bevy pushes a
+        // parent onto the UI stack before any of its children, so every box draws over the
+        // frame whatever its rank. That is a property of the tree rather than of the
+        // number, and it is pinned as one — see
+        // [`a_box_behind_the_body_still_draws_over_the_panel`].
         let rank = ZIndex((box_.nearness() * 1000.0).round() as i32);
         if *depth != rank {
             *depth = rank;
@@ -1889,6 +1904,59 @@ mod tests {
             .map(|(row, _)| *row)
             .collect();
         assert_eq!(bright, vec![Row::Play(7)], "exactly one row is focused");
+    }
+
+    /// A box behind the body still draws over the panel it is drawn on.
+    ///
+    /// **The review of this pull request read a negative `ZIndex` as "behind the panel
+    /// background", and it is not.** The geometry half of that reading was right — the
+    /// Loose model's curtain is the box furthest back, it ranks at -175, and it genuinely
+    /// does peek out beside the neck between the shoulders and the jaw, so a bug there
+    /// would be visible. What makes it safe is structural: `ZIndex` sorts a node among its
+    /// **siblings**, and `bevy_ui::stack::update_uistack_recursive` pushes a parent onto
+    /// the UI stack before any of its children, so a child is drawn after its parent
+    /// whatever its rank.
+    ///
+    /// So this test does not assert a number. It asserts the two facts the safety rests
+    /// on — that a box really does sit behind the body, and that every box is a child of
+    /// the node carrying the panel's background — because the numeric reading is the one
+    /// somebody will arrive at again, and a tree that stopped being that shape would break
+    /// the preview silently.
+    #[test]
+    fn a_box_behind_the_body_still_draws_over_the_panel() {
+        let behind = body_boxes(BodyPart::Hair, HairModel::Loose)
+            .iter()
+            .map(|cell| placed_box(BodyPart::Hair, *cell))
+            .filter(|box_| box_.nearness() < 0.0)
+            .count();
+        assert!(
+            behind > 0,
+            "the Loose model is the one whose curtain falls behind the body"
+        );
+
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        let world = app.world_mut();
+
+        let mut frames = world.query_filtered::<Entity, With<PreviewFrame>>();
+        let panels: Vec<Entity> = frames.iter(world).collect();
+        assert_eq!(panels.len(), 1, "one panel holds the preview");
+
+        let mut drawn = world.query_filtered::<Entity, With<PreviewBox>>();
+        let boxes: Vec<Entity> = drawn.iter(world).collect();
+        assert!(!boxes.is_empty(), "the preview draws boxes");
+
+        let mut children = world.query::<&Children>();
+        let held: Vec<Entity> = children
+            .get(world, panels[0])
+            .expect("the panel has children")
+            .iter()
+            .collect();
+        for box_ in boxes {
+            assert!(
+                held.contains(&box_),
+                "a preview box is not a child of the panel it draws on, so its ZIndex is                  no longer sorted against its siblings alone"
+            );
+        }
     }
 
     /// **The preview wears what is being chosen**, part by part — which is what makes it

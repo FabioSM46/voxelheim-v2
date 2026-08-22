@@ -58,9 +58,10 @@ pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
     ChunkCoord, CraftRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
     InventoryStack, InventoryState, ItemDropState, LifeState, MineProgress, MineRequest, MobAction,
-    MobKind, MobState, PlaceStructureRequest, PlayerInput, PlayerVitals, RecipeId, RefusalReason,
-    RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams, Snapshot,
-    StructureKind, StructureState, WorldClock, WorldUpdate,
+    MobKind, MobState, PLACEHOLDER_APPEARANCE, PlaceStructureRequest, PlayerAppearance,
+    PlayerInput, PlayerVitals, RecipeId, RefusalReason, RefusedAction, Reject,
+    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
+    WorldClock, WorldUpdate,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
@@ -417,6 +418,32 @@ impl MineProgressInbox {
     }
 }
 
+/// Every appearance the net thread has decoded and the player module has not read yet.
+///
+/// A queue like the three above it, and drained the same way. **The order matters and is
+/// the wire's**: two appearances for one entity are the server correcting itself, and the
+/// one that means anything is the later one.
+///
+/// It is deliberately *not* keyed by entity here. A queue is what crossed the thread
+/// boundary; the cache of who looks like what belongs to the module that draws bodies,
+/// because it is that module that knows when a body has gone and the entry may go with it.
+#[derive(Resource, Debug, Default)]
+pub struct AppearanceInbox(Vec<PlayerAppearance>);
+
+impl AppearanceInbox {
+    /// Takes every queued appearance, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<PlayerAppearance> {
+        std::mem::take(&mut self.0)
+    }
+
+    /// Queues one as the net thread would. Test-only, so bodies can be dressed without
+    /// a socket.
+    #[cfg(test)]
+    pub fn push(&mut self, appearance: PlayerAppearance) {
+        self.0.push(appearance);
+    }
+}
+
 /// Every refusal the server has sent and the UI has not shown yet.
 ///
 /// A queue, like the three above it, and drained the same way — but the consumer keeps
@@ -728,6 +755,7 @@ impl Plugin for NetPlugin {
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
             .init_resource::<MineProgressInbox>()
+            .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
@@ -1046,6 +1074,7 @@ struct Inboxes<'w> {
     snapshots: ResMut<'w, SnapshotInbox>,
     inventories: ResMut<'w, InventoryInbox>,
     mining: ResMut<'w, MineProgressInbox>,
+    appearances: ResMut<'w, AppearanceInbox>,
     refusals: ResMut<'w, RefusalInbox>,
 }
 
@@ -1157,6 +1186,11 @@ fn drain_session_events(
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
+
+            // Queued for the player module, which is the only thing that knows whether
+            // there is a body to put it on yet. Not logged: one arrives per player per
+            // time they enter this session's view cube.
+            Ok(SessionEvent::Appearance(appearance)) => inboxes.appearances.0.push(appearance),
 
             // Queued for the UI rather than interpreted here. Not logged either: the one
             // half worth a log line is a refusal that says *this build* sent something the
@@ -3253,6 +3287,7 @@ mod tests {
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
             .init_resource::<MineProgressInbox>()
+            .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,
