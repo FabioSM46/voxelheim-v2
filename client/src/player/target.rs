@@ -672,12 +672,12 @@ fn send_block_edits(
 
     if mining.target != desired {
         if let Some(old) = mining.target {
-            send_mining(&mut outbound, old, false, cadence.client_tick);
+            send_mining(&mut outbound, old, false, held.slot(), cadence.client_tick);
         }
         mining.target = desired;
     }
     if tick_advanced && let Some(pos) = mining.target {
-        send_mining(&mut outbound, pos, true, cadence.client_tick);
+        send_mining(&mut outbound, pos, true, held.slot(), cadence.client_tick);
     }
 
     // Right stays a one-shot block edit. It remains a request only: neither the
@@ -728,10 +728,17 @@ fn send_block_edits(
     }
 }
 
+/// Sends one mining control frame.
+///
+/// **The slot is which, never what.** The server reads its own inventory for the item and
+/// its own table for what that item is worth against the block — a client that named a tool
+/// would be naming its own mining speed. It is the same `held.slot()` the block edit beside
+/// it sends, and mining was the one action on this wire that named no slot until #185.
 fn send_mining(
     outbound: &mut Option<ResMut<'_, Outbound>>,
     pos: IVec3,
     active: bool,
+    slot: u8,
     client_tick: u32,
 ) {
     let Some(outbound) = outbound.as_deref_mut() else {
@@ -745,6 +752,7 @@ fn send_mining(
         },
         active,
         client_tick,
+        slot,
     };
     match outbound.send(encode_mine_request(&request)) {
         Sent::Queued => {}

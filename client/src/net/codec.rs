@@ -781,6 +781,9 @@ pub enum RecipeId {
     Tent,
     Campfire,
     LeatherPatch,
+    Shovel,
+    Pickaxe,
+    Axe,
 }
 
 impl RecipeId {
@@ -800,6 +803,9 @@ impl RecipeId {
             Self::Tent => fb::RecipeID::Tent,
             Self::Campfire => fb::RecipeID::Campfire,
             Self::LeatherPatch => fb::RecipeID::LeatherPatch,
+            Self::Shovel => fb::RecipeID::Shovel,
+            Self::Pickaxe => fb::RecipeID::Pickaxe,
+            Self::Axe => fb::RecipeID::Axe,
         }
     }
 }
@@ -1027,6 +1033,12 @@ pub struct MineRequest {
     pub pos: BlockCoord,
     pub active: bool,
     pub client_tick: u32,
+    /// The inventory slot this player is mining with.
+    ///
+    /// Which slot, never what is in it: the server reads its own inventory for the item.
+    /// Appended in V8, and mining was the one action on this wire naming no slot — an
+    /// attack, a placement and a repair all already did.
+    pub slot: u8,
 }
 
 /// Authoritative progress for mining one voxel. `progress` is a fraction of 255.
@@ -2782,6 +2794,7 @@ pub fn encode_mine_request(request: &MineRequest) -> Vec<u8> {
     ));
     table.add_active(request.active);
     table.add_client_tick(request.client_tick);
+    table.add_slot(request.slot);
     let payload = table.finish();
 
     finish_envelope(builder, fb::Payload::MineRequest, payload.as_union_value())
@@ -6045,6 +6058,9 @@ mod tests {
             pos: BlockCoord { x: -8, y: 3, z: 99 },
             active: true,
             client_tick: 123,
+            // Not slot zero, so a field that was dropped on the way out reads as absent
+            // rather than as the value that happened to be the default.
+            slot: 5,
         };
         let frame = encode_mine_request(&request);
         assert_eq!(decode(&frame), Ok(Message::ClientOnly("MineRequest")));
@@ -6055,6 +6071,11 @@ mod tests {
         assert_eq!((pos.x(), pos.y(), pos.z()), (-8, 3, 99));
         assert!(wire.active());
         assert_eq!(wire.client_tick(), 123);
+        assert_eq!(
+            wire.slot(),
+            5,
+            "the slot the player is mining with never left the client"
+        );
     }
 
     #[test]
@@ -6334,6 +6355,9 @@ mod tests {
             (RecipeId::Tent, fb::RecipeID::Tent),
             (RecipeId::Campfire, fb::RecipeID::Campfire),
             (RecipeId::LeatherPatch, fb::RecipeID::LeatherPatch),
+            (RecipeId::Shovel, fb::RecipeID::Shovel),
+            (RecipeId::Pickaxe, fb::RecipeID::Pickaxe),
+            (RecipeId::Axe, fb::RecipeID::Axe),
         ];
 
         for (recipe, wire) in named {

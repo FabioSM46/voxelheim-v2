@@ -58,6 +58,7 @@ table PlayerInput {
 ///
 /// Decoder invariants the server enforces on this untrusted input:
 ///   - `pos` absent decodes as null / `None`: a protocol error, never the origin
+///   - `slot` must be < `ServerWelcome.inventory_slots`
 ///   - `client_tick` is ordering and staleness only, never a trusted clock
 table MineRequest {
   /// The voxel whose mining control changed, in world coordinates.
@@ -68,6 +69,19 @@ table MineRequest {
 
   /// The client's own tick counter, for ordering and staleness only.
   client_tick: uint;
+
+  /// The authoritative inventory slot the player is mining with.
+  ///
+  /// **Which slot, never what is in it.** The server reads its own inventory to find
+  /// the item and its own table to find what that item is worth against this block; a
+  /// client that named a tool would be naming its own mining speed.
+  ///
+  /// Appended in V8, and this was the one action that named no slot — an attack, a
+  /// placement and a repair all already do. Absent decodes as `0`, which is a real
+  /// hotbar slot rather than a sentinel, and that is deliberate: a client too old to
+  /// send one mines with slot zero rather than being refused, and mining with the wrong
+  /// implement is exactly bare hands. There is nothing a stale client can gain here.
+  slot: ubyte;
 }
 
 /// Authoritative mining progress for one voxel. Server -> client.
@@ -147,7 +161,14 @@ enum RecipeID : ubyte {
   SharpeningStone = 3,
   Tent = 4,
   Campfire = 5,
-  LeatherPatch = 6
+  LeatherPatch = 6,
+
+  // The three implements, appended in V8. Appended and never inserted, for the reason
+  // every member above was: the value is a byte on the wire, and a renumbering turns
+  // every craft a client asks for into a different one.
+  Shovel = 7,
+  Pickaxe = 8,
+  Axe = 9
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.

@@ -227,6 +227,11 @@ type MineRequest struct {
 	HasPos     bool
 	Active     bool
 	ClientTick uint32
+	// Slot is the inventory slot the player is mining with. Which slot, never what is in
+	// it: the server reads its own inventory for the item. Absent on the wire decodes as
+	// 0, a real hotbar slot rather than a sentinel — see the field's own note in
+	// schemas/player.fbs.
+	Slot uint8
 }
 
 // MineProgress is authoritative mining progress sent to a client. Progress is
@@ -867,6 +872,7 @@ func Decode(frame []byte) (msg Message, err error) {
 		mine := &MineRequest{
 			Active:     request.Active(),
 			ClientTick: request.ClientTick(),
+			Slot:       request.Slot(),
 		}
 		if pos := request.Pos(nil); pos != nil {
 			mine.Pos, mine.HasPos = [3]int32{pos.X(), pos.Y(), pos.Z()}, true
@@ -1570,6 +1576,7 @@ func EncodeMineRequest(r MineRequest) []byte {
 	}
 	vnet.MineRequestAddActive(b, r.Active)
 	vnet.MineRequestAddClientTick(b, r.ClientTick)
+	vnet.MineRequestAddSlot(b, r.Slot)
 	request := vnet.MineRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadMineRequest, request)

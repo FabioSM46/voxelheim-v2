@@ -1550,6 +1550,12 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// Appended after Tent = 4.
 		"RecipeID.Campfire":     {byte(vnet.RecipeIDCampfire), 5},
 		"RecipeID.LeatherPatch": {byte(vnet.RecipeIDLeatherPatch), 6},
+
+		// V8's three, appended after LeatherPatch = 6. The value is a byte on the wire,
+		// so a renumbering turns every craft a client asks for into a different one.
+		"RecipeID.Shovel":  {byte(vnet.RecipeIDShovel), 7},
+		"RecipeID.Pickaxe": {byte(vnet.RecipeIDPickaxe), 8},
+		"RecipeID.Axe":     {byte(vnet.RecipeIDAxe), 9},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1562,7 +1568,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]int{
 		"MobKind":       {len(vnet.EnumNamesMobKind), 3},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 7},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 10},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])

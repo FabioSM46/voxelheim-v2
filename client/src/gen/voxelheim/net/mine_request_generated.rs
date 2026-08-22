@@ -15,6 +15,7 @@ pub enum MineRequestOffset {}
 ///
 /// Decoder invariants the server enforces on this untrusted input:
 ///   - `pos` absent decodes as null / `None`: a protocol error, never the origin
+///   - `slot` must be < `ServerWelcome.inventory_slots`
 ///   - `client_tick` is ordering and staleness only, never a trusted clock
 pub struct MineRequest<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
@@ -34,6 +35,7 @@ impl<'a> MineRequest<'a> {
     pub const VT_POS: ::flatbuffers::VOffsetT = 4;
     pub const VT_ACTIVE: ::flatbuffers::VOffsetT = 6;
     pub const VT_CLIENT_TICK: ::flatbuffers::VOffsetT = 8;
+    pub const VT_SLOT: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -54,6 +56,7 @@ impl<'a> MineRequest<'a> {
         if let Some(x) = args.pos {
             builder.add_pos(x);
         }
+        builder.add_slot(args.slot);
         builder.add_active(args.active);
         builder.finish()
     }
@@ -90,6 +93,24 @@ impl<'a> MineRequest<'a> {
                 .unwrap()
         }
     }
+    /// The authoritative inventory slot the player is mining with.
+    ///
+    /// **Which slot, never what is in it.** The server reads its own inventory to find
+    /// the item and its own table to find what that item is worth against this block; a
+    /// client that named a tool would be naming its own mining speed.
+    ///
+    /// Appended in V8, and this was the one action that named no slot — an attack, a
+    /// placement and a repair all already do. Absent decodes as `0`, which is a real
+    /// hotbar slot rather than a sentinel, and that is deliberate: a client too old to
+    /// send one mines with slot zero rather than being refused, and mining with the wrong
+    /// implement is exactly bare hands. There is nothing a stale client can gain here.
+    #[inline]
+    pub fn slot(&self) -> u8 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe { self._tab.get::<u8>(MineRequest::VT_SLOT, Some(0)).unwrap() }
+    }
 }
 
 impl ::flatbuffers::Verifiable for MineRequest<'_> {
@@ -102,6 +123,7 @@ impl ::flatbuffers::Verifiable for MineRequest<'_> {
             .visit_field::<BlockCoord>("pos", Self::VT_POS, false)?
             .visit_field::<bool>("active", Self::VT_ACTIVE, false)?
             .visit_field::<u32>("client_tick", Self::VT_CLIENT_TICK, false)?
+            .visit_field::<u8>("slot", Self::VT_SLOT, false)?
             .finish();
         Ok(())
     }
@@ -110,6 +132,7 @@ pub struct MineRequestArgs<'a> {
     pub pos: Option<&'a BlockCoord>,
     pub active: bool,
     pub client_tick: u32,
+    pub slot: u8,
 }
 impl<'a> Default for MineRequestArgs<'a> {
     #[inline]
@@ -118,6 +141,7 @@ impl<'a> Default for MineRequestArgs<'a> {
             pos: None,
             active: false,
             client_tick: 0,
+            slot: 0,
         }
     }
 }
@@ -143,6 +167,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MineRequestBuilder<'a, 'b, A>
             .push_slot::<u32>(MineRequest::VT_CLIENT_TICK, client_tick, 0);
     }
     #[inline]
+    pub fn add_slot(&mut self, slot: u8) {
+        self.fbb_.push_slot::<u8>(MineRequest::VT_SLOT, slot, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> MineRequestBuilder<'a, 'b, A> {
@@ -165,6 +193,7 @@ impl ::core::fmt::Debug for MineRequest<'_> {
         ds.field("pos", &self.pos());
         ds.field("active", &self.active());
         ds.field("client_tick", &self.client_tick());
+        ds.field("slot", &self.slot());
         ds.finish()
     }
 }

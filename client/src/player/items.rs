@@ -20,7 +20,9 @@
 //! anything.
 
 use super::combat::ITEM_RUSTY_SWORD;
-use super::crafting::{ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
+use super::crafting::{
+    ITEM_AXE, ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
+};
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use crate::world::palette;
 
@@ -83,6 +85,19 @@ pub(crate) enum ItemShape {
     /// means something different while one is in hand — a structure rather than a voxel —
     /// and the hand is where a player sees which of the two they are about to ask for.
     Bundle,
+    /// A haft with a head on it: a shovel, a pickaxe, an axe.
+    ///
+    /// **One shape for the three, and they are told apart by colour**, which is the same
+    /// answer three raw materials already get. `ItemShape` is a vocabulary of *kinds* —
+    /// four of them before this — rather than a picture per item, and three silhouettes
+    /// would be three meshes and three drawings for a difference #175 is the issue for.
+    ///
+    /// It is a shape of its own rather than a `Blade` because the difference is the one
+    /// that matters in the hand: a blade is what the left button swings, and an implement
+    /// is emphatically not — an implement does no melee damage at all, which the server's
+    /// registry says with a zero. A shape is not a capability, and drawing them alike
+    /// would be inviting the reader to think it was.
+    Tool,
 }
 
 impl ItemShape {
@@ -109,7 +124,13 @@ impl ItemShape {
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 4] = [Self::Block, Self::Material, Self::Blade, Self::Bundle];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Block,
+        Self::Material,
+        Self::Blade,
+        Self::Bundle,
+        Self::Tool,
+    ];
 }
 
 /// Everything this client has an opinion about for one item id.
@@ -147,7 +168,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 15] = [
+pub(super) const ITEMS: [ItemDisplay; 18] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -257,6 +278,29 @@ pub(super) const ITEMS: [ItemDisplay; 15] = [
         item_id: ITEM_LEATHER_PATCH,
         name: "leather patch",
         shape: ItemShape::Material,
+        palette_id: palette::LOG,
+    },
+    // The three implements, one shape and three swatches — which is what stops them being
+    // three identical cells, exactly as it does for the bone, the pelt and the patch above.
+    // Each swatch is the ground its tool is for, so what a player reads off the colour is
+    // the thing the tool is good at: earth for the shovel, stone for the pickaxe, wood for
+    // the axe.
+    ItemDisplay {
+        item_id: ITEM_SHOVEL,
+        name: "shovel",
+        shape: ItemShape::Tool,
+        palette_id: palette::DIRT,
+    },
+    ItemDisplay {
+        item_id: ITEM_PICKAXE,
+        name: "pickaxe",
+        shape: ItemShape::Tool,
+        palette_id: palette::STONE,
+    },
+    ItemDisplay {
+        item_id: ITEM_AXE,
+        name: "axe",
+        shape: ItemShape::Tool,
         palette_id: palette::LOG,
     },
 ];
@@ -389,6 +433,9 @@ mod tests {
             ITEM_BONE,
             ITEM_VARGR_PELT,
             ITEM_LEATHER_PATCH,
+            ITEM_SHOVEL,
+            ITEM_PICKAXE,
+            ITEM_AXE,
         ];
         for item_id in declared {
             assert!(

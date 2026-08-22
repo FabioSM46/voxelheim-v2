@@ -51,6 +51,15 @@ pub(super) const ITEM_SHARPENING_STONE: u16 = 11;
 /// so this constant cannot make another item mend and cannot make this one legal.
 pub(super) const ITEM_LEATHER_PATCH: u16 = 15;
 
+/// The three implements, mirrored from `game.ItemShovel`, `ItemPickaxe` and `ItemAxe`.
+///
+/// Appended after the leather patch for the reason every id here is appended: the server's
+/// `iota` renumbers everything below an insertion, and these numbers are already in a
+/// player's inventory the moment somebody makes one.
+pub(super) const ITEM_SHOVEL: u16 = 16;
+pub(super) const ITEM_PICKAXE: u16 = 17;
+pub(super) const ITEM_AXE: u16 = 18;
+
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ingredient {
@@ -103,7 +112,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 6] = [
+pub const RECIPES: [Recipe; 9] = [
     Recipe {
         id: RecipeId::Forge,
         ingredients: &[
@@ -209,6 +218,55 @@ pub const RECIPES: [Recipe; 6] = [
             count: 1,
         },
         station: None,
+    },
+    // The three implements. One price three times, because #185 ruled out tiers — a
+    // difference between them would be a ladder nobody chose. Cheaper than the blade the
+    // same forge makes, which is what puts a tool first in the order somebody builds
+    // things in.
+    Recipe {
+        id: RecipeId::Shovel,
+        ingredients: TOOL_COST,
+        product: Ingredient {
+            item_id: ITEM_SHOVEL,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
+    },
+    Recipe {
+        id: RecipeId::Pickaxe,
+        ingredients: TOOL_COST,
+        product: Ingredient {
+            item_id: ITEM_PICKAXE,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
+    },
+    Recipe {
+        id: RecipeId::Axe,
+        ingredients: TOOL_COST,
+        product: Ingredient {
+            item_id: ITEM_AXE,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
+    },
+];
+
+/// What each of the three implements costs, spelled once.
+///
+/// One constant rather than three identical arrays, because the sameness is the decision:
+/// #185 ruled out tiers, so three prices that happened to match would be three chances for
+/// one of them to stop matching. **This mirrors the server and decides nothing** — the
+/// authoritative price is `recipeTable` in `internal/game/craft.go`, and
+/// `the_mirror_agrees_with_the_contract` is what keeps the two in step.
+const TOOL_COST: &[Ingredient] = &[
+    Ingredient {
+        item_id: ITEM_RAW_IRON,
+        count: 1,
+    },
+    Ingredient {
+        item_id: ITEM_LOG,
+        count: 2,
     },
 ];
 

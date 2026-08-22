@@ -21,6 +21,7 @@ use super::camera::{ViewMode, WorldCamera};
 use super::combat::SwingSent;
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
+use super::merge_all;
 use super::target::{ApplyTargetInput, BlockTarget};
 use crate::net::Session;
 use crate::world::palette;
@@ -51,6 +52,35 @@ const BLADE_SIZE: Vec3 = Vec3::new(0.012, 0.115, 0.030);
 /// A carried structure: a bundle, wider than it is tall, so a tent under the arm does not
 /// read as another stackable cube.
 const BUNDLE_SIZE: Vec3 = Vec3::new(0.075, 0.042, 0.048);
+
+/// An implement's haft: longer and thicker than a blade, because what tells a shovel from
+/// a sword at a glance is that one is a handle with weight on the end and the other is
+/// mostly edge.
+const TOOL_HAFT_SIZE: Vec3 = Vec3::new(0.014, 0.130, 0.014);
+
+/// And its head, across the top of that haft. Wider than the haft in x and z and short in
+/// y, which is the T a shovel, a pickaxe and an axe all share — and the whole of what
+/// distinguishes the silhouette from [`BLADE_SIZE`]'s single tapering box.
+const TOOL_HEAD_SIZE: Vec3 = Vec3::new(0.052, 0.020, 0.026);
+
+/// A haft with a head across the top of it: one mesh, two boxes.
+///
+/// Merged rather than parented, for the reason the body's parts are merged in
+/// `player::part_mesh`: the view model is one entity with one transform that
+/// `animate_view_model` drives, and a second entity under it would be a second thing to
+/// keep in step with a swing.
+///
+/// The three implements share it and are told apart by colour — see [`ItemShape::Tool`].
+fn tool_mesh() -> Mesh {
+    let mut merged = Mesh::from(Cuboid::from_size(TOOL_HAFT_SIZE));
+    let head = Mesh::from(Cuboid::from_size(TOOL_HEAD_SIZE)).translated_by(Vec3::new(
+        0.0,
+        TOOL_HAFT_SIZE.y / 2.0,
+        0.0,
+    ));
+    merge_all(&mut merged, [head], "held tool");
+    merged
+}
 
 pub(super) struct HandsPlugin;
 
@@ -107,6 +137,7 @@ struct HandVisuals {
     material: Handle<Mesh>,
     blade: Handle<Mesh>,
     bundle: Handle<Mesh>,
+    tool: Handle<Mesh>,
     materials: Vec<([f32; 4], Handle<StandardMaterial>)>,
 }
 
@@ -118,6 +149,7 @@ impl HandVisuals {
             Some(ItemShape::Material) => self.material.clone(),
             Some(ItemShape::Blade) => self.blade.clone(),
             Some(ItemShape::Bundle) => self.bundle.clone(),
+            Some(ItemShape::Tool) => self.tool.clone(),
         }
     }
 
@@ -172,6 +204,7 @@ fn spawn_view_model(
         material: meshes.add(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
         blade: meshes.add(Cuboid::from_size(BLADE_SIZE)),
         bundle: meshes.add(Cuboid::from_size(BUNDLE_SIZE)),
+        tool: meshes.add(tool_mesh()),
         materials: Vec::new(),
     };
     let appearance = selected_appearance(None);
