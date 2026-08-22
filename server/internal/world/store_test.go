@@ -1160,3 +1160,24 @@ func TestNewRecordWritesTheBytesTheStoresUsedToWriteThemselves(t *testing.T) {
 		t.Errorf("CheckHeader refused what NewRecord wrote: %v", err)
 	}
 }
+
+// TestNewRecordRefusesAHeaderTooSmallToHoldOne is the review of #139's finding, pinned.
+//
+// The doc comment claimed the slice was the guard. It is not: `buf[4:HeaderSize]` is out of
+// bounds only when the whole record is shorter than a header, so a short header with a long
+// body stays in range and the version lands in the caller's first body bytes — a corrupt
+// record written by the package that exists to refuse them, and written silently.
+func TestNewRecordRefusesAHeaderTooSmallToHoldOne(t *testing.T) {
+	// The case that did *not* panic before: 2 + 100 + 4 is a long buffer, so the slice was
+	// happily in bounds and wrote over what the caller thought was its own.
+	defer func() {
+		got := recover()
+		if got == nil {
+			t.Fatal("NewRecord accepted a 2-byte header and wrote the version into the body")
+		}
+		if msg, ok := got.(string); !ok || !strings.Contains(msg, "smaller than") {
+			t.Errorf("panicked with %v, which does not say what the caller got wrong", got)
+		}
+	}()
+	_ = NewRecord(2, 100, [4]byte{'V', 'X', 'H', 'T'}, 1)
+}

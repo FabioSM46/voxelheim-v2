@@ -680,10 +680,20 @@ func decodeChunkFile(want Coord, data []byte) (map[int]Block, error) {
 // the header and before the checksum. The caller fills both and calls [PutChecksum] last,
 // which is the one step that has to happen after the body is written.
 //
-// A headerSize below [HeaderSize] is a caller bug rather than a corrupt file, and it is
-// left to panic on the slice: every caller passes a constant, so it cannot survive that
-// store's own tests.
+// A headerSize below [HeaderSize] panics, and the check is explicit because the slice is
+// not one. `buf[4:HeaderSize]` is out of bounds only when the *whole record* is shorter
+// than a header — so a two-byte header with a hundred-byte body stays in range and writes
+// the version over the caller's first body bytes instead, which is silent corruption of a
+// record in the one package whose job is refusing corrupt records. Found by the review of
+// #139, where this comment claimed the slice was the guard.
+//
+// A panic rather than an error: every caller passes a constant, so this is a build that
+// cannot store anything correctly rather than a file that cannot be read.
 func NewRecord(headerSize, bodyLen int, magic [4]byte, version uint32) []byte {
+	if headerSize < HeaderSize {
+		panic(fmt.Sprintf("world.NewRecord: headerSize %d is smaller than the %d-byte record header",
+			headerSize, HeaderSize))
+	}
 	buf := make([]byte, headerSize+bodyLen+ChecksumSize)
 	copy(buf[0:4], magic[:])
 	binary.LittleEndian.PutUint32(buf[4:HeaderSize], version)
