@@ -168,6 +168,13 @@ fn rusted_blade_mesh() -> Mesh {
     // Each mark stands a hair proud of the blade's faces, for the reason the rig's hair does:
     // two surfaces sharing a plane is where a renderer has to choose, and it chooses per
     // frame. A twentieth of the blade's thinnest dimension is enough and is invisible.
+    //
+    // The mark is therefore thicker than the blade and centred on it, so **one mark wraps
+    // both flat faces** rather than sitting on one of them. That is what `proud` forces
+    // rather than something it permits: a mark pushed onto a single face travels half of
+    // `proud` to get there, which lands its *other* face exactly on the plane of the
+    // blade's — coplanar, differently coloured, overlapping, which is the flicker rule 2 in
+    // `client/AGENTS.md` names for the body rig, arriving here by the same door.
     let proud = BLADE_SIZE.x * 0.05;
     let mark = Vec3::new(
         BLADE_SIZE.x + proud,
@@ -178,8 +185,9 @@ fn rusted_blade_mesh() -> Mesh {
         .into_iter()
         .enumerate()
         .map(|(index, height)| {
-            // Alternating sides, so the blade is not rusted down one face and clean down the
-            // other — which is what a single column of marks would look like as it turns.
+            // Alternating across the blade's *width*, so the three do not read as one
+            // stripe down the middle of it as it turns. Not across its two faces: every
+            // mark is on both of those, for the reason above.
             let side = if index % 2 == 0 { 1.0 } else { -1.0 };
             rusted(Mesh::from(Cuboid::from_size(mark)).translated_by(Vec3::new(
                 0.0,
@@ -636,6 +644,101 @@ mod tests {
             "the plain blade carries vertex colours, so it is no longer simply its material"
         );
         assert_ne!(rusted, plain, "both swords share one mesh");
+    }
+
+    /// **Every rust mark wraps the blade; what alternates is where the three sit across it.**
+    ///
+    /// Pinned because neither half is what a reader guesses from `side`. A mark is thicker
+    /// than the blade and centred on it, so it stands proud of *both* flat faces; offsetting
+    /// one onto a single face instead would land its other face exactly on the plane of the
+    /// blade's — coplanar, differently coloured, overlapping — which is the flicker `proud`
+    /// exists to prevent. So this fails in that direction as readily as in the direction of
+    /// losing the stagger, which is the point of asserting the geometry rather than the
+    /// comment.
+    #[test]
+    fn every_rust_mark_wraps_the_blade_and_the_three_stagger_across_its_width() {
+        let mut app = app();
+        app.update();
+
+        let rusted = app.world().resource::<HandVisuals>().rusted_blade.clone();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&rusted).expect("the rusted blade mesh");
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the rusted blade must carry Float32x3 positions");
+        };
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the rusted blade must carry Float32x4 colours");
+        };
+
+        // Quantised for the reason `tints` quantises: these pick vertices out by identity
+        // rather than measuring them.
+        let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
+        let marks: Vec<[f32; 3]> = positions
+            .iter()
+            .zip(colours)
+            .filter(|(_, colour)| colour.map(|channel| (channel * 255.0).round() as u8) == rust)
+            .map(|(position, _)| *position)
+            .collect();
+        assert!(!marks.is_empty(), "no vertex carries the rust tint");
+
+        // Grouped into marks by the y planes they sit on: a box contributes exactly two,
+        // and the three heights do not meet. Asked of each mark rather than of all of them
+        // together, because the aggregate span is wide enough to pass while every single
+        // mark sits on one face — which is exactly the shape being ruled out.
+        let plane = |value: f32| (value * 1e6).round() as i32;
+        let mut heights: Vec<i32> = marks.iter().map(|p| plane(p[1])).collect();
+        heights.sort_unstable();
+        heights.dedup();
+        assert!(
+            heights.len() >= 2 && heights.len().is_multiple_of(2),
+            "the rust sits on {} y planes, which is not a whole number of marks",
+            heights.len()
+        );
+
+        // Both faces: each mark reaches past the blade's own thickness on each side of it.
+        let half = BLADE_SIZE.x / 2.0;
+        for (index, bounds) in heights.chunks(2).enumerate() {
+            let [bottom, top] = bounds else {
+                unreachable!("an even number of planes chunks into pairs")
+            };
+            let one: Vec<[f32; 3]> = marks
+                .iter()
+                .copied()
+                .filter(|p| plane(p[1]) == *bottom || plane(p[1]) == *top)
+                .collect();
+            let min_x = one.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+            let max_x = one.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                min_x < -half && max_x > half,
+                "mark {index} spans x {min_x}..{max_x} against a blade of ±{half}, so it \
+                 sits on one face instead of wrapping both"
+            );
+        }
+
+        // Staggered: three marks in one column would put every rust vertex on the same two
+        // z planes.
+        let mut planes: Vec<i32> = marks.iter().map(|p| plane(p[2])).collect();
+        planes.sort_unstable();
+        planes.dedup();
+        assert!(
+            planes.len() > 2,
+            "the rust sits on {} z planes, so the three marks are one column down the width",
+            planes.len()
+        );
+
+        // And clear of both edges, which is what keeps a mark reading as a patch rather
+        // than as a chipped edge.
+        let edge = BLADE_SIZE.z / 2.0;
+        let min_z = marks.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+        let max_z = marks.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            min_z > -edge && max_z < edge,
+            "the rust spans z {min_z}..{max_z} against edges at ±{edge}, so a mark touches one"
+        );
     }
 
     /// The rust reaches the screen only for the sword it belongs to.
