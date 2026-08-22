@@ -41,7 +41,7 @@
 //! | `target.rs` | the voxel raycast, mining intent/progress, placement and outline |
 //! | `structures.rs` | the tents and forges a snapshot names, and the two requests for one |
 //! | `constants.rs` | the numbers, and which of them mirror the server |
-//! | `appearance.rs` | which part of a body each appearance colour covers, and where it sits |
+//! | `appearance.rs` | the rig: which box each appearance colour covers, and where it sits |
 
 mod appearance;
 mod camera;
@@ -65,7 +65,10 @@ use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
-pub(crate) use appearance::{BodyPart, parts as body_parts};
+pub(crate) use appearance::{
+    BodyPart, PlacedBox, boxes as body_boxes, envelope as body_envelope, placed as placed_box,
+    slots as body_slots,
+};
 
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
 pub use interpolate::SnapshotBuffer;
