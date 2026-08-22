@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -48,29 +49,56 @@ type MiningCompletion struct {
 // Pos reports the voxel this completion names, for delivery and diagnostics.
 func (c MiningCompletion) Pos() [3]int32 { return c.pos }
 
-// hardnessTicks is the one authoritative cost table for mining by hand.
+// handMiningTimes is the one authoritative cost table for mining by hand.
+//
+// **Durations, not tick counts, and that is not a stylistic choice.** The tick rate is an
+// operator's flag; a table written in ticks would mean four fifths of these times at 25 Hz
+// and two thirds at 30, so the same block would take a different number of seconds on a
+// server nobody had retuned. [ticksFor] converts each one at [NewSim], exactly as the
+// species registry converts a telegraph.
+//
+// **These are four times what they used to be, and the previous numbers are not thrown
+// away — they become the times a tool brings you back to.** They were tuned by somebody
+// feeling the game and they felt right for a player holding the right implement; they were
+// simply attached to the wrong hand, so dirt went in three tenths of a second and a log in
+// six. Four is large enough that a shovel will be a decision and small enough that the
+// world is still playable before one exists, which is the world today: no tool of any kind
+// is in the item registry yet. Adding them, and the multiplier that spends this headroom,
+// is the other half of the same decision — see #185, which must not be tuned alone.
+//
+// Air and unknown ids are absent rather than zero: not breakable, and therefore no cost.
+var handMiningTimes = map[world.Block]time.Duration{
+	world.Leaves:  400 * time.Millisecond,
+	world.Grass:   600 * time.Millisecond,
+	world.Dirt:    1200 * time.Millisecond,
+	world.Snow:    1200 * time.Millisecond,
+	world.Log:     2400 * time.Millisecond,
+	world.Stone:   4 * time.Second,
+	world.CoalOre: 6 * time.Second,
+	world.IronOre: 8 * time.Second,
+}
+
+// handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
+//
+// Derived once and kept on the simulation, for the reason `mobTimings` is: a conversion
+// repeated per request would be the same arithmetic on every mining refresh, and a table
+// that disagreed with itself between two calls would be a block whose cost changed while a
+// player was paying it.
+func handMiningTicksFor(tickRate uint8) map[world.Block]int {
+	costs := make(map[world.Block]int, len(handMiningTimes))
+	for block, d := range handMiningTimes {
+		costs[block] = int(ticksFor(d, tickRate))
+	}
+	return costs
+}
+
+// hardnessTicks is what one block costs this simulation to break by hand.
 //
 // Tools will multiply the returned cost; they do not need another state machine or
-// another table. Air and unknown ids are not breakable and therefore have no cost.
-func hardnessTicks(block world.Block) (int, bool) {
-	switch block {
-	case world.Leaves:
-		return 2, true
-	case world.Grass:
-		return 3, true
-	case world.Dirt, world.Snow:
-		return 6, true
-	case world.Log:
-		return 12, true
-	case world.Stone:
-		return 20, true
-	case world.CoalOre:
-		return 30, true
-	case world.IronOre:
-		return 40, true
-	default:
-		return 0, false
-	}
+// another table.
+func (s *Sim) hardnessTicks(block world.Block) (int, bool) {
+	cost, breakable := s.hardness[block]
+	return cost, breakable
 }
 
 // Mine accepts one refresh, target change or cancellation of mining intent.
@@ -147,7 +175,7 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 		// non-blocking seam the tick is forbidden to cross.
 		return errors.New("the target chunk is not resident")
 	}
-	cost, breakable := hardnessTicks(block)
+	cost, breakable := p.sim.hardnessTicks(block)
 	if !breakable {
 		return fmt.Errorf("block %d at the target is not breakable", uint16(block))
 	}

@@ -107,7 +107,11 @@ func mineAt(t *testing.T, h *harness, player *game.Player, pos [3]int32) game.Ed
 		return result
 	}
 
-	for range 100 {
+	// Generous against the slowest block in the table rather than a round number: iron ore
+	// costs eight seconds by hand, and a bound that happened to sit above it before #178
+	// raised the table is a bound that fails the next time somebody retunes one.
+	const budget = 400
+	for range budget {
 		h.clientTick++
 		request := protocol.MineRequest{Pos: pos, HasPos: true, Active: true, ClientTick: h.clientTick}
 		if err := player.Mine(request, true); err != nil {
@@ -131,7 +135,7 @@ func mineAt(t *testing.T, h *harness, player *game.Player, pos [3]int32) game.Ed
 		}
 	}
 
-	t.Fatalf("mining at %v did not complete in 100 ticks", pos)
+	t.Fatalf("mining at %v did not complete in %d ticks", pos, budget)
 	return game.EditResult{}
 }
 
@@ -616,16 +620,37 @@ func TestAnEditorFailureIsARefusal(t *testing.T) {
 		_, completeErr := player.CompleteMining(context.Background(), completion)
 		result <- completeErr
 	}()
-	for tick := uint64(1); tick <= 20; tick++ {
+	// Mine until the refusal arrives rather than for a fixed number of ticks. This test is
+	// about what a failing editor does, not about how long a block takes — and a tick count
+	// written here is a hardness number restated in a file that has no business knowing one.
+	// It was 20, which stopped being enough the moment #178 raised the table.
+	const budget = 400
+	var refusal error
+	done := false
+	for tick := uint64(1); tick <= budget && !done; tick++ {
 		if err := player.Mine(protocol.MineRequest{
 			Pos: [3]int32{3, 200, 0}, HasPos: true, Active: true, ClientTick: uint32(tick),
 		}, true); err != nil {
-			t.Fatalf("Mine: %v", err)
+			// The target has paid its cost and the write is in flight, which is the state
+			// this loop exists to reach. Stop asking and wait for what the editor said.
+			break
 		}
 		sim.Step(tick)
+		select {
+		case refusal = <-result:
+			done = true
+		default:
+		}
 	}
-	if err := <-result; !errors.Is(err, errEditorRefused) {
-		t.Fatalf("CompleteMining returned %v, want the editor's own error", err)
+	if !done {
+		select {
+		case refusal = <-result:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("mining did not reach the editor in %d ticks", budget)
+		}
+	}
+	if !errors.Is(refusal, errEditorRefused) {
+		t.Fatalf("CompleteMining returned %v, want the editor's own error", refusal)
 	}
 }
 

@@ -349,7 +349,13 @@ func mineRequest(pos [3]int32, clientTick uint32) []byte {
 func mineUntilBreak(t *testing.T, conn *fakeConn, frames *collector, sim *game.Sim, pos [3]int32, clientTick *uint32, serverTick *uint64) {
 	t.Helper()
 	before := len(frames.blockUpdates())
-	for range 100 {
+	// Generous against the slowest block in the hardness table rather than a round number.
+	// This was 100, which sat comfortably above every cost until #178 raised the table and
+	// iron ore went to 160 ticks — a budget tuned against numbers in another package, with
+	// nothing here to say so. It breaks out on the first BlockUpdate, so the size costs
+	// nothing on the ordinary path.
+	const mineBudget = 400
+	for range mineBudget {
 		*clientTick++
 		conn.in <- mineRequest(pos, *clientTick)
 		// Serve owns a different goroutine. Let it install the refresh before the tick;
@@ -362,7 +368,7 @@ func mineUntilBreak(t *testing.T, conn *fakeConn, frames *collector, sim *game.S
 			return
 		}
 	}
-	t.Fatalf("mining %v produced no BlockUpdate in 100 ticks", pos)
+	t.Fatalf("mining %v produced no BlockUpdate in %d ticks", pos, mineBudget)
 }
 
 // tickUntilDone steps the simulation while it waits, and fails the test if the
@@ -826,7 +832,10 @@ func TestTwoSessionsMineOneChunkWhileTheTickLoopReadsIt(t *testing.T) {
 	first, firstFrames := admit(t, cfg, chunks, sim, peers, 1)
 	second, secondFrames := admit(t, cfg, chunks, sim, peers, 2)
 
-	for tick := uint32(1); tick <= 60; tick++ {
+	// Same reasoning as mineBudget above: bounded generously against the hardness table
+	// rather than against a number that happened to fit before it was retuned. The loop
+	// leaves as soon as both sessions have their block updates.
+	for tick := uint32(1); tick <= 400; tick++ {
 		first.in <- mineRequest(targets[0], tick)
 		second.in <- mineRequest(targets[1], tick)
 		time.Sleep(time.Millisecond)
