@@ -114,6 +114,12 @@ impl ItemShape {
     /// principle fall behind the enum. That would cost a sweep some coverage and nothing
     /// more, because the coverage that matters is the compiler's.
     ///
+    /// **It has a runtime reader now, and that reader is what makes it stronger than a
+    /// sweep.** `player::drops::create_visuals` builds one mesh per entry, so a shape
+    /// missing from this array is a shape no dropped item can be drawn as — not a test
+    /// that covers less, but a pelt nobody can see on the ground. It was `#[cfg(test)]`
+    /// until #182 for want of anybody needing it.
+    ///
     /// **It cannot be pinned the way `net::codec::HairModel::ALL` now is, and the reason
     /// is not effort.** That list is derived from `fb::HairModel::ENUM_VALUES` — flatc's
     /// output, regenerated from the schema — so the contract answers what belongs in it.
@@ -123,7 +129,6 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 5] = [
         Self::Block,
         Self::Material,

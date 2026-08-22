@@ -14,6 +14,8 @@ use bevy::prelude::*;
 
 use super::InputMode;
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
+use super::items::{ItemShape, item_palette_id, item_shape};
+use super::merge_all;
 use crate::net::Session;
 use crate::world::palette;
 
@@ -41,17 +43,47 @@ const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Men
 /// grow this resource by walking through all 65,535 unknown ids over time.
 #[derive(Resource, Debug)]
 pub(super) struct DropVisuals {
-    cube: Handle<Mesh>,
+    /// One mesh per [`ItemShape`], shared by every drop presenting as that shape — the
+    /// same bound the body rig keeps, and the reason a hundred dropped stones cost one
+    /// mesh rather than a hundred.
+    shapes: Vec<(ItemShape, Handle<Mesh>)>,
     materials: Vec<([f32; 4], Handle<StandardMaterial>)>,
 }
 
 impl DropVisuals {
+    /// The mesh one item id is drawn from.
+    ///
+    /// Read through [`item_shape`] — the same table the held view model and the inventory
+    /// cell read, and this is its third reader rather than a second opinion. An id with no
+    /// row answers [`ItemShape::Material`], which that function documents as the least
+    /// wrong guess.
+    fn mesh_for(&self, item_id: u16) -> Handle<Mesh> {
+        let shape = item_shape(item_id);
+        self.shapes
+            .iter()
+            .find(|(candidate, _)| *candidate == shape)
+            .map(|(_, mesh)| mesh.clone())
+            .unwrap_or_else(|| {
+                // Unreachable: `create_visuals` builds one entry per `ItemShape::ALL`, and
+                // both matches on that enum are wildcard-free. Answered rather than
+                // unwrapped, because a drop is the last thing that should take the window
+                // down — and an invisible pelt is a smaller bug than a crash.
+                error!("no drop mesh for {shape:?}");
+                Handle::default()
+            })
+    }
+
     fn material_for(
         &mut self,
         item_id: u16,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        let colour = palette::linear_rgba(item_id);
+        // **Through the item table, never straight into the palette.** `linear_rgba` reads
+        // a *block* id; this is an *item* id, and handing one to the other is exactly the
+        // bug `client/AGENTS.md` records for the pack cells — a log that drew snow-white in
+        // one place and bark in another. #182 is the same mistake, one surface over: the
+        // pelt on the ground was pink.
+        let colour = palette::linear_rgba(item_palette_id(item_id));
         if let Some((_, material)) = self
             .materials
             .iter()
@@ -95,9 +127,62 @@ pub(super) struct DropAssets<'w> {
 
 pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     commands.insert_resource(DropVisuals {
-        cube: meshes.add(Cuboid::from_size(Vec3::splat(DROP_EDGE))),
+        // Built from `ItemShape::ALL`, so a fifth shape gets a drop mesh by existing.
+        shapes: ItemShape::ALL
+            .into_iter()
+            .map(|shape| (shape, meshes.add(drop_mesh(shape))))
+            .collect(),
         materials: Vec::new(),
     });
+}
+
+/// The geometry one shape is drawn from on the ground, at [`DROP_EDGE`] scale.
+///
+/// **Its own geometry rather than the held view model's, deliberately.** `player::hands`
+/// builds a mesh per shape too, and sharing them would look like the saving it is not:
+/// those are authored in camera space against the near plane, sized so a fist does not
+/// fill the screen, and they are retuned for how the *hand* reads. A drop is a thing lying
+/// in the world at world scale. What the two share is the table that says which shape an
+/// item presents as, which is the thing that must not disagree.
+///
+/// Wildcard-free, so a fifth [`ItemShape`] does not compile until it can be dropped — the
+/// same guarantee `ui::icon::parts` and `hands::HandVisuals::mesh` already give.
+fn drop_mesh(shape: ItemShape) -> Mesh {
+    match shape {
+        // A voxel on the ground is a small voxel.
+        ItemShape::Block => Mesh::from(Cuboid::from_size(Vec3::splat(DROP_EDGE))),
+        // A stub of something: rounded, so a pelt and a stone are not the same silhouette.
+        ItemShape::Material => Mesh::from(Capsule3d::new(DROP_EDGE * 0.30, DROP_EDGE * 0.62)),
+        // Long, thin, and lying at an angle — see `spin_and_bob`, which is what turns it.
+        ItemShape::Blade => Mesh::from(Cuboid::from_size(Vec3::new(
+            DROP_EDGE * 0.12,
+            DROP_EDGE * 1.25,
+            DROP_EDGE * 0.28,
+        ))),
+        // A carried structure: wider than it is tall, so a tent never reads as a cube.
+        ItemShape::Bundle => Mesh::from(Cuboid::from_size(Vec3::new(
+            DROP_EDGE * 1.15,
+            DROP_EDGE * 0.62,
+            DROP_EDGE * 0.72,
+        ))),
+        // A haft with a head across the top of it, merged into one mesh for the reason the
+        // held one is: a drop is one entity with one transform, and the spin is on it.
+        ItemShape::Tool => {
+            let mut merged = Mesh::from(Cuboid::from_size(Vec3::new(
+                DROP_EDGE * 0.14,
+                DROP_EDGE * 1.30,
+                DROP_EDGE * 0.14,
+            )));
+            let head = Mesh::from(Cuboid::from_size(Vec3::new(
+                DROP_EDGE * 0.52,
+                DROP_EDGE * 0.20,
+                DROP_EDGE * 0.26,
+            )))
+            .translated_by(Vec3::new(0.0, DROP_EDGE * 0.65, 0.0));
+            merge_all(&mut merged, [head], "dropped tool");
+            merged
+        }
+    }
 }
 
 /// Spawns, places, and despawns drops from the latest authoritative snapshot.
@@ -176,6 +261,7 @@ fn spawn_drop(
     visibility: Visibility,
 ) {
     let material = visuals.material_for(state.item_id, materials);
+    let mesh = visuals.mesh_for(state.item_id);
     let owner = commands
         .spawn((
             DroppedItem {
@@ -189,7 +275,7 @@ fn spawn_drop(
     commands.entity(owner).with_children(|parent| {
         parent.spawn((
             DropVisual { owner },
-            Mesh3d(visuals.cube.clone()),
+            Mesh3d(mesh),
             MeshMaterial3d(material),
             Transform::default(),
         ));
@@ -227,6 +313,7 @@ mod tests {
     use bevy::mesh::VertexAttributeValues;
     use bevy::time::TimeUpdateStrategy;
 
+    use super::super::items::{ITEM_DIRT, ITEM_STONE, ITEM_VARGR_PELT};
     use super::*;
     use crate::net::{EntityState, ItemDropState, SessionParams, Snapshot, SnapshotInbox};
     use crate::player::PlayerPlugin;
@@ -314,7 +401,11 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_with_two_drops_spawns_two_quarter_block_cubes() {
+    fn two_drops_of_one_shape_spawn_at_quarter_block_scale_and_share_one_mesh() {
+        // **Renamed from `..._two_quarter_block_cubes`, because they are not cubes any
+        // more** — a drop is drawn as whatever shape its item presents as (#182). These
+        // two are blocks, so they are still cubes and still share one mesh, which is the
+        // half of the old test that was about the bound rather than about the geometry.
         let mut app = headless_player();
         deliver(
             &mut app,
@@ -322,8 +413,8 @@ mod tests {
                 1,
                 vec![],
                 vec![
-                    drop(10, [1.0, 64.0, 2.0], palette::STONE),
-                    drop(11, [3.0, 65.0, 4.0], palette::DIRT),
+                    drop(10, [1.0, 64.0, 2.0], ITEM_STONE),
+                    drop(11, [3.0, 65.0, 4.0], ITEM_DIRT),
                 ],
             ),
             Instant::now(),
@@ -333,23 +424,31 @@ mod tests {
         assert_eq!(
             anchors(&mut app),
             vec![
-                (10, palette::STONE, Vec3::new(1.0, 64.0, 2.0)),
-                (11, palette::DIRT, Vec3::new(3.0, 65.0, 4.0)),
+                (10, ITEM_STONE, Vec3::new(1.0, 64.0, 2.0)),
+                (11, ITEM_DIRT, Vec3::new(3.0, 65.0, 4.0)),
             ]
         );
 
-        let shared = app.world().resource::<DropVisuals>().cube.clone();
+        let shared = app
+            .world()
+            .resource::<DropVisuals>()
+            .mesh_for(ITEM_STONE)
+            .clone();
         let world = app.world_mut();
         let mut visuals = world.query_filtered::<&Mesh3d, With<DropVisual>>();
         let handles: Vec<_> = visuals.iter(world).map(|mesh| mesh.0.clone()).collect();
-        assert_eq!(handles, vec![shared.clone(), shared.clone()]);
+        assert_eq!(
+            handles,
+            vec![shared.clone(), shared.clone()],
+            "two drops of one shape must share one mesh, not spawn one each"
+        );
 
         let meshes = world.resource::<Assets<Mesh>>();
-        let mesh = meshes.get(&shared).expect("the shared drop cube mesh");
+        let mesh = meshes.get(&shared).expect("the shared block mesh");
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
-            panic!("the cube must carry Float32x3 positions");
+            panic!("the mesh must carry Float32x3 positions");
         };
         for axis in 0..3 {
             let min = positions
@@ -362,6 +461,116 @@ mod tests {
                 .fold(f32::NEG_INFINITY, f32::max);
             assert!((max - min - DROP_EDGE).abs() < 1e-6);
         }
+    }
+
+    /// **A dropped thing looks like the thing it is**, which is the whole issue.
+    ///
+    /// Swept over `ItemShape::ALL` rather than a handful of named items, because the
+    /// acceptance criterion is general: the pelt was the example and the rule is every
+    /// item.
+    ///
+    /// **It compares the geometry, not the handles**, and the first draft of this test did
+    /// the latter — which asserted nothing. `Assets::add` returns a fresh handle for
+    /// identical geometry, so five distinct handles only proves `create_visuals` called it
+    /// five times. Making every shape a cube passed it. The bounding box is what a player
+    /// actually tells apart at a distance, so that is what this reads.
+    #[test]
+    fn every_shape_is_drawn_from_its_own_silhouette() {
+        let mut app = headless_player();
+        app.update();
+
+        let world = app.world_mut();
+        let mut boxes: Vec<(ItemShape, [f32; 3])> = Vec::new();
+        for shape in ItemShape::ALL {
+            let handle = world
+                .resource::<DropVisuals>()
+                .shapes
+                .iter()
+                .find(|(candidate, _)| *candidate == shape)
+                .map(|(_, mesh)| mesh.clone())
+                .unwrap_or_else(|| panic!("{shape:?} has no drop mesh"));
+            let meshes = world.resource::<Assets<Mesh>>();
+            let mesh = meshes.get(&handle).expect("the shape's mesh");
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("{shape:?} must carry Float32x3 positions");
+            };
+
+            let mut extent = [0.0f32; 3];
+            for (axis, value) in extent.iter_mut().enumerate() {
+                let min = positions
+                    .iter()
+                    .map(|position| position[axis])
+                    .fold(f32::INFINITY, f32::min);
+                let max = positions
+                    .iter()
+                    .map(|position| position[axis])
+                    .fold(f32::NEG_INFINITY, f32::max);
+                *value = max - min;
+            }
+            boxes.push((shape, extent));
+        }
+
+        for (index, (shape, extent)) in boxes.iter().enumerate() {
+            for (other, other_extent) in &boxes[index + 1..] {
+                let same = extent
+                    .iter()
+                    .zip(other_extent)
+                    .all(|(a, b)| (a - b).abs() < 1e-6);
+                assert!(
+                    !same,
+                    "{shape:?} and {other:?} are the same silhouette ({extent:?}); a drop \
+                     that looked like every other drop would pass every other test here"
+                );
+            }
+            assert!(
+                extent.iter().all(|axis| *axis > 0.0),
+                "{shape:?} is drawn from nothing"
+            );
+        }
+    }
+
+    /// The colour comes through the item table, never straight into the palette.
+    ///
+    /// **This is the bug the issue names**, and the shape of it is recorded in
+    /// `client/AGENTS.md` for the pack cells: `palette::linear_rgba` reads a *block* id,
+    /// and a drop carries an *item* id. Handing one to the other is how a pelt ended up
+    /// pink. The assertion is against `item_palette_id`, so it is the table that decides
+    /// and not this test.
+    #[test]
+    fn a_drop_wears_the_colour_its_item_row_names() {
+        let mut app = headless_player();
+        // A vargr pelt: an item id whose palette entry is deliberately not itself, which
+        // is what makes it able to fail. Reading the id straight into the palette gives a
+        // different colour, and that difference is the bug.
+        deliver(
+            &mut app,
+            snapshot(1, vec![], vec![drop(10, [0.0, 64.0, 0.0], ITEM_VARGR_PELT)]),
+            Instant::now(),
+        );
+        app.update();
+
+        assert_ne!(
+            item_palette_id(ITEM_VARGR_PELT),
+            ITEM_VARGR_PELT,
+            "this test cannot fail unless the id and its palette entry differ"
+        );
+
+        let world = app.world_mut();
+        let mut visuals =
+            world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<DropVisual>>();
+        let handle = visuals
+            .iter(world)
+            .next()
+            .expect("the drop is drawn")
+            .0
+            .clone();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let material = materials.get(&handle).expect("the drop's material");
+
+        let [r, g, b, a] = palette::linear_rgba(item_palette_id(ITEM_VARGR_PELT));
+        assert_eq!(material.base_color, Color::linear_rgba(r, g, b, a));
     }
 
     #[test]
