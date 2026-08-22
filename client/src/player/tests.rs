@@ -14,7 +14,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::time::TimeUpdateStrategy;
 
 use super::*;
-use crate::net::{EntityState, SessionParams, Snapshot, WorldClock};
+use crate::net::{EntityState, PlayerAppearance, SessionParams, Snapshot, WorldClock};
 
 const TICK_RATE: u8 = 20;
 const INTERVAL: Duration = Duration::from_millis(50);
@@ -68,6 +68,62 @@ fn deliver(app: &mut App, tick: u32, entities: Vec<EntityState>, at: Instant) {
         },
         at,
     );
+}
+
+/// The five colours a character wears, none of them [`appearance::EYE_COLOUR`], so a body
+/// built from them has one material per part and a test can tell them apart.
+const A_SKIN: u32 = 0x00C6_8642;
+const A_SHIRT: u32 = 0x008C_3B2B;
+const A_TROUSERS: u32 = 0x003B_3226;
+const A_SHOES: u32 = 0x002A_211B;
+const A_HAIR: u32 = 0x006B_4423;
+
+fn an_appearance(model: HairModel) -> Appearance {
+    Appearance::new(A_SKIN, A_SHIRT, A_TROUSERS, A_SHOES, model, A_HAIR)
+        .expect("every colour is inside the contract's range")
+}
+
+/// Queues an appearance as the net thread would.
+fn describe(app: &mut App, entity_id: u64, appearance: Appearance) {
+    app.world_mut()
+        .resource_mut::<AppearanceInbox>()
+        .push(PlayerAppearance {
+            entity_id,
+            appearance,
+        });
+}
+
+/// The entity drawing one of the server's, if there is one.
+fn body_of(app: &mut App, entity_id: u64) -> Option<Entity> {
+    let world = app.world_mut();
+    let mut query = world.query::<(Entity, &Body)>();
+    query
+        .iter(world)
+        .find(|(_, body)| body.0 == entity_id)
+        .map(|(entity, _)| entity)
+}
+
+/// Every drawn part of one body, sorted by part so a failure reads the same way twice.
+fn parts_of(
+    app: &mut App,
+    entity_id: u64,
+) -> Vec<(BodyPart, Handle<Mesh>, Handle<StandardMaterial>)> {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_default();
+
+    let mut parts = world.query::<(&BodyVisual, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
+    let mut found: Vec<(BodyPart, Handle<Mesh>, Handle<StandardMaterial>)> = children
+        .into_iter()
+        .filter_map(|child| parts.get(world, child).ok())
+        .map(|(visual, mesh, material)| (visual.0, mesh.0.clone(), material.0.clone()))
+        .collect();
+    found.sort_by_key(|(part, _, _)| format!("{part:?}"));
+    found
 }
 
 fn stats(app: &App) -> PlayerStats {
@@ -149,9 +205,9 @@ fn a_snapshot_places_the_local_player_exactly_where_the_server_says() {
 }
 
 #[test]
-fn the_local_player_has_no_mesh_and_another_player_has_one() {
-    // The camera sits at the local player's eyes, so a capsule there would fill the screen
-    // with the inside of its own head. Another player is exactly what a capsule is for.
+fn the_local_player_has_no_body_and_another_player_has_one() {
+    // The camera sits at the local player's eyes, so a body there would fill the screen
+    // with the inside of its own head. Another player is exactly what a body is for.
     let mut app = headless_player();
     deliver(
         &mut app,
@@ -165,10 +221,10 @@ fn the_local_player_has_no_mesh_and_another_player_has_one() {
     app.update();
 
     let world = app.world_mut();
-    let mut query = world.query::<(&Body, Option<&Mesh3d>)>();
+    let mut query = world.query::<(&Body, Option<&Children>)>();
     let mut drawn: Vec<(u64, bool)> = query
         .iter(world)
-        .map(|(body, mesh)| (body.0, mesh.is_some()))
+        .map(|(body, children)| (body.0, children.is_some_and(|drawn| !drawn.is_empty())))
         .collect();
     drawn.sort_by_key(|(id, _)| *id);
 
@@ -176,10 +232,54 @@ fn the_local_player_has_no_mesh_and_another_player_has_one() {
 }
 
 #[test]
-fn other_players_share_one_mesh_and_take_their_colour_from_their_identity() {
-    // One mesh for every body, so the capsule is uploaded once; a colour per identity, so a
-    // player keeps the same colour for the session and two players are told apart.
+fn a_body_is_drawn_from_parts_that_each_take_their_own_colour() {
+    // The acceptance criterion, part by part: head and hands the skin, torso the shirt,
+    // legs the trousers, feet the shoes, hair its own — and the eyes a colour nobody
+    // picked. Six parts, six materials, and no part wearing another's field.
     let mut app = headless_player();
+    let worn = an_appearance(HairModel::Braided);
+    describe(&mut app, 99, worn);
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let drawn = parts_of(&mut app, 99);
+    let mut parts: Vec<BodyPart> = drawn.iter().map(|(part, _, _)| *part).collect();
+    parts.sort_by_key(|part| format!("{part:?}"));
+    let mut expected = BodyPart::IN_DRAWING_ORDER.to_vec();
+    expected.sort_by_key(|part| format!("{part:?}"));
+    assert_eq!(parts, expected, "every part of the rig is drawn");
+
+    let materials: HashSet<Handle<StandardMaterial>> = drawn
+        .iter()
+        .map(|(_, _, material)| material.clone())
+        .collect();
+    assert_eq!(
+        materials.len(),
+        BodyPart::IN_DRAWING_ORDER.len(),
+        "six colours that differ are six materials that differ"
+    );
+
+    let meshes: HashSet<Handle<Mesh>> = drawn.iter().map(|(_, mesh, _)| mesh.clone()).collect();
+    assert_eq!(meshes.len(), drawn.len(), "no two parts share geometry");
+}
+
+#[test]
+fn every_body_shares_the_geometry_and_two_in_the_same_clothes_share_the_material() {
+    // The cost criterion. The meshes are built once at startup and never again, so two
+    // players are two sets of handles to one set of meshes; the materials are keyed on the
+    // colour itself, so twenty players in view are not a hundred materials.
+    let mut app = headless_player();
+    let worn = an_appearance(HairModel::Cropped);
+    describe(&mut app, 1, worn);
+    describe(&mut app, 2, worn);
     deliver(
         &mut app,
         1,
@@ -192,24 +292,263 @@ fn other_players_share_one_mesh_and_take_their_colour_from_their_identity() {
     );
     app.update();
 
-    let shared = app.world().resource::<PlayerVisuals>().capsule.clone();
-    let world = app.world_mut();
-    // Filtered on `Body`, because this module draws one other thing: `target.rs` spawns
-    // the outline that marks the block being aimed at, and it carries a mesh and a
-    // material like any other drawn entity.
-    let mut query =
-        world.query_filtered::<(&Mesh3d, &MeshMaterial3d<StandardMaterial>), With<Body>>();
-    let drawn: Vec<(Handle<Mesh>, Handle<StandardMaterial>)> = query
-        .iter(world)
-        .map(|(mesh, material)| (mesh.0.clone(), material.0.clone()))
-        .collect();
-
-    assert_eq!(drawn.len(), 2, "the local player is not drawn");
-    assert!(drawn.iter().all(|(mesh, _)| *mesh == shared));
-    assert_ne!(
-        drawn[0].1, drawn[1].1,
-        "two players must not be the same colour"
+    assert_eq!(
+        parts_of(&mut app, 1),
+        parts_of(&mut app, 2),
+        "the same character twice is the same handles twice"
     );
+
+    // And a different shirt is a different material, or the cache would be answering the
+    // wrong question — one material for everybody rather than one per colour.
+    let other = Appearance::new(
+        A_SKIN,
+        0x0000_7F3F,
+        A_TROUSERS,
+        A_SHOES,
+        HairModel::Cropped,
+        A_HAIR,
+    )
+    .expect("green is a colour");
+    describe(&mut app, 2, other);
+    app.update();
+
+    let one = parts_of(&mut app, 1);
+    let two = parts_of(&mut app, 2);
+    let shirt = |drawn: &[(BodyPart, Handle<Mesh>, Handle<StandardMaterial>)]| {
+        drawn
+            .iter()
+            .find(|(part, _, _)| *part == BodyPart::Shirt)
+            .map(|(_, _, material)| material.clone())
+            .expect("a body has a shirt")
+    };
+    assert_ne!(shirt(&one), shirt(&two), "two shirts, two materials");
+    assert_eq!(
+        one.iter().find(|(part, _, _)| *part == BodyPart::Skin),
+        two.iter().find(|(part, _, _)| *part == BodyPart::Skin),
+        "and the skin they still share is still one material"
+    );
+}
+
+#[test]
+fn an_appearance_that_arrives_late_dresses_the_body_that_is_already_there() {
+    // **The criterion that says never popped out and re-spawned.** The two streams are not
+    // ordered against each other, so a player is sometimes visible before the message
+    // describing them lands. The body is drawn in the documented placeholder and updated in
+    // place — same entity, same children, same transform, different colours.
+    let mut app = headless_player();
+    let start = Instant::now();
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+
+    let entity = body_of(&mut app, 99).expect("the entity is drawn before it is described");
+    let children: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut query = world.query::<&Children>();
+        query
+            .get(world, entity)
+            .expect("a drawn body has parts")
+            .iter()
+            .collect()
+    };
+    let grey = parts_of(&mut app, 99);
+    let placeholder = |part: BodyPart| {
+        grey.iter()
+            .find(|(drawn, _, _)| *drawn == part)
+            .map(|(_, _, material)| material.clone())
+            .expect("every part is drawn")
+    };
+    assert_eq!(
+        placeholder(BodyPart::Skin),
+        placeholder(BodyPart::Shirt),
+        "the placeholder is one grey for every worn part"
+    );
+
+    describe(&mut app, 99, an_appearance(HairModel::Topknot));
+    deliver(
+        &mut app,
+        2,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start + INTERVAL,
+    );
+    app.update();
+
+    assert_eq!(
+        body_of(&mut app, 99),
+        Some(entity),
+        "the body was dressed, not replaced"
+    );
+    let world = app.world_mut();
+    let mut query = world.query::<&Children>();
+    let after: Vec<Entity> = query
+        .get(world, entity)
+        .expect("a dressed body still has parts")
+        .iter()
+        .collect();
+    assert_eq!(after, children, "and neither were its parts");
+
+    let dressed = parts_of(&mut app, 99);
+    assert_ne!(
+        dressed, grey,
+        "the appearance that arrived is the one drawn"
+    );
+}
+
+#[test]
+fn the_hair_a_player_chose_is_the_mesh_their_body_wears() {
+    // The one part whose *shape* is chosen rather than only its colour, so it is the one
+    // part where dressing a body swaps a mesh handle.
+    let mut app = headless_player();
+    describe(&mut app, 99, an_appearance(HairModel::Shaved));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let hair = |app: &mut App| {
+        parts_of(app, 99)
+            .into_iter()
+            .find(|(part, _, _)| *part == BodyPart::Hair)
+            .map(|(_, mesh, _)| mesh)
+            .expect("a body has hair, even shaved")
+    };
+    let shaved = hair(&mut app);
+
+    describe(&mut app, 99, an_appearance(HairModel::Loose));
+    app.update();
+
+    assert_ne!(
+        shaved,
+        hair(&mut app),
+        "a different model is a different mesh"
+    );
+}
+
+#[test]
+fn a_body_stands_on_the_feet_position_the_snapshot_carries() {
+    // **The property the capsule had and the rig keeps.** Every part is authored from the
+    // ground up, so the parent transform is the server's position exactly and the children
+    // carry no offset of their own — which is what lets the camera add an eye height to the
+    // same number.
+    let mut app = headless_player();
+    let feet = Vec3::new(4.0, 64.0, -2.0);
+    describe(&mut app, 99, an_appearance(HairModel::Braided));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, feet.to_array(), 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let entity = body_of(&mut app, 99).expect("the other player is drawn");
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Transform, &Children)>();
+    let (transform, children) = owners.get(world, entity).expect("a drawn body has both");
+    assert_eq!(transform.translation, feet);
+
+    let children: Vec<Entity> = children.iter().collect();
+    let mut parts = world.query_filtered::<&Transform, With<BodyVisual>>();
+    for child in children {
+        assert_eq!(
+            *parts.get(world, child).expect("every child is a part"),
+            Transform::default(),
+            "a part carries no offset: the mesh is authored at the feet"
+        );
+    }
+}
+
+#[test]
+fn an_entity_that_leaves_for_good_takes_its_appearance_with_it() {
+    // The cache is the size of what is in view. The server drops its own record for the
+    // same entity at the same moment and describes it again if it comes back, so the two
+    // sides agree without either being told.
+    let mut app = headless_player();
+    let start = Instant::now();
+    describe(&mut app, 99, an_appearance(HairModel::Braided));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+    assert!(app.world().resource::<Appearances>().0.contains_key(&99));
+
+    deliver(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        start + INTERVAL,
+    );
+    app.update();
+    assert!(
+        !app.world().resource::<Appearances>().0.contains_key(&99),
+        "the entity left, and its appearance left with it"
+    );
+
+    // And it is refilled, because the server describes an entity that comes back.
+    describe(&mut app, 99, an_appearance(HairModel::Loose));
+    deliver(
+        &mut app,
+        3,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start + INTERVAL * 2,
+    );
+    app.update();
+    assert!(app.world().resource::<Appearances>().0.contains_key(&99));
+    assert!(body_of(&mut app, 99).is_some());
+}
+
+#[test]
+fn the_end_of_a_session_forgets_every_body_it_drew() {
+    // The mirror of the vitals: what the people in a session that has ended looked like is
+    // not a fact about the next session, and a reconnect is described from scratch.
+    let mut app = headless_player();
+    describe(&mut app, 99, an_appearance(HairModel::Braided));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+    assert!(!app.world().resource::<Appearances>().0.is_empty());
+    assert!(!app.world().resource::<BodyMaterials>().0.is_empty());
+
+    app.world_mut().remove_resource::<Session>();
+    app.update();
+
+    assert!(app.world().resource::<Appearances>().0.is_empty());
+    assert!(app.world().resource::<BodyMaterials>().0.is_empty());
 }
 
 #[test]

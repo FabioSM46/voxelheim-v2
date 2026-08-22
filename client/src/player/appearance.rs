@@ -1,31 +1,102 @@
-//! A character's body, as the parts an [`Appearance`] colours.
+//! A character's body, as the boxes an [`Appearance`] colours.
 //!
 //! **One description, two renderers — the relationship [`ItemShape`] already has.** The
-//! character screen draws these parts flat, as `bevy_ui` nodes, so a player can see what
-//! they are choosing before they enter the world; the issue that gives players a body
-//! worth colouring builds the same parts as meshes. Two tables would be two answers to
+//! character screen draws these boxes flat, as `bevy_ui` nodes seen head-on, so a player
+//! can see what they are choosing before they enter the world; [`super`] builds the same
+//! boxes as meshes for the bodies the snapshots drive. Two tables would be two answers to
 //! "what does a shirt colour cover", and the first thing two answers do is disagree.
 //!
 //! **Nothing here is a gameplay fact.** The collision box is the server's and is
 //! `PLAYER_WIDTH` × `PLAYER_HEIGHT` whatever a character looks like — see
-//! [`super::constants`] — so these are fractions *of* that box rather than sizes of their
+//! [`super::constants`] — so a notch is a fraction *of* that box rather than a size of its
 //! own. A character with more hair is not a taller character.
+//!
+//! # The grain
+//!
+//! One notch is a twelfth of the collided footprint and a thirty-sixth of its height,
+//! which is the same length on both axes: 0.05 blocks, a twentieth of a world block. The
+//! terrain is cut at one block and a body at a twentieth of one — fine enough for a fist,
+//! coarse enough that nothing ever reads as smooth, and the reason the figure looks like
+//! something this world's terrain was cut from rather than something licensed into it.
+//!
+//! # Four rules the numbers below obey
+//!
+//! 1. **Parts interpenetrate; they never merely touch.** A boot swallows a leg, a leg the
+//!    tunic, the neck both. **Nothing checks this one**, deliberately: what a player would
+//!    see is rule 2 failing, and two parts *do* legitimately meet along an edge — the
+//!    trousers and a fist, at the hip — so a test could not tell a lapse from an exception
+//!    without a list nobody would keep.
+//! 2. **No two faces of different colours land on the same plane where they overlap.**
+//!    Coplanar faces of different materials fight for the depth buffer and flicker at
+//!    distance. `no_two_colours_share_a_plane` checks it rather than hoping.
+//! 3. **Detail sits half a notch proud of what it wraps.** The hair on every face, the
+//!    eyes on the face they look out of — the hat-layer trick every blocky model has used
+//!    since Minecraft, and what lets a cap wrap a head without sharing a plane with it.
+//!    See [`Layer`].
+//! 4. **The body keeps the box the server collides**, from the boots to the crown. What
+//!    reaches past it is the arm and the hair, and neither is collided, because neither is
+//!    a gameplay fact: a sleeve by a notch on each side and a fist by two, and a topknot
+//!    three and a half notches above the crown. Twelve notches across cannot hold a torso,
+//!    two legs and two visible arms; Minecraft's own model runs four times further past
+//!    its hitbox than this one does. `the_body_keeps_the_box_the_server_collides`
+//!    is the table of what may leave it and by how much.
+//!
+//! # The axes
+//!
+//! `y` is measured from the feet up, `x` to the character's right, and **`z` along the way
+//! they face**. That last one is the model sheet's convention and the *opposite* of Bevy's,
+//! where a body at yaw 0 faces `-Z`. It is reconciled in exactly one place — [`placed`] —
+//! so the numbers below can be read against the sheet they came from and no caller has to
+//! remember a sign.
 //!
 //! [`ItemShape`]: super::ItemShape
 
+use bevy::prelude::Vec3;
+
+use super::constants::{PLAYER_HEIGHT, PLAYER_WIDTH};
 use crate::net::{Appearance, HairModel};
+
+/// How many notches the collided footprint is across, and how many its height is up.
+///
+/// The grid, and the only two numbers here that are not read out of a box: everything
+/// else is notches, and a notch is these two divided into the server's box.
+const NOTCHES_ACROSS: f32 = 12.0;
+const NOTCHES_UP: f32 = 36.0;
+
+/// One notch, in blocks, across the footprint and up the body.
+///
+/// Two constants rather than one because they are derived from two of the server's
+/// numbers, and deriving both from either would be this file holding a size of its own.
+/// They are the same length, and `the_grid_is_square` is what says so.
+pub const NOTCH_XZ: f32 = PLAYER_WIDTH / NOTCHES_ACROSS;
+pub const NOTCH_Y: f32 = PLAYER_HEIGHT / NOTCHES_UP;
+
+/// How far a detail layer stands off what it wraps, in notches.
+///
+/// Half a notch, which is the smallest offset this grid can express and the largest one
+/// that still reads as *on* the head rather than floating over it.
+const PROUD: f32 = 0.5;
+
+/// The dark a pair of eyes is drawn in, as `0x00RRGGBB`.
+///
+/// **A constant of the model rather than a field on the wire.** The contract carries five
+/// colours and `schemas/common.fbs` is explicit that a sixth would be a colour the server
+/// stores; the eyes are the one part nobody picks, so they are the one part whose colour
+/// this side is entitled to decide. Dark enough to read against every skin in the
+/// palette, which is the whole of what it has to do.
+pub const EYE_COLOUR: u32 = 0x0014_100E;
 
 /// One part of the body, and which of an appearance's colours it takes.
 ///
-/// Five, because that is how many colours the contract carries: `schemas/common.fbs` has
-/// four worn colours plus the hair's, and a sixth part would be a part with nothing to
-/// paint it. The hands are the head's colour rather than a part of their own, which is
-/// the same decision the server's own description of an appearance records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Six: the five the contract carries — `schemas/common.fbs` has four worn colours plus
+/// the hair's — and the eyes, which take [`EYE_COLOUR`] because nobody picks them. The
+/// hands are the head's colour rather than a part of their own, which is the same
+/// decision the server's own description of an appearance records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BodyPart {
-    /// Head and hands: the skin colour.
+    /// Head, neck and fists: the skin colour.
     Skin,
-    /// The shirt, tunic or coat over the torso.
+    /// The shirt, tunic or coat over the torso, and the sleeves.
     Shirt,
     /// Trousers, breeches or leggings.
     Trousers,
@@ -33,20 +104,37 @@ pub enum BodyPart {
     Shoes,
     /// Hair, whose *shape* is the model and whose colour is its own.
     Hair,
+    /// Two of them, one notch each. The one part of a body nobody chooses.
+    Eyes,
 }
 
 impl BodyPart {
-    /// Every part, in the order they are drawn back to front: the body first and the
-    /// hair over it.
+    /// Every part, in the order they are drawn back to front for a viewer standing in
+    /// front of the character.
     ///
     /// A hand-written list for the reason `HairModel::ALL` is one — no stable Rust
-    /// enumerates variants — and the order is load-bearing rather than incidental: hair
-    /// overlaps the head, so a renderer that drew it first would draw a bald character.
-    pub const IN_DRAWING_ORDER: [Self; 5] = [
+    /// enumerates variants. **It is not a depth order**, and must not be read as one: the
+    /// hair falls behind the shoulders on two models and in front of the face on none,
+    /// so what decides which box covers which is the box's own `z`. This order settles
+    /// the ties, and the eyes are last so nothing is ever drawn over a face.
+    pub const IN_DRAWING_ORDER: [Self; 6] = [
         Self::Shoes,
         Self::Trousers,
         Self::Shirt,
         Self::Skin,
+        Self::Hair,
+        Self::Eyes,
+    ];
+
+    /// The five a player chooses, in the order the character screen offers them.
+    ///
+    /// [`Self::Eyes`] is deliberately absent: a swatch row is what a *character* wears,
+    /// and a colour nobody picked is not one of those. Same table, one reader fewer.
+    pub const WORN: [Self; 5] = [
+        Self::Skin,
+        Self::Shirt,
+        Self::Trousers,
+        Self::Shoes,
         Self::Hair,
     ];
 
@@ -58,113 +146,383 @@ impl BodyPart {
             Self::Trousers => appearance.trousers_color(),
             Self::Shoes => appearance.shoes_color(),
             Self::Hair => appearance.hair_color(),
+            Self::Eyes => EYE_COLOUR,
+        }
+    }
+
+    /// How this part sits against what is under it. See [`Layer`].
+    const fn layer(self) -> Layer {
+        match self {
+            Self::Skin | Self::Shirt | Self::Trousers | Self::Shoes => Layer::Flush,
+            Self::Hair => Layer::Wrapping,
+            Self::Eyes => Layer::Facing,
         }
     }
 }
 
-/// Where one part sits on the body, in fractions of the collision box.
-///
-/// `bottom` and `top` are measured from the feet up, so `0.0` is the ground a player
-/// stands on and `1.0` is the crown; `width` is a fraction of `PLAYER_WIDTH`. Fractions
-/// rather than metres because the box belongs to the server: a change to
-/// `game.PlayerHeight` should move every part with it rather than leaving five numbers to
-/// be found and edited.
-///
-/// A part may reach past `1.0` — a topknot does — and that is deliberate. Hair is not
-/// what the server collides, so nothing about the box moves when somebody grows some.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PartExtent {
-    pub bottom: f32,
-    pub top: f32,
-    pub width: f32,
+/// How a part sits against what it wraps — rule 3 in this module's documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    /// The box is exactly what the table says. Everything the body is built from.
+    Flush,
+    /// Half a notch proud on every face, so it wraps what is under it. The hair.
+    Wrapping,
+    /// Half a notch proud of the face and of nothing else. The eyes — a dot on a cheek
+    /// rather than a bead stuck to it.
+    Facing,
 }
 
-/// Where each part of the body sits.
+/// One box of the rig, in notches: the low and high bound on each axis.
 ///
-/// Proportions of a standing figure, chosen to read at the size a preview panel draws
-/// them and to leave the parts distinguishable: feet under trousers, trousers under a
-/// shirt that stops at the shoulders, and a head above it.
-pub const fn extent(part: BodyPart) -> PartExtent {
-    match part {
-        BodyPart::Shoes => PartExtent {
-            bottom: 0.0,
-            top: 0.06,
-            width: 0.92,
-        },
-        BodyPart::Trousers => PartExtent {
-            bottom: 0.05,
-            top: 0.47,
-            width: 0.82,
-        },
-        BodyPart::Shirt => PartExtent {
-            bottom: 0.44,
-            top: 0.80,
-            width: 1.0,
-        },
-        BodyPart::Skin => PartExtent {
-            bottom: 0.78,
-            top: 1.0,
-            width: 0.58,
-        },
-        // The one part whose extent is not fixed: see [`hair_extent`].
-        BodyPart::Hair => hair_extent(HairModel::Cropped),
+/// `i8`, because the whole figure fits between -8 and 39 and a type that cannot hold a
+/// coordinate this grid does not have is one fewer thing to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartBox {
+    /// Low and high bound to the character's right.
+    pub x: (i8, i8),
+    /// Low and high bound above the feet. `0` is the ground they stand on.
+    pub y: (i8, i8),
+    /// Low and high bound along the way they face. **Positive is forwards** — see this
+    /// module's documentation, and [`placed`], which is where that meets Bevy's axes.
+    pub z: (i8, i8),
+}
+
+/// One box of the rig, in blocks, placed relative to the feet and in Bevy's axes.
+///
+/// What both renderers actually consume: the mesh builder makes a `Cuboid` of `size` and
+/// translates it by `centre`, and the preview reads the same two values and throws the
+/// depth away.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedBox {
+    /// The box's extent on each axis.
+    pub size: Vec3,
+    /// Its centre, measured from the point the feet stand on.
+    pub centre: Vec3,
+}
+
+impl PlacedBox {
+    /// How near this box is to a viewer standing in front of the character, in blocks.
+    ///
+    /// Larger is nearer, so it sorts the way a painter would. It exists for the flat
+    /// preview, which has no depth buffer and must order its nodes itself — the world's
+    /// renderer needs none of this, because a depth buffer is exactly what it has.
+    pub fn nearness(self) -> f32 {
+        // A body faces -Z, so the face nearest a viewer in front of it is the one at the
+        // *lowest* z, and nearness is that distance negated.
+        self.size.z / 2.0 - self.centre.z
     }
 }
 
-/// Where the hair sits, which is the whole of what a hair model *is* on this side.
+/// Where one box of one part sits, in blocks, relative to the feet.
+///
+/// **The one place the model sheet's axes meet Bevy's**, and the one place rule 3 is
+/// applied: a wrapping part is grown half a notch on every face and a facing part half a
+/// notch forwards, so the hair never shares a plane with the skull and the eyes never
+/// share one with the face.
+pub fn placed(part: BodyPart, cell: PartBox) -> PlacedBox {
+    let (grow, forward) = match part.layer() {
+        Layer::Flush => (0.0, 0.0),
+        Layer::Wrapping => (PROUD, 0.0),
+        Layer::Facing => (0.0, PROUD),
+    };
+
+    let x = (f32::from(cell.x.0) - grow, f32::from(cell.x.1) + grow);
+    let y = (f32::from(cell.y.0) - grow, f32::from(cell.y.1) + grow);
+    let z = (
+        f32::from(cell.z.0) - grow,
+        f32::from(cell.z.1) + grow + forward,
+    );
+
+    PlacedBox {
+        size: Vec3::new(
+            (x.1 - x.0) * NOTCH_XZ,
+            (y.1 - y.0) * NOTCH_Y,
+            (z.1 - z.0) * NOTCH_XZ,
+        ),
+        centre: Vec3::new(
+            (x.0 + x.1) / 2.0 * NOTCH_XZ,
+            (y.0 + y.1) / 2.0 * NOTCH_Y,
+            // The sheet measures forwards as +z and a body faces -Z here. One negation,
+            // in one place, so every number below reads against the sheet it came from.
+            -(z.0 + z.1) / 2.0 * NOTCH_XZ,
+        ),
+    }
+}
+
+/// The boxes one part is drawn from.
+///
+/// Total over [`BodyPart`], and the hair model is a parameter rather than a second
+/// function for exactly that reason: [`BodyPart::Hair`] is a part like any other, and a
+/// caller that had to remember to ask somewhere else for it is a caller that will forget.
+/// Every other part ignores the model.
+pub const fn boxes(part: BodyPart, hair: HairModel) -> &'static [PartBox] {
+    match part {
+        BodyPart::Shoes => &SHOES,
+        BodyPart::Trousers => &TROUSERS,
+        BodyPart::Shirt => &SHIRT,
+        BodyPart::Skin => &SKIN,
+        BodyPart::Eyes => &EYES,
+        BodyPart::Hair => hair_boxes(hair),
+    }
+}
+
+/// The most boxes one part is ever drawn from, over every hair model.
+///
+/// What a renderer with a fixed pool needs: the character screen spawns this many nodes
+/// per part once, and hides the ones the model currently chosen does not use. Every part
+/// but the hair answers the same number whatever is on the head, which is why this is a
+/// question about a *part* rather than about a pair.
+pub fn slots(part: BodyPart) -> usize {
+    HairModel::ALL
+        .into_iter()
+        .map(|model| boxes(part, model).len())
+        .max()
+        .unwrap_or_default()
+}
+
+/// The smallest box that holds every part of every body, measured from the feet.
+///
+/// **Wider and taller than the box the server collides**, because two parts deliberately
+/// leave it: the fists sideways and the topknot upwards. A renderer that framed a
+/// character by the collided box would clip both, so the one that has to fit a whole
+/// person into a panel asks the rig how big a person can get instead of copying a number
+/// out of it.
+pub fn envelope() -> PlacedBox {
+    let mut low = Vec3::MAX;
+    let mut high = Vec3::MIN;
+
+    for model in HairModel::ALL {
+        for part in BodyPart::IN_DRAWING_ORDER {
+            for cell in boxes(part, model) {
+                let box_ = placed(part, *cell);
+                low = low.min(box_.centre - box_.size / 2.0);
+                high = high.max(box_.centre + box_.size / 2.0);
+            }
+        }
+    }
+
+    PlacedBox {
+        size: high - low,
+        centre: (low + high) / 2.0,
+    }
+}
+
+/// The boxes one hair model is drawn from, which is the whole of what a hair model *is*
+/// on this side.
 ///
 /// The contract carries a model rather than a shape — `schemas/common.fbs` says a colour
 /// is a value both sides can hold without agreeing on any asset and a shape is not — so
 /// this is the client's own reading of five names, and the only thing it has to be is
-/// five silhouettes a player can tell apart.
+/// five silhouettes a player can tell apart at the distance where telling people apart
+/// matters.
 ///
-/// A shaved head still gets one, because it still has stubble: the contract says the
+/// A shaved head still gets a box, because it still has stubble: the contract says the
 /// hair colour is read whatever the model is, and a model that drew nothing would make
-/// one of the six choices invisible.
-pub const fn hair_extent(model: HairModel) -> PartExtent {
+/// one of the five choices invisible and read as a missing asset rather than as a choice.
+pub const fn hair_boxes(model: HairModel) -> &'static [PartBox] {
     match model {
-        HairModel::Shaved => PartExtent {
-            bottom: 0.94,
-            top: 1.01,
-            width: 0.60,
-        },
-        HairModel::Cropped => PartExtent {
-            bottom: 0.90,
-            top: 1.03,
-            width: 0.64,
-        },
-        HairModel::Braided => PartExtent {
-            bottom: 0.70,
-            top: 1.03,
-            width: 0.68,
-        },
-        HairModel::Loose => PartExtent {
-            bottom: 0.62,
-            top: 1.03,
-            width: 0.74,
-        },
-        HairModel::Topknot => PartExtent {
-            bottom: 0.92,
-            top: 1.09,
-            width: 0.52,
-        },
+        HairModel::Shaved => &SHAVED,
+        HairModel::Cropped => &CROPPED,
+        HairModel::Braided => &BRAIDED,
+        HairModel::Loose => &LOOSE,
+        HairModel::Topknot => &TOPKNOT,
     }
 }
 
-/// The parts of one appearance, back to front, each with its extent and its colour.
+// ---------------------------------------------------------------------------
+// The rig
+// ---------------------------------------------------------------------------
+//
+// Thirteen boxes and a haircut — seventeen in all wearing the loosest of them, fourteen
+// with a shaved head. Every one is in notches, feet at y = 0, +x to the character's right
+// and +z the way they face, and every one was drawn before it was written down, which is
+// why each carries the reason it is the size it is.
+
+/// Feet together, the way a toy figure stands, and two notches of toe in front of the
+/// legs — which from above, where a player is when somebody is below them on a slope, is
+/// the arrow that says which way that somebody is pointed.
+const SHOES: [PartBox; 2] = [
+    PartBox {
+        x: (-5, 0),
+        y: (0, 4),
+        z: (-4, 5),
+    },
+    PartBox {
+        x: (0, 5),
+        y: (0, 4),
+        z: (-4, 5),
+    },
+];
+
+/// Two legs with a two-notch slot between them, each sunk a notch into its boot.
+const TROUSERS: [PartBox; 2] = [
+    PartBox {
+        x: (-4, -1),
+        y: (3, 15),
+        z: (-3, 3),
+    },
+    PartBox {
+        x: (1, 4),
+        y: (3, 15),
+        z: (-3, 3),
+    },
+];
+
+/// A torso that overhangs the legs by a notch all round — the tunic hem, which reads as a
+/// belt without spending a colour on one, and the wire carries five colours and not six —
+/// and two thin sleeves hung from inside the shoulders.
+const SHIRT: [PartBox; 3] = [
+    PartBox {
+        x: (-5, 5),
+        y: (14, 25),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (-7, -5),
+        y: (18, 25),
+        z: (-1, 1),
+    },
+    PartBox {
+        x: (5, 7),
+        y: (18, 25),
+        z: (-1, 1),
+    },
+];
+
+/// The neck, of which two notches show; the head, eight notches and 22% of the height;
+/// and two blunt fists at the hips, wider than the sleeves they hang out of.
 ///
-/// The one function both renderers call, so "which colour covers which part of a body"
-/// is answered once. The hair's extent comes from the model rather than from the table,
-/// which is why this exists at all instead of two lookups at each call site.
-pub fn parts(appearance: Appearance) -> [(BodyPart, PartExtent, u32); 5] {
-    BodyPart::IN_DRAWING_ORDER.map(|part| {
-        let extent = match part {
-            BodyPart::Hair => hair_extent(appearance.hair_model()),
-            other => extent(other),
-        };
-        (part, extent, part.colour(appearance))
-    })
-}
+/// The fists reach two notches past the collided footprint on each side, where the sleeves
+/// above them reach one. Nothing collides a hand, and twelve notches across cannot hold a
+/// torso, two legs and two visible arms.
+const SKIN: [PartBox; 4] = [
+    PartBox {
+        x: (-2, 2),
+        y: (23, 28),
+        z: (-2, 2),
+    },
+    PartBox {
+        x: (-4, 4),
+        y: (27, 35),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (-8, -4),
+        y: (15, 19),
+        z: (-2, 2),
+    },
+    PartBox {
+        x: (4, 8),
+        y: (15, 19),
+        z: (-2, 2),
+    },
+];
+
+/// One notch each, a notch and a half apart, which is where eyes are.
+///
+/// The smallest thing this grid can say, and the thing that turns a mannequin into
+/// somebody: a face reads at four times the distance a silhouette does.
+const EYES: [PartBox; 2] = [
+    PartBox {
+        x: (-2, -1),
+        y: (30, 31),
+        z: (3, 4),
+    },
+    PartBox {
+        x: (1, 2),
+        y: (30, 31),
+        z: (3, 4),
+    },
+];
+
+/// A two-notch skullcap and nothing else. Stubble reads as a choice; an absent box would
+/// read as a missing asset.
+const SHAVED: [PartBox; 1] = [PartBox {
+    x: (-4, 4),
+    y: (34, 36),
+    z: (-4, 4),
+}];
+
+/// A full cap and a short nape: the default, and the one that says nothing in particular
+/// about the person wearing it.
+const CROPPED: [PartBox; 2] = [
+    PartBox {
+        x: (-4, 4),
+        y: (32, 36),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (-4, 4),
+        y: (28, 33),
+        z: (-5, -3),
+    },
+];
+
+/// Two side braids to the jaw and one down the spine. The Norse one, and the only model
+/// that shows from behind at any distance.
+const BRAIDED: [PartBox; 4] = [
+    PartBox {
+        x: (-4, 4),
+        y: (32, 36),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (-5, -3),
+        y: (27, 33),
+        z: (-2, 2),
+    },
+    PartBox {
+        x: (3, 5),
+        y: (27, 33),
+        z: (-2, 2),
+    },
+    PartBox {
+        x: (-1, 1),
+        y: (20, 33),
+        z: (-6, -4),
+    },
+];
+
+/// A curtain over the shoulders and panels that frame the face to the jaw. The broadest
+/// head in the set, and the one that changes the silhouette most.
+const LOOSE: [PartBox; 4] = [
+    PartBox {
+        x: (-4, 4),
+        y: (32, 36),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (-5, 5),
+        y: (23, 33),
+        z: (-6, -4),
+    },
+    PartBox {
+        x: (-5, -3),
+        y: (27, 33),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (3, 5),
+        y: (27, 33),
+        z: (-4, 4),
+    },
+];
+
+/// Tight to the skull, then a knot standing three notches above the box the server
+/// collides. The one part of the model that leaves that box upwards — and hair is not
+/// collided, so nothing about the physics changes when somebody grows some.
+const TOPKNOT: [PartBox; 2] = [
+    PartBox {
+        x: (-4, 4),
+        y: (33, 35),
+        z: (-4, 4),
+    },
+    PartBox {
+        x: (-2, 2),
+        y: (34, 39),
+        z: (-2, 2),
+    },
+];
 
 #[cfg(test)]
 mod tests {
@@ -182,6 +540,159 @@ mod tests {
         .expect("every colour is inside the contract's range")
     }
 
+    /// Every box a body draws, with the part it belongs to, for one appearance.
+    fn drawn(appearance: Appearance) -> Vec<(BodyPart, PlacedBox)> {
+        BodyPart::IN_DRAWING_ORDER
+            .into_iter()
+            .flat_map(|part| {
+                boxes(part, appearance.hair_model())
+                    .iter()
+                    .map(move |cell| (part, placed(part, *cell)))
+            })
+            .collect()
+    }
+
+    /// Whether two spans overlap over a positive length.
+    ///
+    /// Strict on purpose. Two coplanar faces fight only where they cover the *same area*,
+    /// and boxes that meet along an edge — the trousers and a fist do, at the hip — cover
+    /// none of it. Reading a shared edge as an overlap would report a flicker that cannot
+    /// happen and, worse, would have to be silenced somewhere.
+    fn overlaps(a: (f32, f32), b: (f32, f32)) -> bool {
+        a.0 < b.1 && b.0 < a.1
+    }
+
+    /// The extents of one placed box, as (low, high) per axis.
+    fn spans(placed: PlacedBox) -> [(f32, f32); 3] {
+        [
+            (
+                placed.centre.x - placed.size.x / 2.0,
+                placed.centre.x + placed.size.x / 2.0,
+            ),
+            (
+                placed.centre.y - placed.size.y / 2.0,
+                placed.centre.y + placed.size.y / 2.0,
+            ),
+            (
+                placed.centre.z - placed.size.z / 2.0,
+                placed.centre.z + placed.size.z / 2.0,
+            ),
+        ]
+    }
+
+    /// A notch is the same length across the body as it is up it.
+    ///
+    /// A test rather than a `const` assertion, which is what the relationships in
+    /// [`super::super::constants`] get: those are properties of the build, where this one
+    /// is arithmetic on two of the server's numbers and needs a tolerance to be
+    /// answerable at all.
+    #[test]
+    fn the_grid_is_square() {
+        assert!(
+            (NOTCH_XZ - NOTCH_Y).abs() < 1e-6,
+            "a notch is {NOTCH_XZ} across and {NOTCH_Y} up: the rig is authored on one grid"
+        );
+    }
+
+    /// How far past the box the server collides each part is allowed to reach, in
+    /// notches: sideways, upwards, and front to back.
+    ///
+    /// **The table is the point of the test.** "Nothing leaves the box" would be false and
+    /// "something leaves the box" would be unfalsifiable; what is worth pinning is exactly
+    /// which parts leave it and by how much, because every entry is a decision somebody
+    /// made and could undo by moving one number.
+    fn allowance(part: BodyPart) -> (f32, f32, f32) {
+        match part {
+            // Everything a player stands on or in stays inside what the server collides.
+            BodyPart::Shoes | BodyPart::Trousers | BodyPart::Eyes => (0.0, 0.0, 0.0),
+            // The arm. A sleeve is a notch outside the footprint and the fist below it is
+            // two, because twelve notches across cannot hold a torso, two legs and two
+            // visible arms — and nothing collides a hand.
+            BodyPart::Shirt => (1.0, 0.0, 0.0),
+            BodyPart::Skin => (2.0, 0.0, 0.0),
+            // Hair is not collided at all. The topknot stands three notches above the
+            // crown and its wrapping layer half a notch more; the same layer is what puts
+            // a curtain half a notch behind the back.
+            BodyPart::Hair => (0.0, 3.5, 0.5),
+        }
+    }
+
+    /// Every part keeps the box the server collides, except where [`allowance`] says it
+    /// does not.
+    ///
+    /// The collided box is the *gameplay* fact here — nothing in this file changes it, and
+    /// this is what says so. A character standing below the ground would be the loudest
+    /// failure and is checked with no allowance at all: there is no reason for one.
+    #[test]
+    fn the_body_keeps_the_box_the_server_collides() {
+        let half = PLAYER_WIDTH / 2.0;
+
+        for model in HairModel::ALL {
+            let worn = Appearance::new(0, 0, 0, 0, model, 0).expect("black is a colour");
+            for (part, box_) in drawn(worn) {
+                let [x, y, z] = spans(box_);
+                let (sideways, up, deep) = allowance(part);
+                let (sideways, up, deep) = (sideways * NOTCH_XZ, up * NOTCH_Y, deep * NOTCH_XZ);
+
+                assert!(y.0 >= -f32::EPSILON, "{part:?} reaches below the ground");
+                assert!(
+                    y.1 <= PLAYER_HEIGHT + up + f32::EPSILON,
+                    "{part:?} reaches {} above the crown, where {up} is allowed",
+                    y.1 - PLAYER_HEIGHT
+                );
+                assert!(
+                    x.0 >= -half - sideways - f32::EPSILON && x.1 <= half + sideways + f32::EPSILON,
+                    "{part:?} spans {x:?} sideways, where {sideways} past {half} is allowed"
+                );
+                assert!(
+                    z.0 >= -half - deep - f32::EPSILON && z.1 <= half + deep + f32::EPSILON,
+                    "{part:?} spans {z:?} front to back, where {deep} past {half} is allowed"
+                );
+            }
+        }
+    }
+
+    /// No two faces of different colours land on the same plane where they overlap.
+    ///
+    /// **Rule 2, and the reason rule 3 exists.** Two coplanar faces of different materials
+    /// fight for the depth buffer, and what a player sees is a seam that flickers as they
+    /// walk — worst at the distance where a body is smallest and hardest to read. It is a
+    /// property of the numbers rather than of the renderer, so it is checked here.
+    ///
+    /// What counts as an overlap is a *positive* area — see [`overlaps`], and the edge two
+    /// parts legitimately meet along.
+    #[test]
+    fn no_two_colours_share_a_plane() {
+        for model in HairModel::ALL {
+            let worn = Appearance::new(0, 0, 0, 0, model, 0).expect("black is a colour");
+            let all = drawn(worn);
+
+            for (i, (part, one)) in all.iter().enumerate() {
+                for (other, two) in &all[i + 1..] {
+                    if part == other {
+                        continue;
+                    }
+                    let (a, b) = (spans(*one), spans(*two));
+                    for axis in 0..3 {
+                        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                        if !overlaps(a[u], b[u]) || !overlaps(a[v], b[v]) {
+                            continue;
+                        }
+                        for side in [a[axis].0, a[axis].1] {
+                            for face in [b[axis].0, b[axis].1] {
+                                assert!(
+                                    (side - face).abs() > f32::EPSILON,
+                                    "{part:?} and {other:?} share the plane {side} on axis \
+                                     {axis} while wearing {model:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Every part takes its own colour, and no two take the same field. A body drawn
     /// with the shirt colour on the legs is the failure this catches, and it is one a
     /// screenshot would show and a type would not.
@@ -196,41 +707,22 @@ mod tests {
         assert_eq!(BodyPart::Hair.colour(worn), worn.hair_color());
     }
 
-    /// The body covers the whole of the box, with no gap between one part and the next.
+    /// The eyes are the same dark whatever a player chose, because nobody chose them.
     ///
-    /// Asserted as an overlap rather than as exact numbers: what matters is that a player
-    /// never sees a stripe of background through their own character, and the parts are
-    /// deliberately allowed to overlap so a small change to one does not open one.
+    /// The half of the test above that cannot be written as "its own field": a sixth
+    /// colour on the wire is exactly what this part is not, and a build that started
+    /// reading one out of the appearance would fail here.
     #[test]
-    fn the_parts_cover_the_body_from_the_ground_to_the_crown() {
-        let ordered = [
-            BodyPart::Shoes,
-            BodyPart::Trousers,
-            BodyPart::Shirt,
-            BodyPart::Skin,
-        ];
+    fn the_eyes_are_not_a_colour_anybody_picked() {
+        let worn = an_appearance();
+        let other = Appearance::new(0, 0, 0, 0, HairModel::Shaved, 0).expect("black is a colour");
 
-        assert_eq!(
-            extent(BodyPart::Shoes).bottom,
-            0.0,
-            "the feet start at the ground"
+        assert_eq!(BodyPart::Eyes.colour(worn), EYE_COLOUR);
+        assert_eq!(BodyPart::Eyes.colour(other), EYE_COLOUR);
+        assert!(
+            !BodyPart::WORN.contains(&BodyPart::Eyes),
+            "a swatch row is what a character wears, and nobody wears these"
         );
-        assert_eq!(
-            extent(BodyPart::Skin).top,
-            1.0,
-            "the head reaches the crown"
-        );
-        for pair in ordered.windows(2) {
-            let (below, above) = (extent(pair[0]), extent(pair[1]));
-            assert!(
-                above.bottom <= below.top,
-                "{:?} starts at {} and {:?} ends at {}, which leaves a gap",
-                pair[1],
-                above.bottom,
-                pair[0],
-                below.top
-            );
-        }
     }
 
     /// Every hair model draws something, and no two draw the same thing.
@@ -241,23 +733,65 @@ mod tests {
     /// labels.
     #[test]
     fn every_hair_model_is_a_silhouette_of_its_own() {
-        let mut seen: Vec<(HairModel, PartExtent)> = Vec::new();
+        let mut seen: Vec<(HairModel, Vec<PlacedBox>)> = Vec::new();
         for model in HairModel::ALL {
-            let extent = hair_extent(model);
+            let cut: Vec<PlacedBox> = hair_boxes(model)
+                .iter()
+                .map(|cell| placed(BodyPart::Hair, *cell))
+                .collect();
+
+            assert!(!cut.is_empty(), "{model:?} draws nothing at all");
             assert!(
-                extent.top > extent.bottom && extent.width > 0.0,
-                "{model:?} draws nothing at all"
+                cut.iter().all(|box_| box_.size.min_element() > 0.0),
+                "{model:?} has a box with no volume"
             );
             for (other, drawn) in &seen {
+                assert_ne!(*drawn, cut, "{model:?} and {other:?} draw the same hair");
+            }
+            seen.push((model, cut));
+        }
+    }
+
+    /// The pool the character screen spawns holds the largest model in the table.
+    ///
+    /// The preview cannot grow when a player cycles the choice, so [`slots`] is what it
+    /// spawns — and a model that a hand-written ceiling had not been widened for would be
+    /// a haircut the preview silently drew half of.
+    #[test]
+    fn the_pool_holds_every_part_of_every_model() {
+        for part in BodyPart::IN_DRAWING_ORDER {
+            for model in HairModel::ALL {
                 assert!(
-                    (drawn.bottom - extent.bottom).abs() > f32::EPSILON
-                        || (drawn.top - extent.top).abs() > f32::EPSILON
-                        || (drawn.width - extent.width).abs() > f32::EPSILON,
-                    "{model:?} and {other:?} draw the same hair"
+                    boxes(part, model).len() <= slots(part),
+                    "{part:?} wearing {model:?} needs more slots than the pool has"
                 );
             }
-            seen.push((model, extent));
         }
+        assert_eq!(slots(BodyPart::Hair), 4, "the widest haircut is four boxes");
+    }
+
+    /// The frame a whole person fits in is bigger than the box the server collides, in
+    /// exactly the two directions the model sheet says something leaves it.
+    ///
+    /// A preview sized from the collided box would cut the knuckles off every character
+    /// and the knot off one of them, which is a thing nobody would notice until they
+    /// chose that haircut.
+    #[test]
+    fn the_envelope_holds_the_parts_that_leave_the_collided_box() {
+        let frame = envelope();
+
+        assert!(
+            frame.size.x > PLAYER_WIDTH,
+            "the fists leave the footprint, so the frame is wider than it"
+        );
+        assert!(
+            frame.size.y > PLAYER_HEIGHT,
+            "the topknot leaves the box upwards, so the frame is taller than it"
+        );
+        assert!(
+            (frame.centre.y - frame.size.y / 2.0).abs() < f32::EPSILON,
+            "a character stands on the bottom of the frame"
+        );
     }
 
     /// The hair a body is drawn with is the model that appearance names, which is what
@@ -266,14 +800,30 @@ mod tests {
     fn the_body_wears_the_hair_the_appearance_names() {
         for model in HairModel::ALL {
             let worn = Appearance::new(0, 0, 0, 0, model, 0).expect("black is a colour");
-            let (part, extent, _) = parts(worn)[4];
 
-            assert_eq!(
-                part,
-                BodyPart::Hair,
-                "the hair is drawn last, over the head"
-            );
-            assert_eq!(extent, hair_extent(model));
+            assert_eq!(boxes(BodyPart::Hair, worn.hair_model()), hair_boxes(model));
         }
+    }
+
+    /// A viewer in front of a character sees the face and not the back of the head.
+    ///
+    /// The flat preview has no depth buffer and orders its nodes by this number, so
+    /// getting the sign wrong is a curtain of hair drawn over a face. It is also the one
+    /// assertion that would catch the model sheet's `+z` being carried into Bevy's axes
+    /// without the negation [`placed`] applies.
+    #[test]
+    fn what_faces_the_viewer_is_nearer_than_what_is_behind_it() {
+        let eye = placed(BodyPart::Eyes, EYES[0]);
+        let head = placed(BodyPart::Skin, SKIN[1]);
+        let nape = placed(BodyPart::Hair, CROPPED[1]);
+
+        assert!(
+            eye.nearness() > head.nearness(),
+            "the eyes sit proud of the face they look out of"
+        );
+        assert!(
+            head.nearness() > nape.nearness(),
+            "the back of the head is behind the front of it"
+        );
     }
 }

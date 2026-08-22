@@ -45,7 +45,7 @@ keeps meaning "everything the client is".
 | Module | Owns | Must not |
 | ------ | ---- | -------- |
 | `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service`, the development address, `--world`, `--name` and `--identity` | contain game or network logic, or admit a combination of address, service and world that is not one of the three launches on `Start` |
-| `player/appearance.rs` | which part of a body each of the six appearance fields covers, and where each part sits in fractions of the collision box | hold a size of its own, or become a second answer for either renderer |
+| `player/appearance.rs` | the rig: which box each of the six appearance colours covers, and where each box sits in notches of the collision box | hold a size of its own, or become a second answer for either renderer |
 | `net/mod.rs` | `NetPlugin`, `SignInPlugin`, `ServerListPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState`/`ServerList` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
 | `net/codec.rs` | FlatBuffers encode/decode, contract limits, `ServerWelcome` validation | know about connections |
@@ -558,8 +558,9 @@ on the shaded side of a hill would be least legible where the terrain is hardest
 
 **Two constants are copied from the server and must stay in sync with it**: `PLAYER_WIDTH` and
 `PLAYER_HEIGHT` mirror `game.PlayerWidth` and `game.PlayerHeight`. The server collides a box of
-that size and this side draws a capsule of it, so a mismatch is a body that visibly does not fit
-the space the server says it fits. **The mob bodies are the same mirror, one file over**:
+that size and this side draws a body inside it, so a mismatch is a body that visibly does not fit
+the space the server says it fits. They are also the **grid the body is cut on** — see "The rig"
+below — so a change to either moves every part of every character with it. **The mob bodies are the same mirror, one file over**:
 `DRAUGR_BODY` and `VARGR_BODY` in `player/mobs.rs` copy the `body` field of each row in
 `server/internal/game/species.go`, and `the_drawn_body_is_the_box_the_server_collides` asserts
 it against the *meshes* rather than against the constants, so a part authored at the wrong
@@ -567,8 +568,64 @@ offset fails there rather than looking right in a table and wrong on screen. `Wa
 copied: nothing here integrates anything, and a duplicated number with no reader is a
 synchronisation hazard that buys nothing. Prediction is the issue that will need them, and the issue
 that should bring them across. The relationships between the constants that *are* here — eyes inside
-the body, capsule inside the collision box, pitch short of vertical — are `const` assertions rather
-than tests, because a build should not be able to violate them at all.
+the body, pitch short of vertical — are `const` assertions rather than tests, because a build should
+not be able to violate them at all. **The body's own proportions used to be among them and are not
+any more**: they were expressible while a body was one capsule inscribed in the collision box, and a
+rig of a dozen-odd boxes says things a `const` expression cannot, so `player/appearance.rs` asserts them
+as tests instead — including the two parts that deliberately leave the box.
+
+## The rig: a body cut from the same grain as the world
+
+A character is thirteen axis-aligned boxes and a haircut — between one box and four — authored in
+`player/appearance.rs` on a grid of **notches**: a twelfth of `PLAYER_WIDTH` across and a
+thirty-sixth of `PLAYER_HEIGHT` up, which is the same length on both axes and 0.05 blocks at the
+server's numbers. Terrain is cut at one block and a body at a twentieth of one — fine enough for a
+fist, coarse enough that nothing reads as smooth. Nothing here is written in metres, because the box
+belongs to the server and a character with more hair is not a taller character.
+
+Four rules hold the numbers together:
+
+1. **Parts interpenetrate; they never merely touch.** A boot swallows a leg, a leg the tunic, the
+   neck both. **Nothing checks this one**, and it is written down rather than asserted for the
+   reason rule 2 is asserted: what a player would see is rule 2 failing, and a part that merely
+   meets its neighbour is one edit away from that rather than already there. Two parts *do*
+   legitimately meet along an edge — the trousers and a fist, at the hip — so a test could not tell
+   the difference without a list of exceptions nobody would keep.
+2. **No two faces of different colours land on the same plane where they overlap.** Coplanar faces
+   of different materials fight for the depth buffer and flicker at exactly the distance a body is
+   hardest to read. It is a property of the numbers rather than of the renderer, so
+   `no_two_colours_share_a_plane` checks it rather than hoping — over a *positive* area, because
+   two boxes that share only an edge cover none of it and reporting that as a flicker would be a
+   finding somebody had to silence.
+3. **Detail sits half a notch proud of what it wraps** — the hair on every face, the eyes on the
+   face they look out of. The hat-layer trick every blocky model has used since Minecraft, and what
+   lets a cap wrap a head without sharing a plane with it.
+4. **The body keeps the box the server collides.** What reaches past it is the arm and the hair,
+   and neither is collided, because neither is a gameplay fact: a sleeve by a notch on each side and
+   a fist by two, and a topknot three and a half notches above the crown. Twelve notches across
+   cannot hold a torso, two legs and two visible arms; Minecraft's own model runs four times further
+   past its hitbox than this one does. `the_body_keeps_the_box_the_server_collides` holds the table
+   of what may leave it and by how much — **"nothing leaves the box" would be false and "something
+   leaves it" would be unfalsifiable**, so what is pinned is which parts and by how far.
+
+**The axes are the model sheet's and not Bevy's, and that is reconciled in exactly one function.**
+`z` is measured along the way a character faces, where a body at yaw 0 faces `-Z` here — so the
+numbers in the table read against the sheet they were drawn from, and `appearance::placed` is the
+one place a sign is applied. `what_faces_the_viewer_is_nearer_than_what_is_behind_it` is what would
+catch that negation going missing.
+
+**The eyes are the one part nobody chooses**, and the one colour this side is entitled to decide.
+The contract carries five colours; a sixth would be a colour the server stores, so the eyes are a
+constant of the model instead. They cost one mesh and buy the thing a silhouette cannot: a face
+reads at four times the distance, and it is what makes the front of a character legible together
+with the two notches of toe the boots run past the legs.
+
+**Ten meshes for a whole settlement.** Every player is the same geometry and only the colours
+differ, so a part is merged into one mesh at startup — five for the parts whose shape is fixed and
+one per hair model — and nothing is ever rebuilt. Materials are keyed on the wire's colour itself,
+so two players in the same walnut tunic share one `StandardMaterial` and the palettes bound how many
+there can be; the map is swept whenever a body leaves, because a server is free to describe a colour
+nobody can choose and sixteen million of those is a map rather than a palette.
 
 ## The sky is on the server's clock, and the sun moved here to get to it
 
@@ -781,13 +838,12 @@ does — `combat.rs` routes on the ids it knows, and what an item can do is the 
 wrong icon draws the wrong picture and has no other effect available to it.
 
 **A body is the same shape of answer, and `player/appearance.rs` is where it is decided once.**
-Six colours cross the wire and five parts wear them; the table says which part takes which field
-and where each part sits, in fractions of the collision box rather than in metres — the box is the
-server's, and a character with more hair is not a taller character. `ui/character.rs` draws those
-parts flat as `bevy_ui` nodes for the preview, exactly as `ui/icon.rs` draws an `ItemShape`, and
-the issue that gives players bodies in the world builds meshes from the same table. Two tables
-would be two answers to "what does a shirt colour cover", and the first thing two answers do is
-disagree.
+Five colours cross the wire and six parts wear them — see "The rig" above for the sixth — and the
+table says which part takes which field and where each of its boxes sits, in notches of the
+collision box rather than in metres. `ui/character.rs` draws those boxes flat as `bevy_ui` nodes for
+the preview, exactly as `ui/icon.rs` draws an `ItemShape`; `player/mod.rs` merges the same boxes into
+meshes for the bodies in the world. Two tables would be two answers to "what does a shirt colour
+cover", and the first thing two answers do is disagree.
 
 ## Conventions that are not obvious from the code
 
@@ -1478,10 +1534,15 @@ Recorded here so the next reader does not mistake them for oversights:
   that is full is full, and `--name` naming nobody on one says so and leaves the screen up. The
   server's store is where a deletion would have to start.
 - **The preview is flat `bevy_ui` nodes, not the body the world draws.** Both read the same table
-  in `player/appearance.rs`, which is what keeps them one answer, but a rectangle stack seen
-  head-on is not a mesh seen from a camera. The issue that gives players bodies is where the second
-  renderer arrives; until then the preview is honest about the colours and approximate about
-  everything else.
+  in `player/appearance.rs` — the same boxes, the same colours, the same haircut — but one is a
+  projection with the depth thrown away and the other is a mesh seen from a camera. Two consequences
+  worth knowing before editing it: the preview needs a **painter's order** where the world has a
+  depth buffer, so each node's `ZIndex` is its box's own nearness and *not* the order the parts are
+  spawned in — a curtain of hair falls behind the shoulders and a cap sits over the crown, and only
+  the box knows which; and the pool of nodes is fixed at the widest model each part has, because a
+  screen that spawned and despawned nodes as somebody cycled a haircut would rebuild a layout on a
+  key press. The frame is sized from `appearance::envelope` rather than from the collided box, or it
+  would clip the knuckles off everybody and the knot off one of them.
 - **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
   says so and `--account-service` pointed somewhere else is a different file.
 - **No reconnect, backoff or session resumption.** A refused or dropped connection is reported
@@ -1500,12 +1561,26 @@ Recorded here so the next reader does not mistake them for oversights:
   fiddly and platform-specific — `CursorGrabMode::Locked` is unsupported on X11, and `Confined`
   stops generating motion at the window edge — so it belongs with the camera-control issue rather
   than as a drive-by here.
-- **First person, and the local player has no body.** The camera sits at its eyes, so a capsule
-  there would fill the screen with the inside of the player's own head. A third-person or orbit
-  camera is what would want one, and that is a camera issue.
-- **Other players are coloured capsules and nothing else.** No animation, no name plate, no
-  distinction between a player and anything else the server might send. Art assets and a character
-  rig are later issues; the colour is keyed on `entity_id` so two players are at least told apart.
+- **First person, and the local player has no body.** The camera sits at its eyes, so a body there
+  would fill the screen with the inside of the player's own head. It is also the reason it carries
+  no `Worn`: there is nothing to dress. A third-person or orbit camera is what would want one, and
+  that is a camera issue.
+- **Other players are the rig and nothing else.** No animation of any kind, no name plate, no
+  equipment on the body, no faces beyond the two eye boxes, and no texture anywhere — it is coloured
+  geometry. Each of those is its own issue.
+- **An entity can be drawn before it has been described, and is never re-spawned when it is.** The
+  appearance stream and the snapshot stream are not ordered against each other, so a body whose
+  `PlayerAppearance` has not landed wears `codec::PLACEHOLDER_APPEARANCE` — the neutral grey
+  `schemas/player.fbs` documents — and `dress_bodies` swaps six handles in place the moment it does.
+  Despawning and re-spawning would restart the interpolation and blink the body. The server sends
+  the appearance *ahead* of the snapshot that first carries the entity where it can, which makes the
+  placeholder rare rather than impossible.
+- **Both body caches are the size of a view, not of a session.** An entity that leaves takes its
+  cached appearance with it, and `Player.described` on the server drops its own entry at the same
+  moment — so a player who walks back into view is described again and neither side had to be told.
+  The one case a snapshot cannot answer is an appearance for an entity no snapshot has ever
+  mentioned; it is held for `APPEARANCE_GRACE` and then dropped, which is what stops a server that
+  describes entities it never shows from growing a map for as long as the connection lasts.
 - **No cross-chunk lighting, ambient occlusion, shadows, LOD or frustum-driven requests.** One
   directional light with shadow maps off, plus a per-camera ambient term and a per-camera distance
   fog — all three on the server's clock — and one `PointLight` per campfire in view, which is on

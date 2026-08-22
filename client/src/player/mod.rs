@@ -41,7 +41,7 @@
 //! | `target.rs` | the voxel raycast, mining intent/progress, placement and outline |
 //! | `structures.rs` | the tents and forges a snapshot names, and the two requests for one |
 //! | `constants.rs` | the numbers, and which of them mirror the server |
-//! | `appearance.rs` | which part of a body each appearance colour covers, and where it sits |
+//! | `appearance.rs` | the rig: which box each appearance colour covers, and where it sits |
 
 mod appearance;
 mod camera;
@@ -58,14 +58,17 @@ mod sky;
 mod structures;
 mod target;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
-pub(crate) use appearance::{BodyPart, parts as body_parts};
+pub(crate) use appearance::{
+    BodyPart, PlacedBox, boxes as body_boxes, envelope as body_envelope, placed as placed_box,
+    slots as body_slots,
+};
 
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
 pub use interpolate::SnapshotBuffer;
@@ -79,10 +82,10 @@ pub(crate) use items::{ItemShape, item_palette_id, item_shape};
 pub use target::{ApplyMiningFeedback, MiningFeedback};
 
 use crate::net::{
-    LifeState, Outbound, PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox,
-    encode_player_input,
+    Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
+    PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
 };
-use constants::{CAPSULE_RADIUS, LOOK_SENSITIVITY, MAX_PITCH, PLAYER_HEIGHT};
+use constants::{LOOK_SENSITIVITY, MAX_PITCH};
 
 /// How far the player has to move before the movement log says so again, in blocks.
 ///
@@ -92,19 +95,26 @@ use constants::{CAPSULE_RADIUS, LOOK_SENSITIVITY, MAX_PITCH, PLAYER_HEIGHT};
 /// player standing still is silent.
 const MOVEMENT_LOG_DISTANCE: f32 = 8.0;
 
-/// The colours other players are drawn in, as linear RGB.
+/// The hair model handed to [`body_boxes`] for a part that is not the hair, where it is
+/// ignored.
 ///
-/// Chosen to sit away from the terrain palette in `world/palette.rs`: a player the same
-/// colour as the rock behind them is a player nobody can see. Indexed by entity id, so a
-/// given player keeps one colour for as long as the session lasts.
-const BODY_COLOURS: [[f32; 3]; 6] = [
-    [0.85, 0.25, 0.20], // rust red
-    [0.20, 0.55, 0.85], // cold blue
-    [0.90, 0.70, 0.20], // amber
-    [0.35, 0.75, 0.45], // moss
-    [0.70, 0.40, 0.85], // violet
-    [0.90, 0.45, 0.65], // heather
-];
+/// Named rather than spelled at the call site, so nobody reads it as a default haircut:
+/// `body_boxes` is total over the part, and every part but [`BodyPart::Hair`] has one
+/// shape whatever is on the head above it.
+const ANY_HAIR: HairModel = HairModel::Shaved;
+
+/// How long an appearance for an entity nobody has drawn yet is kept.
+///
+/// **The bound on a cache the server fills.** An appearance legitimately arrives before
+/// the snapshot that first carries its entity — `schemas/player.fbs` says either order is
+/// legal and the server deliberately sends this one first — so an entry with no body must
+/// survive a tick or two. It must not survive a session: nothing obliges a server to ever
+/// send a snapshot naming an entity it described, and a client that kept every such
+/// appearance would grow a map for as long as it stayed connected.
+///
+/// Two seconds is forty ticks at the default rate, which is two orders of magnitude more
+/// than the gap it exists to cover and still a bound.
+const APPEARANCE_GRACE: Duration = Duration::from_secs(2);
 
 /// Orders anything that reads the transforms a snapshot wrote after the systems that write
 /// them.
@@ -147,12 +157,15 @@ impl Plugin for PlayerPlugin {
             .init_resource::<InputMode>()
             .init_resource::<InputCadence>()
             .init_resource::<SnapshotBuffer>()
+            .init_resource::<Appearances>()
+            .init_resource::<BodyMaterials>()
             .init_resource::<SelfVitals>()
             .init_resource::<sky::SkyClock>()
             .init_resource::<PlayerStats>()
             // `init_resource` rather than `insert_resource`, and `NetPlugin` does the same:
             // whichever plugin is built first creates the inbox and the other finds it.
             .init_resource::<SnapshotInbox>()
+            .init_resource::<AppearanceInbox>()
             .add_systems(
                 Startup,
                 (
@@ -182,6 +195,9 @@ impl Plugin for PlayerPlugin {
                         .chain(),
                     (
                         ingest_snapshots,
+                        // Before the bodies, so an entity whose appearance and first
+                        // snapshot share a frame is dressed on that frame.
+                        ingest_appearances,
                         apply_snapshots,
                         drops::apply_snapshots,
                         mobs::apply_snapshots,
@@ -194,6 +210,9 @@ impl Plugin for PlayerPlugin {
                         // this set writes. It also makes a new drop's cosmetic child
                         // available to the animation system on that same frame.
                         ApplyDeferred,
+                        // After the flush, because the children it writes to are spawned
+                        // by a command and a queued spawn is invisible to a query.
+                        dress_bodies,
                         drops::animate,
                         mobs::animate,
                         structures::animate,
@@ -203,6 +222,7 @@ impl Plugin for PlayerPlugin {
                         .in_set(ApplySnapshots),
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
+                    forget_bodies_without_a_session.after(ApplySnapshots),
                 )
                     .after(crate::net::DrainNetwork),
             )
@@ -285,11 +305,174 @@ impl InputCadence {
     }
 }
 
-/// The mesh and materials every body is drawn with.
+/// The meshes every body is drawn from, built once at startup and shared by everybody.
+///
+/// **Ten meshes for a whole settlement.** Every player is the same geometry and only the
+/// colours differ, so a part is merged into one mesh the way a mob's body and a
+/// structure's are — five for the parts whose shape is fixed, and one per hair model,
+/// which is the one part whose shape a player chooses. Nothing here is ever rebuilt: a
+/// body that changes its hair swaps a handle.
 #[derive(Resource, Debug)]
 struct PlayerVisuals {
-    capsule: Handle<Mesh>,
-    colours: Vec<Handle<StandardMaterial>>,
+    shoes: Handle<Mesh>,
+    trousers: Handle<Mesh>,
+    shirt: Handle<Mesh>,
+    skin: Handle<Mesh>,
+    eyes: Handle<Mesh>,
+    /// One per model, paired with the model it draws. An array rather than a map because
+    /// there are five of them and `HairModel` is deliberately not a number.
+    hair: [(HairModel, Handle<Mesh>); HairModel::ALL.len()],
+}
+
+impl PlayerVisuals {
+    /// The mesh one part of a body wearing one hair model is drawn from.
+    ///
+    /// Total over [`BodyPart`] with no wildcard arm, so a sixth part does not compile
+    /// until it has been given geometry.
+    fn mesh(&self, part: BodyPart, model: HairModel) -> Handle<Mesh> {
+        match part {
+            BodyPart::Shoes => self.shoes.clone(),
+            BodyPart::Trousers => self.trousers.clone(),
+            BodyPart::Shirt => self.shirt.clone(),
+            BodyPart::Skin => self.skin.clone(),
+            BodyPart::Eyes => self.eyes.clone(),
+            BodyPart::Hair => self
+                .hair
+                .iter()
+                .find(|(drawn, _)| *drawn == model)
+                .map_or_else(|| self.skin.clone(), |(_, mesh)| mesh.clone()),
+        }
+    }
+}
+
+/// One material per colour, rather than one per player.
+///
+/// **Keyed on the colour itself, which is what makes twenty players in view cost twenty
+/// bodies and not a hundred materials**: two people in the same walnut tunic share one
+/// `StandardMaterial`, and the palettes the character screen offers bound how many there
+/// can be. The key is the wire's `0x00RRGGBB`, so the value a server sent is the value
+/// this map is asked about — no rounding, and nothing to disagree about.
+///
+/// Swept by [`apply_snapshots`] rather than grown for ever: a server is free to describe
+/// a colour nobody can choose, and sixteen million of them is a map. An entry dropped
+/// while a body still wears it costs nothing, because the body holds a strong handle to
+/// the material and the next one asking for that colour simply makes it again.
+#[derive(Resource, Debug, Default)]
+struct BodyMaterials(HashMap<u32, Handle<StandardMaterial>>);
+
+impl BodyMaterials {
+    /// The material for one colour, making it the first time it is asked for.
+    fn of(
+        &mut self,
+        colour: u32,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        self.0
+            .entry(colour)
+            .or_insert_with(|| {
+                materials.add(StandardMaterial {
+                    // The wire's colours are sRGB, which is what `srgb_u8` takes. The
+                    // character screen's swatches read the same bytes the same way, and
+                    // that is the whole of why a shirt is the colour it was chosen to be.
+                    base_color: Color::srgb_u8(
+                        ((colour >> 16) & 0xFF) as u8,
+                        ((colour >> 8) & 0xFF) as u8,
+                        (colour & 0xFF) as u8,
+                    ),
+                    // Cloth and leather, not armour. Nothing in this world is polished.
+                    perceptual_roughness: 0.9,
+                    ..default()
+                })
+            })
+            .clone()
+    }
+}
+
+/// Everything dressing a body needs, as one borrow.
+///
+/// The three travel together — the shared meshes, the cache that keys a material on a
+/// colour, and the assets that cache mints into — and both the system that spawns a body
+/// and the system that re-dresses one need all three. Grouping them is what keeps
+/// [`Self::outfit`] the single answer to "what is this character wearing", rather than two
+/// loops that have to agree.
+struct Wardrobe<'a> {
+    visuals: &'a PlayerVisuals,
+    palette: &'a mut BodyMaterials,
+    materials: &'a mut Assets<StandardMaterial>,
+}
+
+impl Wardrobe<'_> {
+    /// The mesh and material each part of one appearance is drawn with.
+    fn outfit(
+        &mut self,
+        worn: Appearance,
+    ) -> [(BodyPart, Handle<Mesh>, Handle<StandardMaterial>); BodyPart::IN_DRAWING_ORDER.len()]
+    {
+        let model = worn.hair_model();
+        BodyPart::IN_DRAWING_ORDER.map(|part| {
+            (
+                part,
+                self.visuals.mesh(part, model),
+                self.palette.of(part.colour(worn), self.materials),
+            )
+        })
+    }
+}
+
+/// The same three as one system parameter.
+///
+/// Grouped for the reason `net::Inboxes` is: two systems need all three, and a signature
+/// that lists them is a signature nobody reads. [`Self::wardrobe`] is the only way in, so
+/// the `Option` on the meshes is answered once rather than at each use.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Dressing<'w> {
+    visuals: Option<Res<'w, PlayerVisuals>>,
+    palette: ResMut<'w, BodyMaterials>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+}
+
+impl Dressing<'_> {
+    /// Everything needed to dress a body, or `None` on a frame before the meshes exist.
+    ///
+    /// In practice there is no such frame — [`create_player_visuals`] runs in `Startup`
+    /// and both readers run in `Update` — and it is an `Option` for the reason the
+    /// resource always was: a client that took the window down because a plugin had not
+    /// been built is a worse client than one that draws nothing for a frame.
+    fn wardrobe(&mut self) -> Option<Wardrobe<'_>> {
+        Some(Wardrobe {
+            visuals: self.visuals.as_deref()?,
+            palette: &mut self.palette,
+            materials: &mut self.materials,
+        })
+    }
+}
+
+/// What every entity this session can see looks like.
+///
+/// **The cache the acceptance criterion asks for, and the reason it is here rather than
+/// in `net`**: an entry may be dropped exactly when the body wearing it is despawned, and
+/// this module is what despawns one. `net` knows when a message arrived; it does not know
+/// when a player left.
+///
+/// Bounded in two directions. An entity that leaves for good takes its entry with it, and
+/// the server describes it again if it comes back — its own `described` map is dropped
+/// per entity for the same reason, so the two sides agree without either being told.
+/// An entry that never finds a body is dropped after [`APPEARANCE_GRACE`].
+#[derive(Resource, Debug, Default)]
+struct Appearances(HashMap<u64, Described>);
+
+/// One cached appearance: what the server said, when it said it, and whether anything
+/// has been drawn wearing it yet.
+#[derive(Debug, Clone, Copy)]
+struct Described {
+    appearance: Appearance,
+    /// When this entry was written. Read only while `drawn` is false — once a body
+    /// exists, that body's presence in the newest snapshot is what keeps the entry.
+    at: Instant,
+    /// Whether a body has ever been spawned wearing this. It is what separates *this
+    /// entity has left* from *this entity has not arrived yet*, which are the same absence
+    /// from a snapshot and want opposite answers.
+    drawn: bool,
 }
 
 /// What the debug overlay reports about movement.
@@ -414,44 +597,63 @@ struct Body(u64);
 #[derive(Component)]
 pub struct LocalPlayer;
 
+/// What a drawn body is currently wearing.
+///
+/// Kept on the entity rather than read back out of its children's materials, for the
+/// reason a mob keeps its interpolated yaw: recovering it would mean asking six handles
+/// what colour they are and reversing the map that made them. It is also what makes
+/// dressing a body idempotent — an appearance that has not changed changes nothing.
+///
+/// The local player has none, because it has no body: see [`spawn_body`].
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+struct Worn(Appearance);
+
+/// One drawn part of one body — the six children a body has.
+#[derive(Component, Debug, Clone, Copy)]
+struct BodyVisual(BodyPart);
+
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
 
-fn create_player_visuals(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // A capsule inscribed in the box the server collides: the radius comes from the
-    // footprint's half-width and the cylinder is what is left of the height.
-    //
-    // Translated up by half the body at build time, so a body entity's `Transform` is the
-    // *feet* position the snapshot carries rather than a centre nobody else uses. That
-    // matters beyond tidiness: the camera reads the same transform and adds an eye height
-    // to it, and a test asserts the transform against the snapshot exactly.
-    let capsule = Mesh::from(Capsule3d::new(
-        CAPSULE_RADIUS,
-        PLAYER_HEIGHT - 2.0 * CAPSULE_RADIUS,
-    ))
-    .translated_by(Vec3::Y * (PLAYER_HEIGHT / 2.0));
-
-    let colours = BODY_COLOURS
-        .iter()
-        .map(|[r, g, b]| {
-            materials.add(StandardMaterial {
-                base_color: Color::linear_rgb(*r, *g, *b),
-                // Cloth and leather, not armour. Nothing in this world is polished.
-                perceptual_roughness: 0.9,
-                ..default()
-            })
-        })
-        .collect();
-
+fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     commands.insert_resource(PlayerVisuals {
-        capsule: meshes.add(capsule),
-        colours,
+        shoes: meshes.add(part_mesh(BodyPart::Shoes, ANY_HAIR)),
+        trousers: meshes.add(part_mesh(BodyPart::Trousers, ANY_HAIR)),
+        shirt: meshes.add(part_mesh(BodyPart::Shirt, ANY_HAIR)),
+        skin: meshes.add(part_mesh(BodyPart::Skin, ANY_HAIR)),
+        eyes: meshes.add(part_mesh(BodyPart::Eyes, ANY_HAIR)),
+        hair: HairModel::ALL.map(|model| (model, meshes.add(part_mesh(BodyPart::Hair, model)))),
     });
+}
+
+/// One part of the rig, merged into a single mesh.
+///
+/// **Authored with its origin at the feet**, which is where the server puts the position
+/// it sends, exactly as a mob's parts are. So a body entity's `Transform` is the *feet*
+/// position the snapshot carries rather than a centre only this module would know about,
+/// the children carry no offset of their own, and the camera can add an eye height to the
+/// same number. The capsule this replaces baked the same property in by translating
+/// itself up half a body; `player::appearance` measures from the ground instead, so
+/// nothing here has to.
+///
+/// Merged per part rather than per box, because a material is what a part *is*: five
+/// parts and a haircut is six draws for a body, where a box apiece would be sixteen.
+fn part_mesh(part: BodyPart, model: HairModel) -> Mesh {
+    let mut boxes = body_boxes(part, model).iter().map(|cell| {
+        let placed = placed_box(part, *cell);
+        Mesh::from(Cuboid::from_size(placed.size)).translated_by(placed.centre)
+    });
+
+    // Unreachable: every part in the table is drawn from at least one box, and
+    // `every_hair_model_is_a_silhouette_of_its_own` is what says so. An empty mesh is the
+    // cosmetic failure the rest of this module already prefers to a panic in a renderer.
+    let Some(mut merged) = boxes.next() else {
+        error!("{part:?} is drawn from no boxes at all");
+        return Mesh::from(Cuboid::from_size(Vec3::ZERO));
+    };
+    merge_all(&mut merged, boxes, "player body");
+    merged
 }
 
 /// Reads the controls into [`MoveIntent`] and [`LookState`].
@@ -635,17 +837,19 @@ fn forget_vitals_without_a_session(session: Option<Res<Session>>, mut vitals: Re
 fn apply_snapshots(
     buffer: Res<SnapshotBuffer>,
     session: Option<Res<Session>>,
-    visuals: Option<Res<PlayerVisuals>>,
+    mut dressing: Dressing<'_>,
+    mut appearances: ResMut<Appearances>,
     mut existing: Query<(Entity, &Body, &mut Transform)>,
     mut commands: Commands,
 ) {
     // Both exist from the first frame after startup. A frame without them is a frame before
     // there is a session, and there is nothing to place a body relative to.
-    let (Some(session), Some(visuals)) = (session, visuals) else {
+    let (Some(session), Some(mut wardrobe)) = (session, dressing.wardrobe()) else {
         return;
     };
 
-    let drawn = buffer.sample(Instant::now(), tick_interval(session.0.tick_rate));
+    let now = Instant::now();
+    let drawn = buffer.sample(now, tick_interval(session.0.tick_rate));
 
     // The world is the authority on which bodies exist, rather than a map kept beside it.
     // A map would be a second copy of the same fact and could drift from it — a despawned
@@ -666,21 +870,165 @@ fn apply_snapshots(
         if placed.contains(entity_id) {
             continue;
         }
+        // **The placeholder is a rendering answer and never a decoding one.** An entity
+        // can legitimately be visible before the message describing it lands, because the
+        // two streams are not ordered against each other — so it is drawn in the neutral
+        // grey `schemas/player.fbs` documents and `dress_bodies` replaces that in place
+        // the moment the appearance arrives. Nothing pops out and respawns.
+        let described = appearances.0.get_mut(entity_id);
+        let worn = described
+            .as_ref()
+            .map_or(PLACEHOLDER_APPEARANCE, |described| described.appearance);
+        if let Some(described) = described {
+            described.drawn = true;
+        }
+
         spawn_body(
             &mut commands,
-            &visuals,
+            &mut wardrobe,
             *entity_id,
             session.0.entity_id,
+            worn,
             placement(state),
+        );
+    }
+
+    // **What keeps two caches the size of a view rather than of a session.** An entity in
+    // the newest snapshot keeps its entry; one that has left loses it, and the server
+    // describes it again if it comes back — `Player.described` on the far side drops its
+    // own entry for the same reason, so the two agree without either being told. An entry
+    // that has never had a body is the one case a snapshot cannot answer, and it is held
+    // for [`APPEARANCE_GRACE`] and no longer.
+    let before = appearances.0.len();
+    appearances.0.retain(|entity_id, described| {
+        drawn.iter().any(|(visible, _)| visible == entity_id)
+            || (!described.drawn && now.duration_since(described.at) < APPEARANCE_GRACE)
+    });
+
+    // Only when something actually left, because the sweep is a scan of both maps and
+    // almost every frame has nothing to sweep.
+    if appearances.0.len() != before {
+        let live: HashSet<u32> = appearances
+            .0
+            .values()
+            .flat_map(|described| {
+                BodyPart::IN_DRAWING_ORDER.map(|part| part.colour(described.appearance))
+            })
+            .chain(BodyPart::IN_DRAWING_ORDER.map(|part| part.colour(PLACEHOLDER_APPEARANCE)))
+            .collect();
+        wardrobe.palette.0.retain(|colour, _| live.contains(colour));
+    }
+}
+
+/// Puts every appearance the net thread decoded into the cache, newest last.
+///
+/// Runs **before** [`apply_snapshots`], so a body spawned on the frame its appearance
+/// arrives is dressed on that frame rather than showing a placeholder for one of them.
+/// Whether an entity has been drawn survives an update, because it is a fact about this
+/// client and not about the message.
+fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMut<Appearances>) {
+    let arrived = inbox.take();
+    if arrived.is_empty() {
+        return;
+    }
+
+    let now = Instant::now();
+    for message in arrived {
+        let drawn = appearances
+            .0
+            .get(&message.entity_id)
+            .is_some_and(|described| described.drawn);
+        appearances.0.insert(
+            message.entity_id,
+            Described {
+                appearance: message.appearance,
+                at: now,
+                drawn,
+            },
         );
     }
 }
 
+/// Dresses every body whose appearance has changed since it was drawn.
+///
+/// **In place, and that is the acceptance criterion**: an entity whose appearance arrives
+/// after it does keeps its identity, its transform and its interpolation, and swaps six
+/// handles. Despawning and respawning it would restart both and blink the body.
+///
+/// It is also what makes a *changed* appearance free: the comparison against [`Worn`] is
+/// one equality per body per frame, and the loop below runs only for the bodies where it
+/// failed.
+fn dress_bodies(
+    appearances: Res<Appearances>,
+    mut dressing: Dressing<'_>,
+    mut bodies: Query<(&Body, &mut Worn, &Children)>,
+    mut parts: Query<(
+        &BodyVisual,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+) {
+    let Some(mut wardrobe) = dressing.wardrobe() else {
+        return;
+    };
+
+    for (body, mut worn, children) in &mut bodies {
+        let Some(described) = appearances.0.get(&body.0) else {
+            continue;
+        };
+        if described.appearance == worn.0 {
+            continue;
+        }
+        worn.0 = described.appearance;
+
+        let outfit = wardrobe.outfit(described.appearance);
+
+        for child in children {
+            let Ok((visual, mut mesh, mut material)) = parts.get_mut(*child) else {
+                continue;
+            };
+            let Some((_, shape, colour)) = outfit.iter().find(|(part, _, _)| *part == visual.0)
+            else {
+                continue;
+            };
+            // The hair is the one part whose *shape* a player chooses, so it is the one
+            // part where a mesh handle can change. The other five swap a colour.
+            if mesh.0 != *shape {
+                mesh.0 = shape.clone();
+            }
+            if material.0 != *colour {
+                material.0 = colour.clone();
+            }
+        }
+    }
+}
+
+/// Drops both body caches when there is no session.
+///
+/// The mirror of [`forget_vitals_without_a_session`], and the same argument: what a player
+/// in a session that has ended looked like is not a fact about the next session, and
+/// leaving it behind would have that one inherit it. A reconnect refills both, because the
+/// server describes every entity to every session that has not been told yet.
+///
+/// Guarded rather than unconditional, because this runs on every frame for the rest of the
+/// app's life and clearing an empty map still marks the resource changed.
+fn forget_bodies_without_a_session(
+    session: Option<Res<Session>>,
+    mut appearances: ResMut<Appearances>,
+    mut palette: ResMut<BodyMaterials>,
+) {
+    if session.is_some() || (appearances.0.is_empty() && palette.0.is_empty()) {
+        return;
+    }
+    appearances.0.clear();
+    palette.0.clear();
+}
+
 /// The transform one interpolated state becomes.
 ///
-/// The translation is the **feet** position the snapshot carries — the capsule mesh is
-/// built with its own half-height baked in, so nothing here has to offset it, and the
-/// camera can add an eye height to the same number.
+/// The translation is the **feet** position the snapshot carries — every part of the rig
+/// is authored from the ground up, so nothing here has to offset anything, and the camera
+/// can add an eye height to the same number.
 fn placement(state: &interpolate::Interpolated) -> Transform {
     Transform {
         translation: state.pos,
@@ -691,14 +1039,20 @@ fn placement(state: &interpolate::Interpolated) -> Transform {
 
 /// Spawns the entity that draws one of the server's entities.
 ///
-/// This session's own player gets **no mesh**. The camera sits at its eyes, so a capsule
-/// there would fill the screen with the inside of the player's own head. A third-person
-/// view is what would want one, and that is a camera issue rather than this one.
+/// This session's own player gets **no mesh and no children**. The camera sits at its
+/// eyes, so a body there would fill the screen with the inside of the player's own head.
+/// A third-person view is what would want one, and that is a camera issue rather than this
+/// one — which is also why it carries no [`Worn`]: there is nothing to dress.
+///
+/// Everybody else gets one child per part, all six under the one transform, and none of
+/// them carries an offset: the meshes are authored with their origin at the feet, which is
+/// the point the parent already stands on.
 fn spawn_body(
     commands: &mut Commands,
-    visuals: &PlayerVisuals,
+    wardrobe: &mut Wardrobe<'_>,
     entity_id: u64,
     local_entity_id: u64,
+    worn: Appearance,
     placed: Transform,
 ) {
     if entity_id == local_entity_id {
@@ -706,13 +1060,18 @@ fn spawn_body(
         return;
     }
 
-    let colour = visuals.colours[(entity_id as usize) % visuals.colours.len()].clone();
-    commands.spawn((
-        Body(entity_id),
-        Mesh3d(visuals.capsule.clone()),
-        MeshMaterial3d(colour),
-        placed,
-    ));
+    let parts = wardrobe.outfit(worn);
+    let owner = commands.spawn((Body(entity_id), Worn(worn), placed)).id();
+    commands.entity(owner).with_children(|parent| {
+        for (part, mesh, material) in parts {
+            parent.spawn((
+                BodyVisual(part),
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::default(),
+            ));
+        }
+    });
 }
 
 /// Republishes what the overlay reports.

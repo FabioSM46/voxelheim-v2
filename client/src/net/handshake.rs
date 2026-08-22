@@ -29,8 +29,8 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, InventoryState, Message, MineProgress, Reject, SessionParams,
-    Snapshot, WorldClock, WorldUpdate,
+    ActionRefused, CharacterList, InventoryState, Message, MineProgress, PlayerAppearance, Reject,
+    SessionParams, Snapshot, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -81,6 +81,13 @@ pub enum Transition {
     Inventory(InventoryState),
     /// Authoritative progress for the voxel currently being mined.
     MineProgress(MineProgress),
+    /// What one visible player looks like, admitted because a session exists.
+    ///
+    /// It names an entity rather than answering about one this session already has, and
+    /// that is not a check this layer can make: `schemas/player.fbs` says the appearance
+    /// and the snapshot streams are not ordered against each other, so an appearance for
+    /// an entity no snapshot has mentioned yet is the ordinary case rather than a fault.
+    Appearance(PlayerAppearance),
     /// The server refused an action, admitted because a session exists.
     ///
     /// Named apart from [`Self::Refused`] above, which is the *connection* being
@@ -315,12 +322,13 @@ impl Handshake {
             (Phase::Established, Message::ActionRefused(refused)) => {
                 Ok(Transition::ActionRefused(refused))
             }
-            // Admitted because a session exists, and carried no further: the appearance
-            // is decoded and validated here, and nothing draws one until the issue that
-            // gives players a body worth colouring. `MineProgress` spent Protocol V2 in
-            // exactly this state.
-            (Phase::Established, Message::PlayerAppearance(_)) => {
-                Ok(Transition::Ignored("PlayerAppearance"))
+            // Nothing to check against the welcome either, and for a reason worth
+            // stating: the entity id is checked by the codec against 0, and *not* against
+            // this session's own — an appearance for the viewer's own entity arrives the
+            // same way as everybody else's, which is what `schemas/player.fbs` says and
+            // what makes a player's own body one case rather than two.
+            (Phase::Established, Message::PlayerAppearance(appearance)) => {
+                Ok(Transition::Appearance(appearance))
             }
 
             // -- And the same payloads before there is a session --------------------
@@ -971,15 +979,21 @@ mod tests {
         );
     }
 
-    /// Admitted on a session and carried no further: validated at the decode boundary,
-    /// drawn by nobody until the issue that gives players a body worth colouring.
+    /// Admitted on a session and carried through whole: validated at the decode boundary,
+    /// and handed to the module that draws bodies exactly as it arrived.
+    ///
+    /// The entity id is deliberately **not** checked against this session's own. A viewer's
+    /// own appearance arrives the same way as everybody else's, and an appearance for an
+    /// entity no snapshot has mentioned yet is the ordinary case rather than a fault —
+    /// `schemas/player.fbs` says the two streams are not ordered against each other.
     #[test]
-    fn an_appearance_after_the_welcome_is_admitted_and_dropped() {
+    fn an_appearance_after_the_welcome_is_carried_to_the_renderer() {
         let mut handshake = established();
+        let described = player_appearance();
 
         assert_eq!(
-            handshake.apply(Message::PlayerAppearance(player_appearance())),
-            Ok(Transition::Ignored("PlayerAppearance"))
+            handshake.apply(Message::PlayerAppearance(described)),
+            Ok(Transition::Appearance(described))
         );
     }
 
