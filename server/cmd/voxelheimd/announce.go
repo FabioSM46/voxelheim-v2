@@ -406,8 +406,16 @@ func configureAnnouncer(opts options, fingerprint string) (*announcer, error) {
 // operator who had to notice that would notice it as a 401 with nothing in any log to explain
 // it. **Both ends trim**, which is what makes that safe: registry.ParseKey does the same to
 // the key it compares against.
+//
+// **An empty value means "not given", never "given as nothing".** Sourcing a freshly copied
+// `.env.example` exports every name in it with an empty value, and reading mere presence
+// would turn the documented first step of a local run into a warning on every start: this
+// server would report itself as half-configured — "the game runs and it will not appear in
+// the list" — where the truth is that nobody asked it to announce at all, which is the clean
+// Info line [newAnnouncer] has for exactly that case.
 func registrationKeyFor(path string) (registrationKey, error) {
-	fromEnv, inEnv := os.LookupEnv(registrationKeyEnv)
+	fromEnv := strings.TrimSpace(os.Getenv(registrationKeyEnv))
+	inEnv := fromEnv != ""
 	named := strings.TrimSpace(path)
 
 	switch {

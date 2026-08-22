@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -516,6 +517,51 @@ func TestAServerWithNothingConfiguredAnnouncesNothingAndSaysSoOnce(t *testing.T)
 	}
 	if logged.String() != before {
 		t.Errorf("a nil announcer's loop wrote to the log:\n%s", logged.String())
+	}
+}
+
+// An exported-but-empty registration key is "not given", not "given as nothing".
+//
+// **This is the state `.env.example` produces**, and it is the reason the distinction is
+// worth a test: `set -a; . ./.env; set +a` exports every name in that file, and a run that
+// wants no server list leaves this one empty. Reading mere presence made that start report
+// itself as half-configured — a warning saying the game runs but will not appear in a list —
+// where the truth is that nobody asked it to announce at all.
+func TestAnEmptyRegistrationKeyVariableIsNotAConfiguration(t *testing.T) {
+	t.Setenv(registrationKeyEnv, "")
+
+	log, logged := capturingLogger("text")
+	if a := newAnnouncer(validOptions(), strings.Repeat("ab", 32), log); a != nil {
+		t.Fatal("an empty registration key built an announcer")
+	}
+	if strings.Contains(logged.String(), "level=WARN") {
+		t.Errorf("an empty registration key was reported as a misconfiguration:\n%s", logged.String())
+	}
+	if !strings.Contains(logged.String(), "level=INFO") {
+		t.Errorf("not announcing was not reported at INFO:\n%s", logged.String())
+	}
+
+	// And it is the *unset* answer rather than an error, read at the source.
+	key, err := registrationKeyFor("")
+	if err != nil {
+		t.Fatalf("an empty registration key variable was an error: %v", err)
+	}
+	if key != "" {
+		t.Errorf("an empty registration key variable produced %q, want no key", string(key))
+	}
+
+	// The file beside it still works while the variable is exported empty — which is the
+	// half that would have been refused as "given in both places" had presence been the test.
+	path := filepath.Join(t.TempDir(), "registration-key")
+	if err := os.WriteFile(path, []byte(testRegistrationKey+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	fromFile, err := registrationKeyFor(path)
+	if err != nil {
+		t.Fatalf("reading the key from a file beside an empty variable: %v", err)
+	}
+	if string(fromFile) != testRegistrationKey {
+		t.Errorf("the key read from a file is %q, want the one written", string(fromFile))
 	}
 }
 
