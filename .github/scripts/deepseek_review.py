@@ -50,11 +50,17 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # characters per character of diff. The diff that exactly fills the budget is therefore
 # about 124,000 characters — which is where #164 landed, and why it produced nothing.
 #
-# 90,000 leaves a third of the budget for the verdict: 90,000 x 11.9 / 3.86 is about
-# 277,500 tokens of reasoning against a 384,000-token ceiling, and a real verdict cost
-# 35,966 completion tokens on #80. **It is a truncation threshold and not a promise** — a
-# review that still exhausts the budget under it is a new measurement, and this number is
-# what has to come down.
+# 90,000 spends about 277,500 of those tokens reasoning — 90,000 x 11.9 / 3.86 — and leaves
+# roughly 107,000 against a 384,000-token ceiling.
+#
+# **Almost all of that headroom is margin, not verdict.** The verdict is small: #80's
+# review returned 1,060 final characters, about 275 tokens at the ratio above, out of the
+# 35,966 completion tokens that run spent in total. The rest of those went on reasoning.
+# What the headroom is really for is a diff that reasons harder than the one this ratio was
+# measured on, and the ratio is an average over two observations.
+#
+# **It is a truncation threshold and not a promise** — a review that still exhausts the
+# budget under it is a new measurement, and this number is what has to come down.
 #
 # The ratio is a property of DEEPSEEK_REASONING_EFFORT and of the model. Change either and
 # this has to be measured again; `measure_only: true` on the workflow's dispatch replays a
@@ -94,10 +100,11 @@ def _no_verdict_remedy(finish_reason):
     return (
         "The model ran out of output budget and the ceiling is already the provider's "
         f"maximum ({DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS}), so there is no budget to raise. "
-        f"A diff at or under DEEPSEEK_MAX_DIFF_CHARS ({DEEPSEEK_MAX_DIFF_CHARS:,}) that "
-        "still exhausts it is a new measurement: lower that constant and its documentation "
-        "together. A larger one should have been truncated before this call, and reaching "
-        "here means the cap is not being applied."
+        f"Every diff reaching this call is at or under DEEPSEEK_MAX_DIFF_CHARS "
+        f"({DEEPSEEK_MAX_DIFF_CHARS:,}) — a larger one was truncated before it — so this is "
+        "a measurement saying that cap is now too high. Lower it and its documentation "
+        "together, and note what changed: the ratio it was derived from belongs to the "
+        "model and to DEEPSEEK_REASONING_EFFORT."
     )
 
 

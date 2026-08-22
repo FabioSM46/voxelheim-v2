@@ -285,7 +285,7 @@ Formatting (`gofmt`, `cargo fmt`) is the gate most often skipped and the one tha
 - [ ] Server-authoritative rule honored — no gameplay decisions client-side
 - [ ] Workspace-specific rules honored (local AGENTS.md)
 
-### Step 7: Measure What the Reviewer Will Be Asked to Read
+### Step 7: Commit, Then Measure What the Reviewer Will Be Asked to Read
 
 **A pull request can be too big to review, and the reviewer cannot tell you so in advance.**
 DeepSeek emits its chain of thought into the same output budget the verdict has to fit in, so a
@@ -295,14 +295,28 @@ the problem. `DEEPSEEK_MAX_DIFF_CHARS` is **90,000** characters, measured; over 
 truncated and every unread file is injected as a finding, which blocks the pull request until a
 human acknowledges the gap. Neither outcome is one to open a PR into deliberately.
 
-Measure before `gh pr create`, not after:
+**Commit first, then measure.** `git diff origin/develop...HEAD` compares *commits*: run it on an
+uncommitted tree and it answers for a branch that has not changed, which is `0` however much work
+is sitting in the working directory. A guard that reports `0` is not a guard, and it is silent —
+exactly the shape of failure this step exists to remove. Committing costs nothing here, because
+what must not have happened yet is the **pull request**, not the commit.
 
 ```bash
+git add -A
+git commit -m "<conventional-commit-type>: <concise description>
+
+Implements #<issue-number>
+
+- <bullet point of key change>
+- <bullet point of key change>"
+
 # What the reviewer actually sees: generated code and lockfiles are excluded by name,
-# so exclude them here too or the number is not the one that matters.
+# so exclude them here too or the number is not the one that matters. `wc -m` and not
+# `wc -c`, because the cap is characters and the reviewer measures `len(diff)` in code
+# points — bytes overcount every em-dash in this repository's prose.
 REVIEWABLE=$(git diff origin/develop...HEAD -- . \
   ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
-  ':(exclude)Cargo.lock' ':(exclude)go.sum' | wc -c)
+  ':(exclude)Cargo.lock' ':(exclude)go.sum' | wc -m)
 echo "reviewable diff: ${REVIEWABLE} characters (cap 90,000)"
 ```
 
@@ -320,18 +334,10 @@ across two rounds.
 
 Verify each half before opening it — the same measurement, on the branch you are about to push.
 
-### Step 8: Commit and Open PR
+### Step 8: Push and Open PR
 
 ```bash
-# From within the worktree:
-git add -A
-git commit -m "<conventional-commit-type>: <concise description>
-
-Implements #<issue-number>
-
-- <bullet point of key change>
-- <bullet point of key change>"
-
+# From within the worktree, with Step 7's commit already made:
 git push -u origin HEAD
 
 gh pr create \

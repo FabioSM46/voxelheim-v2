@@ -493,8 +493,11 @@ review (#167).
 3.86 characters per token, so the budget is about 1,481,000 characters of output — and it reasons
 about 11.9 characters per character of diff. That puts the diff which exactly fills the budget at
 about 124,000 characters, which is where #164 landed and why it produced nothing. 90,000 spends
-roughly 277,000 tokens reasoning and leaves the rest for a verdict that cost 35,966 on #80. Two
-diffs are known to fit whole: 50,963 (#80), 64,167 (#168, a verdict in 7m38s) and 72,350 (#169).
+roughly 277,000 of those tokens reasoning and leaves about 107,000 over. **Almost all of that is
+margin rather than verdict**: a verdict is small — #80 returned 1,060 final characters, about 275
+tokens, out of the 35,966 completion tokens that run spent in total — and what the headroom is for
+is a diff that reasons harder than the two this ratio was averaged over. Three diffs are known to
+fit whole: 50,963 (#80), 64,167 (#168, a verdict in 7m38s) and 72,350 (#169).
 
 **The cap is a truncation threshold, not a promise.** A review that still exhausts the budget
 under it is a new measurement, and this number is what comes down. The ratio belongs to the model

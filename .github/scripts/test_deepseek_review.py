@@ -84,12 +84,18 @@ class DiffCapTests(unittest.TestCase):
             "nothing measured says it cannot do",
         )
 
-    def test_the_cap_leaves_room_for_a_verdict(self):
+    def test_the_cap_leaves_the_reasoning_room_to_finish(self):
         """The arithmetic the constant's comment states, checked rather than asserted.
 
         1,481,442 characters emitted for 384,000 tokens is 3.86 characters per token, and
-        the model reasons about 11.9 characters per character of diff. A cap whose
-        reasoning alone would fill the ceiling is a cap that buys nothing.
+        the model reasons about 11.9 characters per character of diff.
+
+        **What the headroom is for is the reasoning, not the verdict.** A verdict is small
+        — #80 returned 1,060 final characters, about 275 tokens — and a margin sized on it
+        would be no margin at all. The number that has to fit with room to spare is the
+        reasoning itself, because the ratio above is an average over two observations and a
+        tangled diff reasons harder than a straightforward one. A quarter of the ceiling
+        left over is the margin this cap claims; anything less and the cap is a coin toss.
         """
         chars_per_token = 1_481_442 / 384_000
         reasoning_per_diff_char = 1_481_442 / self._OBSERVED_FAILURE
@@ -98,13 +104,13 @@ class DiffCapTests(unittest.TestCase):
             * reasoning_per_diff_char
             / chars_per_token
         )
-        # A real verdict cost 35,966 completion tokens on PR #80. Ask for two of them:
-        # one to write, and one of margin for a diff that reasons harder than the average
-        # this ratio was measured on.
+        ceiling = deepseek_review.DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS
         self.assertLess(
-            reasoning_tokens + 2 * 35_966,
-            deepseek_review.DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS,
-            "the cap leaves no room for the verdict the reasoning is supposed to produce",
+            reasoning_tokens,
+            0.75 * ceiling,
+            f"a diff at the cap reasons for about {reasoning_tokens:,.0f} of {ceiling:,} "
+            "tokens, which leaves too little for a diff that reasons harder than the "
+            "average this ratio was measured on",
         )
 
 
