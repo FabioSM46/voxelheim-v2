@@ -12,11 +12,12 @@
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
+use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use super::InputMode;
-use super::camera::WorldCamera;
+use super::camera::{ViewMode, WorldCamera};
 use super::combat::SwingSent;
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
@@ -56,6 +57,13 @@ pub(super) struct HandsPlugin;
 impl Plugin for HandsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HandAnimation>()
+            // `PlayerCameraPlugin` owns it in the game. Initialised here too so this module
+            // stands up headlessly on its own — the same defence `player/target.rs`,
+            // `player/combat.rs`, `player/crafting.rs`, `player/inventory.rs`,
+            // `player/structures.rs` and `ui/crosshair.rs` each keep, and it is not
+            // optional: a `Res<T>` with no resource takes the app down rather than reading
+            // a default.
+            .init_resource::<ViewMode>()
             .add_systems(Startup, spawn_view_model)
             .add_systems(
                 Update,
@@ -198,13 +206,27 @@ fn attach_to_camera(
     }
 }
 
+/// The shared meshes and the assets a material is minted into, as one borrow.
+///
+/// The two always travel together — `HandVisuals::material_for` needs the assets to mint
+/// into, and nothing asks either of them anything on its own — so grouping them is what
+/// `player/mod.rs` already does with `Dressing` for the body's wardrobe, and for the same
+/// reason. It is also what keeps [`refresh_held_item`] inside clippy's argument count now
+/// that it reads the view: an `#[allow]` there would have suppressed the warning rather
+/// than answered it, and the two fields genuinely are one thing.
+#[derive(SystemParam)]
+struct HandWardrobe<'w> {
+    visuals: ResMut<'w, HandVisuals>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+}
+
 fn refresh_held_item(
     inventory: Res<Inventory>,
     selected: Res<SelectedSlot>,
     mode: Res<InputMode>,
+    view: Res<ViewMode>,
     session: Option<Res<Session>>,
-    mut visuals: ResMut<HandVisuals>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut wardrobe: HandWardrobe<'_>,
     mut held: Query<(
         &mut HeldItem,
         &mut Mesh3d,
@@ -213,7 +235,18 @@ fn refresh_held_item(
     )>,
 ) {
     let appearance = selected_appearance(inventory.slot(selected.0));
-    let visible = if *mode == InputMode::Playing && session.is_some() {
+    // **The view term, and it was missing.** This model is a child of the camera, sitting
+    // [`BASE_TRANSLATION`] in front of it — a first-person conceit and nothing else. #172
+    // moved the camera four blocks back for the third-person view and gave every other such
+    // conceit the term that removes it there: `InputGate::may_aim`, `InputGate::may_act`,
+    // `ui::crosshair::show_crosshair` and `show_the_local_body`. This one was missed, so the
+    // thing a player was holding floated between the camera and their own character (#194).
+    //
+    // Hidden rather than despawned, which is what the neighbouring test's name has always
+    // said: a view toggle that removed the model would rebuild a mesh and a material on a
+    // key press, and `animate_view_model` drives a transform on this same entity — so a
+    // hidden model is a hidden animation, with nothing further to gate.
+    let visible = if *mode == InputMode::Playing && session.is_some() && view.first_person() {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -223,8 +256,10 @@ fn refresh_held_item(
         if item.item_id != appearance.item_id || item.shape != appearance.shape {
             item.item_id = appearance.item_id;
             item.shape = appearance.shape;
-            mesh.0 = visuals.mesh(appearance.shape);
-            material.0 = visuals.material_for(appearance.palette_id, &mut materials);
+            mesh.0 = wardrobe.visuals.mesh(appearance.shape);
+            material.0 = wardrobe
+                .visuals
+                .material_for(appearance.palette_id, &mut wardrobe.materials);
         }
         if *visibility != visible {
             *visibility = visible;
@@ -464,6 +499,35 @@ mod tests {
             .expect("the held material");
         let [r, g, b, a] = palette::linear_rgba(u16::MAX);
         assert_eq!(material.base_color, Color::linear_rgba(r, g, b, a));
+    }
+
+    #[test]
+    fn third_person_hides_the_view_model_without_removing_it() {
+        // **The bug this file had**: the model is a child of the camera, and #172 moved the
+        // camera four blocks back without giving this system the term that removes a
+        // first-person conceit there — so the held item floated between the camera and the
+        // character (#194).
+        //
+        // Asserted on the entity as well as the visibility, because *without removing it* is
+        // half the contract: the model is the same one afterwards, so a toggle costs no mesh
+        // and no material.
+        let mut app = app();
+        let (_, visibility, _) = held(&mut app);
+        assert_eq!(visibility, Visibility::Visible, "first person draws it");
+        let before = held(&mut app).0;
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+        app.update();
+        assert_eq!(held(&mut app).1, Visibility::Hidden);
+        assert_eq!(
+            held(&mut app).0,
+            before,
+            "the view toggle rebuilt the model instead of hiding it"
+        );
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
+        app.update();
+        assert_eq!(held(&mut app).1, Visibility::Visible);
     }
 
     #[test]
