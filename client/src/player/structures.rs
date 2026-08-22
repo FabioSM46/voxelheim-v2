@@ -40,7 +40,8 @@ use super::constants::MAX_REACH;
 use super::interpolate::SnapshotBuffer;
 use super::target::{ApplyTargetInput, BlockTarget, DrawTargetHighlight, cell_outline_mesh};
 use super::{
-    ApplySnapshots, InputCadence, InputGate, InputMode, LookState, merge_all, set_if_changed,
+    ApplySnapshots, InputCadence, InputGate, InputMode, LookState, ViewMode, merge_all,
+    set_if_changed,
 };
 use crate::net::{
     BlockCoord, Facing, Outbound, PlaceStructureRequest, RemoveStructureRequest, Sent, Session,
@@ -443,6 +444,9 @@ impl Plugin for StructuresPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StructureTarget>()
             .init_resource::<FootprintPreview>()
+            // `PlayerCameraPlugin` owns it in the game; here too, so `InputGate` resolves
+            // when this module is built on its own.
+            .init_resource::<ViewMode>()
             .add_systems(Startup, spawn_footprint_ghost)
             .add_systems(
                 Update,

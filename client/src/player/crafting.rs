@@ -25,7 +25,9 @@ use bevy::prelude::*;
 use super::inventory::{ApplyInventory, Inventory};
 use super::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE, ITEM_VARGR_PELT};
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
-use super::{ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals};
+use super::{
+    ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
+};
 use crate::net::{CraftRequest, Outbound, RecipeId, Sent, StructureKind, encode_craft_request};
 
 /// Item id 10, the forge's blade, as `server/internal/game/items.go` appends it.
@@ -244,6 +246,7 @@ impl Plugin for CraftingPlugin {
             .init_resource::<InputMode>()
             .init_resource::<InputCadence>()
             .init_resource::<SelfVitals>()
+            .init_resource::<ViewMode>()
             .add_systems(
                 Update,
                 request_craft

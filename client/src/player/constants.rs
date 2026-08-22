@@ -81,6 +81,37 @@ pub const MAX_PITCH: f32 = FRAC_PI_2 - 0.01;
 /// extreme of its range, which shows up as a click that does nothing.
 pub const MAX_REACH: f32 = 4.5;
 
+/// How far behind the eyes the third-person camera sits, in blocks.
+///
+/// Far enough that the whole character is on screen — the rig is one block wide and
+/// [`PLAYER_HEIGHT`] tall — and near enough that the boom rarely has anywhere to be cut
+/// short indoors, which is the failure a longer one produces constantly.
+///
+/// **It is not a reach and nothing measures a gameplay distance from it.** Aiming is off
+/// in the view this belongs to, precisely so this number and [`MAX_REACH`] can never need
+/// to agree.
+pub const BOOM_LENGTH: f32 = 4.0;
+
+/// How far in front of a wall the boom stops when the camera would otherwise be inside it.
+///
+/// The near plane is what this is really about: a camera exactly on a face renders the
+/// voxel behind it clipped open, so the stop is pulled forward by more than nothing.
+pub const BOOM_CLEARANCE: f32 = 0.25;
+
+/// How fast the camera swings back behind the character once the orbit is released, as
+/// the fraction of the remaining angle left after one second.
+///
+/// Exponential rather than a fixed duration, because the distance to travel is whatever
+/// the player happened to orbit to. `settle_the_orbit` snaps the last
+/// [`ORBIT_SETTLED`] radians rather than approaching for ever.
+pub const ORBIT_RETURN_PER_SECOND: f32 = 0.0005;
+
+/// The angle below which the returning camera is simply placed at rest.
+///
+/// Half a tenth of a degree: far below what a frame can show, and the difference between
+/// an animation that ends and one that only ever gets closer.
+pub const ORBIT_SETTLED: f32 = 0.001;
+
 // The relationships between the numbers above, checked at compile time rather than by a
 // test. Each is a property of the *build* rather than of a run: a camera outside the body
 // it is following, or a pitch limit at exactly vertical, are states no build should be able

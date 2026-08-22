@@ -27,7 +27,7 @@ use crate::net::{
 };
 
 use crate::player::{
-    ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals,
+    ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals, ViewMode,
     item_palette_id, item_shape,
 };
 use crate::world::palette;
@@ -78,9 +78,12 @@ impl Plugin for UiPlugin {
         // The producers also register these messages. `add_message` is idempotent, and
         // doing it here keeps every UI module headlessly testable on its own.
         app.init_resource::<InputMode>()
-            // The player plugin owns this in the game; initialising it here keeps every
-            // UI module headlessly testable on its own.
+            // The player plugin owns these two in the game; initialising them here keeps
+            // every UI module headlessly testable on its own. `ViewMode` is here because
+            // `InputGate` reads it, and a `SystemParam` whose resource is missing takes
+            // the app down rather than reading a default.
             .init_resource::<SelfVitals>()
+            .init_resource::<ViewMode>()
             .add_message::<InventoryClick>()
             .add_message::<CraftClick>()
             .add_message::<DisconnectRequest>()

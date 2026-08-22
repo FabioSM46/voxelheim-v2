@@ -1566,10 +1566,23 @@ Recorded here so the next reader does not mistake them for oversights:
   fiddly and platform-specific — `CursorGrabMode::Locked` is unsupported on X11, and `Confined`
   stops generating motion at the window edge — so it belongs with the camera-control issue rather
   than as a drive-by here.
-- **First person, and the local player has no body.** The camera sits at its eyes, so a body there
-  would fill the screen with the inside of the player's own head. It is also the reason it carries
-  no `Worn`: there is nothing to dress. A third-person or orbit camera is what would want one, and
-  that is a camera issue.
+- **Two views, and the local player's body is drawn in both and hidden in one.** First person is
+  what the game is played in and the camera is the eye there, so the body is `Visibility::Hidden` —
+  a body at the eye fills the screen with the inside of the player's own head. F5 swaps to a
+  third-person view whose camera sits `BOOM_LENGTH` behind, and the same body simply becomes
+  visible. It used to get no mesh, no children and no `Worn` at all; #172 gave the camera somewhere
+  else to be, and one spawn path with a visibility toggle is a much smaller thing than two.
+- **Third person is a way of looking, not a way of playing, and that is what makes it small.** No
+  crosshair, no outline, and **both** `InputGate::may_aim` and `may_act` closed — they are two
+  independent expressions over the same inputs, not one defined in terms of the other, so closing
+  only the first would leave a view with no sight in which clicking still mines. Movement keeps
+  working; that is the point. Aiming is off rather than re-based on a separate eye point, because
+  a second point is a thing that can drift from the camera and a closed gate is not.
+- **Holding Shift orbits the camera and never the character.** `LookState::yaw` is what
+  `PlayerInput` carries, so the orbit is a separate `Orbit` *offset* — at rest it is zero, which is
+  why the camera sits behind a turning character with nothing chasing anything, and why releasing
+  the key is an animation back to zero rather than back to a remembered angle. Nothing about the
+  view crosses the wire and the server cannot tell which one a client is in.
 - **Other players are the rig and nothing else.** No animation of any kind, no name plate, no
   equipment on the body, no faces beyond the two eye boxes, and no texture anywhere — it is coloured
   geometry. Each of those is its own issue.

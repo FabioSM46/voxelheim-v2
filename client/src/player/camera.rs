@@ -33,10 +33,14 @@
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::prelude::*;
 
-use super::constants::EYE_HEIGHT;
+use super::constants::{
+    BOOM_CLEARANCE, BOOM_LENGTH, EYE_HEIGHT, MAX_PITCH, ORBIT_RETURN_PER_SECOND, ORBIT_SETTLED,
+};
 use super::sky::Daylight;
-use super::{ApplySnapshots, LocalPlayer, LookState};
-use crate::net::Session;
+use super::target::{BlockHit, raycast};
+use super::{ApplySnapshots, InputMode, LocalPlayer, LookState};
+use crate::net::{BlockCoord, Session};
+use crate::world::ChunkStore;
 
 /// Orders anything that reads where the camera is looking after the systems that aim it.
 ///
@@ -52,16 +56,39 @@ pub struct PlayerCameraPlugin;
 
 impl Plugin for PlayerCameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera).add_systems(
-            Update,
-            // The camera follows the transforms the snapshots wrote, so it has to run
-            // after they were written — a camera a frame behind the body it is attached to
-            // shows the world sliding under a player who is standing still.
-            (place_camera_at_spawn, follow_the_player)
-                .chain()
-                .in_set(AimCamera)
-                .after(ApplySnapshots),
-        );
+        app.init_resource::<ViewMode>()
+            .init_resource::<Orbit>()
+            .add_systems(Startup, spawn_camera)
+            .add_systems(
+                Update,
+                // The camera follows the transforms the snapshots wrote, so it has to run
+                // after they were written — a camera a frame behind the body it is
+                // attached to shows the world sliding under a player who is standing
+                // still.
+                //
+                // `toggle_view` and `settle_the_orbit` are in the chain ahead of the
+                // placement for the same reason: the view the frame is drawn in is the
+                // one this frame's key press asked for, not last frame's.
+                (
+                    toggle_view,
+                    settle_the_orbit,
+                    place_camera_at_spawn,
+                    follow_the_player,
+                )
+                    .chain()
+                    .in_set(AimCamera)
+                    .after(ApplySnapshots)
+                    // **After the input is sampled, and that ordering was missing.** The
+                    // module comment above has always said the rotation is "applied the
+                    // frame the pointer moves", and nothing declared it: the two sets were
+                    // both `after(ApplySnapshots)` and unordered against each other, so a
+                    // camera a frame behind the pointer was left to the executor's
+                    // discretion. #172 made it visible rather than introducing it —
+                    // `settle_the_orbit` reads the `held` flag `sample_input` writes, so an
+                    // undeclared order is a return animation that starts a frame late or
+                    // not, depending on the schedule.
+                    .after(super::sample_input),
+            );
     }
 }
 
@@ -132,6 +159,10 @@ fn place_camera_at_spawn(
 /// and would refuse the system rather than risk aliasing them.
 fn follow_the_player(
     look: Res<LookState>,
+    orbit: Res<Orbit>,
+    view: Res<ViewMode>,
+    session: Option<Res<Session>>,
+    store: Option<Res<ChunkStore>>,
     player: Query<&Transform, With<LocalPlayer>>,
     mut cameras: Query<&mut Transform, (With<WorldCamera>, Without<LocalPlayer>)>,
 ) {
@@ -141,11 +172,339 @@ fn follow_the_player(
         return;
     };
 
+    // Both or neither: the chunk size is what turns a voxel coordinate into a chunk, so a
+    // store with no session to size it is a store nothing can be looked up in — and an
+    // unstreamed world is not solid, which is the same answer the aiming ray gets.
+    let solid = session
+        .as_deref()
+        .zip(store.as_deref())
+        .map(|(session, store)| (store, usize::from(session.0.chunk_size)));
+    let placed = camera_placement(feet, *look, *orbit, *view, |voxel| {
+        solid.is_some_and(|(store, size)| {
+            store.solid_at(
+                BlockCoord {
+                    x: voxel.x,
+                    y: voxel.y,
+                    z: voxel.z,
+                },
+                size,
+            )
+        })
+    });
     for mut transform in &mut cameras {
-        transform.translation = feet + Vec3::Y * EYE_HEIGHT;
-        // Yaw about the world's up axis, then pitch about the camera's own right — in that
-        // order, which is what keeps the horizon level. The other order rolls the view as
-        // soon as both are non-zero.
-        transform.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
+        *transform = placed;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Which view, and the angle that is only the camera's
+// ---------------------------------------------------------------------------
+
+/// The key that swaps the two views.
+///
+/// F5 because that is the key this genre has trained everybody to reach for, and a view
+/// toggle nobody finds is a feature nobody has.
+const TOGGLE: KeyCode = KeyCode::F5;
+
+/// Which view the world is drawn in.
+///
+/// **A way of looking, not a way of playing** — see #172. First person is what the game
+/// is played in and is unchanged; third person is a mode to switch into, look at the
+/// character somebody made, and switch back out of. Everything that follows from that is
+/// a subtraction: no crosshair, no outline, no request.
+///
+/// Nothing about it crosses the wire. `schemas/player.fbs` says the camera is a client
+/// concern, and the server cannot tell which view a client is in.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// The camera is the eye. What the game is played in.
+    #[default]
+    FirstPerson,
+    /// The camera is behind the character, and aiming is off.
+    ThirdPerson,
+}
+
+impl ViewMode {
+    /// Whether the camera is the eye this frame.
+    ///
+    /// The question every other module asks, phrased as the affirmative one: the gates
+    /// and the crosshair are *on* in first person, and third person is what removes them.
+    pub const fn first_person(self) -> bool {
+        matches!(self, Self::FirstPerson)
+    }
+}
+
+/// The angle that belongs to the camera and not to the character.
+///
+/// An **offset** from [`LookState`] rather than an absolute direction, which is what
+/// makes the two acceptance criteria fall out instead of being arranged. At rest it is
+/// zero, so the camera is exactly behind the character and stays there while they turn.
+/// Holding the orbit key moves this and never `LookState`, so the facing the server reads
+/// does not change. Releasing it animates this back to zero, which *is* the camera
+/// returning behind the character — including while the character is turning, which a
+/// remembered absolute angle would have had to chase.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct Orbit {
+    /// Added to `LookState::yaw` before the camera is rotated.
+    pub yaw: f32,
+    /// Added to `LookState::pitch`, and the sum is clamped — not this.
+    pub pitch: f32,
+    /// Whether the orbit key is held this frame. `settle_the_orbit` reads it and nothing
+    /// else does; it is on the resource rather than re-read from the keyboard so that the
+    /// one place deciding what the mouse moves is `sample_input`.
+    pub held: bool,
+}
+
+impl Orbit {
+    /// Whether the camera is anywhere but directly behind the character.
+    pub fn swung(self) -> bool {
+        self.yaw != 0.0 || self.pitch != 0.0
+    }
+}
+
+/// Flips the view, and puts the camera back behind the character when it does.
+///
+/// The orbit is cleared rather than animated on a toggle: the animation exists so that
+/// releasing the orbit key does not snap, and a player leaving the view entirely has
+/// nothing on screen for it to be smooth *for*.
+fn toggle_view(
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mode: Res<InputMode>,
+    mut view: ResMut<ViewMode>,
+    mut orbit: ResMut<Orbit>,
+) {
+    // Optional for the reason `sample_input` gives: this module's own tests build an app
+    // with no `InputPlugin`, and absent input is no input rather than a panic.
+    let Some(keys) = keys else {
+        return;
+    };
+    // A mode transition and the key that caused it share a frame — the same rule
+    // `InputGate::may_act` keeps, and for the same reason: `Escape` closing the pause menu
+    // must not also be read as something else.
+    if *mode != InputMode::Playing || mode.is_changed() || !keys.just_pressed(TOGGLE) {
+        return;
+    }
+
+    *view = match *view {
+        ViewMode::FirstPerson => ViewMode::ThirdPerson,
+        ViewMode::ThirdPerson => ViewMode::FirstPerson,
+    };
+    if orbit.swung() {
+        *orbit = Orbit {
+            held: orbit.held,
+            ..Orbit::default()
+        };
+    }
+}
+
+/// Swings the camera back behind the character once the orbit is released.
+///
+/// Exponential, so the return is fast where the angle is large and gentle where it is
+/// small — and snapped inside [`ORBIT_SETTLED`], which is what makes it an animation that
+/// *ends*. A decay alone approaches zero and never arrives, and "the camera is nearly
+/// behind the player" is a state with no reason to persist for the rest of a session.
+fn settle_the_orbit(time: Res<Time>, mut orbit: ResMut<Orbit>) {
+    if orbit.held || !orbit.swung() {
+        return;
+    }
+
+    let remaining = ORBIT_RETURN_PER_SECOND.powf(time.delta_secs());
+    let next = Orbit {
+        yaw: orbit.yaw * remaining,
+        pitch: orbit.pitch * remaining,
+        held: orbit.held,
+    };
+    let settled = next.yaw.abs() < ORBIT_SETTLED && next.pitch.abs() < ORBIT_SETTLED;
+    *orbit = if settled {
+        Orbit {
+            held: orbit.held,
+            ..Orbit::default()
+        }
+    } else {
+        next
+    };
+}
+
+/// Where the camera sits and what it looks at, in whichever view is current.
+///
+/// The eye is the same point in both: the character's feet plus [`EYE_HEIGHT`], which is
+/// the position the server sent. First person puts the camera there. Third person aims
+/// from there and then walks backwards along the view direction, which is why the two
+/// share a function rather than being two systems that have to agree about what an eye is.
+fn camera_placement(
+    feet: Vec3,
+    look: LookState,
+    orbit: Orbit,
+    view: ViewMode,
+    solid: impl FnMut(IVec3) -> bool,
+) -> Transform {
+    let eye = feet + Vec3::Y * EYE_HEIGHT;
+    // Yaw about the world's up axis, then pitch about the camera's own right — in that
+    // order, which is what keeps the horizon level. The other order rolls the view as soon
+    // as both are non-zero.
+    //
+    // The orbit is added before the clamp rather than after: a player who has swung the
+    // camera fully up should stop at the same place a player who looked fully up does,
+    // and clamping the two separately would allow twice the pitch between them.
+    let pitch = (look.pitch + orbit.pitch).clamp(-MAX_PITCH, MAX_PITCH);
+    let rotation = Quat::from_rotation_y(look.yaw + orbit.yaw) * Quat::from_rotation_x(pitch);
+
+    if view.first_person() {
+        return Transform {
+            translation: eye,
+            rotation,
+            ..default()
+        };
+    }
+
+    // The camera's own backwards, normalised: `face_distance` divides by a component
+    // of it, so it has to be a unit vector for the quotient to be a length in blocks.
+    let back = -(rotation * Vec3::NEG_Z).normalize_or_zero();
+    Transform {
+        translation: eye + back * boom_length(eye, back, solid),
+        rotation,
+        ..default()
+    }
+}
+
+/// How far back the boom actually reaches, given what is behind the player.
+///
+/// The camera stops at the first solid voxel between the eyes and where it would
+/// otherwise sit, so standing against a wall does not put the view inside it. This is
+/// presentation and decides nothing: it reads the world this client has been streamed and
+/// never asks the server anything, and a chunk that has not arrived is not solid — the
+/// same answer `ChunkStore::solid_at` gives the aiming ray, and honest for the same
+/// reason.
+///
+/// Takes the predicate rather than the store, which is the shape [`raycast`] itself has
+/// and for the same reason: what a boom needs to know is whether a voxel stops it, and a
+/// test that has to assemble a chunk store to say "there is a wall here" is a test about
+/// chunk stores.
+fn boom_length(eye: Vec3, back: Vec3, solid: impl FnMut(IVec3) -> bool) -> f32 {
+    let Some(hit) = raycast(eye, back, BOOM_LENGTH, solid) else {
+        return BOOM_LENGTH;
+    };
+
+    // Pulled forward off the face it hit, and never through the eye: a player wedged into
+    // a corner gets a camera at their own eyes rather than one behind their forehead.
+    (face_distance(eye, back, hit) - BOOM_CLEARANCE).max(0.0)
+}
+
+/// How far along `direction` the eye is from the face the ray entered through.
+///
+/// [`BlockHit`] names the voxel and the face and does not carry a distance — the aiming
+/// ray never needed one, because what it reports is *which block*. A boom needs the
+/// length, so it is recovered from the two: the face is an outward unit axis, so the plane
+/// it lies in is the block's coordinate on that axis plus one for a positive face, and the
+/// distance is how far along the ray that plane is.
+fn face_distance(eye: Vec3, direction: Vec3, hit: BlockHit) -> f32 {
+    let Some(axis) = (0..3).find(|axis| hit.face[*axis] != 0) else {
+        // A zero face means the eye is already inside a solid voxel — see [`BlockHit`].
+        // The camera goes nowhere, which is the same answer as being flush against a wall
+        // and the only one that does not put the view further inside the rock.
+        return 0.0;
+    };
+
+    let plane = hit.block[axis] as f32 + f32::from(hit.face[axis] > 0);
+    let component = direction[axis];
+    if component == 0.0 {
+        // Unreachable: a face is crossed on the axis the ray is moving along, so the
+        // component that named it cannot be zero. Answered rather than divided by, because
+        // a camera is the last thing that should produce a NaN translation.
+        return BOOM_LENGTH;
+    }
+    ((plane - eye[axis]) / component).clamp(0.0, BOOM_LENGTH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Looking along -Z with no orbit, which is where a fresh [`LookState`] points.
+    fn looking_ahead() -> (LookState, Orbit) {
+        (LookState::default(), Orbit::default())
+    }
+
+    #[test]
+    fn first_person_puts_the_camera_at_the_eye_whatever_is_behind_the_player() {
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(1.5, 64.0, -2.5);
+        // Solid everywhere: the boom would be cut to nothing, and first person never asks.
+        let placed = camera_placement(feet, look, orbit, ViewMode::FirstPerson, |_| true);
+        assert_eq!(placed.translation, feet + Vec3::Y * EYE_HEIGHT);
+    }
+
+    #[test]
+    fn the_boom_stops_in_front_of_the_wall_behind_the_player() {
+        // **The criterion this exists for**: a player with their back to a wall is looking
+        // at their own back, not through the wall at whatever is on the far side of it.
+        //
+        // Looking along -Z, so the boom goes towards +Z. The eye is at z = -2.5, and the
+        // voxel at z = 0 is solid: its near face is the plane z = 0, which is 2.5 blocks
+        // back — well inside the 4-block boom.
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(0.5, 64.0, -2.5);
+        let eye = feet + Vec3::Y * EYE_HEIGHT;
+        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, |voxel| {
+            voxel.z >= 0
+        });
+
+        let travelled = placed.translation.z - eye.z;
+        assert!(
+            (travelled - (2.5 - BOOM_CLEARANCE)).abs() < 1e-4,
+            "the boom travelled {travelled} towards a wall 2.5 blocks away"
+        );
+        assert!(
+            placed.translation.z < 0.0,
+            "the camera ended up inside the wall at {}",
+            placed.translation.z
+        );
+    }
+
+    #[test]
+    fn an_unstreamed_world_stops_nothing() {
+        // A chunk that has not arrived is not solid — the same answer `solid_at` gives the
+        // aiming ray, and honest for the same reason: this client knows nothing about it.
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(0.5, 64.0, -2.5);
+        let eye = feet + Vec3::Y * EYE_HEIGHT;
+        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, |_| false);
+        assert!((placed.translation.z - (eye.z + BOOM_LENGTH)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_player_inside_a_solid_voxel_gets_a_camera_at_their_own_eyes() {
+        // The one case `BlockHit` reports with a zero face: the ray started inside a solid
+        // voxel, so there is no face it entered through. The camera goes nowhere, which is
+        // the only answer that does not put the view further into the rock.
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(0.5, 64.0, -2.5);
+        let eye = feet + Vec3::Y * EYE_HEIGHT;
+        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, |_| true);
+        assert_eq!(placed.translation, eye);
+    }
+
+    #[test]
+    fn the_orbit_and_the_look_share_one_pitch_clamp() {
+        // Clamped on the sum, not on each: a player who has swung the camera fully up and
+        // then looks up stops where either alone would, rather than at twice the angle.
+        let look = LookState {
+            yaw: 0.0,
+            pitch: MAX_PITCH,
+        };
+        let orbit = Orbit {
+            yaw: 0.0,
+            pitch: MAX_PITCH,
+            held: true,
+        };
+        let placed = camera_placement(Vec3::ZERO, look, orbit, ViewMode::FirstPerson, |_| false);
+        let only_look = camera_placement(
+            Vec3::ZERO,
+            look,
+            Orbit::default(),
+            ViewMode::FirstPerson,
+            |_| false,
+        );
+        assert!(placed.rotation.angle_between(only_look.rotation) < 1e-5);
     }
 }
