@@ -153,13 +153,35 @@ func awaitCompletion(t *testing.T, player *Player) MiningCompletion {
 	return completion
 }
 
+// stepToHardness advances the simulation to the tick a block of this kind breaks on and
+// reports the cost it paid.
+//
+// **Read from the simulation, never restated.** A test that stepped a hardcoded number of
+// ticks is a test that has to be edited every time somebody retunes the table, and — worse —
+// one that asserts the number rather than the behaviour. Four of them did, which is how
+// raising the table by a factor of four broke three tests that were about races and clocks
+// and had no opinion about how long a block takes.
+func stepToHardness(t *testing.T, sim *Sim, block world.Block) int {
+	t.Helper()
+
+	cost, breakable := sim.hardnessTicks(block)
+	if !breakable {
+		t.Fatalf("block %d is not breakable, so there is no tick to step to", block)
+	}
+	for tick := 1; tick <= cost; tick++ {
+		sim.Step(uint64(tick))
+	}
+	return cost
+}
+
 func TestHardnessTableOrdersEveryBreakableBlockByHand(t *testing.T) {
 	t.Parallel()
 
+	sim, _, _, _ := newMiningPlayer(t, nil)
 	blocks := []world.Block{world.Leaves, world.Grass, world.Dirt, world.Snow, world.Log, world.Stone, world.CoalOre, world.IronOre}
 	costs := make(map[world.Block]int, len(blocks))
 	for _, block := range blocks {
-		cost, ok := hardnessTicks(block)
+		cost, ok := sim.hardnessTicks(block)
 		if !ok || cost < 1 {
 			t.Fatalf("block %d has cost %d, breakable %t", block, cost, ok)
 		}
@@ -175,8 +197,53 @@ func TestHardnessTableOrdersEveryBreakableBlockByHand(t *testing.T) {
 		t.Fatalf("hardness order is %+v", costs)
 	}
 	for _, block := range []world.Block{world.Air, 9, 0xffff} {
-		if cost, ok := hardnessTicks(block); ok || cost != 0 {
+		if cost, ok := sim.hardnessTicks(block); ok || cost != 0 {
 			t.Errorf("block %d has cost %d, breakable %t; want no mining cost", block, cost, ok)
+		}
+	}
+}
+
+// The table is written in seconds and converted once, so the same block takes the same
+// time to break whatever rate an operator runs the server at.
+//
+// **This is the property a table written in ticks silently loses**, and it is worth a test
+// of its own rather than an assertion inside the ordering one: a tick count that read
+// correctly at 20 Hz would be two thirds of its intended duration at 30, and nothing about
+// the game would look wrong — blocks would simply break faster on some servers than on
+// others, for no reason anybody could see.
+func TestHardnessIsTheSameDurationAtEveryTickRate(t *testing.T) {
+	t.Parallel()
+
+	for _, rate := range []uint8{10, 20, 30, 64} {
+		costs := handMiningTicksFor(rate)
+		for block, want := range handMiningTimes {
+			cost, ok := costs[block]
+			if !ok {
+				t.Fatalf("block %d has no cost at %d Hz", block, rate)
+			}
+			got := time.Duration(cost) * time.Second / time.Duration(rate)
+			if drift := got - want; drift > time.Second/time.Duration(rate) || drift < -time.Second/time.Duration(rate) {
+				t.Errorf("block %d takes %v at %d Hz, want %v (drift %v, more than one tick)",
+					block, got, rate, want, drift)
+			}
+		}
+	}
+}
+
+// Nothing is breakable by hand in under a quarter of a second, which is the complaint this
+// table was retuned to answer: dirt used to go in three tenths and a log in six.
+//
+// A floor rather than the seven exact numbers, because the numbers are a first guess from
+// ratios and will move once somebody has dug for an hour — where the property that they are
+// *slow enough to want a tool* is the one this issue exists to establish, and the one #185
+// is defined against.
+func TestNothingBreaksInstantlyByHand(t *testing.T) {
+	t.Parallel()
+
+	const floor = 250 * time.Millisecond
+	for block, cost := range handMiningTimes {
+		if cost < floor {
+			t.Errorf("block %d breaks by hand in %v, under the %v floor", block, cost, floor)
 		}
 	}
 }
@@ -190,16 +257,26 @@ func TestMiningBreaksOnItsHardnessTickAndSendsNoCompletionProgress(t *testing.T)
 		t.Fatalf("Mine: %v", err)
 	}
 
+	// Read from the simulation rather than restated: the cost is a tuning number and a
+	// test that hardcoded it would have to be edited every time somebody retuned it — and
+	// would be asserting the number rather than the behaviour.
+	cost, breakable := sim.hardnessTicks(world.Leaves)
+	if !breakable || cost < 2 {
+		t.Fatalf("leaves cost %d ticks, breakable %t; this test needs at least two", cost, breakable)
+	}
+
 	sim.Step(1)
 	if block, _ := terrain.Block(3, 200, 0); block != world.Leaves {
-		t.Fatalf("target broke on tick 1, hardness is 2")
+		t.Fatalf("target broke on tick 1, and leaves cost %d ticks", cost)
 	}
 	progress := out.progress(t)
 	if len(progress) != 1 || progress[0].Progress == 0 {
 		t.Fatalf("tick 1 progress = %+v, want one positive frame", progress)
 	}
 
-	sim.Step(2)
+	for tick := 2; tick <= cost; tick++ {
+		sim.Step(uint64(tick))
+	}
 	completion := awaitCompletion(t, player)
 	result, err := player.CompleteMining(context.Background(), completion)
 	if err != nil {
@@ -209,10 +286,10 @@ func TestMiningBreaksOnItsHardnessTickAndSendsNoCompletionProgress(t *testing.T)
 		t.Fatalf("completion reports block %d, want Air", result.Block)
 	}
 	if block, _ := terrain.Block(3, 200, 0); block != world.Air {
-		t.Fatalf("target holds block %d after hardness tick 2, want Air", block)
+		t.Fatalf("target holds block %d after hardness tick %d, want Air", block, cost)
 	}
-	if got := len(out.progress(t)); got != 1 {
-		t.Fatalf("completion emitted progress: got %d frames, want the tick-1 frame only", got)
+	if got := len(out.progress(t)); got != cost-1 {
+		t.Fatalf("completion emitted progress: got %d frames, want the %d before the break", got, cost-1)
 	}
 }
 
@@ -224,23 +301,23 @@ func TestAChangedBlockAfterHardnessPaymentSendsExactlyOneReset(t *testing.T) {
 	if err := player.Mine(activeMine(target, 1), true); err != nil {
 		t.Fatalf("Mine: %v", err)
 	}
-	sim.Step(1)
-	sim.Step(2)
+	cost := stepToHardness(t, sim, world.Leaves)
 	completion := awaitCompletion(t, player)
 	terrain.set(target, world.Dirt)
 
 	if _, err := player.CompleteMining(context.Background(), completion); !errors.Is(err, ErrMiningTargetChanged) {
 		t.Fatalf("CompleteMining returned %v, want ErrMiningTargetChanged", err)
 	}
+	// One positive frame per tick paid, and then the single zero the reset carries.
 	progress := out.progress(t)
-	if len(progress) != 2 || progress[0].Progress == 0 || progress[1].Progress != 0 {
+	if len(progress) != cost || progress[0].Progress == 0 || progress[len(progress)-1].Progress != 0 {
 		t.Fatalf("completion race progress = %+v, want positive then one zero", progress)
 	}
 	if _, err := player.CompleteMining(context.Background(), completion); err == nil {
 		t.Fatal("the same completion was accepted twice")
 	}
-	if got := len(out.progress(t)); got != 2 {
-		t.Fatalf("replayed completion emitted a second reset: got %d frames", got)
+	if got := len(out.progress(t)); got != cost {
+		t.Fatalf("replayed completion emitted a second reset: got %d frames, want %d", got, cost)
 	}
 }
 
@@ -264,16 +341,21 @@ func TestFakeClockLoopCompletesMiningOnHardnessTick(t *testing.T) {
 		t.Fatalf("Mine: %v", err)
 	}
 
+	cost, breakable := sim.hardnessTicks(world.Leaves)
+	if !breakable {
+		t.Fatal("leaves are not breakable, so there is no hardness tick to complete on")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := &miningClock{}
 	loop, err := NewLoop(DefaultTickRate, clock, slog.New(slog.NewTextHandler(io.Discard, nil)), func(tick uint64) {
-		if tick == 2 {
+		if tick == uint64(cost) {
 			if block, _ := terrain.Block(3, 200, 0); block != world.Leaves {
 				t.Errorf("target changed before hardness tick: block %d", block)
 			}
 		}
 		sim.Step(tick)
-		if tick == 2 {
+		if tick == uint64(cost) {
 			cancel()
 		}
 	})
@@ -297,7 +379,12 @@ func TestRequestSpamAdvancesOnlyOncePerServerTick(t *testing.T) {
 
 	target := [3]int32{3, 200, 0}
 	sim, player, _, out := newMiningPlayer(t, map[[3]int64]world.Block{mineTarget(target): world.Stone})
-	for tick := uint32(1); tick <= 20; tick++ {
+	cost, breakable := sim.hardnessTicks(world.Stone)
+	if !breakable {
+		t.Fatal("stone is not breakable, so there is no progress fraction to spam against")
+	}
+	const requests = 20
+	for tick := uint32(1); tick <= requests; tick++ {
 		if err := player.Mine(activeMine(target, tick), true); err != nil {
 			t.Fatalf("request %d: %v", tick, err)
 		}
@@ -306,9 +393,10 @@ func TestRequestSpamAdvancesOnlyOncePerServerTick(t *testing.T) {
 
 	progress := out.progress(t)
 	if len(progress) != 1 {
-		t.Fatalf("twenty requests before one tick emitted %d progress frames, want 1", len(progress))
+		t.Fatalf("%d requests before one tick emitted %d progress frames, want 1", requests, len(progress))
 	}
-	want := uint8(255 / 20)
+	// One tick of a cost read from the simulation, not a fraction restated here.
+	want := uint8(255 / cost)
 	if progress[0].Progress != want {
 		t.Errorf("one server tick reported %d, want %d", progress[0].Progress, want)
 	}
@@ -664,17 +752,24 @@ func TestTwoPlayersHoldIndependentProgressAndTheFirstCompletionWins(t *testing.T
 		t.Fatalf("Join second: %v", err)
 	}
 
+	cost, breakable := sim.hardnessTicks(world.Leaves)
+	if !breakable {
+		t.Fatal("leaves are not breakable, so neither player can pay for one")
+	}
 	if err := first.Mine(activeMine(target, 1), true); err != nil {
 		t.Fatalf("first Mine: %v", err)
 	}
 	sim.Step(1)
-	if err := first.Mine(activeMine(target, 2), true); err != nil {
-		t.Fatalf("first refresh: %v", err)
-	}
 	if err := second.Mine(activeMine(target, 1), true); err != nil {
 		t.Fatalf("second Mine: %v", err)
 	}
-	sim.Step(2)
+	// The first player keeps paying to the last tick; the second started late.
+	for tick := 2; tick <= cost; tick++ {
+		if err := first.Mine(activeMine(target, uint32(tick)), true); err != nil {
+			t.Fatalf("first refresh at tick %d: %v", tick, err)
+		}
+		sim.Step(uint64(tick))
+	}
 
 	completion := awaitCompletion(t, first)
 	if _, err := first.CompleteMining(context.Background(), completion); err != nil {
@@ -682,11 +777,19 @@ func TestTwoPlayersHoldIndependentProgressAndTheFirstCompletionWins(t *testing.T
 	}
 	sim.Step(3)
 
-	if got := firstOut.progress(t); len(got) != 1 || got[0].Progress == 0 {
-		t.Fatalf("first player's progress = %+v; completion must add no frame", got)
+	// One frame per tick paid except the last: the completion tick emits none, which is
+	// the property TestMiningBreaksOnItsHardnessTickAndSendsNoCompletionProgress owns.
+	if got := firstOut.progress(t); len(got) != cost-1 || got[0].Progress == 0 {
+		t.Fatalf("first player's progress = %+v; want %d frames and no completion frame", got, cost-1)
 	}
-	if got := secondOut.progress(t); len(got) != 2 || got[0].Progress == 0 || got[1].Progress != 0 {
-		t.Fatalf("second player's progress = %+v, want its own positive tick then a reset", got)
+	got := secondOut.progress(t)
+	if len(got) < 2 || got[0].Progress == 0 || got[len(got)-1].Progress != 0 {
+		t.Fatalf("second player's progress = %+v, want its own positive ticks then a reset", got)
+	}
+	for i, frame := range got[:len(got)-1] {
+		if frame.Progress == 0 {
+			t.Fatalf("second player's frame %d is a reset before the last: %+v", i, got)
+		}
 	}
 }
 
@@ -698,8 +801,7 @@ func TestConcurrentWorldEditAndMiningCompletionChooseOneOutcome(t *testing.T) {
 	if err := player.Mine(activeMine(target, 1), true); err != nil {
 		t.Fatalf("Mine: %v", err)
 	}
-	sim.Step(1)
-	sim.Step(2)
+	stepToHardness(t, sim, world.Leaves)
 	completion := awaitCompletion(t, player)
 
 	start := make(chan struct{})

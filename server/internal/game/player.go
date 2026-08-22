@@ -96,6 +96,11 @@ type Sim struct {
 	// tick rate for the same reason the physics timestep is.
 	dropLifetime int
 
+	// hardness is handMiningTimes in the ticks Step counts, for the same reason again: the
+	// table is written in seconds because a block should take the same time to break
+	// whatever rate the server runs at. A block absent from it is not breakable.
+	hardness map[world.Block]int
+
 	log *slog.Logger
 
 	mu      sync.Mutex
@@ -228,6 +233,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		editor:          editor,
 		mintEntityID:    mintEntityID,
 		dropLifetime:    dropLifetimeTicks(tickRate),
+		hardness:        handMiningTicksFor(tickRate),
 		deathTicks:      deathDurationTicks(tickRate),
 		protectionTicks: respawnProtectionTicks(tickRate),
 		mobTimings:      mobTimingsFor(tickRate),
