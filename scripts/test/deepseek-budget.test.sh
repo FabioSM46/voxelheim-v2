@@ -15,6 +15,7 @@ root = Path(sys.argv[1])
 workflow = (root / ".github/workflows/deepseek-pr-review.yml").read_text()
 reviewer_source = (root / ".github/scripts/deepseek_review.py").read_text()
 process_skill = (root / ".claude/skills/process-pr/SKILL.md").read_text()
+dev_skill = (root / ".claude/skills/dev-issue/SKILL.md").read_text()
 agents_md = (root / "AGENTS.md").read_text()
 
 
@@ -110,14 +111,24 @@ assert headroom == 600, (
     "review job must preserve its documented 10-minute setup/posting headroom: "
     f"budget={request_budget}s cap={job_budget}s headroom={headroom}s"
 )
-# The diff cap lives in three places: the constant the script actually applies, the
-# paragraph in AGENTS.md people size a pull request against, and the timing note in
-# process-pr. Nothing pinned it while it was 120_000, and it went on describing a context
-# limit the model did not have until a truncated review on PR #158 made it visible. A
-# number readers make decisions from is an output, and outputs are pinned here.
+# The diff cap lives in four places: the constant the script actually applies, the
+# paragraph in AGENTS.md people size a pull request against, the timing note in process-pr,
+# and — since #167 — the step in dev-issue that measures a diff before opening a pull
+# request around it. Nothing pinned it while it was 120_000, and it went on describing a
+# context limit the model did not have until a truncated review on PR #158 made it visible;
+# 600_000 then described the *next* model's context window, which is not what bounds a
+# review either, and PR #164 paid for that with a 31-minute run and no verdict. A number
+# readers make decisions from is an output, and outputs are pinned here.
+#
+# dev-issue is the one that matters most now: it is the only copy read *before* a pull
+# request exists, which is the only moment splitting one is cheap.
 diff_cap = assignments["DEEPSEEK_MAX_DIFF_CHARS"]
 formatted_cap = f"{diff_cap:,}"
-for text, label in ((agents_md, "AGENTS.md"), (process_skill, "process-pr SKILL.md")):
+for text, label in (
+    (agents_md, "AGENTS.md"),
+    (process_skill, "process-pr SKILL.md"),
+    (dev_skill, "dev-issue SKILL.md"),
+):
     assert formatted_cap in text, (
         f"{label} does not document the diff cap the script applies ({formatted_cap} chars); "
         "change the constant and the prose together"

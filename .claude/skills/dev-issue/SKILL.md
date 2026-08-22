@@ -114,7 +114,7 @@ if [ -n "$EXISTING" ]; then
   cd "$WORKTREE_DIR"
 else
   git fetch origin develop
-  # Three states, not two: the branch can exist with no worktree. Step 9's
+  # Three states, not two: the branch can exist with no worktree. Step 10's
   # `git worktree remove` deletes the worktree and keeps the branch (it holds the
   # PR's commits), so any re-run or retry lands here. `worktree add -b` would die
   # with "A branch named '<branch>' already exists" and take the whole run with it
@@ -286,7 +286,42 @@ Formatting (`gofmt`, `cargo fmt`) is the gate most often skipped and the one tha
 - [ ] Server-authoritative rule honored — no gameplay decisions client-side
 - [ ] Workspace-specific rules honored (local AGENTS.md)
 
-### Step 7: Commit and Open PR
+### Step 7: Measure What the Reviewer Will Be Asked to Read
+
+**A pull request can be too big to review, and the reviewer cannot tell you so in advance.**
+DeepSeek emits its chain of thought into the same output budget the verdict has to fit in, so a
+diff past roughly 124,000 characters reasons until the budget is gone and returns nothing —
+half an hour, a full API spend, a red `review` job, and no statement anywhere that the size was
+the problem. `DEEPSEEK_MAX_DIFF_CHARS` is **90,000** characters, measured; over it the diff is
+truncated and every unread file is injected as a finding, which blocks the pull request until a
+human acknowledges the gap. Neither outcome is one to open a PR into deliberately.
+
+Measure before `gh pr create`, not after:
+
+```bash
+# What the reviewer actually sees: generated code and lockfiles are excluded by name,
+# so exclude them here too or the number is not the one that matters.
+REVIEWABLE=$(git diff origin/develop...HEAD -- . \
+  ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
+  ':(exclude)Cargo.lock' ':(exclude)go.sum' | wc -c)
+echo "reviewable diff: ${REVIEWABLE} characters (cap 90,000)"
+```
+
+**If it is over the cap, split the work before opening anything.** Not after: a PR that exists
+is a PR whose review has already been attempted, and unpicking one into two costs more than
+staging two in the first place. Split along a boundary the code already draws rather than by
+character count — the description and its renderer, the wire and its consumer, the mechanism and
+the callers — so each half is a change somebody can review as a whole and each stands on its
+own. Say which half is which in both descriptions, and open the second only once the first has
+merged: opened earlier it carries the first's commits and the diff is back over the cap.
+
+If the halves cannot each stand alone, say so and ask the user rather than splitting into pieces
+that do not compile. A branch that does not build is worse than a review that has to be split
+across two rounds.
+
+Verify each half before opening it — the same measurement, on the branch you are about to push.
+
+### Step 8: Commit and Open PR
 
 ```bash
 # From within the worktree:
@@ -331,7 +366,7 @@ Only tick a box you actually ran. An unticked box with a one-line reason is usef
 
 **PR target**: Default is `develop`. PRs targeting `main` are allowed for hotfixes. However, NEVER push directly to `main` and NEVER merge any PR. Merging is a human-only operation.
 
-### Step 8: Exit
+### Step 9: Exit
 
 Report to the user:
 
@@ -342,7 +377,7 @@ Report to the user:
 
 **DO NOT** wait for CI, poll for reviews, or attempt to merge. The `/dev-issue` skill is stateless — it exits after PR creation.
 
-### Step 9: Cleanup — Remove Worktree
+### Step 10: Cleanup — Remove Worktree
 
 After the PR is created and the user has been informed:
 

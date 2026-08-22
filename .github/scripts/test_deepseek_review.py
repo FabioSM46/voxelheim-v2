@@ -53,6 +53,91 @@ _CAP = deepseek_review.DEEPSEEK_MAX_DIFF_CHARS
 _BOT_USERNAME = "github-actions[bot]"
 
 
+class DiffCapTests(unittest.TestCase):
+    """The cap is a measured number, and these are the measurements.
+
+    Two caps before this one described the model's context window, which is not what
+    bounds a review — the chain of thought is emitted into the same output budget the
+    verdict needs, so a diff can be far inside the context and still leave no room to
+    answer. Both were defended by a claim about the world and neither was pinned to an
+    observation, so both went on being wrong after the world changed (#167).
+    """
+
+    # Measured on deepseek-v4-flash at reasoning_effort=max. Characters of diff, and
+    # whether a verdict came back.
+    _OBSERVED_FAILURE = 124_711  # PR #164: 1,481,442 reasoning chars, finish_reason=length
+    _OBSERVED_SUCCESS = 72_350  # PR #169: the largest diff a verdict has come back for
+
+    def test_the_cap_is_below_the_diff_that_produced_no_verdict(self):
+        self.assertLess(
+            deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
+            self._OBSERVED_FAILURE,
+            "the cap must keep a diff smaller than one measured to exhaust the output "
+            "budget; above it the guard cannot fire before the API call does",
+        )
+
+    def test_the_cap_is_not_below_a_diff_that_was_reviewed_whole(self):
+        self.assertGreaterEqual(
+            deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
+            self._OBSERVED_SUCCESS,
+            "a cap under a diff the model has actually reviewed would truncate work "
+            "nothing measured says it cannot do",
+        )
+
+    def test_the_cap_leaves_room_for_a_verdict(self):
+        """The arithmetic the constant's comment states, checked rather than asserted.
+
+        1,481,442 characters emitted for 384,000 tokens is 3.86 characters per token, and
+        the model reasons about 11.9 characters per character of diff. A cap whose
+        reasoning alone would fill the ceiling is a cap that buys nothing.
+        """
+        chars_per_token = 1_481_442 / 384_000
+        reasoning_per_diff_char = 1_481_442 / self._OBSERVED_FAILURE
+        reasoning_tokens = (
+            deepseek_review.DEEPSEEK_MAX_DIFF_CHARS
+            * reasoning_per_diff_char
+            / chars_per_token
+        )
+        # A real verdict cost 35,966 completion tokens on PR #80. Ask for two of them:
+        # one to write, and one of margin for a diff that reasons harder than the average
+        # this ratio was measured on.
+        self.assertLess(
+            reasoning_tokens + 2 * 35_966,
+            deepseek_review.DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS,
+            "the cap leaves no room for the verdict the reasoning is supposed to produce",
+        )
+
+
+class NoVerdictRemedyTests(unittest.TestCase):
+    """What the run tells an operator when nothing came back.
+
+    The advice this replaces named a lever that did not move: raise the output ceiling,
+    when the ceiling was already the provider's maximum. A diagnostic somebody makes a
+    decision from is an output, and outputs are pinned here.
+    """
+
+    def test_at_the_provider_ceiling_it_does_not_ask_for_more_budget(self):
+        with mock.patch.object(
+            deepseek_review,
+            "DEEPSEEK_MAX_OUTPUT_TOKENS",
+            deepseek_review.DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS,
+        ):
+            remedy = deepseek_review._no_verdict_remedy("length")
+        self.assertIn("no budget to raise", remedy)
+        self.assertNotIn("Raise DEEPSEEK_MAX_OUTPUT_TOKENS", remedy)
+        self.assertIn("DEEPSEEK_MAX_DIFF_CHARS", remedy)
+
+    def test_below_the_provider_ceiling_it_asks_for_more_budget(self):
+        with mock.patch.object(deepseek_review, "DEEPSEEK_MAX_OUTPUT_TOKENS", 65_536):
+            remedy = deepseek_review._no_verdict_remedy("length")
+        self.assertIn("Raise DEEPSEEK_MAX_OUTPUT_TOKENS", remedy)
+
+    def test_a_finish_that_is_not_length_is_not_a_budget_problem(self):
+        remedy = deepseek_review._no_verdict_remedy("stop")
+        self.assertIn("not an output-budget failure", remedy)
+        self.assertNotIn("DEEPSEEK_MAX_OUTPUT_TOKENS", remedy)
+
+
 class OutputBudgetConfigurationTests(unittest.TestCase):
     def test_missing_configuration_uses_the_documented_default(self):
         self.assertEqual(
@@ -222,7 +307,10 @@ class CallDeepSeekContractTests(unittest.TestCase):
         )
         self.assertIn("finish_reason=length", diagnostic)
         self.assertIn("reasoning_chars=125162", diagnostic)
-        self.assertIn("re-derive the request/job timeout budget", diagnostic)
+        # The remedy is the ceiling's, not a fixed sentence. At the provider maximum —
+        # which is where this build runs — "raise the budget" names a lever that does not
+        # move, and this assertion used to pin exactly that advice. See NoVerdictRemedyTests.
+        self.assertIn("no budget to raise", diagnostic)
         self.assertNotIn("x" * 100, diagnostic, "reasoning content must never be logged")
 
     def test_success_log_records_final_content_and_completion_token_sizes(self):

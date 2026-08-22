@@ -27,10 +27,78 @@ DEEPSEEK_DEFAULT_MAX_OUTPUT_TOKENS = 384_000
 DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 
 # The largest diff, in characters, that is sent to the model. A module constant rather
-# than a local so that it can be read by a test and pinned against the documentation —
-# it was neither when it was 120_000, which is how it went on describing a context limit
-# the model had not had for some time.
-DEEPSEEK_MAX_DIFF_CHARS = 600_000
+# than a local so that it can be read by a test and pinned against the documentation.
+#
+# **This number is measured, and the two before it were not.** 120_000 described the
+# model's context window and stopped being true when the model changed; 600_000 described
+# the context window of the model that replaced it, and was never the thing that bounds a
+# review at all. What bounds it is the **output** budget: the chain of thought is emitted
+# into the same DEEPSEEK_MAX_OUTPUT_TOKENS the verdict has to fit in, and at
+# DEEPSEEK_REASONING_EFFORT=max the reasoning is what exhausts it. A 124,711-character diff
+# reasoned to the last token of a 384,000-token ceiling and had none left to write a
+# verdict with, after 31 minutes and a full spend (#167).
+#
+# The arithmetic, from that run and from the two that succeeded:
+#
+#   *  50,963 chars (PR  #80) — 530,226 reasoning chars, passed at a 262,144 ceiling
+#   *  64,167 chars (PR #168) — passed at 384,000 in 7m38s
+#   *  72,350 chars (PR #169) — passed at 384,000
+#   * 124,711 chars (PR #164) — 1,481,442 reasoning chars, finish_reason=length, no verdict
+#
+# 1,481,442 characters emitted for 384,000 tokens is 3.86 characters per token, so the
+# whole budget is about 1,481,000 characters of output; the model reasons about 11.9
+# characters per character of diff. The diff that exactly fills the budget is therefore
+# about 124,000 characters — which is where #164 landed, and why it produced nothing.
+#
+# 90,000 leaves a third of the budget for the verdict: 90,000 x 11.9 / 3.86 is about
+# 277,500 tokens of reasoning against a 384,000-token ceiling, and a real verdict cost
+# 35,966 completion tokens on #80. **It is a truncation threshold and not a promise** — a
+# review that still exhausts the budget under it is a new measurement, and this number is
+# what has to come down.
+#
+# The ratio is a property of DEEPSEEK_REASONING_EFFORT and of the model. Change either and
+# this has to be measured again; `measure_only: true` on the workflow's dispatch replays a
+# real diff without posting or spending a round, which is the tool for it.
+DEEPSEEK_MAX_DIFF_CHARS = 90_000
+
+
+def _no_verdict_remedy(finish_reason):
+    """What an operator should do about a review that produced no verdict.
+
+    **The advice this replaces was impossible to follow.** It said to raise
+    DEEPSEEK_MAX_OUTPUT_TOKENS, and the ceiling was already the provider's maximum — so the
+    one sentence an operator had to act on named a lever that did not move (#167). Which
+    remedies exist depends on where the ceiling actually is, so this asks rather than
+    assuming.
+
+    A `length` finish under the diff cap is the interesting case and gets its own sentence:
+    the cap is a measured number, and a diff inside it that still exhausts the budget is a
+    measurement saying the number is now wrong. That is a fact about the configuration
+    rather than about the pull request, and telling somebody to split a PR that is already
+    inside the cap would send them to fix the wrong thing.
+    """
+    if finish_reason != "length":
+        return (
+            "This is not an output-budget failure — finish_reason is "
+            f"{finish_reason!r}. Read the run log before changing any budget."
+        )
+
+    if DEEPSEEK_MAX_OUTPUT_TOKENS < DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS:
+        return (
+            "The model ran out of output budget. Raise DEEPSEEK_MAX_OUTPUT_TOKENS "
+            f"(currently {DEEPSEEK_MAX_OUTPUT_TOKENS}) towards the provider limit of "
+            f"{DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS}, and re-derive the request/job timeout "
+            "budget with it."
+        )
+
+    return (
+        "The model ran out of output budget and the ceiling is already the provider's "
+        f"maximum ({DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS}), so there is no budget to raise. "
+        f"A diff at or under DEEPSEEK_MAX_DIFF_CHARS ({DEEPSEEK_MAX_DIFF_CHARS:,}) that "
+        "still exhausts it is a new measurement: lower that constant and its documentation "
+        "together. A larger one should have been truncated before this call, and reaching "
+        "here means the cap is not being applied."
+    )
 
 
 def _read_output_token_budget(environ=None):
@@ -370,18 +438,18 @@ def get_diff(pr):
 
     diff = "\n\n".join(parts)
 
-    # The model's context is 1M tokens (V4, flash and pro alike). 600,000 characters is
-    # roughly 170K tokens, so even a full-budget review leaves most of the window unused.
-    # The old 120,000 was about 35K tokens — 3.5% of the window — and AGENTS.md justified
-    # keeping it with "the model's context is what the cap describes". That was not true
-    # of this model, and PR #158 is what made it visible: five files went unread, two of
-    # them the ones the change actually turned on.
+    # What bounds this is the output budget, not the context window — see
+    # DEEPSEEK_MAX_DIFF_CHARS for the measurements and the arithmetic. Truncation reports
+    # every dropped file and blocks the pull request, because a review nobody can see the
+    # gaps in is worse than none.
     #
-    # What bounds this now is time, not context. A larger diff reasons for longer, and
-    # DEEPSEEK_REQUEST_TIMEOUT_SECONDS is what has to absorb it — raise one and re-check
-    # the other, because the failure on the far side is the job cap killing the step with
-    # no output at all. Truncation still reports every dropped file, and still blocks the
-    # pull request, because a review nobody can see the gaps in is worse than none.
+    # **This guard is why an over-large pull request is answered rather than crashed
+    # into.** It did not fire between roughly 124,000 and 600,000 characters, which was the
+    # band where the model runs out of output budget: the run reached the API, spent the
+    # whole ceiling reasoning and exited on a missing verdict, with nothing anywhere saying
+    # the size was the problem. A cap the model can actually reach is what turns that back
+    # into the outcome this code was written for — a partial review, every unread file
+    # named, and a human who has to acknowledge the gap before the PR can merge (#32).
     MAX_CHARS = DEEPSEEK_MAX_DIFF_CHARS
     if len(diff) > MAX_CHARS:
         truncated_notice = (
@@ -549,9 +617,7 @@ def call_deepseek(client, system_prompt, user_prompt, *, json_mode):
             "DeepSeek returned no final review content "
             f"(model={DEEPSEEK_MODEL}, output_ceiling_tokens={DEEPSEEK_MAX_OUTPUT_TOKENS}, "
             f"finish_reason={finish_reason}, reasoning_chars={len(reasoning)}). "
-            "No review verdict was published. If finish_reason=length, raise "
-            "DEEPSEEK_MAX_OUTPUT_TOKENS without exceeding the provider limit, re-derive the "
-            "request/job timeout budget, or split the PR before re-dispatching the review."
+            "No review verdict was published. " + _no_verdict_remedy(finish_reason)
         )
 
     usage = getattr(resp, "usage", None)
