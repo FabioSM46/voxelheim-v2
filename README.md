@@ -60,10 +60,20 @@ voxelheim/
 signed ticket rather than a token this server minted, so the game server has to hold the account
 service's public key before it can let anybody in — and it reads that key once, at startup.
 
+First, the configuration a local run needs and this repository cannot ship:
+
+```bash
+cp .env.example .env    # then fill in what you have; `.env` is git-ignored
+set -a; . ./.env; set +a
+```
+
+`.env.example` says what each variable is and what leaving it empty costs. Nothing loads that
+file for you — no code here reads a `.env`, and the `set -a` above is the whole mechanism —
+and none of the three commands below needs a value typed into it.
+
 ```bash
 # terminal 1 — the account service (listens on 127.0.0.1:7778)
-cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth \
-  -discord-client-id <your Discord application's client id>
+cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth
 
 # terminal 2 — the game server
 cd server && go run ./cmd/voxelheimd \
@@ -87,12 +97,20 @@ account service to sign in against is refused whatever address it dials — whic
 address that is in no list, and `--world` names the world to ask a ticket for, because a ticket
 names exactly one world and nothing about an address says which world is running there.
 
-**`-discord-client-id` is in the first command because signing in is what produces a ticket**, and
-a Discord application is something you register rather than something this repository can ship.
-Left out, the account service still starts and still publishes its key — the game server comes up
+**The Discord client id is in `.env` because signing in is what produces a ticket**, and a
+Discord application is something you register rather than something this repository can ship.
+`VOXELHEIM_DISCORD_CLIENT_ID` is what the account service reads; `-discord-client-id` takes the
+same value and giving it in both is refused rather than resolved by precedence. Left empty in
+both, the account service still starts and still publishes its key — the game server comes up
 fine — and its two sign-in routes refuse every request, so the login screen appears with nothing
-behind it. `server/cmd/voxelheim-auth` documents what to register and where. There is no client
-secret to keep: PKCE stands in for one, and the account service holds the verifier.
+behind it. `server/cmd/voxelheim-auth` documents what to register and where.
+
+**It is not a secret, and the file is not hiding it.** A public OAuth client's id is public by
+construction: PKCE stands in for a client secret, the account service holds the verifier, and
+there is no client secret anywhere to keep. What `.env` buys is that an account identifier stays
+off a command line — this repository is public, and a command carrying one is a command nobody
+can paste into an issue, a pull request or a CI log. The registration key beside it in that file
+*is* a credential, and is the reason there is no flag that takes one.
 
 **`-world-name` is required and has no default**, and the refusal it produces is the point: a
 ticket names one world and is useless at any other, so a server that does not know which world it

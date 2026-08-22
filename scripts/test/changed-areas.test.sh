@@ -128,6 +128,14 @@ expect ".gitignore runs nothing" \
 .gitignore
 EOF
 
+# The example is read by an operator and by the privacy scan, and by no job. Pinned
+# because it is a *root* path, and root paths are where the fail-open rule bites: without
+# a rule it runs the whole matrix on a change to a file of comments.
+expect ".env.example runs nothing" \
+  false false false <<'EOF'
+.env.example
+EOF
+
 echo
 echo "changed-areas — fail open"
 

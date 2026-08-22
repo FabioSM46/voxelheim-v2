@@ -73,8 +73,10 @@ while IFS= read -r path; do
     # not claim — other workflows run themselves; changing them cannot change
     # what THIS run must verify. `*.md` here is root- and docs-level markdown
     # only (AGENTS.md, README.md, docs/**) — see the workspace note above.
+    # `.env.example` is the same kind of inert: it is read by an operator and by the
+    # privacy scan, and by no job. The `.env` it is copied to is never tracked at all.
     *.md | docs/* | .github/* | .claude/* | .agents/* | .opencode/* | .githooks/* | \
-      .gitignore | .gitattributes | LICENSE*) : ;;
+      .gitignore | .gitattributes | .env.example | LICENSE*) : ;;
     # Fail open. Anything unrecognised runs everything; the fix for the cost is
     # to add a rule here WITH a test, never to guess from the workflow.
     *) global=true ;;

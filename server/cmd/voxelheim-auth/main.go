@@ -97,10 +97,13 @@ func main() {
 }
 
 type options struct {
-	listen             string
-	authDir            string
-	discordClientID    string
-	discordRedirectURI string
+	listen          string
+	authDir         string
+	discordClientID string
+	// discordClientIDFromEnv is the same value read from the environment, resolved in
+	// parseFlags rather than where it is used. See [options.clientID].
+	discordClientIDFromEnv string
+	discordRedirectURI     string
 
 	// registrationKeyFile names a file holding the server-registration key, and is empty
 	// when the key comes from the environment or when there is none. **The key itself is
@@ -125,9 +128,13 @@ func parseFlags() options {
 	// A public client's id, which is public: PKCE is what stands in for a secret, and
 	// there is no flag for one because there is no secret to give. Left empty, the
 	// sign-in routes answer 503 rather than the service refusing to start — see
-	// newSignIn.
+	// newSignIn. It may come from the environment instead, which is what `.env.example`
+	// names and what keeps an account identifier off a command line in a public
+	// repository — see discordClientID.
 	flag.StringVar(&opts.discordClientID, "discord-client-id", "",
-		"the Discord application's client id; empty leaves Discord sign-in unconfigured and its routes refusing")
+		"the Discord application's client id; it may be given in "+discordClientIDEnv+
+			" instead, but not in both, and empty in both leaves Discord sign-in unconfigured "+
+			"and its routes refusing")
 	flag.StringVar(&opts.discordRedirectURI, "discord-redirect-uri", defaultDiscordRedirectURI,
 		"where Discord sends the browser back to; a loopback address on the player's machine, not on this service")
 	// A path, never the key. A flag holding a credential is visible in `ps` to every user
@@ -142,7 +149,48 @@ func parseFlags() options {
 	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
 	flag.Parse()
 
+	// **The one environment variable this command reads, read here and nowhere else.**
+	// The command line is process-wide input and this function is where it is taken, so
+	// the environment belongs beside it — which leaves every consumer a pure function of
+	// `options`. That is not tidiness: `newSignIn` is tested in parallel, and a test that
+	// means "nothing was given" gets it by writing `options{}` rather than by clearing a
+	// process-wide variable it does not own. An operator who has sourced `.env` before
+	// running the suite would otherwise fail tests that have nothing to do with them.
+	opts.discordClientIDFromEnv = strings.TrimSpace(os.Getenv(discordClientIDEnv))
+
 	return opts
+}
+
+// clientID resolves the Discord application's client id from the flag or the
+// environment, or reports that this deployment has been given neither.
+//
+// **The two sources are mutually exclusive rather than ordered**, which is
+// [loadRegistrationKey]'s rule and is the same rule for the same reason: a precedence
+// rule is something an operator has to remember, and an operator who has set both has
+// already made a mistake worth being told about while both are still true.
+//
+// **Unlike the registration key, this is not a credential, and a flag is a perfectly
+// good place for it.** A public OAuth client's id is public by construction — PKCE
+// stands in for a secret, and there is no client secret anywhere in this service. What
+// the environment buys is narrower and is about *this* repository: an account identifier
+// is a thing the publication rules keep out of every tracked file, message and log, so a
+// command line carrying one is a command nobody can paste into an issue, a pull request
+// or a CI log. `.env.example` names it and `.env` is git-ignored.
+//
+// **An empty value means "not given", never "given as nothing".** Not a nicety: sourcing
+// a freshly copied `.env.example` exports every name in it with an empty value, so
+// treating mere presence as an answer would turn the documented first step into a service
+// that refuses the flag beside it.
+func (o options) clientID() (string, error) {
+	fromFlag := strings.TrimSpace(o.discordClientID)
+	if fromFlag != "" && o.discordClientIDFromEnv != "" {
+		return "", fmt.Errorf("the Discord client id is given both in %s and in -discord-client-id; "+
+			"give it in exactly one of the two", discordClientIDEnv)
+	}
+	if fromFlag != "" {
+		return fromFlag, nil
+	}
+	return o.discordClientIDFromEnv, nil
 }
 
 // validate checks the flags against the ranges they will be narrowed into.

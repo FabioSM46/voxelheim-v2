@@ -523,13 +523,96 @@ func TestNewSignInSeparatesUnconfiguredFromMisconfigured(t *testing.T) {
 	if unconfigured.withAccounts(accounts) != nil {
 		t.Error("a service with no client id was given a sign-in flow")
 	}
-	if !strings.Contains(out.String(), "-discord-client-id") {
-		t.Error("the startup log does not say which flag is missing")
+	if !strings.Contains(out.String(), "-discord-client-id") || !strings.Contains(out.String(), discordClientIDEnv) {
+		t.Error("the startup log does not name both places the client id could have come from")
 	}
 
 	misconfigured := options{discordClientID: "111", discordRedirectURI: "://not a url"}
 	if _, err := newSignIn(misconfigured, discard()); err == nil {
 		t.Error("a redirect URI that is not a URL was accepted")
+	}
+}
+
+// The client id comes from the flag or from the environment, and an empty value in
+// either is "not given" rather than "given as nothing".
+//
+// **Parallel, and that is the property under test as much as the table is.** The resolution
+// is a method on `options` because `parseFlags` reads the environment once, so a case that
+// means "nothing was given" is written as an empty `options` rather than by clearing a
+// process-wide variable this test does not own — and an operator who has sourced `.env`
+// before running the suite does not fail tests that have nothing to do with them.
+func TestTheDiscordClientIDComesFromAFlagOrTheEnvironment(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		opts    options
+		want    string
+		refused bool
+	}{
+		"from the flag": {
+			opts: options{discordClientID: "111"},
+			want: "111",
+		},
+		"from the environment": {
+			opts: options{discordClientIDFromEnv: "222"},
+			want: "222",
+		},
+		"from neither is not configured, and not an error": {
+			opts: options{},
+			want: "",
+		},
+		// The case a freshly copied `.env.example` produces: every name in it is
+		// exported with an empty value, and the flag beside it must still work.
+		"an empty variable leaves the flag alone": {
+			opts: options{discordClientID: "333", discordClientIDFromEnv: ""},
+			want: "333",
+		},
+		// Surrounding whitespace is what an editor leaves behind, and it is not an id.
+		"whitespace is not an id": {
+			opts: options{discordClientID: "   "},
+			want: "",
+		},
+		// Both is a refusal rather than a precedence rule, for loadRegistrationKey's
+		// reason: an operator who has set both has already made a mistake worth being
+		// told about while both are still true.
+		"both is a refusal": {
+			opts:    options{discordClientID: "111", discordClientIDFromEnv: "222"},
+			refused: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := tc.opts.clientID()
+			if tc.refused {
+				if err == nil {
+					t.Fatal("a client id given in both places was accepted")
+				}
+				if !strings.Contains(err.Error(), discordClientIDEnv) ||
+					!strings.Contains(err.Error(), "-discord-client-id") {
+					t.Errorf("the refusal %q names neither place it could be removed from", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("clientID: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("clientID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A client id given in both places stops the service before anything is created, exactly
+// as a redirect URI that is not a URL does — it is one of the things `run`'s hoisted
+// configuration pass exists to answer.
+func TestAClientIDGivenTwiceRefusesTheStart(t *testing.T) {
+	t.Parallel()
+
+	both := options{discordClientID: "111", discordClientIDFromEnv: "222"}
+	if _, err := newSignIn(both, discard()); err == nil {
+		t.Error("a client id given in both places was accepted")
 	}
 }
 
