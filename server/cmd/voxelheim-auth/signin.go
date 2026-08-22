@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
@@ -24,6 +23,10 @@ const maxSignInRequestBytes = 4 << 10
 // otherwise: a loopback address on the *player's* machine, caught by a listener the
 // client opens for the length of one sign-in. Nothing in this service ever binds it.
 const defaultDiscordRedirectURI = "http://127.0.0.1:7780/discord/callback"
+
+// discordClientIDEnv is where the Discord application's client id is read from when no
+// flag names it. See [discordClientID].
+const discordClientIDEnv = "VOXELHEIM_DISCORD_CLIENT_ID"
 
 // signIn is the sign-in half of the service: the provider flow, and the store that
 // turns the identity it produces into an account.
@@ -94,14 +97,18 @@ type signInConfig struct {
 // ordering property validate buys is kept instead by calling this before the listener is
 // bound, which TestASignInThatCannotBeConfiguredRefusesBeforeThePortIsBound pins.
 func newSignIn(opts options, log *slog.Logger) (signInConfig, error) {
-	if strings.TrimSpace(opts.discordClientID) == "" {
+	clientID, err := opts.clientID()
+	if err != nil {
+		return signInConfig{}, err
+	}
+	if clientID == "" {
 		log.Warn("Discord sign-in is not configured; its routes will refuse every request",
-			"flag", "-discord-client-id")
+			"flag", "-discord-client-id", "env", discordClientIDEnv)
 		return signInConfig{}, nil
 	}
 
 	flow, err := discord.New(discord.Config{
-		ClientID:    opts.discordClientID,
+		ClientID:    clientID,
 		RedirectURI: opts.discordRedirectURI,
 	})
 	if err != nil {

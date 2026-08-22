@@ -811,8 +811,18 @@ func TestTheRegistrationKeyIsReadFromAFileOrTheEnvironment(t *testing.T) {
 
 // Neither the key nor the file's contents reach an error, and an absent configuration is not
 // an error at all: the route answers 503 until an operator invents a key.
+//
+// Not parallel, because it owns the environment for its duration: this loader reads the
+// variable itself, so "nothing configured" has to be a fact rather than a hope about the
+// machine the suite runs on — and after `.env.example` arrived, a developer who has sourced
+// their own `.env` is exactly who would otherwise fail it.
 func TestAnUnusableRegistrationKeyRefusesAndAnAbsentOneDoesNot(t *testing.T) {
 	dir := t.TempDir()
+	// **Empty is not a key, and setting it here tests that as well as isolating the
+	// test.** Sourcing a freshly copied `.env.example` exports every name in it with an
+	// empty value; reading mere presence would have refused the whole start on a key that
+	// parses as nothing, with the operator's only clue being a name they had just copied.
+	t.Setenv(registrationKeyEnv, "")
 
 	// Nothing configured. A warning and a nil key, which is the "not configured" state
 	// newSignIn already has.

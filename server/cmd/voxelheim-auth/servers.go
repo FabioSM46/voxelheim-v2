@@ -426,8 +426,15 @@ const registrationKeyEnv = "VOXELHEIM_REGISTRATION_KEY"
 // Whatever is read is trimmed of surrounding whitespace by registry.ParseKey, because
 // `echo key > key-file` leaves a newline and an operator who had to notice that would
 // notice it as an authentication failure with nothing in any log to explain it.
+//
+// **An exported-but-empty variable means "not given", never "given as nothing"**, which
+// is [discordClientID]'s rule and arrived with it. It reads as a nicety and is not:
+// sourcing a freshly copied `.env.example` exports every name in it with an empty value,
+// and presence alone would make that documented first step refuse the flag beside it —
+// or, with no flag at all, refuse the whole start on a key that parses as nothing.
 func loadRegistrationKey(path string, log *slog.Logger) (*registry.Key, error) {
-	fromEnv, inEnv := os.LookupEnv(registrationKeyEnv)
+	fromEnv := strings.TrimSpace(os.Getenv(registrationKeyEnv))
+	inEnv := fromEnv != ""
 	named := strings.TrimSpace(path)
 
 	var raw string
