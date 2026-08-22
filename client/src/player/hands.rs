@@ -761,8 +761,6 @@ mod tests {
             *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(0);
             app.update();
 
-            let drawn = held(&mut app).0;
-            let _ = drawn;
             let world = app.world_mut();
             let mut query = world.query_filtered::<&Mesh3d, With<HeldItem>>();
             let mesh = query.single(world).expect("one held view model").0.clone();
