@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use super::InputMode;
 use super::camera::{ViewMode, WorldCamera};
-use super::combat::SwingSent;
+use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
 use super::merge_all;
@@ -30,7 +30,31 @@ use crate::world::palette;
 /// view-space pocket even when terrain touches the player capsule.
 const BASE_TRANSLATION: Vec3 = Vec3::new(0.10, -0.075, -0.18);
 
+/// The whole of the closed fist: the box the palm and the knuckles fit inside.
+///
+/// Unchanged from when the hand *was* this box, so nothing about where the hand sits or how
+/// far it swings moves — #175 replaces what fills it, not what it occupies.
 const HAND_SIZE: Vec3 = Vec3::new(0.045, 0.085, 0.045);
+
+/// How far each knuckle stands proud of the palm, as a fraction of the fist's depth.
+///
+/// Small: a fist read from the inside of a wrist is mostly one mass, and knuckles that
+/// carried a third of the depth would be four separate fingers pointing at the camera.
+const KNUCKLE_PROUD: f32 = 0.22;
+
+/// How much of the fist's height the knuckle row occupies, measured from the top.
+const KNUCKLE_BAND: f32 = 0.30;
+
+/// How much darker a rust mark is than the iron it sits on.
+///
+/// **A multiplier, not a colour**, and that is what keeps `player/items.rs` the one answer
+/// to which palette entry an item presents as. The blade's vertices carry white — identity
+/// — everywhere but the marks, so the base that comes through is whatever that table says.
+/// Change the sword's palette entry and the rust follows it, because it is a shade *of* it.
+///
+/// Warm and dark: red kept, green and blue pulled down, which is what turns a pale iron into
+/// oxide rather than into grey.
+const RUST_TINT: [f32; 4] = [0.72, 0.38, 0.22, 1.0];
 const BLOCK_EDGE: f32 = 0.055;
 const MATERIAL_RADIUS: f32 = 0.020;
 const MATERIAL_LENGTH: f32 = 0.050;
@@ -80,6 +104,118 @@ fn tool_mesh() -> Mesh {
     ));
     merge_all(&mut merged, [head], "held tool");
     merged
+}
+
+/// A closed fist: a palm with four knuckles standing proud of it.
+///
+/// **It was a single box**, which is the crudest shape in the game sharing the screen with
+/// the other crudest shape — and it is on screen more than anything else, because an empty
+/// hand is what a player holds most of the time (#175).
+///
+/// Five boxes merged into one mesh, for the reason [`tool_mesh`] merges two: the view model
+/// is one entity with one transform that `animate_view_model` drives, and a knuckle parented
+/// separately would be a second thing to keep in step with a swing.
+///
+/// It fills exactly [`HAND_SIZE`], so nothing about where the hand sits or how far it swings
+/// moves. The knuckles take their depth out of the palm rather than adding to it.
+fn fist_mesh() -> Mesh {
+    let palm_depth = HAND_SIZE.z * (1.0 - KNUCKLE_PROUD);
+    let mut merged = Mesh::from(Cuboid::from_size(Vec3::new(
+        HAND_SIZE.x,
+        HAND_SIZE.y,
+        palm_depth,
+    )))
+    // Pushed back, so the knuckles below occupy the front of the box rather than growing it.
+    .translated_by(Vec3::new(0.0, 0.0, (HAND_SIZE.z - palm_depth) / 2.0));
+
+    // Four knuckles across the top of the palm, front-facing. A gap between them is what
+    // makes them read as four rather than as one ridge, so each is a little under a quarter
+    // of the width.
+    let knuckle = Vec3::new(
+        HAND_SIZE.x * 0.20,
+        HAND_SIZE.y * KNUCKLE_BAND,
+        HAND_SIZE.z * KNUCKLE_PROUD,
+    );
+    let top = HAND_SIZE.y / 2.0 - knuckle.y / 2.0;
+    let front = -(HAND_SIZE.z / 2.0) + knuckle.z / 2.0;
+    let knuckles = (0..4).map(|index| {
+        // Spread across the palm's width: four centres at 1/8, 3/8, 5/8, 7/8 of it.
+        let across = HAND_SIZE.x * ((index as f32 * 2.0 + 1.0) / 8.0 - 0.5);
+        Mesh::from(Cuboid::from_size(knuckle)).translated_by(Vec3::new(across, top, front))
+    });
+    merge_all(&mut merged, knuckles, "fist");
+    merged
+}
+
+/// The rusty sword's blade: iron with rust on it.
+///
+/// **Two colours on one mesh and one material**, which is what the cost note in
+/// `client/AGENTS.md` asks for — the alternative was a second entity per held item, or a
+/// material per item rather than per palette entry.
+///
+/// The vertices carry `Mesh::ATTRIBUTE_COLOR`, which `StandardMaterial` multiplies into its
+/// `base_color`; `world/render.rs` has drawn the whole terrain that way since it existed, so
+/// this is the established mechanism rather than a new one. White is identity — the iron
+/// that comes through is whatever `player/items.rs` says the sword presents as — and the
+/// marks carry [`RUST_TINT`], so they are a shade *of* that base rather than a second
+/// opinion about it.
+///
+/// Three marks rather than a wash, at different heights and not touching the edge: rust
+/// takes hold in patches, and a blade evenly discoloured reads as painted.
+fn rusted_blade_mesh() -> Mesh {
+    let mut merged = plain(Mesh::from(Cuboid::from_size(BLADE_SIZE)));
+
+    // Each mark stands a hair proud of the blade's faces, for the reason the rig's hair does:
+    // two surfaces sharing a plane is where a renderer has to choose, and it chooses per
+    // frame. A twentieth of the blade's thinnest dimension is enough and is invisible.
+    //
+    // The mark is therefore thicker than the blade and centred on it, so **one mark wraps
+    // both flat faces** rather than sitting on one of them. That is what `proud` forces
+    // rather than something it permits: a mark pushed onto a single face travels half of
+    // `proud` to get there, which lands its *other* face exactly on the plane of the
+    // blade's — coplanar, differently coloured, overlapping, which is the flicker rule 2 in
+    // `client/AGENTS.md` names for the body rig, arriving here by the same door.
+    let proud = BLADE_SIZE.x * 0.05;
+    let mark = Vec3::new(
+        BLADE_SIZE.x + proud,
+        BLADE_SIZE.y * 0.13,
+        BLADE_SIZE.z * 0.55,
+    );
+    let marks = [-0.24, 0.02, 0.29]
+        .into_iter()
+        .enumerate()
+        .map(|(index, height)| {
+            // Alternating across the blade's *width*, so the three do not read as one
+            // stripe down the middle of it as it turns. Not across its two faces: every
+            // mark is on both of those, for the reason above.
+            let side = if index % 2 == 0 { 1.0 } else { -1.0 };
+            rusted(Mesh::from(Cuboid::from_size(mark)).translated_by(Vec3::new(
+                0.0,
+                BLADE_SIZE.y * height,
+                side * BLADE_SIZE.z * 0.10,
+            )))
+        });
+    merge_all(&mut merged, marks, "rusted blade");
+    merged
+}
+
+/// One mesh with every vertex at identity, so the material's own colour comes through.
+///
+/// The attribute has to be present on *both* sides of a merge: `Mesh::merge` refuses to join
+/// a mesh carrying an attribute to one that does not, and the halves would silently disagree
+/// about what white means if it did not.
+fn plain(mesh: Mesh) -> Mesh {
+    tinted(mesh, [1.0, 1.0, 1.0, 1.0])
+}
+
+/// One mesh with every vertex carrying [`RUST_TINT`].
+fn rusted(mesh: Mesh) -> Mesh {
+    tinted(mesh, RUST_TINT)
+}
+
+fn tinted(mesh: Mesh, colour: [f32; 4]) -> Mesh {
+    let vertices = mesh.count_vertices();
+    mesh.with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![colour; vertices])
 }
 
 pub(super) struct HandsPlugin;
@@ -133,6 +269,12 @@ struct Appearance {
 #[derive(Resource, Debug)]
 struct HandVisuals {
     hand: Handle<Mesh>,
+    /// The rusty sword's own blade, and the only item in this table that has one.
+    ///
+    /// A shape says what a *kind* of thing looks like; rust is a fact about one blade. The
+    /// iron sword is the same [`ItemShape::Blade`] and must not inherit it, which is the
+    /// whole reason this is keyed by item rather than by shape.
+    rusted_blade: Handle<Mesh>,
     block: Handle<Mesh>,
     material: Handle<Mesh>,
     blade: Handle<Mesh>,
@@ -142,7 +284,13 @@ struct HandVisuals {
 }
 
 impl HandVisuals {
-    fn mesh(&self, shape: Option<ItemShape>) -> Handle<Mesh> {
+    fn mesh(&self, item_id: Option<u16>, shape: Option<ItemShape>) -> Handle<Mesh> {
+        // The one item whose look is not simply its shape's. Checked before the shape and
+        // not inside it, so [`ItemShape`] stays a vocabulary of kinds and this stays what it
+        // is: one exception, named, for one blade.
+        if item_id == Some(ITEM_RUSTY_SWORD) {
+            return self.rusted_blade.clone();
+        }
         match shape {
             None => self.hand.clone(),
             Some(ItemShape::Block) => self.block.clone(),
@@ -199,16 +347,17 @@ fn spawn_view_model(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let mut visuals = HandVisuals {
-        hand: meshes.add(Cuboid::new(HAND_SIZE.x, HAND_SIZE.y, HAND_SIZE.z)),
+        hand: meshes.add(fist_mesh()),
         block: meshes.add(Cuboid::from_size(Vec3::splat(BLOCK_EDGE))),
         material: meshes.add(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
         blade: meshes.add(Cuboid::from_size(BLADE_SIZE)),
+        rusted_blade: meshes.add(rusted_blade_mesh()),
         bundle: meshes.add(Cuboid::from_size(BUNDLE_SIZE)),
         tool: meshes.add(tool_mesh()),
         materials: Vec::new(),
     };
     let appearance = selected_appearance(None);
-    let mesh = visuals.mesh(appearance.shape);
+    let mesh = visuals.mesh(appearance.item_id, appearance.shape);
     let material = visuals.material_for(appearance.palette_id, &mut materials);
 
     commands.spawn((
@@ -289,7 +438,7 @@ fn refresh_held_item(
         if item.item_id != appearance.item_id || item.shape != appearance.shape {
             item.item_id = appearance.item_id;
             item.shape = appearance.shape;
-            mesh.0 = wardrobe.visuals.mesh(appearance.shape);
+            mesh.0 = wardrobe.visuals.mesh(appearance.item_id, appearance.shape);
             material.0 = wardrobe
                 .visuals
                 .material_for(appearance.palette_id, &mut wardrobe.materials);
@@ -413,6 +562,9 @@ fn animated_transform(animation: &HandAnimation) -> Transform {
 mod tests {
     use bevy::asset::AssetPlugin;
 
+    use bevy::mesh::VertexAttributeValues;
+
+    use super::super::crafting::ITEM_IRON_SWORD;
     use super::*;
     use crate::net::{InventoryStack, SessionParams};
     use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE};
@@ -431,6 +583,239 @@ mod tests {
             hotbar_slots: 4,
             player_token: crate::net::ANY_TOKEN,
         })
+    }
+
+    /// The vertex colours one mesh carries, deduplicated and sorted so a failure reads the
+    /// same way twice.
+    fn tints(meshes: &Assets<Mesh>, handle: &Handle<Mesh>) -> Vec<[u8; 4]> {
+        let mesh = meshes.get(handle).expect("the mesh exists");
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            return Vec::new();
+        };
+        // Quantised, because these are compared for identity rather than measured and two
+        // f32 that print the same must not sort apart.
+        let mut seen: Vec<[u8; 4]> = colours
+            .iter()
+            .map(|c| c.map(|channel| (channel * 255.0).round() as u8))
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    }
+
+    /// **The rusty sword is iron with rust on it**, not one flat colour.
+    ///
+    /// Asserted as *two* vertex tints on one mesh, and as the marks being a shade of the
+    /// base rather than a colour beside it: white is identity, so the iron that comes
+    /// through is whatever `player/items.rs` says the sword presents as. That is what keeps
+    /// that table the one answer — change the sword's palette entry and the rust follows it.
+    #[test]
+    fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
+        let mut app = app();
+        app.update();
+
+        let visuals = app.world().resource::<HandVisuals>();
+        let rusted = visuals.rusted_blade.clone();
+        let plain = visuals.blade.clone();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+
+        let marks = tints(meshes, &rusted);
+        assert_eq!(
+            marks.len(),
+            2,
+            "the rusty blade carries {} tints, want iron and rust: {marks:?}",
+            marks.len()
+        );
+        assert!(
+            marks.contains(&[255, 255, 255, 255]),
+            "no vertex carries identity, so the item's own palette entry never shows through"
+        );
+        let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
+        assert!(marks.contains(&rust), "no vertex carries the rust tint");
+
+        // And the iron sword is not rusty: it is the same `ItemShape::Blade` and must not
+        // inherit one blade's condition. It carries no vertex colours at all — an absent
+        // attribute is how a mesh takes its material's colour whole, which is what every
+        // other held shape does and what the rusted blade opts out of.
+        assert_eq!(
+            tints(meshes, &plain),
+            Vec::<[u8; 4]>::new(),
+            "the plain blade carries vertex colours, so it is no longer simply its material"
+        );
+        assert_ne!(rusted, plain, "both swords share one mesh");
+    }
+
+    /// **Every rust mark wraps the blade; what alternates is where the three sit across it.**
+    ///
+    /// Pinned because neither half is what a reader guesses from `side`. A mark is thicker
+    /// than the blade and centred on it, so it stands proud of *both* flat faces; offsetting
+    /// one onto a single face instead would land its other face exactly on the plane of the
+    /// blade's — coplanar, differently coloured, overlapping — which is the flicker `proud`
+    /// exists to prevent. So this fails in that direction as readily as in the direction of
+    /// losing the stagger, which is the point of asserting the geometry rather than the
+    /// comment.
+    #[test]
+    fn every_rust_mark_wraps_the_blade_and_the_three_stagger_across_its_width() {
+        let mut app = app();
+        app.update();
+
+        let rusted = app.world().resource::<HandVisuals>().rusted_blade.clone();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&rusted).expect("the rusted blade mesh");
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the rusted blade must carry Float32x3 positions");
+        };
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the rusted blade must carry Float32x4 colours");
+        };
+
+        // Quantised for the reason `tints` quantises: these pick vertices out by identity
+        // rather than measuring them.
+        let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
+        let marks: Vec<[f32; 3]> = positions
+            .iter()
+            .zip(colours)
+            .filter(|(_, colour)| colour.map(|channel| (channel * 255.0).round() as u8) == rust)
+            .map(|(position, _)| *position)
+            .collect();
+        assert!(!marks.is_empty(), "no vertex carries the rust tint");
+
+        // Grouped into marks by the y planes they sit on: a box contributes exactly two,
+        // and the three heights do not meet. Asked of each mark rather than of all of them
+        // together, because the aggregate span is wide enough to pass while every single
+        // mark sits on one face — which is exactly the shape being ruled out.
+        let plane = |value: f32| (value * 1e6).round() as i32;
+        let mut heights: Vec<i32> = marks.iter().map(|p| plane(p[1])).collect();
+        heights.sort_unstable();
+        heights.dedup();
+        assert!(
+            heights.len() >= 2 && heights.len().is_multiple_of(2),
+            "the rust sits on {} y planes, which is not a whole number of marks",
+            heights.len()
+        );
+
+        // Both faces: each mark reaches past the blade's own thickness on each side of it.
+        let half = BLADE_SIZE.x / 2.0;
+        for (index, bounds) in heights.chunks(2).enumerate() {
+            let [bottom, top] = bounds else {
+                unreachable!("an even number of planes chunks into pairs")
+            };
+            let one: Vec<[f32; 3]> = marks
+                .iter()
+                .copied()
+                .filter(|p| plane(p[1]) == *bottom || plane(p[1]) == *top)
+                .collect();
+            let min_x = one.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+            let max_x = one.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                min_x < -half && max_x > half,
+                "mark {index} spans x {min_x}..{max_x} against a blade of ±{half}, so it \
+                 sits on one face instead of wrapping both"
+            );
+        }
+
+        // Staggered: three marks in one column would put every rust vertex on the same two
+        // z planes.
+        let mut planes: Vec<i32> = marks.iter().map(|p| plane(p[2])).collect();
+        planes.sort_unstable();
+        planes.dedup();
+        assert!(
+            planes.len() > 2,
+            "the rust sits on {} z planes, so the three marks are one column down the width",
+            planes.len()
+        );
+
+        // And clear of both edges, which is what keeps a mark reading as a patch rather
+        // than as a chipped edge.
+        let edge = BLADE_SIZE.z / 2.0;
+        let min_z = marks.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+        let max_z = marks.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            min_z > -edge && max_z < edge,
+            "the rust spans z {min_z}..{max_z} against edges at ±{edge}, so a mark touches one"
+        );
+    }
+
+    /// The rust reaches the screen only for the sword it belongs to.
+    ///
+    /// Read through the mesh the hand is actually built from, so it is the routing under
+    /// test rather than the table: holding the iron sword must not produce the rusted mesh.
+    #[test]
+    fn only_the_rusty_sword_is_drawn_rusted() {
+        let mut app = app();
+        app.update();
+        let rusted = app.world().resource::<HandVisuals>().rusted_blade.clone();
+
+        for (item_id, want_rusted) in [(ITEM_RUSTY_SWORD, true), (ITEM_IRON_SWORD, false)] {
+            *app.world_mut().resource_mut::<Inventory>() =
+                Inventory::from_stacks(vec![InventoryStack {
+                    item_id,
+                    count: 1,
+                    ..Default::default()
+                }]);
+            *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(0);
+            app.update();
+
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Mesh3d, With<HeldItem>>();
+            let mesh = query.single(world).expect("one held view model").0.clone();
+            assert_eq!(
+                mesh == rusted,
+                want_rusted,
+                "item {item_id} drawn with the rusted blade = {}, want {want_rusted}",
+                mesh == rusted
+            );
+        }
+    }
+
+    /// **The empty hand is a fist**, which is more than one box and still fits the same one.
+    ///
+    /// The count is what says it is not the single cuboid it was — a cube is 24 vertices —
+    /// and the extent is what says nothing about where the hand sits or how far it swings
+    /// moved, which is the half of this that could have broken the swing tests silently.
+    #[test]
+    fn the_empty_hand_is_a_fist_inside_the_box_the_cuboid_filled() {
+        let mut app = app();
+        app.update();
+
+        let hand = app.world().resource::<HandVisuals>().hand.clone();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&hand).expect("the hand mesh");
+
+        assert!(
+            mesh.count_vertices() > 24,
+            "the hand is {} vertices, which is one box — a fist is a palm and knuckles",
+            mesh.count_vertices()
+        );
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the hand must carry Float32x3 positions");
+        };
+        for (axis, size) in [HAND_SIZE.x, HAND_SIZE.y, HAND_SIZE.z]
+            .into_iter()
+            .enumerate()
+        {
+            let min = positions
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::INFINITY, f32::min);
+            let max = positions
+                .iter()
+                .map(|p| p[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!(
+                (max - min - size).abs() < 1e-5,
+                "the fist spans {} on axis {axis}, and HAND_SIZE says {size}",
+                max - min
+            );
+        }
     }
 
     fn app() -> App {
