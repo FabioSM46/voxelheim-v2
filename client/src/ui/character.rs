@@ -22,18 +22,30 @@
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use bevy::ui::UiGlobalTransform;
+use bevy::window::PrimaryWindow;
+use std::f32::consts::TAU;
 
 use super::{BUTTON, button_colour};
-use crate::net::{Appearance, CharacterChoice, ChooseCharacter, HairModel};
+use crate::net::{Appearance, CharacterChoice, ChooseCharacter, HairModel, Session};
 
-use crate::player::{BodyPart, PlacedBox, body_boxes, body_envelope, body_slots, placed_box};
+use crate::player::{
+    BodyPart, BodyVisualsPlugin, Daylight, Dressing, PlacedBox, WorldCamera, body_envelope,
+};
 
 pub(super) struct CharacterUiPlugin;
 
 impl Plugin for CharacterUiPlugin {
     fn build(&self, app: &mut App) {
+        // The preview is a body, and bodies are dressed out of `player`'s wardrobe. Built
+        // here as well as by `PlayerPlugin` so this screen stands up headlessly on its own,
+        // and guarded because Bevy panics on a unique plugin added twice.
+        if !app.is_plugin_added::<BodyVisualsPlugin>() {
+            app.add_plugins(BodyVisualsPlugin);
+        }
         app.init_resource::<Draft>()
             .init_resource::<PlayAs>()
+            .init_resource::<PreviewState>()
             // Bevy's `InputPlugin` registers this one in a running client; registering it
             // here as well is what lets this screen be driven headlessly, which is the
             // same reason `ui/mod.rs` registers the messages its panels write.
@@ -52,6 +64,16 @@ impl Plugin for CharacterUiPlugin {
                     row_clicks,
                     field_clicks,
                     (show_character_screen, refresh_screen),
+                    // The model last, and in this order. `keep_the_preview` reads the
+                    // focus the systems above leave, `turn_the_preview` advances the angle
+                    // `place_the_preview` then writes into a transform, and the backdrop is
+                    // independent of all three.
+                    (
+                        keep_the_preview,
+                        turn_the_preview,
+                        place_the_preview,
+                        paint_the_backdrop,
+                    ),
                 )
                     .chain(),
             );
@@ -427,25 +449,30 @@ struct Swatch {
 #[derive(Component)]
 struct HairLabel;
 
-/// The panel the preview is drawn on.
+/// The hole in the layout the turning model shows through.
 ///
-/// Marked because the boxes being its **children** is load-bearing rather than
-/// incidental: see [`a_box_behind_the_body_still_draws_over_the_panel`].
+/// A node with no background, and the whole of what the UI contributes to the preview:
+/// the model is not drawn by `bevy_ui` at all, it stands in the world in front of the one
+/// camera. What this node is *for* is the layout — it reserves the space beside the panel
+/// so nothing else claims it — and its computed rect is where the model is placed, which
+/// is what keeps the two agreeing when the window is resized.
+///
+/// It sits outside the panel rather than inside it, and it has to: a `bevy_ui` parent
+/// draws behind its children, so a transparent node inside an opaque panel shows the
+/// panel and not the world.
 #[derive(Component)]
-struct PreviewFrame;
+struct PreviewStage;
 
-/// One box of the drawn body: which part it belongs to, and which of that part's boxes
-/// it is.
+/// The turning body itself: a world entity, not a node.
 ///
-/// A pool rather than a node per box that exists: the hair is drawn from between one box
-/// and four depending on the model, and a screen that spawned and despawned nodes as a
-/// player cycled the choice would be rebuilding a layout on a key press. The spare nodes
-/// of a smaller model draw nothing instead.
-#[derive(Component, Debug, Clone, Copy)]
-struct PreviewBox {
-    part: BodyPart,
-    index: usize,
-}
+/// One per character screen, spawned when the screen goes up and despawned when the world
+/// arrives. Its children are the six parts, exactly as [`crate::player`] builds a body's.
+#[derive(Component)]
+struct PreviewModel;
+
+/// One part of the turning body, so a re-dress can find them.
+#[derive(Component)]
+struct PreviewPart;
 
 /// Between the server list's 45 and the login screen's 50. A player choosing a character
 /// has signed in and picked a server, and neither of those screens is up behind this one.
@@ -466,10 +493,40 @@ const IDLE_EDGE: Color = Color::srgba(0.0, 0.0, 0.0, 0.0);
 /// the shape the envelope is and the figure in the middle of it.
 const PREVIEW_MARGIN: f32 = 1.12;
 
-/// How wide the preview panel is drawn, in logical pixels. Its height is not a constant:
-/// it comes from the rig, through [`preview_frame`], so a notch is the same length across
-/// the panel as it is up it and the proportions on screen are the body's.
-const PREVIEW_WIDTH: f32 = 96.0;
+/// How wide the stage the model turns on is drawn, in logical pixels. Its height is not a
+/// constant: it comes from the rig, through [`preview_frame`], so a notch is the same
+/// length across the stage as it is up it and the proportions on screen are the body's.
+///
+/// Wider than the flat swatch stack it replaced, because it now holds a figure that turns
+/// — a body seen from the side is deeper than it is wide, and a stage cut to the front
+/// view would clip an elbow every half turn.
+const PREVIEW_WIDTH: f32 = 200.0;
+
+/// How far in front of the camera the model stands, in blocks.
+///
+/// Any distance draws the same figure — it is scaled to the stage either way — so what
+/// this number picks is the perspective: near enough that the turn reads as a turn rather
+/// than as an orthographic slide, far enough that a nose is not wider than a shoulder.
+const PREVIEW_DISTANCE: f32 = 3.0;
+
+/// How fast the model turns, in radians per second.
+///
+/// A little under twelve seconds a revolution: slow enough to look at, fast enough that a
+/// player who wants the back of a haircut does not wait for it. Presentation, and it
+/// decides nothing — nothing reads this angle back.
+const PREVIEW_TURN: f32 = 0.55;
+
+/// What the camera clears to while the character screen is up.
+///
+/// **The screen is not a window onto the world**, and there is no world behind it anyway:
+/// this client has no session while a character is being chosen. Flat and dark, chosen for
+/// the screen, rather than the sky colour a world with no clock happens to keep — which is
+/// a daylight blue, and reads as a game running behind a menu.
+///
+/// Put back the moment a session exists. `Daylight::FIXED` is where it goes back to,
+/// because that is what `player::camera` spawns the camera with and what a world with no
+/// clock keeps for ever.
+const BACKDROP: Color = Color::srgb(0.020, 0.024, 0.032);
 
 type ChangedButton = (Changed<Interaction>, With<Button>);
 
@@ -506,13 +563,22 @@ fn spawn_character_screen(mut commands: Commands) {
                 height: Val::Percent(100.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
+                column_gap: Val::Px(28.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.012, 0.016, 0.024, 0.98)),
+            // **Transparent, and it used to be a near-opaque sheet.** The dark ground is
+            // now the camera's, set by `paint_the_backdrop` while this screen is up — which
+            // is what lets the turning model be seen at all, since `bevy_ui` draws over the
+            // world and an overlay at 98% would have left a figure nobody could make out.
+            // Nothing is lost by moving it: there is no world behind this screen to hide.
+            BackgroundColor(Color::NONE),
             Visibility::Hidden,
             GlobalZIndex(CHARACTER_LAYER),
         ))
         .with_children(|overlay| {
+            // Beside the panel rather than inside it. A `bevy_ui` parent draws behind its
+            // children, so a hole cut in an opaque panel shows the panel.
+            spawn_preview_stage(overlay);
             overlay
                 .spawn((
                     Node {
@@ -569,7 +635,6 @@ fn spawn_character_screen(mut commands: Commands) {
                             ));
 
                             spawn_form(body);
-                            spawn_preview(body);
                         });
 
                     panel.spawn((
@@ -764,63 +829,342 @@ fn preview_frame() -> PlacedBox {
     frame
 }
 
-/// The body, drawn from the same boxes the world's own body is built from.
+/// The stage the model turns on: a hole in the layout, and nothing else.
 ///
-/// Flat nodes rather than a mesh, which is the choice `ui/icon.rs` already made for
-/// items: a second camera and a render target would cost a texture per frame and put the
-/// result out of reach of a headless test, where a handful of nodes is components a test
-/// can read. What keeps it honest is that the *boxes* come from `player::appearance` —
-/// the same table `player::part_mesh` builds meshes from, seen head-on with the depth
-/// thrown away.
-fn spawn_preview(parent: &mut ChildSpawnerCommands<'_>) {
+/// **The preview used to be flat nodes**, one per box of the rig, laid out by percentage
+/// inside a panel with the depth thrown away and a painter's `ZIndex` standing in for it.
+/// It is now the actual rig, in the world, in front of the one camera — the same meshes
+/// and the same materials the world dresses a body from, so the preview cannot disagree
+/// with what a player will see of themselves.
+///
+/// The objection that kept it flat was that a second camera and a render target would put
+/// the result out of reach of a headless test. That is true of a texture and there is no
+/// texture here: the model is entities carrying `Mesh3d` and `MeshMaterial3d`, which
+/// `player/tests.rs` already reads headlessly. And there is no second camera — the rule in
+/// `player/camera.rs` stands untouched.
+fn spawn_preview_stage(parent: &mut ChildSpawnerCommands<'_>) {
     let frame = preview_frame();
-    // Square notches: the panel is as much taller than it is wide as the rig is.
+    // Square notches: the stage is as much taller than it is wide as the rig is.
     let height = PREVIEW_WIDTH * frame.size.y / frame.size.x;
 
-    parent
-        .spawn(Node {
-            width: Val::Px(PREVIEW_WIDTH + 24.0),
-            display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(6.0),
+    parent.spawn((
+        PreviewStage,
+        Node {
+            width: Val::Px(PREVIEW_WIDTH),
+            height: Val::Px(height),
+            flex_shrink: 0.0,
             ..default()
-        })
-        .with_children(|column| {
-            column
-                .spawn((
-                    PreviewFrame,
-                    Node {
-                        width: Val::Px(PREVIEW_WIDTH),
-                        height: Val::Px(height),
-                        position_type: PositionType::Relative,
-                        border_radius: BorderRadius::all(Val::Px(4.0)),
-                        overflow: Overflow::clip(),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.03, 0.035, 0.045)),
-                ))
-                .with_children(|box_| {
-                    // A fixed pool, sized by the widest model each part has. Which node
-                    // covers which is decided per refresh by `ZIndex`, not by the order
-                    // they are spawned in: a curtain of hair falls *behind* the shoulders
-                    // and a cap sits over the crown, and the box's own depth is the only
-                    // thing that knows the difference.
-                    for part in BodyPart::IN_DRAWING_ORDER {
-                        for index in 0..body_slots(part) {
-                            box_.spawn((
-                                PreviewBox { part, index },
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    ..default()
-                                },
-                                BackgroundColor(Color::NONE),
-                                ZIndex(0),
-                            ));
-                        }
-                    }
-                });
-        });
+        },
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// The model that turns
+// ---------------------------------------------------------------------------
+
+/// What the model is currently wearing and how far round it has turned.
+///
+/// The angle lives here rather than being read back off the transform, for the reason a
+/// mob's interpolated yaw does: recovering it would mean inverting a quaternion that
+/// `place_the_preview` also writes a translation and a scale into. The appearance is what
+/// makes a re-dress free — an unchanged draft changes nothing.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+struct PreviewState {
+    worn: Option<Appearance>,
+    turned: f32,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            worn: None,
+            // Not zero: face-on is the least informative angle a rig has — the nose, the
+            // knot and the fists all hide behind the silhouette — so the model starts a
+            // little turned and the first thing a player sees is a person with depth.
+            turned: 0.6,
+        }
+    }
+}
+
+/// Who the preview is of: the draft while one is being made, the focused character while
+/// one is being chosen.
+///
+/// So the model is always of whoever is about to go in — which is what makes it a preview
+/// rather than a decoration. It moved out of `refresh_screen` with the flat nodes it used
+/// to lay out, and is a function of its own because the model and the tests both ask it.
+fn previewed(draft: &Draft, choice: &CharacterChoice) -> Appearance {
+    let focused = rows(choice).get(draft.row).copied();
+    match (draft.mode, focused) {
+        (Mode::Choosing, Some(Row::Play(id))) => choice
+            .characters()
+            .iter()
+            .find(|character| character.character_id == id)
+            .map_or_else(|| draft.appearance(), |character| character.appearance),
+        _ => draft.appearance(),
+    }
+}
+
+/// Keeps exactly one model alive for as long as the screen is, wearing whoever is chosen.
+///
+/// **Despawned and respawned per part, and that is allowed here where it is not for a
+/// body.** `player::dress_bodies` swaps handles in place because a body carries an
+/// identity and an interpolation that respawning would restart, and because it would blink
+/// a figure standing in the world. This model has neither: the turn lives on the parent,
+/// which is untouched, and rebuilding ten children on the key press that cycles a haircut
+/// is cheaper than the query pair that would avoid it.
+fn keep_the_preview(
+    mut commands: Commands,
+    choice: Option<Res<CharacterChoice>>,
+    draft: Res<Draft>,
+    session: Option<Res<Session>>,
+    mut dressing: Dressing<'_>,
+    mut state: ResMut<PreviewState>,
+    models: Query<(Entity, Option<&Children>), With<PreviewModel>>,
+) {
+    // The world has arrived, or the exchange is over. Either way the screen is not up and
+    // the model goes with it — the same life the screen's own nodes have.
+    if choice.is_none() || session.is_some() {
+        for (model, _) in &models {
+            commands.entity(model).despawn();
+        }
+        if state.worn.is_some() {
+            state.worn = None;
+        }
+        return;
+    }
+
+    let Some(choice) = choice else {
+        // Unreachable: the early return above is the `None` case. Answered rather than
+        // unwrapped, because a screen is the last thing that should panic.
+        return;
+    };
+    let worn = previewed(&draft, &choice);
+    let model = match models.iter().next() {
+        Some((model, children)) => {
+            if state.worn == Some(worn) {
+                return;
+            }
+            for child in children.into_iter().flatten() {
+                commands.entity(*child).despawn();
+            }
+            model
+        }
+        None => commands
+            .spawn((
+                PreviewModel,
+                Transform::default(),
+                // The screen is an overlay over a client that may have no world at all, so
+                // nothing else is guaranteed to give this a visibility to inherit.
+                Visibility::Visible,
+            ))
+            .id(),
+    };
+
+    let Some(mut wardrobe) = dressing.wardrobe() else {
+        // The meshes do not exist yet. Nothing is recorded as worn, so the next frame
+        // tries again rather than leaving a bare figure standing.
+        return;
+    };
+    // The same wardrobe the world dresses a body from: the same meshes, and the same
+    // material per colour. Not a copy of the tables — the acceptance criterion is that
+    // this cannot disagree with what a player will see of themselves.
+    let outfit = wardrobe.outfit(worn);
+    commands.entity(model).with_children(|parent| {
+        for (_, mesh, material) in outfit {
+            parent.spawn((
+                PreviewPart,
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::default(),
+            ));
+        }
+    });
+    state.worn = Some(worn);
+}
+
+/// Turns the model on the spot.
+///
+/// About the world's up axis and nothing else — it rotates, it does not walk. Wrapped
+/// rather than left to grow, so the angle stays a number `f32` can still add a frame's
+/// worth to after an hour on the screen.
+fn turn_the_preview(
+    time: Res<Time>,
+    mut state: ResMut<PreviewState>,
+    mut models: Query<&mut Transform, With<PreviewModel>>,
+) {
+    if state.worn.is_none() {
+        return;
+    }
+    state.turned = (state.turned + PREVIEW_TURN * time.delta_secs()).rem_euclid(TAU);
+
+    // The rotation is written here and the translation and scale by `place_the_preview`,
+    // each touching only its own field. Splitting them is what lets the model turn on a
+    // screen with no camera to be placed in front of — which is every headless test, and
+    // also the frame before `PlayerCameraPlugin`'s `Startup` has run.
+    let turned = Quat::from_rotation_y(state.turned);
+    for mut transform in &mut models {
+        if transform.rotation != turned {
+            transform.rotation = turned;
+        }
+    }
+}
+
+/// Where in the world a point on the screen is, at a given distance in front of the camera.
+///
+/// **This is the coupling the issue named as the risk, and this function is all of it.**
+/// The model stands in the world and the stage is laid out in screen space, so the two
+/// have to agree — and keep agreeing when the window is resized or its aspect changes.
+///
+/// It is done through the projection rather than through `Camera::viewport_to_world`
+/// because that one needs a viewport, which a headless app has none of: the maths would
+/// then be the one part of this feature no test could reach. The vertical field of view is
+/// what Bevy holds fixed across a resize, so the half-height at a distance is a constant
+/// and the half-width is that times the aspect the projection carries.
+fn world_point(
+    camera: &GlobalTransform,
+    fov: f32,
+    aspect: f32,
+    screen: Vec2,
+    distance: f32,
+) -> Vec3 {
+    let half_height = distance * (fov / 2.0).tan();
+    let half_width = half_height * aspect;
+    camera.translation()
+        + camera.forward() * distance
+        + camera.right() * (screen.x * half_width)
+        + camera.up() * (screen.y * half_height)
+}
+
+/// Stands the model in front of the camera, inside the stage, at the size the stage is.
+///
+/// Re-run every frame rather than on a resize event: the stage's computed rect is the
+/// input, and taffy rewrites that whenever anything about the layout moves. A frame of
+/// arithmetic over one entity is cheaper than being wrong about which events change it.
+fn place_the_preview(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
+    stages: Query<(&ComputedNode, &UiGlobalTransform), With<PreviewStage>>,
+    mut models: Query<&mut Transform, With<PreviewModel>>,
+) {
+    let Some((camera, projection)) = cameras.iter().next() else {
+        return;
+    };
+    let Projection::Perspective(perspective) = projection else {
+        // Orthographic or custom: the half-height below is a perspective quantity and
+        // there is no honest answer for one. Nothing is moved rather than something being
+        // put in the wrong place.
+        return;
+    };
+
+    // Where the stage is, as a fraction of the window from its centre: -1..1 across and
+    // up. Both the rect and the window are read in physical pixels, so the scale factor
+    // cancels and no display-scaling term is needed.
+    let (centre, stage_height) = match (windows.iter().next(), stages.iter().next()) {
+        (Some(window), Some((node, stage))) => {
+            let size = window.physical_size().as_vec2();
+            if size.x <= 0.0 || size.y <= 0.0 {
+                return;
+            }
+            // `UiGlobalTransform`, not `GlobalTransform` — `bevy_ui`'s layout writes the
+            // first and leaves the second at whatever transform propagation made of a
+            // node's default `Transform`, which is the identity. Reading the wrong one put
+            // every stage at the origin, which is the top-left corner of the screen.
+            //
+            // Its translation *is* the node's centre: `ui_layout_system` adds a
+            // `local_center` and reads the pair back as `Rect::from_center_size(transform
+            // .translation, node.size())`. Both are physical pixels, and so is
+            // `Window::physical_size`, so the scale factor cancels and no display-scaling
+            // term is needed.
+            let middle = stage.translation;
+            (
+                Vec2::new(
+                    middle.x / size.x * 2.0 - 1.0,
+                    // Screen y grows downward and the frustum's grows up.
+                    1.0 - middle.y / size.y * 2.0,
+                ),
+                node.size().y / size.y,
+            )
+        }
+        // No window, or a layout that has not been computed: dead centre, at the height
+        // the stage is written to be. This is the headless case, and it is the one the
+        // tests run in — what they can assert is the distance, the scale and the turn,
+        // which is everything except where on a screen there is no screen.
+        _ => (
+            Vec2::ZERO,
+            PREVIEW_WIDTH * preview_frame().size.y / preview_frame().size.x / 720.0,
+        ),
+    };
+
+    let frame = preview_frame();
+    let half_height = PREVIEW_DISTANCE * (perspective.fov / 2.0).tan();
+    // The rig is scaled so its framed height fills the stage's share of the window. The
+    // vertical is the axis to anchor on: the field of view Bevy keeps fixed across a
+    // resize is the vertical one, so this holds the figure the same size on screen
+    // whatever the window's aspect becomes.
+    let scale = (stage_height * half_height * 2.0) / frame.size.y;
+
+    let stand = world_point(
+        camera,
+        perspective.fov,
+        perspective.aspect_ratio,
+        centre,
+        PREVIEW_DISTANCE,
+    );
+
+    // The rig is authored from the feet up, so the model is dropped by half its framed
+    // height to put the middle of the figure — rather than its ankles — in the middle of
+    // the stage.
+    let translation = stand - camera.up() * (frame.centre.y * scale);
+    let scale = Vec3::splat(scale);
+    for mut transform in &mut models {
+        if transform.translation != translation {
+            transform.translation = translation;
+        }
+        if transform.scale != scale {
+            transform.scale = scale;
+        }
+    }
+}
+
+/// Gives the camera the screen's own flat backdrop while the screen is up.
+///
+/// Restored the moment a session exists, to the value `player::camera` spawns it with —
+/// read from `Daylight::FIXED` rather than written down again, so a world with no clock
+/// and a client that has just left this screen agree by construction.
+fn paint_the_backdrop(
+    choice: Option<Res<CharacterChoice>>,
+    session: Option<Res<Session>>,
+    mut cameras: Query<&mut Camera, With<WorldCamera>>,
+) {
+    let up = choice.is_some() && session.is_none();
+    for mut camera in &mut cameras {
+        // `ClearColorConfig` is not `PartialEq`, so the comparison is on the colour the two
+        // cases actually differ in. Written only on a change for the reason every other
+        // write on this screen is: `Mut` marks the component changed on `DerefMut` whether
+        // or not the value moved.
+        let current = match camera.clear_color {
+            ClearColorConfig::Custom(colour) => Some(colour),
+            _ => None,
+        };
+
+        if up {
+            if current != Some(BACKDROP) {
+                camera.clear_color = ClearColorConfig::Custom(BACKDROP);
+            }
+        } else if current == Some(BACKDROP) {
+            // **Put back once, and only what this screen put there.** Writing the fixed
+            // sky whenever a session exists would have been this system overwriting
+            // `player::sky::drive_the_sky` on every frame of every world with a clock —
+            // which is every world that has one, so the day would never have turned. Found
+            // by the review of this pull request.
+            //
+            // `Daylight::FIXED` is the right value to restore to and the wrong one to keep
+            // asserting: it is what `player::camera` spawns the camera with, so a world
+            // with no clock lands exactly where it started, and a world with a clock is
+            // corrected by its own system on the very next frame.
+            camera.clear_color = ClearColorConfig::Custom(Daylight::FIXED.sky);
+        }
+    }
 }
 
 /// A palette colour as Bevy holds one. The wire's `0x00RRGGBB` is sRGB, which is what
@@ -1355,7 +1699,6 @@ fn refresh_screen(
     mut fields: Query<(&FormField, &mut BorderColor), Without<Row>>,
     mut swatches: Query<(&Swatch, &mut BorderColor), SwatchEdge>,
 
-    mut previews: Query<(&PreviewBox, &mut Node, &mut BackgroundColor, &mut ZIndex)>,
     mut name: Query<&mut Text, With<NameField>>,
     mut hair: Query<&mut Text, HairText>,
     mut status: Query<&mut Text, StatusText>,
@@ -1398,72 +1741,6 @@ fn refresh_screen(
             IDLE_EDGE
         };
         set_border(&mut border, edge);
-    }
-
-    // The body, drawn from the draft while one is being made and from the focused
-    // character while one is being chosen — so the preview is always of whoever is about
-    // to go in.
-    let worn = match (draft.mode, focused_row) {
-        (Mode::Choosing, Some(Row::Play(id))) => choice
-            .characters()
-            .iter()
-            .find(|character| character.character_id == id)
-            .map_or_else(|| draft.appearance(), |character| character.appearance),
-        _ => draft.appearance(),
-    };
-    // One frame and one hair model for the whole pass, rather than one of each per node.
-    let frame = preview_frame();
-    let low = frame.centre - frame.size / 2.0;
-    let model = worn.hair_model();
-
-    for (slot, mut node, mut colour, mut depth) in &mut previews {
-        let Some(cell) = body_boxes(slot.part, model).get(slot.index) else {
-            // A model drawn from fewer boxes than the pool holds. The spare nodes keep
-            // whatever layout they had and simply draw nothing.
-            if colour.0 != Color::NONE {
-                colour.0 = Color::NONE;
-            }
-            continue;
-        };
-
-        let box_ = placed_box(slot.part, *cell);
-        // The four fields written as one value and compared as one, because `Mut<Node>`
-        // marks the component changed on the *first* `DerefMut` and Bevy lays a changed
-        // node's subtree out again. This system runs on every key press while somebody is
-        // typing a name, and none of those move a box.
-        let next = Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent((box_.centre.x - box_.size.x / 2.0 - low.x) / frame.size.x * 100.0),
-            bottom: Val::Percent(
-                (box_.centre.y - box_.size.y / 2.0 - low.y) / frame.size.y * 100.0,
-            ),
-            width: Val::Percent(box_.size.x / frame.size.x * 100.0),
-            height: Val::Percent(box_.size.y / frame.size.y * 100.0),
-            ..default()
-        };
-        if *node != next {
-            *node = next;
-        }
-
-        let worn_colour = swatch_colour(slot.part.colour(worn));
-        if colour.0 != worn_colour {
-            colour.0 = worn_colour;
-        }
-
-        // The painter's algorithm a flat projection needs and a depth buffer would not:
-        // what faces the viewer is drawn over what is behind it. Millimetres, because
-        // `ZIndex` is an integer and the smallest gap in the rig is half a notch.
-        //
-        // **A box behind the body gets a negative rank, and that does not hide it behind
-        // the panel.** `ZIndex` sorts a node among its *siblings* only: Bevy pushes a
-        // parent onto the UI stack before any of its children, so every box draws over the
-        // frame whatever its rank. That is a property of the tree rather than of the
-        // number, and it is pinned as one — see
-        // [`a_box_behind_the_body_still_draws_over_the_panel`].
-        let rank = ZIndex((box_.nearness() * 1000.0).round() as i32);
-        if *depth != rank {
-            *depth = rank;
-        }
     }
 
     for mut text in &mut name {
@@ -1539,6 +1816,11 @@ fn describe(draft: &Draft, choice: &CharacterChoice) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use bevy::asset::AssetPlugin;
+    use bevy::time::TimeUpdateStrategy;
+
     use super::*;
     // The screen no longer reads the connection state — see `describe`. The tests still
     // insert it, because the plugin is built under the state the game builds it under.
@@ -1549,7 +1831,12 @@ mod tests {
     /// and it needs no display.
     fn headless(choice: CharacterChoice) -> App {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            // The preview is a real body now, so the assets its meshes and materials live
+            // in have to exist. `MinimalPlugins` has no renderer and needs none: `Assets<T>`
+            // is an ordinary resource, which is exactly what `player/tests.rs` relies on.
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
             .add_message::<ChooseCharacter>()
             .init_resource::<ButtonInput<KeyCode>>()
             .insert_resource(ConnectionState::Choosing)
@@ -1559,10 +1846,55 @@ mod tests {
         app
     }
 
+    /// A session, which is what makes the character screen go down.
+    ///
+    /// The values are not read by anything under test here — what matters is that the
+    /// resource exists, because its presence *is* "the world has arrived".
+    fn a_session() -> Session {
+        Session(crate::net::SessionParams {
+            clock: Default::default(),
+            entity_id: 1,
+            spawn: [0.5, 64.0, 0.5],
+            world_seed: 1,
+            tick_rate: 20,
+            chunk_size: 32,
+            view_distance: 8,
+            inventory_slots: 36,
+            hotbar_slots: 9,
+            player_token: crate::net::ANY_TOKEN,
+        })
+    }
+
+    /// The parts of the turning model, and the colour each is wearing.
+    ///
+    /// Read off `StandardMaterial::base_color` rather than a `BackgroundColor`: the
+    /// preview is meshes and materials now, which is the shape `player/tests.rs` already
+    /// asserts headlessly.
+    fn preview_colours(app: &mut App) -> Vec<Color> {
+        let world = app.world_mut();
+        let mut parts =
+            world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<PreviewPart>>();
+        let handles: Vec<_> = parts
+            .iter(world)
+            .map(|material| material.0.clone())
+            .collect();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        handles
+            .iter()
+            .filter_map(|handle| materials.get(handle))
+            .map(|material| material.base_color)
+            .collect()
+    }
+
     /// The same, launched with `--name` naming somebody.
     fn headless_playing_as(choice: CharacterChoice, name: &str) -> App {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            // The character screen's preview is a real body, so the assets its meshes and
+            // materials live in have to exist. `Assets<T>` is an ordinary resource, which
+            // is what keeps this headless.
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
             .add_message::<ChooseCharacter>()
             .init_resource::<ButtonInput<KeyCode>>()
             .insert_resource(ConnectionState::Choosing)
@@ -2008,61 +2340,55 @@ mod tests {
         assert_eq!(bright, vec![Row::Play(7)], "exactly one row is focused");
     }
 
-    /// A box behind the body still draws over the panel it is drawn on.
+    /// **The preview is the rig, and it turns.**
     ///
-    /// **The review of this pull request read a negative `ZIndex` as "behind the panel
-    /// background", and it is not.** The geometry half of that reading was right — the
-    /// Loose model's curtain is the box furthest back, it ranks at -175, and it genuinely
-    /// does peek out beside the neck between the shoulders and the jaw, so a bug there
-    /// would be visible. What makes it safe is structural: `ZIndex` sorts a node among its
-    /// **siblings**, and `bevy_ui::stack::update_uistack_recursive` pushes a parent onto
-    /// the UI stack before any of its children, so a child is drawn after its parent
-    /// whatever its rank.
-    ///
-    /// So this test does not assert a number. It asserts the two facts the safety rests
-    /// on — that a box really does sit behind the body, and that every box is a child of
-    /// the node carrying the panel's background — because the numeric reading is the one
-    /// somebody will arrive at again, and a tree that stopped being that shape would break
-    /// the preview silently.
+    /// The whole of what replaced the flat swatch stack: entities carrying a mesh and a
+    /// material under one parent that rotates about the vertical axis. Asserted on the
+    /// parent rather than on a child, because the turn belongs to the body as a whole —
+    /// and on the axis, because a rotation about any other one is a figure falling over.
     #[test]
-    fn a_box_behind_the_body_still_draws_over_the_panel() {
-        let behind = body_boxes(BodyPart::Hair, HairModel::Loose)
-            .iter()
-            .map(|cell| placed_box(BodyPart::Hair, *cell))
-            .filter(|box_| box_.nearness() < 0.0)
-            .count();
-        assert!(
-            behind > 0,
-            "the Loose model is the one whose curtain falls behind the body"
+    fn the_preview_is_a_body_that_turns_on_the_spot() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        app.update();
+
+        let world = app.world_mut();
+        let mut models = world.query_filtered::<&Children, With<PreviewModel>>();
+        let parts: Vec<usize> = models.iter(world).map(|children| children.len()).collect();
+        assert_eq!(parts.len(), 1, "one model stands on the screen");
+        assert_eq!(
+            parts[0],
+            BodyPart::IN_DRAWING_ORDER.len(),
+            "the model is drawn from every part of the rig"
         );
 
-        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        let before = app.world().resource::<PreviewState>().turned;
+        app.update();
+        let after = app.world().resource::<PreviewState>().turned;
+        assert!(
+            after > before,
+            "the model did not turn: {before} -> {after}"
+        );
+
         let world = app.world_mut();
-
-        let mut frames = world.query_filtered::<Entity, With<PreviewFrame>>();
-        let panels: Vec<Entity> = frames.iter(world).collect();
-        assert_eq!(panels.len(), 1, "one panel holds the preview");
-
-        let mut drawn = world.query_filtered::<Entity, With<PreviewBox>>();
-        let boxes: Vec<Entity> = drawn.iter(world).collect();
-        assert!(!boxes.is_empty(), "the preview draws boxes");
-
-        let mut children = world.query::<&Children>();
-        let held: Vec<Entity> = children
-            .get(world, panels[0])
-            .expect("the panel has children")
-            .iter()
-            .collect();
-        for box_ in boxes {
-            assert!(
-                held.contains(&box_),
-                "a preview box is not a child of the panel it draws on, so its ZIndex is                  no longer sorted against its siblings alone"
-            );
-        }
+        let mut placed = world.query_filtered::<&Transform, With<PreviewModel>>();
+        let turned = placed
+            .iter(world)
+            .next()
+            .copied()
+            .expect("the model is placed");
+        let (axis, angle) = turned.rotation.to_axis_angle();
+        assert!(angle > 0.0, "the transform carries no rotation");
+        assert!(
+            axis.abs_diff_eq(Vec3::Y, 1e-4),
+            "the model turns about {axis:?} rather than the vertical"
+        );
     }
 
-    /// **The preview wears what is being chosen**, part by part — which is what makes it
-    /// worth having at all: a player picking a shirt colour sees the shirt change.
+    /// **The preview wears what is being chosen**, which is what makes it worth having at
+    /// all: a player picking a shirt colour sees the shirt change.
     #[test]
     fn the_preview_wears_what_is_chosen() {
         let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
@@ -2071,19 +2397,16 @@ mod tests {
         press(&mut app, KeyCode::ArrowDown);
         press(&mut app, KeyCode::ArrowDown);
         press(&mut app, KeyCode::ArrowRight);
-        let expected = swatch_colour(SHIRT[draft(&app).colour[1]]);
+        app.update();
 
-        let world = app.world_mut();
-        let mut parts = world.query::<(&PreviewBox, &BackgroundColor)>();
-        let shirt = parts
-            .iter(world)
-            .find(|(slot, _)| slot.part == BodyPart::Shirt)
-            .map(|(_, colour)| colour.0)
-            .expect("the body is drawn from boxes");
-        assert_eq!(shirt, expected);
+        let expected = swatch_colour(SHIRT[draft(&app).colour[1]]);
+        assert!(
+            preview_colours(&mut app).contains(&expected),
+            "the shirt colour a player just chose is not on the model"
+        );
     }
 
-    /// While a character is being *chosen* the preview is that character's, so the panel
+    /// While a character is being *chosen* the preview is that character's, so the screen
     /// always shows whoever is about to go in.
     #[test]
     fn the_preview_shows_the_character_the_focus_is_on() {
@@ -2106,14 +2429,230 @@ mod tests {
         ));
         app.update();
 
+        assert!(
+            preview_colours(&mut app).contains(&swatch_colour(SKIN[5])),
+            "the focused character's skin is not what the model is wearing"
+        );
+    }
+
+    /// The model lives exactly as long as the screen does.
+    ///
+    /// Both ends of it: nothing before a character list arrives, and nothing left standing
+    /// once the world has. A model that outlived the screen would be a figure turning in
+    /// the middle of the world the player had just walked into.
+    #[test]
+    fn the_model_exists_only_while_the_screen_does() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_message::<ChooseCharacter>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(ConnectionState::Connecting)
+            .add_plugins(CharacterUiPlugin);
+        app.update();
+        assert_eq!(models(&mut app), 0, "no list, no model");
+
+        app.insert_resource(CharacterChoice::for_a_test(Vec::new(), 3));
+        app.update();
+        assert_eq!(
+            models(&mut app),
+            1,
+            "the screen is up and nothing stands on it"
+        );
+
+        // The world arrives. The screen's own nodes go down with it, and so does this.
+        app.insert_resource(a_session());
+        app.update();
+        assert_eq!(models(&mut app), 0, "the model outlived the screen");
+    }
+
+    fn models(app: &mut App) -> usize {
         let world = app.world_mut();
-        let mut parts = world.query::<(&PreviewBox, &BackgroundColor)>();
-        let skin = parts
+        let mut query = world.query_filtered::<Entity, With<PreviewModel>>();
+        query.iter(world).count()
+    }
+
+    /// The camera wears the screen's flat backdrop while the screen is up, and gets the
+    /// world's sky back when the world arrives.
+    ///
+    /// **Read from `Daylight::FIXED` rather than restated**, which is half the point of
+    /// the assertion: a world with no clock and a client that has just left this screen
+    /// have to agree about that colour, and they do it by reading one constant.
+    #[test]
+    fn the_backdrop_is_the_screens_while_the_screen_is_up() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        let camera = app.world_mut().spawn((WorldCamera, Camera::default())).id();
+        app.update();
+        assert_eq!(clear_colour(&app, camera), Some(BACKDROP));
+
+        app.insert_resource(a_session());
+        app.update();
+        assert_eq!(clear_colour(&app, camera), Some(Daylight::FIXED.sky));
+    }
+
+    /// A sky somebody else is driving is left alone.
+    ///
+    /// **The half of the backdrop that had a bug in it**, found by the review of this pull
+    /// request. Restoring `Daylight::FIXED.sky` whenever a session existed made this system
+    /// overwrite `player::sky::drive_the_sky` on every frame of every world with a clock —
+    /// so the day would never have turned. It now puts back only what it put there.
+    #[test]
+    fn a_sky_this_screen_did_not_set_is_left_alone() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        let camera = app.world_mut().spawn((WorldCamera, Camera::default())).id();
+        app.update();
+        assert_eq!(
+            clear_colour(&app, camera),
+            Some(BACKDROP),
+            "the screen is up"
+        );
+
+        // The world arrives, and its clock paints a dusk nobody here chose.
+        let dusk = Color::srgb(0.42, 0.21, 0.11);
+        app.insert_resource(a_session());
+        app.update();
+        app.world_mut()
+            .entity_mut(camera)
+            .get_mut::<Camera>()
+            .expect("the camera is still there")
+            .clear_color = ClearColorConfig::Custom(dusk);
+
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            clear_colour(&app, camera),
+            Some(dusk),
+            "the character screen repainted a sky it did not set"
+        );
+    }
+
+    fn clear_colour(app: &App, camera: Entity) -> Option<Color> {
+        match app.world().get::<Camera>(camera)?.clear_color {
+            ClearColorConfig::Custom(colour) => Some(colour),
+            _ => None,
+        }
+    }
+
+    /// The model lands inside its stage, from a layout this test supplies by hand.
+    ///
+    /// **The coupling end to end**, and the test the review of this pull request earned:
+    /// the placement reads `UiGlobalTransform` and `ComputedNode`, and reading the *other*
+    /// transform — `GlobalTransform`, which `bevy_ui`'s layout does not write — put every
+    /// stage at the origin and the model in the top-left corner of the screen. A test that
+    /// only checked `world_point`'s arithmetic could not see that, because the arithmetic
+    /// was right.
+    ///
+    /// The layout values are inserted rather than computed: `MinimalPlugins` runs no taffy,
+    /// and what is under test is which components are read and what is done with them.
+    #[test]
+    fn the_model_lands_inside_the_stage_the_layout_gave_it() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+
+        // A 1600x900 window with the stage's centre a quarter of the way in from the left
+        // and halfway up: screen fraction (-0.5, 0).
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: bevy::window::WindowResolution::new(1600, 900),
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        let _ = window;
+        let camera = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Camera::default(),
+                Projection::default(),
+                Transform::default(),
+                GlobalTransform::default(),
+            ))
+            .id();
+        let _ = camera;
+
+        let mut stage = app
+            .world_mut()
+            .query_filtered::<Entity, With<PreviewStage>>();
+        let stage = stage
+            .iter(app.world())
+            .next()
+            .expect("the screen reserves a stage");
+        app.world_mut().entity_mut(stage).insert((
+            ComputedNode {
+                size: Vec2::new(200.0, 360.0),
+                ..ComputedNode::DEFAULT
+            },
+            UiGlobalTransform::from_xy(400.0, 450.0),
+        ));
+        app.update();
+
+        let world = app.world_mut();
+        let mut placed = world.query_filtered::<&Transform, With<PreviewModel>>();
+        let model = placed
             .iter(world)
-            .find(|(slot, _)| slot.part == BodyPart::Skin)
-            .map(|(_, colour)| colour.0)
-            .expect("the body is drawn from boxes");
-        assert_eq!(skin, swatch_colour(SKIN[5]));
+            .next()
+            .copied()
+            .expect("the model is placed");
+
+        // Left of centre, because the stage is: a camera looks along -Z, so its right is
+        // +X and a stage at screen fraction -0.5 puts the model at negative x.
+        assert!(
+            model.translation.x < -0.1,
+            "the stage is left of centre and the model is at {}",
+            model.translation.x
+        );
+        assert!(
+            (model.translation.z + PREVIEW_DISTANCE).abs() < 1e-4,
+            "the model is not {PREVIEW_DISTANCE} in front of the camera: {}",
+            model.translation.z
+        );
+
+        // And it is scaled to the stage's share of the window height, not to the window.
+        let half_height = PREVIEW_DISTANCE * (std::f32::consts::FRAC_PI_4 / 2.0).tan();
+        let expected = (360.0 / 900.0 * half_height * 2.0) / preview_frame().size.y;
+        assert!(
+            (model.scale.x - expected).abs() < 1e-4,
+            "scaled to {} where the stage asks for {expected}",
+            model.scale.x
+        );
+    }
+
+    /// The stage and the model agree about where on the screen the figure is.
+    ///
+    /// **The coupling the issue named as the risk**, tested as arithmetic rather than
+    /// through a window: a point at the centre of the view is straight ahead, and a point
+    /// at the right edge is `aspect` half-heights to the right of that. Getting the aspect
+    /// term wrong is a model that drifts out of its stage the moment somebody resizes.
+    #[test]
+    fn a_point_on_the_screen_lands_where_the_frustum_says() {
+        let camera = GlobalTransform::from(Transform::default());
+        let fov = std::f32::consts::FRAC_PI_4;
+        let distance = 3.0;
+        let half_height = distance * (fov / 2.0).tan();
+
+        // Straight ahead is straight ahead, whatever the aspect.
+        for aspect in [0.5, 1.0, 2.0] {
+            let middle = world_point(&camera, fov, aspect, Vec2::ZERO, distance);
+            assert!(
+                middle.abs_diff_eq(Vec3::new(0.0, 0.0, -distance), 1e-5),
+                "the middle of the view at aspect {aspect} is {middle:?}"
+            );
+        }
+
+        // The top edge is one half-height up, and the aspect does not touch the vertical —
+        // which is the whole reason the model is scaled off the vertical.
+        let top = world_point(&camera, fov, 2.0, Vec2::new(0.0, 1.0), distance);
+        assert!((top.y - half_height).abs() < 1e-5, "{top:?}");
+
+        // The right edge is `aspect` half-heights across. A camera looks along -Z, so its
+        // right is +X.
+        let right = world_point(&camera, fov, 2.0, Vec2::new(1.0, 0.0), distance);
+        assert!((right.x - half_height * 2.0).abs() < 1e-5, "{right:?}");
     }
 
     /// Every colour this screen offers is one the contract allows, which is what makes

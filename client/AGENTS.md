@@ -1538,16 +1538,33 @@ Recorded here so the next reader does not mistake them for oversights:
   for either — `schemas/handshake.fbs` reserves a list, a selection and a creation — so a roster
   that is full is full, and `--name` naming nobody on one says so and leaves the screen up. The
   server's store is where a deletion would have to start.
-- **The preview is flat `bevy_ui` nodes, and it is the rig seen head-on.** It reads the same table
-  the world's bodies are built from, which is what keeps them one answer — but a projection with the
-  depth thrown away is not a mesh seen from a camera. Two things to know before editing it: the preview needs a
-  **painter's order** where a mesh would have a depth buffer, so each node's `ZIndex` is its box's
-  own nearness and *not* the order the parts are spawned in — a curtain of hair falls behind the
-  shoulders and a cap sits over the crown, and only the box knows which; and the pool of nodes is
-  fixed at the widest model each part has, because a screen that spawned and despawned nodes as
-  somebody cycled a haircut would rebuild a layout on a key press. The frame is sized from
-  `appearance::envelope` rather than from the collided box, or it would clip the knuckles off
-  everybody and the knot off one of them.
+- **The preview is the real rig, in the world, turning in front of the one camera.** It is dressed
+  out of the same wardrobe a body is — `player::BodyVisualsPlugin`, the same meshes and the same
+  material per colour — so it cannot disagree with what a player will see of themselves. It was
+  flat `bevy_ui` nodes until #181, with a hand-written painter's order standing in for a depth
+  buffer; that went, and `PlacedBox::nearness` and `appearance::slots` went with it. **There is
+  still exactly one camera** — `player/camera.rs`'s rule is untouched, and this adds no second
+  camera and no render target.
+- **The screen is not a window onto the world, and three things make that true together.** The
+  camera clears to the screen's own flat `BACKDROP` while it is up and **puts back only what this
+  screen put there** — restoring `Daylight::FIXED.sky` unconditionally would have overwritten
+  `sky::drive_the_sky` on every frame of every world with a clock, so the day would never have
+  turned; the root overlay is transparent, where it used to be a 98% sheet
+  that would have hidden the model; and the model is despawned with the screen. Change any one of
+  them and the other two stop making sense.
+- **What the UI contributes is a hole, not a picture.** `PreviewStage` is a node with no
+  background whose computed rect is where the model is placed — which is what keeps the figure and
+  the layout agreeing across a resize. It sits *outside* the panel and has to: a `bevy_ui` parent
+  draws behind its children, so a transparent node inside an opaque panel shows the panel. The
+  rect comes from **`UiGlobalTransform`, not `GlobalTransform`** — `bevy_ui`'s layout writes the
+  first and leaves the second at the identity, so reading the wrong one puts every stage at the
+  top-left corner of the screen; its translation is the node's *centre* and both it and
+  `ComputedNode::size` are physical pixels, which is why no scale-factor term appears. The
+  placement goes through the projection rather than `Camera::viewport_to_world`, because that one
+  needs a viewport and a headless app has none — the maths would be the one part of the feature no
+  test could reach. Anchor on the **vertical**: the field of view Bevy holds fixed across a resize
+  is the vertical one. The stage is sized from `appearance::envelope` rather than from the collided
+  box, or it would clip the knuckles off everybody and the knot off one of them.
 - **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
   says so and `--account-service` pointed somewhere else is a different file.
 - **No reconnect, backoff or session resumption.** A refused or dropped connection is reported
