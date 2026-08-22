@@ -803,6 +803,11 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 (
+                    // Ahead of both dials, and chained to them, so the `ConnectRequest` it
+                    // writes is read in the same frame it is written: a rejoin that waited
+                    // a frame would show the server list over the world the player had
+                    // just left.
+                    rejoin_for_a_character,
                     connect_on_request,
                     connect_once_signed_in,
                     drain_session_events.in_set(DrainNetwork),
@@ -835,9 +840,17 @@ impl Plugin for NetPlugin {
         // `--server` with no account service: dialled now, `Unlisted` because nothing
         // named a certificate to expect at an address somebody typed, and presenting no
         // account because this launch was told of nowhere to get one.
-        match start_session(&addr, expected, &settings, None) {
+        match start_session(&addr, expected.clone(), &settings, None) {
             Ok((link, outbound)) => {
                 app.insert_resource(ConnectionState::Connecting)
+                    // How to come back here if the player leaves. Recorded even though
+                    // this dial happened at build: `rejoin_for_a_character` is a system,
+                    // and a system has no plugin to ask what it was built with.
+                    .insert_resource(RejoinBy::Address {
+                        addr: addr.clone(),
+                        expected: expected.clone(),
+                        ticket_path: None,
+                    })
                     .insert_resource(ServerAddress(addr))
                     .insert_resource(link)
                     .insert_resource(outbound);
@@ -927,6 +940,111 @@ fn start_session(
     ))
 }
 
+/// How the live session was opened, so leaving it can open the world again.
+///
+/// Recorded when a connection is dialled and read when the player asks to leave. It is the
+/// *route*, not the address: a row of the list carries a certificate fingerprint alongside
+/// its address, and re-dialling by address alone would be verifying against nothing. Going
+/// back through the path that opened the session in the first place is what keeps that
+/// structural.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+enum RejoinBy {
+    /// A row of the server list, by name. [`rejoin_for_a_character`] writes the same
+    /// `ConnectRequest` a click writes, so the address and the expectation come out of the
+    /// row a second time rather than being remembered separately from the fingerprint that
+    /// verifies them.
+    Row(String),
+    /// A `--server` launch, which has no list and no row. Everything `start_session` needs,
+    /// because there is nowhere else to look it up: both launch paths reach here, the one
+    /// dialled at build and the one that waits for a ticket.
+    Address {
+        addr: String,
+        expected: tls::Expectation,
+        ticket_path: Option<PathBuf>,
+    },
+}
+
+/// Set while a player-initiated disconnect is on its way back to the character screen.
+///
+/// **This is the whole of the difference between leaving and failing**, and the reason it
+/// is a resource rather than a state. `disconnect_on_request` inserts it — that system is
+/// reached only by a `DisconnectRequest`, which is a player asking — and nothing on the
+/// failure paths does: a refusal, a dropped connection or a dead net thread all leave
+/// `Rejected` or `Disconnected` with their reason and stay there.
+///
+/// It is removed by whichever dial consumes it, before that dial can fail. So a rejoin
+/// that is itself refused reports the refusal and stops, which is what keeps this one
+/// return rather than a retry policy — `client/AGENTS.md` still says there is none.
+#[derive(Resource, Debug, Default)]
+struct Rejoining;
+
+/// Asks the world to be opened again, on the route the last session was opened by.
+///
+/// **Only after the player asked to leave.** The trigger is [`Rejoining`], which only
+/// `disconnect_on_request` inserts.
+///
+/// It waits for [`NetLink`] to be gone rather than dialling the frame the request lands:
+/// the read thread is still represented by that resource until it reports its orderly end,
+/// and a second session opened over the top of one still closing is two threads believing
+/// they own a socket.
+fn rejoin_for_a_character(
+    rejoining: Option<Res<Rejoining>>,
+    route: Option<Res<RejoinBy>>,
+    settings: Res<SessionSettings>,
+    link: Option<Res<NetLink>>,
+    mut state: ResMut<ConnectionState>,
+    mut requests: MessageWriter<ConnectRequest>,
+    mut commands: Commands,
+) {
+    if rejoining.is_none() || link.is_some() {
+        return;
+    }
+    // A rejoin already under way, or one that has arrived. Either is somebody else's
+    // business now; the flag is dropped so nothing dials a second time.
+    if !matches!(
+        *state,
+        ConnectionState::Disconnected | ConnectionState::Rejected { .. }
+    ) {
+        commands.remove_resource::<Rejoining>();
+        return;
+    }
+
+    // **Dropped before anything can fail, which is what makes this one return rather than
+    // a retry policy.** A rejoin that is itself refused leaves `Rejected` with the reason
+    // and nothing set to try again — the rule `client/AGENTS.md` states, kept.
+    commands.remove_resource::<Rejoining>();
+
+    match route.as_deref() {
+        Some(RejoinBy::Row(name)) => {
+            // The same message a click on that row writes, read by the same system in the
+            // same frame — `connect_on_request` is chained after this one, and it already
+            // accepts `Disconnected`, because the list screen has always offered a way to
+            // ask again.
+            requests.write(ConnectRequest { name: name.clone() });
+        }
+        Some(RejoinBy::Address {
+            addr,
+            expected,
+            ticket_path,
+        }) => match start_session(addr, expected.clone(), &settings, ticket_path.clone()) {
+            Ok((link, outbound)) => {
+                *state = ConnectionState::Connecting;
+                commands.insert_resource(ServerAddress(addr.clone()));
+                commands.insert_resource(link);
+                commands.insert_resource(outbound);
+            }
+            Err(err) => {
+                error!("the network thread would not start: {err}");
+                *state = ConnectionState::Rejected { reason: err };
+            }
+        },
+        None => {
+            // Nothing was ever dialled, so there is nothing to go back to. Reachable only
+            // if a `DisconnectRequest` arrived on a client that never opened a session.
+        }
+    }
+}
+
 /// Opens a session against the server a [`ConnectRequest`] named.
 ///
 /// **The address and the fingerprint come out of the same row**, which is what makes
@@ -985,6 +1103,9 @@ fn connect_on_request(
             // Set here rather than through `Commands`, so the state is already
             // `Connecting` by the time the link it describes exists.
             *state = ConnectionState::Connecting;
+            // How to come back here if the player leaves. The name rather than the
+            // address, so the row's fingerprint is found again with it.
+            commands.insert_resource(RejoinBy::Row(request.name.clone()));
             commands.insert_resource(ServerAddress(chosen.address().to_owned()));
             commands.insert_resource(link);
             commands.insert_resource(outbound);
@@ -1058,6 +1179,13 @@ fn connect_once_signed_in(
             // `Connecting` by the time the link it describes exists — which is also
             // what stops this system starting a second one on the next frame.
             *state = ConnectionState::Connecting;
+            // How to come back here if the player leaves. There is no list and no row on
+            // this path, so the rejoin dials it directly.
+            commands.insert_resource(RejoinBy::Address {
+                addr: dial.0.clone(),
+                expected: tls::Expectation::Unlisted,
+                ticket_path: sign_in_settings.ticket_path.clone(),
+            });
             commands.insert_resource(ServerAddress(dial.0.clone()));
             commands.insert_resource(link);
             commands.insert_resource(outbound);
@@ -1298,6 +1426,20 @@ fn drain_session_events(
                     commands.remove_resource::<Identity>();
                     commands.remove_resource::<CharacterChoice>();
                 }
+                // **And the link itself, which used to outlive the thread it represents.**
+                // Reaching this arm means the sender was dropped, and the sender lives in
+                // the net thread — so there is no thread left for "the ECS end of the net
+                // thread's channels" to be an end of. Nothing needed it gone before #184:
+                // every reader takes it as an `Option` and a dead channel simply answered
+                // `Disconnected` for ever. `rejoin_for_a_character` needs it, because
+                // absence is how it knows the previous session has finished letting go of
+                // its socket — and it is what makes this system stop running at all rather
+                // than reach this arm on every frame for the rest of the app's life.
+                //
+                // Outside the guard above deliberately: that guard is about not rewriting a
+                // terminal *state*, and a link with no thread is stale whichever state the
+                // client is in.
+                commands.remove_resource::<NetLink>();
                 break;
             }
         }
@@ -1386,6 +1528,13 @@ fn disconnect_on_request(
         Err(poisoned) => poisoned.into_inner(),
     };
     let _ = channels.commands.send(NetCommand::Disconnect);
+
+    // **The one place a return is asked for.** Reaching this system means a
+    // `DisconnectRequest` was written, which is a player pressing something — so leaving a
+    // world lands back on its character screen rather than at a dead end. Every way a
+    // session ends *without* being asked to reaches `drain_session_events` instead, which
+    // sets no flag: a refusal and a dropped connection are reported and stay reported.
+    commands.insert_resource(Rejoining);
 
     if !matches!(
         *state,
@@ -2657,6 +2806,145 @@ mod tests {
         );
     }
 
+    /// **Leaving a world lands back on its character screen**, over a real socket.
+    ///
+    /// The whole loop, end to end: a session is established, the player asks to leave, and
+    /// the client dials the same address again and stops at the character list. Two
+    /// connections from the stub, because the second one is the point.
+    ///
+    /// It asserts `CharacterChoice` rather than `ConnectionState::Choosing` because the
+    /// resource is what the screen is drawn from — the state is how the status line
+    /// describes it, and a screen nobody could see would satisfy the wrong one.
+    #[test]
+    fn leaving_a_world_dials_it_again_and_stops_at_the_character_list() {
+        let scratch = Scratch::new("net-rejoin");
+        let (addr, _stub) = spawn_stub_serving(
+            Reply::AfterAChoice(vec![encode_server_welcome(&WelcomeWire::default())]),
+            2,
+        );
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(
+                NetPlugin::as_if_listed(&addr)
+                    .over_plaintext()
+                    .with_identity_path(Some(scratch.join("identity")))
+                    .with_data_home(scratch.join("data")),
+            )
+            .add_systems(Update, answer_the_character_phase.after(DrainNetwork));
+
+        pump_until(&mut app, "Connected", |app| {
+            state(app) == ConnectionState::Connected
+        });
+        assert!(!app.world().contains_resource::<CharacterChoice>());
+
+        app.world_mut().write_message(DisconnectRequest);
+
+        // The list, not merely a state: it is fetched again over a second connection
+        // rather than reused, which is what makes it what the server holds now.
+        pump_until(&mut app, "the character list again", |app| {
+            app.world().contains_resource::<CharacterChoice>()
+        });
+        assert_eq!(state(&app), ConnectionState::Choosing);
+        assert!(
+            !app.world().contains_resource::<Session>(),
+            "the rejoin went straight back into the world instead of stopping to ask"
+        );
+
+        // And choosing from there enters the world again, through the ordinary handshake.
+        pump_until(&mut app, "Connected again", |app| {
+            state(app) == ConnectionState::Connected
+        });
+    }
+
+    /// A connection that dropped is reported and stays reported.
+    ///
+    /// **The line #184 draws**, and the reason `Rejoining` is a resource rather than a
+    /// state: only `disconnect_on_request` sets it, and that system is reached only by a
+    /// `DisconnectRequest` — a player pressing something. Every other way a session ends
+    /// arrives at `drain_session_events`, which sets nothing, so this is still the "no
+    /// reconnect, no backoff" client `client/AGENTS.md` describes.
+    #[test]
+    fn a_session_that_ended_on_its_own_does_not_dial_again() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        app.insert_resource(RejoinBy::Row("midgard".to_owned()))
+            .add_message::<ConnectRequest>()
+            .add_systems(Update, rejoin_for_a_character.before(drain_session_events));
+
+        events
+            .send(SessionEvent::Ended(Some("the peer went away".to_owned())))
+            .expect("the app holds the receiver");
+        app.update();
+        drop(events);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert_eq!(state(&app), ConnectionState::Disconnected);
+        assert!(
+            !app.world().contains_resource::<Rejoining>(),
+            "a dropped connection asked to rejoin"
+        );
+        let messages = app.world().resource::<Messages<ConnectRequest>>();
+        let mut cursor = messages.get_cursor();
+        assert_eq!(
+            cursor.read(messages).count(),
+            0,
+            "a dropped connection dialled again"
+        );
+    }
+
+    /// A refusal keeps its reason, and a rejoin that is refused keeps that one too.
+    ///
+    /// The fourth acceptance criterion, and the half of it that has teeth: returning to a
+    /// screen must not swallow why. `Rejoining` is dropped before the dial that consumes
+    /// it can fail, so a refused rejoin is a refusal a player can read rather than the
+    /// first turn of a loop.
+    #[test]
+    fn a_refused_rejoin_reports_why_and_stops() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(ConnectionState::Disconnected)
+            .insert_resource(Rejoining)
+            .insert_resource(RejoinBy::Address {
+                // Port 0 is not an address a client can dial, so the attempt fails the way
+                // an unreachable server does — with a reason, and without a thread.
+                addr: "127.0.0.1:0".to_owned(),
+                expected: tls::Expectation::Unlisted,
+                ticket_path: None,
+            })
+            .insert_resource(SessionSettings {
+                player_name: DEFAULT_PLAYER_NAME.to_owned(),
+                identity_path: None,
+                data_home: None,
+                transport: session::Transport::Plaintext,
+            })
+            .add_message::<ConnectRequest>()
+            .add_systems(Update, rejoin_for_a_character);
+
+        app.update();
+        app.update();
+        app.update();
+
+        assert!(
+            !app.world().contains_resource::<Rejoining>(),
+            "the flag survived the dial, so the next frame would try again"
+        );
+        // `start_session` fails only when the *thread* will not start; an address nothing
+        // answers on fails later, over the socket, and arrives as a `SessionEvent` the
+        // ordinary way. Either outcome is fine and neither is a loop — which is what the
+        // flag above is the assertion for. What must not happen is the state going back to
+        // one this client would dial from again on its own.
+        assert!(
+            matches!(
+                state(&app),
+                ConnectionState::Connecting | ConnectionState::Rejected { .. }
+            ),
+            "a failed rejoin left {:?}",
+            state(&app)
+        );
+    }
+
     /// **The character a session played is the one the next launch starts on.**
     ///
     /// Two sessions at one address: the first plays a character, and the second is offered
@@ -3360,6 +3648,13 @@ mod tests {
                 events: event_rx,
                 commands: command_tx,
             })))
+            // Read by `rejoin_for_a_character`, which some of these tests add.
+            .insert_resource(SessionSettings {
+                player_name: DEFAULT_PLAYER_NAME.to_owned(),
+                identity_path: None,
+                data_home: None,
+                transport: session::Transport::Plaintext,
+            })
             .add_systems(Update, drain_session_events);
 
         (app, event_tx)

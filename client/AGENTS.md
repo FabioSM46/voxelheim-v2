@@ -1550,9 +1550,29 @@ Recorded here so the next reader does not mistake them for oversights:
   everybody and the knot off one of them.
 - **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
   says so and `--account-service` pointed somewhere else is a different file.
-- **No reconnect, backoff or session resumption.** A refused or dropped connection is reported
-  and stays reported. `Reject` carries the reject code's name for display; a reconnect policy is
-  the thing that would want to branch on the numeric code, and it can widen that struct.
+- **No reconnect, backoff or session resumption — and leaving a world lands on its character
+  screen, which is not the same thing.** The rule is about a client that *decides on its own* to
+  dial again, and it stands: a refused or dropped connection is reported and stays reported, with
+  nothing set to try it a second time. What #184 added is a place to land after a
+  `DisconnectRequest`, which is a player pressing something. **`disconnect_on_request` is the only
+  writer of `Rejoining`**, and that is the whole of the distinction — every other way a session
+  ends arrives at `drain_session_events`, which sets nothing.
+
+  The flag is dropped *before* the dial that consumes it can fail, so a rejoin that is itself
+  refused is a refusal a player can read rather than the first turn of a loop. The list is fetched
+  again over a fresh connection rather than reused, because what the server holds may have changed,
+  and going back through `RejoinBy::Row` rather than a remembered address is what keeps the
+  certificate verified against the same row it was verified against the first time.
+
+  Two consequences worth knowing before editing this. **`NetLink` is now removed when its channel
+  closes** — it used to outlive the thread it represents, harmlessly, because every reader takes it
+  as an `Option`; its absence is how a rejoin knows the previous session has let go of its socket.
+  And **`--name` answers one exchange only**: it is spent once a `Session` has existed, or leaving a
+  world would send the player straight back into it. A refused creation never makes a session, so
+  the retry that behaviour was written for still works.
+
+  `Reject` carries the reject code's name for display; a reconnect *policy* is the thing that would
+  want to branch on the numeric code, and it can widen that struct.
 - **`MAX_DECODE_BACKLOG` bounds chunk payloads and nothing else, so a flood of `BlockUpdate`s
   for chunks this session *holds* still grows the queue.** Each costs a decode budget unit and
   none may be refused, because nothing re-sends one. It is a narrower door than the one that was

@@ -24,7 +24,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
 use super::{BUTTON, button_colour};
-use crate::net::{Appearance, CharacterChoice, ChooseCharacter, HairModel};
+use crate::net::{Appearance, CharacterChoice, ChooseCharacter, HairModel, Session};
 
 use crate::player::{BodyPart, PlacedBox, body_boxes, body_envelope, body_slots, placed_box};
 
@@ -878,18 +878,34 @@ impl PlayAs {
 /// boundary in the frame it sends the frame, which is not necessarily this one, so the
 /// guard is local as well: a second `SelectCharacterRequest` after a welcome is a
 /// protocol error that ends the session, and this system must never be what causes one.
+///
+/// **And spent once the player has actually been in the world**, which is what #184 added.
+/// Leaving a world now lands back on its character screen, and a launch flag that answered
+/// that exchange too would send the player straight back in — a control that cannot be
+/// used. The line is drawn at a [`Session`] having existed rather than at the exchange
+/// number, because that is the same line #184 draws everywhere else: a refused creation
+/// ends the session without ever making one, and reconnecting after that still gets the
+/// launch's answer, which is what `a_second_exchange_is_answered_like_the_first` holds.
 fn answer_from_the_launch(
     choice: Option<Res<CharacterChoice>>,
     play_as: Res<PlayAs>,
+    session: Option<Res<Session>>,
     mut chosen: MessageWriter<ChooseCharacter>,
     mut asked: Local<bool>,
+    mut spent: Local<bool>,
 ) {
+    if session.is_some() {
+        *spent = true;
+    }
     let Some(choice) = choice else {
         // The exchange is over — established, refused or disconnected. The next one is a
-        // new question and gets a new answer.
+        // new question, and gets a new answer unless the launch's has been spent.
         *asked = false;
         return;
     };
+    if *spent {
+        return;
+    }
     let Some(wanted) = play_as.wanted() else {
         return;
     };
@@ -1618,6 +1634,22 @@ mod tests {
     }
 
     /// What the screen has asked the network boundary for.
+    /// A session, which is what makes the launch's answer spent.
+    fn a_session() -> Session {
+        Session(crate::net::SessionParams {
+            clock: Default::default(),
+            entity_id: 1,
+            spawn: [0.5, 64.0, 0.5],
+            world_seed: 1,
+            tick_rate: 20,
+            chunk_size: 32,
+            view_distance: 8,
+            inventory_slots: 36,
+            hotbar_slots: 9,
+            player_token: crate::net::ANY_TOKEN,
+        })
+    }
+
     fn asked(app: &App) -> Vec<ChooseCharacter> {
         let messages = app.world().resource::<Messages<ChooseCharacter>>();
         let mut cursor = messages.get_cursor();
@@ -2289,6 +2321,44 @@ mod tests {
         );
 
         assert_eq!(asked(&app), vec![]);
+    }
+
+    /// **A launch flag does not answer the screen a player asked to be on.**
+    ///
+    /// #184 made leaving a world land back on its character screen. `--name` answering
+    /// that exchange too would send the player straight back in — a control that cannot be
+    /// used. The line is a [`Session`] having existed, not the exchange number, which is
+    /// what keeps the retry below working: a refused creation ends the session without
+    /// ever making one.
+    #[test]
+    fn the_launch_does_not_answer_the_screen_a_player_left_a_world_for() {
+        let mut app = headless_playing_as(
+            CharacterChoice::for_a_test(vec![character(900, "Eivor")], 3),
+            "Eivor",
+        );
+        assert_eq!(asked(&app), vec![ChooseCharacter::Play(900)]);
+
+        // The world arrives, and then the player leaves it.
+        app.insert_resource(a_session());
+        app.update();
+        app.world_mut().remove_resource::<Session>();
+        app.world_mut().remove_resource::<CharacterChoice>();
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<ChooseCharacter>>()
+            .clear();
+
+        app.world_mut().insert_resource(CharacterChoice::for_a_test(
+            vec![character(900, "Eivor")],
+            3,
+        ));
+        app.update();
+
+        assert_eq!(
+            asked(&app),
+            vec![],
+            "the launch answered the screen the player had just asked to be on"
+        );
     }
 
     /// The next exchange gets its own answer: a refused creation ends the session, and
