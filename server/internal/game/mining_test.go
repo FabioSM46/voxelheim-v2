@@ -775,7 +775,14 @@ func TestTwoPlayersHoldIndependentProgressAndTheFirstCompletionWins(t *testing.T
 	if _, err := first.CompleteMining(context.Background(), completion); err != nil {
 		t.Fatalf("first completion: %v", err)
 	}
-	sim.Step(3)
+	// The tick after the last one paid. It was 3 while leaves cost 2 ticks, and stayed 3
+	// when the table moved — a tick number already in the past, which `Sim.Step` does not
+	// refuse and which would have gone into the reset frame it produces.
+	//
+	// **And it is load-bearing rather than tidy**: removing it leaves the second player
+	// with seven positive frames and no reset at all, because `CompleteMining` does not
+	// emit the loser's reset synchronously — the following tick does.
+	sim.Step(uint64(cost + 1))
 
 	// One frame per tick paid except the last: the completion tick emits none, which is
 	// the property TestMiningBreaksOnItsHardnessTickAndSendsNoCompletionProgress owns.
