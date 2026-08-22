@@ -805,3 +805,132 @@ func TestDeathUnderConcurrentInventoryMovement(t *testing.T) {
 		t.Error("the blade stopped existing")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Health that comes back on its own
+// ---------------------------------------------------------------------------
+
+// stepFor advances the harness by a duration, in the ticks the rate makes of it.
+func (h *vitalsHarness) stepFor(d time.Duration) {
+	h.t.Helper()
+
+	for range ticksFor(d, DefaultTickRate) {
+		h.step()
+	}
+}
+
+// The delay is quiet since the last hit, and the first point lands one interval after it.
+//
+// **The off-by-one is asserted deliberately rather than discovered.** Regeneration resumes
+// at HealthRegenDelay and produces its first point HealthRegenInterval later, so a test
+// that stepped exactly the delay and expected a point would be describing a different
+// design — and one that stepped "about six seconds" would pass whichever design was built.
+func TestHealthComesBackOneIntervalAfterTheDelay(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.hurt(player, 40)
+	if got := h.vitals(player).Health; got != PlayerMaxHealth-40 {
+		t.Fatalf("health after the hit is %d, want %d", got, PlayerMaxHealth-40)
+	}
+
+	// One tick short of the delay plus an interval: still nothing given back.
+	h.stepFor(HealthRegenDelay + HealthRegenInterval)
+	h.step() // the tick the point lands on is the one after that span
+	if got := h.vitals(player).Health; got != PlayerMaxHealth-39 {
+		t.Fatalf("health after the delay and one interval is %d, want %d", got, PlayerMaxHealth-39)
+	}
+
+	// And then one a second.
+	h.stepFor(3 * HealthRegenInterval)
+	if got := h.vitals(player).Health; got != PlayerMaxHealth-36 {
+		t.Errorf("health three intervals later is %d, want %d", got, PlayerMaxHealth-36)
+	}
+}
+
+// Nothing comes back inside the delay, and a second hit starts it over.
+//
+// This is the property the five seconds exist for: a draugr swings about every 1.5s, so a
+// player being hit never reaches the threshold at all. Asserted by hitting twice with less
+// than the delay between, which is what a fight is.
+func TestRegenerationNeverTicksInsideAFight(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	h.hurt(player, 30)
+	h.stepFor(HealthRegenDelay - HealthRegenInterval)
+	if got := h.vitals(player).Health; got != PlayerMaxHealth-30 {
+		t.Fatalf("health moved inside the delay: %d, want %d", got, PlayerMaxHealth-30)
+	}
+
+	// A second hit before the threshold, the way a fight lands them.
+	h.hurt(player, 10)
+	h.stepFor(HealthRegenDelay - HealthRegenInterval)
+	if got := h.vitals(player).Health; got != PlayerMaxHealth-40 {
+		t.Errorf("the second hit did not restart the delay: health %d, want %d", got, PlayerMaxHealth-40)
+	}
+}
+
+// It stops at the maximum, and a dead player gains nothing.
+//
+// The second half is a property of the call site rather than of a check: regenerateLocked
+// runs on advanceVitalsLocked's alive branch and nowhere else, so a corpse that healed
+// would mean the call had moved.
+func TestRegenerationIsBoundedAndNeverResurrects(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	full, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.stepFor(HealthRegenDelay + 5*HealthRegenInterval)
+	if got := h.vitals(full).Health; got != PlayerMaxHealth {
+		t.Errorf("an unhurt player's health is %d, want the maximum %d", got, PlayerMaxHealth)
+	}
+
+	dead, _ := h.join(2, [3]float32{0.5, 64, 0.5})
+	h.hurt(dead, PlayerMaxHealth)
+	if got := h.vitals(dead); got.Health != 0 || got.LifeState != vnet.LifeStateDead {
+		t.Fatalf("the second player is %+v, want dead at zero", got)
+	}
+	// Long enough to have healed several points had anything been running, and short of
+	// the respawn that would legitimately restore them.
+	for range ticksFor(HealthRegenDelay+3*HealthRegenInterval, DefaultTickRate) {
+		h.sim.mu.Lock()
+		dead.respawnTicks = h.sim.deathTicks // hold the countdown open
+		h.sim.mu.Unlock()
+		h.step()
+	}
+	if got := h.vitals(dead); got.Health != 0 {
+		t.Errorf("a dead player regenerated to %d, want none at all", got.Health)
+	}
+}
+
+// The two constants are the same wall-clock spans at every rate an operator may set.
+//
+// The same property #178 pinned for the hardness table, for the same reason: a delay
+// written in ticks would be two seconds at 20 Hz and one at 40, and nothing about the game
+// would look wrong — players would simply heal differently on different servers.
+func TestRegenerationIsTheSameDurationAtEveryTickRate(t *testing.T) {
+	t.Parallel()
+
+	for _, rate := range []uint8{10, 20, 30, 64} {
+		delay := ticksFor(HealthRegenDelay, rate)
+		interval := ticksFor(HealthRegenInterval, rate)
+		for _, c := range []struct {
+			name  string
+			ticks uint32
+			want  time.Duration
+		}{
+			{"delay", delay, HealthRegenDelay},
+			{"interval", interval, HealthRegenInterval},
+		} {
+			got := time.Duration(c.ticks) * time.Second / time.Duration(rate)
+			if drift := got - c.want; drift > time.Second/time.Duration(rate) || drift < -time.Second/time.Duration(rate) {
+				t.Errorf("%s is %v at %d Hz, want %v (drift %v, more than one tick)",
+					c.name, got, rate, c.want, drift)
+			}
+		}
+	}
+}

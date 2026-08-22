@@ -120,6 +120,32 @@ const (
 	// in ticks for the same reason.
 	RespawnProtection = 2 * time.Second
 
+	// HealthRegenDelay is how long after the last landed hit before health starts
+	// coming back, and HealthRegenInterval is how long one point of it takes.
+	//
+	// **Tuned slow-and-soon, and that is the decision rather than the numbers.** A
+	// wound is meant to outlive the encounter without ending the session: you walk
+	// away hurt, you stay hurt for a while, and you get there. The opposite tuning —
+	// fast and late — suits a game where fights are discrete episodes, and moving these
+	// that way is a design change rather than a retune.
+	//
+	// Neither value is a taste. Both are ratios against numbers this package already
+	// holds:
+	//
+	//   - Five seconds is three to four full swing cycles. A draugr's is windup 600ms
+	//     plus recovery 900ms, a vargr's 1.1s, so regeneration never ticks inside a
+	//     fight — and it clears RespawnProtection above, so the two never interact.
+	//   - One point a second against PlayerMaxHealth's hundred is about a minute and a
+	//     half from near death. Against a draugr's ten damage per 1.5s cycle — near
+	//     seven a second — regeneration is slower by a factor of seven, which is the
+	//     relationship that matters: it can recover you from a fight and can never
+	//     carry you through one.
+	//
+	// They are a first guess from those ratios and not from play. Expect to revisit
+	// them once somebody has actually been hurt.
+	HealthRegenDelay    = 5 * time.Second
+	HealthRegenInterval = 1 * time.Second
+
 	// --- The creatures ----------------------------------------------------------
 	//
 	// **Their numbers are not here.** Health, speed, reach, damage, telegraph, body and
