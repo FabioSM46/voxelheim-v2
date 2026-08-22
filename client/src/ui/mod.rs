@@ -700,7 +700,12 @@ mod tests {
         keys.press(key);
 
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            // The character screen's preview is a real body, so the assets its meshes and
+            // materials live in have to exist. `Assets<T>` is an ordinary resource, which
+            // is what keeps this headless.
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
             .insert_resource(keys)
             .insert_resource(initial)
             .insert_resource(session())
@@ -768,7 +773,12 @@ mod tests {
     #[test]
     fn cursor_capture_follows_the_live_playing_mode() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            // The character screen's preview is a real body, so the assets its meshes and
+            // materials live in have to exist. `Assets<T>` is an ordinary resource, which
+            // is what keeps this headless.
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
             .insert_resource(ConnectionState::Connected)
             .insert_resource(ServerAddress("ws://127.0.0.1:7777".to_owned()))
             .insert_resource(session())

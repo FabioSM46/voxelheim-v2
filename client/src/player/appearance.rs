@@ -200,19 +200,6 @@ pub struct PlacedBox {
     pub centre: Vec3,
 }
 
-impl PlacedBox {
-    /// How near this box is to a viewer standing in front of the character, in blocks.
-    ///
-    /// Larger is nearer, so it sorts the way a painter would. It exists for the flat
-    /// preview, which has no depth buffer and must order its nodes itself — the world's
-    /// renderer needs none of this, because a depth buffer is exactly what it has.
-    pub fn nearness(self) -> f32 {
-        // A body faces -Z, so the face nearest a viewer in front of it is the one at the
-        // *lowest* z, and nearness is that distance negated.
-        self.size.z / 2.0 - self.centre.z
-    }
-}
-
 /// Where one box of one part sits, in blocks, relative to the feet.
 ///
 /// **The one place the model sheet's axes meet Bevy's**, and the one place rule 3 is
@@ -264,20 +251,6 @@ pub const fn boxes(part: BodyPart, hair: HairModel) -> &'static [PartBox] {
         BodyPart::Eyes => &EYES,
         BodyPart::Hair => hair_boxes(hair),
     }
-}
-
-/// The most boxes one part is ever drawn from, over every hair model.
-///
-/// What a renderer with a fixed pool needs: the character screen spawns this many nodes
-/// per part once, and hides the ones the model currently chosen does not use. Every part
-/// but the hair answers the same number whatever is on the head, which is why this is a
-/// question about a *part* rather than about a pair.
-pub fn slots(part: BodyPart) -> usize {
-    HairModel::ALL
-        .into_iter()
-        .map(|model| boxes(part, model).len())
-        .max()
-        .unwrap_or_default()
 }
 
 /// The smallest box that holds every part of every body, measured from the feet.
@@ -752,24 +725,6 @@ mod tests {
         }
     }
 
-    /// The pool the character screen spawns holds the largest model in the table.
-    ///
-    /// The preview cannot grow when a player cycles the choice, so [`slots`] is what it
-    /// spawns — and a model that a hand-written ceiling had not been widened for would be
-    /// a haircut the preview silently drew half of.
-    #[test]
-    fn the_pool_holds_every_part_of_every_model() {
-        for part in BodyPart::IN_DRAWING_ORDER {
-            for model in HairModel::ALL {
-                assert!(
-                    boxes(part, model).len() <= slots(part),
-                    "{part:?} wearing {model:?} needs more slots than the pool has"
-                );
-            }
-        }
-        assert_eq!(slots(BodyPart::Hair), 4, "the widest haircut is four boxes");
-    }
-
     /// The frame a whole person fits in is bigger than the box the server collides, in
     /// exactly the two directions the model sheet says something leaves it.
     ///
@@ -807,10 +762,13 @@ mod tests {
 
     /// A viewer in front of a character sees the face and not the back of the head.
     ///
-    /// The flat preview has no depth buffer and orders its nodes by this number, so
-    /// getting the sign wrong is a curtain of hair drawn over a face. It is also the one
-    /// assertion that would catch the model sheet's `+z` being carried into Bevy's axes
-    /// without the negation [`placed`] applies.
+    /// **This is the one assertion that catches the model sheet's `+z` being carried into
+    /// Bevy's axes without the negation [`placed`] applies**, and it is why it survived
+    /// #181. It used to read a `PlacedBox::nearness` — a painter's sort key the flat
+    /// preview needed and a depth buffer does not — and that method went with the flat
+    /// preview. The property it was really testing is about the rig, not about a renderer,
+    /// so it is asserted on the axis directly: a body faces -Z, so what is nearer a viewer
+    /// in front of it has the *lower* z.
     #[test]
     fn what_faces_the_viewer_is_nearer_than_what_is_behind_it() {
         let eye = placed(BodyPart::Eyes, EYES[0]);
@@ -818,11 +776,11 @@ mod tests {
         let nape = placed(BodyPart::Hair, CROPPED[1]);
 
         assert!(
-            eye.nearness() > head.nearness(),
+            eye.centre.z < head.centre.z,
             "the eyes sit proud of the face they look out of"
         );
         assert!(
-            head.nearness() > nape.nearness(),
+            head.centre.z < nape.centre.z,
             "the back of the head is behind the front of it"
         );
     }

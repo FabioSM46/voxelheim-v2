@@ -67,10 +67,11 @@ use bevy::prelude::*;
 
 pub(crate) use appearance::{
     BodyPart, PlacedBox, boxes as body_boxes, envelope as body_envelope, placed as placed_box,
-    slots as body_slots,
 };
 
-pub use camera::{Orbit, ViewMode};
+pub use camera::{Orbit, ViewMode, WorldCamera};
+// The character screen's preview is the same rig with no server entity behind it, so it
+// is dressed out of the same wardrobe rather than from a second copy of the tables.
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
 pub use interpolate::SnapshotBuffer;
 pub use inventory::{
@@ -80,6 +81,7 @@ pub use items::item_label;
 #[cfg(test)]
 pub(crate) use items::known_item_ids;
 pub(crate) use items::{ItemShape, item_palette_id, item_shape};
+pub(crate) use sky::Daylight;
 pub use target::{ApplyMiningFeedback, MiningFeedback};
 
 use crate::net::{
@@ -153,13 +155,17 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
+        // Guarded, because `CharacterUiPlugin` builds it too and the two are independent —
+        // Bevy panics on a unique plugin added twice.
+        if !app.is_plugin_added::<BodyVisualsPlugin>() {
+            app.add_plugins(BodyVisualsPlugin);
+        }
         app.init_resource::<LookState>()
             .init_resource::<MoveIntent>()
             .init_resource::<InputMode>()
             .init_resource::<InputCadence>()
             .init_resource::<SnapshotBuffer>()
             .init_resource::<Appearances>()
-            .init_resource::<BodyMaterials>()
             .init_resource::<SelfVitals>()
             .init_resource::<sky::SkyClock>()
             .init_resource::<PlayerStats>()
@@ -170,7 +176,6 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Startup,
                 (
-                    create_player_visuals,
                     drops::create_visuals,
                     mobs::create_visuals,
                     structures::create_visuals,
@@ -319,7 +324,7 @@ impl InputCadence {
 /// which is the one part whose shape a player chooses. Nothing here is ever rebuilt: a
 /// body that changes its hair swaps a handle.
 #[derive(Resource, Debug)]
-struct PlayerVisuals {
+pub(crate) struct PlayerVisuals {
     shoes: Handle<Mesh>,
     trousers: Handle<Mesh>,
     shirt: Handle<Mesh>,
@@ -366,7 +371,7 @@ impl PlayerVisuals {
 /// body still wears it costs nothing, because the body holds a strong handle to the
 /// material and the next one asking for that colour simply makes it again.
 #[derive(Resource, Debug, Default)]
-struct BodyMaterials(HashMap<u32, Handle<StandardMaterial>>);
+pub(crate) struct BodyMaterials(HashMap<u32, Handle<StandardMaterial>>);
 
 impl BodyMaterials {
     /// The material for one colour, making it the first time it is asked for.
@@ -403,7 +408,7 @@ impl BodyMaterials {
 /// and the system that re-dresses one need all three. Grouping them is what keeps
 /// [`Self::outfit`] the single answer to "what is this character wearing", rather than two
 /// loops that have to agree.
-struct Wardrobe<'a> {
+pub(crate) struct Wardrobe<'a> {
     visuals: &'a PlayerVisuals,
     palette: &'a mut BodyMaterials,
     materials: &'a mut Assets<StandardMaterial>,
@@ -411,7 +416,7 @@ struct Wardrobe<'a> {
 
 impl Wardrobe<'_> {
     /// The mesh and material each part of one appearance is drawn with.
-    fn outfit(
+    pub(crate) fn outfit(
         &mut self,
         worn: Appearance,
     ) -> [(BodyPart, Handle<Mesh>, Handle<StandardMaterial>); BodyPart::IN_DRAWING_ORDER.len()]
@@ -433,7 +438,7 @@ impl Wardrobe<'_> {
 /// that lists them is a signature nobody reads. [`Self::wardrobe`] is the only way in, so
 /// the `Option` on the meshes is answered once rather than at each use.
 #[derive(bevy::ecs::system::SystemParam)]
-struct Dressing<'w> {
+pub(crate) struct Dressing<'w> {
     visuals: Option<Res<'w, PlayerVisuals>>,
     palette: ResMut<'w, BodyMaterials>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
@@ -446,7 +451,7 @@ impl Dressing<'_> {
     /// and both readers run in `Update` — and it is an `Option` for the reason the
     /// resource always was: a client that took the window down because a plugin had not
     /// been built is a worse client than one that draws nothing for a frame.
-    fn wardrobe(&mut self) -> Option<Wardrobe<'_>> {
+    pub(crate) fn wardrobe(&mut self) -> Option<Wardrobe<'_>> {
         Some(Wardrobe {
             visuals: self.visuals.as_deref()?,
             palette: &mut self.palette,
@@ -610,6 +615,24 @@ impl InputGate<'_> {
             && !self.mode.is_changed()
             && !self.vitals.dead()
             && self.view.first_person()
+    }
+}
+
+/// The shared part meshes and the material-per-colour cache a dressed body is built from.
+///
+/// Its own plugin because two things dress bodies now: the world, and the character
+/// screen's turning preview. `CharacterUiPlugin` builds it too, which is what keeps that
+/// screen headlessly testable on its own — the same reason every other panel initialises
+/// the resources its systems read.
+///
+/// Both callers guard with `is_plugin_added`, because Bevy panics on a unique plugin added
+/// twice and the two are built independently.
+pub(crate) struct BodyVisualsPlugin;
+
+impl Plugin for BodyVisualsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<BodyMaterials>()
+            .add_systems(Startup, create_player_visuals);
     }
 }
 
