@@ -137,14 +137,6 @@ fn add_input_mode_systems(app: &mut App) {
     );
 }
 
-/// `E` owns the inventory toggle and `Esc` owns the pause menu.
-///
-/// **Death takes the inventory and leaves the menu.** Quitting and disconnecting must
-/// never depend on being alive, so `Esc` keeps working exactly as it did; the pack is
-/// game input the server would refuse anyway, and an open one on top of a death overlay is
-/// a screen nobody can read. Closing one that is already open is the same rule rather than
-/// a second one — and both are presentation, since the server owns every outcome a click
-/// in there could ask for.
 /// Every resource that decides which screen owns the pointer, as one parameter.
 ///
 /// Grouped rather than listed, for the reason `net::Inboxes` is: there is one of these
@@ -190,6 +182,14 @@ impl Overlays<'_> {
     }
 }
 
+/// `E` owns the inventory toggle and `Esc` owns the pause menu.
+///
+/// **Death takes the inventory and leaves the menu.** Quitting and disconnecting must
+/// never depend on being alive, so `Esc` keeps working exactly as it did; the pack is
+/// game input the server would refuse anyway, and an open one on top of a death overlay is
+/// a screen nobody can read. Closing one that is already open is the same rule rather than
+/// a second one — and both are presentation, since the server owns every outcome a click
+/// in there could ask for.
 fn choose_input_mode(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     session: Option<Res<Session>>,

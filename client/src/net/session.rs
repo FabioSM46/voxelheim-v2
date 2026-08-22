@@ -1107,6 +1107,20 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 // instruction arriving less politely.
                 Ok(NetCommand::Disconnect) | Err(TryRecvError::Disconnected) => return None,
                 Ok(NetCommand::Choose(choice)) => {
+                    // **The phase decides, and it decides before anything is written.**
+                    // A choice arriving after `Established` would put this thread on a
+                    // socket the writer thread already owns, and two writers is the one
+                    // arrangement `transport.Conn` does not survive. `send_character_choice`
+                    // will not send one — but that guard is a Bevy system in another
+                    // module, and the invariant is this one's to keep.
+                    //
+                    // Moving the record ahead of the write costs nothing `Unchosen` was
+                    // protecting: a write that fails ends the session on the next line,
+                    // so there is no reachable state where the phase moved and the
+                    // question was never asked.
+                    if !handshake.chose() {
+                        continue;
+                    }
                     let frame = match &choice {
                         Choice::Play(character) => {
                             codec::encode_select_character_request(*character)
@@ -1120,10 +1134,6 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                             &format!("sending the character choice failed: {err}"),
                         ));
                     }
-                    // Recorded only once the frame is on the wire, which is what makes
-                    // `Unchosen` mean what it says: a welcome is refused until a question
-                    // has actually been asked.
-                    handshake.chose();
                     playing = match choice {
                         Choice::Play(character) => Some(character),
                         Choice::Create(_) => None,

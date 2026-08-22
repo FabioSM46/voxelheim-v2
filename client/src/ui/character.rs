@@ -244,14 +244,17 @@ const FIELDS: [Field; 9] = [
     Field::Back,
 ];
 
-/// The longest name this screen will hold.
+/// The longest name this screen will hold, **in bytes**.
 ///
-/// **A bound on a text field and not a rule about names.** The server's own limit is 64
-/// bytes and it is the authority — `persist.MaxNameBytes` — so this is a multibyte-safe
-/// stop that keeps a player from typing a paragraph into a panel, not a judgement about
-/// what a name may be. A name this accepts can still be refused, and that refusal is the
-/// server's to make.
-const NAME_LIMIT: usize = 32;
+/// **A bound on a text field and not a rule about names**, and it mirrors
+/// `persist.MaxNameBytes` because the server measures the same thing the same way. This
+/// counted *characters* until review found it: thirty-two of them is inside any character
+/// count and twice over the byte limit as soon as they are CJK or emoji, and the refusal
+/// that earns is a `ServerReject` — which by contract ends the session, so the player is
+/// dropped back to the server list for a name the field offered to hold. A name this
+/// accepts can still be refused; that refusal is the server's to make, and it should not
+/// be one this screen composed on purpose.
+const NAME_LIMIT_BYTES: usize = 64;
 
 /// What the player has chosen so far.
 ///
@@ -579,12 +582,14 @@ fn spawn_form(parent: &mut ChildSpawnerCommands<'_>) {
             CreatingPanel,
             Node {
                 flex_grow: 1.0,
-                display: Display::Flex,
+                // Down until somebody asks for it, and out of the layout while it is:
+                // see `show_character_screen` for why this is a display and not a
+                // visibility.
+                display: Display::None,
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(8.0),
                 ..default()
             },
-            Visibility::Hidden,
         ))
         .with_children(|form| {
             // The name, which is the one field a player types into.
@@ -790,13 +795,6 @@ fn swatch_colour(colour: u32) -> Color {
     )
 }
 
-/// Whether the character screen owns the screen this frame.
-///
-/// Read by `ui/mod.rs` as well: the pointer belongs to whatever is on top, and a control
-/// nobody can click is not a control. It is up exactly while an exchange is live, which
-/// is the presence of [`CharacterChoice`] and nothing else — the login screen cannot be
-/// up at the same time, because a client that has not signed in has no session to be
-/// choosing on.
 /// The character the command line named, if it named one.
 ///
 /// **`--name` used to be a display name and is now the person going in.** Before V7 the
@@ -887,6 +885,13 @@ fn answer_from_the_launch(
     *asked = true;
 }
 
+/// Whether the character screen owns the screen this frame.
+///
+/// Read by `ui/mod.rs` as well: the pointer belongs to whatever is on top, and a control
+/// nobody can click is not a control. It is up exactly while an exchange is live, which
+/// is the presence of [`CharacterChoice`] and nothing else — the login screen cannot be
+/// up at the same time, because a client that has not signed in has no session to be
+/// choosing on.
 pub(super) fn character_is_up(choice: Option<&CharacterChoice>) -> bool {
     choice.is_some()
 }
@@ -895,8 +900,8 @@ fn show_character_screen(
     choice: Option<Res<CharacterChoice>>,
     draft: Res<Draft>,
     mut roots: Query<&mut Visibility, With<CharacterRoot>>,
-    mut choosing: Query<&mut Visibility, ChoosingHalf>,
-    mut creating: Query<&mut Visibility, CreatingHalf>,
+    mut choosing: Query<&mut Node, ChoosingHalf>,
+    mut creating: Query<&mut Node, CreatingHalf>,
 ) {
     let up = character_is_up(choice.as_deref());
     let next = if up {
@@ -910,22 +915,28 @@ fn show_character_screen(
         }
     }
 
+    // **`Display`, not `Visibility`, and the difference is the whole of this fix.** The
+    // two halves are flex siblings that both grow, and `bevy_ui` lays a hidden node out
+    // exactly as it lays out a visible one — only `Display::None` takes a node out of
+    // taffy. Switched by visibility, the half that was down went on claiming half the
+    // panel, so the list drew into half its width beside an empty column. Nothing caught
+    // it because every test here is headless and reads components rather than a layout.
     let (list, form) = match (up, draft.mode) {
-        (true, Mode::Choosing) => (Visibility::Inherited, Visibility::Hidden),
-        (true, Mode::Creating) => (Visibility::Hidden, Visibility::Inherited),
+        (true, Mode::Choosing) => (Display::Flex, Display::None),
+        (true, Mode::Creating) => (Display::None, Display::Flex),
         // The root is hidden, so neither half is drawn either way. Left as it was rather
-        // than written every frame: a `Visibility` written on an idle frame marks the
-        // component changed for every consumer of it.
+        // than written every frame: a `Node` written on an idle frame marks the component
+        // changed for every consumer of it, and taffy is one of them.
         (false, _) => return,
     };
-    for mut visibility in &mut choosing {
-        if *visibility != list {
-            *visibility = list;
+    for mut node in &mut choosing {
+        if node.display != list {
+            node.display = list;
         }
     }
-    for mut visibility in &mut creating {
-        if *visibility != form {
-            *visibility = form;
+    for mut node in &mut creating {
+        if node.display != form {
+            node.display = form;
         }
     }
 }
@@ -946,6 +957,12 @@ fn rebuild_rows(
     mut commands: Commands,
 ) {
     let Some(choice) = choice else {
+        // The exchange is over, and what was drawn belonged to it. `Row::Play` carries an
+        // id and nothing else — not the name, not the face, not the limit — and character
+        // ids are minted per world, so the next server's list can be identical row for row
+        // and describe different people. Forgetting here is what makes the comparison
+        // below a comparison within one exchange, which is the only thing it can be.
+        drawn.clear();
         return;
     };
     let offered = rows(&choice);
@@ -1170,7 +1187,9 @@ fn type_the_name(
 /// this screen filters anything, and it filters what a *text field* may hold rather than
 /// what a name may be — the length, the emptiness and the shape are the server's.
 fn push_name(name: &mut String, character: char) {
-    if character.is_control() || name.chars().count() >= NAME_LIMIT {
+    // Measured the way the server measures it: the character that would cross the limit
+    // is refused whole, never split.
+    if character.is_control() || name.len() + character.len_utf8() > NAME_LIMIT_BYTES {
         return;
     }
     name.push(character);
@@ -2063,5 +2082,105 @@ mod tests {
         app.update();
 
         assert_eq!(asked(&app), vec![ChooseCharacter::Play(900)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // What the review of #161 found
+    // -----------------------------------------------------------------------
+
+    /// The `display` of the two halves, which is what decides whether a half occupies
+    /// the panel. `Visibility` does not: `bevy_ui` lays a hidden node out exactly as it
+    /// lays out a visible one.
+    fn halves(app: &mut App) -> (Display, Display) {
+        let world = app.world_mut();
+        let mut choosing = world.query_filtered::<&Node, With<ChoosingPanel>>();
+        let list = choosing
+            .iter(world)
+            .next()
+            .expect("the choosing half exists")
+            .display;
+        let mut creating = world.query_filtered::<&Node, With<CreatingPanel>>();
+        let form = creating
+            .iter(world)
+            .next()
+            .expect("the creating half exists")
+            .display;
+        (list, form)
+    }
+
+    /// **The half that is down leaves the layout, not just the screen.**
+    ///
+    /// The two halves are flex siblings that both grow, so a half switched off with
+    /// `Visibility` went on claiming its share of the row: the list drew into half the
+    /// panel with an empty column beside it, and the form did the same in reverse. Only
+    /// `Display::None` takes a node out of taffy. Asserted on the component because a
+    /// headless app has no layout to measure — which is exactly why nothing caught it.
+    #[test]
+    fn the_half_that_is_down_is_out_of_the_layout() {
+        let mut choosing = headless(CharacterChoice::for_a_test(
+            vec![character(900, "Eivor")],
+            3,
+        ));
+        assert_eq!(halves(&mut choosing), (Display::Flex, Display::None));
+
+        // An account with nothing here opens on the form, which is the other half up.
+        let mut creating = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        assert_eq!(halves(&mut creating), (Display::None, Display::Flex));
+    }
+
+    /// **The rows belong to the exchange that drew them.**
+    ///
+    /// `Row::Play` carries an id and nothing else — not the name, not the face, not the
+    /// limit — and character ids are minted per world, so the next server's list can be
+    /// identical row for row and describe somebody else entirely. The screen used to
+    /// compare the two and keep the first server's rows: you would stand at the gate of
+    /// one world reading a name from another.
+    #[test]
+    fn the_rows_belong_to_the_exchange_that_drew_them() {
+        let mut app = headless(CharacterChoice::for_a_test(vec![character(1, "Eivor")], 3));
+        assert_eq!(row_labels(&mut app)[0], "Eivor");
+
+        // The exchange ends the way all of them do, and the next one lists the same id.
+        app.world_mut().remove_resource::<CharacterChoice>();
+        app.update();
+        app.world_mut()
+            .insert_resource(CharacterChoice::for_a_test(vec![character(1, "Bjorn")], 3));
+        app.update();
+
+        assert_eq!(
+            row_labels(&mut app)[0],
+            "Bjorn",
+            "the row is the previous server's"
+        );
+    }
+
+    /// **The field stops at the byte the server stops at.**
+    ///
+    /// It counted characters, which is inside any limit you like and twice over the
+    /// server's as soon as the characters are CJK or emoji — and the refusal that earns
+    /// is a `ServerReject`, which by contract ends the session. A field that offers to
+    /// hold a name the server cannot is a field that costs a player their connection.
+    #[test]
+    fn the_name_field_stops_at_the_bytes_the_server_accepts() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+
+        // Three bytes each, forty of them: 120 bytes offered against a 64-byte limit.
+        type_text(&mut app, &"名".repeat(40));
+
+        let name = draft(&app).name;
+        assert!(
+            name.len() <= NAME_LIMIT_BYTES,
+            "{} bytes reached the draft",
+            name.len()
+        );
+        assert_eq!(
+            name.chars().count(),
+            NAME_LIMIT_BYTES / 3,
+            "the character that would cross the limit is refused whole, never split"
+        );
+        assert!(
+            name.chars().all(|c| c == '名'),
+            "a character was split: {name}"
+        );
     }
 }

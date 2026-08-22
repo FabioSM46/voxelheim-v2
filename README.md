@@ -170,7 +170,10 @@ character wearing that name and has one created under it when this account holds
 what lets an unattended run — `scripts/interop-check.sh` — reach a world. The server decides either
 way: a name it refuses is refused with `--name` too. The character played on each server is
 remembered under `$XDG_DATA_HOME/voxelheim/characters/<address>` and preselected next time, so the
-common case is one keypress.
+common case is one keypress — with one exception the wire forces: **a creation is not remembered**,
+because `ServerWelcome` names an entity and no character, so a client that has just made one cannot
+know the id the server minted for it. The launch after that lists it like any other and selecting
+it once is what teaches the file.
 
 The way a *player* reaches a server is `--account-service`: sign in once, then click a server out
 of the list that service answers with. Every row carries the address and the SHA-256 of the
