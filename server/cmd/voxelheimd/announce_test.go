@@ -523,8 +523,8 @@ func TestAServerWithNothingConfiguredAnnouncesNothingAndSaysSoOnce(t *testing.T)
 // An exported-but-empty registration key is "not given", not "given as nothing".
 //
 // **This is the state `.env.example` produces**, and it is the reason the distinction is
-// worth a test: `set -a; . ./.env; set +a` exports every name in that file, and a run that
-// wants no server list leaves this one empty. Reading mere presence made that start report
+// worth a test: sourcing that file exports every name in it — each assignment carries its
+// own `export` — and a run that wants no server list leaves this one empty. Reading mere presence made that start report
 // itself as half-configured — a warning saying the game runs but will not appear in a list —
 // where the truth is that nobody asked it to announce at all.
 func TestAnEmptyRegistrationKeyVariableIsNotAConfiguration(t *testing.T) {

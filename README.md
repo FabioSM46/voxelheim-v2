@@ -64,12 +64,23 @@ First, the configuration a local run needs and this repository cannot ship:
 
 ```bash
 cp .env.example .env    # then fill in what you have; `.env` is git-ignored
-set -a; . ./.env; set +a
+. ./.env
 ```
 
 `.env.example` says what each variable is and what leaving it empty costs. Nothing loads that
-file for you — no code here reads a `.env`, and the `set -a` above is the whole mechanism —
-and none of the three commands below needs a value typed into it.
+file for you — no code here reads a `.env`, and sourcing it is the whole mechanism — and none
+of the three commands below needs a value typed into it.
+
+**The one line works because each assignment in that file carries an `export`.** Without one,
+sourcing sets a *shell* variable, which a child process does not inherit: `go run` would see
+nothing and the file would look loaded while doing nothing. `set -a; . ./.env; set +a` is the
+other way to get there — it exports everything assigned between the two — and it still works
+on a file that exports itself.
+
+**It lives in the shell, not in the project.** Sourcing it in one terminal does nothing for
+another, so the two server commands below either share a shell or each source it first. A
+server started from a terminal that never did is a server with an empty environment, which is
+a supported state and looks exactly like having forgotten.
 
 ```bash
 # terminal 1 — the account service (listens on 127.0.0.1:7778)
