@@ -8,6 +8,10 @@
 //! of it, so a mismatch is a body that visibly does not fit the space the server says
 //! it fits.
 //!
+//! They are also the **grid a character is cut on**: [`super::appearance`] divides them
+//! into twelfths across and thirty-sixths up rather than holding a size of its own, so a
+//! change here moves every part of every character with it.
+//!
 //! # What deliberately is *not* mirrored here
 //!
 //! The server's `WalkSpeed`, `Gravity` and `JumpImpulse`. There is no client-side

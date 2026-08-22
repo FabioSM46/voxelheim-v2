@@ -25,7 +25,7 @@ use bevy::prelude::*;
 
 use crate::net::{Appearance, CharacterChoice, ChooseCharacter, ConnectionState, HairModel};
 
-use crate::player::{BodyPart, body_parts};
+use crate::player::{BodyPart, PlacedBox, body_boxes, body_envelope, body_slots, placed_box};
 
 pub(super) struct CharacterUiPlugin;
 
@@ -426,9 +426,18 @@ struct Swatch {
 #[derive(Component)]
 struct HairLabel;
 
-/// One part of the drawn body.
+/// One box of the drawn body: which part it belongs to, and which of that part's boxes
+/// it is.
+///
+/// A pool rather than a node per box that exists: the hair is drawn from between one box
+/// and four depending on the model, and a screen that spawned and despawned nodes as a
+/// player cycled the choice would be rebuilding a layout on a key press. The spare nodes
+/// of a smaller model draw nothing instead.
 #[derive(Component, Debug, Clone, Copy)]
-struct PreviewPart(BodyPart);
+struct PreviewBox {
+    part: BodyPart,
+    index: usize,
+}
 
 /// Between the server list's 45 and the login screen's 50. A player choosing a character
 /// has signed in and picked a server, and neither of those screens is up behind this one.
@@ -445,17 +454,17 @@ const FOCUS_EDGE: Color = Color::srgb(1.0, 0.72, 0.25);
 /// And everything else's, which is the dark edge a cell already has.
 const IDLE_EDGE: Color = Color::srgba(0.0, 0.0, 0.0, 0.0);
 
-/// The vertical span the preview box covers, in bodies.
+/// How much bigger the preview frame is than the rig it holds.
 ///
-/// A little over one, because hair may reach past the crown — a topknot does — and a box
-/// exactly one body high would clip it. See `player::appearance`.
-const PREVIEW_SPAN: f32 = 1.15;
+/// A little air on every side, so a pair of fists is *inside* the panel rather than
+/// flush against its edge. Applied to both axes at once, which is what keeps the frame
+/// the shape the envelope is and the figure in the middle of it.
+const PREVIEW_MARGIN: f32 = 1.12;
 
-/// The preview's box, at three times as tall as it is wide, which is
-/// `PLAYER_HEIGHT / PLAYER_WIDTH`. A part's width is a fraction of the box's width for
-/// exactly that reason: the proportions are the server's box rather than this panel's.
+/// How wide the preview panel is drawn, in logical pixels. Its height is not a constant:
+/// it comes from the rig, through [`preview_frame`], so a notch is the same length across
+/// the panel as it is up it and the proportions on screen are the body's.
 const PREVIEW_WIDTH: f32 = 96.0;
-const PREVIEW_HEIGHT: f32 = PREVIEW_WIDTH * 3.0;
 
 type ChangedButton = (Changed<Interaction>, With<Button>);
 
@@ -738,14 +747,31 @@ fn spawn_palette_row(parent: &mut ChildSpawnerCommands<'_>, row: usize, palette:
         });
 }
 
-/// The body, drawn from the same parts the world's own body is described by.
+/// The frame the preview draws inside: the whole rig, plus [`PREVIEW_MARGIN`].
+///
+/// Read from `player::appearance` rather than written down here, because how big a
+/// character can get is a property of the body and not of this panel — and two of the
+/// rig's parts deliberately leave the box the server collides, so a frame sized from that
+/// box would clip a pair of knuckles off everybody and a knot off one haircut.
+fn preview_frame() -> PlacedBox {
+    let mut frame = body_envelope();
+    frame.size *= PREVIEW_MARGIN;
+    frame
+}
+
+/// The body, drawn from the same boxes the world's own body is built from.
 ///
 /// Flat nodes rather than a mesh, which is the choice `ui/icon.rs` already made for
 /// items: a second camera and a render target would cost a texture per frame and put the
 /// result out of reach of a headless test, where a handful of nodes is components a test
-/// can read. What keeps it honest is that the *parts* come from `player::appearance` —
-/// the same description the issue that gives players a body builds meshes from.
+/// can read. What keeps it honest is that the *boxes* come from `player::appearance` —
+/// the same table `player::part_mesh` builds meshes from, seen head-on with the depth
+/// thrown away.
 fn spawn_preview(parent: &mut ChildSpawnerCommands<'_>) {
+    let frame = preview_frame();
+    // Square notches: the panel is as much taller than it is wide as the rig is.
+    let height = PREVIEW_WIDTH * frame.size.y / frame.size.x;
+
     parent
         .spawn(Node {
             width: Val::Px(PREVIEW_WIDTH + 24.0),
@@ -760,26 +786,32 @@ fn spawn_preview(parent: &mut ChildSpawnerCommands<'_>) {
                 .spawn((
                     Node {
                         width: Val::Px(PREVIEW_WIDTH),
-                        height: Val::Px(PREVIEW_HEIGHT),
+                        height: Val::Px(height),
                         position_type: PositionType::Relative,
                         border_radius: BorderRadius::all(Val::Px(4.0)),
+                        overflow: Overflow::clip(),
                         ..default()
                     },
                     BackgroundColor(Color::srgb(0.03, 0.035, 0.045)),
                 ))
                 .with_children(|box_| {
-                    // One node per part, in the order they are drawn: the hair last, so
-                    // it sits over the head rather than under it.
+                    // A fixed pool, sized by the widest model each part has. Which node
+                    // covers which is decided per refresh by `ZIndex`, not by the order
+                    // they are spawned in: a curtain of hair falls *behind* the shoulders
+                    // and a cap sits over the crown, and the box's own depth is the only
+                    // thing that knows the difference.
                     for part in BodyPart::IN_DRAWING_ORDER {
-                        box_.spawn((
-                            PreviewPart(part),
-                            Node {
-                                position_type: PositionType::Absolute,
-                                border_radius: BorderRadius::all(Val::Px(3.0)),
-                                ..default()
-                            },
-                            BackgroundColor(Color::NONE),
-                        ));
+                        for index in 0..body_slots(part) {
+                            box_.spawn((
+                                PreviewBox { part, index },
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    ..default()
+                                },
+                                BackgroundColor(Color::NONE),
+                                ZIndex(0),
+                            ));
+                        }
                     }
                 });
         });
@@ -1044,7 +1076,7 @@ fn spawn_row(parent: &mut ChildSpawnerCommands<'_>, row: Row, choice: &Character
                     .iter()
                     .find(|character| character.character_id == id)
             {
-                for (_, _, colour) in body_parts(character.appearance) {
+                for part in BodyPart::WORN {
                     button.spawn((
                         Node {
                             width: Val::Px(12.0),
@@ -1052,7 +1084,7 @@ fn spawn_row(parent: &mut ChildSpawnerCommands<'_>, row: Row, choice: &Character
                             border_radius: BorderRadius::all(Val::Px(2.0)),
                             ..default()
                         },
-                        BackgroundColor(swatch_colour(colour)),
+                        BackgroundColor(swatch_colour(part.colour(character.appearance))),
                     ));
                 }
             }
@@ -1300,7 +1332,7 @@ fn refresh_screen(
     mut fields: Query<(&FormField, &mut BorderColor), Without<Row>>,
     mut swatches: Query<(&Swatch, &mut BorderColor), SwatchEdge>,
 
-    mut previews: Query<(&PreviewPart, &mut Node, &mut BackgroundColor)>,
+    mut previews: Query<(&PreviewBox, &mut Node, &mut BackgroundColor, &mut ZIndex)>,
     mut name: Query<&mut Text, With<NameField>>,
     mut hair: Query<&mut Text, HairText>,
     mut status: Query<&mut Text, StatusText>,
@@ -1355,20 +1387,51 @@ fn refresh_screen(
             .map_or_else(|| draft.appearance(), |character| character.appearance),
         _ => draft.appearance(),
     };
-    for (part, mut node, mut colour) in &mut previews {
-        let Some((_, extent, worn_colour)) = body_parts(worn)
-            .into_iter()
-            .find(|(drawn, _, _)| *drawn == part.0)
-        else {
+    // One frame and one hair model for the whole pass, rather than one of each per node.
+    let frame = preview_frame();
+    let low = frame.centre - frame.size / 2.0;
+    let model = worn.hair_model();
+
+    for (slot, mut node, mut colour, mut depth) in &mut previews {
+        let Some(cell) = body_boxes(slot.part, model).get(slot.index) else {
+            // A model drawn from fewer boxes than the pool holds. The spare nodes keep
+            // whatever layout they had and simply draw nothing.
+            if colour.0 != Color::NONE {
+                colour.0 = Color::NONE;
+            }
             continue;
         };
-        node.bottom = Val::Percent(extent.bottom / PREVIEW_SPAN * 100.0);
-        node.height = Val::Percent((extent.top - extent.bottom) / PREVIEW_SPAN * 100.0);
-        node.width = Val::Percent(extent.width * 100.0);
-        node.left = Val::Percent((1.0 - extent.width) * 50.0);
-        let next = swatch_colour(worn_colour);
-        if colour.0 != next {
-            colour.0 = next;
+
+        let box_ = placed_box(slot.part, *cell);
+        // The four fields written as one value and compared as one, because `Mut<Node>`
+        // marks the component changed on the *first* `DerefMut` and Bevy lays a changed
+        // node's subtree out again. This system runs on every key press while somebody is
+        // typing a name, and none of those move a box.
+        let next = Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent((box_.centre.x - box_.size.x / 2.0 - low.x) / frame.size.x * 100.0),
+            bottom: Val::Percent(
+                (box_.centre.y - box_.size.y / 2.0 - low.y) / frame.size.y * 100.0,
+            ),
+            width: Val::Percent(box_.size.x / frame.size.x * 100.0),
+            height: Val::Percent(box_.size.y / frame.size.y * 100.0),
+            ..default()
+        };
+        if *node != next {
+            *node = next;
+        }
+
+        let worn_colour = swatch_colour(slot.part.colour(worn));
+        if colour.0 != worn_colour {
+            colour.0 = worn_colour;
+        }
+
+        // The painter's algorithm a flat projection needs and a depth buffer would not:
+        // what faces the viewer is drawn over what is behind it. Millimetres, because
+        // `ZIndex` is an integer and the smallest gap in the rig is half a notch.
+        let rank = ZIndex((box_.nearness() * 1000.0).round() as i32);
+        if *depth != rank {
+            *depth = rank;
         }
     }
 
@@ -1841,12 +1904,12 @@ mod tests {
         let expected = swatch_colour(SHIRT[draft(&app).colour[1]]);
 
         let world = app.world_mut();
-        let mut parts = world.query::<(&PreviewPart, &BackgroundColor)>();
+        let mut parts = world.query::<(&PreviewBox, &BackgroundColor)>();
         let shirt = parts
             .iter(world)
-            .find(|(part, _)| part.0 == BodyPart::Shirt)
+            .find(|(slot, _)| slot.part == BodyPart::Shirt)
             .map(|(_, colour)| colour.0)
-            .expect("the body is drawn from parts");
+            .expect("the body is drawn from boxes");
         assert_eq!(shirt, expected);
     }
 
@@ -1874,12 +1937,12 @@ mod tests {
         app.update();
 
         let world = app.world_mut();
-        let mut parts = world.query::<(&PreviewPart, &BackgroundColor)>();
+        let mut parts = world.query::<(&PreviewBox, &BackgroundColor)>();
         let skin = parts
             .iter(world)
-            .find(|(part, _)| part.0 == BodyPart::Skin)
+            .find(|(slot, _)| slot.part == BodyPart::Skin)
             .map(|(_, colour)| colour.0)
-            .expect("the body is drawn from parts");
+            .expect("the body is drawn from boxes");
         assert_eq!(skin, swatch_colour(SKIN[5]));
     }
 
