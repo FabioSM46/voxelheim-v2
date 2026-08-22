@@ -74,6 +74,13 @@ func (p *Player) damageLocked(amount uint16) {
 		return
 	}
 
+	// A landed hit restarts both clocks. After the guards above rather than before them:
+	// a swing that connects for nothing is not a hit, and neither is one on a player the
+	// protection window is covering, so neither may postpone a recovery it did not
+	// interrupt.
+	p.sinceDamageTicks = 0
+	p.regenTicks = 0
+
 	if amount >= p.health {
 		p.health = 0
 		p.dieLocked()
@@ -131,6 +138,7 @@ func (p *Player) advanceVitalsLocked() {
 	}
 
 	if p.alive() {
+		p.regenerateLocked()
 		return
 	}
 
@@ -159,6 +167,43 @@ func (p *Player) advanceVitalsLocked() {
 	}
 }
 
+// regenerateLocked gives back one point of health when enough quiet has passed.
+//
+// **It only ever runs for a living player**, because [advanceVitalsLocked] calls it on the
+// alive branch and nowhere else. That is what makes "it never resurrects" a property of
+// the call site rather than a check that could be forgotten: a dead player's route back is
+// the respawn countdown below, unchanged.
+//
+// The two clocks are separate on purpose. `sinceDamageTicks` is the quiet since the last
+// landed hit and stops at the delay; `regenTicks` is progress toward the next point and
+// resets each time one is given. Folding them into one counter would mean either losing
+// partial progress on every hit — which is what a fight already does — or carrying it
+// across a delay it should not survive.
+//
+// **Regeneration resumes at the delay; the first point arrives one interval later.** Five
+// seconds of quiet, then a point at six, then one a second. Stated because it is the kind
+// of off-by-one a test should assert deliberately rather than discover.
+//
+// The caller holds sim.mu.
+func (p *Player) regenerateLocked() {
+	// Counted to the threshold and no further, so a session that runs for years does not
+	// overflow a counter whose only question is "has the delay passed yet".
+	if p.sinceDamageTicks < p.sim.regenDelayTicks {
+		p.sinceDamageTicks++
+		return
+	}
+	if p.health >= PlayerMaxHealth {
+		return
+	}
+
+	p.regenTicks++
+	if p.regenTicks < p.sim.regenIntervalTicks {
+		return
+	}
+	p.regenTicks = 0
+	p.health++
+}
+
 // respawnLocked puts a dead player back in the world at full health.
 //
 // **The position is the tent they own, and the join spawn only when they own none.**
@@ -176,6 +221,12 @@ func (p *Player) respawnLocked() {
 	p.health = PlayerMaxHealth
 	p.respawnTicks = 0
 	p.protectionTicks = p.sim.protectionTicks
+
+	// A respawn is full health, so there is nothing to give back — but the clocks are
+	// cleared rather than left running, because a player who died mid-recovery must not
+	// arrive with a partial point owed to a life that has ended.
+	p.sinceDamageTicks = 0
+	p.regenTicks = 0
 
 	p.pos = p.respawnPositionLocked()
 	p.vel = [3]float64{}

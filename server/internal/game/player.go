@@ -68,6 +68,12 @@ type Sim struct {
 	deathTicks      uint32
 	protectionTicks uint32
 
+	// regenDelayTicks and regenIntervalTicks are HealthRegenDelay and
+	// HealthRegenInterval in the ticks Step counts, derived for the reason every other
+	// duration here is: the tick rate is an operator's flag.
+	regenDelayTicks    uint32
+	regenIntervalTicks uint32
+
 	// mobTimings is every registered species' windup and recovery in the ticks Step
 	// counts, derived from the configured rate for the reason every other duration here
 	// is: a telegraph is four hundred milliseconds on a 5 Hz server and on a 60 Hz one,
@@ -236,19 +242,22 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		hardness:        handMiningTicksFor(tickRate),
 		deathTicks:      deathDurationTicks(tickRate),
 		protectionTicks: respawnProtectionTicks(tickRate),
-		mobTimings:      mobTimingsFor(tickRate),
-		spawnEvery:      ticksFor(SpawnDirectorInterval, tickRate),
-		mobDespawnTicks: ticksFor(MobDespawnGrace, tickRate),
-		spawns:          newSpawnRNG(worldSeed),
-		loot:            newLootRNG(worldSeed),
-		attackCooldown:  ticksFor(SwordCooldown, tickRate),
-		log:             log,
-		players:         make(map[uint64]*Player),
-		drops:           make(map[uint64]*itemDrop),
-		mobs:            make(map[uint64]*mob),
-		structures:      make(map[uint64]*structure),
-		byIdentity:      make(map[identity.PlayerID]*Player),
-		minersByPos:     make(map[[3]int32]map[*Player]struct{}),
+		regenDelayTicks: ticksFor(HealthRegenDelay, tickRate),
+
+		regenIntervalTicks: ticksFor(HealthRegenInterval, tickRate),
+		mobTimings:         mobTimingsFor(tickRate),
+		spawnEvery:         ticksFor(SpawnDirectorInterval, tickRate),
+		mobDespawnTicks:    ticksFor(MobDespawnGrace, tickRate),
+		spawns:             newSpawnRNG(worldSeed),
+		loot:               newLootRNG(worldSeed),
+		attackCooldown:     ticksFor(SwordCooldown, tickRate),
+		log:                log,
+		players:            make(map[uint64]*Player),
+		drops:              make(map[uint64]*itemDrop),
+		mobs:               make(map[uint64]*mob),
+		structures:         make(map[uint64]*structure),
+		byIdentity:         make(map[identity.PlayerID]*Player),
+		minersByPos:        make(map[[3]int32]map[*Player]struct{}),
 	}, nil
 }
 
@@ -346,12 +355,24 @@ type Player struct {
 	// spawn is the position Join was given, kept as the provisional respawn point. Kept
 	// rather than recomputed because the world helper that produced it can generate
 	// terrain, and the tick may not.
-	health          uint16
-	lifeState       vnet.LifeState
-	respawnTicks    uint32
-	protectionTicks uint32
-	penaltyApplied  bool
-	spawn           [3]float64
+	health       uint16
+	lifeState    vnet.LifeState
+	respawnTicks uint32
+
+	// sinceDamageTicks is how long since the last landed hit, and regenTicks how far
+	// through the current point of regeneration. Both stop counting once they have done
+	// their job, so neither grows without bound over a long session.
+	//
+	// **Neither is persisted, and that is the same rule as the respawn countdown.** A
+	// record describes a living player and carries nothing that only means something
+	// inside one session — see the note at the top of vitals.go. A player who leaves
+	// hurt comes back hurt and waits the full delay again, which is the honest answer:
+	// this server did not watch them for the time they were away.
+	sinceDamageTicks uint32
+	regenTicks       uint32
+	protectionTicks  uint32
+	penaltyApplied   bool
+	spawn            [3]float64
 
 	// inventoryDirty records that a pickup changed the slots and the client has not
 	// been told yet. Guarded by sim.mu rather than by the inventory's own lock: it is
