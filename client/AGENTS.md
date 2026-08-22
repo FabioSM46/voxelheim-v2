@@ -1546,14 +1546,20 @@ Recorded here so the next reader does not mistake them for oversights:
   still exactly one camera** — `player/camera.rs`'s rule is untouched, and this adds no second
   camera and no render target.
 - **The screen is not a window onto the world, and three things make that true together.** The
-  camera clears to the screen's own flat `BACKDROP` while it is up and to `Daylight::FIXED.sky`
-  the moment a session exists; the root overlay is transparent, where it used to be a 98% sheet
+  camera clears to the screen's own flat `BACKDROP` while it is up and **puts back only what this
+  screen put there** — restoring `Daylight::FIXED.sky` unconditionally would have overwritten
+  `sky::drive_the_sky` on every frame of every world with a clock, so the day would never have
+  turned; the root overlay is transparent, where it used to be a 98% sheet
   that would have hidden the model; and the model is despawned with the screen. Change any one of
   them and the other two stop making sense.
 - **What the UI contributes is a hole, not a picture.** `PreviewStage` is a node with no
   background whose computed rect is where the model is placed — which is what keeps the figure and
   the layout agreeing across a resize. It sits *outside* the panel and has to: a `bevy_ui` parent
   draws behind its children, so a transparent node inside an opaque panel shows the panel. The
+  rect comes from **`UiGlobalTransform`, not `GlobalTransform`** — `bevy_ui`'s layout writes the
+  first and leaves the second at the identity, so reading the wrong one puts every stage at the
+  top-left corner of the screen; its translation is the node's *centre* and both it and
+  `ComputedNode::size` are physical pixels, which is why no scale-factor term appears. The
   placement goes through the projection rather than `Camera::viewport_to_world`, because that one
   needs a viewport and a headless app has none — the maths would be the one part of the feature no
   test could reach. Anchor on the **vertical**: the field of view Bevy holds fixed across a resize

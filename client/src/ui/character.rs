@@ -22,6 +22,7 @@
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use bevy::ui::UiGlobalTransform;
 use bevy::window::PrimaryWindow;
 use std::f32::consts::TAU;
 
@@ -1042,7 +1043,7 @@ fn world_point(
 fn place_the_preview(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
-    stages: Query<(&ComputedNode, &GlobalTransform), With<PreviewStage>>,
+    stages: Query<(&ComputedNode, &UiGlobalTransform), With<PreviewStage>>,
     mut models: Query<&mut Transform, With<PreviewModel>>,
 ) {
     let Some((camera, projection)) = cameras.iter().next() else {
@@ -1064,7 +1065,17 @@ fn place_the_preview(
             if size.x <= 0.0 || size.y <= 0.0 {
                 return;
             }
-            let middle = stage.translation().truncate();
+            // `UiGlobalTransform`, not `GlobalTransform` — `bevy_ui`'s layout writes the
+            // first and leaves the second at whatever transform propagation made of a
+            // node's default `Transform`, which is the identity. Reading the wrong one put
+            // every stage at the origin, which is the top-left corner of the screen.
+            //
+            // Its translation *is* the node's centre: `ui_layout_system` adds a
+            // `local_center` and reads the pair back as `Rect::from_center_size(transform
+            // .translation, node.size())`. Both are physical pixels, and so is
+            // `Window::physical_size`, so the scale factor cancels and no display-scaling
+            // term is needed.
+            let middle = stage.translation;
             (
                 Vec2::new(
                     middle.x / size.x * 2.0 - 1.0,
@@ -1125,22 +1136,33 @@ fn paint_the_backdrop(
     session: Option<Res<Session>>,
     mut cameras: Query<&mut Camera, With<WorldCamera>>,
 ) {
-    let wanted = if choice.is_some() && session.is_none() {
-        BACKDROP
-    } else {
-        Daylight::FIXED.sky
-    };
+    let up = choice.is_some() && session.is_none();
     for mut camera in &mut cameras {
-        // `ClearColorConfig` is not `PartialEq`, so the comparison is on the colour the
-        // two arms actually differ in. Written only on a change for the reason every other
-        // write on this screen is: `ResMut`/`Mut` marks the component changed on `DerefMut`
-        // whether or not the value moved.
+        // `ClearColorConfig` is not `PartialEq`, so the comparison is on the colour the two
+        // cases actually differ in. Written only on a change for the reason every other
+        // write on this screen is: `Mut` marks the component changed on `DerefMut` whether
+        // or not the value moved.
         let current = match camera.clear_color {
             ClearColorConfig::Custom(colour) => Some(colour),
             _ => None,
         };
-        if current != Some(wanted) {
-            camera.clear_color = ClearColorConfig::Custom(wanted);
+
+        if up {
+            if current != Some(BACKDROP) {
+                camera.clear_color = ClearColorConfig::Custom(BACKDROP);
+            }
+        } else if current == Some(BACKDROP) {
+            // **Put back once, and only what this screen put there.** Writing the fixed
+            // sky whenever a session exists would have been this system overwriting
+            // `player::sky::drive_the_sky` on every frame of every world with a clock —
+            // which is every world that has one, so the day would never have turned. Found
+            // by the review of this pull request.
+            //
+            // `Daylight::FIXED` is the right value to restore to and the wrong one to keep
+            // asserting: it is what `player::camera` spawns the camera with, so a world
+            // with no clock lands exactly where it started, and a world with a clock is
+            // corrected by its own system on the very next frame.
+            camera.clear_color = ClearColorConfig::Custom(Daylight::FIXED.sky);
         }
     }
 }
@@ -2469,11 +2491,135 @@ mod tests {
         assert_eq!(clear_colour(&app, camera), Some(Daylight::FIXED.sky));
     }
 
+    /// A sky somebody else is driving is left alone.
+    ///
+    /// **The half of the backdrop that had a bug in it**, found by the review of this pull
+    /// request. Restoring `Daylight::FIXED.sky` whenever a session existed made this system
+    /// overwrite `player::sky::drive_the_sky` on every frame of every world with a clock —
+    /// so the day would never have turned. It now puts back only what it put there.
+    #[test]
+    fn a_sky_this_screen_did_not_set_is_left_alone() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+        let camera = app.world_mut().spawn((WorldCamera, Camera::default())).id();
+        app.update();
+        assert_eq!(
+            clear_colour(&app, camera),
+            Some(BACKDROP),
+            "the screen is up"
+        );
+
+        // The world arrives, and its clock paints a dusk nobody here chose.
+        let dusk = Color::srgb(0.42, 0.21, 0.11);
+        app.insert_resource(a_session());
+        app.update();
+        app.world_mut()
+            .entity_mut(camera)
+            .get_mut::<Camera>()
+            .expect("the camera is still there")
+            .clear_color = ClearColorConfig::Custom(dusk);
+
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            clear_colour(&app, camera),
+            Some(dusk),
+            "the character screen repainted a sky it did not set"
+        );
+    }
+
     fn clear_colour(app: &App, camera: Entity) -> Option<Color> {
         match app.world().get::<Camera>(camera)?.clear_color {
             ClearColorConfig::Custom(colour) => Some(colour),
             _ => None,
         }
+    }
+
+    /// The model lands inside its stage, from a layout this test supplies by hand.
+    ///
+    /// **The coupling end to end**, and the test the review of this pull request earned:
+    /// the placement reads `UiGlobalTransform` and `ComputedNode`, and reading the *other*
+    /// transform — `GlobalTransform`, which `bevy_ui`'s layout does not write — put every
+    /// stage at the origin and the model in the top-left corner of the screen. A test that
+    /// only checked `world_point`'s arithmetic could not see that, because the arithmetic
+    /// was right.
+    ///
+    /// The layout values are inserted rather than computed: `MinimalPlugins` runs no taffy,
+    /// and what is under test is which components are read and what is done with them.
+    #[test]
+    fn the_model_lands_inside_the_stage_the_layout_gave_it() {
+        let mut app = headless(CharacterChoice::for_a_test(Vec::new(), 3));
+
+        // A 1600x900 window with the stage's centre a quarter of the way in from the left
+        // and halfway up: screen fraction (-0.5, 0).
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: bevy::window::WindowResolution::new(1600, 900),
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        let _ = window;
+        let camera = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Camera::default(),
+                Projection::default(),
+                Transform::default(),
+                GlobalTransform::default(),
+            ))
+            .id();
+        let _ = camera;
+
+        let mut stage = app
+            .world_mut()
+            .query_filtered::<Entity, With<PreviewStage>>();
+        let stage = stage
+            .iter(app.world())
+            .next()
+            .expect("the screen reserves a stage");
+        app.world_mut().entity_mut(stage).insert((
+            ComputedNode {
+                size: Vec2::new(200.0, 360.0),
+                ..ComputedNode::DEFAULT
+            },
+            UiGlobalTransform::from_xy(400.0, 450.0),
+        ));
+        app.update();
+
+        let world = app.world_mut();
+        let mut placed = world.query_filtered::<&Transform, With<PreviewModel>>();
+        let model = placed
+            .iter(world)
+            .next()
+            .copied()
+            .expect("the model is placed");
+
+        // Left of centre, because the stage is: a camera looks along -Z, so its right is
+        // +X and a stage at screen fraction -0.5 puts the model at negative x.
+        assert!(
+            model.translation.x < -0.1,
+            "the stage is left of centre and the model is at {}",
+            model.translation.x
+        );
+        assert!(
+            (model.translation.z + PREVIEW_DISTANCE).abs() < 1e-4,
+            "the model is not {PREVIEW_DISTANCE} in front of the camera: {}",
+            model.translation.z
+        );
+
+        // And it is scaled to the stage's share of the window height, not to the window.
+        let half_height = PREVIEW_DISTANCE * (std::f32::consts::FRAC_PI_4 / 2.0).tan();
+        let expected = (360.0 / 900.0 * half_height * 2.0) / preview_frame().size.y;
+        assert!(
+            (model.scale.x - expected).abs() < 1e-4,
+            "scaled to {} where the stage asks for {expected}",
+            model.scale.x
+        );
     }
 
     /// The stage and the model agree about where on the screen the figure is.
