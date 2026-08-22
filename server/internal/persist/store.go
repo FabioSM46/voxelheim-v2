@@ -721,9 +721,7 @@ func (s *Store) recordPath(id CharacterID) string {
 func encodeRecord(rec Record) []byte {
 	name := rec.Name
 
-	buf := make([]byte, recordHeaderSize+len(name)+world.ChecksumSize)
-	copy(buf[0:4], playerMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:8], StoreVersion)
+	buf := world.NewRecord(recordHeaderSize, len(name), playerMagic, StoreVersion)
 	// Seconds, in UTC, because a record is compared by a person reading a log rather
 	// than by anything that needs sub-second resolution — and because a zero time
 	// round-trips through Unix seconds unambiguously.

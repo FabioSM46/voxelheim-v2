@@ -332,9 +332,8 @@ func encodeAccount(acct Account) ([]byte, error) {
 	provider, subject := acct.Identity.Provider, acct.Identity.Subject
 	name := truncateName(acct.DisplayName)
 
-	buf := make([]byte, recordHeaderSize+len(provider)+len(subject)+len(name)+world.ChecksumSize)
-	copy(buf[0:4], accountMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:8], StoreVersion)
+	buf := world.NewRecord(recordHeaderSize, len(provider)+len(subject)+len(name),
+		accountMagic, StoreVersion)
 	copy(buf[offAccountID:offAccountID+AccountIDSize], acct.ID[:])
 	// Seconds, in UTC, because an account's age is read by a person rather than by
 	// anything needing sub-second resolution — and because a whole second round-trips

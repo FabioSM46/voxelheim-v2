@@ -563,9 +563,8 @@ func syncDir(dir string) error {
 }
 
 func encodeWorldFile(seed int64) []byte {
-	buf := make([]byte, worldFileSize)
-	copy(buf[0:4], worldMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:8], StoreVersion)
+	// No body: world.bin is header and checksum, so every field below is a header field.
+	buf := NewRecord(worldFileSize-ChecksumSize, 0, worldMagic, StoreVersion)
 	binary.LittleEndian.PutUint32(buf[8:12], WorldgenVersion)
 	binary.LittleEndian.PutUint64(buf[12:20], uint64(seed))
 	PutChecksum(buf)
@@ -596,9 +595,7 @@ func decodeWorldFile(data []byte) (int64, uint32, error) {
 func encodeChunkFile(coord Coord, edits map[int]Block) ([]byte, error) {
 	indices := slices.Sorted(maps.Keys(edits))
 
-	buf := make([]byte, chunkHeaderSize+len(indices)*chunkEntrySize+ChecksumSize)
-	copy(buf[0:4], chunkMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:8], StoreVersion)
+	buf := NewRecord(chunkHeaderSize, len(indices)*chunkEntrySize, chunkMagic, StoreVersion)
 	binary.LittleEndian.PutUint32(buf[8:12], uint32(coord.X))
 	binary.LittleEndian.PutUint32(buf[12:16], uint32(coord.Y))
 	binary.LittleEndian.PutUint32(buf[16:20], uint32(coord.Z))
@@ -665,6 +662,32 @@ func decodeChunkFile(want Coord, data []byte) (map[int]Block, error) {
 		at += chunkEntrySize
 	}
 	return edits, nil
+}
+
+// NewRecord allocates a record of the shape every store under this directory writes: a
+// header, a body, and a trailing checksum — with the magic and the format version already
+// stamped into the first [HeaderSize] bytes.
+//
+// **The write-side twin of [CheckHeader], and the reason it exists is that it had none.**
+// The magic and the version were read in one place and written in eight, so the two halves
+// of one format decision sat on opposite sides of the package boundary: a change to
+// [HeaderSize], to the field order, or to the endianness of the version would have been one
+// edit here and eight to find. Nothing about the bytes changes — this writes exactly what
+// those eight sites wrote.
+//
+// headerSize is the caller's own, because a store's header is this package's magic and
+// version followed by whatever fixed fields that store keeps. bodyLen is everything after
+// the header and before the checksum. The caller fills both and calls [PutChecksum] last,
+// which is the one step that has to happen after the body is written.
+//
+// A headerSize below [HeaderSize] is a caller bug rather than a corrupt file, and it is
+// left to panic on the slice: every caller passes a constant, so it cannot survive that
+// store's own tests.
+func NewRecord(headerSize, bodyLen int, magic [4]byte, version uint32) []byte {
+	buf := make([]byte, headerSize+bodyLen+ChecksumSize)
+	copy(buf[0:4], magic[:])
+	binary.LittleEndian.PutUint32(buf[4:HeaderSize], version)
+	return buf
 }
 
 // CheckHeader validates the magic number and the format version a record claims.

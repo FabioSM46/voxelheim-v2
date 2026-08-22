@@ -163,9 +163,7 @@ func (s *ClockStore) Save(tickOfDay uint32) error {
 
 // encodeClock lays out the sixteen bytes.
 func encodeClock(tickOfDay uint32) []byte {
-	buf := make([]byte, clockFileSize)
-	copy(buf[0:4], clockMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:8], ClockVersion)
+	buf := world.NewRecord(offClockTickOfDay, 4, clockMagic, ClockVersion)
 	binary.LittleEndian.PutUint32(buf[offClockTickOfDay:offClockTickOfDay+4], tickOfDay)
 	world.PutChecksum(buf)
 	return buf

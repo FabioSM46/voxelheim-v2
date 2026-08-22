@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -600,9 +599,7 @@ func readKeyFile(path string, size int, secret bool) ([]byte, error) {
 
 // encodeKeyRecord wraps one 32-byte half in the record discipline above.
 func encodeKeyRecord(magic [4]byte, payload []byte) []byte {
-	buf := make([]byte, world.HeaderSize+len(payload)+world.ChecksumSize)
-	copy(buf[0:4], magic[:])
-	binary.LittleEndian.PutUint32(buf[4:world.HeaderSize], KeyStoreVersion)
+	buf := world.NewRecord(world.HeaderSize, len(payload), magic, KeyStoreVersion)
 	copy(buf[world.HeaderSize:], payload)
 	world.PutChecksum(buf)
 	return buf
