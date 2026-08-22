@@ -18,7 +18,8 @@ use bevy::prelude::*;
 
 use super::crafting::{ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
 use super::{
-    ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, set_if_changed,
+    ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
+    set_if_changed,
 };
 use crate::net::{
     InventoryInbox, InventoryMoveRequest, InventoryStack, Outbound, RepairRequest, Sent, Session,
@@ -142,6 +143,7 @@ impl Plugin for InventoryPlugin {
             .init_resource::<InputMode>()
             .init_resource::<InputCadence>()
             .init_resource::<SelfVitals>()
+            .init_resource::<ViewMode>()
             .add_message::<InventoryClick>()
             // NetPlugin initialises the same inbox. Whichever plugin is built first
             // creates it and the other finds it.

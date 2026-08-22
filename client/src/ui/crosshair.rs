@@ -5,7 +5,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use bevy::prelude::*;
 
 use crate::net::Session;
-use crate::player::{ApplyMiningFeedback, InputMode, MiningFeedback};
+use crate::player::{ApplyMiningFeedback, InputMode, MiningFeedback, ViewMode};
 use crate::world::palette;
 
 const FRAME_EDGE: f32 = 48.0;
@@ -19,6 +19,9 @@ pub(super) struct CrosshairPlugin;
 impl Plugin for CrosshairPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MiningFeedback>()
+            // `PlayerCameraPlugin` owns it in the game. Initialising it here keeps this
+            // module's headless contract complete when it is built on its own.
+            .init_resource::<ViewMode>()
             .add_systems(Startup, spawn_crosshair)
             .add_systems(
                 Update,
@@ -151,12 +154,19 @@ fn bar(left: f32, top: f32, width: f32, height: f32) -> Node {
     }
 }
 
+/// The crosshair is up exactly while there is something to aim.
+///
+/// The view term matches `InputGate::may_aim`, which is what actually stops the ray being
+/// cast — this is presentation and follows it. A crosshair over a third-person view would
+/// be a sight for a shot the client will not take, and the mode exists to be looked
+/// *through* rather than aimed with.
 fn show_crosshair(
     mode: Res<InputMode>,
+    view: Res<ViewMode>,
     session: Option<Res<Session>>,
     mut roots: Query<&mut Visibility, With<CrosshairRoot>>,
 ) {
-    let next = if *mode == InputMode::Playing && session.is_some() {
+    let next = if *mode == InputMode::Playing && session.is_some() && view.first_person() {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -271,5 +281,27 @@ mod tests {
                 "mode {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn third_person_hides_the_crosshair_too() {
+        // A sight for a shot the client will not take. `InputGate::may_aim` is closed in
+        // this view, so nothing is outlined and no ray is cast — a crosshair over it would
+        // be pointing at something the player cannot reach.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<InputMode>()
+            .insert_resource(session())
+            .add_plugins(CrosshairPlugin);
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Visible);
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Visible);
     }
 }

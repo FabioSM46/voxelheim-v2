@@ -70,6 +70,7 @@ pub(crate) use appearance::{
     slots as body_slots,
 };
 
+pub use camera::{Orbit, ViewMode};
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
 pub use interpolate::SnapshotBuffer;
 pub use inventory::{
@@ -213,6 +214,11 @@ impl Plugin for PlayerPlugin {
                         // After the flush, because the children it writes to are spawned
                         // by a command and a queued spawn is invisible to a query.
                         dress_bodies,
+                        // After the flush too: the local body is spawned by the same
+                        // command, and this is what decides whether the player is looking
+                        // at it. Inside the set rather than after it, so the visibility a
+                        // frame draws is the one this frame's view asked for.
+                        show_the_local_body,
                         drops::animate,
                         mobs::animate,
                         structures::animate,
@@ -563,6 +569,7 @@ impl SelfVitals {
 pub struct InputGate<'w> {
     mode: Res<'w, InputMode>,
     vitals: Res<'w, SelfVitals>,
+    view: Res<'w, ViewMode>,
 }
 
 impl InputGate<'_> {
@@ -576,9 +583,14 @@ impl InputGate<'_> {
         self.vitals.dead()
     }
 
+    /// Which view the world is being drawn in. See [`ViewMode`].
+    pub fn view(&self) -> ViewMode {
+        *self.view
+    }
+
     /// Whether aiming, targeting and the outline are live.
     pub fn may_aim(&self) -> bool {
-        *self.mode == InputMode::Playing && !self.vitals.dead()
+        *self.mode == InputMode::Playing && !self.vitals.dead() && self.view.first_person()
     }
 
     /// Whether a gameplay request may be originated this frame.
@@ -586,8 +598,18 @@ impl InputGate<'_> {
     /// Stricter than [`Self::may_aim`] by the mode's change flag: a transition and the key
     /// or click that caused it share a frame, and treating that frame as UI-owned is what
     /// keeps clicking *Resume* from also swinging at the block behind the button.
+    ///
+    /// **The view term is repeated rather than inherited, and that is the point.** These
+    /// are two independent expressions over the same inputs — `may_act` is not defined as
+    /// `may_aim` plus a condition — so a term added to one is simply absent from the
+    /// other. Closing only `may_aim` for third person would hide the crosshair and the
+    /// outline and leave every request still reachable: no sight, and clicking still
+    /// mines. Third person closes both.
     pub fn may_act(&self) -> bool {
-        *self.mode == InputMode::Playing && !self.mode.is_changed() && !self.vitals.dead()
+        *self.mode == InputMode::Playing
+            && !self.mode.is_changed()
+            && !self.vitals.dead()
+            && self.view.first_person()
     }
 }
 
@@ -670,12 +692,33 @@ fn sample_input(
     gate: InputGate<'_>,
     mut intent: ResMut<MoveIntent>,
     mut look: ResMut<LookState>,
+    mut orbit: ResMut<Orbit>,
 ) {
     // A mode transition and its key or pointer event share a frame. Treat that frame as
     // UI-owned too, so clicking Resume cannot also swing at the block behind the button.
     if *gate.mode != InputMode::Playing || gate.mode.is_changed() {
         set_if_changed(&mut intent, MoveIntent::default());
+        // Released rather than left as it was: a player who opened the pause menu with the
+        // orbit key down is not holding it any more as far as this client is concerned,
+        // and an orbit that never settles would leave the camera off to one side for the
+        // rest of the session.
+        if orbit.held {
+            orbit.held = false;
+        }
         return;
+    }
+
+    // **Which angle the mouse moves, and the only place that is decided.** Third person
+    // with the orbit key held moves a camera-only offset; everything else moves the
+    // character's own look. That is what keeps holding the key from spinning the player on
+    // the server — `LookState::yaw` is what `PlayerInput` carries, and the orbit is not
+    // in it.
+    let orbiting = !gate.view().first_person()
+        && keys.as_ref().is_some_and(|keys| {
+            keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+        });
+    if orbit.held != orbiting {
+        orbit.held = orbiting;
     }
 
     if let Some(pointer) = pointer
@@ -683,14 +726,28 @@ fn sample_input(
     {
         // Right turns right: looking along -Z, turning towards +X is a *negative* rotation
         // about +Y. Screen y grows downward, so a downward drag has to lower the pitch.
-        let next = LookState {
-            yaw: look.yaw - pointer.delta.x * LOOK_SENSITIVITY,
-            pitch: (look.pitch - pointer.delta.y * LOOK_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH),
-        };
-        // Wrapped here rather than left to grow, so the yaw stays a number a lerp can use:
-        // the server wraps what it echoes, and a client whose own copy had drifted a
-        // thousand turns away would disagree with every snapshot about which way it faces.
-        set_if_changed(&mut look, wrap_look(next));
+        let yaw = -pointer.delta.x * LOOK_SENSITIVITY;
+        let pitch = -pointer.delta.y * LOOK_SENSITIVITY;
+        if orbiting {
+            // Unclamped here; `camera_placement` clamps the sum, so a swung camera and a
+            // raised head cannot add up to more pitch than either could reach alone.
+            let next = Orbit {
+                yaw: orbit.yaw + yaw,
+                pitch: orbit.pitch + pitch,
+                held: orbit.held,
+            };
+            set_if_changed(&mut orbit, next);
+        } else {
+            let next = LookState {
+                yaw: look.yaw + yaw,
+                pitch: (look.pitch + pitch).clamp(-MAX_PITCH, MAX_PITCH),
+            };
+            // Wrapped here rather than left to grow, so the yaw stays a number a lerp can
+            // use: the server wraps what it echoes, and a client whose own copy had
+            // drifted a thousand turns away would disagree with every snapshot about which
+            // way it faces.
+            set_if_changed(&mut look, wrap_look(next));
+        }
     }
 
     // Dead, as the *server* says. The axes are zeroed rather than the input stream being
@@ -1058,14 +1115,17 @@ fn placement(state: &interpolate::Interpolated) -> Transform {
 
 /// Spawns the entity that draws one of the server's entities.
 ///
-/// This session's own player gets **no mesh and no children**. The camera sits at its
-/// eyes, so a body there would fill the screen with the inside of the player's own head.
-/// A third-person view is what would want one, and that is a camera issue rather than this
-/// one — which is also why it carries no [`Worn`]: there is nothing to dress.
+/// Everybody gets one child per part, all six under the one transform, and none of them
+/// carries an offset: the meshes are authored with their origin at the feet, which is the
+/// point the parent already stands on.
 ///
-/// Everybody else gets one child per part, all six under the one transform, and none of
-/// them carries an offset: the meshes are authored with their origin at the feet, which is
-/// the point the parent already stands on.
+/// **This session's own player is drawn the same way and simply hidden in first person.**
+/// It used to get no mesh, no children and no [`Worn`] at all — the camera sits at its
+/// eyes, so a body there fills the screen with the inside of its own head. #172 gave that
+/// camera somewhere else to be, and a body that exists but is invisible is a much smaller
+/// thing than a second spawn path: `dress_bodies` needs the `Worn` it was denied,
+/// `show_the_local_body` toggles a `Visibility` the renderer already honours, and toggling
+/// the view therefore cannot respawn anything.
 fn spawn_body(
     commands: &mut Commands,
     wardrobe: &mut Wardrobe<'_>,
@@ -1074,13 +1134,16 @@ fn spawn_body(
     worn: Appearance,
     placed: Transform,
 ) {
-    if entity_id == local_entity_id {
-        commands.spawn((Body(entity_id), LocalPlayer, placed));
-        return;
-    }
-
+    let local = entity_id == local_entity_id;
     let parts = wardrobe.outfit(worn);
     let owner = commands.spawn((Body(entity_id), Worn(worn), placed)).id();
+    if local {
+        // Hidden until `show_the_local_body` says otherwise, which is the honest starting
+        // value: the client starts in first person.
+        commands
+            .entity(owner)
+            .insert((LocalPlayer, Visibility::Hidden));
+    }
     commands.entity(owner).with_children(|parent| {
         for (part, mesh, material) in parts {
             parent.spawn((
@@ -1091,6 +1154,25 @@ fn spawn_body(
             ));
         }
     });
+}
+
+/// Shows the local player's body exactly while the camera is not inside its head.
+///
+/// `Visibility` rather than spawning and despawning, so the body the player looks at in
+/// third person is the same entity the snapshots have been driving all along — with the
+/// appearance `dress_bodies` already put on it, and no frame of a bare figure while the
+/// wardrobe catches up.
+fn show_the_local_body(view: Res<ViewMode>, mut bodies: Query<&mut Visibility, With<LocalPlayer>>) {
+    let next = if view.first_person() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut visibility in &mut bodies {
+        if *visibility != next {
+            *visibility = next;
+        }
+    }
 }
 
 /// Republishes what the overlay reports.

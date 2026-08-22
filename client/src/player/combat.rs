@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 use super::crafting;
 use super::inventory::{Inventory, SelectedSlot};
-use super::{ApplySnapshots, InputCadence, InputGate};
+use super::{ApplySnapshots, InputCadence, InputGate, ViewMode};
 use crate::net::{AttackRequest, Outbound, Sent, encode_attack_request};
 
 /// The button that swings, and the same one that mines. Which of the two it means is
@@ -63,6 +63,9 @@ pub(super) struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
+        // `PlayerCameraPlugin` owns it in the game; here too, so `InputGate` — which
+        // reads it — resolves when this module is built on its own.
+        app.init_resource::<ViewMode>();
         app.add_message::<SwingSent>().add_systems(
             Update,
             send_attacks

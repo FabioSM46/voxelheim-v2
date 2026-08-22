@@ -9,7 +9,9 @@
 //! what proves [`sample_input`] tolerates its absence.
 
 use bevy::asset::AssetPlugin;
+use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::MouseMotion;
 use bevy::time::TimeUpdateStrategy;
 
@@ -205,9 +207,13 @@ fn a_snapshot_places_the_local_player_exactly_where_the_server_says() {
 }
 
 #[test]
-fn the_local_player_has_no_body_and_another_player_has_one() {
-    // The camera sits at the local player's eyes, so a body there would fill the screen
-    // with the inside of its own head. Another player is exactly what a body is for.
+fn the_local_player_is_drawn_like_everybody_else_and_hidden_while_it_is_the_eye() {
+    // **This assertion is inverted from what it was, on purpose** — see #172. The local
+    // player used to get no mesh and no children at all, because the camera sat at its
+    // eyes and a body there fills the screen with the inside of its own head. It is now
+    // built from the same rig as everybody else and simply hidden while the camera is
+    // still the eye, which is what lets the third-person view have something to look at
+    // without a second spawn path to keep in step.
     let mut app = headless_player();
     deliver(
         &mut app,
@@ -227,8 +233,342 @@ fn the_local_player_has_no_body_and_another_player_has_one() {
         .map(|(body, children)| (body.0, children.is_some_and(|drawn| !drawn.is_empty())))
         .collect();
     drawn.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        drawn,
+        vec![(LOCAL_ID, true), (99, true)],
+        "both bodies are drawn from parts"
+    );
 
-    assert_eq!(drawn, vec![(LOCAL_ID, false), (99, true)]);
+    assert_eq!(
+        local_visibility(&mut app),
+        Visibility::Hidden,
+        "the client starts in first person, where the body is inside the camera"
+    );
+}
+
+/// What the local body's own `Visibility` says. Its own, not the computed one: there is no
+/// render app here to propagate inheritance, and the value this client writes is the thing
+/// under test.
+fn local_visibility(app: &mut App) -> Visibility {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<&Visibility, With<LocalPlayer>>();
+    let found: Vec<Visibility> = query.iter(world).copied().collect();
+    assert_eq!(found.len(), 1, "exactly one body is this session's own");
+    found[0]
+}
+
+/// A session, two players and an appearance for each, one frame in.
+fn a_world_with_a_body(app: &mut App) {
+    describe(app, LOCAL_ID, an_appearance(HairModel::Braided));
+    deliver(
+        app,
+        1,
+        vec![state(LOCAL_ID, [1.5, 64.0, -2.5], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+}
+
+/// Drags the pointer through the event `InputPlugin` accumulates, and one frame.
+///
+/// [`drag`] pokes `AccumulatedMouseMotion` directly, which only works in an app with no
+/// `InputPlugin` — the plugin recomputes that resource in `PreUpdate` from the messages
+/// below, so a poked value is gone before `sample_input` runs. Every test that needs both
+/// a keyboard and a pointer has to come this way.
+fn drag_with_input(app: &mut App, delta: Vec2) {
+    app.world_mut().write_message(MouseMotion { delta });
+    app.update();
+}
+
+/// Presses the view toggle for one frame.
+///
+/// Written as a `KeyboardInput` message rather than poked into `ButtonInput`, because
+/// `InputPlugin` clears `just_pressed` at the start of every frame — a resource written
+/// before `update()` arrives at `Update` already cleared, and the toggle is an edge. The
+/// same reason `combat.rs` and `structures.rs` drive their presses this way.
+fn press_toggle(app: &mut App) {
+    app.world_mut().write_message(KeyboardInput {
+        key_code: KeyCode::F5,
+        logical_key: Key::F5,
+        state: ButtonState::Pressed,
+        text: None,
+        repeat: false,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+    app.world_mut().write_message(KeyboardInput {
+        key_code: KeyCode::F5,
+        logical_key: Key::F5,
+        state: ButtonState::Released,
+        text: None,
+        repeat: false,
+        window: Entity::PLACEHOLDER,
+    });
+    app.update();
+}
+
+#[test]
+fn the_toggle_shows_the_body_and_puts_the_camera_behind_it_without_respawning_anything() {
+    let mut app = headless_player();
+    app.add_plugins(InputPlugin);
+    a_world_with_a_body(&mut app);
+
+    let feet = Vec3::new(1.5, 64.0, -2.5);
+    let eye = feet + Vec3::Y * constants::EYE_HEIGHT;
+    let body = body_of(&mut app, LOCAL_ID).expect("the local player is drawn");
+    let worn_before = *app
+        .world()
+        .get::<Worn>(body)
+        .expect("the local body is dressed like every other");
+    assert_eq!(camera_transform(&mut app).translation, eye, "first person");
+
+    press_toggle(&mut app);
+
+    assert_eq!(*app.world().resource::<ViewMode>(), ViewMode::ThirdPerson);
+    assert_eq!(local_visibility(&mut app), Visibility::Inherited);
+    assert_eq!(
+        body_of(&mut app, LOCAL_ID),
+        Some(body),
+        "the toggle respawned the body instead of revealing the one that was there"
+    );
+    assert_eq!(
+        *app.world().get::<Worn>(body).expect("still dressed"),
+        worn_before,
+        "the toggle undressed the body"
+    );
+
+    // Behind the eye by the whole boom, because nothing has been streamed to stop it —
+    // and still looking the same way, which is what "behind" means here.
+    let placed = camera_transform(&mut app);
+    let back = -(placed.rotation * Vec3::NEG_Z);
+    assert!(
+        (placed.translation - (eye + back * constants::BOOM_LENGTH)).length() < 1e-4,
+        "third person put the camera at {}",
+        placed.translation
+    );
+    assert!(
+        (placed.rotation.angle_between(Quat::IDENTITY)).abs() < 1e-4,
+        "the toggle changed where the player was looking"
+    );
+
+    // And back again.
+    press_toggle(&mut app);
+    assert_eq!(*app.world().resource::<ViewMode>(), ViewMode::FirstPerson);
+    assert_eq!(local_visibility(&mut app), Visibility::Hidden);
+    assert_eq!(camera_transform(&mut app).translation, eye);
+}
+
+#[test]
+fn the_local_bodys_transform_is_the_feet_position_the_snapshot_carries() {
+    // The assertion #169 established for remote bodies, now that the local one is drawn
+    // the same way: the parent stands on the feet and the meshes are authored from there,
+    // so nothing carries an offset that could drift.
+    let mut app = headless_player();
+    a_world_with_a_body(&mut app);
+
+    assert_eq!(
+        bodies(&mut app),
+        vec![(LOCAL_ID, Vec3::new(1.5, 64.0, -2.5))]
+    );
+}
+
+#[test]
+fn the_local_body_goes_when_the_snapshots_stop_naming_it() {
+    // Now that it is drawn like everybody else it has to be forgotten like everybody else:
+    // the world is the authority on which bodies exist, and `apply_snapshots` despawns any
+    // that this tick did not name — with no exception for the local one.
+    let mut app = headless_player();
+    a_world_with_a_body(&mut app);
+    assert!(body_of(&mut app, LOCAL_ID).is_some());
+
+    deliver(&mut app, 2, vec![], Instant::now() + INTERVAL);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        body_of(&mut app, LOCAL_ID),
+        None,
+        "the local body outlived the snapshots that named it"
+    );
+}
+
+#[test]
+fn holding_the_orbit_moves_the_camera_and_not_the_character() {
+    // **The criterion that keeps the mode a way of looking.** `LookState::yaw` is what
+    // `PlayerInput` carries, so a mouse that moved it while the orbit key was held would
+    // spin the character on the server for a player who only wanted to see their own back.
+    // Asserted on the look state rather than on the camera: a build that turned both would
+    // pass a test that only watched the camera move.
+    let mut app = headless_player();
+    app.add_plugins(InputPlugin);
+    a_world_with_a_body(&mut app);
+    press_toggle(&mut app);
+
+    let facing_before = *app.world().resource::<LookState>();
+    let camera_before = camera_transform(&mut app).rotation;
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    drag_with_input(&mut app, Vec2::new(120.0, 0.0));
+
+    assert_eq!(
+        *app.world().resource::<LookState>(),
+        facing_before,
+        "the orbit turned the character"
+    );
+    assert!(
+        app.world().resource::<Orbit>().swung(),
+        "the orbit did not move"
+    );
+    assert!(
+        camera_transform(&mut app)
+            .rotation
+            .angle_between(camera_before)
+            > 0.1,
+        "the camera did not move either"
+    );
+}
+
+#[test]
+fn the_camera_returns_behind_the_character_and_arrives() {
+    // Animated, not snapped: the first frame after release is neither where it was nor at
+    // rest. And it *arrives* — a decay alone approaches zero for ever, which would leave
+    // the camera fractionally off to one side for the rest of the session.
+    let mut app = headless_player();
+    app.add_plugins(InputPlugin);
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )));
+    a_world_with_a_body(&mut app);
+    press_toggle(&mut app);
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    drag_with_input(&mut app, Vec2::new(300.0, 0.0));
+    let swung = *app.world().resource::<Orbit>();
+    assert!(swung.swung(), "nothing to return from");
+
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .release(KeyCode::ShiftLeft);
+    app.update();
+
+    let midway = *app.world().resource::<Orbit>();
+    assert!(
+        midway.swung() && midway.yaw.abs() < swung.yaw.abs(),
+        "the return snapped or did not start: {swung:?} -> {midway:?}"
+    );
+
+    // One second of 16 ms frames is far more than the decay needs, and the point is that
+    // it reaches rest rather than how fast.
+    for _ in 0..64 {
+        app.update();
+    }
+    assert_eq!(
+        *app.world().resource::<Orbit>(),
+        Orbit::default(),
+        "the camera never arrived behind the character"
+    );
+}
+
+#[test]
+fn the_orbit_settles_when_the_view_is_left_or_the_pointer_is_taken_away() {
+    // Two ways out of the orbit that are not releasing the key, both of which used to be
+    // able to leave the camera swung: toggling back to first person, and a mode change
+    // that stops `sample_input` reading the keyboard at all.
+    for leave in [
+        |app: &mut App| press_toggle(app),
+        |app: &mut App| {
+            *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+            app.update();
+            app.update();
+        },
+    ] {
+        let mut app = headless_player();
+        app.add_plugins(InputPlugin);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            16,
+        )));
+        a_world_with_a_body(&mut app);
+        press_toggle(&mut app);
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        drag_with_input(&mut app, Vec2::new(300.0, 0.0));
+        assert!(app.world().resource::<Orbit>().swung());
+
+        leave(&mut app);
+        for _ in 0..64 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<Orbit>(), Orbit::default());
+    }
+}
+
+#[test]
+fn third_person_originates_no_aim_and_no_request() {
+    // **Both gates, and the reason they are asserted separately.** `may_act` is not
+    // defined in terms of `may_aim` — it is a second expression over the same inputs — so
+    // closing only the first would give a view with no crosshair and no outline in which
+    // clicking still mines. Asserted through the gate rather than through the outline,
+    // because the outline is presentation and the request is what the server would act on.
+    let mut app = headless_player();
+    app.add_plugins(InputPlugin);
+    a_world_with_a_body(&mut app);
+
+    assert_eq!(
+        gates(&mut app),
+        (true, true),
+        "first person neither aims nor acts"
+    );
+
+    press_toggle(&mut app);
+    assert_eq!(
+        gates(&mut app),
+        (false, false),
+        "third person left a gate open — and a `may_aim` that closed alone would be the \
+         worst of both: no crosshair, no outline, and clicking still mines"
+    );
+
+    press_toggle(&mut app);
+    assert_eq!(gates(&mut app), (true, true), "the view came back closed");
+}
+
+/// `(may_aim, may_act)`, read the way every consumer reads them.
+fn gates(app: &mut App) -> (bool, bool) {
+    fn read(gate: InputGate<'_>, mut answer: ResMut<GateAnswer>) {
+        *answer = GateAnswer(gate.may_aim(), gate.may_act());
+    }
+    app.init_resource::<GateAnswer>();
+    let id = app.world_mut().register_system(read);
+    // Twice, and the second answer is the one read. `may_act` carries `InputMode`'s change
+    // flag, and a system that has never run sees *every* resource as changed — so a
+    // one-shot's first answer is always `may_act == false`, for a reason that has nothing
+    // to do with the view. The second run has a real `last_run` to compare against.
+    app.world_mut().run_system(id).expect("the gate reads");
+    app.world_mut().run_system(id).expect("the gate reads");
+    let answer = *app.world().resource::<GateAnswer>();
+    (answer.0, answer.1)
+}
+
+#[derive(Resource, Default, Clone, Copy)]
+struct GateAnswer(bool, bool);
+
+#[test]
+fn there_is_still_exactly_one_camera_in_both_views() {
+    // The rule in `player/camera.rs`, which this issue could have broken in the obvious
+    // way. `camera_transform` asserts the count, so calling it in both views is the test.
+    let mut app = headless_player();
+    app.add_plugins(InputPlugin);
+    a_world_with_a_body(&mut app);
+    let _ = camera_transform(&mut app);
+    press_toggle(&mut app);
+    let _ = camera_transform(&mut app);
+    press_toggle(&mut app);
+    let _ = camera_transform(&mut app);
 }
 
 #[test]

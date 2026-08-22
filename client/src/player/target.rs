@@ -42,7 +42,7 @@ use super::constants::MAX_REACH;
 use super::inventory::ApplyInventory;
 #[cfg(test)]
 use super::inventory::SelectedSlot;
-use super::{InputCadence, InputGate, SelfVitals, set_if_changed, tick_interval};
+use super::{InputCadence, InputGate, SelfVitals, ViewMode, set_if_changed, tick_interval};
 use crate::net::{
     BlockCoord, BlockEditRequest, EditAction, MineProgress, MineProgressInbox, MineRequest,
     Outbound, Sent, Session, encode_block_edit_request, encode_mine_request,
@@ -127,6 +127,7 @@ impl Plugin for BlockTargetPlugin {
             // `PlayerPlugin` owns this in the game. Initialising it here too keeps this
             // module's headless contract complete when it is built on its own.
             .init_resource::<SelfVitals>()
+            .init_resource::<ViewMode>()
             .init_resource::<MiningFeedback>()
             .init_resource::<MineProgressInbox>()
             .add_systems(Startup, spawn_highlight)
