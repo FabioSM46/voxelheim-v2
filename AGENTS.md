@@ -465,7 +465,7 @@ reading develop's copy, never the branch's.
 
 **Safety**: DeepSeek never creates commits, pushes code, or modifies files — it is
 review-only. The bot ignores its own comments (anti-loop guard, enforced at job level
-before a runner boots). Diffs over 600,000 characters are truncated with every dropped file
+before a runner boots). Diffs over 90,000 characters are truncated with every dropped file
 named in the log **and in the review itself**: a truncated pass cannot come back clean, because
 the skipped files are injected as a finding, so the pull request blocks until a human has
 acknowledged what nobody read (#32 — on PR #30 the budget ran out after the client files and the
@@ -479,13 +479,33 @@ of that window. The cap described a limit the model did not have. It cost PR #15
 files — `session.go` and `world/store.go` among them, the two the change actually turned on —
 and the block did its job: nothing came back clean, and a human had to acknowledge the gap.
 
-600,000 characters is roughly 170K tokens, so a full-budget review still leaves most of the
-window free. **What bounds the cap now is time, not context.** A larger diff reasons for longer,
-which is why raising it moved `DEEPSEEK_REQUEST_TIMEOUT_SECONDS` with it — raise one and
-re-check the other, because the failure on the far side is the job cap killing the step with no
-output at all. The lesson is narrower than "caps should be generous": **a number defended by a
-claim about the world has to be re-checked when the world changes**, and a model swap is exactly
-that. #155 changed the model and left this paragraph describing the old one.
+**Then it was 600,000, and that was the same mistake with a bigger number.** It described the
+*new* model's context window, and the context window is not what bounds a review: the chain of
+thought is emitted into the same output budget the verdict has to fit in, so a diff can sit
+comfortably inside a 1M-token context and still leave nothing to answer with. The cap therefore
+never fired in the band where the model actually runs out — anything between roughly 124,000 and
+600,000 characters reached the API, spent the whole ceiling reasoning, and exited on a missing
+verdict with nothing anywhere saying the size was the problem. PR #164 is where that was paid for:
+124,711 characters, 1,481,442 characters of reasoning, `finish_reason=length`, 31 minutes, no
+review (#167).
+
+**90,000 is measured.** From #164, the model emitted 1,481,442 characters for 384,000 tokens —
+3.86 characters per token, so the budget is about 1,481,000 characters of output — and it reasons
+about 11.9 characters per character of diff. That puts the diff which exactly fills the budget at
+about 124,000 characters, which is where #164 landed and why it produced nothing. 90,000 spends
+roughly 277,000 of those tokens reasoning and leaves about 107,000 over. **Almost all of that is
+margin rather than verdict**: a verdict is small — #80 returned 1,060 final characters, about 275
+tokens, out of the 35,966 completion tokens that run spent in total — and what the headroom is for
+is a diff that reasons harder than the two this ratio was averaged over. Three diffs are known to
+fit whole: 50,963 (#80), 64,167 (#168, a verdict in 7m38s) and 72,350 (#169).
+
+**The cap is a truncation threshold, not a promise.** A review that still exhausts the budget
+under it is a new measurement, and this number is what comes down. The ratio belongs to the model
+and to `DEEPSEEK_REASONING_EFFORT`; change either and it has to be measured again, which is what
+`measure_only: true` on the dispatch is for. The lesson is narrower than "caps should be
+generous": **a number defended by a claim about the world has to be re-checked when the world
+changes** — and twice now the claim was about the context window when the binding constraint was
+somewhere else entirely.
 
 **An unreadable diff fails the run**, and "unreadable" covers three shapes:
 
@@ -531,10 +551,11 @@ measured 50,963-character / 13-file diff; a faithful measure-only replay then ex
 tokens too (run 32171858677: 530,226 reasoning characters, no final content). With 262,144,
 run 32175108406 reviewed that same diff on its first attempt in 8m58s and returned 1,060 final
 characters / 35,966 completion tokens; the JSON verdict parsed successfully and measure-only
-posted nothing to GitHub. 262,144 held until the diff cap was raised to 600,000 characters; a
-diff five times larger reasons for longer before it has a verdict, so the configured value now
-*is* [V4's documented 384K maximum](https://api-docs.deepseek.com/quick_start/pricing) rather
-than a step below it. Startup validation rejects zero, non-numeric and oversized values before
+posted nothing to GitHub. 262,144 held until the diff cap was raised; a larger diff reasons for
+longer before it has a verdict, so the configured value now *is*
+[V4's documented 384K maximum](https://api-docs.deepseek.com/quick_start/pricing) rather than a
+step below it — and because there is nothing above it, the diff cap is the number that has to
+absorb every later surprise. Startup validation rejects zero, non-numeric and oversized values before
 an API call, and its executable ceiling was already 384,000 — this change spends headroom that
 existed rather than creating any. **There is none left above it**: a review that exhausts 384K
 needs a smaller diff, not a larger budget. At the V4 Flash rate of $0.28 per million output

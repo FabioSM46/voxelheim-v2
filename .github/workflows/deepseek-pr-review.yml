@@ -101,9 +101,10 @@ jobs:
           # (530,226 reasoning chars, no verdict). 262,144 is the next power-of-two
           # ceiling; the same replay then finished on its first attempt in 8m58s with
           # 1,060 final chars / 35,966 completion tokens. 262,144 held until the diff
-          # cap was raised; a 600,000-char diff can reason far longer before it has a
-          # verdict, so this now sits at V4's documented 384K maximum — the ceiling the
-          # startup guard already allowed, not a new one. At the V4 Flash $0.28/M
+          # cap was raised; a larger diff reasons far longer before it has a verdict, so
+          # this now sits at V4's documented 384K maximum — the ceiling the startup guard
+          # already allowed, not a new one. Nothing sits above it, which is why
+          # DEEPSEEK_MAX_DIFF_CHARS is the number that absorbs a diff too big to answer. At the V4 Flash $0.28/M
           # output-token rate, one fully used output costs about $0.108; two fully
           # billed attempts cost at most about $0.215, excluding input.
           DEEPSEEK_MAX_OUTPUT_TOKENS: "384000"
