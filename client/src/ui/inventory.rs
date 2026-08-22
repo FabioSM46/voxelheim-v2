@@ -40,6 +40,7 @@ impl Plugin for InventoryUiPlugin {
         // The player plugin registers this too; doing it here as well keeps this module
         // headlessly testable on its own. `add_message` is idempotent.
         app.add_message::<CraftClick>()
+            .init_resource::<InventoryTab>()
             .add_systems(Startup, spawn_inventory_screen)
             .add_systems(
                 Update,
@@ -49,6 +50,10 @@ impl Plugin for InventoryUiPlugin {
                     refresh_inventory_cells,
                     refresh_recipe_rows,
                     show_inventory,
+                    // After `show_inventory`, which resets the tab when the screen opens,
+                    // so the frame it appears on is already showing the pack.
+                    switch_tabs,
+                    show_the_active_tab,
                     hover_tooltip,
                     inventory_clicks,
                     craft_clicks,
@@ -125,6 +130,60 @@ const TOOLTIP_TEXT: Color = Color::srgb(0.92, 0.94, 0.97);
 /// glyph never covers the first letter.
 const TOOLTIP_GAP: f32 = 14.0;
 
+/// Which half of the inventory screen is on show.
+///
+/// **Local presentation and nothing else.** Switching tabs originates no request, reaches no
+/// message and tells the server nothing — it is which nodes have a `Display`, decided here.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InventoryTab {
+    /// The pack and the hotbar. What the screen opens on.
+    #[default]
+    Pack,
+    /// The recipe rows, which were a third section of the one panel until #177.
+    Crafting,
+}
+
+impl InventoryTab {
+    /// Every tab, in the order the strip draws them.
+    ///
+    /// A hand-written list, for the reason `ItemShape::ALL` is one: no stable Rust
+    /// enumerates an enum's variants. What keeps it honest is that the strip is built from
+    /// it and `label` matches on the variant with no wildcard arm, so a third tab is a
+    /// build failure until it has a name — and then it appears in the strip and gets its
+    /// own panel with nothing rearranged, which is the acceptance criterion.
+    const ALL: [Self; 2] = [Self::Pack, Self::Crafting];
+
+    /// What a player reads on the tab.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Pack => "PACK",
+            Self::Crafting => "CRAFTING",
+        }
+    }
+}
+
+/// One tab in the strip: the half it selects.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct TabButton(InventoryTab);
+
+/// The container holding one tab's contents, shown by `Display` and never by `Visibility`.
+///
+/// `bevy_ui` lays a hidden node out exactly as it lays out a visible one, so a `Visibility`
+/// here would leave the crafting rows occupying the panel's height while the pack is up —
+/// the same trap `ui/character.rs` records for its two halves, and the reason both use
+/// `Display::None`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct TabPanel(InventoryTab);
+
+/// The tab currently on show.
+///
+/// Its own state rather than one of the three [`super::button_colour`] answers, for the
+/// reason the short recipe row below has one: a selected tab is not a hovered tab and not a
+/// pressed one, and a palette with three interactions has no arm for it. The three ordinary
+/// ones still come from that one function — a tab strip is exactly the fifth copy of the
+/// button palette #163 collapsed, and must not become one.
+const TAB_SELECTED: Color = Color::srgb(0.20, 0.24, 0.30);
+
 fn spawn_inventory_screen(mut commands: Commands) {
     commands
         .spawn((
@@ -155,23 +214,47 @@ fn spawn_inventory_screen(mut commands: Commands) {
                     BackgroundColor(Color::srgb(0.075, 0.085, 0.105)),
                 ))
                 .with_children(|panel| {
-                    panel.spawn(section_title("PACK"));
-                    panel.spawn((InventoryGrid::Pack, grid_node()));
-                    panel.spawn(section_title("HOTBAR"));
-                    panel.spawn((InventoryGrid::Hotbar, grid_node()));
-                    panel.spawn(section_title("CRAFTING"));
-                    spawn_recipe_rows(panel);
-                    panel.spawn((
-                        Text::new(
-                            "Left click: move stack    Right click: split    \
-                             Click a recipe to craft    E: close",
-                        ),
-                        TextFont {
-                            font_size: FontSize::Px(15.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.72, 0.75, 0.80)),
-                    ));
+                    spawn_tab_strip(panel);
+
+                    // The pack half. `Display` is set by `show_the_active_tab` from the
+                    // frame the screen is built, so the value here is only what it starts
+                    // as — and it starts as the tab the screen opens on.
+                    panel
+                        .spawn((
+                            TabPanel(InventoryTab::Pack),
+                            Node {
+                                display: Display::Flex,
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(10.0),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|pack| {
+                            pack.spawn(section_title("PACK"));
+                            pack.spawn((InventoryGrid::Pack, grid_node()));
+                            pack.spawn(section_title("HOTBAR"));
+                            pack.spawn((InventoryGrid::Hotbar, grid_node()));
+                            pack.spawn(hint(
+                                "Left click: move stack    Right click: split    E: close",
+                            ));
+                        });
+
+                    // And the crafting half, holding exactly the rows that used to be a
+                    // third section of the panel above.
+                    panel
+                        .spawn((
+                            TabPanel(InventoryTab::Crafting),
+                            Node {
+                                display: Display::None,
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(10.0),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|crafting| {
+                            spawn_recipe_rows(crafting);
+                            crafting.spawn(hint("Click a recipe to craft    E: close"));
+                        });
                 });
             overlay.spawn(tooltip_bundle());
         });
@@ -297,6 +380,58 @@ fn station_note(station: StructureKind) -> String {
         StructureKind::Campfire => "campfire",
     };
     format!("requires a {name} nearby")
+}
+
+/// The line of help under a tab's contents.
+///
+/// One per tab rather than one for the screen, and the words are the ones that were on the
+/// single line before #177 — split so each half sits under the controls it describes,
+/// nothing added and nothing dropped.
+fn hint(text: &str) -> impl Bundle {
+    (
+        Text::new(text),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.72, 0.75, 0.80)),
+    )
+}
+
+/// The strip of tabs, built from [`InventoryTab::ALL`] so a third one appears in it by
+/// existing.
+fn spawn_tab_strip(panel: &mut ChildSpawnerCommands<'_>) {
+    panel
+        .spawn(Node {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .with_children(|strip| {
+            for tab in InventoryTab::ALL {
+                strip
+                    .spawn((
+                        TabButton(tab),
+                        Button,
+                        Node {
+                            padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(BUTTON),
+                    ))
+                    .with_child((
+                        Text::new(tab.label()),
+                        TextFont {
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                        TextShadow::default(),
+                    ));
+            }
+        });
 }
 
 fn section_title(label: &str) -> impl Bundle {
@@ -478,9 +613,65 @@ fn refresh_recipe_rows(
     }
 }
 
+/// Reads the tab strip, and paints it.
+///
+/// **Originates nothing.** A press writes a resource; there is no message, no request and
+/// nothing the server could learn from it. The screen is a mirror on both tabs.
+fn switch_tabs(
+    mode: Res<InputMode>,
+    mut tabs: Query<(&TabButton, &Interaction, &mut BackgroundColor)>,
+    mut active: ResMut<InventoryTab>,
+) {
+    // The same guard `inventory_clicks` and `craft_clicks` keep, and it is load-bearing
+    // rather than tidy: without it a tab left under the pointer as the screen closes goes
+    // on selecting itself every frame, and would undo the reset `show_inventory` performs
+    // when the screen next opens. Found by `re_opening_the_screen_returns_to_the_pack`.
+    if *mode != InputMode::Inventory {
+        return;
+    }
+    for (tab, interaction, _) in &tabs {
+        if *interaction == Interaction::Pressed && *active != tab.0 {
+            *active = tab.0;
+        }
+    }
+
+    for (tab, interaction, mut colour) in &mut tabs {
+        // The selected tab keeps its own colour under the pointer too: a tab that lit up
+        // like an unselected one while hovered would read as though pressing it did
+        // something, and it does not.
+        let next = if tab.0 == *active {
+            TAB_SELECTED
+        } else {
+            button_colour(interaction)
+        };
+        if colour.0 != next {
+            colour.0 = next;
+        }
+    }
+}
+
+/// Gives the active tab a `Display` and takes it from the others.
+///
+/// `Display`, never `Visibility` — see [`TabPanel`].
+fn show_the_active_tab(active: Res<InventoryTab>, mut panels: Query<(&TabPanel, &mut Node)>) {
+    for (panel, mut node) in &mut panels {
+        let next = if panel.0 == *active {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        // Written only on a change, because `Mut<Node>` marks the component changed on the
+        // first `DerefMut` and `bevy_ui` lays a changed node's subtree out again.
+        if node.display != next {
+            node.display = next;
+        }
+    }
+}
+
 fn show_inventory(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
+    mut active: ResMut<InventoryTab>,
     mut roots: Query<&mut Visibility, With<InventoryRoot>>,
 ) {
     let next = if *mode == InputMode::Inventory && session.is_some() {
@@ -490,6 +681,12 @@ fn show_inventory(
     };
     for mut visibility in &mut roots {
         if *visibility != next {
+            // **Opening resets the tab**, which is what "Pack is the one it opens on"
+            // means for the second opening as well as the first. Inside the change guard,
+            // so a screen that is already up is left where the player put it.
+            if next == Visibility::Visible && *active != InventoryTab::Pack {
+                *active = InventoryTab::Pack;
+            }
             *visibility = next;
         }
     }
@@ -746,6 +943,195 @@ mod tests {
             .insert_resource(InputMode::Inventory)
             .add_plugins(InventoryUiPlugin);
         app
+    }
+
+    /// Which tabs have a `Display`, read the way `bevy_ui` decides whether a half occupies
+    /// the panel.
+    ///
+    /// `Display` and not `Visibility`, which is the trap: a hidden node is laid out exactly
+    /// as a visible one, so a `Visibility` here would leave the crafting rows taking up the
+    /// panel's height behind the pack. `ui/character.rs` records the same thing for its two
+    /// halves.
+    fn shown(app: &mut App) -> Vec<InventoryTab> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&TabPanel, &Node)>();
+        let mut tabs: Vec<InventoryTab> = query
+            .iter(world)
+            .filter(|(_, node)| node.display != Display::None)
+            .map(|(panel, _)| panel.0)
+            .collect();
+        tabs.sort_by_key(|tab| format!("{tab:?}"));
+        tabs
+    }
+
+    fn tab_button(app: &mut App, tab: InventoryTab) -> Entity {
+        let world = app.world_mut();
+        let mut query = world.query::<(Entity, &TabButton)>();
+        query
+            .iter(world)
+            .find(|(_, button)| button.0 == tab)
+            .map(|(entity, _)| entity)
+            .expect("every tab has a button")
+    }
+
+    fn tab_colour(app: &mut App, tab: InventoryTab) -> Color {
+        let button = tab_button(app, tab);
+        app.world()
+            .get::<BackgroundColor>(button)
+            .expect("a tab is drawn")
+            .0
+    }
+
+    #[test]
+    fn the_screen_opens_on_the_pack_and_shows_one_tab_at_a_time() {
+        let mut app = app();
+        app.update();
+
+        assert_eq!(shown(&mut app), vec![InventoryTab::Pack]);
+        assert_eq!(
+            *app.world().resource::<InventoryTab>(),
+            InventoryTab::Pack,
+            "the screen opened on something else"
+        );
+    }
+
+    #[test]
+    fn pressing_a_tab_swaps_which_half_occupies_the_panel() {
+        let mut app = app();
+        app.update();
+
+        let crafting = tab_button(&mut app, InventoryTab::Crafting);
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Pressed;
+        app.update();
+
+        assert_eq!(shown(&mut app), vec![InventoryTab::Crafting]);
+
+        let pack = tab_button(&mut app, InventoryTab::Pack);
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::None;
+        *app.world_mut()
+            .entity_mut(pack)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Pressed;
+        app.update();
+
+        assert_eq!(shown(&mut app), vec![InventoryTab::Pack]);
+    }
+
+    /// **Switching tabs originates nothing**, which is the acceptance criterion that keeps
+    /// this a refactor: the screen is a mirror on both halves, and a tab is which nodes have
+    /// a `Display` rather than anything the server could learn.
+    #[test]
+    fn switching_tabs_reports_no_intent_and_changes_no_count() {
+        let mut app = app();
+        app.update();
+        let before = app.world().resource::<Inventory>().stacks().to_vec();
+
+        for tab in [InventoryTab::Crafting, InventoryTab::Pack] {
+            let button = tab_button(&mut app, tab);
+            *app.world_mut()
+                .entity_mut(button)
+                .get_mut::<Interaction>()
+                .expect("a tab is a button") = Interaction::Pressed;
+            app.update();
+            *app.world_mut()
+                .entity_mut(button)
+                .get_mut::<Interaction>()
+                .expect("a tab is a button") = Interaction::None;
+        }
+
+        let crafts: Vec<CraftClick> = app
+            .world_mut()
+            .resource_mut::<Messages<CraftClick>>()
+            .drain()
+            .collect();
+        assert_eq!(crafts, vec![], "a tab press asked to craft something");
+        let moves: Vec<InventoryClick> = app
+            .world_mut()
+            .resource_mut::<Messages<InventoryClick>>()
+            .drain()
+            .collect();
+        assert_eq!(moves, vec![], "a tab press asked to move a stack");
+        assert_eq!(
+            app.world().resource::<Inventory>().stacks(),
+            before,
+            "a tab press changed a displayed count"
+        );
+    }
+
+    /// Closing and re-opening puts the pack back, which is what "the one it opens on" means
+    /// for the second opening as well as the first.
+    #[test]
+    fn re_opening_the_screen_returns_to_the_pack() {
+        let mut app = app();
+        app.update();
+
+        let crafting = tab_button(&mut app, InventoryTab::Crafting);
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Pressed;
+        app.update();
+        assert_eq!(shown(&mut app), vec![InventoryTab::Crafting]);
+
+        // Released, which is what a player's hand does and what `bevy_ui` writes back on
+        // the next frame. Left pressed, the stale interaction re-selects the tab on the
+        // frame the screen re-opens — a property of poking the component directly rather
+        // than of the screen.
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::None;
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+
+        assert_eq!(shown(&mut app), vec![InventoryTab::Pack]);
+    }
+
+    /// **The tab strip is not a fifth copy of the button palette.**
+    ///
+    /// #163 collapsed four copies of the three button colours into one
+    /// `ui::button_colour`, and a tab strip is exactly the next candidate. The unselected
+    /// tab wears what that function answers; the selected one wears a colour of its own,
+    /// which is the same shape the short recipe row keeps — a state the three-interaction
+    /// palette has no arm for.
+    #[test]
+    fn a_tab_reads_the_shared_palette_and_the_selected_one_keeps_its_own_colour() {
+        let mut app = app();
+        app.update();
+
+        assert_eq!(tab_colour(&mut app, InventoryTab::Pack), TAB_SELECTED);
+        assert_eq!(tab_colour(&mut app, InventoryTab::Crafting), BUTTON);
+
+        // And a hover on the selected tab does not light it like an unselected one: it
+        // would read as though pressing it did something, and it does not.
+        let pack = tab_button(&mut app, InventoryTab::Pack);
+        *app.world_mut()
+            .entity_mut(pack)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Hovered;
+        app.update();
+        assert_eq!(tab_colour(&mut app, InventoryTab::Pack), TAB_SELECTED);
+
+        // An unselected one does, through the shared function and not a copy of it.
+        let crafting = tab_button(&mut app, InventoryTab::Crafting);
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Hovered;
+        app.update();
+        assert_eq!(
+            tab_colour(&mut app, InventoryTab::Crafting),
+            button_colour(&Interaction::Hovered)
+        );
     }
 
     #[test]
