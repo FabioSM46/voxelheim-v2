@@ -635,9 +635,14 @@ mod tests {
     ///
     /// Read through the **mesh the hand is actually built from**, because `HeldShape` and
     /// `item_presentation` are private to `super::hands` and this test is not in that
-    /// module. `HandVisuals` adds one mesh per shape, so two ids share a handle exactly
-    /// when they share a shape — and the rusty sword, a blade by definition here, is what
-    /// names the blade's handle rather than this test hard-coding one.
+    /// module. The blades name their own handles rather than this test hard-coding any.
+    ///
+    /// **There is more than one blade handle now, and there used to be exactly one.**
+    /// `HandVisuals` added one mesh per shape, so "shares a handle" meant "shares a shape"
+    /// and the rusty sword alone could stand for both. #175 gave that sword its own mesh —
+    /// rust is a fact about one blade rather than about blades — so this reads the *set* of
+    /// handles the blades produce. Asserting against one of them would have quietly stopped
+    /// covering the other, which is the direction this test exists to fail in.
     ///
     /// Swept over a **range** rather than over the ids that exist today: a hand-written
     /// list would be a third copy of the item table, and the entry it lost would be the
@@ -649,13 +654,23 @@ mod tests {
         const HIGHEST_SWEPT_ID: u16 = 64;
 
         let (mut app, _sent) = clicking_app(blade());
-        let blade_mesh = held_mesh(&mut app);
+
+        // Every handle a blade produces, read off the hand rather than named here.
+        let mut blade_meshes = Vec::new();
+        for (_, stack) in blades() {
+            deliver(&mut app, stack);
+            app.update();
+            let mesh = held_mesh(&mut app);
+            if !blade_meshes.contains(&mesh) {
+                blade_meshes.push(mesh);
+            }
+        }
 
         let mut drawn_as_blades = Vec::new();
         for item_id in 1..=HIGHEST_SWEPT_ID {
             deliver(&mut app, one(item_id));
             app.update();
-            if held_mesh(&mut app) == blade_mesh {
+            if blade_meshes.contains(&held_mesh(&mut app)) {
                 drawn_as_blades.push(item_id);
                 assert!(
                     item_is_a_blade(item_id),
