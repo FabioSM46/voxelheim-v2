@@ -54,7 +54,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::codec::{
     self, ActionRefused, CharacterList, InventoryState, MineProgress, PLAYER_TOKEN_LEN,
-    PlayerToken, SessionParams, SessionTicket, Snapshot, WorldUpdate,
+    PlayerAppearance, PlayerToken, SessionParams, SessionTicket, Snapshot, WorldUpdate,
 };
 
 use super::frame::{self, FrameDecoder};
@@ -199,6 +199,13 @@ pub(super) enum SessionEvent {
     Inventory(InventoryState),
     /// Authoritative progress for one mined voxel.
     MineProgress(MineProgress),
+    /// What one visible player looks like.
+    ///
+    /// Unordered with respect to the snapshot that first carries the entity it names, and
+    /// deliberately so — `schemas/player.fbs` says either order is legal. The server sends
+    /// it *ahead* of that snapshot where it can, which is the cheap half of making the
+    /// placeholder rare rather than a guarantee the ECS may rely on.
+    Appearance(PlayerAppearance),
     /// The server refused an action, with the reason a player reads.
     ///
     /// Named apart from [`Self::Refused`] below, which means there is no session at all.
@@ -1266,6 +1273,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::MineProgress(progress)) => {
                     events.send(SessionEvent::MineProgress(progress)).ok()?;
+                }
+                Ok(Transition::Appearance(appearance)) => {
+                    events.send(SessionEvent::Appearance(appearance)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;

@@ -49,12 +49,10 @@ pub const SESSION_TICKET_LEN: usize = 96;
 /// Built through [`Appearance::new`] like every other appearance in this build, which is
 /// what makes "the placeholder is a legal appearance" a compile error rather than a
 /// sentence: the `Err` arm below cannot be reached, and the constructor is what says so.
-// Still reserved ahead of its reader, and the reader is now named: nothing *draws* an
-// entity's appearance until the issue that gives players a body worth colouring, which is
-// the one place a placeholder for "it has not arrived yet" can be used. The character
-// screen this issue adds never needs one — every appearance it draws is either one the
-// server listed or one the player is choosing.
-#[allow(dead_code)]
+// The reader arrived with the bodies: `player::apply_snapshots` dresses an entity in this
+// when no `PlayerAppearance` for it has landed yet, and `player::dress_bodies` replaces it
+// in place the moment one does. The character screen still needs none — every appearance
+// it draws is either one the server listed or one the player is choosing.
 pub const PLACEHOLDER_APPEARANCE: Appearance = match Appearance::new(
     0x0080_8080,
     0x0080_8080,

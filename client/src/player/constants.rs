@@ -4,8 +4,8 @@
 //!
 //! [`PLAYER_WIDTH`] and [`PLAYER_HEIGHT`] are copies of `game.PlayerWidth` and
 //! `game.PlayerHeight` in `server/internal/game/constants.go`. **Change one and change
-//! the other**: the server collides a box of that size and this module draws a capsule
-//! of it, so a mismatch is a body that visibly does not fit the space the server says
+//! the other**: the server collides a box of that size and this module draws a body
+//! inside it, so a mismatch is a body that visibly does not fit the space the server says
 //! it fits.
 //!
 //! They are also the **grid a character is cut on**: [`super::appearance`] divides them
@@ -81,28 +81,19 @@ pub const MAX_PITCH: f32 = FRAC_PI_2 - 0.01;
 /// extreme of its range, which shows up as a click that does nothing.
 pub const MAX_REACH: f32 = 4.5;
 
-/// How many blocks a capsule is inset from the collision box it represents.
-///
-/// The server collides an axis-aligned box; a capsule inscribed in it would poke out of
-/// the corners of the footprint, so the radius is taken from the box's half-width and
-/// the visible body sits just inside what the simulation actually blocks.
-pub const CAPSULE_RADIUS: f32 = PLAYER_WIDTH / 2.0;
-
 // The relationships between the numbers above, checked at compile time rather than by a
-// test. Each is a property of the *build* rather than of a run: a camera outside the body it
-// is following, a capsule wider than the box the server collides, or a pitch limit at
-// exactly vertical are all states no build should be able to produce, and a `const` assert
-// says so where a test would only find out afterwards.
+// test. Each is a property of the *build* rather than of a run: a camera outside the body
+// it is following, or a pitch limit at exactly vertical, are states no build should be able
+// to produce, and a `const` assert says so where a test would only find out afterwards.
+//
+// The body's own proportions are not among them any more. They were, while the body was
+// one capsule inscribed in the collision box; a rig of a dozen-odd boxes has relationships
+// a `const` expression cannot state, so `super::appearance` asserts them as tests instead
+// — which is also where the parts that deliberately leave the box are named.
 
 /// A camera above the head renders from outside the thing it follows; one at the feet
 /// renders from inside the ground.
 const _: () = assert!(EYE_HEIGHT > 0.0 && EYE_HEIGHT < PLAYER_HEIGHT);
-
-/// The capsule is the box the server collides, drawn. A radius wider than the footprint's
-/// half-width would show a player clipping into walls it is standing clear of, and a body
-/// taller than the box would put its head inside a ceiling it fits under.
-const _: () = assert!(CAPSULE_RADIUS <= PLAYER_WIDTH / 2.0);
-const _: () = assert!(2.0 * CAPSULE_RADIUS <= PLAYER_HEIGHT);
 
 /// At exactly ±π/2 the view direction is the up axis, every yaw looks identical, and the
 /// image flips as the pitch crosses it.
