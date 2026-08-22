@@ -1114,3 +1114,70 @@ func TestAFailedSaveIsRetriedRatherThanForgotten(t *testing.T) {
 		t.Fatalf("the chunk directory holds %v after the retry, want one chunk file", files)
 	}
 }
+
+// TestNewRecordWritesTheBytesTheStoresUsedToWriteThemselves is the whole of what makes
+// #139 a refactor rather than a format change.
+//
+// Eight call sites across six packages each allocated a buffer and stamped the magic and
+// the version by hand; they now call [NewRecord]. The stores' own round-trip and refusal
+// tests pass untouched, which is the specification — but they would also pass if the
+// helper and the sites had drifted together, so this pins the helper against the literal
+// sequence it replaced rather than against itself.
+func TestNewRecordWritesTheBytesTheStoresUsedToWriteThemselves(t *testing.T) {
+	const (
+		headerSize = HeaderSize + 6 // a store's own fixed fields after the version
+		bodyLen    = 5
+		version    = 7
+	)
+	magic := [4]byte{'V', 'X', 'H', 'T'}
+
+	// The three lines every one of those sites used to carry, verbatim.
+	want := make([]byte, headerSize+bodyLen+ChecksumSize)
+	copy(want[0:4], magic[:])
+	binary.LittleEndian.PutUint32(want[4:8], version)
+
+	got := NewRecord(headerSize, bodyLen, magic, version)
+
+	if len(got) != len(want) {
+		t.Fatalf("NewRecord allocated %d bytes, the hand-written form allocated %d", len(got), len(want))
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("NewRecord wrote % x, the hand-written form wrote % x", got, want)
+	}
+
+	// And it stamps only the header: everything a caller is about to fill is still zero,
+	// which is what lets a store write its own fields in any order afterwards.
+	for i := HeaderSize; i < len(got); i++ {
+		if got[i] != 0 {
+			t.Errorf("NewRecord wrote %#02x at offset %d, past the header it owns", got[i], i)
+		}
+	}
+
+	// The header this writes is the header CheckHeader reads. The two were on opposite
+	// sides of the package boundary until #139, which is the drift this pair now cannot
+	// have.
+	if err := CheckHeader(got, magic, version); err != nil {
+		t.Errorf("CheckHeader refused what NewRecord wrote: %v", err)
+	}
+}
+
+// TestNewRecordRefusesAHeaderTooSmallToHoldOne is the review of #139's finding, pinned.
+//
+// The doc comment claimed the slice was the guard. It is not: `buf[4:HeaderSize]` is out of
+// bounds only when the whole record is shorter than a header, so a short header with a long
+// body stays in range and the version lands in the caller's first body bytes — a corrupt
+// record written by the package that exists to refuse them, and written silently.
+func TestNewRecordRefusesAHeaderTooSmallToHoldOne(t *testing.T) {
+	// The case that did *not* panic before: 2 + 100 + 4 is a long buffer, so the slice was
+	// happily in bounds and wrote over what the caller thought was its own.
+	defer func() {
+		got := recover()
+		if got == nil {
+			t.Fatal("NewRecord accepted a 2-byte header and wrote the version into the body")
+		}
+		if msg, ok := got.(string); !ok || !strings.Contains(msg, "smaller than") {
+			t.Errorf("panicked with %v, which does not say what the caller got wrong", got)
+		}
+	}()
+	_ = NewRecord(2, 100, [4]byte{'V', 'X', 'H', 'T'}, 1)
+}

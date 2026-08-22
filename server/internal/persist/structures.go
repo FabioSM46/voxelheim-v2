@@ -216,9 +216,8 @@ func encodeStructures(records []StructureRecord) ([]byte, error) {
 			ErrTooManyStructures, len(records), MaxStructures)
 	}
 
-	buf := make([]byte, structuresHeaderSize+len(records)*structureEntrySize+world.ChecksumSize)
-	copy(buf[0:4], structuresMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:8], StructuresVersion)
+	buf := world.NewRecord(structuresHeaderSize, len(records)*structureEntrySize,
+		structuresMagic, StructuresVersion)
 	binary.LittleEndian.PutUint32(buf[offStructureCount:offStructureCount+4], uint32(len(records)))
 
 	for i, rec := range records {

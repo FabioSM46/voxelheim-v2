@@ -307,10 +307,9 @@ func encodeServer(srv Server) ([]byte, error) {
 		return nil, err
 	}
 
-	buf := make([]byte, recordHeaderSize+len(srv.Name)+len(srv.DisplayName)+
-		len(srv.Address)+len(srv.Fingerprint)+world.ChecksumSize)
-	copy(buf[0:4], serverMagic[:])
-	binary.LittleEndian.PutUint32(buf[4:world.HeaderSize], StoreVersion)
+	buf := world.NewRecord(recordHeaderSize,
+		len(srv.Name)+len(srv.DisplayName)+len(srv.Address)+len(srv.Fingerprint),
+		serverMagic, StoreVersion)
 	// Seconds, in UTC, because that is the resolution [OfflineAfter] is compared at and
 	// because a whole second round-trips through Unix time unambiguously.
 	binary.LittleEndian.PutUint64(buf[offLastSeen:offLastSeen+8], uint64(srv.LastSeen.UTC().Unix()))
