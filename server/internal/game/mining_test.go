@@ -1007,3 +1007,76 @@ func TestMiningWithAPickaxeCostsAQuarterOfTheHandOnTheRealPath(t *testing.T) {
 		t.Errorf("an axe on stone set a cost of %d, want the hand's %d", got, byHand)
 	}
 }
+
+// TestSwitchingToTheRightToolMidBlockAppliesImmediately is the review of #185's finding.
+//
+// The cost used to be set only when a *new* target was judged, so a player who started on
+// stone bare-handed and then selected the pickaxe without releasing the button went on
+// paying hand price until they re-targeted — while the client sent the new slot on every
+// tick. It is now re-read on every refresh.
+//
+// Progress is asserted alongside, because keeping it is what makes the change safe in both
+// directions rather than a refund.
+func TestSwitchingToTheRightToolMidBlockAppliesImmediately(t *testing.T) {
+	t.Parallel()
+
+	const toolSlot = 4
+	target := [3]int32{1, 199, 0}
+	sim, player, _, _ := newMiningPlayer(t, map[[3]int64]world.Block{
+		{1, 199, 0}: world.Stone,
+	})
+
+	byHand, ok := sim.hardnessTicks(world.Stone, ItemNone)
+	if !ok {
+		t.Fatal("stone is not breakable")
+	}
+
+	// Start bare-handed and pay a few ticks.
+	if err := player.Mine(activeMineWith(target, 1, toolSlot), true); err != nil {
+		t.Fatalf("Mine bare-handed: %v", err)
+	}
+	if player.mining.cost != byHand {
+		t.Fatalf("started at cost %d, want the hand's %d", player.mining.cost, byHand)
+	}
+	for tick := uint64(1); tick <= 3; tick++ {
+		sim.Step(tick)
+	}
+	paid := player.mining.progress
+	if paid == 0 {
+		t.Fatal("three ticks bought no progress, so there is nothing to carry across")
+	}
+
+	// Select the pickaxe and refresh the *same* target, which is what a client does on
+	// every tick while the button is held.
+	player.inventory.mu.Lock()
+	player.inventory.slots[toolSlot] = stackOf(ItemPickaxe, 1)
+	player.inventory.mu.Unlock()
+
+	if err := player.Mine(activeMineWith(target, 2, toolSlot), true); err != nil {
+		t.Fatalf("Mine after switching: %v", err)
+	}
+
+	want := max((byHand+ToolSpeedFactor-1)/ToolSpeedFactor, 1)
+	if got := player.mining.cost; got != want {
+		t.Errorf("after switching to the pickaxe the cost is %d, want %d", got, want)
+	}
+	if got := player.mining.progress; got != paid {
+		t.Errorf("switching tools changed progress from %d to %d; it must be kept", paid, got)
+	}
+
+	// And the other direction: putting the pickaxe away costs hand price again, still
+	// without a refund.
+	player.inventory.mu.Lock()
+	player.inventory.slots[toolSlot] = inventoryStack{}
+	player.inventory.mu.Unlock()
+
+	if err := player.Mine(activeMineWith(target, 3, toolSlot), true); err != nil {
+		t.Fatalf("Mine after putting it away: %v", err)
+	}
+	if got := player.mining.cost; got != byHand {
+		t.Errorf("after putting the tool away the cost is %d, want the hand's %d", got, byHand)
+	}
+	if got := player.mining.progress; got != paid {
+		t.Errorf("putting the tool away changed progress from %d to %d", paid, got)
+	}
+}

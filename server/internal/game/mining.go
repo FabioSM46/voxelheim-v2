@@ -245,6 +245,22 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 			return errors.New("the target chunk has not been delivered to this session")
 		}
 		p.mining.idleTicks = 0
+
+		// **The cost is re-read on every refresh, not only when a target is judged.**
+		// A player who starts on stone bare-handed and then selects the pickaxe without
+		// letting go of the button would otherwise go on paying hand price until they
+		// released and re-targeted — with the client faithfully sending the new slot the
+		// whole time. Found by the review of #185.
+		//
+		// Progress is untouched, and that is what makes this safe rather than exploitable
+		// in either direction: it is a count of ticks paid, so switching to the right
+		// implement makes the ticks already paid go further — up to finishing on the next
+		// one, which is the honest answer for somebody who has already paid more than the
+		// tool asks — and switching away from it leaves them owing more. Nothing is
+		// refunded and nothing is charged twice.
+		if cost, breakable := p.sim.hardnessTicks(p.mining.block, p.heldItemLocked(req.Slot)); breakable {
+			p.mining.cost = cost
+		}
 		return nil
 	}
 
