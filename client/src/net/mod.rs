@@ -139,6 +139,38 @@ pub enum ConnectionState {
     Disconnected,
 }
 
+#[cfg(test)]
+impl ConnectionState {
+    /// Every state, for the sweeps that have to answer for all of them.
+    ///
+    /// One list rather than one per sweep. Two screens decide what they do from this
+    /// enum — the server list is up or down, the status line names the address or does
+    /// not — and each carried its own list of states to try. `Choosing` was added to the
+    /// enum in #160 and reached neither, so for two iterations both sweeps read as
+    /// exhaustive while leaving the one state this client spends waiting for a person
+    /// untested.
+    ///
+    /// **What pins it is `the_list_holds_every_state` below**, which matches with no
+    /// wildcard arm: an eighth variant stops the tests compiling. That forces the
+    /// question to be asked, not the answer to be right — nothing makes the new variant
+    /// appear in the array except the person the failure sends here. It is the same
+    /// limit `HairModel::ALL` has, and unlike that one there is no contract underneath
+    /// to derive the list from: `ConnectionState` is this client's own vocabulary.
+    pub(crate) fn every() -> Vec<Self> {
+        vec![
+            Self::Idle,
+            Self::Connecting,
+            Self::Handshaking,
+            Self::Choosing,
+            Self::Connected,
+            Self::Rejected {
+                reason: "refused".to_owned(),
+            },
+            Self::Disconnected,
+        ]
+    }
+}
+
 /// The authoritative session parameters, present exactly when
 /// [`ConnectionState::Connected`] has been reached.
 ///
@@ -1825,6 +1857,7 @@ fn drain_server_list_events(
 
 #[cfg(test)]
 mod tests {
+
     use std::io::{Read, Write};
 
     use std::net::{TcpListener, TcpStream};
@@ -1843,6 +1876,31 @@ mod tests {
     use super::session::Scratch;
     use super::*;
     use crate::wire::voxelheim::net as fb;
+
+    /// The list [`ConnectionState::every`] hands the sweeps holds every variant.
+    ///
+    /// The `match` is the whole test: no wildcard arm, so an eighth state fails to
+    /// compile here. The count is what catches the other direction — an entry deleted
+    /// or written twice, which a `match` over the values cannot see.
+    #[test]
+    fn the_list_holds_every_state() {
+        let mut counted = 0;
+        for state in ConnectionState::every() {
+            match state {
+                ConnectionState::Idle
+                | ConnectionState::Connecting
+                | ConnectionState::Handshaking
+                | ConnectionState::Choosing
+                | ConnectionState::Connected
+                | ConnectionState::Rejected { .. }
+                | ConnectionState::Disconnected => counted += 1,
+            }
+        }
+        assert_eq!(
+            counted, 7,
+            "a state was added to `every` twice, or dropped from it"
+        );
+    }
 
     /// How long a test will pump the app waiting for a state. Generous because it
     /// covers a loopback round trip on a loaded CI runner, and irrelevant to

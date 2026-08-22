@@ -23,7 +23,8 @@ use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
-use crate::net::{Appearance, CharacterChoice, ChooseCharacter, ConnectionState, HairModel};
+use super::{BUTTON, button_colour};
+use crate::net::{Appearance, CharacterChoice, ChooseCharacter, HairModel};
 
 use crate::player::{BodyPart, PlacedBox, body_boxes, body_envelope, body_slots, placed_box};
 
@@ -451,9 +452,6 @@ struct PreviewBox {
 const CHARACTER_LAYER: i32 = 47;
 
 const PANEL: Color = Color::srgb(0.065, 0.075, 0.095);
-const BUTTON: Color = Color::srgb(0.16, 0.18, 0.22);
-const BUTTON_HOVERED: Color = Color::srgb(0.25, 0.29, 0.35);
-const BUTTON_PRESSED: Color = Color::srgb(0.42, 0.31, 0.15);
 
 /// The focused control's edge. Amber, which is the one colour this UI already uses to
 /// mean "this is the one selected" — the hotbar's own [`super::SELECTED_EDGE`].
@@ -1131,7 +1129,15 @@ fn navigate(
     let offered = rows(&choice);
     match draft.mode {
         Mode::Choosing => {
-            let count = offered.len().max(1);
+            // `offered` is never empty, so none of this defends against one that is.
+            // `rows` returns a row per character plus a creation while there is room,
+            // and `codec::character_list` refuses a list whose `max_characters` is zero
+            // or smaller than the count it just sent — so an account with no characters
+            // is offered a creation and an account with characters is offered them. The
+            // three guards that used to be here (`len().max(1)`, `min(count - 1)`, and
+            // an `is_empty` on Escape) each covered a state that cannot decode, and
+            // together they made a reachable list look like the uncertain case.
+            let count = offered.len();
             if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::Tab) {
                 draft.row = wrap(draft.row, 1, count);
             }
@@ -1139,7 +1145,7 @@ fn navigate(
                 draft.row = wrap(draft.row, -1, count);
             }
             if (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
-                && let Some(row) = offered.get(draft.row.min(count - 1)).copied()
+                && let Some(row) = offered.get(draft.row).copied()
             {
                 take(row, &mut draft, &mut choices);
             }
@@ -1169,7 +1175,7 @@ fn navigate(
             // Escape leaves the form rather than the screen. The screen itself is not
             // dismissible — a session that has been offered a character list is waiting
             // for one — which is the rule the login screen keeps for the same reason.
-            if keys.just_pressed(KeyCode::Escape) && !offered.is_empty() {
+            if keys.just_pressed(KeyCode::Escape) {
                 draft.mode = Mode::Choosing;
             }
         }
@@ -1244,11 +1250,7 @@ fn row_clicks(
 ) {
     let answered = choice.is_none_or(|choice| choice.answered());
     for (interaction, row, mut colour) in &mut rows {
-        colour.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON,
-        };
+        colour.0 = button_colour(interaction);
         if *interaction == Interaction::Pressed && !answered {
             take(*row, &mut draft, &mut choices);
         }
@@ -1289,11 +1291,7 @@ fn field_clicks(
     let answered = choice.is_none_or(|choice| choice.answered());
 
     for (interaction, field, mut colour) in &mut fields {
-        colour.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON,
-        };
+        colour.0 = button_colour(interaction);
         if *interaction != Interaction::Pressed || answered {
             continue;
         }
@@ -1335,7 +1333,6 @@ fn field_clicks(
 fn refresh_screen(
     draft: Res<Draft>,
     choice: Option<Res<CharacterChoice>>,
-    state: Option<Res<ConnectionState>>,
     mut drawn_rows: Query<(&Row, &mut BorderColor)>,
     mut fields: Query<(&FormField, &mut BorderColor), Without<Row>>,
     mut swatches: Query<(&Swatch, &mut BorderColor), SwatchEdge>,
@@ -1345,9 +1342,10 @@ fn refresh_screen(
     mut hair: Query<&mut Text, HairText>,
     mut status: Query<&mut Text, StatusText>,
 ) {
-    let moved = draft.is_changed()
-        || choice.as_ref().is_some_and(|choice| choice.is_changed())
-        || state.as_ref().is_some_and(|state| state.is_changed());
+    // Two resources, not three. `ConnectionState` was a third trigger while `describe`
+    // read it; nothing this system writes is derived from the state any more, so waking
+    // on a change to it could only ever rewrite the same values.
+    let moved = draft.is_changed() || choice.as_ref().is_some_and(|choice| choice.is_changed());
     if !moved {
         return;
     }
@@ -1470,7 +1468,7 @@ fn refresh_screen(
         }
     }
 
-    let line = describe(&draft, &choice, state.as_deref());
+    let line = describe(&draft, &choice);
     for mut text in &mut status {
         if text.0 != line {
             *text = Text::new(line.clone());
@@ -1490,16 +1488,17 @@ fn set_border(border: &mut BorderColor, edge: Color) {
 /// It says what the screen is waiting for, which is a different thing in each of its
 /// three states — and after a choice has gone out it says so, because a screen that
 /// looked unchanged while a request was in flight is one a player presses again.
-fn describe(draft: &Draft, choice: &CharacterChoice, state: Option<&ConnectionState>) -> String {
+///
+/// **It does not read [`ConnectionState`], and used to.** An arm returned the refusal
+/// reason for `Rejected`, under a comment conceding it was reached "for a refusal that
+/// did not end this exchange, which today means none". There is no such refusal: every
+/// reject on this screen closes the connection, `ui::status` renders the reason on the
+/// screen that follows, and `a_rejection_shows_the_servers_reason_verbatim` is what
+/// holds that promise. An arm that cannot run is not a defence — it is a second place a
+/// refusal could be rendered, quietly disagreeing with the first.
+fn describe(draft: &Draft, choice: &CharacterChoice) -> String {
     if choice.answered() {
         return "Asking the server...".to_owned();
-    }
-    // A refusal outranks everything else, for the reason the server list's own line does:
-    // a player who was just told no is looking for why. It reaches here only for a
-    // refusal that did not end this exchange, which today means none — a refused creation
-    // closes the connection, and the sentence is read on the screen that follows.
-    if let Some(ConnectionState::Rejected { reason }) = state {
-        return reason.clone();
     }
     match draft.mode {
         Mode::Choosing if choice.characters().is_empty() => {
@@ -1523,7 +1522,9 @@ fn describe(draft: &Draft, choice: &CharacterChoice, state: Option<&ConnectionSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::CharacterSummary;
+    // The screen no longer reads the connection state — see `describe`. The tests still
+    // insert it, because the plugin is built under the state the game builds it under.
+    use crate::net::{CharacterSummary, ConnectionState};
 
     /// Builds the screen headlessly. `MinimalPlugins` has no renderer, so the nodes are
     /// spawned and updated but never drawn — which is exactly the part worth asserting,
@@ -1651,6 +1652,39 @@ mod tests {
             labels[2].contains('3'),
             "the row says what the limit is: {labels:?}"
         );
+    }
+
+    /// The list this screen navigates is never empty, which is what let three guards go.
+    ///
+    /// `navigate` used to carry `len().max(1)`, `min(count - 1)` and an `is_empty` on
+    /// Escape. Each covered a list with no rows, and no such list decodes:
+    /// `codec::character_list` refuses `max_characters == 0` and refuses a maximum
+    /// smaller than the count it just sent, so either the account has characters to play
+    /// or it has room to make one. Swept over the whole range a `u8` maximum allows,
+    /// rather than spot-checked, because the interesting case is the boundary — an
+    /// account exactly at its limit is the one with no creation row.
+    #[test]
+    fn every_list_the_contract_permits_offers_at_least_one_row() {
+        for max in 1..=8u8 {
+            for held in 0..=usize::from(max) {
+                let characters: Vec<_> = (0..held)
+                    .map(|index| character(index as u64 + 1, "Eivor"))
+                    .collect();
+                let choice = CharacterChoice::for_a_test(characters, max);
+                let offered = rows(&choice);
+                assert!(
+                    !offered.is_empty(),
+                    "{held} of at most {max} offered no row at all"
+                );
+                // The boundary, stated so a change to `has_room` cannot quietly make the
+                // sweep pass for the wrong reason.
+                assert_eq!(
+                    offered.contains(&Row::Create),
+                    held < usize::from(max),
+                    "{held} of at most {max}"
+                );
+            }
+        }
     }
 
     /// An account holding as many as the world allows is offered no creation. The server

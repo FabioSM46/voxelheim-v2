@@ -23,6 +23,7 @@ use crate::net::{
 };
 
 use super::login::login_is_up;
+use super::{BUTTON, button_colour};
 
 pub(super) struct ServerListUiPlugin;
 
@@ -65,10 +66,6 @@ struct ServerListStatus;
 /// has nothing for this screen to be about, and a player who is has nothing for the
 /// pause menu to be about yet.
 const SERVERS_LAYER: i32 = 45;
-
-const BUTTON: Color = Color::srgb(0.16, 0.18, 0.22);
-const BUTTON_HOVERED: Color = Color::srgb(0.25, 0.29, 0.35);
-const BUTTON_PRESSED: Color = Color::srgb(0.42, 0.31, 0.15);
 
 /// An offline server's row, and it is dimmed rather than disabled. "Offline" is the
 /// account service saying it has not heard from that server recently, which is not the
@@ -310,11 +307,7 @@ fn row_action(
     mut requests: MessageWriter<ConnectRequest>,
 ) {
     for (interaction, row, mut colour) in &mut rows {
-        colour.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON,
-        };
+        colour.0 = button_colour(interaction);
         if *interaction == Interaction::Pressed {
             requests.write(ConnectRequest {
                 name: row.0.clone(),
@@ -329,11 +322,7 @@ fn retry_action(
     mut requests: MessageWriter<RefreshServerList>,
 ) {
     for (interaction, mut colour) in &mut buttons {
-        colour.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON,
-        };
+        colour.0 = button_colour(interaction);
         if *interaction == Interaction::Pressed {
             requests.write(RefreshServerList);
         }
@@ -525,26 +514,28 @@ mod tests {
         let list = ServerList::Ready(Vec::new());
         let signed_in = SignInState::SignedIn;
 
-        for up in [
-            ConnectionState::Idle,
-            ConnectionState::Disconnected,
-            ConnectionState::Rejected {
-                reason: "refused".to_owned(),
-            },
-        ] {
-            assert!(
-                server_list_is_up(Some(&list), Some(&up), Some(&signed_in)),
-                "{up:?}"
-            );
-        }
-        for down in [
-            ConnectionState::Connecting,
-            ConnectionState::Handshaking,
-            ConnectionState::Connected,
-        ] {
-            assert!(
-                !server_list_is_up(Some(&list), Some(&down), Some(&signed_in)),
-                "{down:?}"
+        // Driven off `ConnectionState::every` rather than a list of its own, and the
+        // expectation is a wildcard-free match: a state added to the enum reaches this
+        // sweep by construction, and it cannot be answered for by accident. `Choosing`
+        // is why — it existed for two iterations and neither sweep had heard of it.
+        for state in ConnectionState::every() {
+            let expected = match state {
+                // There is no session, so the list is the screen.
+                ConnectionState::Idle
+                | ConnectionState::Rejected { .. }
+                | ConnectionState::Disconnected => true,
+                // Something is in progress on a server already chosen. `Choosing` is one
+                // of them: the character screen is up and picking a *different server*
+                // underneath it is not an offer this client makes.
+                ConnectionState::Connecting
+                | ConnectionState::Handshaking
+                | ConnectionState::Choosing
+                | ConnectionState::Connected => false,
+            };
+            assert_eq!(
+                server_list_is_up(Some(&list), Some(&state), Some(&signed_in)),
+                expected,
+                "{state:?}"
             );
         }
     }

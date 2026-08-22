@@ -70,6 +70,39 @@ pub(super) const CELL_EDGE: Color = Color::srgb(0.30, 0.33, 0.38);
 /// the picture inside it never reaches the border.
 pub(super) const SELECTED_EDGE: Color = Color::srgb(1.0, 0.72, 0.25);
 
+/// The rest colour of anything this client offers as pressable: menu entries, server
+/// rows, character rows, the form's fields, a recipe.
+///
+/// One triple and one [`button_colour`] rather than a copy per screen. There were four
+/// copies of these three values and five copies of the match below — the crafting rows
+/// carried the fourth under names of their own, which is exactly the shape the problem
+/// takes: a retheme edits what it can find, and the screen it misses is the one whose
+/// buttons stop matching the others.
+pub(super) const BUTTON: Color = Color::srgb(0.16, 0.18, 0.22);
+
+/// Hovered: lighter, so the pointer says which row it is on before anything is pressed.
+pub(super) const BUTTON_HOVERED: Color = Color::srgb(0.25, 0.29, 0.35);
+
+/// Held down. Amber rather than lighter still, because a press should read as a
+/// different thing from a hover rather than as more of one.
+pub(super) const BUTTON_PRESSED: Color = Color::srgb(0.42, 0.31, 0.15);
+
+/// What a button wears for the interaction it is in.
+///
+/// Total over [`Interaction`] with no wildcard arm, so a fourth interaction state is a
+/// build failure here rather than a screen quietly rendering it as at rest.
+///
+/// A control with a state of its own does not get an arm here — it decides that state
+/// first and asks this only for the ordinary three. The unaffordable recipe row is the
+/// one that does.
+pub(super) const fn button_colour(interaction: &Interaction) -> Color {
+    match interaction {
+        Interaction::Pressed => BUTTON_PRESSED,
+        Interaction::Hovered => BUTTON_HOVERED,
+        Interaction::None => BUTTON,
+    }
+}
+
 /// The complete player-facing UI.
 pub struct UiPlugin;
 

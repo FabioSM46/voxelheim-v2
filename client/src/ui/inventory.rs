@@ -24,8 +24,8 @@ use bevy::window::PrimaryWindow;
 
 use super::icon::DrawnIcon;
 use super::{
-    CELL_EDGE, SELECTED_EDGE, SlotCount, cell_node, refresh_cell_contents, spawn_cell_contents,
-    stack_style,
+    BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, button_colour, cell_node, refresh_cell_contents,
+    spawn_cell_contents, stack_style,
 };
 use crate::net::{Session, StructureKind};
 use crate::player::{
@@ -99,12 +99,6 @@ struct CraftTitle(Recipe);
 /// One ingredient's `held/needed` label inside a recipe row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct CraftCost(Ingredient);
-
-/// A recipe whose materials this client can already see, and how it answers the pointer.
-/// The three shades are the pause menu's, so a clickable thing looks the same everywhere.
-const RECIPE_ROW: Color = Color::srgb(0.16, 0.18, 0.22);
-const RECIPE_ROW_HOVERED: Color = Color::srgb(0.25, 0.29, 0.35);
-const RECIPE_ROW_PRESSED: Color = Color::srgb(0.42, 0.31, 0.15);
 
 /// A recipe whose materials are short. Flat and unlit by hover, so the row reads as inert
 /// rather than as one that did not respond.
@@ -236,7 +230,7 @@ fn spawn_recipe_rows(panel: &mut ChildSpawnerCommands<'_>) {
                     border_radius: BorderRadius::all(Val::Px(4.0)),
                     ..default()
                 },
-                BackgroundColor(RECIPE_ROW),
+                BackgroundColor(BUTTON),
             ))
             .with_children(|row| {
                 row.spawn((
@@ -439,13 +433,14 @@ fn refresh_recipe_rows(
     };
 
     for (row, interaction, mut background) in &mut rows {
-        let next = match (row.0.affordable(&inventory), interaction) {
-            // Short rows ignore hover as well as the press: a row that cannot be used
-            // should read as inert rather than as one that failed to respond.
-            (false, _) => RECIPE_ROW_SHORT,
-            (true, Interaction::Pressed) => RECIPE_ROW_PRESSED,
-            (true, Interaction::Hovered) => RECIPE_ROW_HOVERED,
-            (true, Interaction::None) => RECIPE_ROW,
+        // Short rows ignore hover as well as the press: a row that cannot be used should
+        // read as inert rather than as one that failed to respond. That is this row's own
+        // state, decided here; the ordinary three come from the one place every other
+        // pressable thing reads them.
+        let next = if row.0.affordable(&inventory) {
+            button_colour(interaction)
+        } else {
+            RECIPE_ROW_SHORT
         };
         if background.0 != next {
             background.0 = next;
@@ -975,13 +970,13 @@ mod tests {
         deliver(&mut app, &[(LOG, 8)]);
         assert_eq!(
             row_colour(&mut app, RecipeId::Tent),
-            RECIPE_ROW,
+            BUTTON,
             "the eighth log did not enable the row"
         );
 
         // Counted across slots, exactly as the server spends across slots.
         deliver(&mut app, &[(LOG, 5), (LOG, 3)]);
-        assert_eq!(row_colour(&mut app, RecipeId::Tent), RECIPE_ROW);
+        assert_eq!(row_colour(&mut app, RecipeId::Tent), BUTTON);
     }
 
     /// Proximity is the server's call, so a forge recipe is never grayed out for want of a
@@ -993,7 +988,7 @@ mod tests {
 
         assert_eq!(
             row_colour(&mut app, RecipeId::SharpeningStone),
-            RECIPE_ROW,
+            BUTTON,
             "a recipe this client cannot know the station for was drawn as unavailable"
         );
 

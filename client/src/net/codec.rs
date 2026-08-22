@@ -523,10 +523,18 @@ pub enum HairModel {
 impl HairModel {
     /// Every model a character may wear, in the order the contract declares them.
     ///
-    /// A hand-written list, for the reason `ItemShape::ALL` is one: no stable Rust
-    /// enumerates an enum's variants. What it is *for* is the screen that offers a
-    /// choice — a model missing from here is a model no player can pick, which is a
-    /// gap a sweep can catch rather than a build failure the compiler could.
+    /// A hand-written list, because no stable Rust enumerates an enum's variants — but
+    /// not an unpinned one, and that is the difference from `ItemShape::ALL`. What this
+    /// list is *for* is the screen that offers a choice, so a model missing from it is a
+    /// model no player can pick: not a build failure, because nothing here fails to
+    /// compile, and a gap the compiler cannot see.
+    ///
+    /// **There is a contract underneath, so the list is derived from it rather than
+    /// trusted.** `every_wire_hair_model_but_unknown_is_one_a_player_can_pick` walks
+    /// `fb::HairModel::ENUM_VALUES` — flatc's own output, regenerated from
+    /// `schemas/handshake.fbs` — and requires every declared member but `Unknown` to
+    /// decode *and* to appear here. Appending a sixth model to the schema therefore
+    /// fails a test rather than shipping a head nobody can choose.
     pub const ALL: [Self; 5] = [
         Self::Shaved,
         Self::Cropped,
@@ -4277,6 +4285,47 @@ mod tests {
             6,
             "a new hair model needs a decision, not a test edit"
         );
+    }
+
+    /// Every hair model the contract declares is one this client offers.
+    ///
+    /// The other half of the test above, and the half that catches the *likely*
+    /// mistake. That one pins the numbering, so a member appended to
+    /// `schemas/handshake.fbs` fails it with "a new hair model needs a decision, not a
+    /// test edit" — and the decision it asks for is a number, which is satisfied by
+    /// bumping the count. Nothing there points at [`HairModel::ALL`], the hand-written
+    /// list the character screen builds its choice from, so a sixth model could arrive
+    /// on the wire, decode, render, and still be one no player could pick.
+    ///
+    /// This reads `ENUM_VALUES` rather than restating it: it is flatc's output, so what
+    /// it holds is what the schema says and not what anybody typed here.
+    #[test]
+    fn every_wire_hair_model_but_unknown_is_one_a_player_can_pick() {
+        let declared: Vec<fb::HairModel> = fb::HairModel::ENUM_VALUES
+            .iter()
+            .copied()
+            // `Unknown` is the absent-field case and has no variant by construction —
+            // see [`HairModel`]. It is the one member that must *not* be offered.
+            .filter(|value| *value != fb::HairModel::Unknown)
+            .collect();
+
+        assert_eq!(
+            HairModel::ALL.len(),
+            declared.len(),
+            "the contract declares {} models a player may wear and `HairModel::ALL` \
+             offers {}",
+            declared.len(),
+            HairModel::ALL.len()
+        );
+
+        for value in declared {
+            let model = HairModel::from_wire(value)
+                .unwrap_or_else(|| panic!("{value:?} is on the wire and does not decode"));
+            assert!(
+                HairModel::ALL.contains(&model),
+                "{model:?} decodes and is not offered on the character screen"
+            );
+        }
     }
 
     /// V7 gave every player an appearance and put none of it in `EntityState`.
