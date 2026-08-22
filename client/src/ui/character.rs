@@ -1862,10 +1862,16 @@ mod tests {
         app
     }
 
-    /// A session, which is what makes the character screen go down.
+    /// A session: what makes the character screen go down, and what spends the launch's
+    /// answer.
     ///
     /// The values are not read by anything under test here — what matters is that the
     /// resource exists, because its presence *is* "the world has arrived".
+    ///
+    /// One copy serving both. #181 and #184 each added their own, in different halves of
+    /// this module, and git merged the pair without a conflict to report — two definitions
+    /// of one name, in a tree that then did not compile. Worth knowing before adding a
+    /// third: a clean merge is not a compiling one.
     fn a_session() -> Session {
         Session(crate::net::SessionParams {
             clock: Default::default(),
@@ -1966,22 +1972,6 @@ mod tests {
     }
 
     /// What the screen has asked the network boundary for.
-    /// A session, which is what makes the launch's answer spent.
-    fn a_session() -> Session {
-        Session(crate::net::SessionParams {
-            clock: Default::default(),
-            entity_id: 1,
-            spawn: [0.5, 64.0, 0.5],
-            world_seed: 1,
-            tick_rate: 20,
-            chunk_size: 32,
-            view_distance: 8,
-            inventory_slots: 36,
-            hotbar_slots: 9,
-            player_token: crate::net::ANY_TOKEN,
-        })
-    }
-
     fn asked(app: &App) -> Vec<ChooseCharacter> {
         let messages = app.world().resource::<Messages<ChooseCharacter>>();
         let mut cursor = messages.get_cursor();
