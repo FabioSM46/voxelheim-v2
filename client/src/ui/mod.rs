@@ -10,6 +10,7 @@ mod inventory;
 mod login;
 mod menu;
 mod servers;
+mod settings;
 mod status;
 
 use bevy::prelude::*;
@@ -30,7 +31,10 @@ use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals, ViewMode,
     item_palette_id, item_shape,
 };
+use crate::settings::{Control, Settings};
+
 use crate::world::palette;
+use settings::SettingsScreen;
 
 /// One square in either inventory view, in logical pixels.
 pub(super) const CELL_SIZE: f32 = 52.0;
@@ -141,6 +145,7 @@ impl Plugin for UiPlugin {
                 login::LoginPlugin,
                 menu::MenuPlugin,
                 servers::ServerListUiPlugin,
+                settings::SettingsScreenPlugin,
                 status::StatusUiPlugin,
             ));
 
@@ -231,6 +236,8 @@ fn choose_input_mode(
     session: Option<Res<Session>>,
     overlays: Overlays<'_>,
     vitals: Res<SelfVitals>,
+    settings: Option<Res<Settings>>,
+    screen: Option<Res<SettingsScreen>>,
     mut mode: ResMut<InputMode>,
 ) {
     // **A full-screen overlay owns the input while one is up.** The game is running
@@ -264,7 +271,22 @@ fn choose_input_mode(
         return;
     };
 
-    if keys.just_pressed(KeyCode::Escape) {
+    // **The settings screen owns the keyboard while it is up.** It sits inside `Menu`, so
+    // the mode is already right; what it needs is for no key to mean two things at once —
+    // the press that closes it must not also resume play, and the press that rebinds a
+    // control must not also fire the control it is taken from. `ui/settings.rs` runs after
+    // this system for the same reason.
+    if screen.is_some_and(|screen| screen.is_open()) {
+        return;
+    }
+
+    // The bindings, or the defaults for an app built without them — which are `Escape` and
+    // `E`, the two literals that stood here until this screen existed.
+    let bindings = settings
+        .as_deref()
+        .map_or_else(Default::default, |settings| *settings.bindings());
+
+    if keys.just_pressed(bindings.key(Control::Menu)) {
         let next = if *mode == InputMode::Menu {
             InputMode::Playing
         } else {
@@ -274,7 +296,7 @@ fn choose_input_mode(
         return;
     }
 
-    if keys.just_pressed(KeyCode::KeyE) {
+    if keys.just_pressed(bindings.key(Control::Inventory)) {
         if vitals.dead() {
             return;
         }
@@ -742,6 +764,96 @@ mod tests {
             InputMode::Menu,
             "inventory cannot replace an open pause menu"
         );
+    }
+
+    /// The same app as [`mode_after_key_while`], with the two resources this screen added.
+    fn mode_after_key_with(
+        initial: InputMode,
+        key: KeyCode,
+        settings: Settings,
+        screen: SettingsScreen,
+    ) -> InputMode {
+        let mut keys = ButtonInput::default();
+        keys.press(key);
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .insert_resource(keys)
+            .insert_resource(initial)
+            .insert_resource(session())
+            .insert_resource(settings)
+            .insert_resource(screen)
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .add_systems(Update, choose_input_mode);
+        app.update();
+        *app.world().resource::<InputMode>()
+    }
+
+    /// `Escape` and `E` are bindings now rather than literals, and this is what says so:
+    /// move them, and the mode follows the keys the settings name rather than the keys
+    /// this file used to spell.
+    #[test]
+    fn the_two_mode_keys_are_the_ones_the_settings_name() {
+        let mut settings = Settings::default();
+        settings
+            .rebind(Control::Menu, KeyCode::KeyG)
+            .expect("g is bindable and free");
+        settings
+            .rebind(Control::Inventory, KeyCode::KeyH)
+            .expect("h is bindable and free");
+        let screen = SettingsScreen::default();
+
+        assert_eq!(
+            mode_after_key_with(
+                InputMode::Playing,
+                KeyCode::KeyG,
+                settings.clone(),
+                screen.clone()
+            ),
+            InputMode::Menu
+        );
+        assert_eq!(
+            mode_after_key_with(
+                InputMode::Playing,
+                KeyCode::KeyH,
+                settings.clone(),
+                screen.clone()
+            ),
+            InputMode::Inventory
+        );
+        // And the keys they used to be belong to nobody.
+        assert_eq!(
+            mode_after_key_with(
+                InputMode::Playing,
+                KeyCode::Escape,
+                settings.clone(),
+                screen.clone()
+            ),
+            InputMode::Playing
+        );
+        assert_eq!(
+            mode_after_key_with(InputMode::Playing, KeyCode::KeyE, settings, screen),
+            InputMode::Playing
+        );
+    }
+
+    /// While the settings screen is up this system reads no key at all. Without that, the
+    /// press that closes the screen would resume play in the same frame, and the key a
+    /// player pressed to rebind a control would also fire the control it is being taken
+    /// from.
+    #[test]
+    fn the_settings_screen_keeps_the_keyboard_while_it_is_up() {
+        let mut screen = SettingsScreen::default();
+        screen.open();
+        for key in [KeyCode::Escape, KeyCode::KeyE] {
+            assert_eq!(
+                mode_after_key_with(InputMode::Menu, key, Settings::default(), screen.clone()),
+                InputMode::Menu,
+                "{key:?} reached the mode through an open settings screen"
+            );
+        }
     }
 
     #[test]

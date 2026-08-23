@@ -88,7 +88,13 @@ use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
     PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
 };
-use constants::{DEATH_BODY_PITCH, LOOK_SENSITIVITY, MAX_PITCH};
+use crate::settings::{Bindings, Control, Settings};
+// `pub use` rather than `use` for these two: `crate::settings` builds its defaults from
+// the sensitivity, and its test that the pitch limit survives every sensitivity this client
+// offers needs the limit itself. Both are still in scope here, which is what keeps
+// `sample_input` reading them by their own names.
+use constants::DEATH_BODY_PITCH;
+pub use constants::{DEFAULT_LOOK_SENSITIVITY, MAX_PITCH};
 
 /// How far the player has to move before the movement log says so again, in blocks.
 ///
@@ -728,6 +734,7 @@ fn sample_input(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     pointer: Option<Res<AccumulatedMouseMotion>>,
     gate: InputGate<'_>,
+    settings: Option<Res<Settings>>,
     mut intent: ResMut<MoveIntent>,
     mut look: ResMut<LookState>,
     mut orbit: ResMut<Orbit>,
@@ -745,6 +752,15 @@ fn sample_input(
         }
         return;
     }
+
+    // What the player asked for, or what this client ships with. Optional for the reason
+    // the two input resources above are: every one of this module's own tests builds an
+    // app without the settings plugin, and a `Res<T>` on a missing resource takes the
+    // whole app down. The defaults are what those tests are written against.
+    let (sensitivity, bindings) = match settings.as_deref() {
+        Some(settings) => (settings.look_sensitivity(), *settings.bindings()),
+        None => (DEFAULT_LOOK_SENSITIVITY, Bindings::default()),
+    };
 
     // **Which angle the mouse moves, and the only place that is decided.** Third person
     // with the orbit key held moves a camera-only offset; everything else moves the
@@ -764,8 +780,8 @@ fn sample_input(
     {
         // Right turns right: looking along -Z, turning towards +X is a *negative* rotation
         // about +Y. Screen y grows downward, so a downward drag has to lower the pitch.
-        let yaw = -pointer.delta.x * LOOK_SENSITIVITY;
-        let pitch = -pointer.delta.y * LOOK_SENSITIVITY;
+        let yaw = -pointer.delta.x * sensitivity;
+        let pitch = -pointer.delta.y * sensitivity;
         if orbiting {
             // Unclamped here; `camera_placement` clamps the sum, so a swung camera and a
             // raised head cannot add up to more pitch than either could reach alone.
@@ -812,9 +828,9 @@ fn sample_input(
     };
 
     let next = MoveIntent {
-        x: axis(KeyCode::KeyA, KeyCode::KeyD),
-        z: axis(KeyCode::KeyS, KeyCode::KeyW),
-        jump: keys.pressed(KeyCode::Space),
+        x: axis(bindings.key(Control::Left), bindings.key(Control::Right)),
+        z: axis(bindings.key(Control::Back), bindings.key(Control::Forward)),
+        jump: keys.pressed(bindings.key(Control::Jump)),
     };
     // Opposite keys cancel, and both axes are left un-normalised on purpose: the diagonal
     // (1, 1) is a vector of length √2, and scaling it is the *server's* speed clamp to

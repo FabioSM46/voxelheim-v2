@@ -39,11 +39,17 @@ pub const PLAYER_HEIGHT: f32 = 1.8;
 /// Written as a fraction of the body so it cannot drift outside it.
 pub const EYE_HEIGHT: f32 = PLAYER_HEIGHT * 0.9;
 
-/// Radians of turn per logical pixel of pointer movement.
+/// Radians of turn per logical pixel of pointer movement, before anybody changes it.
 ///
-/// Not a setting yet, because there is no settings menu to put it in. A full turn takes
-/// about 2 000 pixels, which is a comfortable desk-width sweep.
-pub const LOOK_SENSITIVITY: f32 = 0.003;
+/// It **is** a setting now: `crate::settings::Settings::look_sensitivity` is what
+/// `sample_input` reads, and this is where that starts and what it falls back to in an app
+/// built without the resource. A full turn takes about 2 000 pixels, a desk-width sweep.
+///
+/// **[`MAX_PITCH`] did not move with it**, and will not. A default is a number a player may
+/// replace; an invariant is one the build depends on — the `const` assertion below is
+/// evaluated at compile time, which a value read from a file cannot satisfy, and since #176
+/// that angle is also where a dead player's head comes to rest.
+pub const DEFAULT_LOOK_SENSITIVITY: f32 = 0.003;
 
 /// How far the camera may tilt up or down, in radians.
 ///

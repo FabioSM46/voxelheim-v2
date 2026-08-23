@@ -1,9 +1,10 @@
-//! The three-action pause menu.
+//! The four-action pause menu.
 
 use bevy::prelude::*;
 
 use super::login::login_is_up;
 use super::set_mode;
+use super::settings::SettingsScreen;
 use super::{BUTTON, button_colour};
 use crate::net::{DisconnectRequest, Session, SignInState};
 use crate::player::InputMode;
@@ -12,7 +13,11 @@ pub(super) struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_menu)
+        // Also initialised by `SettingsScreenPlugin`, which owns the resource; doing it
+        // here too keeps this plugin testable on its own, exactly as `UiPlugin` registers
+        // messages its producers also register.
+        app.init_resource::<SettingsScreen>()
+            .add_systems(Startup, spawn_menu)
             .add_systems(Update, (show_menu, menu_actions));
     }
 }
@@ -23,6 +28,7 @@ struct MenuRoot;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
     Resume,
+    Settings,
     Disconnect,
     Quit,
 }
@@ -79,6 +85,7 @@ fn spawn_menu(mut commands: Commands) {
                         },
                     ));
                     spawn_button(panel, MenuAction::Resume, "RESUME");
+                    spawn_button(panel, MenuAction::Settings, "SETTINGS");
                     spawn_button(panel, MenuAction::Disconnect, "DISCONNECT");
                     spawn_button(panel, MenuAction::Quit, "QUIT");
                 });
@@ -115,13 +122,19 @@ fn show_menu(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
     sign_in: Option<Res<SignInState>>,
+    screen: Res<SettingsScreen>,
     mut roots: Query<&mut Visibility, With<MenuRoot>>,
 ) {
     // The login screen puts the input mode in `Menu` to take a click away from the
     // world, and this is the other half of that: the pause menu is not what that
     // mode is about while a player has not signed in, and drawing it underneath
     // would be two panels for one state.
-    let next = if *mode == InputMode::Menu && session.is_some() && !login_is_up(sign_in.as_deref())
+    // The settings screen is the same mode wearing a different panel; drawing both would
+    // be two overlays for one state, which is the argument one line up.
+    let next = if *mode == InputMode::Menu
+        && session.is_some()
+        && !login_is_up(sign_in.as_deref())
+        && !screen.is_open()
     {
         Visibility::Visible
     } else {
@@ -137,6 +150,7 @@ fn show_menu(
 fn menu_actions(
     mut buttons: Query<MenuButton<'_>, ChangedMenuButton>,
     mut mode: ResMut<InputMode>,
+    mut screen: ResMut<SettingsScreen>,
     mut disconnect: MessageWriter<DisconnectRequest>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -148,6 +162,9 @@ fn menu_actions(
         }
         match action {
             MenuAction::Resume => set_mode(&mut mode, InputMode::Playing),
+            // The mode stays `Menu`: the settings screen is a second panel over the same
+            // paused session, not a third input mode.
+            MenuAction::Settings => screen.open(),
             MenuAction::Disconnect => {
                 disconnect.write(DisconnectRequest);
                 set_mode(&mut mode, InputMode::Playing);
@@ -197,7 +214,7 @@ mod tests {
                 .iter(world)
                 .map(|(entity, action)| (entity, *action))
                 .collect();
-            assert_eq!(actions.len(), 3, "the pause menu has exactly three entries");
+            assert_eq!(actions.len(), 4, "the pause menu has exactly four entries");
             actions
                 .into_iter()
                 .find(|(_, action)| *action == MenuAction::Disconnect)
@@ -218,5 +235,48 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Escape's menu gains Settings, and pressing it puts the settings screen up without
+    /// taking the player out of the pause the menu represents.
+    #[test]
+    fn settings_is_one_menu_action_and_it_stands_the_pause_menu_down() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<DisconnectRequest>()
+            .add_message::<AppExit>()
+            .insert_resource(session())
+            .insert_resource(InputMode::Menu)
+            .add_plugins(MenuPlugin);
+        app.update();
+
+        let visible = |app: &mut App| {
+            let world = app.world_mut();
+            let mut query = world.query::<(&Visibility, &MenuRoot)>();
+            query
+                .iter(world)
+                .map(|(visibility, _)| *visibility)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(visible(&mut app), vec![Visibility::Visible]);
+
+        let settings_button = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &MenuAction)>();
+            query
+                .iter(world)
+                .find(|(_, action)| **action == MenuAction::Settings)
+                .map(|(entity, _)| entity)
+                .expect("a settings entry")
+        };
+        *app.world_mut()
+            .entity_mut(settings_button)
+            .get_mut::<Interaction>()
+            .expect("a button has an interaction") = Interaction::Pressed;
+        app.update();
+
+        assert!(app.world().resource::<SettingsScreen>().is_open());
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Menu);
+        assert_eq!(visible(&mut app), vec![Visibility::Hidden]);
     }
 }
