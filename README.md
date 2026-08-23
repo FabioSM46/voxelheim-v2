@@ -263,6 +263,17 @@ documented in [`docs/PUBLIC_REPOSITORY.md`](docs/PUBLIC_REPOSITORY.md).
 | Rust  | stable (rustfmt + clippy)       | client             |
 | flatc | pinned in [`.flatc-version`](.flatc-version) | schemas |
 | gh    | any recent                      | pipeline scripts   |
+| jq    | any recent                      | pipeline scripts, `scripts/test/` |
+
+`jq` is a hard requirement of `scripts/gh-automation.sh` and of the helper test suite, not a
+convenience. GitHub's `ubuntu-latest` image ships it, so CI never noticed it was undeclared —
+`pr-status` simply printed `[FAIL] ? unresolved review threads (must be 0)` on a workstation
+without it and exited 0. Every standalone `jq` call in that script is redirected with
+`2>/dev/null`, because a working jq can still be handed an unparseable payload and the
+fail-closed sentinel is what must answer that; the same redirection swallowed
+`jq: command not found`. `require_jq` now runs before the first API call of every subcommand
+that needs the binary and says so in one line instead. Note that gh's built-in `--jq` is a
+different thing, evaluated inside gh, and needs nothing installed.
 
 ## License
 

@@ -19,6 +19,16 @@
 # cmd_pr_status now takes its verdict from cmd_pr_status_json verbatim. These
 # tests stub that function to pin the delegation.
 #
+# The second half of the file is the same failure one layer down (#211). The verdict
+# was delegated correctly and still read out as `[FAIL] ? unresolved review threads
+# (must be 0)` with an exit status of 0 and an empty stderr, because `jq` was not
+# installed. Every standalone `jq` call in gh-automation.sh carries `2>/dev/null` --
+# rightly, since a jq that runs can still be handed an unparseable payload and the
+# fail-closed sentinel is what must answer that -- and the same redirection swallowed
+# `jq: command not found` at each of them. `require_jq` is the preflight; these cases
+# drive the reproduction from the issue and pin that the machine-facing half did not
+# change with it.
+#
 # Run: bash scripts/test/pr-status-frozen-rule.test.sh
 # =============================================================================
 
@@ -52,6 +62,17 @@ assert_eq() {
     pass=$((pass + 1))
   else
     echo "  FAIL — ${name}: expected '${expected}', got '${actual}'"
+    fail=$((fail + 1))
+  fi
+}
+
+assert_nonzero() {
+  local name="$1" status="$2"
+  if [ "$status" -ne 0 ]; then
+    echo "  ok   — ${name}"
+    pass=$((pass + 1))
+  else
+    echo "  FAIL — ${name}: expected a non-zero exit, got 0"
     fail=$((fail + 1))
   fi
 }
@@ -538,6 +559,134 @@ WIRE_PAYLOAD=''
 out=$(cmd_pr_status_json 464 2>/dev/null)
 assert_contains "an unreadable payload fails closed to -1" "$out" '"deepseek_unread_findings":-1'
 assert_contains "an unreadable payload is never ready" "$out" '"ready_to_merge":false'
+
+echo
+echo "jq preflight — an absent jq announces itself instead of rendering as '?'"
+
+# Driven through the real entry point as a subprocess, which is the only place a PATH
+# without jq on it means anything: this file has already sourced the script, and the
+# shell running these lines has a working jq by definition.
+#
+# PATH is REPLACED rather than prefixed, so nothing else on the machine can supply the
+# binary. That is also why `$BASH` is named absolutely — resolving `bash` would itself
+# need a PATH entry, and the stub directory deliberately has exactly one.
+
+JQ_ABSENT_DIR="$(mktemp -d)"
+JQ_BROKEN_DIR="$(mktemp -d)"
+API_FAIL_DIR="$(mktemp -d)"
+trap 'rm -rf -- "$JQ_ABSENT_DIR" "$JQ_BROKEN_DIR" "$API_FAIL_DIR"' EXIT
+
+# A gh that authenticates and then refuses everything else with a line naming itself.
+# Nothing in this section should reach an API call; if the preflight regresses, this
+# is what makes that visible instead of letting a test run touch the network.
+#
+# `#!/bin/sh` and not the suite's usual `#!/usr/bin/env bash`: an absolute interpreter
+# is the whole point when PATH holds one directory. `env` would resolve — it is named
+# absolutely too — and then fail to find `bash`, so the stub would exit 127 and the
+# run would die on "gh not authenticated" with nothing about jq in it.
+cat >"${JQ_ABSENT_DIR}/gh" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "auth" ]; then exit 0; fi
+echo "gh: the stub was reached — the jq preflight did not run first" >&2
+exit 1
+STUB
+chmod +x "${JQ_ABSENT_DIR}/gh"
+
+# The issue's reproduction, verbatim in shape: nothing is installed or removed, a jq
+# that exits 127 is simply put where PATH finds it first. `command -v jq` succeeds on
+# this file, which is precisely why the preflight cannot be a PATH lookup alone — and
+# why `require_jq` runs a real filter and checks the answer.
+cp "${JQ_ABSENT_DIR}/gh" "${JQ_BROKEN_DIR}/gh"
+printf '#!/bin/sh\necho "jq: command not found" >&2\nexit 127\n' >"${JQ_BROKEN_DIR}/jq"
+chmod +x "${JQ_BROKEN_DIR}/jq"
+
+INSTALL_HINT="https://jqlang.github.io/jq/download/"
+
+# Every subcommand that reaches the standalone binary — directly, or through a callee
+# whose stderr it discards. `pr-comments`, `pr-check-label` and `pr-deepseek-force-review`
+# are deliberately absent: they use gh's built-in `--jq`, which is evaluated inside gh
+# and needs no binary, so a preflight there would refuse work that would have succeeded.
+for jq_case in "pr-status 279" \
+               "pr-status-json 279" \
+               "is-ready-to-merge 279" \
+               "pr-label 279 add ready-for-dev" \
+               "pr-deepseek-rounds 279" \
+               "iteration-advance"; do
+  jq_name="${jq_case%% *}"
+  # Word splitting is the point: the case string carries the argv.
+  # shellcheck disable=SC2086
+  jq_out=$(PATH="$JQ_ABSENT_DIR" "$BASH" "${SCRIPT_DIR}/gh-automation.sh" $jq_case 2>/dev/null)
+  jq_status=$?
+  # shellcheck disable=SC2086
+  jq_err=$(PATH="$JQ_ABSENT_DIR" "$BASH" "${SCRIPT_DIR}/gh-automation.sh" $jq_case 2>&1 >/dev/null)
+
+  assert_nonzero "${jq_name} exits non-zero with no jq" "$jq_status"
+  assert_contains "${jq_name} names the missing tool" "$jq_err" "jq"
+  assert_contains "${jq_name} says how to install it" "$jq_err" "$INSTALL_HINT"
+  assert_eq "${jq_name} writes nothing to stdout" "" "$jq_out"
+done
+
+echo
+echo "jq preflight — the reproduction from the issue"
+
+repro_out=$(PATH="$JQ_BROKEN_DIR" "$BASH" "${SCRIPT_DIR}/gh-automation.sh" pr-status 279 2>/dev/null)
+repro_status=$?
+repro_err=$(PATH="$JQ_BROKEN_DIR" "$BASH" "${SCRIPT_DIR}/gh-automation.sh" pr-status 279 2>&1 >/dev/null)
+
+assert_nonzero "a jq on PATH that does not run is still a missing jq" "$repro_status"
+assert_contains "the diagnostic reaches stderr" "$repro_err" "jq"
+assert_contains "and carries the install hint" "$repro_err" "$INSTALL_HINT"
+assert_not_contains "the '?' verdict is gone" "$repro_out" "[FAIL] ?"
+assert_not_contains "and so is the sentence about GitHub" "$repro_out" "unresolved review threads (must be 0)"
+
+echo
+echo "jq preflight — what it must NOT block"
+
+# `require_jq` is called from the command dispatch, not at file scope, for the same
+# reason `require_gh` is not: a path that needs neither tool must stay usable without
+# them. The usage text is that path, and hoisting the check to the top of the file is
+# the change these three cases exist to catch.
+#
+# Run under the broken shim on a full PATH rather than the one-entry directory above:
+# the usage block is a heredoc into `cat`, so a PATH with no coreutils would fail it
+# for a reason that has nothing to do with the preflight. What matters here is that
+# jq is unusable, and the shim is exactly that.
+help_out=$(PATH="${JQ_BROKEN_DIR}:${PATH}" "$BASH" "${SCRIPT_DIR}/gh-automation.sh" --help 2>&1)
+help_status=$?
+assert_eq "the usage path still exits 0 with no jq" "0" "$help_status"
+assert_contains "the usage path still prints usage" "$help_out" "Usage: gh-automation.sh"
+assert_not_contains "and says nothing about jq" "$help_out" "jq"
+
+echo
+echo "jq preflight — the fail-closed contract survives it"
+
+# The half of #211 that was already correct, and the half the fix must not disturb: a
+# preflight that dies on an absent tool and a count that could not be read at runtime
+# are different things. With jq present and the API refusing every call, pr-status-json
+# must still answer -1 — never 0 — and still say so on stderr.
+cat >"${API_FAIL_DIR}/gh" <<'STUB'
+#!/usr/bin/env bash
+if [ "${1:-}" = "auth" ]; then exit 0; fi
+echo "gh: API rate limit exceeded" >&2
+exit 1
+STUB
+chmod +x "${API_FAIL_DIR}/gh"
+
+FIXTURE_REPO="voxelheim-test/repo"
+run_api_fail() {
+  PATH="${API_FAIL_DIR}:${PATH}" REPO="$FIXTURE_REPO" GITHUB_REPOSITORY="$FIXTURE_REPO" \
+    "$BASH" "${SCRIPT_DIR}/gh-automation.sh" pr-status-json 279
+}
+closed_out=$(run_api_fail 2>/dev/null)
+closed_err=$(run_api_fail 2>&1 >/dev/null)
+
+assert_contains "an unreadable thread count is still -1" "$closed_out" '"unresolved_threads":-1'
+assert_contains "an unreadable ci_failing is still -1" "$closed_out" '"ci_failing":-1'
+assert_contains "an unreadable ci_pending is still -1" "$closed_out" '"ci_pending":-1'
+assert_contains "the required check is still UNREADABLE" "$closed_out" '"required_check_state":"UNREADABLE"'
+assert_contains "and the PR is still not ready" "$closed_out" '"ready_to_merge":false'
+assert_contains "a WARN per unreadable field still reaches stderr" "$closed_err" "failing closed"
+assert_not_contains "the preflight adds no line when jq works" "$closed_err" "jq"
 
 echo
 echo "${pass} passed, ${fail} failed"
