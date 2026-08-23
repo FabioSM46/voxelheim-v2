@@ -24,9 +24,14 @@ use bevy::prelude::KeyCode;
 use super::{Bindings, Control, Settings, key_from_name, key_name};
 
 /// The environment variable naming the XDG data directory.
+///
+/// Guarded the way [`Environment::read`] is, and only because that is its one reader — a
+/// name a test build has no way to look up is a name a test build has no use for.
+#[cfg(not(test))]
 const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 
 /// The environment variable naming the home directory.
+#[cfg(not(test))]
 const HOME: &str = "HOME";
 
 /// Where the data directory sits under a home directory when nothing names one.
@@ -54,6 +59,15 @@ pub(super) struct Environment {
 
 impl Environment {
     /// What this process was started with.
+    ///
+    /// **Absent from a test build**, for the reason `net/session.rs`'s copy is absent from
+    /// one: #230 was a test suite writing into the developer's own `$XDG_DATA_HOME`, and
+    /// #232 closed it by making the question uncallable rather than by remembering to
+    /// inject an environment at each call site. This module arrived with a second way to
+    /// ask it, which would have reopened the hole in a file nobody had looked at yet — so
+    /// it carries the same `#[cfg]`, and [`default_environment`] is where the two builds
+    /// differ.
+    #[cfg(not(test))]
     pub(super) fn read() -> Self {
         Self {
             xdg_data_home: std::env::var(XDG_DATA_HOME).ok(),
@@ -69,6 +83,28 @@ impl Environment {
             home: None,
         }
     }
+}
+
+/// The environment the settings file is named from when nobody names a directory.
+///
+/// One function with two bodies, exactly as `net/session.rs` has since #232. A shipped
+/// client falls back to the process environment, the only place a player's data directory
+/// is written down. A test build falls back to [`Environment::default`], which names
+/// neither variable — [`data_home`] answers `None` for it and [`settings_path`] therefore
+/// answers `None` too, so a test that forgot to name a file reads and writes **nothing,
+/// nowhere** instead of the developer's own settings. That is already a state this module
+/// supports rather than a special case: `SettingsPlugin` holds `Option<PathBuf>` because an
+/// environment naming no data directory is a legitimate way to run the client.
+#[cfg(not(test))]
+pub(super) fn default_environment() -> Environment {
+    Environment::read()
+}
+
+/// See the shipped half above: under `cargo test` there is no process environment to fall
+/// back to, so the fallback names nowhere.
+#[cfg(test)]
+pub(super) fn default_environment() -> Environment {
+    Environment::default()
 }
 
 /// The XDG data directory, or `None` when the environment names none.

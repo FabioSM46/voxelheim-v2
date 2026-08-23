@@ -18,8 +18,6 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
-use crate::player::DEFAULT_LOOK_SENSITIVITY;
-
 /// Loads the settings and keeps the file in step with them.
 ///
 /// It pushes nothing at anybody: `player/mod.rs` reads the sensitivity and the bindings
@@ -36,7 +34,7 @@ impl SettingsPlugin {
     /// The settings file this process's environment names.
     pub fn from_environment() -> Self {
         Self {
-            file: store::settings_path(&store::Environment::read()),
+            file: store::settings_path(&store::default_environment()),
         }
     }
 
@@ -346,6 +344,15 @@ impl Knob {
     }
 }
 
+/// Radians of turn per logical pixel of pointer movement, before anybody changes it.
+///
+/// A full turn takes about 2 000 pixels, a desk-width sweep. It is what [`Settings`] starts
+/// from and what `player`'s `sample_input` falls back to in an app built without the
+/// resource. `player/constants.rs` held it until #179 and this is where it landed: a bound,
+/// a step and the default between them are one statement about one setting, and splitting
+/// them across two modules is what made this one import `player` while `client/AGENTS.md`
+/// said it imported nothing from it.
+pub const DEFAULT_LOOK_SENSITIVITY: f32 = 0.003;
 /// Radians of turn per logical pixel, at the slowest this screen offers.
 const MIN_LOOK_SENSITIVITY: f32 = 0.0005;
 /// And at the fastest. Roughly a third of a turn across a desk-width sweep.

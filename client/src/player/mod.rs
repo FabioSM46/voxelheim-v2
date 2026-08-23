@@ -88,13 +88,13 @@ use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
     PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
 };
-use crate::settings::{Bindings, Control, Settings};
-// `pub use` rather than `use` for these two: `crate::settings` builds its defaults from
-// the sensitivity, and its test that the pitch limit survives every sensitivity this client
-// offers needs the limit itself. Both are still in scope here, which is what keeps
-// `sample_input` reading them by their own names.
+use crate::settings::{Bindings, Control, DEFAULT_LOOK_SENSITIVITY, Settings};
+// `pub use` rather than `use` for the pitch limit: it is a build invariant rather than a
+// preference, so it did not move to `crate::settings` with the sensitivity — and that
+// module's test that no sensitivity this client offers can reach past it needs the limit
+// itself. It stays in scope here, which is what keeps `sample_input` reading it by name.
 use constants::DEATH_BODY_PITCH;
-pub use constants::{DEFAULT_LOOK_SENSITIVITY, MAX_PITCH};
+pub use constants::MAX_PITCH;
 
 /// How far the player has to move before the movement log says so again, in blocks.
 ///

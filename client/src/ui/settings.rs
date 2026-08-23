@@ -383,8 +383,16 @@ fn settings_actions(
         match *action {
             SettingsAction::Nudge(knob, steps) => settings.adjust(knob, steps),
             SettingsAction::Capture(control) => {
-                screen.capturing = Some(control);
-                screen.notice = format!("press a key for {}", control.label().to_lowercase());
+                // A second press on the row that is already waiting takes the request
+                // back. It is the cancel `Escape` used to be, moved onto the mouse that
+                // armed the capture in the first place — see [`read_settings_keys`].
+                if screen.capturing == Some(control) {
+                    screen.capturing = None;
+                    screen.notice.clear();
+                } else {
+                    screen.capturing = Some(control);
+                    screen.notice = format!("press a key for {}", control.label().to_lowercase());
+                }
                 continue;
             }
             SettingsAction::Back => {
@@ -399,11 +407,20 @@ fn settings_actions(
     }
 }
 
-/// Closes the screen, or gives the next key press to the control that is waiting.
+/// Gives the next key press to the control that is waiting, or closes the screen.
 ///
-/// `Escape` is the one key this screen keeps for itself: it cancels a capture rather than
-/// being captured, and closes the panel when nothing is waiting — so a player who has bound
-/// the pause menu somewhere unfortunate always has a way out of this screen.
+/// **`Escape` is a key like any other while a capture is waiting**, and that is deliberate
+/// rather than incidental. `crate::settings` offers it, [`Control::Menu`] *starts* on it,
+/// and the file round-trips it — so a screen that swallowed every press of it would be a
+/// screen that could never put the pause menu back where a player found it. The model would
+/// go on saying the key was free while the panel silently disagreed, which is the one shape
+/// of bug a settings screen must not have.
+///
+/// What the screen keeps for itself is the *other* state. With nothing waiting, `Escape`
+/// takes the panel down, so a player who has bound the pause menu somewhere unfortunate
+/// always has a way out of here. A capture is taken back by pressing its own row again,
+/// which is the same mouse that armed it and is on screen the whole time — `BACK` closes
+/// the panel outright and forgets the capture too.
 fn read_settings_keys(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mut settings: ResMut<Settings>,
@@ -416,17 +433,10 @@ fn read_settings_keys(
         return;
     };
 
-    if keys.just_pressed(KeyCode::Escape) {
-        if screen.capturing.is_some() {
-            screen.capturing = None;
-            screen.notice.clear();
-        } else {
+    let Some(control) = screen.capturing else {
+        if keys.just_pressed(KeyCode::Escape) {
             screen.close();
         }
-        return;
-    }
-
-    let Some(control) = screen.capturing else {
         return;
     };
     let Some(pressed) = keys.get_just_pressed().next().copied() else {
@@ -527,6 +537,17 @@ mod tests {
         app.update();
     }
 
+    /// Lets go of everything held, so the next `app.update()` sees no press at all.
+    ///
+    /// A test that presses a button after pressing a key needs it: nothing in this app
+    /// clears `ButtonInput` between frames, so a key stays *just* pressed for every later
+    /// update and would be read as the answer to the capture the button just armed.
+    fn release_keys(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+    }
+
     fn reading_of(app: &mut App, wanted: Reading) -> String {
         let world = app.world_mut();
         let mut query = world.query::<(&Reading, &Text)>();
@@ -609,9 +630,23 @@ mod tests {
         assert_eq!(reading_of(&mut app, Reading::Notice), "");
     }
 
+    /// With nothing waiting, `Escape` is the way out of this screen — the one state it is
+    /// kept for.
     #[test]
-    fn escape_cancels_a_capture_and_then_closes_the_screen() {
+    fn escape_closes_the_screen_when_nothing_is_waiting() {
         let mut app = screen_app();
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!app.world().resource::<SettingsScreen>().is_open());
+    }
+
+    /// `crate::settings` offers `Escape` and [`Control::Menu`] starts on it, so this screen
+    /// has to be able to hand it back — otherwise a player who moved the pause menu could
+    /// never move it home, and the model would go on offering a key the panel refused.
+    /// While the menu still answers to `Escape` it is refused like any other taken key.
+    #[test]
+    fn escape_is_bindable_through_the_screen_once_the_menu_has_left_it() {
+        let mut app = screen_app();
+
         press(&mut app, SettingsAction::Capture(Control::Jump));
         press_key(&mut app, KeyCode::Escape);
         assert_eq!(
@@ -620,12 +655,71 @@ mod tests {
                 .bindings()
                 .key(Control::Jump),
             KeyCode::Space,
-            "escape was captured instead of cancelling"
+            "escape stranded the pause menu instead of being refused"
         );
+        let notice = reading_of(&mut app, Reading::Notice);
+        assert!(notice.contains("unreachable"), "{notice}");
         assert!(app.world().resource::<SettingsScreen>().is_open());
 
+        // Moving the menu off `Escape` is what frees it.
+        release_keys(&mut app);
+        press(&mut app, SettingsAction::Capture(Control::Menu));
+        press_key(&mut app, KeyCode::KeyM);
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .bindings()
+                .key(Control::Menu),
+            KeyCode::KeyM
+        );
+
+        // And now the key this screen used to swallow reaches the control that asked for it.
+        release_keys(&mut app);
+        press(&mut app, SettingsAction::Capture(Control::Jump));
+        press_key(&mut app, KeyCode::Escape);
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .bindings()
+                .key(Control::Jump),
+            KeyCode::Escape,
+            "escape was swallowed instead of captured"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Jump)),
+            "escape"
+        );
+        assert!(
+            app.world().resource::<SettingsScreen>().is_open(),
+            "the captured escape also closed the screen"
+        );
+    }
+
+    /// A capture is taken back by pressing its own row again — the cancel `Escape` used to
+    /// be, on the mouse that armed it.
+    #[test]
+    fn pressing_a_waiting_row_again_takes_the_capture_back() {
+        let mut app = screen_app();
+        press(&mut app, SettingsAction::Capture(Control::Jump));
+        assert_eq!(reading_of(&mut app, Reading::Binding(Control::Jump)), "...");
+
+        press(&mut app, SettingsAction::Capture(Control::Jump));
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Jump)),
+            "space"
+        );
+        assert_eq!(reading_of(&mut app, Reading::Notice), "");
+
+        // Nothing is waiting again, so `Escape` is the way out rather than a binding.
         press_key(&mut app, KeyCode::Escape);
         assert!(!app.world().resource::<SettingsScreen>().is_open());
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .bindings()
+                .key(Control::Jump),
+            KeyCode::Space
+        );
     }
 
     #[test]

@@ -39,23 +39,18 @@ pub const PLAYER_HEIGHT: f32 = 1.8;
 /// Written as a fraction of the body so it cannot drift outside it.
 pub const EYE_HEIGHT: f32 = PLAYER_HEIGHT * 0.9;
 
-/// Radians of turn per logical pixel of pointer movement, before anybody changes it.
-///
-/// It **is** a setting now: `crate::settings::Settings::look_sensitivity` is what
-/// `sample_input` reads, and this is where that starts and what it falls back to in an app
-/// built without the resource. A full turn takes about 2 000 pixels, a desk-width sweep.
-///
-/// **[`MAX_PITCH`] did not move with it**, and will not. A default is a number a player may
-/// replace; an invariant is one the build depends on — the `const` assertion below is
-/// evaluated at compile time, which a value read from a file cannot satisfy, and since #176
-/// that angle is also where a dead player's head comes to rest.
-pub const DEFAULT_LOOK_SENSITIVITY: f32 = 0.003;
-
 /// How far the camera may tilt up or down, in radians.
 ///
 /// Just short of straight up and straight down. At exactly ±π/2 the yaw and the view
 /// direction become degenerate — every yaw looks the same — and the view flips as the
 /// pitch crosses it.
+///
+/// **The look sensitivity used to sit beside this, and does not any more.** #179 made it a
+/// setting and it left for `crate::settings`, where a setting's bound, its step and the
+/// default it starts from are stated in one place. This one stayed, and will: a default is
+/// a number a player may replace; an invariant is one the build depends on — the `const`
+/// assertion below is evaluated at compile time, which a value read from a file cannot
+/// satisfy, and since #176 that angle is also where a dead player's head comes to rest.
 pub const MAX_PITCH: f32 = FRAC_PI_2 - 0.01;
 
 /// How far the player can aim, in blocks, measured from the eye along the view ray.
