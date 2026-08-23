@@ -594,13 +594,28 @@ fn show_settings_screen(
 /// detour; two settings tabs are two halves of one errand, and a player who was adjusting the
 /// graphics and stepped back out to look at something should find the graphics again. Nothing
 /// here depends on it either way — there is no reset for a stray press to undo.
+///
+/// **A waiting capture does not survive the switch**, and that is the one thing here that is
+/// not merely painting. A capture is armed over a row on the tab it was armed from; carry it
+/// to the other tab and the next key press rebinds a control the player can no longer see,
+/// while the notice under the panel goes on asking for a key beside rows that have nothing to
+/// do with it. The binding it overwrites is one nobody chose to change. `SettingsAction::Reset`
+/// takes a capture back for the same reason and says so where it does it — the state stops
+/// being readable, so it stops being armed.
 fn switch_settings_tabs(
     mut tabs: Query<(&TabButton, &Interaction, &mut BackgroundColor)>,
     mut active: ResMut<Tab>,
+    mut screen: ResMut<SettingsScreen>,
 ) {
     for (tab, interaction, _) in &tabs {
         if *interaction == Interaction::Pressed && *active != tab.0 {
             *active = tab.0;
+            // Guarded rather than assigned unconditionally: `ResMut` marks the resource
+            // changed on any deref, and a screen that reported a change on every tab press
+            // would wake every reader of it for nothing.
+            if screen.capturing.is_some() {
+                screen.capturing = None;
+            }
         }
     }
 
@@ -1143,6 +1158,134 @@ mod tests {
                 .filter(|row| matches!(row, Row::Binding(drawn) if *drawn == control))
                 .count();
             assert_eq!(drawn, 1, "{control:?} has {drawn} rows");
+        }
+
+        // **The toggles too, and they are the half this test used to miss.** `KNOBS` and
+        // `CONTROLS` are lists the model owns, so sweeping them catches a row that was never
+        // drawn; the three toggles are written into `rows_of` by hand and were therefore
+        // covered by nothing — `the_graphics_flags_read_back_what_pressing_them_did` presses
+        // the actions directly, so a row could have been deleted from the screen with every
+        // test still green.
+        for reading in [Reading::Vsync, Reading::Readout, Reading::ReadoutCorner] {
+            let drawn = all
+                .iter()
+                .filter(|row| matches!(row, Row::Toggle(_, _, shown) if *shown == reading))
+                .count();
+            assert_eq!(drawn, 1, "{reading:?} has {drawn} rows");
+        }
+        // And the count, so the sweep above cannot be satisfied by a list that has grown a
+        // fourth toggle nobody named here.
+        let toggles = all
+            .iter()
+            .filter(|row| matches!(row, Row::Toggle(..)))
+            .count();
+        assert_eq!(
+            toggles, 3,
+            "the screen draws {toggles} toggles; name the new one above rather than widening \
+             this number"
+        );
+    }
+
+    /// Leaving the tab a capture was armed on takes the capture back.
+    ///
+    /// Found in review on PR #257. A capture is armed over one row; switch tabs and that row is
+    /// no longer drawn, but the arm survived — so the next key press rebound a control the
+    /// player could not see, while the notice under the panel went on asking for a key. The
+    /// binding it overwrote was one nobody had chosen to change.
+    #[test]
+    fn switching_tabs_takes_back_a_capture_armed_on_the_one_being_left() {
+        let mut app = screen_app();
+        press(&mut app, SettingsAction::Capture(Control::Forward));
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().capturing,
+            Some(Control::Forward),
+            "the capture did not arm, so this test would pass for the wrong reason"
+        );
+
+        press_tab(&mut app, Tab::Graphics);
+
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().capturing,
+            None,
+            "a capture armed on CONTROLS survived the switch to GRAPHICS"
+        );
+
+        // And the key that would have gone to it goes nowhere: the binding it was armed over
+        // is the one it started as. Asserting the state alone would not catch a capture that
+        // was cleared and re-armed by the same press.
+        let bindings = *app.world().resource::<Settings>().bindings();
+        press_key(&mut app, KeyCode::KeyJ);
+        assert_eq!(
+            *app.world().resource::<Settings>().bindings(),
+            bindings,
+            "a key pressed after the switch still rebound something"
+        );
+    }
+
+    /// Pressing the tab already showing is not leaving it, so a capture on it survives.
+    ///
+    /// The negative that keeps the fix above honest: clearing on every tab press would pass
+    /// that test and would also cancel a capture a player armed and then clicked beside.
+    #[test]
+    fn pressing_the_tab_already_showing_leaves_a_capture_armed() {
+        let mut app = screen_app();
+        press(&mut app, SettingsAction::Capture(Control::Forward));
+
+        press_tab(&mut app, Tab::Controls);
+
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().capturing,
+            Some(Control::Forward),
+            "pressing the tab that was already showing cancelled the capture"
+        );
+    }
+
+    /// Each tab's own panel carries its own reset button, and only its own.
+    ///
+    /// `press` finds a button anywhere in the world, so every `a_reset_*` test above passes on
+    /// a screen where both reset buttons sit on one tab, or where one of them is drawn outside
+    /// any panel at all. What those tests pin is that the *action* is scoped; this pins that
+    /// the button a player can actually reach is the one for the tab they are looking at.
+    #[test]
+    fn each_tab_draws_its_own_reset_button_and_no_other() {
+        let mut app = screen_app();
+        let world = app.world_mut();
+
+        let resets: Vec<(Entity, Tab)> = world
+            .query::<(Entity, &SettingsAction)>()
+            .iter(world)
+            .filter_map(|(entity, action)| match action {
+                SettingsAction::Reset(tab) => Some((entity, *tab)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resets.len(),
+            Tab::ALL.len(),
+            "the screen draws {} reset buttons for {} tabs",
+            resets.len(),
+            Tab::ALL.len()
+        );
+
+        for (button, tab) in resets {
+            // Up the tree to the panel the button is actually inside. A reset drawn outside
+            // every panel reaches the end with nothing found, which is the failure this walk
+            // exists to name.
+            let mut at = button;
+            let panel = loop {
+                if let Some(panel) = world.get::<TabPanel>(at) {
+                    break Some(panel.0);
+                }
+                match world.get::<ChildOf>(at) {
+                    Some(parent) => at = parent.0,
+                    None => break None,
+                }
+            };
+            assert_eq!(
+                panel,
+                Some(tab),
+                "the reset for {tab:?} is drawn inside {panel:?} rather than inside its own tab"
+            );
         }
     }
 
