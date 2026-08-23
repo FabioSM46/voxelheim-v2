@@ -63,7 +63,7 @@ keeps meaning "everything the client is".
 | `world/palette.rs` | block id → colour, and which ids are solid | know about meshes or about the wire |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
-| `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean and hit flash | read health as death, hold an AI, or advance an action local time did not receive |
+| `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
 | `player/items.rs` | one row per item id: its display name, its held shape, the palette entry it draws as | hold a capability, a stat, or anything a rule is read from |
 | `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the three intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down |
@@ -1653,6 +1653,32 @@ Recorded here so the next reader does not mistake them for oversights:
   only the first would leave a view with no sight in which clicking still mines. Movement keeps
   working; that is the point. Aiming is off rather than re-based on a separate eye point, because
   a second point is a thing that can drift from the camera and a closed gate is not.
+- **A death does something different in each view, and it was decided rather than
+  inherited.** In **first person** the camera is the eye, so the eye goes over: the pitch
+  swings up to `MAX_PITCH` and the eye sinks to `DEATH_EYE_HEIGHT`, and it rests on the sky
+  until the server respawns the player. In **third person** the camera does not move at all —
+  it is an observer, and what falls is the character, tipped by `collapse_the_local_body` on
+  the same `DeathFall` curve. A camera that fell here would take the body out of frame at
+  exactly the moment the player is watching it go down, which is the case that view is most
+  worth having for. **The F5 toggle is refused while dead**, in both directions: the two views
+  resolve a death into two different things, and flipping mid-death would either stand a
+  fallen camera up or drop an upright one on its back. It was also the last playing-mode key
+  `SelfVitals::dead` did not already close.
+- **None of that decides anything, and the drop is the proof.** The fall follows the server's
+  `LifeState` and the mob fall follows `MobAction.Dying`; a client that drew neither would be
+  dead for the same three seconds, respawn at the same moment, and pick up a draugr's bones at
+  the same moment, because the wait before a kill's loot exists is `MobDeathDuration` on the
+  server and nothing here is asked about it. There is deliberately **no mirror of that number
+  on this side**: a body's fall is a curve that finishes, and what ends a death is the server
+  no longer sending the creature, which despawns it through the branch one that walked out of
+  view takes.
+- **A draugr topples backwards and a vargr slumps sideways with its legs splaying**, which is
+  the one thing about a death that differs by species and the only place `player/mobs.rs`
+  matches on the kind to decide a pose. Both pivot at the feet, because every mesh in that
+  file is authored with its origin there. The vargr's legs moved out of its body mesh into a
+  child of their own so that a collapse can scale them outward — one transform on the group,
+  where four legs each turning on their own hip would be a rig, and the price is that they
+  thicken by the factor they travel.
 - **Holding Shift orbits the camera and never the character.** `LookState::yaw` is what
   `PlayerInput` carries, so the orbit is a separate `Orbit` *offset* — at rest it is zero, which is
   why the camera sits behind a turning character with nothing chasing anything, and why releasing
@@ -1692,6 +1718,17 @@ Recorded here so the next reader does not mistake them for oversights:
   probe, and the screen says as much rather than implying reachability it did not measure. The
   list is read when the sign-in completes and when the retry is pressed — there is no automatic
   refresh, so a server that comes up while the panel is open appears on the next press.
+- **A remote player who dies stands there — #224.** `PlayerVitals` is per-recipient by
+  contract, carried inside `EntitySnapshot` as `self_vitals`, so this client is told its
+  *own* life state and nobody else's. `collapse_the_local_body` therefore tips exactly one
+  body, and the player beside it keeps standing after it is killed. **Mobs do not have this
+  problem, and the asymmetry is the useful part**: `MobState.action` is in every snapshot for
+  every creature, so a draugr's death is a fact about the world while a player's is a fact
+  about the recipient. Closing it means a life state beside every entity — `EntityState` is a
+  struct and can never gain a field, so it is either a table alongside it in the shape
+  `MobState` already took, or a second per-entity vector — which is a wire change with a
+  version bump and a choice between two shapes. That is #224 and not a widening of the issue
+  that found it.
 - **Interpolation holds the last position for ever when a server goes quiet.** There is no timeout
   that fades an entity out, and none that says "this session is stale": a quiet server is a
   legitimate state, and the read timeout in `session.rs` is a poll interval rather than a session

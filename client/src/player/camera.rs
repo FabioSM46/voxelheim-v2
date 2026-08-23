@@ -29,16 +29,48 @@
 //! came from here in the first place. Waiting a tick for that echo would put the delay of
 //! a network round trip on the act of looking around, which is the one thing a
 //! first-person view cannot survive.
+//!
+//! ## Dying, in two views, decided rather than inherited
+//!
+//! There are two of them now, and a death does something different in each. Stated here
+//! because the alternative is for it to be whatever the arithmetic happened to produce.
+//!
+//! - **First person: the view falls.** The camera *is* the eye, so the eye is what goes
+//!   over — the pitch swings up to the sky and the eye sinks to [`DEATH_EYE_HEIGHT`], and
+//!   it rests there until the server respawns the player. Nothing about the fall is
+//!   reversible from here; the respawn is what ends it, and the respawn is the server's.
+//! - **Third person: the view does not move at all.** The camera is an observer rather
+//!   than an eye, and what falls is the *character* — `super::collapse_the_local_body` tips
+//!   the rig over on the same clock this resource holds. Tipping the camera as well would
+//!   be tipping the thing that is watching, which is the one view where that is nonsense:
+//!   the player is looking at their own body going down, and the camera's job is to keep
+//!   it in frame. The boom, the orbit and the pitch are all untouched, so it does.
+//! - **The toggle is refused while dead**, in both directions. The two views resolve a
+//!   death into two different things — a camera that has fallen, and a camera watching a
+//!   body that has — and flipping between them mid-death would either stand a fallen
+//!   camera up or drop an upright one on its back. It is also the last playing-mode key
+//!   that was not already closed by [`super::SelfVitals::dead`], and a view swap is a
+//!   thing a corpse does not do.
+//!
+//! **None of it decides anything.** The fall follows [`super::SelfVitals::dead`], which is
+//! the server's `LifeState` and nothing else; a client that skipped the whole animation
+//! would be dead for the same length of time, respawn at the same moment and see the same
+//! world, because the only thing the server is told is that this player's controls went
+//! quiet — which they do whether the view fell or not.
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use std::time::Duration;
+
 use super::constants::{
-    BOOM_CLEARANCE, BOOM_LENGTH, EYE_HEIGHT, MAX_PITCH, ORBIT_RETURN_PER_SECOND, ORBIT_SETTLED,
+    BOOM_CLEARANCE, BOOM_LENGTH, DEATH_EYE_HEIGHT, DEATH_FALL_TIME, EYE_HEIGHT, MAX_PITCH,
+    ORBIT_RETURN_PER_SECOND, ORBIT_SETTLED,
 };
 use super::sky::Daylight;
 use super::target::{BlockHit, raycast};
-use super::{ApplySnapshots, InputMode, LocalPlayer, LookState};
+use super::{ApplySnapshots, InputMode, LocalPlayer, LookState, SelfVitals};
 use crate::net::{BlockCoord, Session};
 use crate::world::ChunkStore;
 
@@ -58,6 +90,7 @@ impl Plugin for PlayerCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewMode>()
             .init_resource::<Orbit>()
+            .init_resource::<DeathFall>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -151,6 +184,20 @@ fn place_camera_at_spawn(
     }
 }
 
+/// Everything that decides where the camera goes and which way it points.
+///
+/// One `SystemParam` rather than four resources threaded through a signature, for the
+/// reason [`super::InputGate`] is one: it gives "the state a placement is computed from" a
+/// name, and it keeps [`follow_the_player`] inside the argument budget a fourth resource
+/// took it past.
+#[derive(SystemParam)]
+struct Aim<'w> {
+    look: Res<'w, LookState>,
+    orbit: Res<'w, Orbit>,
+    view: Res<'w, ViewMode>,
+    fall: Res<'w, DeathFall>,
+}
+
 /// Keeps the camera at the player's eyes, looking where the player is looking.
 ///
 /// The two halves come from different places on purpose — see the module comment. The
@@ -158,9 +205,7 @@ fn place_camera_at_spawn(
 /// camera's `Transform` and the player's are different components of different entities,
 /// and would refuse the system rather than risk aliasing them.
 fn follow_the_player(
-    look: Res<LookState>,
-    orbit: Res<Orbit>,
-    view: Res<ViewMode>,
+    aim: Aim<'_>,
     session: Option<Res<Session>>,
     store: Option<Res<ChunkStore>>,
     player: Query<&Transform, With<LocalPlayer>>,
@@ -179,18 +224,25 @@ fn follow_the_player(
         .as_deref()
         .zip(store.as_deref())
         .map(|(session, store)| (store, usize::from(session.0.chunk_size)));
-    let placed = camera_placement(feet, *look, *orbit, *view, |voxel| {
-        solid.is_some_and(|(store, size)| {
-            store.solid_at(
-                BlockCoord {
-                    x: voxel.x,
-                    y: voxel.y,
-                    z: voxel.z,
-                },
-                size,
-            )
-        })
-    });
+    let placed = camera_placement(
+        feet,
+        *aim.look,
+        *aim.orbit,
+        *aim.view,
+        aim.fall.fallen(),
+        |voxel| {
+            solid.is_some_and(|(store, size)| {
+                store.solid_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            })
+        },
+    );
     for mut transform in &mut cameras {
         *transform = placed;
     }
@@ -267,9 +319,19 @@ impl Orbit {
 /// The orbit is cleared rather than animated on a toggle: the animation exists so that
 /// releasing the orbit key does not snap, and a player leaving the view entirely has
 /// nothing on screen for it to be smooth *for*.
+///
+/// **Refused while the server says the player is dead**, which is the module comment's
+/// third decision and the only one that is a *refusal* rather than a pose. The two views
+/// resolve a death differently — this camera falls, the other one watches a body fall — so
+/// a swap part way through either would have to stand a fallen camera up or drop an upright
+/// one on its back, and neither is an animation anybody asked for. `SelfVitals::dead` is
+/// the same gate every other playing control already reads; this key was the last one that
+/// did not, and it decides nothing either way — the server refuses a dead player's
+/// requests whichever view they are in.
 fn toggle_view(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mode: Res<InputMode>,
+    vitals: Res<SelfVitals>,
     mut view: ResMut<ViewMode>,
     mut orbit: ResMut<Orbit>,
 ) {
@@ -282,6 +344,9 @@ fn toggle_view(
     // `InputGate::may_act` keeps, and for the same reason: `Escape` closing the pause menu
     // must not also be read as something else.
     if *mode != InputMode::Playing || mode.is_changed() || !keys.just_pressed(TOGGLE) {
+        return;
+    }
+    if vitals.dead() {
         return;
     }
 
@@ -325,20 +390,83 @@ fn settle_the_orbit(time: Res<Time>, mut orbit: ResMut<Orbit>) {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Going over
+// ---------------------------------------------------------------------------
+
+/// How long this player has been lying where they died, or `None` while the server says
+/// they are alive.
+///
+/// **It exists exactly while [`SelfVitals::dead`] is true**, and it is recomputed from that
+/// every frame rather than started by an edge this side detected — the same shape a mob's
+/// fall has, and for the same reason: a transition that has to be *noticed* is a transition
+/// that can be missed. A respawn clears it in one assignment, so nothing has to animate the
+/// view back upright; the server has already moved the player somewhere else.
+///
+/// Nothing reads it as a fact. It feeds a pose and a rig rotation and reaches no request,
+/// no snapshot and no decision.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct DeathFall(Option<Duration>);
+
+impl DeathFall {
+    /// How far over the view has gone, from nought to one.
+    ///
+    /// Squared, so it accelerates, and clamped, so it *ends* — the same curve a mob's fall
+    /// uses, which is deliberate: a player watching their own body go down in third person
+    /// is watching two falls, and two curves would be visible as one lagging the other.
+    pub fn fallen(self) -> f32 {
+        let Some(elapsed) = self.0 else {
+            return 0.0;
+        };
+        let progress = (elapsed.as_secs_f32() / DEATH_FALL_TIME.as_secs_f32()).clamp(0.0, 1.0);
+        progress * progress
+    }
+}
+
+/// Advances the fall while the server says this player is dead, and forgets it otherwise.
+///
+/// Reads `SelfVitals` and writes only on a change, because `ResMut` marks a resource
+/// changed on every deref and this runs every frame for the rest of the session.
+///
+/// **Registered by `PlayerPlugin` rather than by this plugin, and inside the
+/// `ApplySnapshots` chain**, which is not a filing decision. Two systems in two different
+/// modules read what it writes — [`follow_the_player`] here and
+/// `super::collapse_the_local_body` there — and the second of those runs inside that set,
+/// so a `fall_over` sitting in this plugin's own chain would be *after* one of its readers
+/// and before the other. That is not hypothetical: it left the body a frame behind the
+/// camera in both directions, which showed up as a corpse still on its back for one frame
+/// after the respawn had already stood the view up. Chained after `ingest_snapshots`, which
+/// is what writes the `SelfVitals` it reads, it is ahead of both.
+pub(super) fn fall_over(time: Res<Time>, vitals: Res<SelfVitals>, mut fall: ResMut<DeathFall>) {
+    let next = if vitals.dead() {
+        DeathFall(Some(fall.0.unwrap_or(Duration::ZERO) + time.delta()))
+    } else {
+        DeathFall(None)
+    };
+    if *fall != next {
+        *fall = next;
+    }
+}
+
 /// Where the camera sits and what it looks at, in whichever view is current.
 ///
 /// The eye is the same point in both: the character's feet plus [`EYE_HEIGHT`], which is
 /// the position the server sent. First person puts the camera there. Third person aims
 /// from there and then walks backwards along the view direction, which is why the two
 /// share a function rather than being two systems that have to agree about what an eye is.
+///
+/// **`fallen` is the one input the two views do not share.** In first person the camera is
+/// the eye, so the eye is what goes over; in third person it is an observer watching a body
+/// go over, and an observer that fell with it would take the thing being watched out of
+/// frame. See the module comment, where the decision is argued rather than only applied.
 fn camera_placement(
     feet: Vec3,
     look: LookState,
     orbit: Orbit,
     view: ViewMode,
+    fallen: f32,
     solid: impl FnMut(IVec3) -> bool,
 ) -> Transform {
-    let eye = feet + Vec3::Y * EYE_HEIGHT;
     // Yaw about the world's up axis, then pitch about the camera's own right — in that
     // order, which is what keeps the horizon level. The other order rolls the view as soon
     // as both are non-zero.
@@ -346,16 +474,29 @@ fn camera_placement(
     // The orbit is added before the clamp rather than after: a player who has swung the
     // camera fully up should stop at the same place a player who looked fully up does,
     // and clamping the two separately would allow twice the pitch between them.
-    let pitch = (look.pitch + orbit.pitch).clamp(-MAX_PITCH, MAX_PITCH);
-    let rotation = Quat::from_rotation_y(look.yaw + orbit.yaw) * Quat::from_rotation_x(pitch);
+    let aimed = (look.pitch + orbit.pitch).clamp(-MAX_PITCH, MAX_PITCH);
 
     if view.first_person() {
+        // Going over backwards *is* the view swinging up: the player ends on their back
+        // looking at the sky, so the pitch travels to the top of its own range and the eye
+        // sinks to the ground. Interpolated from wherever the player happened to be looking
+        // when they died rather than snapped, so the last thing they saw slides out of view.
+        //
+        // `MAX_PITCH` rather than a right angle, because straight up is the degenerate
+        // direction this whole file avoids: at exactly ±π/2 every yaw looks the same and
+        // the image flips as the pitch crosses it.
+        let pitch = aimed + (MAX_PITCH - aimed) * fallen;
         return Transform {
-            translation: eye,
-            rotation,
+            translation: feet + Vec3::Y * (EYE_HEIGHT + (DEATH_EYE_HEIGHT - EYE_HEIGHT) * fallen),
+            rotation: Quat::from_rotation_y(look.yaw + orbit.yaw) * Quat::from_rotation_x(pitch),
             ..default()
         };
     }
+
+    // Third person, where `fallen` is deliberately unread: what falls is the character, and
+    // this camera's job for the next three seconds is to keep it in frame.
+    let eye = feet + Vec3::Y * EYE_HEIGHT;
+    let rotation = Quat::from_rotation_y(look.yaw + orbit.yaw) * Quat::from_rotation_x(aimed);
 
     // The camera's own backwards, normalised: `face_distance` divides by a component
     // of it, so it has to be a unit vector for the quotient to be a length in blocks.
@@ -425,12 +566,19 @@ mod tests {
         (LookState::default(), Orbit::default())
     }
 
+    /// A player who has not fallen over, spelled once so that every test that is not about
+    /// a death says so rather than passing a bare zero.
+    const UPRIGHT: f32 = 0.0;
+
+    /// A player whose fall has finished.
+    const FALLEN: f32 = 1.0;
+
     #[test]
     fn first_person_puts_the_camera_at_the_eye_whatever_is_behind_the_player() {
         let (look, orbit) = looking_ahead();
         let feet = Vec3::new(1.5, 64.0, -2.5);
         // Solid everywhere: the boom would be cut to nothing, and first person never asks.
-        let placed = camera_placement(feet, look, orbit, ViewMode::FirstPerson, |_| true);
+        let placed = camera_placement(feet, look, orbit, ViewMode::FirstPerson, UPRIGHT, |_| true);
         assert_eq!(placed.translation, feet + Vec3::Y * EYE_HEIGHT);
     }
 
@@ -445,7 +593,7 @@ mod tests {
         let (look, orbit) = looking_ahead();
         let feet = Vec3::new(0.5, 64.0, -2.5);
         let eye = feet + Vec3::Y * EYE_HEIGHT;
-        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, |voxel| {
+        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, UPRIGHT, |voxel| {
             voxel.z >= 0
         });
 
@@ -468,7 +616,7 @@ mod tests {
         let (look, orbit) = looking_ahead();
         let feet = Vec3::new(0.5, 64.0, -2.5);
         let eye = feet + Vec3::Y * EYE_HEIGHT;
-        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, |_| false);
+        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, UPRIGHT, |_| false);
         assert!((placed.translation.z - (eye.z + BOOM_LENGTH)).abs() < 1e-4);
     }
 
@@ -480,8 +628,143 @@ mod tests {
         let (look, orbit) = looking_ahead();
         let feet = Vec3::new(0.5, 64.0, -2.5);
         let eye = feet + Vec3::Y * EYE_HEIGHT;
-        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, |_| true);
+        let placed = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, UPRIGHT, |_| true);
         assert_eq!(placed.translation, eye);
+    }
+
+    /// **First person: the view falls backwards and comes to rest on the sky.**
+    ///
+    /// Two things at once, and both are the criterion rather than decoration: the pitch
+    /// ends at the top of its range, which is the "falls backwards" the issue asks for read
+    /// as what a first-person camera can actually do, and the eye ends on the ground, which
+    /// is what tells it apart from a player who merely looked up.
+    #[test]
+    fn dying_in_first_person_lays_the_view_on_its_back() {
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+
+        let alive = camera_placement(feet, look, orbit, ViewMode::FirstPerson, UPRIGHT, |_| false);
+        assert_eq!(alive.translation, feet + Vec3::Y * EYE_HEIGHT);
+
+        let dead = camera_placement(feet, look, orbit, ViewMode::FirstPerson, FALLEN, |_| false);
+        assert!(
+            (dead.translation.y - (feet.y + DEATH_EYE_HEIGHT)).abs() < 1e-5,
+            "the eye came to rest {} above the feet, want {DEATH_EYE_HEIGHT}",
+            dead.translation.y - feet.y
+        );
+
+        // Looking at the sky: the view direction is very nearly straight up, and it is
+        // `MAX_PITCH` rather than a right angle because straight up is degenerate.
+        let looking = dead.rotation * Vec3::NEG_Z;
+        assert!(
+            looking.y > MAX_PITCH.sin() - 1e-5,
+            "a fallen player is looking at {looking} rather than at the sky"
+        );
+
+        // And it is an interpolation from wherever they were looking rather than a snap:
+        // half way over is between the two.
+        let midway = camera_placement(feet, look, orbit, ViewMode::FirstPerson, 0.5, |_| false);
+        let part_way = midway.rotation * Vec3::NEG_Z;
+        assert!(
+            part_way.y > 0.0 && part_way.y < looking.y,
+            "the fall jumped straight to the sky: {part_way}"
+        );
+    }
+
+    /// **Third person: the camera does not move, because what falls is the body.**
+    ///
+    /// The decision the issue asked to be made deliberately, pinned so that it stays made.
+    /// A camera that tipped here would take the character out of frame at exactly the
+    /// moment the player is watching them go down, which is the case this view is most
+    /// worth having for.
+    #[test]
+    fn dying_in_third_person_leaves_the_camera_where_it_was_watching_from() {
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(0.5, 64.0, 0.5);
+
+        let alive = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, UPRIGHT, |_| false);
+        let dead = camera_placement(feet, look, orbit, ViewMode::ThirdPerson, FALLEN, |_| false);
+
+        assert_eq!(
+            alive.translation, dead.translation,
+            "the third-person camera moved when the player died"
+        );
+        assert_eq!(
+            alive.rotation, dead.rotation,
+            "the third-person camera tipped over with the body it is watching"
+        );
+    }
+
+    /// The view toggle is refused while the server says the player is dead, and works
+    /// again once it says otherwise.
+    ///
+    /// Driven through the system rather than by asserting the branch, because what is worth
+    /// holding is that the *key* does nothing — and the key is read in a system with four
+    /// conditions on it, three of which were already there.
+    #[test]
+    fn the_view_cannot_be_swapped_while_dead() {
+        use crate::net::{LifeState, PlayerVitals};
+
+        fn view_after_f5(life_state: LifeState) -> ViewMode {
+            let mut keys = ButtonInput::default();
+            keys.press(TOGGLE);
+
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<InputMode>()
+                .init_resource::<ViewMode>()
+                .init_resource::<Orbit>()
+                .insert_resource(SelfVitals::from_server(PlayerVitals {
+                    health: if life_state == LifeState::Dead { 0 } else { 60 },
+                    max_health: 60,
+                    life_state,
+                    respawn_ticks: 0,
+                    invulnerable: false,
+                }))
+                .add_systems(Update, toggle_view);
+
+            // One update before the key arrives, to spend the `is_changed` flag a freshly
+            // inserted `InputMode` carries — which `toggle_view` reads as "a mode
+            // transition shares this frame" and refuses on, for every life state. No
+            // `InputPlugin`, so nothing clears the press between the two.
+            app.update();
+            app.insert_resource(keys);
+            app.update();
+            *app.world().resource::<ViewMode>()
+        }
+
+        assert_eq!(
+            view_after_f5(LifeState::Dead),
+            ViewMode::FirstPerson,
+            "a dead player swapped the view"
+        );
+        assert_eq!(
+            view_after_f5(LifeState::Alive),
+            ViewMode::ThirdPerson,
+            "the toggle was refused to a living player, so the test above proved nothing"
+        );
+    }
+
+    /// The fall exists exactly while the server says the player is dead, and a respawn
+    /// clears it in one assignment rather than animating anything back.
+    #[test]
+    fn the_fall_follows_the_servers_life_state_and_nothing_else() {
+        assert_eq!(DeathFall::default().fallen(), 0.0);
+        assert_eq!(DeathFall(Some(Duration::ZERO)).fallen(), 0.0);
+        assert_eq!(DeathFall(Some(DEATH_FALL_TIME)).fallen(), 1.0);
+        assert_eq!(
+            DeathFall(Some(DEATH_FALL_TIME * 10)).fallen(),
+            1.0,
+            "the view kept going over past the end of its own fall"
+        );
+
+        // Accelerating, and the same curve a mob's fall uses: in third person the player
+        // watches both at once, and two curves would show as one lagging the other.
+        let halfway = DeathFall(Some(DEATH_FALL_TIME / 2)).fallen();
+        assert!(
+            halfway < 0.5,
+            "the fall was half over at half the time ({halfway}), so it does not accelerate"
+        );
     }
 
     #[test]
@@ -497,12 +780,20 @@ mod tests {
             pitch: MAX_PITCH,
             held: true,
         };
-        let placed = camera_placement(Vec3::ZERO, look, orbit, ViewMode::FirstPerson, |_| false);
+        let placed = camera_placement(
+            Vec3::ZERO,
+            look,
+            orbit,
+            ViewMode::FirstPerson,
+            UPRIGHT,
+            |_| false,
+        );
         let only_look = camera_placement(
             Vec3::ZERO,
             look,
             Orbit::default(),
             ViewMode::FirstPerson,
+            UPRIGHT,
             |_| false,
         );
         assert!(placed.rotation.angle_between(only_look.rotation) < 1e-5);

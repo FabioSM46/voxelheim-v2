@@ -24,6 +24,7 @@
 //! not something it is told, because it is not something it decides.
 
 use std::f32::consts::FRAC_PI_2;
+use std::time::Duration;
 
 /// The edge of the player's square footprint, in blocks. Mirrors `game.PlayerWidth`.
 pub const PLAYER_WIDTH: f32 = 0.6;
@@ -112,6 +113,35 @@ pub const ORBIT_RETURN_PER_SECOND: f32 = 0.0005;
 /// an animation that ends and one that only ever gets closer.
 pub const ORBIT_SETTLED: f32 = 0.001;
 
+/// How long the view takes to go over once the server says the player is dead.
+///
+/// **A pose on a fixed curve and never a clock.** `DeathDuration` on the server is three
+/// seconds and this number is not it: what ends a death is the respawn the server sends,
+/// and this side is not told how long that is away except as a count it displays. A fall
+/// that finished would be a fall that finished — the view then rests on the sky for
+/// however long the server keeps saying `Dead`, which is exactly the shape a mob's fall
+/// has one file over.
+///
+/// Slower than a mob's, deliberately: it is the player's own head, and a view that snapped
+/// to the sky in a third of a second would read as a cut rather than as falling.
+pub const DEATH_FALL_TIME: Duration = Duration::from_millis(900);
+
+/// How far above the feet the eye comes to rest once the player has fallen, in blocks.
+///
+/// A head lying on the ground rather than one at [`EYE_HEIGHT`] pointing upwards, which is
+/// the difference between having fallen over and having looked up. Above zero, because a
+/// camera exactly on the ground plane renders the ground clipped open.
+pub const DEATH_EYE_HEIGHT: f32 = 0.22;
+
+/// How far the character's own body tips as it goes down, in radians.
+///
+/// A quarter turn, so it finishes flat on its back — the same pose and the same direction
+/// a draugr's fall ends in, because they are the same event happening to two bodies. The
+/// sign is argued where a mob's is: the rig faces -Z and a positive rotation about +X
+/// carries the top of it towards +Z, and `the_local_body_goes_over_backwards` is what
+/// actually holds that.
+pub const DEATH_BODY_PITCH: f32 = FRAC_PI_2;
+
 // The relationships between the numbers above, checked at compile time rather than by a
 // test. Each is a property of the *build* rather than of a run: a camera outside the body
 // it is following, or a pitch limit at exactly vertical, are states no build should be able
@@ -133,3 +163,7 @@ const _: () = assert!(MAX_PITCH > 0.0 && MAX_PITCH < FRAC_PI_2);
 /// A reach shorter than the drop from the eyes to the player's own feet cannot target
 /// the block being stood on — which is the first edit every player tries.
 const _: () = assert!(MAX_REACH > EYE_HEIGHT);
+
+/// An eye that came to rest *above* where it stood has not fallen, and one at or below the
+/// ground plane renders the ground clipped open.
+const _: () = assert!(DEATH_EYE_HEIGHT > 0.0 && DEATH_EYE_HEIGHT < EYE_HEIGHT);
