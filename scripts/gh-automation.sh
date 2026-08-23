@@ -74,6 +74,34 @@ require_gh() {
   gh auth status &>/dev/null || die "gh not authenticated. Run: gh auth login"
 }
 
+# `jq` is a hard dependency of this script and, unlike `gh`, it never said so. The
+# standalone binary is piped into throughout, and every one of those call sites
+# carries `2>/dev/null` — correctly, because a jq that runs can still be handed an
+# unparseable payload, and the fail-closed sentinel is what must answer that. The
+# same redirection swallows `jq: command not found`. `pr-status-json` survived it by
+# design (`-1` everywhere, `UNREADABLE`, a `[WARN]` per field), but `pr-status` read
+# the sentinel back out as `[FAIL] ? unresolved review threads (must be 0)`, exited
+# 0, and wrote nothing to stderr — a sentence about GitHub describing a fact about
+# the workstation (#211).
+#
+# Two probes rather than one, because "absent" is not the only way jq fails to work
+# and `command -v` cannot tell the difference. A stub, a wrapper or a broken install
+# satisfies a PATH lookup and then exits non-zero for every filter — which is exactly
+# how the issue reproduces the fault without uninstalling anything. So the second
+# probe runs a real filter and checks the answer: what is verified is that jq
+# *works*, not that a file with that name exists.
+#
+# Deliberately not called at file scope, for the reason `require_gh` is not: `--help`
+# and any subcommand that needs neither tool must stay usable without them. Each
+# command that reaches the standalone binary calls it before its first API call, so
+# the diagnostic arrives instead of a round-trip whose answer cannot be read.
+require_jq() {
+  command -v jq &>/dev/null \
+    || die "jq not found. Install: https://jqlang.github.io/jq/download/ (Debian/Ubuntu: sudo apt-get install jq)"
+  [ "$(jq -rn '"ok"' 2>/dev/null)" = "ok" ] \
+    || die "jq is on PATH but does not run. Reinstall: https://jqlang.github.io/jq/download/ (Debian/Ubuntu: sudo apt-get install jq)"
+}
+
 # Resolve the repository once for commands whose API shape needs an explicit
 # owner/name. Prefer Actions' event repository, then a caller's local REPO
 # override, then the current checkout as understood by gh. The last path is deliberately
@@ -189,6 +217,7 @@ graphql_pr_review() {
 cmd_pr_status() {
   local pr="$1"
   require_gh
+  require_jq
 
   echo "=== PR #${pr} Status ==="
   echo ""
@@ -427,6 +456,7 @@ resolve_mergeable() {
 cmd_pr_status_json() {
   local pr="$1"
   require_gh
+  require_jq
 
   local graphql_out unresolved ci_failing ci_pending changes_requested
   local checks_missing checks_missing_names required_check_state mergeable
@@ -744,6 +774,9 @@ repo_label_defined() {
 cmd_pr_label() {
   local pr="$1" action="$2" label="$3"
   require_gh
+  # The `remove` path percent-encodes the label with `jq -rn … '$s|@uri'`, so this
+  # command needs the binary too even though its reads go through `gh --jq`.
+  require_jq
   resolve_repo || die "Could not resolve the repository for a label write on PR #${pr}"
 
   case "$action" in
@@ -1004,6 +1037,11 @@ cmd_pr_deepseek_rounds() {
   fi
 
   require_gh
+  # Before resolve_repo, and not through deepseek_rounds_error: that reporter builds
+  # its {"error":…} envelope with `jq -cn`, so the one fault it can never describe is
+  # a missing jq. `die` is what is left, and it is the right shape anyway — a
+  # preflight, not an unreadable round count.
+  require_jq
   if ! resolve_repo; then
     deepseek_rounds_error "Could not determine the current GitHub repository" "$max_rounds"
     return 1
@@ -1104,6 +1142,11 @@ cmd_pr_check_label() {
 
 cmd_is_ready_to_merge() {
   local pr="$1"
+  # This command reaches jq only through cmd_pr_status_json — whose stderr it
+  # discards, because stdout there is JSON this function parses. That redirection
+  # would swallow the preflight's own diagnostic exactly as it swallowed `jq:
+  # command not found`, so the check belongs on this side of it.
+  require_jq
   local json
   json=$(cmd_pr_status_json "$pr" 2>/dev/null)
   local ready
@@ -1277,6 +1320,7 @@ ceremonies_for_marker() {
 
 cmd_iteration_advance() {
   require_gh
+  require_jq
   resolve_repo || die "Could not resolve the repository for iteration advancement"
 
   local milestones milestone_count

@@ -587,6 +587,20 @@ connection errors (they fail fast) while keeping the worst case bounded.
 
 ### Setup Prerequisites
 
+0. **Local tools**: `gh` and `jq`. `scripts/gh-automation.sh` needs both, and the helper
+   test suite needs `jq` as well — the full list lives in the Toolchain table in
+   `README.md`. `jq` is the one that went undeclared for a long time, because GitHub's
+   `ubuntu-latest` image ships it and CI therefore never noticed: on a workstation without
+   it, `pr-status` reported `[FAIL] ? unresolved review threads (must be 0)` and exited 0,
+   a sentence about GitHub describing a fact about the workstation (#211). Every standalone
+   `jq` call in that script is deliberately `2>/dev/null` — a working jq can still be handed
+   an unparseable payload, and the fail-closed sentinel is what must answer that — so the
+   same redirection swallowed `jq: command not found` at all of them. `require_jq` sits
+   beside `require_gh` and is reached the same way, from the command dispatch rather than
+   file scope, so `--help` and the subcommands that need neither tool stay usable. **gh's
+   built-in `--jq` is not the same thing**: that expression is evaluated inside `gh` and
+   needs no binary, which is exactly what makes the two easy to confuse when reading the
+   script.
 1. **GitHub Token**: Create a fine-grained PAT with `contents: read/write`,
    `pull_requests: read/write`, `issues: read/write` on this repository. Store as
    `GH_PIPELINE_TOKEN` in repository secrets.
