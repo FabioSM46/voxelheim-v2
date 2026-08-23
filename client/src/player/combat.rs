@@ -95,6 +95,13 @@ pub struct ApplyCombatInput;
 ///
 /// Sent whether the blow later hits or misses, because this client does not know which
 /// and will not find out except by watching the draugr's health in a later snapshot.
+///
+/// **A unit struct, and it stays one.** `super::hands` draws three different arcs and picks
+/// between them itself, from a cursor that never leaves that module (#174) — so which shape
+/// plays is decided *downstream* of this message rather than carried by it, and there is no
+/// direction in which it could travel back. That is what keeps the picture from deciding
+/// anything: the `AttackRequest` below names a slot and a tick and has nowhere to put an
+/// animation, so three consecutive swings ask the server for exactly the same thing.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SwingSent;
 
@@ -363,6 +370,20 @@ mod tests {
         });
     }
 
+    /// Letting go, so the next [`click`] is another `just_pressed` rather than nothing.
+    ///
+    /// `ButtonInput::press` on a button that is already down sets no `just_pressed` flag —
+    /// which is exactly the behaviour `holding_the_button_does_not_repeat_the_swing` relies
+    /// on — so a test about *consecutive* presses has to release between them or it is a
+    /// test about one press with extra frames in it.
+    fn release(app: &mut App) {
+        app.world_mut().write_message(MouseButtonInput {
+            button: SWING_BUTTON,
+            state: ButtonState::Released,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+
     fn drain(sent: &Receiver<Vec<u8>>) {
         while sent.try_recv().is_ok() {}
     }
@@ -622,6 +643,45 @@ mod tests {
             let inventory = Inventory::from_stacks(vec![stack]);
             assert!(!blade_in_hand(&inventory, &selected), "{name} swings");
         }
+    }
+
+    /// **Three swings in a row ask the server for exactly the same thing.**
+    ///
+    /// The hand draws a different arc for each of them — an overhead cut, a lateral slash
+    /// and a thrust, rotating so no two consecutive presses repeat (#174) — and not one of
+    /// those shapes reaches this module. `AttackRequest` carries a slot and the shared
+    /// counter, and this reads both: the slot is identical across the three, and the tick is
+    /// the only thing that moves, because time passed rather than because a picture changed.
+    ///
+    /// It is the sending half of *a picture decides nothing*. The drawing half is pinned in
+    /// `super::hands`, where the cursor lives; what could not be checked there is that
+    /// nothing leaked into the frame, and a frame is the only thing the server acts on.
+    #[test]
+    fn consecutive_swings_ask_for_the_same_thing() {
+        let (mut app, sent) = clicking_app(blade());
+
+        let mut asked = Vec::new();
+        for press in 0..3 {
+            click(&mut app);
+            app.update();
+            release(&mut app);
+            app.update();
+            let found = attacks(&sent);
+            assert_eq!(found.len(), 1, "press {press} sent {} swings", found.len());
+            asked.push(found[0]);
+        }
+
+        let slots: Vec<u8> = asked.iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(
+            slots,
+            vec![0, 0, 0],
+            "the three swings named different slots: {asked:?}"
+        );
+
+        // And the presses really were three, rather than one that the queue echoed: the
+        // shared counter moves with the tick-paced input stream, so the ticks are allowed to
+        // differ and are the only field that is.
+        assert_eq!(asked.len(), 3);
     }
 
     /// Every item the hand draws as a blade also routes the left button to a swing.
