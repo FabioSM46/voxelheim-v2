@@ -472,6 +472,17 @@ acknowledged what nobody read (#32 — on PR #30 the budget ran out after the cl
 entire server half was reported as having no issues). Splitting the pull request is still the
 reliable fix when a diff exceeds it.
 
+**And it never claims to have done any of it.** Both system prompts forbade *suggesting* an
+action; neither forbade *asserting* one, so on PR #209 a Mode B reply announced "I'm closing this
+thread as resolved" — 72 seconds after a human had already resolved it. The script's entire write
+surface is `create_issue_comment`, `create_review` and `create_review_comment_reply`; resolving a
+thread is not among them. Both prompts now forbid the claim as well as the suggestion, and both
+carry the worked example that keeps it from widening into a muzzle: *"I checked the callers"* is a
+reviewer doing its job, *"I closed the thread"* is a reviewer reporting something that did not
+happen. Making the claim true was the wrong fix — a bot that can clear its own findings is the
+opposite of what `unresolved_threads == 0` exists to mean. Third instance of the #134 / #46 family,
+same resolution: **when an output asserts something no machine checks, stop asserting it** (#212).
+
 **The cap used to be 120,000, and the reason given for keeping it there was wrong.** This file
 said it was not raised "because the model's context is what the cap describes". V4 documents a
 **1M-token context**, flash and pro alike; 120,000 characters is roughly 35K tokens, about 3.5%
