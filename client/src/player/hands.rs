@@ -535,10 +535,11 @@ impl HandIntent<'_, '_> {
         *self.mode == InputMode::Playing && !self.mode.is_changed()
     }
 
-    /// **Whether the server says a block is coming apart under this crosshair right now.**
+    /// **Whether the server says a block is coming apart under this crosshair right now,
+    /// and the hand is on screen to be shown doing it.**
     ///
-    /// [`MiningFeedback`] is the whole of the answer, and deliberately the whole of it. It
-    /// holds a byte the server sent; it is cleared by the zero frame a server-side reset
+    /// [`MiningFeedback`] is the whole of the *gameplay* answer, and deliberately the whole
+    /// of it. It holds a byte the server sent; it is cleared by the zero frame a server-side reset
     /// sends, cleared when the crosshair leaves the voxel that byte describes, and expired
     /// after `PROGRESS_SILENCE_TICKS` of silence. So *the block broke*, *the player looked
     /// away* and *the request was refused and nothing came back* are already one fact by
@@ -551,8 +552,26 @@ impl HandIntent<'_, '_> {
     /// the resource instead also keeps the two presentations of one fact in step, because
     /// `ui/crosshair.rs` fills its ring from this very resource: the hand and the ring
     /// start together, hold through the same silence, and stop together.
+    ///
+    /// **[`Self::playing`] is in it, and it is not a second opinion about mining.** It
+    /// answers a different question — does this frame's hand belong to the world at all —
+    /// and it is the same UI-state gate [`Self::placing`] takes and
+    /// `target::send_block_edits` takes. All it can do is stop the punch being *drawn*
+    /// while the pack or the pause menu owns the screen: it advances no progress, times no
+    /// break, and decides nothing about whether one happened. Every question about what is
+    /// coming apart still has exactly one answer, and it is the byte above.
+    ///
+    /// It has to be here rather than left to the crosshair, because the byte outlives the
+    /// transition. Nothing orders [`super::ApplyInputMode`] before
+    /// [`ApplyMiningFeedback`], so on the frame the mode changes the feedback can still be
+    /// the one computed while the player was aiming — and the hand would go on punching
+    /// behind an open inventory until the next frame's raycast reported nothing targeted.
+    /// It is also what keeps the paragraph above true: `ui/crosshair.rs` hides its whole
+    /// root on this same mode test, so without the term here the ring and the hand would
+    /// stop on different frames — the one thing reading a shared resource was meant to
+    /// prevent.
     fn mining(&self) -> bool {
-        self.feedback.progress() != 0
+        self.playing() && self.feedback.progress() != 0
     }
 
     /// A press that asked for a block somewhere there is room to put one.
@@ -580,7 +599,9 @@ fn animate_view_model(
     let mut next_animation = *animation;
     // The loop runs exactly while the server's answer says it should, and resets the
     // instant it does not — so a break, a look-away and a refusal all end it, without this
-    // module knowing which of the three happened. See [`HandIntent::mining`].
+    // module knowing which of the three happened. Opening the pack ends it too, which is
+    // the screen changing hands rather than a fourth thing the server said. See
+    // [`HandIntent::mining`].
     if intent.mining() {
         next_animation.mine_elapsed += time.delta();
     } else {
@@ -1432,5 +1453,67 @@ mod tests {
                 .pressed(MouseButton::Left),
             "the button was released, so this test proved nothing about it"
         );
+    }
+
+    /// **The pack opening stops the hand, whatever the last byte from the server said.**
+    ///
+    /// The gate is [`HandIntent::playing`], and it is UI state rather than a second
+    /// opinion about mining: it decides whether this frame's hand belongs to the world,
+    /// not whether the block is coming apart. What makes it necessary is that the byte
+    /// outlives the transition — nothing orders the input mode before the feedback that
+    /// reads it, so the frame the inventory opens on can still be holding the progress
+    /// computed while the player was aiming.
+    ///
+    /// So the test says exactly that: the server's answer is left untouched and the button
+    /// is left held down, and both are asserted at the end. If either had changed, the
+    /// reset below would be evidence about something other than the mode.
+    #[test]
+    fn a_mode_that_is_not_playing_stops_the_hand_the_server_is_still_feeding() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        for mode in [InputMode::Inventory, InputMode::Menu] {
+            let mut app = hand_only_app();
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+            // A held button, a voxel under the crosshair, and the server reporting that it
+            // is coming apart: the loop is running.
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            *app.world_mut().resource_mut::<BlockTarget>() = BlockTarget(Some(BlockHit {
+                block: IVec3::ZERO,
+                face: IVec3::Y,
+            }));
+            *app.world_mut().resource_mut::<MiningFeedback>() = MiningFeedback::for_test(64);
+            app.update();
+            app.update();
+            assert_eq!(
+                app.world().resource::<HandAnimation>().mine_elapsed,
+                STEP * 2,
+                "{mode:?}: the loop never started, so nothing below is about stopping it"
+            );
+
+            // The screen changes hands. The server has said nothing new.
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
+            assert_eq!(
+                app.world().resource::<HandAnimation>().mine_elapsed,
+                Duration::ZERO,
+                "{mode:?}: the hand kept punching while the UI owned the screen"
+            );
+
+            // The two halves that make that assertion mean anything.
+            assert!(
+                app.world()
+                    .resource::<ButtonInput<MouseButton>>()
+                    .pressed(MouseButton::Left),
+                "{mode:?}: the button was released, so this test proved nothing about it"
+            );
+            assert_ne!(
+                app.world().resource::<MiningFeedback>().progress(),
+                0,
+                "{mode:?}: the server's progress was cleared, so the mode gate proved nothing"
+            );
+        }
     }
 }
