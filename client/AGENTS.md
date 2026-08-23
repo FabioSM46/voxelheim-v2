@@ -74,13 +74,29 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings, and the one rule that refuses a rebinding rather than leaving a control unreachable — each with its bound, its step and the default it starts from | reach the wire, take a value from something the server sent, or decide any outcome |
+| `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory | reach into another module's internals, or grow a health bar |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
+| `ui/settings.rs` | the settings screen behind the pause menu: the rows, the steppers, the rebinding capture and the refusal it prints | hold a bound, a step or a default of its own, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
+
+**`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
+`ui` both *read* it and only `ui` writes it, from the one screen; the code it ships imports
+nothing from either and nothing from `net` at all. **The default a setting starts from is
+why that is stated here rather than assumed** — `DEFAULT_LOOK_SENSITIVITY` began in
+`player/constants.rs`, which made this module import `player` while this file said it did
+not, and a documented invariant contradicted by the code beneath it is worse than either
+half alone. A bound, a step and a default are one statement about one setting and they live
+together. The single exception is a *test*: the pitch limit is `player`'s build invariant
+and stayed there, so `the_pitch_limit_holds_at_every_sensitivity_this_screen_offers` reads
+it across the module line to hold that no sensitivity this screen offers can reach past it.
+The `net` half is the structural half of "nothing the server sent becomes a preference", and
+`no_setting_is_sourced_from_anything_the_server_sent` keeps it true as the module grows.
 
 The layout deliberately mirrors the server's packages — `frame.rs` ↔ `internal/transport`,
 `codec.rs` ↔ `internal/protocol`, `session.rs` ↔ `internal/session`, `world/` ↔
@@ -1572,6 +1588,30 @@ Recorded here so the next reader does not mistake them for oversights:
   `TcpListener::bind` takes one address, and a browser may connect to the other. Naming the
   literal address in the service's `-discord-redirect-uri` avoids it entirely, which is what its
   own default does.
+- **The settings screen holds two settings so far, and #179's second half is the rest.**
+  The graphics options — render distance, field of view, vertical sync, frame cap,
+  brightness and where the fog begins — and the frame-rate readout are additive: rows on
+  this screen, fields in this file. Not coming with them: *cursor capture*, which belongs to
+  the camera-control issue this file has named for a while and that still does not exist;
+  *audio*; and *shadows, ambient occlusion and texture quality*, which have no shadow map,
+  no AO pass and no texture behind them. Nor the pitch limit, which `player/constants.rs`
+  explains is an invariant rather than a preference.
+- **A module that names a file under the data directory carries #230's guard, and this is
+  the second one.** `Environment::read` is `#[cfg(not(test))]` in `settings/store.rs` for
+  the same reason it is in `net/session.rs`: a test build that can ask what
+  `$XDG_DATA_HOME` is will eventually write into the developer's own, and #230 is what that
+  looks like after a while — 1769 files nobody noticed, nothing ever red. Each such module
+  falls back through its own `default_environment()`, whose test half names nowhere.
+  `scripts/test/client-data-home-isolation.test.sh` holds both, from one list; the next
+  module joins that list rather than copying the reasoning.
+- **`Escape` is bindable, and the settings screen keeps it only while nothing is waiting.**
+  It is `Control::Menu`'s default and `crate::settings` offers it like every other key, so a
+  panel that swallowed every press of it would be one that could never put the pause menu
+  back where a player found it — the model saying a key is free while the screen quietly
+  refuses it is the one disagreement a settings screen must not have. With a capture
+  waiting, the press goes to the control that asked for it; with nothing waiting it takes
+  the panel down, which is the way out a player who has bound the menu somewhere unfortunate
+  still needs. Taking a capture back is a second press of its own row.
 - **A character cannot be deleted or renamed, from here or at all.** The contract has no message
   for either — `schemas/handshake.fbs` reserves a list, a selection and a creation — so a roster
   that is full is full, and `--name` naming nobody on one says so and leaves the screen up. The

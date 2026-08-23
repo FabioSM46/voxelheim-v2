@@ -31,6 +31,7 @@ mod wire;
 
 mod net;
 mod player;
+mod settings;
 mod ui;
 mod world;
 
@@ -41,6 +42,7 @@ use bevy::prelude::*;
 
 use crate::net::{AccountService, DEFAULT_PLAYER_NAME, NetPlugin, ServerListPlugin, SignInPlugin};
 use crate::player::PlayerPlugin;
+use crate::settings::SettingsPlugin;
 use crate::ui::{PlayAs, UiPlugin};
 use crate::world::WorldPlugin;
 
@@ -248,6 +250,11 @@ fn run(start: Start) -> AppExit {
             .with_identity_path(identity_path),
     )
     .add_plugins(WorldPlugin)
+    // Before the two that read it: `player` takes the mouse sensitivity and the key
+    // bindings out of the resource this inserts, and `ui` draws the screen that writes
+    // them. It is the whole of the file this client keeps for a player's preferences —
+    // nothing here reaches the wire, and nothing here decides an outcome.
+    .add_plugins(SettingsPlugin::from_environment())
     // The player before the UI: the player plugin owns the one camera, and `bevy_ui`
     // draws through it. See the module comment in player/camera.rs.
     .add_plugins(PlayerPlugin)
