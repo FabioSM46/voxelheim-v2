@@ -51,6 +51,7 @@ use std::time::{Duration, Instant};
 use super::http::{self, MAX_REQUEST_LINE_BYTES, Url};
 use super::json;
 use super::tickets::{self, CachedTicket};
+use super::tls::{self, FINGERPRINT_CHARS};
 
 /// How long either POST to the account service may take, per phase.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -125,42 +126,57 @@ impl fmt::Debug for Secret {
 /// and read from there by both the sign-in and the list. A second one cannot be
 /// introduced by anything a server says.
 ///
-/// **What is deliberately *not* claimed is that the hop to it is authenticated.** It is
-/// plain HTTP: [`Self::parse`] refuses `https` rather than downgrading silently, because
-/// verifying a web PKI certificate needs a root store this client does not carry. So the
-/// anchor is only as good as the network between this process and that service, and an
-/// account service belongs on a loopback address or a private network until that
-/// changes. That gap is tracked as **#131** and nothing here closes it.
+/// **And the hop to it is authenticated, which is the one thing this paragraph used to
+/// have to disclaim** (#131). It is `https`, and the certificate is checked against a
+/// SHA-256 the launch supplied — `--account-service-fingerprint`, beside the address, the
+/// way an operator hands both out. There is no root store and none is needed: pinning is
+/// a digest comparison, which is what `net/tls.rs` already does for a game server. There
+/// is no trust on first use, no `--insecure` and no plaintext form — first contact is
+/// exactly when a substitution happens, so a fingerprint this client discovered would be
+/// a fingerprint an attacker could choose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountService {
     authority: String,
     /// The path the service is served under, with no trailing `/`. Empty when it is
     /// served at the root, which is what `voxelheim-auth` does on its own port.
     prefix: String,
+    /// How this service is reached, carrying the certificate to expect there.
+    ///
+    /// **A field rather than an argument at each call, and that is the enforcement.**
+    /// There is no way to hold an `AccountService` and not have stated what it must
+    /// present: [`Self::parse`] is the only constructor a shipped client has and it takes
+    /// the fingerprint, so "the sign-in is pinned and the list is pinned" is a property of
+    /// this type rather than two call sites that each remembered.
+    transport: http::Transport,
 }
 
 impl AccountService {
-    /// Reads an account service URL, or says what is wrong with it.
+    /// Reads an account service URL and the fingerprint to expect at it, or says what is
+    /// wrong with them.
     ///
-    /// **`https` is refused rather than downgraded.** This client cannot verify a
-    /// web PKI certificate: `rustls` is taken without a root store, and adding one
-    /// is a fourth crate — see `client/AGENTS.md`. Speaking plaintext to a URL that
-    /// said `https` would be the silent downgrade that is worse than either honest
-    /// answer, so it is refused and the gap is written down instead.
-    pub fn parse(raw: &str) -> Result<Self, String> {
+    /// **`http` is refused rather than accepted.** The account service listens over TLS
+    /// and has no plaintext form, so an `http` address cannot work — and refusing it here
+    /// turns what would otherwise be a connection error on a login screen into a usage
+    /// error before a window opens. It is the same refusal `cmd/voxelheimd` makes on its
+    /// own copy of this address.
+    ///
+    /// **The fingerprint is required and is not discovered.** A malformed one is refused
+    /// with the shape it should have had, because the alternative — connecting anyway and
+    /// comparing against nothing — is the hole this whole path exists to close.
+    pub fn parse(raw: &str, fingerprint: &str) -> Result<Self, String> {
         let url = http::parse_url(raw)?;
         match url.scheme.as_str() {
-            "http" => {}
-            "https" => {
+            "https" => {}
+            "http" => {
                 return Err(format!(
-                    "{raw} is https, and this client has no way to verify a certificate for an \
-                     account service. Use http:// to a service you reach over a private network \
-                     or a loopback address."
+                    "{raw} is http, and the account service listens over TLS. Use https:// — and \
+                     pass the fingerprint it prints when it starts, which is what this client \
+                     checks instead of a certificate authority."
                 ));
             }
             other => {
                 return Err(format!(
-                    "{raw} is {other}, and the account service speaks http"
+                    "{raw} is {other}, and the account service speaks https"
                 ));
             }
         }
@@ -170,11 +186,41 @@ impl AccountService {
             ));
         }
 
-        let prefix = url.path.trim_end_matches('/').to_owned();
+        let Some(fingerprint) = tls::parse_fingerprint(fingerprint) else {
+            return Err(format!(
+                "the account service fingerprint is not a SHA-256: it is \
+                 {FINGERPRINT_CHARS} hexadecimal characters, printed by that service at \
+                 every start as certificate_sha256. Ask whoever runs it for the number; \
+                 there is nothing this client can read it from, because this connection \
+                 is where its trust begins."
+            ));
+        };
+
         Ok(Self {
             authority: url.authority(),
-            prefix,
+            prefix: url.path.trim_end_matches('/').to_owned(),
+            transport: http::Transport::Pinned(fingerprint),
         })
+    }
+
+    /// The same service reached in the clear, for a test standing a fake one up.
+    ///
+    /// `cfg(test)` and nowhere else, which is the seam [`http::Transport`] documents: a
+    /// shipped client has [`Self::parse`] and nothing else, so there is no build a player
+    /// runs in which an account service can be reached unencrypted.
+    #[cfg(test)]
+    pub(super) fn plaintext(raw: &str) -> Result<Self, String> {
+        let url = http::parse_url(raw)?;
+        Ok(Self {
+            authority: url.authority(),
+            prefix: url.path.trim_end_matches('/').to_owned(),
+            transport: http::Transport::Plaintext,
+        })
+    }
+
+    /// How this service is reached, for the two modules that make requests to it.
+    pub(super) fn transport(&self) -> &http::Transport {
+        &self.transport
     }
 
     /// `host:port`, which is what the cache path is derived from and what a socket
@@ -200,8 +246,20 @@ impl AccountService {
 }
 
 impl fmt::Display for AccountService {
+    /// The address as it was given, scheme and all.
+    ///
+    /// The scheme comes from the transport rather than from a literal, so a line in a log
+    /// cannot say `https` about a plaintext test fixture or the reverse. **The
+    /// fingerprint is deliberately absent**: it is not a secret, but it is not part of
+    /// the address either, and a message that carried it would be a message somebody
+    /// copies the wrong half of.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "http://{}{}", self.authority, self.prefix)
+        let scheme = match self.transport {
+            http::Transport::Pinned(_) => "https",
+            #[cfg(test)]
+            http::Transport::Plaintext => "http",
+        };
+        write!(f, "{scheme}://{}{}", self.authority, self.prefix)
     }
 }
 
@@ -341,6 +399,7 @@ struct Started {
 /// Asks the account service to begin a sign-in.
 fn begin(service: &AccountService) -> Result<Started, String> {
     let response = http::post_json(
+        service.transport(),
         service.authority(),
         &service.start_path(),
         "{}",
@@ -682,6 +741,7 @@ fn complete(
         secret = json::quote(started.finish_secret.reveal()),
     );
     let response = http::post_json(
+        service.transport(),
         service.authority(),
         &service.finish_path(),
         &body,
@@ -977,7 +1037,7 @@ mod tests {
         }
 
         fn service(&self) -> AccountService {
-            AccountService::parse(&format!("http://{}", self.authority)).expect("a URL")
+            AccountService::plaintext(&format!("http://{}", self.authority)).expect("a URL")
         }
 
         fn seen(&self) -> Vec<(String, String)> {
@@ -1334,7 +1394,7 @@ mod tests {
         // request, so it is checked on its own rather than through an attempt.
         let (events, _drain) = mpsc::channel();
         // Discard: reaching a socket at all would be the failure under test.
-        let service = AccountService::parse("http://127.0.0.1:9").expect("a URL");
+        let service = AccountService::plaintext("http://127.0.0.1:9").expect("a URL");
         let started = Started {
             state: "the-state".to_owned(),
             finish_secret: Secret::new("sec".to_owned()),
@@ -1533,21 +1593,52 @@ mod tests {
 
     #[test]
     fn an_account_service_url_is_read_or_refused_with_a_reason() {
-        let service = AccountService::parse("http://127.0.0.1:7780").expect("a URL");
+        let pin = "ab".repeat(32);
+
+        let service = AccountService::parse("https://127.0.0.1:7780", &pin).expect("a URL");
         assert_eq!(service.authority(), "127.0.0.1:7780");
         assert_eq!(service.start_path(), START_PATH);
         assert_eq!(service.finish_path(), FINISH_PATH);
-        assert_eq!(service.to_string(), "http://127.0.0.1:7780");
+        assert_eq!(service.to_string(), "https://127.0.0.1:7780");
 
-        let prefixed = AccountService::parse("http://accounts.example/auth/").expect("a URL");
-        assert_eq!(prefixed.authority(), "accounts.example:80");
+        // No port, so the scheme decides it — 443 rather than the 80 a single default
+        // would have dialled at an address nobody typed wrong.
+        let prefixed =
+            AccountService::parse("https://accounts.example/auth/", &pin).expect("a URL");
+        assert_eq!(prefixed.authority(), "accounts.example:443");
         assert_eq!(prefixed.start_path(), format!("/auth{START_PATH}"));
 
-        let err = AccountService::parse("https://accounts.example").expect_err("no root store");
-        assert!(err.contains("verify a certificate"), "{err}");
-        assert!(AccountService::parse("accounts.example").is_err());
-        assert!(AccountService::parse("ftp://accounts.example").is_err());
-        assert!(AccountService::parse("http://accounts.example/?a=1").is_err());
+        // **The plaintext refusal, which is the direction that matters** (#131): there is
+        // no unencrypted account service to reach, so `http` is a usage error before a
+        // window opens rather than a connection failure on a login screen.
+        let err = AccountService::parse("http://accounts.example", &pin).expect_err("no plaintext");
+        assert!(err.contains("listens over TLS"), "{err}");
+        assert!(AccountService::parse("accounts.example", &pin).is_err());
+        assert!(AccountService::parse("ftp://accounts.example", &pin).is_err());
+        assert!(AccountService::parse("https://accounts.example/?a=1", &pin).is_err());
+
+        // And a fingerprint that is not a SHA-256 is refused whatever the address is. A
+        // service reached with nothing to compare against is the hole, so there is no
+        // shape of this type that carries a URL and no expectation.
+        for bad in [
+            "",
+            "not a fingerprint",
+            &"ab".repeat(31),
+            &"ab".repeat(33),
+            &"zz".repeat(32),
+        ] {
+            assert!(
+                AccountService::parse("https://accounts.example", bad).is_err(),
+                "{bad} was accepted as a certificate fingerprint"
+            );
+        }
+
+        // Case is folded rather than refused, which is `tls::parse_fingerprint`'s call:
+        // the value is compared against a digest this client computes, and an operator
+        // pasting an uppercase copy of their own log line has not made a mistake.
+        let upper = AccountService::parse("https://accounts.example", &"AB".repeat(32))
+            .expect("an uppercase digest");
+        assert_eq!(upper.transport(), &http::Transport::Pinned("ab".repeat(32)));
     }
 
     #[test]

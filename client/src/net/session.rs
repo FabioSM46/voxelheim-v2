@@ -431,7 +431,14 @@ pub(super) fn run(
     };
     let (identity, complaint) = match expected {
         tls::Expectation::Listed(_) => IdentityFile::open(&addr, identity_override, &env),
-        tls::Expectation::Unlisted => (IdentityFile::forgetful(), None),
+        // `Supplied` is the account service's expectation and reaches no game server:
+        // `Target` is built only from a list row or from `--server`. It is matched here
+        // rather than folded into a wildcard so that a fourth variant one day is a
+        // compile error at this line, which is where "which credential may be presented"
+        // is decided.
+        tls::Expectation::Supplied(_) | tls::Expectation::Unlisted => {
+            (IdentityFile::forgetful(), None)
+        }
     };
     if let Some(complaint) = complaint
         && events.send(SessionEvent::Warning(complaint)).is_err()

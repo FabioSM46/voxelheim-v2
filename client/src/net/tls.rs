@@ -81,13 +81,14 @@ pub(super) const FINGERPRINT_CHARS: usize = 64;
 /// pair.
 const SERVER_NAME: &str = "voxelheim";
 
-/// What this client expects the server's certificate to be, and where that came from.
+/// What this client expects a certificate to be, and where that came from.
 ///
-/// **The two shapes are not two policies.** One carries a fingerprint somebody stated
-/// in advance; the other carries nothing because nobody stated anything, and it exists
-/// only because `--server` names an address that is in no list. Neither is a fallback
-/// for the other: an unreadable list produces a retry screen, never an
-/// [`Expectation::Unlisted`] connection to an address the list would have carried.
+/// **The three shapes are not three policies.** Two carry a fingerprint somebody stated
+/// in advance and differ only in who stated it; the third carries nothing because nobody
+/// stated anything, and it exists only because `--server` names an address that is in no
+/// list. None is a fallback for another: an unreadable list produces a retry screen,
+/// never an [`Expectation::Unlisted`] connection to an address the list would have
+/// carried.
 ///
 /// The type is also where "a stored identity is never presented to an unverified
 /// server" is enforced. `session::run` opens the identity file on
@@ -98,6 +99,15 @@ pub(super) enum Expectation {
     /// The fingerprint the server list carried for this server, as lowercase hex.
     /// Built only by [`super::servers`], which validates its shape at the boundary.
     Listed(String),
+    /// The fingerprint the launch supplied for the **account service**, as lowercase hex.
+    ///
+    /// A variant of its own rather than a second `Listed`, because the remedy in a
+    /// refusal is different and the remedy is the whole value of the message: a listed
+    /// server is fixed on the other side of the list, and this one cannot be — it *is*
+    /// the list's source, so nothing above it can vouch for it and the number has to
+    /// reach a player the way the address does. Built only by
+    /// [`super::signin::AccountService`], which validates its shape at the boundary.
+    Supplied(String),
     /// `--server`: an address in no list, so there is nothing to check the certificate
     /// against. The session is encrypted and unauthenticated, and it presents no
     /// identity — see the module comment. Development only.
@@ -189,15 +199,15 @@ impl ServerCertVerifier for PinnedServer {
         }
 
         match &self.expected {
-            Expectation::Listed(listed) if *listed == presented => {
+            Expectation::Listed(stated) | Expectation::Supplied(stated) if *stated == presented => {
                 Ok(ServerCertVerified::assertion())
             }
             // **The whole of this file's job.** Refused inside the handshake rather
             // than reported after it: an accepted handshake is a session, and a
-            // session is where a credential would go.
-            Expectation::Listed(_) => Err(rustls::Error::General(
-                "the server presented a certificate that is not the one the server list carried"
-                    .to_owned(),
+            // session is where a credential would go — an identity token on the game
+            // wire, an authorization code and a ticket on the account service's.
+            Expectation::Listed(_) | Expectation::Supplied(_) => Err(rustls::Error::General(
+                "the peer presented a certificate that is not the one that was expected".to_owned(),
             )),
             // Nothing stated what to expect, so there is nothing to compare against and
             // this accepts what it was shown. It is reachable only from `--server`, and
@@ -319,44 +329,8 @@ impl TlsWire {
         expected: &Expectation,
         handshake_timeout: Duration,
     ) -> Result<Self, ConnectError> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let verifier = Arc::new(PinnedServer {
-            expected: expected.clone(),
-            observed: Mutex::new(None),
-            provider: Arc::clone(&provider),
-        });
-
-        let config = ClientConfig::builder_with_provider(Arc::clone(&provider))
-            .with_safe_default_protocol_versions()
-            .map_err(|err| ConnectError::Failed(format!("cannot configure TLS: {err}")))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::clone(&verifier) as Arc<dyn ServerCertVerifier>)
-            .with_no_client_auth();
-
-        // `dangerous()` names the fact that the default verifier has been replaced, and
-        // it is the right word for it in general. Here the replacement is stricter than
-        // the default would be able to be: web PKI would have nothing to validate
-        // against, so the alternative to pinning is not "safer validation", it is none.
-
-        let name = ServerName::try_from(SERVER_NAME)
-            .map_err(|err| ConnectError::Failed(format!("cannot name the server: {err}")))?;
-        let mut conn = ClientConnection::new(Arc::new(config), name)
-            .map_err(|err| ConnectError::Failed(format!("cannot start TLS with {addr}: {err}")))?;
-
         let mut sock = sock;
-        // A generous timeout for the handshake, replaced by the caller's poll interval
-        // once the session is up. Without one, a peer that accepts a connection and then
-        // says nothing parks this thread until the OS gives up.
-        if let Err(err) = sock.set_read_timeout(Some(handshake_timeout)) {
-            return Err(ConnectError::Failed(format!(
-                "cannot bound the handshake with {addr}: {err}"
-            )));
-        }
-
-        if let Err(err) = conn.complete_io(&mut sock) {
-            let observed = verifier.observed.lock().ok().and_then(|slot| slot.clone());
-            return Err(refusal(addr, expected, observed.as_deref(), &err));
-        }
+        let conn = handshake(&mut sock, addr, expected, Some(handshake_timeout))?;
 
         let send = sock.try_clone().map_err(|err| {
             ConnectError::Failed(format!("cannot open a writer for {addr}: {err}"))
@@ -554,6 +528,89 @@ const CIPHERTEXT_CHUNK: usize = 20 * 1024;
 /// remedy is on the server's side of the list — its operator reads the fingerprint out
 /// of the startup line and registers that — so the only thing a player can do here is
 /// ask them, which is what the text says.
+/// Completes one handshake against `expected`, or says why it did not.
+///
+/// **The one place a TLS client configuration is built in this client**, and it is one
+/// place on purpose: the game wire and the account service are different protocols
+/// carried over the same guarantee, and two configurations would be two chances to build
+/// one that verifies nothing. What differs between the callers is what they wrap the
+/// finished connection in, which is below and above this line rather than inside it.
+///
+/// `handshake_timeout` is `None` when the caller has already bounded the socket — which
+/// is what `net/http.rs` does, because a request's read timeout is the same deadline the
+/// handshake should be under.
+fn handshake(
+    sock: &mut TcpStream,
+    addr: &str,
+    expected: &Expectation,
+    handshake_timeout: Option<Duration>,
+) -> Result<ClientConnection, ConnectError> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(PinnedServer {
+        expected: expected.clone(),
+        observed: Mutex::new(None),
+        provider: Arc::clone(&provider),
+    });
+
+    let config = ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|err| ConnectError::Failed(format!("cannot configure TLS: {err}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::clone(&verifier) as Arc<dyn ServerCertVerifier>)
+        .with_no_client_auth();
+
+    // `dangerous()` names the fact that the default verifier has been replaced, and
+    // it is the right word for it in general. Here the replacement is stricter than
+    // the default would be able to be: web PKI would have nothing to validate
+    // against, so the alternative to pinning is not "safer validation", it is none.
+
+    let name = ServerName::try_from(SERVER_NAME)
+        .map_err(|err| ConnectError::Failed(format!("cannot name the peer: {err}")))?;
+    let mut conn = ClientConnection::new(Arc::new(config), name)
+        .map_err(|err| ConnectError::Failed(format!("cannot start TLS with {addr}: {err}")))?;
+
+    // A generous timeout for the handshake, replaced by the caller's poll interval
+    // once the session is up. Without one, a peer that accepts a connection and then
+    // says nothing parks this thread until the OS gives up.
+    if let Some(timeout) = handshake_timeout
+        && let Err(err) = sock.set_read_timeout(Some(timeout))
+    {
+        return Err(ConnectError::Failed(format!(
+            "cannot bound the handshake with {addr}: {err}"
+        )));
+    }
+
+    if let Err(err) = conn.complete_io(sock) {
+        let observed = verifier.observed.lock().ok().and_then(|slot| slot.clone());
+        return Err(refusal(addr, expected, observed.as_deref(), &err));
+    }
+    Ok(conn)
+}
+
+/// One blocking encrypted stream, for the request/response conversations in
+/// `net/http.rs`.
+///
+/// A `StreamOwned` rather than [`TlsWire`] because nothing here needs two handles: an
+/// HTTP request is written and then read on one thread, where a session is a reader and a
+/// writer parked on different things. The verification is the same verification — same
+/// verifier, same comparison, same refusal — which is the property that matters and the
+/// reason both go through [`handshake`].
+pub(super) type HttpsStream = rustls::StreamOwned<ClientConnection, TcpStream>;
+
+/// Connects `sock` to the account service, refusing anything that is not `expected`.
+///
+/// The socket arrives already bounded by the caller's timeouts, so the handshake is under
+/// the same deadline the request is; see [`handshake`].
+pub(super) fn connect_https(
+    sock: TcpStream,
+    addr: &str,
+    expected: &Expectation,
+) -> Result<HttpsStream, ConnectError> {
+    let mut sock = sock;
+    let conn = handshake(&mut sock, addr, expected, None)?;
+    Ok(HttpsStream::new(conn, sock))
+}
+
 fn refusal(
     addr: &str,
     expected: &Expectation,
@@ -572,8 +629,23 @@ fn refusal(
                  register it again before this client will connect."
             ))
         }
+        // The account service, whose remedy cannot be "the list will fix it": this hop is
+        // what the list arrives over, so the number has to come from whoever runs the
+        // service, the same way its address did.
+        (Expectation::Supplied(supplied), Some(observed)) if supplied != observed => {
+            ConnectError::Substituted(format!(
+                "refusing to sign in at {addr}: it presented a different certificate than the one \
+                 this client was told to expect.\n  you gave:      {supplied}\n  it presented:  \
+                 {observed}\n\nThis means either that whoever runs the account service replaced \
+                 its certificate, or that something is standing between you and it — and nothing \
+                 here can tell those apart. Ask them for the fingerprint it prints when it starts \
+                 (certificate_sha256) and pass that to --account-service-fingerprint. Nothing this \
+                 client can read will settle it on its own: this connection is where its trust \
+                 begins."
+            ))
+        }
         _ => ConnectError::Failed(format!(
-            "cannot establish an encrypted session with {addr}: {err}"
+            "cannot establish an encrypted connection with {addr}: {err}"
         )),
     }
 }
@@ -648,7 +720,7 @@ mod tests {
         let err = verify(&pinned, &certificate(b"somebody else"))
             .expect_err("a substituted certificate was accepted");
         assert!(
-            format!("{err}").contains("not the one the server list carried"),
+            format!("{err}").contains("not the one that was expected"),
             "the refusal does not say what happened: {err}"
         );
 
@@ -718,6 +790,60 @@ mod tests {
         // No bypass is offered, and none exists to offer. The words a player would go
         // looking for are the ones that must not be there.
         for absent in ["delete", "--", "anyway", "ignore"] {
+            assert!(
+                !message.to_lowercase().contains(absent),
+                "the refusal offers a way past itself with {absent:?}: {message}"
+            );
+        }
+    }
+
+    /// **The account service's half of the same comparison** (#131), and it is the same
+    /// verifier: a supplied fingerprint is checked exactly as a listed one is, so the
+    /// root of the chain is not a second, weaker policy written somewhere else.
+    #[test]
+    fn a_supplied_fingerprint_is_checked_like_a_listed_one() {
+        let cert = certificate(b"the account service");
+        let supplied = fingerprint_of(&rustls::crypto::ring::default_provider(), &cert)
+            .expect("a SHA-256 suite");
+
+        verify(&verifier(Expectation::Supplied(supplied.clone())), &cert)
+            .expect("the supplied certificate is accepted");
+
+        verify(
+            &verifier(Expectation::Supplied(supplied)),
+            &certificate(b"somebody else"),
+        )
+        .expect_err("a substituted account service was accepted");
+    }
+
+    /// The account service's refusal names the two numbers and the flag to correct — and
+    /// it cannot say "the list will fix it", because this hop is what the list arrives
+    /// over. Naming a flag here is a remedy rather than a bypass: it is where the right
+    /// number goes, and there is no value of it that turns the check off.
+    #[test]
+    fn the_account_services_refusal_names_the_flag_that_carries_the_number() {
+        let err = refusal(
+            "accounts.example:7778",
+            &Expectation::Supplied("aaaa".to_owned()),
+            Some("bbbb"),
+            &io::Error::other("handshake failed"),
+        );
+        assert!(matches!(err, ConnectError::Substituted(_)));
+
+        let message = err.message();
+        for expected in [
+            "accounts.example:7778",
+            "aaaa",
+            "bbbb",
+            "--account-service-fingerprint",
+            "certificate_sha256",
+        ] {
+            assert!(
+                message.contains(expected),
+                "the refusal never mentions {expected}: {message}"
+            );
+        }
+        for absent in ["anyway", "ignore", "insecure", "skip"] {
             assert!(
                 !message.to_lowercase().contains(absent),
                 "the refusal offers a way past itself with {absent:?}: {message}"

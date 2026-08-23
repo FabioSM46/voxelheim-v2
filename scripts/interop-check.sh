@@ -83,7 +83,11 @@ SERVER_PID=""
 # it signs in only when it has nothing to present. The URL has to parse; nobody has to
 # answer it. A check that could not say that would be a check that had quietly acquired
 # a dependency on the sign-in flow.
-UNUSED_ACCOUNT_SERVICE="http://127.0.0.1:7798"
+UNUSED_ACCOUNT_SERVICE="https://127.0.0.1:7798"
+# The fingerprint the client would check that service against, if it ever reached one.
+# It has to be a well-formed SHA-256 because the flag is validated before a window opens;
+# it has to match nothing because nothing is listening. Both are true of this one (#131).
+UNUSED_ACCOUNT_FINGERPRINT=$(printf 'ab%.0s' $(seq 1 32))
 TICKET_AUTHORITY="127.0.0.1_7798"
 
 # **A failure keeps its evidence.** Every message below names a log inside $WORK, and
@@ -219,7 +223,8 @@ pass "a hello presenting no account is refused, and the refusal reaches the play
 # socket read with several TLS records, which is the record-layer bug this script found
 # the first time it ran.
 mint_ticket "$WORLD" "$WORK/clientdata/voxelheim/world-ticket/$TICKET_AUTHORITY/$WORLD"
-run_client "$WORK/client-join.log" --account-service "$UNUSED_ACCOUNT_SERVICE" --world "$WORLD"
+run_client "$WORK/client-join.log" --account-service "$UNUSED_ACCOUNT_SERVICE" \
+  --account-service-fingerprint "$UNUSED_ACCOUNT_FINGERPRINT" --world "$WORLD"
 grep -q "session established" "$WORK/client-join.log" \
   || fail "the documented development launch never established a session; see $WORK/client-join.log"
 grep -qi "decrypt\|protocol error" "$WORK/client-join.log" \
@@ -237,7 +242,8 @@ pass "a signed-in development client reaches a world over TLS and the record str
 # one world, and a server running another refuses it. Widen check 2 without this one and
 # the trade stops being the one that was argued for.
 mint_ticket "asgard" "$WORK/clientdata/voxelheim/world-ticket/$TICKET_AUTHORITY/asgard"
-run_client "$WORK/client-wrong-world.log" --account-service "$UNUSED_ACCOUNT_SERVICE" --world asgard
+run_client "$WORK/client-wrong-world.log" --account-service "$UNUSED_ACCOUNT_SERVICE" \
+  --account-service-fingerprint "$UNUSED_ACCOUNT_FINGERPRINT" --world asgard
 grep -q "session established" "$WORK/client-wrong-world.log" \
   && fail "a ticket for another world was admitted; see $WORK/client-wrong-world.log"
 grep -q "the ticket names another world" "$WORK/server1.log" \
@@ -269,7 +275,8 @@ pass "an address in no list is shown no identity and leaves nothing behind"
 # file this path used to report every session as a new character; the ticket names an
 # account and the server restores that account's character, so the second launch is the
 # same player as the first — and the client, which is told neither, must claim neither.
-run_client "$WORK/client-again.log" --account-service "$UNUSED_ACCOUNT_SERVICE" --world "$WORLD"
+run_client "$WORK/client-again.log" --account-service "$UNUSED_ACCOUNT_SERVICE" \
+  --account-service-fingerprint "$UNUSED_ACCOUNT_FINGERPRINT" --world "$WORLD"
 grep -q "session established" "$WORK/client-again.log" \
   || fail "the second launch never established a session; see $WORK/client-again.log"
 grep -q "a new character" "$WORK/client-again.log" \

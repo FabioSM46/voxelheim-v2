@@ -44,7 +44,7 @@ keeps meaning "everything the client is".
 
 | Module | Owns | Must not |
 | ------ | ---- | -------- |
-| `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service`, the development address, `--world`, `--name` and `--identity` | contain game or network logic, or admit a combination of address, service and world that is not one of the three launches on `Start` |
+| `main.rs` | the Bevy app, plugin registration, CLI/env parsing of `--account-service` and its `--account-service-fingerprint`, the development address, `--world`, `--name` and `--identity` | contain game or network logic, or admit a combination of address, service and world that is not one of the three launches on `Start` |
 | `player/appearance.rs` | the rig: which box each of the six appearance colours covers, and where each box sits in notches of the collision box | hold a size of its own, or become a second answer for either renderer |
 | `net/mod.rs` | `NetPlugin`, `SignInPlugin`, `ServerListPlugin`, the channels, `ConnectionState`/`Session`/`ServerAddress`/`SignInState`/`ServerList` and the world/snapshot/inventory/mining-progress inboxes | touch a socket, or know about rendering |
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
@@ -55,7 +55,7 @@ keeps meaning "everything the client is".
 | `net/servers.rs` | one read of the server list: the ticket it presents, the rows it validates, and the address and fingerprint it keeps out of the ECS | shorten a list it could not read whole, answer a failure with an empty list, or expose an address |
 | `net/tls.rs` | the encrypted transport, the certificate check and the two shapes of expectation | write a fingerprint anywhere, or offer a way past a refusal |
 | `net/tickets.rs` | the cached ticket — its file, its mode, its expiry, and the base64url the service answers in and reads back | parse a ticket's body, or decide anything from one |
-| `net/http.rs` | the smallest HTTP/1.1 the account service needs, plus URL and query shapes | grow into a general HTTP client, or quote a body in an error |
+| `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the six chunks a mesh is culled against | mesh, or spawn anything |
 | `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed | mention a Bevy type, or read a chunk it was not given |
@@ -988,11 +988,14 @@ that owns a socket.
   for. An unreadable list is a screen with a retry on it and no address at all.
 - **A stored identity is never presented to a server nobody stated a certificate for.** The rule
   predates the list and had to survive it, so it is now structural rather than a check.
-  `tls::Expectation` has two shapes: `Listed(fingerprint)`, built only by `net/servers.rs` from a
-  row of the list, and `Unlisted`, which carries nothing because nothing stated anything.
-  `session::run` opens the identity file on the first and on nothing else — so **the variant that
-  omits the fingerprint is the variant that omits the credential**, and there is no ordering to
-  get right and no flag to forget. `net/mod.rs` pins it from the wire in both directions: the
+  `tls::Expectation` has three shapes: `Listed(fingerprint)`, built only by `net/servers.rs` from
+  a row of the list; `Supplied(fingerprint)`, built only by `signin::AccountService` from the
+  launch (#131) and never reaching a game server; and `Unlisted`, which carries nothing because
+  nothing stated anything. `session::run` opens the identity file on `Listed` and on nothing else
+  — so **the variant that omits the fingerprint is the variant that omits the credential**, and
+  there is no ordering to get right and no flag to forget. `Supplied` is matched there
+  explicitly rather than folded into a wildcard, so a fourth variant one day is a compile error
+  at the line that decides which credential may be presented. `net/mod.rs` pins it from the wire in both directions: the
   same file and the same token is presented to a listed server and is not presented to an
   unlisted one.
 - **`Unlisted` is `--server`, and it is the development path.** An address typed on the command
@@ -1049,12 +1052,27 @@ that owns a socket.
   `SignInSettings`, and read from there by both the sign-in and the list; no server can add a
   source at runtime and there is no pin file left to be a second opinion.
 
-  **What is deliberately not claimed is that the hop to it is authenticated.** It is plain HTTP,
-  and `AccountService::parse` refuses `https` rather than downgrading silently, because verifying
-  a web PKI certificate needs a root store this client does not carry. So the anchor is only as
-  good as the network between this process and that service, and an account service belongs on a
-  loopback address or a private network. That gap is **#131**; nothing here closes it and nothing
-  written here should be read as saying it is closed.
+  **And the hop to it is authenticated, which this paragraph used to have to disclaim** (#131).
+  It is `https`, and `AccountService::parse` refuses `http` rather than downgrading silently. The
+  certificate is checked against a SHA-256 the launch supplied — `--account-service-fingerprint`
+  or `VOXELHEIM_ACCOUNT_SERVICE_FINGERPRINT`, beside the address — through the same verifier a
+  game server's certificate goes through, as `tls::Expectation::Supplied`. No root store is
+  needed and none is carried: pinning is a digest comparison, which is why this cost no fourth
+  crate.
+
+  **The number is supplied, never discovered**, and that is the part not to soften. There is no
+  trust on first use, no `--insecure` and no plaintext form: first contact is exactly when a
+  substitution happens, so a fingerprint this client learned from the connection would be a
+  fingerprint an attacker could choose. It travels the way the address does — out of band, from
+  whoever runs the service, once. The refusal names both digests and the flag to correct, and it
+  cannot say "the list will fix it" the way a game server's can, because this hop is what the
+  list arrives over.
+
+  **`AccountService` cannot be constructed without it in a shipped build.** `parse` is the only
+  public constructor and it takes the fingerprint; `plaintext` is `#[cfg(test)]`, the seam
+  `http::Transport` documents and `session::Transport` established. So "the sign-in is pinned and
+  the list is pinned" is a property of the type rather than of two call sites that each
+  remembered.
 
 ## The server list, and why an empty one is a claim
 
@@ -1156,7 +1174,9 @@ the wait carries on.
 
 **Four hand-rolled readers, and the dependency budget is why.** `net/http.rs` and `net/json.rs`
 carry an HTTP/1.1 client, a URL splitter, percent-decoding, a JSON reader and an RFC 3339 parser;
-`net/tickets.rs` carries a base64url codec. Every one is narrow on purpose and none is a general
+`net/tickets.rs` carries a base64url codec. **`net/http.rs` gained TLS in #131 and no crate with
+it**: the transport is `net/tls.rs`'s verifier over a `rustls::StreamOwned`, because pinning is a
+digest comparison and needs no root store. Every one is narrow on purpose and none is a general
 facility — the base64url codec knows one alphabet and one length, and the JSON reader admits
 exactly one nested shape, an array of flat objects, because that is what `GET /v1/servers`
 answers with. `Depth` in `net/json.rs` is that rule written as a value rather than as care: an
@@ -1283,9 +1303,13 @@ for any contract diff — so regenerate here and in the server in the same PR.
 ## Running it
 
 ```bash
-cargo run --release -- --account-service http://127.0.0.1:7780   # sign in, then pick a server
-cargo run --release -- --account-service http://127.0.0.1:7780 \
-    --server 127.0.0.1:7777 --world midgard                      # development: sign in, one address
+# Sign in, then pick a server. <sha256> is what voxelheim-auth prints at every start,
+# as certificate_sha256; this client checks it instead of a certificate authority.
+cargo run --release -- --account-service https://127.0.0.1:7778 \
+    --account-service-fingerprint <sha256>
+# Development: sign in, one address.
+cargo run --release -- --account-service https://127.0.0.1:7778 \
+    --account-service-fingerprint <sha256> --server 127.0.0.1:7777 --world midgard
 cargo run --release                          # development: 127.0.0.1:7777, and refused
 cargo run -- 192.0.2.5:7000                  # the same, at an explicit address
 cargo run -- --server norse.example         # bare host gets port 7777
@@ -1296,9 +1320,11 @@ cargo run -- --identity /tmp/second         # a second character on one server
 cargo run -- --help
 ```
 
-**The first line is the path a player takes, the second is the development one, and the third
-connects and is refused.** With `--account-service` alone the addresses come from that service's
-list, each carrying the certificate to expect at it. With `--server` as well, the address is the
+**The first command is the path a player takes, the second is the development one, and the third
+connects and is refused.** `--account-service` is `https` and always travels with
+`--account-service-fingerprint`; neither is optional and there is no way to skip the check, since
+that connection is where this client's trust begins. With them alone the addresses come from that
+service's list, each carrying the certificate to expect at it. With `--server` as well, the address is the
 one that was typed and `--world` names the world to ask a ticket for — the session is unverified
 and says so, and it presents the ticket because a server admits nobody without one. With an
 address and no service there is nothing to sign in against, so the hello names no account and the
@@ -1517,15 +1543,6 @@ Recorded here so the next reader does not mistake them for oversights:
   the second reddens CI with `Package 'wayland-client' ... not found` — and it will still build
   fine on your machine, which is the trap. It deserves its own issue rather than a drive-by.
 
-- **The account service is reached over plain HTTP, and `https` is refused rather than
-  downgraded.** Verifying a web PKI certificate needs a root store, and `rustls` is taken here
-  without one — `webpki-roots` or `rustls-native-certs` would be a fourth crate. So
-  `AccountService::parse` turns an `https://` URL away with a message saying why, because a client
-  that silently spoke plaintext to a URL that said `https` would be the worst of the three
-  outcomes. `voxelheim-auth` serves plain HTTP today (`srv.Serve(ln)`, no TLS), so this matches
-  what exists; what it means operationally is that the account service belongs on a loopback
-  address or behind a private network until the crate discussion happens. It deserves its own
-  issue rather than a drive-by.
 - **Joining from the list still presents no ticket, and that is #107.** #154 gave the
   *development* path a world to name, so `--server` with `--account-service` signs in for that
   world and presents what comes back. A row of the list already carries the world name — it is the

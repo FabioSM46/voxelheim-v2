@@ -28,6 +28,75 @@ use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use super::tls::{self, Expectation};
+
+/// How a request reaches the account service.
+///
+/// **`Pinned` is the only variant a shipped client can name.** `Plaintext` exists under
+/// `cfg(test)` and nowhere else, so "this client does not talk to an account service in
+/// the clear" is enforced by the compiler in every build a player runs rather than by a
+/// flag nobody sets. It is `session::Transport`'s seam, one protocol over, and it exists
+/// for that seam's reason: the tests below and in `net/signin.rs` stand a fake service on
+/// a real socket and drive the whole conversation through it, and a rustls *server* needs
+/// a certificate this repository will not carry — a private key committed as a fixture is
+/// still a private key — and cannot generate, because doing so needs a fourth crate the
+/// dependency rule forbids. What those tests are about is the HTTP, the JSON and the
+/// sign-in state machine; the pinning has its own tests in [`super::tls`] and on the Go
+/// side, where a certificate exists to test it with.
+///
+/// **There is no third variant and no `Unlisted` here.** `Pinned` carries the fingerprint
+/// itself rather than an [`Expectation`], so the shape that accepts whatever answers
+/// cannot be constructed on this path at all — the account service is the root of the
+/// chain, and a root nobody stated is not a weaker root, it is none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Transport {
+    /// The certificate this client will accept, as lowercase hex. Validated at the
+    /// boundary by `signin::AccountService::parse`, which is the only thing that builds
+    /// one.
+    Pinned(String),
+    #[cfg(test)]
+    Plaintext,
+}
+
+/// One connection to the account service, whichever way it is carried.
+///
+/// Boxed on the encrypted side because a `ClientConnection` holds the whole record layer
+/// and an enum is as large as its largest variant; nothing here is in a hot path, and an
+/// unboxed one would put kilobytes on the stack of every request.
+enum Stream {
+    Tls(Box<tls::HttpsStream>),
+    #[cfg(test)]
+    Plain(TcpStream),
+}
+
+impl Read for Stream {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tls(stream) => stream.read(out),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.read(out),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, payload: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tls(stream) => stream.write(payload),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.write(payload),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tls(stream) => stream.flush(),
+            #[cfg(test)]
+            Self::Plain(socket) => socket.flush(),
+        }
+    }
+}
+
 /// The largest response this client will hold. The service's answers are a few
 /// hundred bytes; this is three orders of magnitude of headroom and still a bound.
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -39,8 +108,27 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// than a redirect needs.
 pub(super) const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 
-/// The port an `http` URL means when it names none.
+/// The ports a URL means when it names none, per scheme.
+///
+/// **Both, because the account service moved to `https` and one constant would have
+/// silently dialled 80 for it** (#131). A URL with no port is the ordinary way to write a
+/// service reached at its scheme's default, and the failure would have been a connection
+/// refused at an address the player typed correctly.
 const DEFAULT_HTTP_PORT: u16 = 80;
+const DEFAULT_HTTPS_PORT: u16 = 443;
+
+/// The port `scheme` implies.
+///
+/// Anything that is not `https` answers 80, and the two callers of [`parse_url`] have
+/// already narrowed what can arrive here: an account service URL must be `https`, and a
+/// redirect URI must be loopback `http` naming an explicit port. So the fallback is a
+/// value neither of them reaches rather than a claim about schemes in general.
+fn default_port(scheme: &str) -> u16 {
+    match scheme {
+        "https" => DEFAULT_HTTPS_PORT,
+        _ => DEFAULT_HTTP_PORT,
+    }
+}
 
 /// One parsed URL, in the pieces a request is built from.
 ///
@@ -112,7 +200,7 @@ pub(super) fn parse_url(raw: &str) -> Result<Url, String> {
         ));
     }
 
-    let (host, port) = split_authority(authority, raw)?;
+    let (host, port) = split_authority(authority, raw, default_port(&scheme))?;
     Ok(Url {
         scheme,
         host,
@@ -127,7 +215,7 @@ pub(super) fn parse_url(raw: &str) -> Result<Url, String> {
 }
 
 /// `host`, `host:port` or `[::1]:port`.
-fn split_authority(authority: &str, raw: &str) -> Result<(String, u16), String> {
+fn split_authority(authority: &str, raw: &str, default_port: u16) -> Result<(String, u16), String> {
     let empty = || format!("{raw} names no host");
 
     if let Some(rest) = authority.strip_prefix('[') {
@@ -141,7 +229,7 @@ fn split_authority(authority: &str, raw: &str) -> Result<(String, u16), String> 
             Some(port) => port
                 .parse()
                 .map_err(|_| format!("{raw} does not name a port number"))?,
-            None if after.is_empty() => DEFAULT_HTTP_PORT,
+            None if after.is_empty() => default_port,
             None => return Err(format!("{raw} has trailing text after its address")),
         };
         return Ok((host.to_owned(), port));
@@ -158,7 +246,7 @@ fn split_authority(authority: &str, raw: &str) -> Result<(String, u16), String> 
             Ok((host.to_owned(), port))
         }
         None if authority.is_empty() => Err(empty()),
-        None => Ok((authority.to_owned(), DEFAULT_HTTP_PORT)),
+        None => Ok((authority.to_owned(), default_port)),
     }
 }
 
@@ -240,16 +328,13 @@ pub(super) struct Response {
 /// **The body is never named in an error.** A `finish` request carries an
 /// authorization code and a `finish` response carries a ticket.
 pub(super) fn post_json(
+    transport: &Transport,
     authority: &str,
     path: &str,
     body: &str,
     timeout: Duration,
 ) -> Result<Response, String> {
-    let mut stream = connect(authority, timeout)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|err| format!("cannot configure the connection to {authority}: {err}"))?;
+    let mut stream = connect(transport, authority, timeout)?;
 
     let request = format!(
         "POST {path} HTTP/1.1\r\n\
@@ -281,16 +366,13 @@ pub(super) fn post_json(
 /// `timeout` bounds each of the three phases — connect, write, read — which is the
 /// granularity `TcpStream` offers.
 pub(super) fn get_json(
+    transport: &Transport,
     authority: &str,
     path: &str,
     credential: &str,
     timeout: Duration,
 ) -> Result<Response, String> {
-    let mut stream = connect(authority, timeout)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .and_then(|()| stream.set_write_timeout(Some(timeout)))
-        .map_err(|err| format!("cannot configure the connection to {authority}: {err}"))?;
+    let mut stream = connect(transport, authority, timeout)?;
 
     let request = format!(
         "GET {path} HTTP/1.1\r\n\
@@ -309,34 +391,64 @@ pub(super) fn get_json(
     read_response(&mut stream, authority)
 }
 
-/// Connects to the first address that answers, within `timeout`.
+/// Connects to the first address that answers, within `timeout`, and puts TLS over it.
 ///
-/// The same shape as `session::connect`, and for the same reason: a name can
-/// resolve to several addresses and `connect_timeout` takes exactly one.
-fn connect(authority: &str, timeout: Duration) -> Result<TcpStream, String> {
+/// The socket half is the same shape as `session::connect`, and for the same reason: a
+/// name can resolve to several addresses and `connect_timeout` takes exactly one.
+///
+/// **The timeouts are set before the handshake rather than after it**, which is what puts
+/// the handshake under the same deadline the request is. A service that accepts a
+/// connection and then says nothing would otherwise park this thread inside
+/// `complete_io` until the operating system gave up, which on a sign-in is a login screen
+/// that never answers.
+fn connect(transport: &Transport, authority: &str, timeout: Duration) -> Result<Stream, String> {
     let candidates = authority
         .to_socket_addrs()
         .map_err(|err| format!("cannot resolve {authority}: {err}"))?;
     let mut last = None;
+    let mut socket = None;
     for candidate in candidates {
         match TcpStream::connect_timeout(&candidate, timeout) {
             Ok(stream) => {
                 // Nagle would hold a small request back waiting for a second write
                 // that never comes. Best effort, as on the game socket.
                 let _ = stream.set_nodelay(true);
-                return Ok(stream);
+                socket = Some(stream);
+                break;
             }
             Err(err) => last = Some(err),
         }
     }
-    Err(match last {
-        Some(err) => format!("cannot reach {authority}: {err}"),
-        None => format!("{authority} resolved to nothing"),
-    })
+    let Some(socket) = socket else {
+        return Err(match last {
+            Some(err) => format!("cannot reach {authority}: {err}"),
+            None => format!("{authority} resolved to nothing"),
+        });
+    };
+
+    socket
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| socket.set_write_timeout(Some(timeout)))
+        .map_err(|err| format!("cannot configure the connection to {authority}: {err}"))?;
+
+    match transport {
+        // The refusal is `tls::ConnectError`'s, taken whole: a certificate that is not
+        // the one this launch named produces the message naming both fingerprints and the
+        // remedy, and rewriting it here would be a second vocabulary for one event.
+        Transport::Pinned(fingerprint) => tls::connect_https(
+            socket,
+            authority,
+            &Expectation::Supplied(fingerprint.clone()),
+        )
+        .map(|stream| Stream::Tls(Box::new(stream)))
+        .map_err(tls::ConnectError::message),
+        #[cfg(test)]
+        Transport::Plaintext => Ok(Stream::Plain(socket)),
+    }
 }
 
 /// Reads until the answer is complete or the peer closes.
-fn read_response(stream: &mut TcpStream, authority: &str) -> Result<Response, String> {
+fn read_response(stream: &mut Stream, authority: &str) -> Result<Response, String> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -354,6 +466,15 @@ fn read_response(stream: &mut TcpStream, authority: &str) -> Result<Response, St
                 buffer.extend_from_slice(&chunk[..read]);
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            // **A TLS peer that hangs up without `close_notify` is a peer that hung up.**
+            // rustls reports that as `UnexpectedEof` rather than as end of stream, which
+            // is the right default for a protocol whose length is inside the data — and
+            // exactly wrong for the third body framing this module reads, where the close
+            // *is* the delimiter. Treated as the close it is, and then
+            // `parse_response(.., true)` below decides whether what arrived was a whole
+            // answer. Nothing is accepted that would not have been: a truncated body is
+            // still a truncated body.
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
             Err(err) => return Err(format!("cannot read the answer from {authority}: {err}")),
         }
     }
