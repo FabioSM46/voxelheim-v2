@@ -64,7 +64,7 @@ keeps meaning "everything the client is".
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean and hit flash | read health as death, hold an AI, or advance an action local time did not receive |
-| `player/hands.rs` | the camera-space held item and its cosmetic swing/bump | decide item legality, mining progress or any gameplay outcome |
+| `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
 | `player/items.rs` | one row per item id: its display name, its held shape, the palette entry it draws as | hold a capability, a stat, or anything a rule is read from |
 | `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the two intents a cell click means | increment, decrement, move or merge a count, or move a durability |
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
@@ -140,7 +140,13 @@ Rules that hold on this boundary:
   thread boundary.
 - **A `MineProgress` crosses as one complete server answer.** The ECS queues it in
   `MineProgressInbox`; `player/target.rs` displays the exact byte, holds it unchanged during
-  brief silence, then clears it. No timer or hardness table can advance it.
+  brief silence, then clears it. No timer or hardness table can advance it. Everything else
+  reads the `MiningFeedback` resource that holds it and never the inbox — the outline's
+  colour, `ui/crosshair.rs`'s ring and `player/hands.rs`'s mining punch — which is what
+  makes them one answer that starts, holds through the same silence, and stops together.
+  **The punch is the one of the three that could have been written from local input**, and
+  deliberately was not: a hand that swung on the button press would be animating a break the
+  server had not granted, which is advancing progress locally wearing a different hat.
 - **No Bevy type appears below `net/mod.rs`.** That is what makes `frame`, `codec`, `handshake`
   and `session` testable as plain Rust, with no app to build and no display to open.
 - **The thread is stopped by dropping the ECS end of the channels**, not by an atomic flag: the

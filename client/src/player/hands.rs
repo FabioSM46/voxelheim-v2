@@ -6,8 +6,13 @@
 //! recipe panel do. What stays here is the view model itself — the meshes, the camera-space
 //! placement and the cosmetic swing. None of it is a legality table: it cannot place,
 //! consume or reject anything, and an unknown id remains visible through the palette
-//! fallback. Mining progress never enters this module either; local time animates the hand,
-//! while [`super::target`] alone displays the server's progress byte.
+//! fallback.
+//!
+//! Mining progress does now enter this module, and only in one direction. The mining
+//! loop is *started and stopped* by the authoritative [`super::target::MiningFeedback`]
+//! and by nothing else; local time supplies the cadence of one punch and nothing else.
+//! There is no timer, no hardness table and no button in that decision, so the hand
+//! cannot animate a break the server has not granted and cannot outlast one it has.
 
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
@@ -22,7 +27,7 @@ use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
 use super::merge_all;
-use super::target::{ApplyTargetInput, BlockTarget};
+use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
 use crate::net::Session;
 use crate::world::palette;
 
@@ -58,15 +63,32 @@ const RUST_TINT: [f32; 4] = [0.72, 0.38, 0.22, 1.0];
 const BLOCK_EDGE: f32 = 0.055;
 const MATERIAL_RADIUS: f32 = 0.020;
 const MATERIAL_LENGTH: f32 = 0.050;
-const SWINGS_PER_SECOND: f32 = 2.4;
-const SWING_RADIANS: f32 = 0.42;
+
+/// The mining loop's cadence, and how far one punch carries the view model.
+///
+/// **All three are cosmetic, and the cadence in particular is not a clock.** How fast the
+/// hand punches says nothing about how fast the block is coming apart: a punch takes the
+/// same time on dirt as on stone, and the loop simply repeats for as long as
+/// [`HandIntent::mining`] — the server's own answer — stays true.
+const MINE_PUNCHES_PER_SECOND: f32 = 2.4;
+const MINE_PUNCH_RADIANS: f32 = 0.42;
+
+/// How far the fist reaches away from the camera at full extension.
+///
+/// **Toward the block, so along -Z**, which is deliberately the opposite of
+/// [`PLACE_BUMP_DISTANCE`]: a punch reaches for what it is breaking and a placement draws
+/// back from what it just set down. Two animations on one axis have to be told apart at a
+/// glance, and a shared direction is the first thing that stops being possible once a
+/// third one lands here.
+const MINE_PUNCH_DISTANCE: f32 = 0.045;
+
 const PLACE_BUMP_TIME: Duration = Duration::from_millis(150);
 const PLACE_BUMP_DISTANCE: f32 = 0.025;
 
 /// How long one attack swing plays for, and how far it carries the view model.
 ///
-/// A one-shot, unlike the mining swing above, which repeats while the button is held: an
-/// attack is an event the server judges once, so its feedback happens once.
+/// A one-shot, unlike the mining loop above, which repeats while the server reports
+/// progress: an attack is an event the server judges once, so its feedback happens once.
 const ATTACK_SWING_TIME: Duration = Duration::from_millis(220);
 const ATTACK_SWING_RADIANS: f32 = 0.9;
 
@@ -230,6 +252,8 @@ impl Plugin for HandsPlugin {
             // optional: a `Res<T>` with no resource takes the app down rather than reading
             // a default.
             .init_resource::<ViewMode>()
+            // `BlockTargetPlugin` owns this one, and it is here for the same reason.
+            .init_resource::<MiningFeedback>()
             .add_systems(Startup, spawn_view_model)
             .add_systems(
                 Update,
@@ -242,6 +266,13 @@ impl Plugin for HandsPlugin {
                     .chain()
                     .after(ApplyInventory)
                     .after(ApplyTargetInput)
+                    // After this frame's authoritative progress has been applied, so the
+                    // punch starts and stops on the frame the server's answer changed
+                    // rather than the one after it. `ApplyTargetInput` already implies it
+                    // today — `player/target.rs` chains the two — but what this module
+                    // requires is the progress, not the request that follows it, and an
+                    // ordering it depends on should be one it states.
+                    .after(ApplyMiningFeedback)
                     // After the swing is sent, so the feedback plays on the frame the
                     // request left rather than the one after it.
                     .after(super::combat::ApplyCombatInput),
@@ -332,7 +363,13 @@ impl HandVisuals {
 
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct HandAnimation {
-    swing_elapsed: Duration,
+    /// How long the mining loop has been running, and zero the moment it is not.
+    ///
+    /// **Local time under an authoritative gate, never a measure of the break.** It says
+    /// where in a punch the hand is; how far along the block is, is a byte the server
+    /// sends and `ui/crosshair.rs` draws. Nothing reads a break out of this field, which
+    /// is what stops the animation from becoming a second opinion about one.
+    mine_elapsed: Duration,
     bump_elapsed: Option<Duration>,
 
     /// How long the current attack swing has been running, if one is. Started by a
@@ -475,38 +512,106 @@ fn selected_appearance(stack: Option<crate::net::InventoryStack>) -> Appearance 
     }
 }
 
+/// What the hand is reacting to this frame: one authoritative fact and two local presses.
+///
+/// A bundle rather than five parameters, for the reason [`HandWardrobe`] is one —
+/// [`animate_view_model`] was already at clippy's argument bound, and *what is the hand
+/// doing* is one question that should have one place to be asked. It is also where the
+/// rule below is written down once, so the next animation this file grows has somewhere
+/// to read the answer rather than somewhere to re-decide it.
+#[derive(SystemParam)]
+struct HandIntent<'w, 's> {
+    mode: Res<'w, InputMode>,
+    buttons: Option<Res<'w, ButtonInput<MouseButton>>>,
+    target: Res<'w, BlockTarget>,
+    feedback: Res<'w, MiningFeedback>,
+    swings: MessageReader<'w, 's, SwingSent>,
+}
+
+impl HandIntent<'_, '_> {
+    /// Whether gameplay input counts this frame. A mode transition belongs to the UI for
+    /// the whole of it, which is how `target::send_block_edits` reads the same thing.
+    fn playing(&self) -> bool {
+        *self.mode == InputMode::Playing && !self.mode.is_changed()
+    }
+
+    /// **Whether the server says a block is coming apart under this crosshair right now,
+    /// and the hand is on screen to be shown doing it.**
+    ///
+    /// [`MiningFeedback`] is the whole of the *gameplay* answer, and deliberately the whole
+    /// of it. It holds a byte the server sent; it is cleared by the zero frame a server-side reset
+    /// sends, cleared when the crosshair leaves the voxel that byte describes, and expired
+    /// after `PROGRESS_SILENCE_TICKS` of silence. So *the block broke*, *the player looked
+    /// away* and *the request was refused and nothing came back* are already one fact by
+    /// the time it gets here, and not one of the three is this module's to work out.
+    ///
+    /// **The button is deliberately not in this predicate.** A held button is a request,
+    /// not an outcome: a hand that punched on the press would be animating a break the
+    /// server had not granted yet, which is the local clock this file must never grow —
+    /// the same mistake as advancing progress locally, wearing a different hat. Reading
+    /// the resource instead also keeps the two presentations of one fact in step, because
+    /// `ui/crosshair.rs` fills its ring from this very resource: the hand and the ring
+    /// start together, hold through the same silence, and stop together.
+    ///
+    /// **[`Self::playing`] is in it, and it is not a second opinion about mining.** It
+    /// answers a different question — does this frame's hand belong to the world at all —
+    /// and it is the same UI-state gate [`Self::placing`] takes and
+    /// `target::send_block_edits` takes. All it can do is stop the punch being *drawn*
+    /// while the pack or the pause menu owns the screen: it advances no progress, times no
+    /// break, and decides nothing about whether one happened. Every question about what is
+    /// coming apart still has exactly one answer, and it is the byte above.
+    ///
+    /// It has to be here rather than left to the crosshair, because the byte outlives the
+    /// transition. Nothing orders [`super::ApplyInputMode`] before
+    /// [`ApplyMiningFeedback`], so on the frame the mode changes the feedback can still be
+    /// the one computed while the player was aiming — and the hand would go on punching
+    /// behind an open inventory until the next frame's raycast reported nothing targeted.
+    /// It is also what keeps the paragraph above true: `ui/crosshair.rs` hides its whole
+    /// root on this same mode test, so without the term here the ring and the hand would
+    /// stop on different frames — the one thing reading a shared resource was meant to
+    /// prevent.
+    fn mining(&self) -> bool {
+        self.playing() && self.feedback.progress() != 0
+    }
+
+    /// A press that asked for a block somewhere there is room to put one.
+    fn placing(&self) -> bool {
+        self.playing()
+            && self
+                .buttons
+                .as_deref()
+                .is_some_and(|buttons| buttons.just_pressed(MouseButton::Right))
+            && self.target.0.and_then(|hit| hit.place_target()).is_some()
+    }
+
+    /// Whether a swing request left this client this frame.
+    fn swing_sent(&mut self) -> bool {
+        self.swings.read().next().is_some()
+    }
+}
+
 fn animate_view_model(
     time: Res<Time>,
-    buttons: Option<Res<ButtonInput<MouseButton>>>,
-    mode: Res<InputMode>,
-    target: Res<BlockTarget>,
-    mut swings: MessageReader<SwingSent>,
+    mut intent: HandIntent<'_, '_>,
     mut animation: ResMut<HandAnimation>,
     mut held: Query<&mut Transform, With<HeldItem>>,
 ) {
-    let playing = *mode == InputMode::Playing && !mode.is_changed();
-    let mining = playing
-        && buttons
-            .as_deref()
-            .is_some_and(|buttons| buttons.pressed(MouseButton::Left))
-        && target.0.is_some();
-    let placing = playing
-        && buttons
-            .as_deref()
-            .is_some_and(|buttons| buttons.just_pressed(MouseButton::Right))
-        && target.0.and_then(|hit| hit.place_target()).is_some();
-
     let mut next_animation = *animation;
-    if mining {
-        next_animation.swing_elapsed += time.delta();
+    // The loop runs exactly while the server's answer says it should, and resets the
+    // instant it does not — so a break, a look-away and a refusal all end it, without this
+    // module knowing which of the three happened. Opening the pack ends it too, which is
+    // the screen changing hands rather than a fourth thing the server said. See
+    // [`HandIntent::mining`].
+    if intent.mining() {
+        next_animation.mine_elapsed += time.delta();
     } else {
-        next_animation.swing_elapsed = Duration::ZERO;
+        next_animation.mine_elapsed = Duration::ZERO;
     }
 
     // One swing per message, restarted rather than queued: two clicks inside one
     // animation should look like two swings, and the second server-side request is
     // refused by the cooldown either way.
-    if swings.read().next().is_some() {
+    if intent.swing_sent() {
         next_animation.attack_elapsed = Some(Duration::ZERO);
     }
     if let Some(elapsed) = next_animation.attack_elapsed.as_mut() {
@@ -515,7 +620,7 @@ fn animate_view_model(
             next_animation.attack_elapsed = None;
         }
     }
-    if placing {
+    if intent.placing() {
         next_animation.bump_elapsed = Some(Duration::ZERO);
     }
     if let Some(elapsed) = next_animation.bump_elapsed.as_mut() {
@@ -537,9 +642,12 @@ fn animate_view_model(
 }
 
 fn animated_transform(animation: &HandAnimation) -> Transform {
-    let swing_phase = animation.swing_elapsed.as_secs_f32() * SWINGS_PER_SECOND * TAU;
-    let mut swing = swing_phase.sin() * SWING_RADIANS;
-    // One arc, out and back, added to whatever the mining swing is doing. The two never
+    let punch = mine_punch(animation.mine_elapsed);
+    // Negative, which is the direction the attack arc below also drives: both carry the
+    // hand over toward the thing it is hitting. One convention for *out* is what keeps a
+    // second and a third animation in this file from arguing about which way that is.
+    let mut swing = -punch * MINE_PUNCH_RADIANS;
+    // One arc, out and back, added to whatever the mining loop is doing. The two never
     // run together in practice — a blade suppresses mining — and summing rather than
     // branching keeps the transform one expression.
     if let Some(elapsed) = animation.attack_elapsed {
@@ -551,11 +659,31 @@ fn animated_transform(animation: &HandAnimation) -> Transform {
         (fraction * PI).sin()
     });
 
+    // Two animations on one axis, pulling opposite ways on purpose: a placement draws back
+    // from the block it just set down, a punch reaches for the one it is breaking.
+    let along_view = bump * PLACE_BUMP_DISTANCE - punch * MINE_PUNCH_DISTANCE;
+
     Transform {
-        translation: BASE_TRANSLATION + Vec3::Z * (bump * PLACE_BUMP_DISTANCE),
+        translation: BASE_TRANSLATION + Vec3::Z * along_view,
         rotation: Quat::from_rotation_x(-0.18 + swing) * Quat::from_rotation_z(-0.12 - bump * 0.18),
         ..default()
     }
+}
+
+/// How far through one punch the mining loop is: `0.0` at rest, `1.0` at full extension,
+/// back to `0.0` at the end of the cycle, repeating.
+///
+/// `(1 - cos)/2` rather than a sine, and that is the difference between punching and
+/// shaking. A sine is symmetric about rest, so half of every cycle drags the hand back
+/// *behind* where it started; this never goes negative, so the loop only ever reaches out
+/// and lets the hand return.
+///
+/// It is a function of local elapsed time and of nothing else. It is only ever consulted
+/// while [`HandIntent::mining`] holds, and the caller zeroes its input the moment that
+/// stops — so the phase says where in a punch the hand is, never how near the break is.
+fn mine_punch(elapsed: Duration) -> f32 {
+    let phase = elapsed.as_secs_f32() * MINE_PUNCHES_PER_SECOND * TAU;
+    (1.0 - phase.cos()) * 0.5
 }
 
 #[cfg(test)]
@@ -563,8 +691,10 @@ mod tests {
     use bevy::asset::AssetPlugin;
 
     use bevy::mesh::VertexAttributeValues;
+    use bevy::time::TimeUpdateStrategy;
 
     use super::super::crafting::ITEM_IRON_SWORD;
+    use super::super::target::BlockHit;
     use super::*;
     use crate::net::{InventoryStack, SessionParams};
     use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE};
@@ -964,12 +1094,12 @@ mod tests {
     fn mining_loops_while_placement_is_one_distinct_bump() {
         let resting = animated_transform(&HandAnimation::default());
         let swinging = animated_transform(&HandAnimation {
-            swing_elapsed: Duration::from_millis(50),
+            mine_elapsed: Duration::from_millis(50),
             bump_elapsed: None,
             ..Default::default()
         });
         let bumping = animated_transform(&HandAnimation {
-            swing_elapsed: Duration::ZERO,
+            mine_elapsed: Duration::ZERO,
             bump_elapsed: Some(PLACE_BUMP_TIME / 2),
             ..Default::default()
         });
@@ -977,7 +1107,7 @@ mod tests {
         assert_ne!(swinging.rotation, resting.rotation, "mining did not swing");
         assert_eq!(
             animated_transform(&HandAnimation {
-                swing_elapsed: Duration::ZERO,
+                mine_elapsed: Duration::ZERO,
                 bump_elapsed: None,
                 ..Default::default()
             }),
@@ -1177,5 +1307,213 @@ mod tests {
             "the swing left the view model leaning at {:?}",
             finished.rotation
         );
+    }
+
+    /// **A punch, not a wobble.** The hand reaches for the block, comes back, and the
+    /// cycle closes on rest so the loop repeats from the same place however long it runs.
+    #[test]
+    fn the_mining_punch_reaches_for_the_block_and_comes_back() {
+        let cycle = Duration::from_secs_f32(1.0 / MINE_PUNCHES_PER_SECOND);
+        let resting = animated_transform(&HandAnimation::default());
+        let extended = animated_transform(&HandAnimation {
+            mine_elapsed: cycle / 2,
+            ..Default::default()
+        });
+
+        // Away from the camera is -Z, so the fist reaches for what it is breaking.
+        assert!(
+            extended.translation.z < resting.translation.z,
+            "the punch never carried the hand toward the block: {} against {} at rest",
+            extended.translation.z,
+            resting.translation.z
+        );
+
+        // And the other way from a placement, which draws back from the block it just set
+        // down. Two animations sharing an axis have to be told apart at a glance.
+        let bumping = animated_transform(&HandAnimation {
+            bump_elapsed: Some(PLACE_BUMP_TIME / 2),
+            ..Default::default()
+        });
+        assert!(
+            bumping.translation.z > resting.translation.z,
+            "the placement bump now travels the same way as the mining punch"
+        );
+
+        // Nothing is left extended or leaning at the end of one punch. Compared with a
+        // tolerance for the reason the attack arc above is: `cos(TAU)` is an ulp from one.
+        let closed = animated_transform(&HandAnimation {
+            mine_elapsed: cycle,
+            ..Default::default()
+        });
+        assert!(
+            closed.translation.abs_diff_eq(resting.translation, 1e-5),
+            "the punch left the hand out at {:?}",
+            closed.translation
+        );
+        assert!(
+            closed.rotation.abs_diff_eq(resting.rotation, 1e-5),
+            "the punch left the hand leaning at {:?}",
+            closed.rotation
+        );
+
+        // No part of the cycle pulls the hand back *behind* rest. That is the whole
+        // difference between a punch and a shake, and it is the property a sine — which is
+        // symmetric about rest — would not have had.
+        for step in 0u8..=64 {
+            let at = animated_transform(&HandAnimation {
+                mine_elapsed: cycle.mul_f32(f32::from(step) / 64.0),
+                ..Default::default()
+            });
+            assert!(
+                at.translation.z <= resting.translation.z + 1e-6,
+                "the punch pulled the hand back behind rest {step}/64 of the way through"
+            );
+        }
+    }
+
+    /// The view model with nothing beside it that writes [`MiningFeedback`].
+    ///
+    /// The full [`app`] above cannot answer this question: `BlockTargetPlugin` recomputes
+    /// the feedback from the inbox and the crosshair every frame, and with no chunks
+    /// loaded the raycast answers "nothing targeted" — which is one of the states that
+    /// clears it. Here the test plays the server, which is the only way to say *the server
+    /// reported this* and still have it be true when `animate_view_model` reads it.
+    fn hand_only_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            // What sibling plugins provide in the game: the aimed voxel from
+            // `BlockTargetPlugin`, the swing message from `CombatPlugin`, the mouse from
+            // Bevy's input plugin, and the pack from `InventoryPlugin`.
+            .init_resource::<BlockTarget>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<SwingSent>()
+            .init_resource::<Inventory>()
+            .init_resource::<InputMode>()
+            .insert_resource(SelectedSlot(0))
+            .add_plugins(HandsPlugin);
+        app.update();
+        app
+    }
+
+    /// **The loop is the server's to start and to stop, and the button's to do neither.**
+    ///
+    /// The three ways mining ends — the block broke, the player looked away, the request
+    /// was refused and nothing came back — are already one fact by the time this module
+    /// sees them: `MiningFeedback` reporting nothing. So the test says it the way the code
+    /// reads it, and holds the button down throughout to show what is *not* driving this.
+    #[test]
+    fn the_mining_loop_starts_and_stops_on_the_servers_progress_alone() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+        // A held button and a voxel under the crosshair, and not one word from the server.
+        // A hand on a local clock would already be punching here.
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        *app.world_mut().resource_mut::<BlockTarget>() = BlockTarget(Some(BlockHit {
+            block: IVec3::ZERO,
+            face: IVec3::Y,
+        }));
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<HandAnimation>().mine_elapsed,
+            Duration::ZERO,
+            "the hand punched on the press, before the server had granted anything"
+        );
+
+        // The server reports progress. Now, and only now, the loop runs.
+        *app.world_mut().resource_mut::<MiningFeedback>() = MiningFeedback::for_test(64);
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<HandAnimation>().mine_elapsed,
+            STEP * 2,
+            "the server's progress did not start the loop"
+        );
+
+        // And the moment the server stops saying so, it resets rather than winding down.
+        *app.world_mut().resource_mut::<MiningFeedback>() = MiningFeedback::default();
+        app.update();
+        assert_eq!(
+            app.world().resource::<HandAnimation>().mine_elapsed,
+            Duration::ZERO,
+            "the hand kept punching after the server stopped reporting progress"
+        );
+
+        // The half that makes the two assertions above mean anything.
+        assert!(
+            app.world()
+                .resource::<ButtonInput<MouseButton>>()
+                .pressed(MouseButton::Left),
+            "the button was released, so this test proved nothing about it"
+        );
+    }
+
+    /// **The pack opening stops the hand, whatever the last byte from the server said.**
+    ///
+    /// The gate is [`HandIntent::playing`], and it is UI state rather than a second
+    /// opinion about mining: it decides whether this frame's hand belongs to the world,
+    /// not whether the block is coming apart. What makes it necessary is that the byte
+    /// outlives the transition — nothing orders the input mode before the feedback that
+    /// reads it, so the frame the inventory opens on can still be holding the progress
+    /// computed while the player was aiming.
+    ///
+    /// So the test says exactly that: the server's answer is left untouched and the button
+    /// is left held down, and both are asserted at the end. If either had changed, the
+    /// reset below would be evidence about something other than the mode.
+    #[test]
+    fn a_mode_that_is_not_playing_stops_the_hand_the_server_is_still_feeding() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        for mode in [InputMode::Inventory, InputMode::Menu] {
+            let mut app = hand_only_app();
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+            // A held button, a voxel under the crosshair, and the server reporting that it
+            // is coming apart: the loop is running.
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            *app.world_mut().resource_mut::<BlockTarget>() = BlockTarget(Some(BlockHit {
+                block: IVec3::ZERO,
+                face: IVec3::Y,
+            }));
+            *app.world_mut().resource_mut::<MiningFeedback>() = MiningFeedback::for_test(64);
+            app.update();
+            app.update();
+            assert_eq!(
+                app.world().resource::<HandAnimation>().mine_elapsed,
+                STEP * 2,
+                "{mode:?}: the loop never started, so nothing below is about stopping it"
+            );
+
+            // The screen changes hands. The server has said nothing new.
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
+            assert_eq!(
+                app.world().resource::<HandAnimation>().mine_elapsed,
+                Duration::ZERO,
+                "{mode:?}: the hand kept punching while the UI owned the screen"
+            );
+
+            // The two halves that make that assertion mean anything.
+            assert!(
+                app.world()
+                    .resource::<ButtonInput<MouseButton>>()
+                    .pressed(MouseButton::Left),
+                "{mode:?}: the button was released, so this test proved nothing about it"
+            );
+            assert_ne!(
+                app.world().resource::<MiningFeedback>().progress(),
+                0,
+                "{mode:?}: the server's progress was cleared, so the mode gate proved nothing"
+            );
+        }
     }
 }
