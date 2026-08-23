@@ -55,9 +55,9 @@ const KNUCKLE_BAND: f32 = 0.30;
 /// How much darker a rust mark is than the iron it sits on.
 ///
 /// **A multiplier, not a colour**, and that is what keeps `player/items.rs` the one answer
-/// to which palette entry an item presents as. The blade's vertices carry white — identity
+/// to which colour an item presents as. The blade's vertices carry white — identity
 /// — everywhere but the marks, so the base that comes through is whatever that table says.
-/// Change the sword's palette entry and the rust follows it, because it is a shade *of* it.
+/// Change the sword's item colour and the rust follows it, because it is a shade *of* it.
 ///
 /// Warm and dark: red kept, green and blue pulled down, which is what turns a pale iron into
 /// oxide rather than into grey.
@@ -579,7 +579,7 @@ fn scatter(mark: u32, channel: u32) -> f32 {
 ///
 /// **Two colours on one mesh and one material**, which is what the cost note in
 /// `client/AGENTS.md` asks for — the alternative was a second entity per held item, or a
-/// material per item rather than per palette entry.
+/// material per item rather than one cached handle per resolved colour.
 ///
 /// The vertices carry `Mesh::ATTRIBUTE_COLOR`, which `StandardMaterial` multiplies into its
 /// `base_color`; `world/render.rs` has drawn the whole terrain that way since it existed, so
@@ -726,11 +726,11 @@ struct HeldItem {
     shape: Option<ItemShape>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct Appearance {
     item_id: Option<u16>,
     shape: Option<ItemShape>,
-    palette_id: u16,
+    colour: [f32; 4],
 }
 
 #[derive(Resource, Debug)]
@@ -770,10 +770,9 @@ impl HandVisuals {
 
     fn material_for(
         &mut self,
-        palette_id: u16,
+        colour: [f32; 4],
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        let colour = palette::linear_rgba(palette_id);
         if let Some((_, handle)) = self
             .materials
             .iter()
@@ -971,7 +970,7 @@ fn spawn_view_model(
     };
     let appearance = selected_appearance(None);
     let mesh = visuals.mesh(appearance.item_id, appearance.shape);
-    let material = visuals.material_for(appearance.palette_id, &mut materials);
+    let material = visuals.material_for(appearance.colour, &mut materials);
 
     commands.spawn((
         HeldItem {
@@ -1054,7 +1053,7 @@ fn refresh_held_item(
             mesh.0 = wardrobe.visuals.mesh(appearance.item_id, appearance.shape);
             material.0 = wardrobe
                 .visuals
-                .material_for(appearance.palette_id, &mut wardrobe.materials);
+                .material_for(appearance.colour, &mut wardrobe.materials);
         }
         if *visibility != visible {
             *visibility = visible;
@@ -1077,14 +1076,14 @@ fn selected_appearance(stack: Option<crate::net::InventoryStack>) -> Appearance 
             shape: None,
             // The bare hand is not an item and has no row: dirt is the closest the terrain
             // palette comes to skin, and it is read here rather than looked up.
-            palette_id: palette::DIRT,
+            colour: palette::linear_rgba(palette::DIRT),
         };
     };
 
     Appearance {
         item_id: Some(item_id),
         shape: Some(items::item_shape(item_id)),
-        palette_id: items::item_palette_id(item_id),
+        colour: items::item_linear_rgba(item_id),
     }
 }
 
@@ -1330,7 +1329,7 @@ mod tests {
     /// Asserted as *two* vertex tints on one mesh, and as the marks being a shade of the
     /// base rather than a colour beside it: white is identity, so the iron that comes
     /// through is whatever `player/items.rs` says the sword presents as. That is what keeps
-    /// that table the one answer — change the sword's palette entry and the rust follows it.
+    /// that table the one answer — change the sword's colour and the rust follows it.
     #[test]
     fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
         let mut app = app();
@@ -1350,7 +1349,7 @@ mod tests {
         );
         assert!(
             marks.contains(&[255, 255, 255, 255]),
-            "no vertex carries identity, so the item's own palette entry never shows through"
+            "no vertex carries identity, so the item's own colour never shows through"
         );
         let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
         assert!(marks.contains(&rust), "no vertex carries the rust tint");
@@ -2202,11 +2201,9 @@ mod tests {
         // apart.
         for (first, second) in [(0, 1), (0, 2), (1, 2)] {
             assert_ne!(
-                palette::linear_rgba(carried[first].palette_id),
-                palette::linear_rgba(carried[second].palette_id),
+                carried[first].colour, carried[second].colour,
                 "items {} and {} are carried in the same colour",
-                bundles[first],
-                bundles[second]
+                bundles[first], bundles[second]
             );
         }
 
@@ -2242,8 +2239,7 @@ mod tests {
             max_durability: 100,
         }));
         assert_ne!(
-            palette::linear_rgba(iron.palette_id),
-            palette::linear_rgba(rusty.palette_id),
+            iron.colour, rusty.colour,
             "the two blades are carried in the same colour"
         );
 
@@ -2259,7 +2255,7 @@ mod tests {
         // version skew.
         for known in [crafting::ITEM_IRON_SWORD, crafting::ITEM_SHARPENING_STONE] {
             assert_ne!(
-                palette::linear_rgba(items::item_palette_id(known)),
+                items::item_linear_rgba(known),
                 palette::linear_rgba(u16::MAX),
                 "item {known} still draws as an unknown id"
             );
@@ -2281,20 +2277,23 @@ mod tests {
             crafting::ITEM_SHARPENING_STONE,
         ] {
             assert_eq!(
-                items::item_palette_id(item_id),
+                items::item_linear_rgba(item_id),
                 selected_appearance(Some(InventoryStack {
                     item_id,
                     count: 1,
                     ..Default::default()
                 }))
-                .palette_id,
+                .colour,
                 "item {item_id}"
             );
         }
 
         // And an id from a newer contract still reaches the palette's loud placeholder
         // rather than a plausible shade this module invented.
-        assert_eq!(items::item_palette_id(u16::MAX), u16::MAX);
+        assert_eq!(
+            items::item_linear_rgba(u16::MAX),
+            palette::linear_rgba(u16::MAX)
+        );
     }
 
     /// One transform for a swing of the named shape, `fraction` of the way through its arc.

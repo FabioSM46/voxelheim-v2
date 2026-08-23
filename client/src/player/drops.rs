@@ -15,9 +15,10 @@ use bevy::prelude::*;
 use super::InputMode;
 use super::hands::sword_mesh;
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
-use super::items::{ItemShape, item_palette_id, item_shape};
+use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::merge_all;
 use crate::net::Session;
+#[cfg(test)]
 use crate::world::palette;
 
 /// The side length of one drop cube, in blocks.
@@ -44,9 +45,9 @@ const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 /// Modes whose UI owns the view instead of the 3D world.
 const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
-/// The shared cube mesh and the small set of palette materials created so far.
+/// The shared meshes and the small set of item colours created so far.
 ///
-/// Materials are keyed by their actual palette colour rather than by item id. Every
+/// Materials are keyed by their actual colour rather than by item id. Every
 /// unknown id therefore shares the one placeholder material instead of letting a peer
 /// grow this resource by walking through all 65,535 unknown ids over time.
 #[derive(Resource, Debug)]
@@ -86,12 +87,11 @@ impl DropVisuals {
         item_id: u16,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        // **Through the item table, never straight into the palette.** `linear_rgba` reads
-        // a *block* id; this is an *item* id, and handing one to the other is exactly the
-        // bug `client/AGENTS.md` records for the pack cells — a log that drew snow-white in
-        // one place and bark in another. #182 is the same mistake, one surface over: the
-        // pelt on the ground was pink.
-        let colour = palette::linear_rgba(item_palette_id(item_id));
+        // **Through the item table, never straight into the block palette.** A drop carries
+        // an item id, and handing it to a block-id lookup is exactly the bug
+        // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
+        // place and bark in another. It would also make item-only colours impossible.
+        let colour = item_linear_rgba(item_id);
         if let Some((_, material)) = self
             .materials
             .iter()
@@ -638,14 +638,14 @@ mod tests {
     /// **This is the bug the issue names**, and the shape of it is recorded in
     /// `client/AGENTS.md` for the pack cells: `palette::linear_rgba` reads a *block* id,
     /// and a drop carries an *item* id. Handing one to the other is how a pelt ended up
-    /// pink. The assertion is against `item_palette_id`, so it is the table that decides
+    /// pink. The assertion is against `item_linear_rgba`, so it is the table that decides
     /// and not this test.
     #[test]
     fn a_drop_wears_the_colour_its_item_row_names() {
         let mut app = headless_player();
-        // A vargr pelt: an item id whose palette entry is deliberately not itself, which
-        // is what makes it able to fail. Reading the id straight into the palette gives a
-        // different colour, and that difference is the bug.
+        // A vargr pelt: an item id whose row deliberately resolves differently from the
+        // same-numbered block, which is what makes this able to fail. Reading the id
+        // straight into the palette gives a different colour, and that difference is the bug.
         deliver(
             &mut app,
             snapshot(1, vec![], vec![drop(10, [0.0, 64.0, 0.0], ITEM_VARGR_PELT)]),
@@ -654,9 +654,9 @@ mod tests {
         app.update();
 
         assert_ne!(
-            item_palette_id(ITEM_VARGR_PELT),
-            ITEM_VARGR_PELT,
-            "this test cannot fail unless the id and its palette entry differ"
+            item_linear_rgba(ITEM_VARGR_PELT),
+            palette::linear_rgba(ITEM_VARGR_PELT),
+            "this test cannot fail unless the item row differs from the same-numbered block"
         );
 
         let world = app.world_mut();
@@ -671,7 +671,7 @@ mod tests {
         let materials = world.resource::<Assets<StandardMaterial>>();
         let material = materials.get(&handle).expect("the drop's material");
 
-        let [r, g, b, a] = palette::linear_rgba(item_palette_id(ITEM_VARGR_PELT));
+        let [r, g, b, a] = item_linear_rgba(ITEM_VARGR_PELT);
         assert_eq!(material.base_color, Color::linear_rgba(r, g, b, a));
     }
 
@@ -729,7 +729,7 @@ mod tests {
             .resource::<Assets<StandardMaterial>>()
             .get(&handle)
             .expect("the placeholder material");
-        let [r, g, b, a] = palette::linear_rgba(UNKNOWN_ITEM);
+        let [r, g, b, a] = item_linear_rgba(UNKNOWN_ITEM);
         assert_eq!(material.base_color, Color::linear_rgba(r, g, b, a));
     }
 
