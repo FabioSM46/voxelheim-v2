@@ -96,7 +96,7 @@ jobs:
           # API cost and the time this synchronous call occupies the Actions runner.
           DEEPSEEK_MODEL: "deepseek-v4-flash"
           DEEPSEEK_REASONING_EFFORT: "max"
-          # PR #80 spent 65,536 tokens entirely on reasoning for a 50,963-character /
+          # Legacy PR 80 spent 65,536 tokens entirely on reasoning for a 50,963-character /
           # 13-file diff. A faithful measure-only replay then exhausted 131,072 too
           # (530,226 reasoning chars, no verdict). 262,144 is the next power-of-two
           # ceiling; the same replay then finished on its first attempt in 8m58s with

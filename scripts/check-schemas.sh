@@ -14,7 +14,7 @@
 # **Phase 2 — are the committed bindings still the ones this contract produces?**
 # Phase 1 throws its output away, so for a long time nothing compared `gen/`
 # against `schemas/`: editing a contract and forgetting to regenerate passed every
-# gate in the repository. It was not hypothetical. PR #139 changed one comment in
+# gate in the repository. It was not hypothetical. Legacy PR 139 changed one comment in
 # `RepairRequest` and CI went green with `server/gen/.../RepairRequest.go` and
 # `client/src/gen/.../repair_request_generated.rs` still carrying the text the
 # change removed — flatc propagates `///` documentation into both consumers, so

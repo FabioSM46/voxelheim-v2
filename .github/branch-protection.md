@@ -149,4 +149,4 @@ gh pr view <number> --json mergeable,mergeStateStatus
 
 `mergeable: MERGEABLE` together with `mergeStateStatus: BLOCKED` is the signature of a rule
 holding the merge back — the PR itself is clean, the policy is what says no. That is exactly the
-state PR #9 was in with `ci-gate` green and three unresolved review threads.
+state legacy PR 9 was in with `ci-gate` green and three unresolved review threads.

@@ -259,8 +259,8 @@ jobs:
         # Every APT source on a hosted runner resolves through a mirrorlist, and
         # azure.archive.ubuntu.com is the entry it reaches for first. When that
         # host stops answering, every index fetch below waits out its timeout and
-        # the install expires with nothing fetched — three consecutive runs on PR
-        # #120, on a diff that touched no workflow and no dependency, while
+        # the install expires with nothing fetched — three consecutive runs on
+        # legacy PR 120, on a diff that touched no workflow and no dependency, while
         # archive.ubuntu.com answered in the same logs.
         #
         # **Its own step, and that is not tidiness.** The step below is a pinned
@@ -398,6 +398,7 @@ jobs:
           bash scripts/test/commit-privacy.test.sh
           bash scripts/test/publication-privacy.test.sh
           bash scripts/test/body-privacy.test.sh
+          bash scripts/test/legacy-citation-provenance.test.sh
           bash scripts/test/gh-automation-deepseek-rounds.test.sh
           bash scripts/test/iteration-lifecycle.test.sh
           bash scripts/test/pr-labeler-step.test.sh

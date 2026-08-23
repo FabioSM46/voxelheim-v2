@@ -171,7 +171,7 @@ cleanup. Entries keyed to a path that no longer exists outlive it, so a run in a
 worktree can report ordinary `errcheck` findings against `../../voxelheim-pr-165/server/...`
 and exit 1, with the linter's own `no such file or directory` warnings sitting above them.
 `golangci-lint cache clean` and a re-run in the same worktree answers `0 issues` on identical
-source (#178). **Read the paths before you believe the findings** — the tell is that they sit
+source (legacy PR 178). **Read the paths before you believe the findings** — the tell is that they sit
 outside the tree you pointed the linter at, in a package your diff never touched.
 
 This is the more dangerous of the two traps, and the direction each fails in is why it is worth
@@ -212,7 +212,7 @@ mechanism the helper loop below relies on. Step 4's worktree recipe opens with
 shell besides, so assume it is on rather than checking.
 
 This is the helper loop's defect one layer up, and it is not hypothetical: it happened twice
-in one session, to two agents who had not read each other's transcripts (#195). It is silent
+in one session, to two agents who had not read each other's transcripts (legacy PR 195). It is silent
 by construction, which is what makes a paragraph the only defence — a piped gate that passed
 prints exactly what a piped gate that failed prints, so nothing about the transcript looks
 wrong. `head` and `tail` stay in `allowed-tools` because step 4's slug recipe needs them; what

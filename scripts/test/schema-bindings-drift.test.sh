@@ -2,7 +2,7 @@
 # Pin check-schemas.sh's regeneration recipe against the one schemas/AGENTS.md documents.
 #
 # The drift phase exists because nothing compared `gen/` to `schemas/`, so a contract could
-# move and its bindings stay put (#139). Closing that put the generation recipe in a second
+# move and its bindings stay put (legacy PR 139). Closing that put the generation recipe in a second
 # place: the prose in schemas/AGENTS.md that a human follows, and the script that now follows
 # it for them. Two copies of one procedure is the shape this repository keeps having to fix,
 # so it is pinned rather than trusted.

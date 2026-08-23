@@ -682,7 +682,7 @@ cmd_pr_comments() {
 # land — the reason was discarded, the exit status was discarded, and the word
 # "(idempotent)" made the line read as "it was already there" when it meant
 # "nobody checked". Found live: `pr-label 131 add ready-for-dev` printed success,
-# exited 0, and applied nothing (#134).
+# exited 0, and applied nothing (legacy PR 134).
 #
 # The reading half of this script has always failed closed — an unreadable count
 # is -1 in `pr-status-json`, never 0. The writing half now does too: an operation
@@ -908,7 +908,7 @@ deepseek_rounds_from_graphql() {
     def is_full_review: .state == "COMMENTED" and ((.body // "") | contains($marker));
     # A clean verdict. GitHub forbids Actions from approving, so the script records
     # "nothing found" as a COMMENT whose body begins with the no-findings marker and
-    # carries no full-review marker (#22). Both halves are required: a review with
+    # carries no full-review marker (legacy PR 22). Both halves are required: a review with
     # findings always carries the full-review marker, so it can never be mistaken for
     # this shape even if its header order ever changed.
     def is_clean_verdict:
@@ -1010,7 +1010,7 @@ deepseek_unread_findings_from_graphql() {
         # general-comments composer always puts its own header first.
         #
         # The state used to be half of this test (APPROVED only). GitHub forbids
-        # Actions from approving, so the clean verdict is now a COMMENT (#22) and the
+        # Actions from approving, so the clean verdict is now a COMMENT (legacy PR 22) and the
         # state can no longer discriminate. The full-review marker replaces it, and is
         # strictly stronger: a review carrying findings always has that marker, so it
         # cannot be exempted regardless of what its body starts with.
@@ -1117,7 +1117,7 @@ cmd_pr_deepseek_force_review() {
 # -qxF`, a failed lookup produces no output, grep exits non-zero, and the answer is
 # indistinguishable from "the label is not there" — with the reason in /dev/null.
 # The two call for opposite responses, and `cmd_pr_label remove` was taking the
-# second for the first (#134).
+# second for the first (legacy PR 134).
 #
 # Callers that only branch on "present" keep working unchanged: 2 is non-zero, so
 # an `if cmd_pr_check_label …` still falls to its else, which is the fail-closed

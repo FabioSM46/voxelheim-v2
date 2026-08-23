@@ -52,7 +52,7 @@ Trigger: `/scrum-master backlog-refine` or run from a ceremony issue.
      `/dev-issue` reads the issue with `gh issue view <number> --json title,body,labels` and
      parses the required fields out of the body alone — it never fetches comments. A field
      drafted into a comment is written to a channel the agent it was written for cannot read,
-     so the refinement never arrives and nothing turns red to say so (#152).
+     so the refinement never arrives and nothing turns red to say so (legacy PR 152).
 
      `gh issue edit --body-file` replaces the **entire** body, so the edit is surgical by
      discipline rather than by the tool: substitute the one named `### <Field>` section and
