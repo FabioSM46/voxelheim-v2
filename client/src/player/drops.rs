@@ -700,9 +700,13 @@ mod tests {
         );
         app.update();
 
-        assert_eq!(
-            anchors(&mut app),
-            vec![(11, palette::DIRT, Vec3::new(3.0, 64.0, 4.0))]
+        let remaining = anchors(&mut app);
+        assert_eq!(remaining.len(), 1, "the omitted drop anchor survived");
+        assert_eq!((remaining[0].0, remaining[0].1), (11, palette::DIRT));
+        assert!(
+            remaining[0].2.distance(Vec3::new(3.0, 64.0, 4.0)) < 1e-5,
+            "the surviving drop moved to {:?}",
+            remaining[0].2
         );
         let world = app.world_mut();
         let mut visuals = world.query_filtered::<Entity, With<DropVisual>>();
