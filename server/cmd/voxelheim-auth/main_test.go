@@ -3,8 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -13,10 +18,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/certs"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/registry"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
@@ -314,6 +321,11 @@ func TestTheStartupLogNamesTheStoreAndItsFormatVersion(t *testing.T) {
 		fmt.Sprintf("format_version=%d", auth.StoreVersion),
 		"voxelheim-auth listening",
 		"addr=",
+		// **The number an operator copies twice**, into every game server's
+		// -account-service-fingerprint and every client's --account-service-fingerprint.
+		// It is the root of the chain: nothing above this service can vouch for it, so a
+		// fingerprint nobody can find in a log is a service nobody can reach safely.
+		"certificate_sha256=",
 		// **The public key is logged deliberately**, because an operator has to read it
 		// off this line in order to give it to a game server. It is the one half that
 		// may be here; TestNothingOfTheSigningKeyReachesTheLog is the other side of
@@ -337,6 +349,175 @@ func TestTheStartupLogNamesTheStoreAndItsFormatVersion(t *testing.T) {
 	if !strings.Contains(logged, keys.PublicHex()) {
 		t.Error("the startup log does not carry the public key of the pair it kept")
 	}
+
+	// And the fingerprint it printed is the certificate on disk, rather than a
+	// placeholder that happens to be 64 characters. Same assertion as the key above and
+	// it matters more: a caller pins this number, so a log line that did not name the
+	// certificate actually presented would send every operator to a refusal.
+	cert, err := certs.LoadOrCreate(opts.authDir)
+	if err != nil {
+		t.Fatalf("reading back the certificate run created: %v", err)
+	}
+	fingerprint, err := certs.Fingerprint(cert)
+	if err != nil {
+		t.Fatalf("certs.Fingerprint: %v", err)
+	}
+	if !strings.Contains(logged, fingerprint) {
+		t.Error("the startup log does not carry the fingerprint of the certificate it kept")
+	}
+}
+
+// **The whole of this service's transport, asserted against a real handshake.** Every
+// other test here drives `serve` over a listener it owns, which is the right seam for a
+// handler and says nothing about what `run` wraps that listener in — and "the account
+// service listens over TLS" is exactly the claim a handler test cannot make.
+//
+// Three things at once, because they are one property: the port speaks TLS, the
+// certificate it presents is the one whose fingerprint the startup line printed, and a
+// plaintext request to the same port is not answered. The third is what "no plaintext
+// fallback" means concretely; without it this test would pass against a service that
+// listened both ways.
+func TestTheServiceListensOverTLSPresentingTheCertificateItPrinted(t *testing.T) {
+	t.Parallel()
+
+	opts := validOptions(t)
+
+	// Minted before `run` rather than read back after it, so the expected fingerprint is
+	// not taken from the same call under test. `LoadOrCreate` is load-or-create: run
+	// reads this pair back rather than making a second one.
+	cert, err := certs.LoadOrCreate(opts.authDir)
+	if err != nil {
+		t.Fatalf("certs.LoadOrCreate: %v", err)
+	}
+	want, err := certs.Fingerprint(cert)
+	if err != nil {
+		t.Fatalf("certs.Fingerprint: %v", err)
+	}
+
+	var out lockedBuffer
+	log := slog.New(slog.NewTextHandler(&out, nil))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- run(ctx, opts, log) }()
+
+	addr := awaitListenAddress(t, &out)
+
+	// A verifier that checks the fingerprint and nothing else — the same comparison
+	// cmd/voxelheimd makes and the client makes, written here rather than imported
+	// because this test is the far end of that contract and should not share its
+	// implementation.
+	var presented string
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		//nolint:gosec // The name check is replaced by a fingerprint comparison below, not skipped.
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS13,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("the service presented no certificate")
+			}
+			sum := sha256.Sum256(rawCerts[0])
+			presented = hex.EncodeToString(sum[:])
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("the account service did not complete a TLS handshake: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if presented != want {
+		t.Errorf("the service presented %s, the startup line printed %s", presented, want)
+	}
+
+	// And it answers HTTP inside that connection, so the TLS is the transport rather
+	// than a listener nothing is served on.
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("bounding the request: %v", err)
+	}
+	if _, err := io.WriteString(conn, "GET /healthz HTTP/1.1\r\nHost: voxelheim\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("sending a request over the encrypted connection: %v", err)
+	}
+	answer, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("reading the answer: %v", err)
+	}
+	if !strings.Contains(string(answer), "200 OK") {
+		t.Errorf("the encrypted connection did not carry an answer to /healthz: %q", string(answer))
+	}
+
+	// The same request in the clear. It is not answered: the first bytes of an HTTP
+	// request line are not a ClientHello, so the handshake fails and the connection is
+	// closed with nothing that looks like a response on it.
+	plain, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dialling the port in the clear: %v", err)
+	}
+	defer func() { _ = plain.Close() }()
+	if err := plain.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("bounding the plaintext request: %v", err)
+	}
+	// The write may succeed — a TCP connection was accepted before anything was read —
+	// and what must not happen is an HTTP answer coming back.
+	_, _ = io.WriteString(plain, "GET /healthz HTTP/1.1\r\nHost: voxelheim\r\nConnection: close\r\n\r\n")
+	refused, _ := io.ReadAll(plain)
+	if strings.Contains(string(refused), "HTTP/1.1") {
+		t.Errorf("a plaintext request was answered: %q", string(refused))
+	}
+
+	cancel()
+	if err := <-stopped; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+}
+
+// lockedBuffer is a log sink two goroutines touch: the service writes to it while the
+// test reads it looking for the address. bytes.Buffer is not safe for that on its own,
+// and the race detector is what would say so.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// awaitListenAddress reads the bound address out of the startup line.
+//
+// The log is the only place it appears — `-listen 127.0.0.1:0` is the whole point, so
+// there is no address to know in advance — and reading it here is the same thing an
+// operator does. A deadline rather than an unbounded wait, so a service that never binds
+// fails this test with a sentence instead of hanging the suite.
+func awaitListenAddress(t *testing.T, out *lockedBuffer) string {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(out.String(), "\n") {
+			if !strings.Contains(line, "voxelheim-auth listening") {
+				continue
+			}
+			for _, field := range strings.Fields(line) {
+				if addr, ok := strings.CutPrefix(field, "addr="); ok {
+					return addr
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the service never logged a listen address; log so far: %s", out.String())
+	return ""
 }
 
 // **An unreadable key pair refuses before the port is bound**, in the order the store

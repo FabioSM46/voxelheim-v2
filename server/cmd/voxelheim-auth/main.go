@@ -1,11 +1,20 @@
 // Command voxelheim-auth is Voxelheim's account service.
 //
 // It keeps who the people playing here are — one account per provider identity, under
-// its own directory — and answers over HTTP. It shares a Go module with the game
-// server and nothing else: not a port, not a directory, not a package beyond the
-// standard library and internal/auth. cmd/voxelheimd does not import that package and
-// must not; the two are separate trust domains that happen to ship together, and
-// internal/auth's imports_test.go is what says so.
+// its own directory — and answers over HTTPS. It shares a Go module with the game
+// server and a handful of leaf packages that belong to neither trust domain —
+// internal/certs, internal/ticket, internal/world — and nothing else: not a port, not
+// a directory, and above all not internal/auth. cmd/voxelheimd does not import that
+// package and must not; the two are separate trust domains that happen to ship
+// together, and internal/auth's imports_test.go is what says so.
+//
+// **Its transport is TLS and there is no plaintext form of it.** The certificate is
+// self-signed, kept under -auth-dir by internal/certs, and its SHA-256 is printed at
+// every start; both callers — a game server reading /v1/ticket-key, and a client
+// signing in — are given that number out of band and refuse anything else. This hop is
+// the root of the whole chain: the game server's fingerprint reaches a client inside
+// /v1/servers, which is worth nothing unless the connection that carried the list was
+// itself the right one. See "The root of trust" in server/AGENTS.md.
 //
 // It signs people in with the Discord account they already have — OAuth 2.0
 // Authorization Code with PKCE, as a public client, so there is no client secret here
@@ -35,6 +44,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,6 +61,7 @@ import (
 	"time"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/auth"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/certs"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/registry"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 )
@@ -344,16 +355,56 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	}
 	log.Info("server registry opened", "servers_dir", servers.Dir(), "format_version", registry.StoreVersion)
 
+	// The last thing that can refuse this configuration, and it is here rather than
+	// beside the listener for the reason everything above it is: it writes a file the
+	// first time, and a service that has already bound a port is a worse place to
+	// discover that -auth-dir cannot hold a key.
+	//
+	// **There is no ephemeral form and no plaintext form.** certs.Ephemeral exists for a
+	// game server that keeps nothing; this service keeps accounts by definition, so a
+	// certificate it could not keep would present a new fingerprint on every restart and
+	// refuse every caller that was given the old one.
+	cert, err := certs.LoadOrCreate(opts.authDir)
+	if err != nil {
+		return fmt.Errorf("preparing the account service certificate: %w", err)
+	}
+	fingerprint, err := certs.Fingerprint(cert)
+	if err != nil {
+		return fmt.Errorf("reading the account service certificate: %w", err)
+	}
+
 	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", opts.listen, err)
 	}
+	// MinVersion is stated rather than inherited, and NextProtos names the only
+	// protocol anything here speaks. Both are internal/transport's reasoning on the
+	// game wire, one service over: crypto/tls's floor has moved between releases and
+	// will again, and a caller that asked for h2 should be turned away in the handshake
+	// rather than answered in a framing neither of this service's two clients parses.
+	// Nothing else is configured — under TLS 1.3 the suites and the key exchange are not
+	// negotiable, and a list here would be a hand-rolled opinion that ages badly.
+	ln = tls.NewListener(ln, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{"http/1.1"},
+	})
 
 	svc := &service{log: log, keys: keys, signin: signin, servers: servers, registrationKey: registrationKey}
 
 	// The address the listener actually bound rather than the one that was asked for,
 	// which is the only way `-listen 127.0.0.1:0` tells anybody where it went.
-	log.Info("voxelheim-auth listening", "addr", ln.Addr().String(), "accounts_dir", accounts.Dir())
+	//
+	// **`certificate_sha256` is spelled exactly as cmd/voxelheimd spells its own**, and
+	// deliberately: an operator running both reads one attribute name out of two logs,
+	// and the number under it is the one thing they have to copy — into
+	// `-account-service-fingerprint` on every game server, and into
+	// `--account-service-fingerprint` on every client. It gives nothing away; it is a
+	// hash of the certificate this service hands to everyone who connects.
+	log.Info("voxelheim-auth listening",
+		"addr", ln.Addr().String(),
+		"accounts_dir", accounts.Dir(),
+		"certificate_sha256", fingerprint)
 
 	return svc.serve(ctx, ln)
 }
