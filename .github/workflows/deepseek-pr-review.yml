@@ -29,7 +29,7 @@ permissions:
 # Keyed on the event as well as the PR: pull_request.number is populated for
 # BOTH pull_request and pull_request_review_comment, so a PR-only key put full
 # reviews and thread replies in one lane and let a reply cancel an in-flight
-# review (observed in clinic-deck on #260/#259). comment.id — empty for
+# review (observed on clinic-deck #260/#259). comment.id — empty for
 # non-comment events — additionally keeps concurrent replies from cancelling
 # each other.
 concurrency:

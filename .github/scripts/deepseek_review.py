@@ -350,7 +350,7 @@ def is_generated_path(filename):
     diffs. Reviewing generated output is worthless in both directions: nobody acts
     on a finding about regenerated bindings, and the round budget is one. The
     clinic-deck ancestor of this rule watched generated artifacts crowd 13 real
-    source files out of a review's char budget (#399) — same failure mode.
+    source files out of a review's char budget (clinic-deck #399) — same failure mode.
 
     Convention (documented in AGENTS.md): all generated code lives under a `gen/`
     path segment, and flatc's Rust output additionally carries the `_generated.`
