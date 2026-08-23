@@ -57,8 +57,8 @@ func TestADroppedStackLeavesThePackAndLandsAtTheFeet(t *testing.T) {
 }
 
 // An ordinary drop and nothing more: the stack a player put down expires on exactly the
-// same clock as one the world produced, because it *is* one — spawnDrop is the only way
-// either comes into existence and there is no second lifetime anywhere.
+// same clock as one the world produced, because it *is* one — spawnStackDrop is the one
+// core path and there is no second lifetime anywhere.
 //
 // The player walks away first, because a drop lands at their feet and the pickup rule is
 // proximity. That is the subject of the test below rather than an inconvenience here.
@@ -166,6 +166,18 @@ func TestADropIsRefusedInSilenceAndChangesNothing(t *testing.T) {
 			slot: 255,
 		},
 		{
+			name: "an internally invalid durability pair",
+			slot: 0,
+			setup: func(_ *testing.T, _ *dropHarness, player *Player) {
+				player.inventory.mu.Lock()
+				player.inventory.slots[0] = inventoryStack{
+					item: ItemRustySword, count: 1, durability: 12,
+					maxDurability: RustySwordMaxDurability - 1,
+				}
+				player.inventory.mu.Unlock()
+			},
+		},
+		{
 			name: "a player who is dead",
 			slot: 0,
 			setup: func(_ *testing.T, h *dropHarness, player *Player) {
@@ -206,17 +218,14 @@ func TestADropIsRefusedInSilenceAndChangesNothing(t *testing.T) {
 	}
 }
 
-// **A worn thing cannot be put down, and this is the test that says why.** A drop carries an
-// item id and a count and nothing else, so a blade that reached the ground would come back
-// through stackOf at the maximum its registry row states — a repair granted by asking.
-//
-// Asserted on a *worn* sword rather than only on the type, because the value that would be
-// laundered is the one worth naming.
-func TestAnItemThatWearsOutCannotBeDropped(t *testing.T) {
+// **The inverse of the refusal this test replaced:** a worn thing may be put down, and the
+// exact object comes back. The ground state and the collected slot are both asserted so
+// neither half can silently restore the registry maximum and grant a repair by dropping.
+func TestAWornItemCanBeDroppedAndCollectedWithoutRepair(t *testing.T) {
 	t.Parallel()
 
 	h := newDropHarness(t, dropTerrain{groundTop: 63})
-	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
 
 	player.inventory.mu.Lock()
 	player.inventory.slots[0] = inventoryStack{
@@ -227,16 +236,47 @@ func TestAnItemThatWearsOutCannotBeDropped(t *testing.T) {
 	}
 	player.inventory.mu.Unlock()
 
-	if _, err := player.DropItem(protocol.DropItemRequest{Slot: 0}); err == nil {
-		t.Fatal("a worn blade was put on the ground, where its wear cannot be carried")
+	if _, err := player.DropItem(protocol.DropItemRequest{Slot: 0}); err != nil {
+		t.Fatalf("putting down the worn blade: %v", err)
 	}
-	if got := h.dropCount(); got != 0 {
-		t.Errorf("%d drops are lying in the world after the refusal", got)
+	if got := h.dropCount(); got != 1 {
+		t.Fatalf("%d drops are lying in the world, want the worn blade", got)
 	}
 
+	var ground inventoryStack
+	h.sim.mu.Lock()
+	for _, drop := range h.sim.drops {
+		ground = drop.stack()
+	}
+	h.sim.mu.Unlock()
+	want := inventoryStack{
+		item:          ItemRustySword,
+		count:         1,
+		durability:    12,
+		maxDurability: RustySwordMaxDurability,
+	}
+	if ground != want {
+		t.Fatalf("the ground holds %+v, want the exact worn blade %+v", ground, want)
+	}
+
+	// The client sees the same condition through the sparse snapshot vector. The first
+	// step is still inside the pickup delay, so streaming cannot race collection here.
+	h.step()
+	shown := out.snapshotDrops(t)
+	if len(shown) != 1 || shown[0].ItemID != uint16(want.item) || shown[0].Count != 1 ||
+		shown[0].Durability != want.durability || shown[0].MaxDurability != want.maxDurability {
+		t.Fatalf("the snapshot carries %+v, want the exact worn blade", shown)
+	}
+
+	h.advance(dropPickupDelayTicks - 1)
+	h.step()
+	if got := h.dropCount(); got != 0 {
+		t.Fatalf("%d drops remain after the player collected the blade", got)
+	}
 	held := player.InventoryState().Stacks[0]
-	if held.ItemID != uint16(ItemRustySword) || held.Durability != 12 {
-		t.Errorf("slot 0 holds %+v, want the worn blade exactly as it was", held)
+	if held.ItemID != uint16(want.item) || held.Count != want.count ||
+		held.Durability != want.durability || held.MaxDurability != want.maxDurability {
+		t.Errorf("slot 0 holds %+v, want the blade still at 12/%d", held, RustySwordMaxDurability)
 	}
 }
 

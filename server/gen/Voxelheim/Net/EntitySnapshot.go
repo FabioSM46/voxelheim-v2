@@ -355,8 +355,45 @@ func (rcv *EntitySnapshot) MutateDeadPlayers(j int, n uint64) bool {
 	return false
 }
 
+// / Wear for the sparse subset of `drops` that came from durable inventory slots.
+// / Block yields, loot rolls and structure bundles carry no entry and remain wearless.
+// / See `ItemDropDurability` for the invariants tying the two vectors together.
+// /
+// / **V11 appends this field and changes no existing drop's fixed layout.** A V11
+// / receiver interprets absence as wearless, so a V10 server would silently turn a
+// / worn ground item pristine in presentation while the server later returned it worn.
+// / `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
+// / different state to the same drop after a clean handshake.
+func (rcv *EntitySnapshot) DropDurabilities(obj *ItemDropDurability, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 16
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *EntitySnapshot) DropDurabilitiesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / Wear for the sparse subset of `drops` that came from durable inventory slots.
+// / Block yields, loot rolls and structure bundles carry no entry and remain wearless.
+// / See `ItemDropDurability` for the invariants tying the two vectors together.
+// /
+// / **V11 appends this field and changes no existing drop's fixed layout.** A V11
+// / receiver interprets absence as wearless, so a V10 server would silently turn a
+// / worn ground item pristine in presentation while the server later returned it worn.
+// / `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
+// / different state to the same drop after a clean handshake.
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -396,6 +433,12 @@ func EntitySnapshotAddDeadPlayers(builder *flatbuffers.Builder, deadPlayers flat
 }
 func EntitySnapshotStartDeadPlayersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(8, numElems, 8)
+}
+func EntitySnapshotAddDropDurabilities(builder *flatbuffers.Builder, dropDurabilities flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(8, flatbuffers.UOffsetT(dropDurabilities), 0)
+}
+func EntitySnapshotStartDropDurabilitiesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(16, numElems, 8)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

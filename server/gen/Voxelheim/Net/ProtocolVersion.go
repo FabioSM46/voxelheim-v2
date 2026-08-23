@@ -43,7 +43,13 @@ import "strconv"
 // / the session the first time it dies — which is precisely the mid-session
 // / failure this number exists to turn into a clean refusal at the handshake.
 // /
-// / The rule that generalises, now that four shapes have been argued: **ask
+// / **V11 appends `EntitySnapshot.drop_durabilities`.** The vector is sparse and its
+// / absence means every drop is wearless, so a V11 client against a V10 server would
+// / accept a worn drop as pristine after a clean handshake. The server still preserves
+// / the real wear on collection, leaving the two peers with different state for the same
+// / entity. That silent disagreement is a bump owed.
+// /
+// / The rule that generalises, now that five shapes have been argued: **ask
 // / what the receiver does with the value it does not recognise, not which way
 // / it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
 type ProtocolVersion uint16
@@ -54,7 +60,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 10
+	ProtocolVersionCurrent ProtocolVersion = 11
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

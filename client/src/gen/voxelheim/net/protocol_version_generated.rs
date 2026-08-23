@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 10;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 11;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -59,7 +59,13 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// the session the first time it dies — which is precisely the mid-session
 /// failure this number exists to turn into a clean refusal at the handshake.
 ///
-/// The rule that generalises, now that four shapes have been argued: **ask
+/// **V11 appends `EntitySnapshot.drop_durabilities`.** The vector is sparse and its
+/// absence means every drop is wearless, so a V11 client against a V10 server would
+/// accept a worn drop as pristine after a clean handshake. The server still preserves
+/// the real wear on collection, leaving the two peers with different state for the same
+/// entity. That silent disagreement is a bump owed.
+///
+/// The rule that generalises, now that five shapes have been argued: **ask
 /// what the receiver does with the value it does not recognise, not which way
 /// it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -72,10 +78,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(10);
+    pub const Current: Self = Self(11);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 10;
+    pub const ENUM_MAX: u16 = 11;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

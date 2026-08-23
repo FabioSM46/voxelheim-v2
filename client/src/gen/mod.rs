@@ -88,6 +88,8 @@ pub mod voxelheim {
         pub use self::entity_state_generated::*;
         mod item_drop_state_generated;
         pub use self::item_drop_state_generated::*;
+        mod item_drop_durability_generated;
+        pub use self::item_drop_durability_generated::*;
         mod player_vitals_generated;
         pub use self::player_vitals_generated::*;
         mod mob_state_generated;

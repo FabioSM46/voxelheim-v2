@@ -147,6 +147,40 @@ func (i *inventory) insertLocked(itemID ItemID, count uint16) uint16 {
 	return i.slots.insert(itemID, count)
 }
 
+// insertStackLocked inserts one stack exactly as it exists, preserving the durability
+// that came back from a drop. Wearless stacks use the ordinary insertion rule below;
+// durable stacks are one object and take one empty slot without merging into anything.
+func (i *inventory) insertStackLocked(stack inventoryStack) uint16 {
+	return i.slots.insertStack(stack)
+}
+
+func (t *slotTable) insertStack(stack inventoryStack) uint16 {
+	if !stack.durable() {
+		if stack.durability != 0 {
+			return stack.count
+		}
+		return t.insert(stack.item, stack.count)
+	}
+
+	definition, ok := itemByID(stack.item)
+	if !ok || stack.item == ItemNone || stack.count != 1 ||
+		definition.maxDurability == 0 || stack.maxDurability != definition.maxDurability ||
+		stack.durability > stack.maxDurability {
+		return stack.count
+	}
+
+	for slot := range t {
+		if t[slot].count != 0 {
+			continue
+		}
+		// Copy the whole object. Going through stackOf would read the registry's
+		// maximum into both durability fields and turn a pickup into a free repair.
+		t[slot] = stack
+		return 0
+	}
+	return stack.count
+}
+
 // insert is the insertion rule itself, on the slots rather than on the lock around them.
 //
 // One implementation, deliberately. A craft has to know whether its output would fit

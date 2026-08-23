@@ -509,10 +509,11 @@ The client samples the controls, sends what the player is *trying* to do at the 
   **The drop is the third, and it is the one that pairs with nothing.** `drop_request` in
   `player/inventory.rs` asks two things and no third: is the index one the contract permits,
   and does the last complete state show something in that cell. It deliberately does *not*
-  mirror the server's rule that a slot which wears out may not be put down — that is a
-  gameplay outcome read from a pack one message old, and it is the failure direction
-  `combat::BLADES` records, where a courtesy that guesses wrong refuses what the server would
-  have granted. So a worn blade is asked about and silence answers it. The branch also runs
+  predict whether the server will accept a slot — that is a gameplay outcome read from a
+  pack one message old, and it is the failure direction `combat::BLADES` records, where a
+  courtesy that guesses wrong refuses what the server would have granted. A worn blade is
+  therefore asked about like anything else; acceptance arrives only through the complete
+  inventory and the snapshot's sparse authoritative durability entry. The branch also runs
   ahead of the cursor and leaves it untouched: a picked slot is a source waiting for a
   destination, and a shift-click elsewhere is not that destination.
 

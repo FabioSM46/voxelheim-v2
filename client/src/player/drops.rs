@@ -365,6 +365,8 @@ mod tests {
             pos,
             item_id,
             count: 1,
+            durability: 0,
+            max_durability: 0,
         }
     }
 

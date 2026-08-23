@@ -92,7 +92,14 @@ union switch to keep exhaustive.
    V9 server never sends the vector, so that client would handshake cleanly and drop the
    session the first time it died.
 
-   The rule that generalises, now that four shapes have been argued: **ask what the receiver
+   **V11 appends another table field and moves for the silent direction.**
+   `EntitySnapshot.drop_durabilities` is sparse, and absence means every drop is
+   wearless. A V11 client against a V10 server would therefore accept a worn drop as
+   pristine while the authoritative server still returned it worn on collection: two
+   peers assigning different state to one entity after a clean handshake. No decode
+   refusal is needed for a bump to be owed; silent disagreement is the stronger case.
+
+   The rule that generalises, now that five shapes have been argued: **ask what the receiver
    does with the value it does not recognise, not which way it travelled.** Dropping it is a
    bump avoided; refusing it is a bump owed.
 4. **The client never sends authoritative state.** No client→server message may carry a
