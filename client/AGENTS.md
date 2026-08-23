@@ -74,7 +74,7 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the six graphics values and the frame-rate readout — each with its bound, its step and the default it starts from | reach the wire, take a value from something the server sent, or decide any outcome |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the six graphics values and the frame-rate readout — each with its bound, its step and the default it starts from — plus which tab each belongs to, which is what a reset is scoped by | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
@@ -82,7 +82,7 @@ keeps meaning "everything the client is".
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the rows, the steppers, the two flags and the corner, the rebinding capture and the refusal it prints | hold a bound, a step or a default of its own, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the two tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints and one reset per tab | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
@@ -1606,19 +1606,29 @@ Recorded here so the next reader does not mistake them for oversights:
   `TcpListener::bind` takes one address, and a browser may connect to the other. Naming the
   literal address in the service's `-discord-redirect-uri` avoids it entirely, which is what its
   own default does.
-- **The settings screen is one column, and #247 owes it tabs and a reset per tab.** The
-  graphics half of #179 landed here — render distance, field of view, vertical sync, frame
-  cap, brightness, where the fog begins, and the frame-rate readout in any of the four
-  corners — and it landed as rows on the one column this screen has always been. What #247
-  still owes is the `CONTROLS` / `GRAPHICS` strip over them and a reset that puts back **one
-  tab's** settings: a reset that wrote `Settings::default()` back would look right on the tab
-  it was asked about and would silently clear the other, and restoring bindings has to go
-  through `Bindings::from_pairs` because two controls that traded keys cannot be put back one
-  rebinding at a time. Not coming with any of it: *cursor capture*, which belongs to the
-  camera-control issue this file has named for a while and that still does not exist;
-  *audio*; and *shadows, ambient occlusion and texture quality*, which have no shadow map,
-  no AO pass and no texture behind them. Nor the pitch limit, which `player/constants.rs`
-  explains is an invariant rather than a preference.
+- **The settings screen is not every setting, and what it leaves out each has a reason.**
+  #179's second half landed in #247 — the six graphics values, the four-corner frame-rate
+  readout, the two tabs and one reset per tab — so what remains outside is deliberate:
+  *cursor capture*, which belongs to the camera-control issue this file has named for a
+  while and that still does not exist; *audio*, of which there is none; and *shadows,
+  ambient occlusion and texture quality*, which have no shadow map, no AO pass and no
+  texture behind them. Nor the pitch limit, which `player/constants.rs` explains is an
+  invariant rather than a preference.
+- **A reset is scoped by a tab, and the obvious implementation is the bug.** `Settings::reset`
+  names one tab's fields; writing `Settings::default()` back would look right on the tab
+  being reset and would silently clear the other — a button labelled "reset graphics"
+  throwing away every key binding a player had set. The two directions are asserted
+  separately, in the model and again through the screen, because a happy-path test passes
+  either way. A Controls reset goes through `Bindings::from_pairs`, the same
+  whole-assignment validation the file is read with: two controls that traded keys cannot be
+  restored one rebinding at a time.
+- **The settings screen's content area is a fixed height, and `ui/inventory.rs`'s is not.**
+  Both draw a strip above their halves; that one sizes the panel to whatever the visible
+  half needs, so the strip moves when a player switches tabs, which is what #251 is about.
+  This one gives the area below the strip `CONTENT_HEIGHT` whichever tab is up, and
+  `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails when a row is added past what
+  that height was sized for — rather than the panel quietly growing and taking the strip
+  with it.
 - **A module that names a file under the data directory carries #230's guard, and this is
   the second one.** `Environment::read` is `#[cfg(not(test))]` in `settings/store.rs` for
   the same reason it is in `net/session.rs`: a test build that can ask what
