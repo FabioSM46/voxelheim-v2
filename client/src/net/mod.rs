@@ -2299,7 +2299,7 @@ mod tests {
     /// about what happens *after* one exists.
     fn sign_in_settings(world: &str, ticket_path: &std::path::Path) -> SignInSettings {
         SignInSettings {
-            service: AccountService::parse("http://127.0.0.1:7780").expect("a service URL"),
+            service: AccountService::plaintext("http://127.0.0.1:7780").expect("a service URL"),
             world: Some(world.to_owned()),
             ticket_path: Some(ticket_path.to_path_buf()),
             browser: signin::Browser::System,
@@ -3830,8 +3830,8 @@ mod sign_in_tests {
     }
 
     fn app_at(authority: &str, path: PathBuf) -> (App, Receiver<String>) {
-        let service =
-            AccountService::parse(&format!("http://{authority}")).expect("an account service URL");
+        let service = AccountService::plaintext(&format!("http://{authority}"))
+            .expect("an account service URL");
         let (browser_tx, browser_rx) = mpsc::channel();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(
@@ -4064,7 +4064,7 @@ mod server_list_tests {
         )
         .expect("a cached ticket");
 
-        let service = AccountService::parse(&format!("http://127.0.0.1:{}", closed_port()))
+        let service = AccountService::plaintext(&format!("http://127.0.0.1:{}", closed_port()))
             .expect("an account service URL");
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -4125,7 +4125,8 @@ mod server_list_tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let authority = listener.local_addr().expect("an address").to_string();
         app.world_mut().resource_mut::<SignInSettings>().service =
-            AccountService::parse(&format!("http://{authority}")).expect("an account service URL");
+            AccountService::plaintext(&format!("http://{authority}"))
+                .expect("an account service URL");
 
         app.world_mut().write_message(RefreshServerList);
         app.update();
@@ -4148,7 +4149,7 @@ mod server_list_tests {
     fn no_read_happens_before_the_sign_in() {
         let scratch = Scratch::new("list-signed-out");
         // No cached ticket at all, so `SignInPlugin` starts signed out.
-        let service = AccountService::parse(&format!("http://127.0.0.1:{}", closed_port()))
+        let service = AccountService::plaintext(&format!("http://127.0.0.1:{}", closed_port()))
             .expect("an account service URL");
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)

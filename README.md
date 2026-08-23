@@ -83,17 +83,42 @@ server started from a terminal that never did is a server with an empty environm
 a supported state and looks exactly like having forgotten.
 
 ```bash
-# terminal 1 — the account service (listens on 127.0.0.1:7778)
+# terminal 1 — the account service (listens on 127.0.0.1:7778, over TLS)
 cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth
+# ... voxelheim-auth listening addr=127.0.0.1:7778 certificate_sha256=<64 hex characters>
+#                                                  ^^^^^^^^^^^^^^^^^^ copy this
 
 # terminal 2 — the game server
 cd server && go run ./cmd/voxelheimd \
-  -world-name midgard -account-service http://127.0.0.1:7778
+  -world-name midgard -account-service https://127.0.0.1:7778 \
+  -account-service-fingerprint <that number>
 
 # terminal 3 — the client
 cd client && cargo run --release -- \
-  --account-service http://127.0.0.1:7778 --server 127.0.0.1:7777 --world midgard
+  --account-service https://127.0.0.1:7778 --account-service-fingerprint <that number> \
+  --server 127.0.0.1:7777 --world midgard
 ```
+
+**The fingerprint is the one thing you have to copy, and it comes out of terminal 1.** The
+account service prints it at every start, as `certificate_sha256=…` in the line that also names
+the address it bound. It is a hash of the certificate that service hands to everyone who
+connects, so it is not a secret — it goes in a chat message or a wiki page beside the address.
+
+**Both consumers refuse without it, and neither will discover one.** `-account-service` and
+`--account-service-fingerprint` are required together on their respective commands; there is no
+`--insecure`, no trust on first use and no plaintext form of this hop. The reason is the whole
+point: the account service is the root of the trust chain — a game server reads its signing key
+from it and a client reads the server list from it, and both of those are worth nothing unless
+the connection that carried them reached the right machine. First contact is exactly when a
+substitution happens, so a number the software discovered would be a number an attacker could
+choose.
+
+**It survives restarts and changes when the directory does.** The certificate lives in
+`-auth-dir` as `server-cert.pem`, generated on first start and read back afterwards, so the
+number is stable until somebody deletes the file or points the service at a new directory. If it
+changes, both consumers refuse and say so, naming what they expected and what they were shown —
+which is the same refusal a substituted service would produce, because nothing on either side can
+tell the two apart.
 
 **`-auth-dir` is deliberately outside the checkout above.** It holds the account service's
 Ed25519 signing key, and its own default (`auth`) resolves against the working directory — so
@@ -101,7 +126,7 @@ running that command from `server/` puts a private key inside this repository, o
 away from a public commit. `.gitignore` covers the default and the two key file names for that
 reason, and the path here points somewhere a mistake cannot reach.
 
-**The client needs all three of those flags on this path, and none of them has a default that
+**The client needs all four of those flags on this path, and none of them has a default that
 would do.** A server admits a player on a signed ticket and nothing else, so a client with no
 account service to sign in against is refused whatever address it dials — which is what
 `cargo run --release` on its own does, and it says so rather than pretending. `--server` names an
@@ -130,9 +155,10 @@ of zero, which the verifier refuses outright — the server fails at startup rat
 admitting everyone. Lowercase letters, digits and hyphens.
 
 **Exactly one of `-account-service` and `-ticket-key` is required, never both.** The first fetches
-the key; the second takes it as hex, which is what `voxelheim-auth` prints at startup and what
-`GET /v1/ticket-key` publishes. Use `-ticket-key` when you would rather not keep the account
-service running:
+the key over the pinned connection above; the second takes it as hex, which is what
+`voxelheim-auth` prints at startup — as `public_key=…`, the *other* number in that log, not the
+fingerprint — and what `GET /v1/ticket-key` publishes. Use `-ticket-key` when you would rather not
+keep the account service running:
 
 ```bash
 cd server && go run ./cmd/voxelheimd -world-name midgard -ticket-key <hex from the auth log>
@@ -155,10 +181,11 @@ the one number that says movement is working.
 
 ```bash
 cd server && go run ./cmd/voxelheimd \
-  -world-name midgard -account-service http://127.0.0.1:7778 \
-  -log-level debug -log-format json
+  -world-name midgard -account-service https://127.0.0.1:7778 \
+  -account-service-fingerprint <sha256> -log-level debug -log-format json
 cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release -- \
-  --account-service http://127.0.0.1:7778 --server 127.0.0.1:7777 --world midgard
+  --account-service https://127.0.0.1:7778 --account-service-fingerprint <sha256> \
+  --server 127.0.0.1:7777 --world midgard
 ```
 
 ### Two things that surprise people once each

@@ -81,12 +81,23 @@ const WORLD_ENV: &str = "VOXELHEIM_WORLD";
 /// client given no service behaves exactly as it did before signing in existed.
 const ACCOUNT_SERVICE_ENV: &str = "VOXELHEIM_ACCOUNT_SERVICE";
 
+/// Environment variable holding the account service's certificate fingerprint, with the
+/// same precedence.
+///
+/// **It travels the way the address does, and that is the design rather than a
+/// convenience** (#131). The account service is where this client's trust begins, so
+/// there is nothing above it to learn the number from — no list, no certificate
+/// authority, no first connection to remember. Whoever runs the service reads it out of
+/// their own startup line and hands it over with the address, once.
+const ACCOUNT_SERVICE_FINGERPRINT_ENV: &str = "VOXELHEIM_ACCOUNT_SERVICE_FINGERPRINT";
+
 const USAGE: &str = "\
 Voxelheim client
 
 Usage:
-  voxelheim-client --account-service URL
-  voxelheim-client --account-service URL --server ADDRESS --world NAME
+  voxelheim-client --account-service URL --account-service-fingerprint SHA256
+  voxelheim-client --account-service URL --account-service-fingerprint SHA256 \
+                   --server ADDRESS --world NAME
   voxelheim-client [ADDRESS]
   voxelheim-client --help
 
@@ -96,8 +107,14 @@ Arguments:
 
 Options:
   -a, --account-service
-                  URL of the account service to sign in against. The servers you
-                  can join come from its list; you never type an address.
+                  https URL of the account service to sign in against. The
+                  servers you can join come from its list; you never type an
+                  address.
+      --account-service-fingerprint
+                  the SHA-256 of the certificate that service presents, as it
+                  prints it at startup (certificate_sha256). Required with
+                  --account-service: this client checks it instead of a
+                  certificate authority, and there is no way to skip the check.
   -s, --server    the same address as ADDRESS, named explicitly
   -w, --world     which world to ask for a ticket for, with --server. Only with
                   --server: from the list, the row you click names the world.
@@ -108,6 +125,8 @@ Options:
 
 Environment:
   VOXELHEIM_ACCOUNT_SERVICE  used when --account-service is not given
+  VOXELHEIM_ACCOUNT_SERVICE_FINGERPRINT
+                             used when --account-service-fingerprint is not given
   VOXELHEIM_SERVER           used when no address is given on the command line
   VOXELHEIM_WORLD            used when --world is not given
   VOXELHEIM_NAME             used when --name is not given
@@ -115,13 +134,15 @@ Environment:
 
 There are three ways to launch this and they are not interchangeable.
 
-  --account-service alone is the path a player takes. You sign in with Discord
-  once and then pick a server out of the list it answers with. The list carries
-  each server's address and the fingerprint of the certificate it presents, so
-  the address is followed if it moves and a server presenting anything else is
-  refused before this client sends a byte. There is no way past that refusal, by
-  design: ask whoever runs the server to register the fingerprint it logs at
-  startup.
+  --account-service and its fingerprint alone is the path a player takes. You
+  sign in with Discord once and then pick a server out of the list it answers
+  with. The connection to the service is encrypted and pinned to the fingerprint
+  you were given, so the authorization code, the sign-in secret and the ticket
+  that comes back are unreadable on the way. The list then carries each server's
+  address and the fingerprint of the certificate it presents, so the address is
+  followed if it moves and a server presenting anything else is refused before
+  this client sends a byte. There is no way past either refusal, by design: ask
+  whoever runs the server to register the fingerprint it logs at startup.
 
   --account-service with --server and --world is the development path. You sign
   in the same way, but the address is the one you typed and the world is the one
@@ -164,6 +185,7 @@ fn main() -> ExitCode {
         player_name: std::env::var(PLAYER_NAME_ENV).ok(),
         identity_path: std::env::var(IDENTITY_ENV).ok(),
         account_service: std::env::var(ACCOUNT_SERVICE_ENV).ok(),
+        account_service_fingerprint: std::env::var(ACCOUNT_SERVICE_FINGERPRINT_ENV).ok(),
         world: std::env::var(WORLD_ENV).ok(),
     };
 
@@ -328,6 +350,7 @@ struct LaunchEnv {
     player_name: Option<String>,
     identity_path: Option<String>,
     account_service: Option<String>,
+    account_service_fingerprint: Option<String>,
     world: Option<String>,
 }
 
@@ -339,6 +362,7 @@ const SERVER_ADDR: &str = "server address";
 const PLAYER_NAME: &str = "player name";
 const IDENTITY_PATH: &str = "identity file";
 const ACCOUNT_SERVICE: &str = "account service";
+const ACCOUNT_SERVICE_FINGERPRINT: &str = "account service fingerprint";
 const WORLD: &str = "world";
 
 /// Resolves every launch setting from, in order of precedence: the command line,
@@ -359,6 +383,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
     let mut player_name: Option<String> = None;
     let mut identity_path: Option<String> = None;
     let mut account_service: Option<String> = None;
+    let mut account_service_fingerprint: Option<String> = None;
     let mut world: Option<String> = None;
     let mut args = args.iter();
 
@@ -378,6 +403,15 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
             "-n" | "--name" => (&mut player_name, PLAYER_NAME, after("a name")?),
             "-i" | "--identity" => (&mut identity_path, IDENTITY_PATH, after("a path")?),
             "-a" | "--account-service" => (&mut account_service, ACCOUNT_SERVICE, after("a URL")?),
+            // Long-only, deliberately. Every short flag here is the first letter of what
+            // it names and `-a` is taken; a second letter chosen for this one would be a
+            // letter nobody guesses right, and it is typed once per machine rather than
+            // once per launch.
+            "--account-service-fingerprint" => (
+                &mut account_service_fingerprint,
+                ACCOUNT_SERVICE_FINGERPRINT,
+                after("a SHA-256")?,
+            ),
             "-w" | "--world" => (&mut world, WORLD, after("a world name")?),
             other => {
                 if let Some(value) = other.strip_prefix("--server=") {
@@ -386,6 +420,12 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
                     (&mut player_name, PLAYER_NAME, value.to_owned())
                 } else if let Some(value) = other.strip_prefix("--identity=") {
                     (&mut identity_path, IDENTITY_PATH, value.to_owned())
+                } else if let Some(value) = other.strip_prefix("--account-service-fingerprint=") {
+                    (
+                        &mut account_service_fingerprint,
+                        ACCOUNT_SERVICE_FINGERPRINT,
+                        value.to_owned(),
+                    )
                 } else if let Some(value) = other.strip_prefix("--account-service=") {
                     (&mut account_service, ACCOUNT_SERVICE, value.to_owned())
                 } else if let Some(value) = other.strip_prefix("--world=") {
@@ -430,11 +470,40 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
         .map(|path| PathBuf::from(path.trim()));
     // Parsed here rather than in the plugin, so a mistyped URL is a usage error
     // before a window opens instead of a refusal on a login screen. It is also the
-    // one place `https` is turned away — see `AccountService::parse`.
-    let account = account_service
-        .or_else(|| exported(env.account_service.as_deref()))
-        .map(|raw| AccountService::parse(raw.trim()))
-        .transpose()?;
+    // one place `http` is turned away — see `AccountService::parse`.
+    //
+    // **The address and its fingerprint are resolved together and refused together**,
+    // because an address with nothing to check the certificate against is the hole #131
+    // closed and a fingerprint with no address is a launch that means something other
+    // than what was typed. Neither is defaulted: there is no number this client could
+    // guess and no service it could discover one from — this connection is where its
+    // trust begins.
+    let given_service = account_service.or_else(|| exported(env.account_service.as_deref()));
+    let given_print = account_service_fingerprint
+        .or_else(|| exported(env.account_service_fingerprint.as_deref()));
+    let account = match (given_service, given_print) {
+        (Some(raw), Some(fingerprint)) => {
+            Some(AccountService::parse(raw.trim(), fingerprint.trim())?)
+        }
+        (Some(raw), None) => {
+            return Err(format!(
+                "an account service was given ({}) with no fingerprint to expect at it. \
+                 That service prints one at every start, as certificate_sha256; pass it \
+                 with --account-service-fingerprint. This client checks it instead of a \
+                 certificate authority, and a connection it cannot check is one anybody \
+                 on the way can answer — including with a signing key of their own.",
+                raw.trim()
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(
+                "an account service fingerprint was given with no --account-service \
+                 to reach. Give the service's https URL beside it, or drop it."
+                    .to_owned(),
+            );
+        }
+        (None, None) => None,
+    };
 
     let world = world
         .or_else(|| exported(env.world.as_deref()))
@@ -553,6 +622,24 @@ mod tests {
         LaunchEnv::default()
     }
 
+    /// A well-formed account service address, and the fingerprint that has to travel with
+    /// it. Neither is reachable in a test; what they have to be is well-formed.
+    const SERVICE_URL: &str = "https://127.0.0.1:7780";
+    const SERVICE_PIN: &str = "abababababababababababababababababababababababababababababababab";
+
+    /// An environment exporting that fingerprint and nothing else.
+    ///
+    /// The fingerprint travels with the address rather than instead of it, and most of
+    /// the cases below are about the address — so exporting the number keeps them about
+    /// what they are about. The pairing itself is
+    /// [`an_account_service_and_its_fingerprint_travel_together`].
+    fn pinned() -> LaunchEnv {
+        LaunchEnv {
+            account_service_fingerprint: Some(SERVICE_PIN.to_owned()),
+            ..LaunchEnv::default()
+        }
+    }
+
     fn start(raw: &[&str], env: &LaunchEnv) -> Result<Start, String> {
         match parse_launch(&args(raw), env)? {
             Launch::Connect(start) => Ok(start),
@@ -588,9 +675,15 @@ mod tests {
         start(raw, &env).map(|start| start.identity_path)
     }
 
+    /// The account service a launch resolved to, as it renders.
+    ///
+    /// `env` is an exported address, and the fingerprint is exported with it: the two are
+    /// one setting given in two places, and a helper that exported one without the other
+    /// would make every case below a test of the pairing rule instead of of the address.
     fn account(raw: &[&str], env: Option<&str>) -> Result<Option<String>, String> {
         let env = LaunchEnv {
             account_service: env.map(str::to_owned),
+            account_service_fingerprint: env.map(|_| SERVICE_PIN.to_owned()),
             ..LaunchEnv::default()
         };
         start(raw, &env).map(|start| start.account_service.map(|service| service.to_string()))
@@ -843,6 +936,7 @@ mod tests {
                 player_name: Some("ignored".to_owned()),
                 identity_path: Some("/tmp/ignored".to_owned()),
                 account_service: None,
+                account_service_fingerprint: None,
                 world: None,
             },
         )
@@ -885,6 +979,8 @@ mod tests {
             "VOXELHEIM_IDENTITY",
             "--account-service",
             "VOXELHEIM_ACCOUNT_SERVICE",
+            "--account-service-fingerprint",
+            "VOXELHEIM_ACCOUNT_SERVICE_FINGERPRINT",
             "--world",
             "VOXELHEIM_WORLD",
             // The development path is documented as one, which is the acceptance
@@ -946,13 +1042,13 @@ mod tests {
         for both in [
             vec![
                 "--account-service",
-                "http://127.0.0.1:7780",
+                SERVICE_URL,
                 "--server",
                 "server.example:7777",
             ],
-            vec!["server.example:7777", "-a", "http://127.0.0.1:7780"],
+            vec!["server.example:7777", "-a", SERVICE_URL],
         ] {
-            let err = start(&both, &nothing()).expect_err("a world has to be named");
+            let err = start(&both, &pinned()).expect_err("a world has to be named");
             assert!(err.contains("--world"), "{err}");
             assert!(err.contains("server.example:7777"), "{err}");
         }
@@ -961,10 +1057,10 @@ mod tests {
         // value somebody set, and the refusal names it rather than quietly winning or
         // quietly losing.
         let err = start(
-            &["--account-service", "http://127.0.0.1:7780"],
+            &["--account-service", SERVICE_URL],
             &LaunchEnv {
                 server_addr: Some("server.example:7777".to_owned()),
-                ..LaunchEnv::default()
+                ..pinned()
             },
         )
         .expect_err("an exported address was accepted with no world");
@@ -978,13 +1074,13 @@ mod tests {
         let start = start(
             &[
                 "--account-service",
-                "http://127.0.0.1:7780",
+                SERVICE_URL,
                 "--server",
                 "127.0.0.1:7777",
                 "--world",
                 "midgard",
             ],
-            &nothing(),
+            &pinned(),
         )
         .expect("all three together are a complete command line");
 
@@ -1000,9 +1096,9 @@ mod tests {
             vec!["-w", "midgard"],
             vec!["--world=midgard"],
         ] {
-            let mut whole = vec!["-a", "http://127.0.0.1:7780", "-s", "127.0.0.1:7777"];
+            let mut whole = vec!["-a", SERVICE_URL, "-s", "127.0.0.1:7777"];
             whole.extend(raw.iter().copied());
-            let start = start(&whole, &nothing()).expect("a complete command line");
+            let start = start(&whole, &pinned()).expect("a complete command line");
             assert_eq!(start.world.as_deref(), Some("midgard"), "{raw:?}");
         }
     }
@@ -1013,12 +1109,12 @@ mod tests {
     fn the_command_line_world_beats_the_environment() {
         let both = LaunchEnv {
             world: Some("exported".to_owned()),
-            ..LaunchEnv::default()
+            ..pinned()
         };
         let typed = start(
             &[
                 "-a",
-                "http://127.0.0.1:7780",
+                SERVICE_URL,
                 "-s",
                 "127.0.0.1:7777",
                 "--world",
@@ -1029,11 +1125,8 @@ mod tests {
         .expect("a complete command line");
         assert_eq!(typed.world.as_deref(), Some("typed"));
 
-        let exported = start(
-            &["-a", "http://127.0.0.1:7780", "-s", "127.0.0.1:7777"],
-            &both,
-        )
-        .expect("an exported world is enough");
+        let exported = start(&["-a", SERVICE_URL, "-s", "127.0.0.1:7777"], &both)
+            .expect("an exported world is enough");
         assert_eq!(exported.world.as_deref(), Some("exported"));
     }
 
@@ -1054,13 +1147,8 @@ mod tests {
         // A service but no address: the row that is clicked names the world, so a
         // second answer here could only disagree with it.
         let err = start(
-            &[
-                "--account-service",
-                "http://127.0.0.1:7780",
-                "-w",
-                "midgard",
-            ],
-            &nothing(),
+            &["--account-service", SERVICE_URL, "-w", "midgard"],
+            &pinned(),
         )
         .expect_err("a world with no address was accepted");
         assert!(err.contains("--server"), "{err}");
@@ -1081,7 +1169,7 @@ mod tests {
     /// none — not even the default, which would be an address nobody asked for.
     #[test]
     fn an_account_service_leaves_the_address_to_the_list() {
-        let launched = start(&["--account-service", "http://127.0.0.1:7780"], &nothing())
+        let launched = start(&["--account-service", SERVICE_URL], &pinned())
             .expect("a service alone is a complete command line");
         assert_eq!(launched.server_addr, None);
         assert!(launched.account_service.is_some());
@@ -1096,24 +1184,73 @@ mod tests {
 
     #[test]
     fn every_spelling_of_the_account_service_option_works() {
+        let long_pin = format!("--account-service-fingerprint={SERVICE_PIN}");
         for raw in [
-            vec!["--account-service", "http://127.0.0.1:7780"],
-            vec!["-a", "http://127.0.0.1:7780"],
-            vec!["--account-service=http://127.0.0.1:7780"],
+            vec![
+                "--account-service",
+                SERVICE_URL,
+                "--account-service-fingerprint",
+                SERVICE_PIN,
+            ],
+            vec![
+                "-a",
+                SERVICE_URL,
+                "--account-service-fingerprint",
+                SERVICE_PIN,
+            ],
+            vec![&format!("--account-service={SERVICE_URL}"), &long_pin],
         ] {
             assert_eq!(
                 account(&raw, None),
-                Ok(Some("http://127.0.0.1:7780".to_owned())),
+                Ok(Some(SERVICE_URL.to_owned())),
                 "{raw:?}"
             );
         }
         assert_eq!(
-            account(&[], Some("http://accounts.example:7780")),
-            Ok(Some("http://accounts.example:7780".to_owned()))
+            account(&[], Some("https://accounts.example:7780")),
+            Ok(Some("https://accounts.example:7780".to_owned()))
         );
+        // The address from the command line, the fingerprint from the environment: the
+        // two are resolved independently, so a machine can export the number once and
+        // still name a different service on one launch.
         assert_eq!(
-            account(&["-a", "http://one.example"], Some("http://two.example")),
-            Ok(Some("http://one.example:80".to_owned()))
+            account(&["-a", "https://one.example"], Some("https://two.example")),
+            Ok(Some("https://one.example:443".to_owned()))
+        );
+    }
+
+    /// **Neither half of the anchor is optional, and neither is silently ignored** (#131).
+    /// An address with nothing to check the certificate against is the hole this closed;
+    /// a fingerprint with no address is a launch that means something other than what was
+    /// typed, and dropping it quietly is how a mistyped `--account-service` becomes a
+    /// client that never signs in and never says why.
+    #[test]
+    fn an_account_service_and_its_fingerprint_travel_together() {
+        let err = start(&["-a", SERVICE_URL], &nothing())
+            .expect_err("an account service with no fingerprint was accepted");
+        assert!(err.contains("--account-service-fingerprint"), "{err}");
+        assert!(err.contains(SERVICE_URL), "{err}");
+
+        let err = start(&["--account-service-fingerprint", SERVICE_PIN], &nothing())
+            .expect_err("a fingerprint with no account service was accepted");
+        assert!(err.contains("--account-service"), "{err}");
+
+        // And the exported spellings reach the same rule, because they are the same
+        // setting arriving somewhere else.
+        assert!(
+            start(&[], &pinned()).is_err(),
+            "an exported fingerprint with no service was accepted"
+        );
+        assert!(
+            start(
+                &[],
+                &LaunchEnv {
+                    account_service: Some(SERVICE_URL.to_owned()),
+                    ..LaunchEnv::default()
+                }
+            )
+            .is_err(),
+            "an exported service with no fingerprint was accepted"
         );
     }
 
@@ -1121,12 +1258,38 @@ mod tests {
     fn a_url_the_client_cannot_use_is_a_usage_error_rather_than_a_login_screen() {
         // Caught before a window opens, which is the whole reason the URL is parsed
         // in here rather than in the plugin.
-        for raw in ["accounts.example", "ftp://accounts.example", "http://"] {
-            assert!(account(&["-a", raw], None).is_err(), "{raw}");
+        for raw in ["accounts.example", "ftp://accounts.example", "https://"] {
+            assert!(
+                account(
+                    &["-a", raw, "--account-service-fingerprint", SERVICE_PIN],
+                    None
+                )
+                .is_err(),
+                "{raw}"
+            );
         }
-        let err = account(&["-a", "https://accounts.example"], None)
-            .expect_err("no root store, so no https");
-        assert!(err.contains("verify a certificate"), "{err}");
+        // **The plaintext one is the refusal #131 added**, and it is a usage error rather
+        // than a downgrade: the account service has no plaintext listener to reach.
+        let err = account(
+            &[
+                "-a",
+                "http://accounts.example",
+                "--account-service-fingerprint",
+                SERVICE_PIN,
+            ],
+            None,
+        )
+        .expect_err("plaintext was accepted");
+        assert!(err.contains("listens over TLS"), "{err}");
+
+        // And a fingerprint that is not a digest, which is the other half of the same
+        // anchor and the one a typo produces.
+        let err = account(
+            &["-a", SERVICE_URL, "--account-service-fingerprint", "nope"],
+            None,
+        )
+        .expect_err("a malformed fingerprint was accepted");
+        assert!(err.contains("SHA-256"), "{err}");
     }
 
     #[test]

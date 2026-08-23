@@ -193,6 +193,7 @@ fn fetch(service: &AccountService, ticket_path: Option<&Path>) -> ServerListEven
 
     let credential = tickets::encode_ticket(&cached.ticket());
     let response = match http::get_json(
+        service.transport(),
         service.authority(),
         &servers_path(service),
         &credential,
@@ -437,7 +438,7 @@ mod tests {
     /// list — the failure this whole module is written to avoid.
     #[test]
     fn a_read_with_no_ticket_is_never_an_empty_list() {
-        let service = AccountService::parse("http://127.0.0.1:7780").expect("a service");
+        let service = AccountService::plaintext("http://127.0.0.1:7780").expect("a service");
         assert!(matches!(
             fetch(&service, None),
             ServerListEvent::SignedOut(_)
@@ -448,10 +449,11 @@ mod tests {
     /// same derivation the two sign-in paths use.
     #[test]
     fn the_path_follows_the_services_prefix() {
-        let root = AccountService::parse("http://127.0.0.1:7780").expect("a service");
+        let root = AccountService::plaintext("http://127.0.0.1:7780").expect("a service");
         assert_eq!(servers_path(&root), "/v1/servers");
 
-        let prefixed = AccountService::parse("http://accounts.example/voxelheim/").expect("a URL");
+        let prefixed =
+            AccountService::plaintext("http://accounts.example/voxelheim/").expect("a URL");
         assert_eq!(servers_path(&prefixed), "/voxelheim/v1/servers");
     }
 
