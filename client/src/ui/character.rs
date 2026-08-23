@@ -13,11 +13,12 @@
 //! two different answers and a client that guessed at either would be holding an opinion
 //! about a world it can only see part of.
 //!
-//! **A refused creation closes the connection, and that is the contract rather than a
-//! shortcoming here.** `schemas/handshake.fbs` answers one with `ServerReject`, which
-//! ends the session — so the sentence a player reads is on the screen they land on
-//! afterwards, with the server's own words in it. What this screen keeps is the draft:
-//! the name and the colours survive, so coming back is a click rather than a redo.
+//! **A refused creation closes the connection, and the client re-opens only the two a
+//! different name remedies.** `schemas/handshake.fbs` answers one with `ServerReject`,
+//! which ends the socket. `CHARACTER_NAME_TAKEN` and `CHARACTER_NAME_REFUSED` keep this
+//! form up while the network boundary reconnects on the same route, then put the
+//! server's sentence beside the name field. Every other reject remains terminal. The
+//! draft already outlives an exchange, so the name and colours never need reconstructing.
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
@@ -273,18 +274,17 @@ const FIELDS: [Field; 9] = [
 /// `persist.MaxNameBytes` because the server measures the same thing the same way. This
 /// counted *characters* until review found it: thirty-two of them is inside any character
 /// count and twice over the byte limit as soon as they are CJK or emoji, and the refusal
-/// that earns is a `ServerReject` — which by contract ends the session, so the player is
-/// dropped back to the server list for a name the field offered to hold. A name this
-/// accepts can still be refused; that refusal is the server's to make, and it should not
-/// be one this screen composed on purpose.
+/// that earns is a `ServerReject` — which by contract ends the connection and now costs a
+/// reconnect before the same form can explain it. A name this accepts can still be
+/// refused; that refusal is the server's to make, and it should not be one this screen
+/// composed on purpose.
 const NAME_LIMIT_BYTES: usize = 64;
 
 /// What the player has chosen so far.
 ///
-/// It deliberately **outlives one exchange**: a creation the server refuses closes the
-/// connection, and a player who comes back to type the same six choices again would be
-/// paying for a rule they have already been told about. Only the focus is re-derived,
-/// and only when a new list arrives.
+/// It deliberately **outlives one exchange**: a retryable creation refusal closes the
+/// connection but leaves this form in place, and the fresh character list re-enables the
+/// same draft rather than reconstructing six choices. Only the list focus is re-derived.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 struct Draft {
     mode: Mode,
@@ -434,6 +434,10 @@ struct CharacterStatus;
 #[derive(Component)]
 struct NameField;
 
+/// The server's answer to the last name submitted, directly under that field.
+#[derive(Component)]
+struct NameRefusal;
+
 /// One control on the creation form.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct FormField(Field);
@@ -545,11 +549,29 @@ type CreatingHalf = (
     Without<ChoosingPanel>,
 );
 type SwatchEdge = (Without<Row>, Without<FormField>);
-type HairText = (With<HairLabel>, Without<NameField>);
+type NameText = (
+    With<NameField>,
+    Without<NameRefusal>,
+    Without<HairLabel>,
+    Without<CharacterStatus>,
+);
+type NameRefusalText = (
+    With<NameRefusal>,
+    Without<NameField>,
+    Without<HairLabel>,
+    Without<CharacterStatus>,
+);
+type HairText = (
+    With<HairLabel>,
+    Without<NameField>,
+    Without<NameRefusal>,
+    Without<CharacterStatus>,
+);
 
 type StatusText = (
     With<CharacterStatus>,
     Without<NameField>,
+    Without<NameRefusal>,
     Without<HairLabel>,
 );
 
@@ -695,6 +717,19 @@ fn spawn_form(parent: &mut ChildSpawnerCommands<'_>) {
                     ..default()
                 },
                 TextColor(Color::WHITE),
+            ));
+            form.spawn((
+                NameRefusal,
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.95, 0.34, 0.30)),
+                Node {
+                    max_width: Val::Percent(100.0),
+                    ..default()
+                },
             ));
 
             for (row, palette) in PALETTES.iter().enumerate() {
@@ -1227,9 +1262,10 @@ impl PlayAs {
 /// Leaving a world now lands back on its character screen, and a launch flag that answered
 /// that exchange too would send the player straight back in — a control that cannot be
 /// used. The line is drawn at a [`Session`] having existed rather than at the exchange
-/// number, because that is the same line #184 draws everywhere else: a refused creation
-/// ends the session without ever making one, and reconnecting after that still gets the
-/// launch's answer, which is what `a_second_exchange_is_answered_like_the_first` holds.
+/// number. A wholly new pre-session exchange still gets the launch's answer, which is
+/// what `a_second_exchange_is_answered_like_the_first` holds. A name-refusal reconnect is
+/// not wholly new: `CharacterChoice` stays present and the local `asked` guard prevents
+/// the launch from submitting the same refused name forever.
 fn answer_from_the_launch(
     choice: Option<Res<CharacterChoice>>,
     play_as: Res<PlayAs>,
@@ -1715,7 +1751,8 @@ fn refresh_screen(
     mut fields: Query<(&FormField, &mut BorderColor), Without<Row>>,
     mut swatches: Query<(&Swatch, &mut BorderColor), SwatchEdge>,
 
-    mut name: Query<&mut Text, With<NameField>>,
+    mut name: Query<&mut Text, NameText>,
+    mut name_refusal: Query<&mut Text, NameRefusalText>,
     mut hair: Query<&mut Text, HairText>,
     mut status: Query<&mut Text, StatusText>,
 ) {
@@ -1770,6 +1807,13 @@ fn refresh_screen(
         }
     }
 
+    let refusal = choice.creation_refusal().unwrap_or_default();
+    for mut text in &mut name_refusal {
+        if text.0 != refusal {
+            *text = Text::new(refusal.to_owned());
+        }
+    }
+
     for mut text in &mut hair {
         let line = HairModel::ALL
             .get(draft.hair)
@@ -1800,13 +1844,11 @@ fn set_border(border: &mut BorderColor, edge: Color) {
 /// three states — and after a choice has gone out it says so, because a screen that
 /// looked unchanged while a request was in flight is one a player presses again.
 ///
-/// **It does not read [`ConnectionState`], and used to.** An arm returned the refusal
-/// reason for `Rejected`, under a comment conceding it was reached "for a refusal that
-/// did not end this exchange, which today means none". There is no such refusal: every
-/// reject on this screen closes the connection, `ui::status` renders the reason on the
-/// screen that follows, and `a_rejection_shows_the_servers_reason_verbatim` is what
-/// holds that promise. An arm that cannot run is not a defence — it is a second place a
-/// refusal could be rendered, quietly disagreeing with the first.
+/// **It does not read [`ConnectionState`]**, and the retryable refusal does not change
+/// that. The network boundary carries the server's sentence on [`CharacterChoice`], and
+/// [`refresh_screen`] writes it beside the name; all other rejects take this screen down
+/// and remain the status screen's responsibility. One rejection therefore still has one
+/// renderer.
 fn describe(draft: &Draft, choice: &CharacterChoice) -> String {
     if choice.answered() {
         return "Asking the server...".to_owned();
@@ -2004,6 +2046,18 @@ mod tests {
 
     fn draft(app: &App) -> Draft {
         app.world().resource::<Draft>().clone()
+    }
+
+    /// The sentence drawn directly under the name field.
+    fn name_refusal(app: &mut App) -> String {
+        let world = app.world_mut();
+        let mut refusal = world.query_filtered::<&Text, With<NameRefusal>>();
+        refusal
+            .iter(world)
+            .next()
+            .expect("the name refusal line exists")
+            .0
+            .clone()
     }
 
     /// **Two characters, two rows, and a way to make a third.** The names are the
@@ -2857,8 +2911,7 @@ mod tests {
     /// #184 made leaving a world land back on its character screen. `--name` answering
     /// that exchange too would send the player straight back in — a control that cannot be
     /// used. The line is a [`Session`] having existed, not the exchange number, which is
-    /// what keeps the retry below working: a refused creation ends the session without
-    /// ever making one.
+    /// why a pre-session exchange and a return from a world are not the same thing.
     #[test]
     fn the_launch_does_not_answer_the_screen_a_player_left_a_world_for() {
         let mut app = headless_playing_as(
@@ -2890,8 +2943,9 @@ mod tests {
         );
     }
 
-    /// The next exchange gets its own answer: a refused creation ends the session, and
-    /// reconnecting asks the same question again.
+    /// A wholly new exchange gets its own launch answer. The automatic reconnect after
+    /// a name refusal deliberately keeps `CharacterChoice` present, so it does not reset
+    /// this local guard and cannot repeat the same refused creation in a loop.
     #[test]
     fn a_second_exchange_is_answered_like_the_first() {
         let mut app = headless_playing_as(
@@ -2958,6 +3012,24 @@ mod tests {
         // An account with nothing here opens on the form, which is the other half up.
         let mut creating = headless(CharacterChoice::for_a_test(Vec::new(), 3));
         assert_eq!(halves(&mut creating), (Display::None, Display::Flex));
+    }
+
+    /// A retryable name refusal leaves the creation half present and draws the server's
+    /// sentence beside the field that can remedy it.
+    ///
+    /// Both halves matter: a test that asserted only the text could pass with that text
+    /// hidden in the list panel, and a test that asserted only the form could pass while
+    /// leaving the player no explanation for why nothing was created.
+    #[test]
+    fn a_name_refusal_keeps_the_form_and_its_message_together() {
+        let reason = "CHARACTER_NAME_TAKEN: a character on this world already has that name; \
+                      choose another";
+        let mut app =
+            headless(CharacterChoice::for_a_test(Vec::new(), 3).after_creation_refusal(reason));
+
+        assert_eq!(halves(&mut app), (Display::None, Display::Flex));
+        assert_eq!(draft(&app).mode, Mode::Creating);
+        assert_eq!(name_refusal(&mut app), reason);
     }
 
     /// **The rows belong to the exchange that drew them.**

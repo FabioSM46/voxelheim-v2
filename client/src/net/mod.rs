@@ -234,6 +234,20 @@ pub struct CharacterChoice {
     max_characters: u8,
     preselect: Option<u64>,
     answered: bool,
+    attempted: Option<CharacterAttempt>,
+    creation_refusal: Option<String>,
+}
+
+/// Which half of the character question the server is answering.
+///
+/// Private and deliberately smaller than [`ChooseCharacter`]: the ECS needs only to
+/// know whether a character-name refusal answered a *creation*. A server sending the
+/// same code after a selection or before any choice is not a retryable exchange, and
+/// treating it as one would turn a broken peer into a redial loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharacterAttempt {
+    Play,
+    Create,
 }
 
 impl CharacterChoice {
@@ -278,6 +292,14 @@ impl CharacterChoice {
         self.answered
     }
 
+    /// The server's answer to the last name this form submitted, while one exists.
+    ///
+    /// Display only. The code and detail are kept verbatim, and neither is parsed into a
+    /// client-side name rule: the next name is sent to the server exactly as before.
+    pub fn creation_refusal(&self) -> Option<&str> {
+        self.creation_refusal.as_deref()
+    }
+
     /// A pending choice without a socket, so the screen that draws one can be exercised
     /// headlessly. Test-only, for the reason `ListedServer::for_a_test` is: this is a
     /// value the server sends, and a system that could build one would be a client
@@ -289,6 +311,8 @@ impl CharacterChoice {
             max_characters,
             preselect: None,
             answered: false,
+            attempted: None,
+            creation_refusal: None,
         }
     }
 
@@ -304,6 +328,13 @@ impl CharacterChoice {
     #[cfg(test)]
     pub fn already_answered(mut self) -> Self {
         self.answered = true;
+        self
+    }
+
+    /// The retryable answer a re-opened exchange carries back to the form.
+    #[cfg(test)]
+    pub fn after_creation_refusal(mut self, reason: impl Into<String>) -> Self {
+        self.creation_refusal = Some(reason.into());
         self
     }
 }
@@ -964,13 +995,13 @@ enum RejoinBy {
     },
 }
 
-/// Set while a player-initiated disconnect is on its way back to the character screen.
+/// Set while this client is on its way back to the character screen.
 ///
-/// **This is the whole of the difference between leaving and failing**, and the reason it
-/// is a resource rather than a state. `disconnect_on_request` inserts it — that system is
-/// reached only by a `DisconnectRequest`, which is a player asking — and nothing on the
-/// failure paths does: a refusal, a dropped connection or a dead net thread all leave
-/// `Rejected` or `Disconnected` with their reason and stay there.
+/// Two events insert it, and both have a complete remedy on the same route:
+/// `disconnect_on_request`, when the player asks to leave a world, and a
+/// `CHARACTER_NAME_TAKEN` / `CHARACTER_NAME_REFUSED` that answered a creation, when the
+/// player can type another name. Every other refusal, dropped connection or dead net
+/// thread leaves `Rejected` or `Disconnected` with its reason and stays there.
 ///
 /// It is removed by whichever dial consumes it, before that dial can fail. So a rejoin
 /// that is itself refused reports the refusal and stops, which is what keeps this one
@@ -980,8 +1011,8 @@ struct Rejoining;
 
 /// Asks the world to be opened again, on the route the last session was opened by.
 ///
-/// **Only after the player asked to leave.** The trigger is [`Rejoining`], which only
-/// `disconnect_on_request` inserts.
+/// **Only after a deliberate return or a retryable character-name answer.** The trigger
+/// is [`Rejoining`]; generic failures never insert it.
 ///
 /// It waits for [`NetLink`] to be gone rather than dialling the frame the request lands:
 /// the read thread is still represented by that resource until it reports its orderly end,
@@ -1000,47 +1031,53 @@ fn rejoin_for_a_character(
         return;
     }
     // A rejoin already under way, or one that has arrived. Either is somebody else's
-    // business now; the flag is dropped so nothing dials a second time.
+    // business now; the flag is dropped so nothing dials a second time. `Choosing` is
+    // the deliberate exception: a rejected character name keeps the form mounted while
+    // this one replacement connection is opened.
     if !matches!(
         *state,
-        ConnectionState::Disconnected | ConnectionState::Rejected { .. }
+        ConnectionState::Choosing
+            | ConnectionState::Disconnected
+            | ConnectionState::Rejected { .. }
     ) {
         commands.remove_resource::<Rejoining>();
         return;
     }
 
-    // **Dropped before anything can fail, which is what makes this one return rather than
-    // a retry policy.** A rejoin that is itself refused leaves `Rejected` with the reason
-    // and nothing set to try again — the rule `client/AGENTS.md` states, kept.
-    commands.remove_resource::<Rejoining>();
-
     match route.as_deref() {
         Some(RejoinBy::Row(name)) => {
             // The same message a click on that row writes, read by the same system in the
-            // same frame — `connect_on_request` is chained after this one, and it already
-            // accepts `Disconnected`, because the list screen has always offered a way to
-            // ask again.
+            // same frame. Leave `Rejoining` for that system to consume: its presence is
+            // what lets this internal request pass while the visible state remains
+            // `Choosing`, without widening ordinary list clicks to that state.
             requests.write(ConnectRequest { name: name.clone() });
         }
         Some(RejoinBy::Address {
             addr,
             expected,
             ticket_path,
-        }) => match start_session(addr, expected.clone(), &settings, ticket_path.clone()) {
-            Ok((link, outbound)) => {
-                *state = ConnectionState::Connecting;
-                commands.insert_resource(ServerAddress(addr.clone()));
-                commands.insert_resource(link);
-                commands.insert_resource(outbound);
+        }) => {
+            // **Dropped before anything can fail, which is what makes this one return
+            // rather than a retry policy.** A rejoin that is itself refused leaves
+            // `Rejected` with the reason and nothing set to try again.
+            commands.remove_resource::<Rejoining>();
+            match start_session(addr, expected.clone(), &settings, ticket_path.clone()) {
+                Ok((link, outbound)) => {
+                    *state = ConnectionState::Connecting;
+                    commands.insert_resource(ServerAddress(addr.clone()));
+                    commands.insert_resource(link);
+                    commands.insert_resource(outbound);
+                }
+                Err(err) => {
+                    error!("the network thread would not start: {err}");
+                    *state = ConnectionState::Rejected { reason: err };
+                }
             }
-            Err(err) => {
-                error!("the network thread would not start: {err}");
-                *state = ConnectionState::Rejected { reason: err };
-            }
-        },
+        }
         None => {
             // Nothing was ever dialled, so there is nothing to go back to. Reachable only
             // if a `DisconnectRequest` arrived on a client that never opened a session.
+            commands.remove_resource::<Rejoining>();
         }
     }
 }
@@ -1055,6 +1092,7 @@ fn rejoin_for_a_character(
 fn connect_on_request(
     mut requests: MessageReader<ConnectRequest>,
     list: Option<Res<ServerList>>,
+    rejoining: Option<Res<Rejoining>>,
     settings: Res<SessionSettings>,
     mut state: ResMut<ConnectionState>,
     mut commands: Commands,
@@ -1068,11 +1106,21 @@ fn connect_on_request(
 
     // Only from a standing start. A click that arrives while a session is live or
     // being opened is a click the list screen was not showing a button for.
-    if !matches!(
-        *state,
-        ConnectionState::Idle | ConnectionState::Rejected { .. } | ConnectionState::Disconnected
-    ) {
+    let reopening_character = rejoining.is_some() && matches!(*state, ConnectionState::Choosing);
+    if !reopening_character
+        && !matches!(
+            *state,
+            ConnectionState::Idle
+                | ConnectionState::Rejected { .. }
+                | ConnectionState::Disconnected
+        )
+    {
         return;
+    }
+    if reopening_character {
+        // Consume the single internal retry before the dial can fail. Ordinary clicks
+        // cannot reach `Choosing`, and a failed retry has no flag left to loop on.
+        commands.remove_resource::<Rejoining>();
     }
 
     let chosen = match list.as_deref() {
@@ -1248,8 +1296,10 @@ struct Inboxes<'w> {
 fn drain_session_events(
     mut commands: Commands,
     link: Option<ResMut<NetLink>>,
+    rejoining: Option<Res<Rejoining>>,
     mut state: ResMut<ConnectionState>,
     mut inboxes: Inboxes<'_>,
+    mut pending_character: Option<ResMut<CharacterChoice>>,
 ) {
     // Absent until a server has been chosen, which is the ordinary state of a client
     // sitting on the login screen or the server list. Nothing to drain, and nothing
@@ -1266,6 +1316,13 @@ fn drain_session_events(
         Ok(channels) => channels,
         Err(poisoned) => poisoned.into_inner(),
     };
+    // A reject and the orderly close behind it may arrive in one drain or in two
+    // frames. The resource covers the latter; the local flag is set immediately for
+    // the former, before deferred commands can make the resource visible.
+    let mut reopening_character = rejoining.is_some()
+        && pending_character
+            .as_deref()
+            .is_some_and(|choice| choice.creation_refusal.is_some());
 
     loop {
         match channels.events.try_recv() {
@@ -1287,11 +1344,20 @@ fn drain_session_events(
                     list.characters.len(),
                     list.max_characters
                 );
+                let creation_refusal = pending_character
+                    .as_deref()
+                    .and_then(|choice| choice.creation_refusal.clone());
                 commands.insert_resource(CharacterChoice {
                     characters: list.characters,
                     max_characters: list.max_characters,
                     preselect,
                     answered: false,
+                    attempted: None,
+                    // A reconnect after a name refusal is the same form answering the
+                    // same player action, not a fresh screen. Preserve the server's
+                    // sentence while replacing every server-owned list field with the
+                    // new connection's answer.
+                    creation_refusal,
                 });
 
                 *state = ConnectionState::Choosing;
@@ -1361,6 +1427,35 @@ fn drain_session_events(
             // beside the sentence it writes for the other half.
             Ok(SessionEvent::ActionRefused(refused)) => inboxes.refusals.0.push(refused),
 
+            Ok(SessionEvent::ServerRefused(reject)) => {
+                let reason = reject.describe();
+                let retryable_creation = reject.is_character_name_refusal()
+                    && pending_character
+                        .as_deref()
+                        .is_some_and(|choice| choice.attempted == Some(CharacterAttempt::Create));
+
+                warn!("no session: {reason}");
+                // The server closes after every ServerReject. For the two name answers,
+                // that means another connection on the same route; the cached ticket is
+                // read again by the ordinary session thread and may independently fail.
+                if retryable_creation {
+                    if let Some(choice) = pending_character.as_deref_mut() {
+                        choice.creation_refusal = Some(reason);
+                    }
+                    // The screen is keyed on `CharacterChoice`, and the state stays on
+                    // the same player task instead of flashing a terminal rejection.
+                    *state = ConnectionState::Choosing;
+                    reopening_character = true;
+                    commands.insert_resource(Rejoining);
+                } else {
+                    *state = ConnectionState::Rejected { reason };
+                    commands.remove_resource::<CharacterChoice>();
+                }
+                commands.remove_resource::<Outbound>();
+                commands.remove_resource::<Session>();
+                commands.remove_resource::<Identity>();
+            }
+
             Ok(SessionEvent::Refused(reason)) => {
                 warn!("no session: {reason}");
                 *state = ConnectionState::Rejected { reason };
@@ -1377,11 +1472,13 @@ fn drain_session_events(
                     Some(detail) => warn!("session ended: {detail}"),
                     None => info!("the server closed the connection"),
                 }
-                *state = ConnectionState::Disconnected;
+                if !reopening_character {
+                    *state = ConnectionState::Disconnected;
+                    commands.remove_resource::<CharacterChoice>();
+                }
                 commands.remove_resource::<Outbound>();
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
-                commands.remove_resource::<CharacterChoice>();
             }
 
             Err(TryRecvError::Empty) => break,
@@ -1411,12 +1508,14 @@ fn drain_session_events(
                 // is not about a session that ended: a link cannot exist while no
                 // server has been chosen, so reaching here in that state would mean
                 // reporting a disconnection from a server nobody dialled.
-                if !matches!(
-                    *state,
-                    ConnectionState::Idle
-                        | ConnectionState::Rejected { .. }
-                        | ConnectionState::Disconnected
-                ) {
+                if !reopening_character
+                    && !matches!(
+                        *state,
+                        ConnectionState::Idle
+                            | ConnectionState::Rejected { .. }
+                            | ConnectionState::Disconnected
+                    )
+                {
                     *state = ConnectionState::Disconnected;
                     // Inside the guard, so this stays idempotent along with the
                     // assignment: `remove_resource` on an absent resource is a no-op, but
@@ -1484,11 +1583,18 @@ fn send_character_choice(
         Err(poisoned) => poisoned.into_inner(),
     };
     let choice = match choice {
-        ChooseCharacter::Play(character) => Choice::Play(character),
+        ChooseCharacter::Play(character) => {
+            pending.attempted = Some(CharacterAttempt::Play);
+            Choice::Play(character)
+        }
         ChooseCharacter::Create { name, appearance } => {
+            pending.attempted = Some(CharacterAttempt::Create);
             Choice::Create(codec::CreateCharacterRequest { name, appearance })
         }
     };
+    // A second submission supersedes the sentence about the first. The server remains
+    // the only judge: clearing display state does not accept the new name locally.
+    pending.creation_refusal = None;
     // Which of the two went out, and deliberately not who: a character's name is player
     // text, and the one thing a log needs to say here is which request the session is
     // now waiting on an answer to. The screen shows the rest, including a refusal.
@@ -2136,6 +2242,38 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut received = Vec::new();
             for _ in 0..connections {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    return received;
+                };
+                socket
+                    .set_read_timeout(Some(PATIENCE))
+                    .expect("a fresh socket accepts a read timeout");
+                if !serve_one(&mut socket, &reply, &mut received) {
+                    return received;
+                }
+            }
+            received
+        });
+
+        (addr, handle)
+    }
+
+    /// The same address answering each connection differently.
+    ///
+    /// A retryable character refusal needs both halves in one test: the first socket
+    /// closes after the reject, and the second answers the fresh hello with the list the
+    /// form is rebuilt from. Repeating one reply cannot model that sequence without
+    /// either refusing forever or welcoming the retry before a person has typed again.
+    fn spawn_stub_sequence(replies: Vec<Reply>) -> (String, JoinHandle<Vec<Vec<u8>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let addr = listener
+            .local_addr()
+            .expect("read the stub's own address")
+            .to_string();
+
+        let handle = thread::spawn(move || {
+            let mut received = Vec::new();
+            for reply in replies {
                 let Ok((mut socket, _)) = listener.accept() else {
                     return received;
                 };
@@ -2810,6 +2948,107 @@ mod tests {
         );
     }
 
+    /// Both server-owned name judgements reopen the same creation form over a fresh
+    /// connection, carrying the reason that explains what the player should change.
+    ///
+    /// The server closes after `ServerReject`; three recorded frames prove the retry is
+    /// a real redial rather than display state pretending the old socket survived:
+    /// hello + creation on the first connection, then a new hello on the second. The
+    /// second stub stops at its character list so the client cannot reach `Connected`
+    /// and accidentally satisfy this test with a world behind the form.
+    #[test]
+    fn character_name_refusals_reopen_the_creation_exchange() {
+        for (code, name) in [
+            (fb::RejectReason::CHARACTER_NAME_TAKEN, "Eivor"),
+            (fb::RejectReason::CHARACTER_NAME_REFUSED, "   "),
+        ] {
+            let detail = "choose another name";
+            let (addr, stub) = spawn_stub_sequence(vec![
+                Reply::AfterAChoice(vec![encode_server_reject(code, detail)]),
+                Reply::Frames(vec![one_character()]),
+            ]);
+            let scratch = Scratch::new("net-name-retry");
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins).add_plugins(
+                NetPlugin::as_if_listed(&addr)
+                    .over_plaintext()
+                    .with_identity_path(Some(scratch.join("identity")))
+                    .with_data_home(scratch.join("data")),
+            );
+
+            pump_until(&mut app, "the first character list", |app| {
+                app.world().contains_resource::<CharacterChoice>()
+            });
+            app.world_mut().write_message(ChooseCharacter::Create {
+                name: name.to_owned(),
+                appearance: codec::PLACEHOLDER_APPEARANCE,
+            });
+
+            pump_until(&mut app, "the creation form on the new connection", |app| {
+                app.world()
+                    .get_resource::<CharacterChoice>()
+                    .is_some_and(|choice| !choice.answered() && choice.creation_refusal().is_some())
+                    && state(app) == ConnectionState::Choosing
+            });
+
+            let choice = app.world().resource::<CharacterChoice>();
+            let reason = choice
+                .creation_refusal()
+                .expect("the form carries the server's answer");
+            assert_eq!(
+                Reject::split_description(reason).0,
+                code.variant_name().unwrap()
+            );
+            assert!(reason.contains(detail), "{reason}");
+            assert!(
+                !app.world().contains_resource::<Session>(),
+                "a retryable creation refusal entered a world"
+            );
+
+            drop(app);
+            let sent = stub.join().expect("the stub thread must not panic");
+            assert_eq!(sent.len(), 3, "hello + creation, then the retry hello");
+        }
+    }
+
+    /// A creation does not make every `ServerReject` retryable. `BAD_REQUEST` may mean
+    /// the frame or appearance was invalid, and typing another name is not its remedy.
+    #[test]
+    fn bad_request_after_creation_remains_terminal() {
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_reject(
+            fb::RejectReason::BAD_REQUEST,
+            "that request cannot be accepted",
+        )]));
+        let scratch = Scratch::new("net-name-retry-negative");
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(
+            NetPlugin::as_if_listed(&addr)
+                .over_plaintext()
+                .with_identity_path(Some(scratch.join("identity")))
+                .with_data_home(scratch.join("data")),
+        );
+
+        pump_until(&mut app, "the character list", |app| {
+            app.world().contains_resource::<CharacterChoice>()
+        });
+        app.world_mut().write_message(ChooseCharacter::Create {
+            name: "Eivor".to_owned(),
+            appearance: codec::PLACEHOLDER_APPEARANCE,
+        });
+        pump_until(&mut app, "the terminal rejection", |app| {
+            matches!(state(app), ConnectionState::Rejected { .. })
+        });
+
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "a non-name rejection returned to the creation form"
+        );
+        assert!(
+            !app.world().contains_resource::<Rejoining>(),
+            "a non-name rejection scheduled another connection"
+        );
+    }
+
     /// **Leaving a world lands back on its character screen**, over a real socket.
     ///
     /// The whole loop, end to end: a session is established, the player asks to leave, and
@@ -2863,11 +3102,10 @@ mod tests {
 
     /// A connection that dropped is reported and stays reported.
     ///
-    /// **The line #184 draws**, and the reason `Rejoining` is a resource rather than a
-    /// state: only `disconnect_on_request` sets it, and that system is reached only by a
-    /// `DisconnectRequest` — a player pressing something. Every other way a session ends
-    /// arrives at `drain_session_events`, which sets nothing, so this is still the "no
-    /// reconnect, no backoff" client `client/AGENTS.md` describes.
+    /// **The line #184 draws.** A dropped connection inserts no `Rejoining`; the only
+    /// failure that does is a character-name reject answering a creation, whose complete
+    /// remedy is another name on the same form. There is still no reconnect or backoff
+    /// policy for a session that ended on its own.
     #[test]
     fn a_session_that_ended_on_its_own_does_not_dial_again() {
         let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
@@ -3719,6 +3957,50 @@ mod tests {
             ConnectionState::Rejected {
                 reason: "SERVER_FULL: the realm is full".to_owned()
             }
+        );
+    }
+
+    /// A retryable name answer and the orderly close behind it are one exchange,
+    /// even when both are waiting in the channel on the same frame. Neither the
+    /// explicit `Ended` nor the sender disappearing may replace the form with a
+    /// terminal state before the one redial consumes `Rejoining`.
+    #[test]
+    fn a_name_rejection_and_its_close_keep_the_creation_form_mounted() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Choosing);
+        let mut choice = CharacterChoice::for_a_test(Vec::new(), 3).already_answered();
+        choice.attempted = Some(CharacterAttempt::Create);
+        app.insert_resource(choice);
+
+        events
+            .send(SessionEvent::ServerRefused(Reject {
+                code: "CHARACTER_NAME_TAKEN",
+                detail: "choose another name".to_owned(),
+            }))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::Ended(None))
+            .expect("the app holds the receiver");
+        drop(events);
+        app.update();
+
+        assert_eq!(state(&app), ConnectionState::Choosing);
+        let choice = app
+            .world()
+            .get_resource::<CharacterChoice>()
+            .expect("the same creation form stays mounted");
+        assert!(
+            choice
+                .creation_refusal()
+                .is_some_and(|reason| reason.contains("choose another name")),
+            "the form carries the answer the player can act on"
+        );
+        assert!(
+            app.world().contains_resource::<Rejoining>(),
+            "the clean close must leave the single redial scheduled"
+        );
+        assert!(
+            !app.world().contains_resource::<NetLink>(),
+            "the closed thread no longer owns the route"
         );
     }
 

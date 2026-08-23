@@ -1318,16 +1318,19 @@ pub struct DropItemRequest {
 /// A decoded `ServerReject`.
 ///
 /// [`Self::describe`] is the one place the code and the detail become a single
-/// string. It has one owner deliberately: `net/session.rs` produces that string and
+/// string. It has one owner deliberately: the ECS boundary produces that string and
 /// `ui/status.rs` reads the code back out of it, so a separator chosen in two places
-/// would let the two drift apart with every test still green.
+/// would let the two drift apart with every test still green. The typed value crosses
+/// the net-thread boundary intact: a character-name refusal is the one rejection whose
+/// code changes what the client can offer next, and turning it into display text before
+/// that decision is exactly how the distinction used to be lost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reject {
     /// The schema name of the reject code (`PROTOCOL_MISMATCH`, `SERVER_FULL`,
     /// `BAD_REQUEST`, `ALREADY_CONNECTED`). Codes are logged verbatim on both
     /// sides and shown to the player as-is, which is why the name is what gets
-    /// carried. Reconnect policy is the one thing that would want to branch on
-    /// the numeric code, and it arrives with its own issue.
+    /// carried. The one reconnect policy branches on this field through
+    /// [`Self::is_character_name_refusal`], never on the detail.
     pub code: &'static str,
     /// Human-readable detail. Never parsed — branch on the code, display this.
     pub detail: String,
@@ -1338,6 +1341,17 @@ pub struct Reject {
 const REJECT_SEPARATOR: &str = ": ";
 
 impl Reject {
+    /// Whether another character name is the complete remedy.
+    ///
+    /// These are the two server-owned name judgements. Both close the connection by
+    /// contract, and both leave the admitted account with no character selected, so the
+    /// client can reconnect and offer the same creation form again. No other reject code
+    /// is widened into a retry: `BAD_REQUEST`, an expired ticket and a full roster all
+    /// need a different remedy.
+    pub(crate) fn is_character_name_refusal(&self) -> bool {
+        matches!(self.code, "CHARACTER_NAME_TAKEN" | "CHARACTER_NAME_REFUSED")
+    }
+
     /// The refusal as one string: the code, and the server's detail when there is
     /// one.
     ///
