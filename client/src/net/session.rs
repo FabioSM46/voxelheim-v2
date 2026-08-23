@@ -578,6 +578,15 @@ impl Environment {
 /// already names its own root through [`Target::data_home`] and would fail loudly
 /// without it. There is deliberately no cleanup anywhere in this file: nothing here
 /// removes a file it did not create, least of all one under a path a developer chose.
+///
+/// **What `cfg(test)` does and does not cover.** It is set while this crate is compiled as
+/// its own test harness — its unit tests — and not while it is compiled for something else
+/// to link. An integration test under `client/tests/` would therefore link the shipped half
+/// below. That is unreachable rather than merely unwritten: this package builds one target,
+/// a `bin`, so there is no library for such a test to link, and `client/tests/` does not
+/// exist. Both halves of that footing are asserted by
+/// `scripts/test/client-data-home-isolation.test.sh`, which fails the day either changes
+/// and names what has to be decided then.
 #[cfg(not(test))]
 pub(super) fn default_environment() -> Environment {
     Environment::read()

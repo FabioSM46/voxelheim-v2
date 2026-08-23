@@ -16,6 +16,11 @@
 # stand-in for it. A redirected-environment run can only report on the tests that exist
 # today; the `#[cfg]` answers for the ones nobody has written.
 #
+# `cfg(test)` covers a crate's own unit tests and nothing else, so that guarantee rests on
+# a precondition — the client publishes no library and has no `client/tests/`. The pin
+# below asserts the precondition too, because a guarantee whose footing is unchecked is
+# remembered rather than constructed.
+#
 # **This test cannot build the client, and that is worth stating rather than hiding.** The
 # `automation` job has no Rust toolchain, no Bevy system dependencies, no warm cargo cache
 # and a ten-minute budget; building Bevy inside it would spend the whole budget duplicating
@@ -141,7 +146,55 @@ assert reads == {"client/src/net/session.rs": {"XDG_DATA_HOME": 1, "HOME": 1}}, 
     f"test build cannot call. Found: {reads}"
 )
 
-print("structural pin: a test build cannot name the developer's data directory")
+# ── The precondition `#[cfg(not(test))]` rests on ─────────────────────────────────────
+#
+# `cfg(test)` is set only while a crate is compiled *as its own* test harness — its unit
+# tests. An integration test under `client/tests/` is a separate crate that links the
+# library, and that library was compiled without `cfg(test)`, so the half of
+# `default_environment` it reaches is the shipped one. Raised in review on #232, and
+# correct as a statement about Rust.
+#
+# It is unreachable here, and these three assertions are the reason rather than a
+# paragraph claiming so:
+#
+#   * the client is a **binary-only** package — `cargo metadata` reports one target,
+#     `voxelheim-client` of kind `bin`, and no `lib`. A crate that publishes no library
+#     cannot be `use`d, so nothing under `tests/`, `benches/` or `examples/` can name
+#     `default_environment` at all, whatever it was compiled with.
+#   * so the two ways that changes are a `[lib]` section and a `src/lib.rs`, and both are
+#     checked, because cargo auto-detects the second without anybody writing the first.
+#   * and there is no `client/tests/`. That one needs no library: an integration test can
+#     spawn the *binary* through `CARGO_BIN_EXE_*`, and the binary is the shipped client
+#     reading the real `$XDG_DATA_HOME` — correctly, because it is the shipped client.
+#     Under `cargo test` that is #230 again by another route.
+#
+# Any of the three changing is the moment the guarantee stops holding by construction, so
+# it fails here rather than being remembered. The remedy then is a decision, not a revert:
+# hand the new build an `Environment` of its own through `Target::data_home`, which is
+# what every unit test that cares already does, or point `XDG_DATA_HOME` at a directory
+# the test owns, as `scripts/interop-check.sh` does — and widen this check to say which.
+manifest = (root / "client/Cargo.toml").read_text()
+# TOML comments start with `#`, so a `[lib]` at the head of a line is a real one.
+assert not re.search(r"^\s*\[lib\]", manifest, flags=re.MULTILINE), (
+    "client/Cargo.toml now declares a [lib] target, so `client/tests/`, `benches/` and "
+    "`examples/` can link the crate — and they link a build with no `cfg(test)`, whose "
+    "`default_environment()` is the shipped one that reads the developer's real "
+    "$XDG_DATA_HOME. Give that build an Environment of its own, or redirect "
+    "XDG_DATA_HOME for it, then widen this check."
+)
+assert not (root / "client/src/lib.rs").exists(), (
+    "client/src/lib.rs now exists, so cargo auto-detects a library target even with no "
+    "[lib] section — see the [lib] assertion above for why that reopens #230."
+)
+assert not (root / "client/tests").exists(), (
+    "client/tests/ now exists. An integration test needs no library target to reach the "
+    "real data directory: `CARGO_BIN_EXE_voxelheim-client` runs the shipped client, "
+    "which reads $XDG_DATA_HOME because that is its job. Point XDG_DATA_HOME at a "
+    "directory the test owns, the way scripts/interop-check.sh does, then widen this "
+    "check to name the test that does."
+)
+
+print("structural pin: no build of this crate can name the developer's data directory")
 PY
 
 # ── 2. The dynamic half: run the suite, and let it prove it ────────────────────────────
