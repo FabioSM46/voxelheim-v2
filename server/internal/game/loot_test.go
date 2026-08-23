@@ -36,19 +36,28 @@ func (h *vitalsHarness) drops() []itemDrop {
 	return seen
 }
 
-// killWithTheStarterBlade swings until the named creature is gone, and reports where it
-// was standing on the tick it died.
+// strikeDown swings until the named creature is killed, and reports where it was standing
+// on the tick the last blow landed.
+//
+// **The creature is dying when this returns, not gone.** A blow no longer removes anything
+// and no longer puts anything on the ground: the body stays in the world in
+// MobActionDying for MobDeathDuration, and what it left behind is rolled when that runs
+// out. This half exists for the tests that ask about the window in between;
+// killWithTheStarterBlade below is the whole story.
 //
 // Through the authoritative path — Attack, then the tick — rather than by calling
 // damageMobLocked, because the whole question this file asks is what happens when a kill
 // is resolved *inside* the tick, under the lock spawnDrop wants.
-func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64 {
+func (h *vitalsHarness) strikeDown(p *Player, id uint64) [3]float64 {
 	h.t.Helper()
 
 	for blow := 1; blow <= 10; blow++ {
-		stood, alive := h.mobState(id)
-		if !alive {
+		stood, live := h.mobState(id)
+		if !live {
 			h.t.Fatalf("creature %d was already gone at blow %d", id, blow)
+		}
+		if stood.dying() {
+			h.t.Fatalf("creature %d was already dying at blow %d", id, blow)
 		}
 		// The client tick is taken from the simulation's own rather than from the blow
 		// number, because Attack refuses a stale one and a second kill in the same harness
@@ -57,14 +66,42 @@ func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64
 			h.t.Fatalf("swing %d was refused: %v", blow, err)
 		}
 		h.step()
-		if _, stillAlive := h.mobState(id); !stillAlive {
-			return stood.pos
+		if struck, live := h.mobState(id); live && struck.dying() {
+			return struck.pos
 		}
 		// Past the cooldown before the next one, which is the server's cadence and not
 		// the client's.
 		h.advance(int(h.sim.attackCooldown))
 	}
 	h.t.Fatalf("ten blows of the starter blade did not kill creature %d", id)
+	return [3]float64{}
+}
+
+// killWithTheStarterBlade swings until the named creature is dead *and* its body has
+// stopped existing, and reports where that body came to rest.
+//
+// **Stepping the death out is the point rather than a detail.** Nothing a kill produces
+// exists until the reap has run, so a test that stopped at the blow would be asking its
+// question of a world half way through a death and would get "nothing on the ground" for
+// an answer whatever the loot rules said.
+//
+// The resting position is re-read every tick rather than taken from the blow, because a
+// body falls while it is dying — which is the whole reason the roll happens at the reap.
+func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64 {
+	h.t.Helper()
+
+	resting := h.strikeDown(p, id)
+	// Two ticks of slack over the countdown, so the failure below means "the body outlived
+	// its own death" rather than "the arithmetic was one out".
+	for range int(h.sim.mobDeathTicks) + 2 {
+		body, live := h.mobState(id)
+		if !live {
+			return resting
+		}
+		resting = body.pos
+		h.step()
+	}
+	h.t.Fatalf("creature %d was still in the world after the whole of its death", id)
 	return [3]float64{}
 }
 
@@ -213,8 +250,179 @@ func TestAKilledVargrLeavesOnePelt(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// The wait, which is the server's
+// ---------------------------------------------------------------------------
+
+// Nothing is on the ground until the body has stopped existing, and then everything is.
+//
+// **This is the whole of the delay, asserted tick by tick rather than at the two ends.**
+// A test that killed a draugr, waited three seconds and found a bone would pass equally
+// against a server that spawned it on the instant of the blow — the interesting claim is
+// that the ground is empty for every tick in between, which is what makes the wait a wait.
+func TestNothingReachesTheGroundUntilTheBodyHasGone(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
+	h.strikeDown(player, id)
+
+	for tick := 1; tick <= int(h.sim.mobDeathTicks)+1; tick++ {
+		_, live := h.mobState(id)
+		if got := h.sim.DropCount(); got != 0 && live {
+			t.Fatalf("%d drops were on the ground at tick %d of the death, while the body was still there",
+				got, tick)
+		}
+		if !live {
+			// The reap ran on the previous tick and Step spawned what it produced, which
+			// is where the bone appears. The body and the drop are never both present.
+			if got := h.sim.DropCount(); got != 1 {
+				t.Fatalf("the body went and left %d drops, want the one bone the roll makes", got)
+			}
+			return
+		}
+		h.step()
+	}
+	t.Fatal("the body never stopped existing, so nothing it left ever reached the ground")
+}
+
+// The wait is the same wall-clock length at every tick rate, which is what makes it the
+// server's rather than a count of frames.
+//
+// **A client cannot shorten it and cannot lengthen it**, because nothing a client sends is
+// read anywhere on this path: the countdown is set from MobDeathDuration at construction,
+// spent by Step, and the drop does not exist until it runs out. The rate sweep is what says
+// so mechanically — an operator's -tick-rate is the only thing that changes how many ticks
+// the wait takes, and it changes nothing about how long it lasts.
+func TestTheDeathIsTheSameLengthAtEveryRate(t *testing.T) {
+	t.Parallel()
+
+	for _, rate := range []uint8{1, 5, DefaultTickRate, 60, 255} {
+		if got := ticksFor(MobDeathDuration, rate); got == 0 {
+			t.Errorf("a death lasts no ticks at all at %d Hz; a body nobody sees is not a death", rate)
+			continue
+		}
+		// Within one tick of the duration at that rate, which is the whole of the rounding
+		// ticksFor can introduce. At 1 Hz that is the floor to a single tick, and it is the
+		// case the `max` in ticksFor exists for.
+		elapsed := time.Duration(ticksFor(MobDeathDuration, rate)) * (time.Second / time.Duration(rate))
+		if slack := elapsed - MobDeathDuration; slack > time.Second/time.Duration(rate) || slack < -MobDeathDuration {
+			t.Errorf("a death lasts %s at %d Hz, want %s", elapsed, rate, MobDeathDuration)
+		}
+	}
+}
+
+// A body on its way down is not a target, and a swing aimed past it reaches what is behind.
+//
+// **Being immune is not enough, and that is the point of the test.** damageMobLocked
+// refuses a creature with no health left whatever happens here, so a corpse left in the
+// candidate set would take no damage — and would still be *chosen*, because the search
+// returns the nearest thing in the arc. Every swing would then be spent on the body lying
+// in front of the draugr that killed it.
+func TestASwingIsNotSpentOnABodyGoingDown(t *testing.T) {
+	t.Parallel()
+
+	// Two draugr in a line ahead of the player, both inside SwordReach. The near one is
+	// killed first, so the far one is what the next swings must reach.
+	h, player, _, near := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
+	far := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{0.5, 64, -2.2})
+
+	h.strikeDown(player, near)
+	if body, live := h.mobState(near); !live || !body.dying() {
+		t.Fatal("the near draugr was not left going down, so this test asked nothing")
+	}
+
+	h.advance(int(h.sim.attackCooldown))
+	if err := h.swing(player, 0, uint32(h.tick)+1); err != nil {
+		t.Fatalf("the swing past the body was refused: %v", err)
+	}
+	h.step()
+
+	behind, live := h.mobState(far)
+	if !live {
+		t.Fatal("the draugr behind the body left the world")
+	}
+	if behind.health == draugrRow.maxHealth {
+		t.Error("the swing was absorbed by the body in front and never reached the draugr behind it")
+	}
+}
+
+// A body going down does nothing else: it does not chase, does not swing, and does not
+// keep whatever it was hunting.
+func TestABodyGoingDownStopsDoingEverythingElse(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	id := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{0.5, 64, -1.0})
+
+	// Committed to a blow that is one tick from landing, and then killed inside that tick.
+	h.sim.mu.Lock()
+	m := h.sim.mobs[id]
+	m.action = vnet.MobActionWindup
+	m.actionTicks = 1
+	m.target = player.entityID
+	h.sim.damageMobLocked(m, draugrRow.maxHealth)
+	h.sim.mu.Unlock()
+
+	body, live := h.mobState(id)
+	if !live {
+		t.Fatal("the body left the world on the blow")
+	}
+	if body.target != 0 {
+		t.Errorf("a body going down is still hunting entity %d", body.target)
+	}
+
+	stood := body.pos
+	h.advance(5)
+	moved, live := h.mobState(id)
+	if !live {
+		t.Fatal("the body did not last five ticks")
+	}
+	if moved.pos[0] != stood[0] || moved.pos[2] != stood[2] {
+		t.Errorf("a body going down walked from %v to %v", stood, moved.pos)
+	}
+	if got := h.vitals(player).Health; got != PlayerMaxHealth {
+		t.Errorf("a body going down landed the blow it was winding up: %d health lost", PlayerMaxHealth-got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // What a despawn leaves, which is nothing
 // ---------------------------------------------------------------------------
+
+// The dawn does not take a body that is already going down, and the kill's loot survives it.
+//
+// **The two rules point opposite ways and the death has to win.** A nocturnal creature
+// hunting nobody is exactly what the daylight removes, and a killed one hunts nobody by
+// construction — its target is cleared at the blow — so every tick of every death that
+// straddles a dawn matched the removal rule. Removing it there would delete loot a player
+// had already earned, which is the one thing "a despawn leaves nothing" was never meant to
+// say.
+func TestTheDawnDoesNotTakeABodyThatIsGoingDown(t *testing.T) {
+	t.Parallel()
+
+	// Night, so the draugr may be killed without the daylight taking it first; the clock is
+	// then wound to the dawn while the body is on its way down.
+	h, player, _, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
+	h.keepNight()
+	h.strikeDown(player, id)
+
+	if err := h.sim.RestoreClock(NightEndTicks); err != nil {
+		t.Fatalf("RestoreClock: %v", err)
+	}
+	h.step()
+	if _, live := h.mobState(id); !live {
+		t.Fatal("the dawn took a body that was still going down, and its loot with it")
+	}
+
+	h.advance(int(h.sim.mobDeathTicks) + 2)
+	if _, live := h.mobState(id); live {
+		t.Fatal("the body outlived its own death")
+	}
+	left := h.drops()
+	if len(left) != 1 || left[0].item != ItemBone {
+		t.Fatalf("a draugr killed just before the dawn left %v, want its bones", left)
+	}
+}
 
 // Loot is the reward for a kill, not for having existed.
 //
@@ -275,9 +483,10 @@ func TestADespawnedMobLeavesNothing(t *testing.T) {
 // budget below is a deadlock detector rather than a performance assertion — a wedged tick
 // never finishes, and a slow machine finishes in milliseconds.
 //
-// The "very next" is exact and worth stating: the loot is spawned after the tick that
-// killed the creature has already encoded its snapshots, so it appears in the tick after
-// it — the same tick a mined block's drop waits.
+// The "very next" is exact and worth stating, and the tick it is counted from moved: the
+// loot is spawned after the tick that *reaped the body* has already encoded its snapshots,
+// so it appears in the tick after that one — the same tick a mined block's drop waits. The
+// kill itself is MobDeathDuration earlier and puts nothing anywhere.
 func TestAKillInsideTheTickNeitherDeadlocksNorMissesTheNextSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -295,7 +504,7 @@ func TestAKillInsideTheTickNeitherDeadlocksNorMissesTheNextSnapshot(t *testing.T
 	}
 
 	if drops := len(out.snapshotDrops(t)); drops != 0 {
-		t.Errorf("the snapshot of the killing tick already carried %d drops; loot spawns after it", drops)
+		t.Errorf("the snapshot of the reaping tick already carried %d drops; loot spawns after it", drops)
 	}
 
 	h.step()

@@ -94,6 +94,17 @@ type Sim struct {
 	spawnEvery      uint32
 	mobDespawnTicks uint32
 
+	// mobDeathTicks is MobDeathDuration in the ticks Step counts: how long a killed
+	// creature's body lies in the world before it stops existing and its loot reaches the
+	// ground. Derived per server for the reason deathTicks is — two and a half seconds of
+	// dying has to be two and a half seconds at every rate.
+	//
+	// **It is neither of the two above.** The director's removals take away a creature
+	// *instead of* killing it, which is what makes "a despawn leaves nothing" true; this
+	// one counts a creature that has already been killed out of the world, and it is the
+	// only countdown loot waits on.
+	mobDeathTicks uint32
+
 	// attackCooldown is SwordCooldown in the ticks Step counts, so a blade recovers in
 	// six hundred milliseconds whatever rate the server is run at.
 	attackCooldown uint32
@@ -248,6 +259,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		mobTimings:         mobTimingsFor(tickRate),
 		spawnEvery:         ticksFor(SpawnDirectorInterval, tickRate),
 		mobDespawnTicks:    ticksFor(MobDespawnGrace, tickRate),
+		mobDeathTicks:      ticksFor(MobDeathDuration, tickRate),
 		spawns:             newSpawnRNG(worldSeed),
 		loot:               newLootRNG(worldSeed),
 		attackCooldown:     ticksFor(SwordCooldown, tickRate),
@@ -768,18 +780,20 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	// produced, so network scheduling cannot choose an in-between one to be judged at,
 	// and a draugr killed here cannot land an attack later in the same tick.
 	//
-	// What a kill left behind is gathered rather than spawned, and carried out of this
-	// function for Step to put on the ground once the lock is gone. Nil for every tick
-	// nothing died in, which is almost all of them — append over an unallocated slice is
-	// exactly the right cost for that.
-	var loot []lootDrop
+	// **A swing produces nothing to carry out of here any more.** A blow that kills starts
+	// the creature dying; what it left behind reaches the ground MobDeathDuration later,
+	// from the reap below, and travels out through the same return value it always did.
 	for _, p := range players {
-		loot = append(loot, p.resolveSwingLocked()...)
+		p.resolveSwingLocked()
 	}
 
 	// The mobs, after the players have moved so a chase steers at the position this tick
-	// produced rather than the last one's — and after the swings above.
-	mobs := s.advanceMobsLocked(players)
+	// produced rather than the last one's — and after the swings above. This is also where
+	// a body whose time is up stops existing, which is why the loot comes from here: it is
+	// gathered rather than spawned, and carried out of this function for Step to put on the
+	// ground once the lock is gone. Nil for every tick nothing finished dying in, which is
+	// almost all of them.
+	mobs, loot := s.advanceMobsLocked(players)
 
 	// And the director last, after the creatures it manages have been advanced: what it
 	// spawns is judged against the positions this tick produced, and what it removes it

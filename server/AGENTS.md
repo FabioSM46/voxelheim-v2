@@ -1014,6 +1014,11 @@ numbers from that table rather than from constants of their own.
 - **"Nothing spawns in daylight" stopped being true, and it was never the rule it looked
   like.** It was a statement about the draugr wearing a clock's clothes. What is true is
   that a nocturnal species arrives only in the dark.
+- **How long a body takes to go down is deliberately not a column.** `MobDeathDuration` is
+  in `constants.go` because it holds for every species alike, which is this section's own
+  test for what a row is: a column that would carry the same value in every row is not a
+  species difference. What *does* differ is the pose, and a pose is drawn rather than
+  simulated — so no number describing one exists on this side at all.
 - **The two timings are per species and still converted per server.** `Sim.mobTimings` is
   `mobTimingsFor(tickRate)`, built once at construction beside every other duration
   `NewSim` turns into ticks. The vargr's 400 ms telegraph is the shortest in the game, and
@@ -1034,22 +1039,54 @@ numbers from that table rather than from constants of their own.
 kill. A draugr leaves 1..2 bones, a vargr leaves exactly one pelt, and two pelts are a
 `RecipeIDLeatherPatch` away from a field repair.
 
-- **A kill, and only a kill.** `damageMobLocked` is the single caller of `rollLootLocked`,
-  which is the whole of the rule: the director's two removals — dawn, and "outside every
-  streamed cube for five seconds" — `delete` from `Sim.mobs` without going near it, so a mob
-  that despawns leaves nothing. Loot is the reward for the kill, and a world that paid it out
-  for having existed would be a world where waiting is a strategy.
-- **The lock is the whole design, and it is why `Step` is two functions.** A mob dies inside
-  the tick, under `Sim.mu`; `spawnDrop` takes `Sim.mu` itself, because its other callers are
-  session goroutines. Spawning at the point of death therefore deadlocks the server on the
-  first kill anybody makes. So the death **collects** and the tick **spawns**:
-  `resolveSwingLocked` and `damageMobLocked` return `[]lootDrop`, `stepWorld` gathers them
-  and returns them under the lock, and `Step` — which holds nothing — is one line:
-  `s.spawnLoot(s.stepWorld(tick))`. That is `collapseStructuresAt` / `dropCollapsed` from
-  `edit.go`, written for a caller that is already inside the critical section.
+- **A kill, and only a kill.** The reap in `advanceMobsLocked` is the single caller of
+  `rollLootLocked`, and only a creature that was *killed* ever reaches it: the director's two
+  removals — dawn, and "outside every streamed cube for five seconds" — `delete` from
+  `Sim.mobs` without going near it, so a mob that despawns leaves nothing. Loot is the reward
+  for the kill, and a world that paid it out for having existed would be a world where
+  waiting is a strategy.
+- **A blow no longer removes anything, and that is the whole of #176's server half.**
+  `damageMobLocked` puts the creature into `vnet.MobActionDying` with a countdown of
+  `mobDeathTicks` and returns nothing; the body stays in `Sim.mobs` and in every snapshot for
+  `MobDeathDuration`, and `advanceMobsLocked` takes it away and rolls the loot when the
+  countdown runs out. The body used to vanish on the tick of the blow, on the argument that
+  "a corpse with a timer would be a second kind of thing for every consumer to know about" —
+  which was true, and the cost of not having one was that nothing could show a creature
+  falling over and the drop had to appear on the instant of death. The extra state is
+  therefore exactly what that comment refused, deliberately, and the wire says so
+  (`MobAction.Dying`) rather than leaving it to be inferred from a health of zero.
+- **The delay is the server's, and that is the point rather than an implementation
+  detail.** When an item begins to exist is a gameplay outcome. A client that draws no
+  animation at all waits the same two and a half seconds as one that does, because the wait
+  is not the animation's — the animation only fills it. `MobDeathDuration` lives in
+  `constants.go`, is converted per server like every other duration, and is the only
+  countdown loot waits on.
+- **Three consequences that had to be handled rather than discovered.** A dying creature is
+  skipped by `swingTargetLocked`, or a corpse would absorb every swing aimed past it — being
+  immune is not the same as not being chosen. Its `target` is cleared at the blow, so nothing
+  reads a body as still hunting. And `removeSpentMobsLocked` skips it outright: the dawn rule
+  matches a nocturnal creature that hunts nobody, which is what a dying draugr is on every
+  tick of its death, and removing it there would delete loot a player had already earned.
+  `MobDespawnGrace` is twice `MobDeathDuration`, so the distance rule could not reach it
+  either way — it is guarded regardless, because that is a property of two constants rather
+  than of the loop.
+- **The roll happens at the reap, not at the blow.** Two reasons, and the second is the one
+  that shows: the answer should not be decided two and a half seconds before it exists, and
+  the voxel comes from the creature's position when it is rolled — a draugr killed on a ledge
+  falls off it while it is dying, and its bones belong at the bottom rather than in the air it
+  was hit in. `Sim.loot` is advanced only inside the locked tick either way, so determinism is
+  untouched.
+- **The lock is the whole design, and it is why `Step` is two functions.** The reap runs
+  inside the tick, under `Sim.mu`; `spawnDrop` takes `Sim.mu` itself, because its other
+  callers are session goroutines. Spawning there therefore deadlocks the server on the first
+  kill anybody makes. So the tick **collects** and `Step` **spawns**: `advanceMobsLocked`
+  returns `[]lootDrop` beside its surviving mobs, `stepWorld` carries them out under the
+  lock, and `Step` — which holds nothing — is one line: `s.spawnLoot(s.stepWorld(tick))`.
+  That is `collapseStructuresAt` / `dropCollapsed` from `edit.go`, written for a caller that
+  is already inside the critical section.
 - **The consequence is one tick, and it is worth knowing rather than discovering.** Loot
-  spawns after the killing tick has already encoded its snapshots, so a kill on tick N is a
-  drop on tick N+1 — the same tick a mined block's yield waits, and pinned by
+  spawns after the *reaping* tick has already encoded its snapshots, so a body that goes on
+  tick N is a drop on tick N+1 — the same tick a mined block's yield waits, and pinned by
   `TestAKillInsideTheTickNeitherDeadlocksNorMissesTheNextSnapshot`. A re-entrant lock or a
   `spawnDropLocked` twin would buy that tick back and cost the one-way lock discipline the
   rest of this file rests on.

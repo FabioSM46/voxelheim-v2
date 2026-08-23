@@ -106,6 +106,12 @@ func dropLifetimeTicks(tickRate uint8) int {
 // over it. A fifth reason is a fifth caller, not a second spawn path and not a second
 // lifetime; whatever is different about it belongs in the caller that decided it.
 //
+// **The third of those is now late, and it is late in its caller rather than here.** A kill
+// puts the creature into [vnet.MobActionDying] and its loot reaches this function
+// MobDeathDuration afterwards, when the body stops existing — a delay the drop knows nothing
+// about, because "when may this exist" was decided by the thing that decided the kill. The
+// list is still four; only the moment the third one fires moved.
+//
 // **Called with Sim.mu not held**, because this takes it. Anything that decides a drop
 // inside the tick hands what it decided out through a return value and lets a caller outside
 // the lock spawn it — [Sim.spawnLoot] and [Sim.dropCollapsed]; the argument is in loot.go.

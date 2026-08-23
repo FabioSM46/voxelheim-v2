@@ -11,18 +11,19 @@ pub const ENUM_MIN_MOB_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_ACTION: u8 = 4;
+pub const ENUM_MAX_MOB_ACTION: u8 = 5;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_ACTION: [MobAction; 5] = [
+pub const ENUM_VALUES_MOB_ACTION: [MobAction; 6] = [
     MobAction::Unknown,
     MobAction::Idle,
     MobAction::Chase,
     MobAction::Windup,
     MobAction::Recovery,
+    MobAction::Dying,
 ];
 
 /// What a mob is doing this tick, as the server's finite-state machine holds it.
@@ -44,15 +45,33 @@ impl MobAction {
     pub const Windup: Self = Self(3);
     /// Cannot attack again until this expires. The server's answer to attack cadence.
     pub const Recovery: Self = Self(4);
+    /// Killed, and going down. The creature has no health left and is not coming back;
+    /// the server holds the body here for a fixed span and then stops sending it, and
+    /// what the kill left behind reaches the ground at that moment and not before.
+    ///
+    /// **It is the only statement of death this contract makes about a mob, and it is
+    /// what a receiver must animate on.** There is no `LifeState` beside a `MobState` and
+    /// there is no removal event: a creature that leaves a snapshot may have been killed,
+    /// may have walked out of the streamed cube, or may have been taken away by the
+    /// daylight, and those three are indistinguishable from the outside. Zero `health` is
+    /// not the signal either — it is a *consequence* of this member, sent alongside it,
+    /// and a receiver that read the number instead of this field would be inferring a
+    /// gameplay fact the server is already stating.
+    ///
+    /// Nothing about the pose is here. How long a body takes to go down, and which way it
+    /// falls, are presentation; how long the server keeps sending this action, and when
+    /// the drop exists, are not.
+    pub const Dying: Self = Self(5);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 4;
+    pub const ENUM_MAX: u8 = 5;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Idle,
         Self::Chase,
         Self::Windup,
         Self::Recovery,
+        Self::Dying,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -62,6 +81,7 @@ impl MobAction {
             Self::Chase => Some("Chase"),
             Self::Windup => Some("Windup"),
             Self::Recovery => Some("Recovery"),
+            Self::Dying => Some("Dying"),
             _ => None,
         }
     }

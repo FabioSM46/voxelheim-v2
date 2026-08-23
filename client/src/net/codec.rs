@@ -420,6 +420,13 @@ pub enum MobAction {
     Chase,
     Windup,
     Recovery,
+    /// Killed, and going down. **The only statement of death this contract makes about a
+    /// creature**, and the only thing a renderer may animate one on: a mob that simply
+    /// leaves a snapshot may have been killed, may have walked out of the streamed cube,
+    /// or may have been taken by the daylight, and nothing distinguishes those three from
+    /// here. Zero `health` does not distinguish them either — it arrives *with* this
+    /// action rather than instead of it.
+    Dying,
 }
 
 impl MobAction {
@@ -429,6 +436,7 @@ impl MobAction {
             fb::MobAction::Chase => Some(Self::Chase),
             fb::MobAction::Windup => Some(Self::Windup),
             fb::MobAction::Recovery => Some(Self::Recovery),
+            fb::MobAction::Dying => Some(Self::Dying),
             _ => None,
         }
     }
@@ -3885,10 +3893,25 @@ mod tests {
     /// so tag 25 travelling client→server means a V7 server and a V8 client would handshake
     /// cleanly and die on the first stack anybody put down. Every client→server tag arrived
     /// with a bump; the one appended without one goes the other way.
+    ///
+    /// **V9 adds no tag at all and moves the version anyway**, which is what makes the
+    /// preceding paragraph too narrow to be the rule. It appends `MobAction::Dying`, an
+    /// enum member inside a table field, travelling server→client — the direction tag 20
+    /// got away with. The exemption does not follow it, because the exemption belongs to
+    /// the *union switch*: an unnamed tag is a whole frame this decoder never opens, while
+    /// [`malformed_mobs_are_protocol_errors`] is what an unnamed enum member gets instead —
+    /// its "an action a newer contract added" case is precisely this failure.
+    /// A V8 client against a V9 server would therefore connect perfectly and drop the
+    /// session on the first creature anybody killed.
+    ///
+    /// The rule that generalises, now that three shapes have been argued: **ask what the
+    /// receiver does with the value it does not recognise, not which way it travelled.**
+    /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
+    /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v8_appends_a_drop_tag_and_moves_to_eight() {
+    fn protocol_v9_appends_no_tag_and_still_moves_to_nine() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 8);
+        assert_eq!(fb::ProtocolVersion::Current.0, 9);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4273,6 +4296,9 @@ mod tests {
         assert_eq!(fb::MobAction::Chase.0, 2);
         assert_eq!(fb::MobAction::Windup.0, 3);
         assert_eq!(fb::MobAction::Recovery.0, 4);
+        // Appended by V9, pinned with the four before it: the value is an integer on the
+        // wire, so a renumbering would draw one action where the server said another.
+        assert_eq!(fb::MobAction::Dying.0, 5);
     }
 
     /// The same guarantee for V4's vocabulary, and the zero carries more weight here:

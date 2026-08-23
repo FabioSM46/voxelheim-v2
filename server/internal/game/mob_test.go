@@ -438,14 +438,20 @@ func TestTheAttackCadenceIsTheSameAtEveryTickRate(t *testing.T) {
 // Dying
 // ---------------------------------------------------------------------------
 
-// A kill removes a draugr and schedules nothing.
+// A kill puts a draugr down, takes it away when its death is over, and schedules nothing.
 //
 // **The absence is the assertion.** Killing one used to start a countdown to a fresh
 // draugr at the same anchor, which made a kill a way of *moving* a creature rather than
 // of removing it — the same one came back, in the same field, however many times you
 // went there. Nothing replaces it now; what refills the world is the director, and only
 // where somebody is standing.
-func TestAKilledDraugrLeavesTheWorldAndNothingReplacesIt(t *testing.T) {
+//
+// **The removal is no longer the blow, and both halves are asserted.** A killed creature
+// stays in the world, and in every snapshot, in MobActionDying with no health left; the
+// body stops existing MobDeathDuration later. A test that only checked the end state would
+// pass just as well against a server that deleted it on the instant, which is the design
+// this replaced.
+func TestAKilledDraugrGoesDownAndThenLeavesTheWorld(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
@@ -458,16 +464,48 @@ func TestAKilledDraugrLeavesTheWorldAndNothingReplacesIt(t *testing.T) {
 	h.sim.damageMobLocked(h.sim.mobs[first], draugrRow.maxHealth)
 	h.sim.mu.Unlock()
 
-	if h.mobCount() != 0 {
-		t.Fatal("a dead draugr is still in the world")
+	body, live := h.mobState(first)
+	if !live {
+		t.Fatal("a killed draugr left the world on the tick of the blow, with no death to watch")
 	}
+	if !body.dying() {
+		t.Errorf("a killed draugr is in %s, want Dying", body.action)
+	}
+	if body.health != 0 {
+		t.Errorf("a killed draugr has %d health, want none", body.health)
+	}
+
 	h.step()
-	if got := len(newestSnapshotMobs(t, out)); got != 0 {
-		t.Errorf("a dead draugr is in %d snapshot entries", got)
+	var shown bool
+	for _, state := range newestSnapshotMobs(t, out) {
+		if state.EntityID != first {
+			continue
+		}
+		shown = true
+		if state.Action != vnet.MobActionDying || state.Health != 0 {
+			t.Errorf("the snapshot draws the body as %s with %d health, want Dying with none",
+				state.Action, state.Health)
+		}
 	}
-	// Death is not loot.
+	if !shown {
+		t.Error("a body going down is in no snapshot entry, so nothing can draw it falling")
+	}
+	// The wait is the server's, and nothing is on the ground until it is over.
 	if got := h.sim.DropCount(); got != 0 {
-		t.Errorf("the draugr's death left %d drops", got)
+		t.Errorf("a draugr still going down has already left %d drops", got)
+	}
+
+	h.advance(int(h.sim.mobDeathTicks) + 1)
+	if _, live := h.mobState(first); live {
+		t.Fatal("the body outlived the whole of its own death")
+	}
+	// By identity rather than by count: it is night with a player connected, so the
+	// director has had two and a half seconds to put fresh creatures in that snapshot and
+	// a total would be asserting the director's behaviour instead of this one's.
+	for _, state := range newestSnapshotMobs(t, out) {
+		if state.EntityID == first {
+			t.Error("a body that stopped existing is still in the snapshot")
+		}
 	}
 
 	// Nothing comes back at that spot. The director may put a creature *somewhere* —

@@ -10,27 +10,46 @@ import (
 // # A kill, and only a kill
 //
 // The table is a field of the registry row (species.go); everything about turning one
-// into items on the ground is here. There is exactly one caller — [Sim.damageMobLocked],
-// where a creature's health reaches zero — and that is the whole of the rule the issue
-// asked for: a mob the director takes away at dawn, or because nobody has been near it
-// for five seconds, leaves nothing, because the two removals in spawn.go do not come
-// through here. Loot is the reward for the kill rather than for having existed.
+// into items on the ground is here. There is exactly one caller — the reap in
+// [Sim.advanceMobsLocked], where a creature killed MobDeathDuration ago stops existing —
+// and that is the whole of the rule the issue asked for: a mob the director takes away at
+// dawn, or because nobody has been near it for five seconds, leaves nothing, because the
+// two removals in spawn.go do not come through here. Loot is the reward for the kill rather
+// than for having existed.
+//
+// # It is rolled when the body goes, not when the blow lands
+//
+// The blow used to be the caller. It is not, and the difference is two things.
+//
+// **When.** Nothing reaches the ground until the body has stopped existing — that delay is
+// the point of MobDeathDuration, and it is a server delay precisely so that a client cannot
+// have one item timetable and a client with the animation switched off another. Rolling at
+// the blow and holding the result would be the same wait with the answer decided early; it
+// would also mean carrying a rolled table on the mob for two and a half seconds, which is a
+// second place a kill's outcome lives.
+//
+// **Where.** The voxel comes from the creature's position at the moment it is rolled, and a
+// body falls while it is dying. Rolled at the blow, a draugr killed on a ledge would leave
+// its bones in the air it was hit in; rolled at the reap, they land where it came to rest.
+//
+// The generator is unaffected either way — [Sim.loot] is advanced only inside the locked
+// tick, so the same world and the same sequence of ticks still leave the same items.
 //
 // # The lock discipline, which is the real hazard
 //
-// A mob dies inside [Sim.damageMobLocked], which runs under Sim.mu — a swing is resolved
-// on the tick, and the tick holds that lock for its whole duration. [Sim.spawnDrop] takes
-// the same lock *itself*, because its other callers are session goroutines off the tick.
-// Calling it from inside the tick would therefore deadlock the server on the first kill.
+// A creature is reaped inside [Sim.advanceMobsLocked], which runs under Sim.mu — the tick
+// holds that lock for its whole duration. [Sim.spawnDrop] takes the same lock *itself*,
+// because its other callers are session goroutines off the tick. Calling it from inside the
+// tick would therefore deadlock the server on the first kill.
 //
-// So the death **collects** its loot under the lock and the tick **spawns** it after,
-// which is the shape edit.go already has for a structure a break brought down:
-// collapseStructuresAt takes the lock and returns what fell, dropCollapsed puts the items
-// on the ground outside it. [Sim.Step] is the one place that pairing happens for a kill —
-// see the comment there, which is why Step is two functions.
+// So the tick **collects** the loot under the lock and **spawns** it after, which is the
+// shape edit.go already has for a structure a break brought down: collapseStructuresAt
+// takes the lock and returns what fell, dropCollapsed puts the items on the ground outside
+// it. [Sim.Step] is the one place that pairing happens for a kill — see the comment there,
+// which is why Step is two functions.
 //
 // The consequence is worth stating rather than discovering: loot spawns *after* the tick
-// that killed the creature has already encoded its snapshots, so a kill on tick N is
+// that reaped the body has already encoded its snapshots, so a body that goes on tick N is
 // visible as a drop on tick N+1. That is one tick, it is the same tick a drop from a
 // mined block waits, and it is what makes the alternative — a re-entrant lock, or a
 // spawnDrop with a locked twin — unnecessary.
@@ -80,7 +99,8 @@ type lootRoll struct {
 //
 // It carries the voxel rather than the mob, because by the time the tick spawns it the
 // creature is gone from Sim.mobs — a pointer to one would be a pointer to something that
-// has stopped existing.
+// has stopped existing. The voxel is where the body came to rest rather than where the blow
+// landed; see the note above on when this is rolled.
 type lootDrop struct {
 	item  ItemID
 	count uint16
@@ -89,8 +109,10 @@ type lootDrop struct {
 
 // rollLootLocked is what this creature leaves behind, in its table's order.
 //
-// Called from [Sim.damageMobLocked] the moment a mob's health reaches zero, and from
-// nowhere else. The caller holds Sim.mu, which is what guards the generator.
+// Called from the reap in [Sim.advanceMobsLocked], the moment a killed creature's body
+// stops existing, and from nowhere else. The caller holds Sim.mu, which is what guards the
+// generator — and has already taken the mob out of Sim.mobs, so the position read below is
+// the last one anything will ever have.
 //
 // A roll that comes out at zero is skipped rather than spawned: [Sim.spawnDrop] refuses a
 // zero count anyway, and the wire forbids one. Today no table can produce it, because the
