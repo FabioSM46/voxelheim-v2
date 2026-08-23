@@ -145,6 +145,28 @@ fn bodies(app: &mut App) -> Vec<(u64, Vec3)> {
     found
 }
 
+/// Where one body's local up axis points after its snapshot pose is composed.
+fn body_up_axis(app: &mut App, entity_id: u64) -> Vec3 {
+    let world = app.world_mut();
+    let mut query = world.query::<(&Body, &Transform)>();
+    query
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, transform)| transform.rotation * Vec3::Y)
+        .unwrap_or_else(|| panic!("entity {entity_id} has no body"))
+}
+
+/// Advances past the complete death curve without hitting virtual time's delta clamp.
+fn finish_body_fall(app: &mut App) {
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        100,
+    )));
+    for _ in 0..12 {
+        app.update();
+    }
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+}
+
 fn camera_transform(app: &mut App) -> Transform {
     let world = app.world_mut();
     let mut query = world.query_filtered::<&Transform, With<camera::WorldCamera>>();
@@ -1152,11 +1174,16 @@ fn vitals(health: u16, life_state: LifeState, respawn_ticks: u32) -> PlayerVital
 
 /// Queues a snapshot carrying vitals the test chose, as the net thread would.
 fn deliver_vitals(app: &mut App, tick: u32, carried: PlayerVitals, at: Instant) {
+    let dead_players = (carried.life_state == LifeState::Dead)
+        .then_some(LOCAL_ID)
+        .into_iter()
+        .collect();
     app.world_mut().resource_mut::<SnapshotInbox>().push(
         Snapshot {
             server_tick: tick,
             entities: vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
             self_vitals: carried,
+            dead_players,
             ..Default::default()
         },
         at,
@@ -1178,24 +1205,13 @@ fn held(app: &App) -> Option<PlayerVitals> {
 /// either of them.
 #[test]
 fn the_local_body_goes_over_backwards() {
-    fn drawn_up_axis(app: &mut App) -> Vec3 {
-        let world = app.world_mut();
-        let mut query = world.query_filtered::<&Transform, With<LocalPlayer>>();
-        let found: Vec<Vec3> = query
-            .iter(world)
-            .map(|transform| transform.rotation * Vec3::Y)
-            .collect();
-        assert_eq!(found.len(), 1, "exactly one body is this session's own");
-        found[0]
-    }
-
     let mut app = headless_player();
     let start = Instant::now();
     // Yaw 0, so the body's local frame is the world's and "behind" is +Z.
     deliver_vitals(&mut app, 1, vitals(100, LifeState::Alive, 0), start);
     app.update();
     assert!(
-        drawn_up_axis(&mut app).dot(Vec3::Y) > 0.999,
+        body_up_axis(&mut app, LOCAL_ID).dot(Vec3::Y) > 0.999,
         "a living body is already leaning"
     );
 
@@ -1210,15 +1226,9 @@ fn the_local_body_goes_over_backwards() {
     // The whole fall, in steps under `Time<Virtual>`'s 250 ms `max_delta`: one long step
     // is silently clamped to that, so a fall driven in one arrives part way over and every
     // assertion below would really be about the clamp.
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        100,
-    )));
-    for _ in 0..12 {
-        app.update();
-    }
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+    finish_body_fall(&mut app);
 
-    let fallen = drawn_up_axis(&mut app);
+    let fallen = body_up_axis(&mut app, LOCAL_ID);
     assert!(
         fallen.z > 0.99,
         "a dead player's body ended up with its head at {fallen}, want it behind at +Z"
@@ -1235,9 +1245,126 @@ fn the_local_body_goes_over_backwards() {
     );
     app.update();
     assert!(
-        drawn_up_axis(&mut app).dot(Vec3::Y) > 0.999,
+        body_up_axis(&mut app, LOCAL_ID).dot(Vec3::Y) > 0.999,
         "the body was still on its back after the respawn"
     );
+}
+
+/// The same authoritative death list drives the viewer and everybody beside them, and the
+/// first snapshot that clears it stands both bodies back up.
+#[test]
+fn every_client_sees_every_dead_player_fall_and_respawn() {
+    let mut app = headless_player();
+    let start = Instant::now();
+    let entities = || {
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ]
+    };
+
+    deliver(&mut app, 1, entities(), start);
+    app.update();
+
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 2,
+            entities: entities(),
+            self_vitals: vitals(0, LifeState::Dead, 60),
+            dead_players: vec![LOCAL_ID, 99],
+            ..Default::default()
+        },
+        start + INTERVAL,
+    );
+    app.update();
+    finish_body_fall(&mut app);
+
+    let local = body_up_axis(&mut app, LOCAL_ID);
+    let remote = body_up_axis(&mut app, 99);
+    assert!(
+        local.z > 0.99,
+        "the local body did not finish its fall: {local}"
+    );
+    assert!(
+        remote.z > 0.99,
+        "the remote body did not finish its fall: {remote}"
+    );
+    assert!(
+        local.abs_diff_eq(remote, 1e-5),
+        "one server state produced different local and remote poses: {local} and {remote}"
+    );
+
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 3,
+            entities: entities(),
+            self_vitals: vitals(100, LifeState::Alive, 0),
+            ..Default::default()
+        },
+        start + INTERVAL * 2,
+    );
+    app.update();
+    for id in [LOCAL_ID, 99] {
+        assert!(
+            body_up_axis(&mut app, id).dot(Vec3::Y) > 0.999,
+            "body {id} stayed down after the server respawned it"
+        );
+    }
+}
+
+/// A client entering view after the event sees the state, not a replay from standing.
+#[test]
+fn a_body_first_seen_dead_is_already_on_the_ground() {
+    let mut app = headless_player();
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            entities: vec![
+                state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+                state(99, [4.0, 64.0, 0.0], 0.0),
+            ],
+            dead_players: vec![99],
+            ..Default::default()
+        },
+        Instant::now(),
+    );
+    app.update();
+
+    assert!(
+        body_up_axis(&mut app, 99).z > 0.99,
+        "an already-dead body replayed its fall from standing"
+    );
+    assert!(
+        body_up_axis(&mut app, LOCAL_ID).dot(Vec3::Y) > 0.999,
+        "the living viewer inherited the remote body's pose"
+    );
+}
+
+/// Presentation never promotes a health value into a life-state decision.
+#[test]
+fn zero_health_without_the_authoritative_dead_list_does_not_tip_a_body() {
+    let mut app = headless_player();
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            entities: vec![
+                state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+                state(99, [4.0, 64.0, 0.0], 0.0),
+            ],
+            self_vitals: vitals(0, LifeState::Alive, 0),
+            ..Default::default()
+        },
+        Instant::now(),
+    );
+    app.update();
+    finish_body_fall(&mut app);
+
+    for id in [LOCAL_ID, 99] {
+        assert!(
+            body_up_axis(&mut app, id).dot(Vec3::Y) > 0.999,
+            "body {id} fell even though dead_players did not name it"
+        );
+    }
 }
 
 #[test]

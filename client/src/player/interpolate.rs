@@ -120,6 +120,17 @@ impl SnapshotBuffer {
             .map(|state| state.vel)
     }
 
+    /// Whether the newest snapshot says this player is dead.
+    ///
+    /// The sparse list is the complete authoritative answer for that snapshot. Absence
+    /// means alive, including after a respawn; no health value, missing snapshot or local
+    /// inference participates in the answer.
+    pub fn player_is_dead(&self, entity_id: u64) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|latest| latest.snapshot.dead_players.contains(&entity_id))
+    }
+
     /// Every structure the newest snapshot names, exactly as it named them.
     ///
     /// **Not a sample, and it takes no `now`** — that is the whole point of the method
