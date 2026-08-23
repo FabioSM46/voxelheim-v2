@@ -24,6 +24,7 @@
 //! holds it.
 
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::FRAC_PI_2;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
@@ -95,6 +96,41 @@ const RECOVERY_LEAN: f32 = 0.22;
 /// How quickly a pose settles towards its target lean, per second.
 const LEAN_RESPONSE: f32 = 12.0;
 
+/// How long a body takes to go down, once the server has said it is dying.
+///
+/// **Deliberately not a mirror of the server's `MobDeathDuration`, and shorter than it.**
+/// This side is never told how long a death lasts and does not need to be: the fall is a
+/// curve that *finishes*, and the body then lies where it landed for as long as the
+/// snapshots keep naming it. What ends a death is the server no longer sending the
+/// creature, which despawns the body through the same path a creature that walked out of
+/// view takes — so there is no second clock here and nothing to keep in step. A server
+/// configured with a shorter death would cut a fall off part way, which is a pose being
+/// interrupted rather than a disagreement about a fact.
+///
+/// Seven hundred milliseconds is about what a body of that size takes to go over under
+/// this game's gravity, and short enough that most of the wait before the drop is the body
+/// already lying still — which is the bit that makes the drop read as coming *from* it.
+const FALL_TIME: Duration = Duration::from_millis(700);
+
+/// How far a humanoid ends up tipped, in radians, and which way.
+///
+/// A quarter turn, so a draugr finishes flat on its back rather than propped against
+/// nothing. Positive, which is *backwards*: every mesh here faces -Z, and a positive
+/// rotation about +X takes the top of a body towards +Z. That sentence is not what holds
+/// it — [`a_draugr_goes_over_backwards`] is, in world space, because a sign argued in prose
+/// is a sign nobody notices flipping.
+const DRAUGR_FALL_PITCH: f32 = FRAC_PI_2;
+
+/// How far a four-legged body ends up rolled onto its side, in radians.
+///
+/// Short of a quarter turn on purpose: a beast whose legs went out from under it comes to
+/// rest slumped over on one shoulder, where a full ninety degrees is a carcass somebody
+/// rolled. About sixty-six degrees.
+const VARGR_COLLAPSE_ROLL: f32 = 1.15;
+
+/// How far out a vargr's legs slide as they give way, as a multiple of where they stand.
+const VARGR_LEG_SPLAY: f32 = 1.9;
+
 /// Modes whose UI owns the view instead of the 3D world. The same rule drops obey.
 const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
@@ -127,6 +163,10 @@ const FLASH_COLOUR: Color = Color::srgb(0.85, 0.20, 0.18);
 struct SpeciesVisuals {
     body: Handle<Mesh>,
     head: Handle<Mesh>,
+    /// The legs, for a species that is drawn with a set that moves on its own. `None` for
+    /// one whose legs are part of its body, which a draugr's are — nothing poses them
+    /// separately, so nothing gains from a child holding them.
+    legs: Option<Handle<Mesh>>,
     body_material: Handle<StandardMaterial>,
     head_material: Handle<StandardMaterial>,
 }
@@ -185,13 +225,48 @@ pub(super) struct Mob {
 
     /// The lean the pose is easing towards, and where it has got to.
     lean: f32,
+
+    /// How long this body has been going down, or `None` while the server is not saying
+    /// it is.
+    ///
+    /// **It exists exactly while the newest snapshot says [`MobAction::Dying`]** and is
+    /// recomputed from that every time one arrives, which is what keeps the fall a
+    /// consequence of an authoritative transition rather than a state this side entered on
+    /// its own. Local time advances it; nothing reads it back as a fact.
+    ///
+    /// **It is not a clock the body is counted out on.** What ends a death is the server
+    /// dropping the creature from its snapshots, which despawns the body through the same
+    /// branch a creature that walked out of view takes. So there is no comparison against
+    /// [`FALL_TIME`] anywhere except in the pose, and a body whose fall has finished simply
+    /// lies still.
+    ///
+    /// A body first seen already dying starts its fall from the top, because the wire
+    /// carries no elapsed time and inventing one would be this side guessing at a moment it
+    /// was not told about. The visible cost is a body that streams into view part way
+    /// through its death and then falls from upright — rarer than the case it would take to
+    /// fix, which is a field on `MobState`.
+    falling: Option<Duration>,
 }
 
-/// Marks the two child meshes so a flash can recolour them without touching the parent.
+/// Which part of a body one child mesh draws.
+///
+/// Three where the flash only ever needed two, and the third is why this is an enum rather
+/// than the `head: bool` it replaces: the legs are the one part a pose moves on its own, and
+/// a boolean cannot name a third thing. The flash still asks one question of it — head or
+/// not — so nothing about the recolour grew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MobPart {
+    Body,
+    Head,
+    Legs,
+}
+
+/// Marks the child meshes so a flash can recolour them, and a collapse can splay them,
+/// without touching the parent.
 #[derive(Component, Debug)]
 pub(super) struct MobVisual {
     owner: Entity,
-    head: bool,
+    part: MobPart,
 }
 
 pub(super) fn create_visuals(
@@ -203,12 +278,14 @@ pub(super) fn create_visuals(
         draugr: SpeciesVisuals {
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
+            legs: None,
             body_material: materials.add(StandardMaterial::from_color(DRAUGR_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(DRAUGR_HEAD_COLOUR)),
         },
         vargr: SpeciesVisuals {
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
+            legs: Some(meshes.add(vargr_legs_mesh())),
             body_material: materials.add(StandardMaterial::from_color(VARGR_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(VARGR_HEAD_COLOUR)),
         },
@@ -257,21 +334,37 @@ fn vargr_body_mesh() -> Mesh {
         VARGR_TORSO_CENTRE.z - VARGR_TORSO.z / 4.0,
     ));
 
-    let leg = Cuboid::from_size(VARGR_LEG);
-    let legs = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(sx, sz)| {
-        Mesh::from(leg).translated_by(Vec3::new(
-            sx * VARGR_LEG_SPREAD.x,
-            VARGR_LEG.y / 2.0,
-            sz * VARGR_LEG_SPREAD.z,
-        ))
-    });
-
-    merge_all(
-        &mut torso,
-        std::iter::once(hackles).chain(legs),
-        "vargr body",
-    );
+    merge_all(&mut torso, std::iter::once(hackles), "vargr body");
     torso
+}
+
+/// The vargr's four legs, in a mesh of their own.
+///
+/// **They were merged into the body until a death needed to move them**, and they are split
+/// out for exactly that: a part a pose moves has to be a child something can hold a
+/// transform on, and [`collapse`] slides these outwards as the beast goes down. Nothing
+/// else about the split matters — the hit flash recolours everything that is not the head,
+/// and these are not the head, so it is still one material swap per body.
+///
+/// Authored in the same frame the rest of the vargr is, with each leg standing on the
+/// origin plane, so the group's transform is a scale about the point the body stands on.
+fn vargr_legs_mesh() -> Mesh {
+    let leg = Cuboid::from_size(VARGR_LEG);
+    let mut standing = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        .map(|(sx, sz): (f32, f32)| {
+            Mesh::from(leg).translated_by(Vec3::new(
+                sx * VARGR_LEG_SPREAD.x,
+                VARGR_LEG.y / 2.0,
+                sz * VARGR_LEG_SPREAD.z,
+            ))
+        })
+        .into_iter();
+
+    // Four by construction, so the first is always there; the expect names the invariant
+    // rather than hoping for it.
+    let mut legs = standing.next().expect("a vargr has four legs");
+    merge_all(&mut legs, standing, "vargr legs");
+    legs
 }
 
 /// The vargr's head: low and thrust out along the facing, reaching the front of the box.
@@ -327,6 +420,14 @@ pub(super) fn apply_snapshots(
         mob.health = state.health;
         mob.action = state.action;
         mob.kind = state.kind;
+        // **The fall exists exactly while the server says the creature is dying**, and it
+        // is recomputed from the action every time a snapshot lands rather than started by
+        // an edge this side detected. Written this way round so there is no transition to
+        // miss: an action that is not `Dying` has no fall, whatever the previous one was.
+        mob.falling = match state.action {
+            MobAction::Dying => Some(mob.falling.unwrap_or(Duration::ZERO)),
+            _ => None,
+        };
 
         placed.insert(mob.entity_id);
     }
@@ -357,6 +458,8 @@ fn spawn_mob(
                 flash: None,
                 yaw: state.yaw,
                 lean: lean_for(state.action),
+                // A body first seen already dying falls from upright — see the field.
+                falling: (state.action == MobAction::Dying).then_some(Duration::ZERO),
             },
             Transform::from_translation(state.pos).with_rotation(Quat::from_rotation_y(state.yaw)),
             visibility,
@@ -369,20 +472,39 @@ fn spawn_mob(
     let species = visuals.of(state.kind).clone();
 
     commands.entity(owner).with_children(|parent| {
-        // No offset on either child: both meshes are authored with their origin at the
-        // feet, which is the point the parent transform already stands on.
+        // No offset on any child: every mesh is authored with its origin at the feet,
+        // which is the point the parent transform already stands on. The legs child is
+        // the one whose transform ever becomes anything else, and only while a body is
+        // going down.
         parent.spawn((
-            MobVisual { owner, head: false },
+            MobVisual {
+                owner,
+                part: MobPart::Body,
+            },
             Mesh3d(species.body),
-            MeshMaterial3d(species.body_material),
+            MeshMaterial3d(species.body_material.clone()),
             Transform::default(),
         ));
         parent.spawn((
-            MobVisual { owner, head: true },
+            MobVisual {
+                owner,
+                part: MobPart::Head,
+            },
             Mesh3d(species.head),
             MeshMaterial3d(species.head_material),
             Transform::default(),
         ));
+        if let Some(legs) = species.legs {
+            parent.spawn((
+                MobVisual {
+                    owner,
+                    part: MobPart::Legs,
+                },
+                Mesh3d(legs),
+                MeshMaterial3d(species.body_material),
+                Transform::default(),
+            ));
+        }
     });
 }
 
@@ -396,16 +518,9 @@ fn mob_visibility(mode: InputMode) -> Visibility {
 
 /// The lean an action poses at. Bounded, and a function of the action alone.
 ///
-/// **`Dying` leans at nothing yet, and that is a placeholder rather than a decision.** This
-/// change is the server half of #176: a killed creature now stays in the world for
-/// `MobDeathDuration` and its loot waits for the body to go, and the wire says so with
-/// `MobAction.Dying`. What a body *looks like* on the way down is the follow-up, and the arm
-/// is here because the match is total over [`MobAction`] — which is exactly the property
-/// worth keeping, since it is what made a new member impossible to ignore.
-///
-/// Until then a body going down stands still for two and a half seconds and then stops
-/// existing. Odd to watch, and correct in every other respect: nothing is inferred, nothing
-/// is timed locally, and the drop appears when the server says it does.
+/// A body going down leans at nothing: the whole of its pose is [`collapse`], and easing a
+/// windup's lean out of the way while the fall eases in is what keeps a creature killed
+/// mid-telegraph from finishing that telegraph on its back.
 fn lean_for(action: MobAction) -> f32 {
     match action {
         MobAction::Windup => WINDUP_LEAN,
@@ -414,22 +529,89 @@ fn lean_for(action: MobAction) -> f32 {
     }
 }
 
-/// Runs the cosmetic half: the pose easing towards its action's lean, and the hit flash.
+/// How far through its fall a body is, from how long it has been going down.
 ///
-/// Local time drives both, and neither can change an action, a health or whether a body
-/// exists. A flash that outlives its mob simply goes with it.
+/// Squared, so the topple accelerates: something that starts down as fast as it finishes
+/// reads as having been pushed rather than as having lost its footing. Clamped at one,
+/// which is what makes this an animation that *ends* rather than one that keeps going as
+/// long as the body does — see [`Mob::falling`].
+fn fallen(elapsed: Duration) -> f32 {
+    let progress = (elapsed.as_secs_f32() / FALL_TIME.as_secs_f32()).clamp(0.0, 1.0);
+    progress * progress
+}
+
+/// The rotation a body has reached on its way down.
+///
+/// **A humanoid topples and a beast slumps**, which is the one thing about a death that
+/// differs by species and the only place in this module a `match` on the kind decides a
+/// pose. Both pivot at the feet, because every mesh here is authored with its origin
+/// there — so a draugr goes over backwards about its heels and a vargr rolls sideways off
+/// its legs, and neither needs anything translated.
+///
+/// Total over [`MobKind`] with no wildcard arm, for the reason [`body`] is: a third species
+/// does not compile until somebody has decided how it falls over.
+///
+/// The identity at `fallen == 0` is what lets this be composed unconditionally, whether the
+/// creature is dying or not.
+fn collapse(kind: MobKind, fallen: f32) -> Quat {
+    match kind {
+        MobKind::Draugr => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
+        MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
+    }
+}
+
+/// How far out a species' legs have slid, as a scale on the group they are drawn in.
+///
+/// Only the vargr has a group to scale, and only the plan axes move: the legs go outwards
+/// from under the body while its own height is left alone. **One transform on the group
+/// rather than four legs each turning on its own hip**, which is the exchange this whole
+/// file makes — a rig is a different kind of thing from a handful of cuboids and a lean.
+/// The cost is that the legs thicken by the same factor they travel; at the distance a
+/// fight happens at, what reads is the splay.
+fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
+    match kind {
+        MobKind::Draugr => Vec3::ONE,
+        MobKind::Vargr => {
+            let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
+            Vec3::new(out, 1.0, out)
+        }
+    }
+}
+
+/// Runs the cosmetic half: the pose easing towards its action's lean, the fall a killed
+/// body is part way through, and the hit flash.
+///
+/// Local time drives all three, and none of them can change an action, a health or whether
+/// a body exists. A flash that outlives its mob simply goes with it, and so does a fall.
+///
+/// **Ordered inside the `ApplySnapshots` chain, after [`apply_snapshots`]**, and declared
+/// there rather than relied on: the fall this advances is started by the action that system
+/// writes, so a frame that ran the two the other way round would begin every death one
+/// frame late.
 pub(super) fn animate(
     time: Res<Time>,
     visuals: Option<Res<MobVisuals>>,
     mut mobs: Query<(Entity, &mut Mob, &mut Transform)>,
-    mut parts: Query<(&MobVisual, &mut MeshMaterial3d<StandardMaterial>)>,
+    // `Without<Mob>` so Bevy can prove the two `&mut Transform` sets are disjoint: the
+    // parents carry `Mob` and the children carry `MobVisual`, and without the filter it
+    // refuses the system rather than risk aliasing them.
+    mut parts: Query<
+        (
+            &MobVisual,
+            &mut MeshMaterial3d<StandardMaterial>,
+            &mut Transform,
+        ),
+        Without<Mob>,
+    >,
 ) {
     let Some(visuals) = visuals else {
         return;
     };
     let delta = time.delta();
 
-    let mut kinds: HashMap<Entity, MobKind> = HashMap::new();
+    // The kind and how far down the body is: between them, everything a child needs — one
+    // says which materials it wears, the other where the legs are.
+    let mut poses: HashMap<Entity, (MobKind, f32)> = HashMap::new();
     let mut flashing = HashSet::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
@@ -440,7 +622,20 @@ pub(super) fn animate(
         let response = 1.0 - (-LEAN_RESPONSE * delta.as_secs_f32()).exp();
         mob.lean += (target - mob.lean) * response;
 
-        transform.rotation = Quat::from_rotation_y(mob.yaw) * Quat::from_rotation_x(mob.lean);
+        let down = match mob.falling.as_mut() {
+            Some(elapsed) => {
+                *elapsed += delta;
+                fallen(*elapsed)
+            }
+            None => 0.0,
+        };
+
+        // The fall goes between the facing and the lean, so it turns the whole body about
+        // the feet: the yaw is still the way the creature was pointing when it went, and
+        // the lean is whatever is left of a telegraph easing out underneath it.
+        transform.rotation = Quat::from_rotation_y(mob.yaw)
+            * collapse(mob.kind, down)
+            * Quat::from_rotation_x(mob.lean);
 
         if let Some(elapsed) = mob.flash.as_mut() {
             *elapsed += delta;
@@ -451,24 +646,37 @@ pub(super) fn animate(
             }
         }
 
-        kinds.insert(entity, mob.kind);
+        poses.insert(entity, (mob.kind, down));
     }
 
-    for (part, mut material) in &mut parts {
-        let Some(species) = kinds.get(&part.owner).map(|kind| visuals.of(*kind)) else {
+    for (part, mut material, mut transform) in &mut parts {
+        let Some((kind, down)) = poses.get(&part.owner).copied() else {
             // The body this part hangs under was despawned this frame and the child goes
-            // with it. There is nothing left to recolour.
+            // with it. There is nothing left to recolour or to move.
             continue;
         };
+        let species = visuals.of(kind);
+
         let next = if flashing.contains(&part.owner) {
             visuals.flash_material.clone()
-        } else if part.head {
+        } else if part.part == MobPart::Head {
             species.head_material.clone()
         } else {
             species.body_material.clone()
         };
         if material.0 != next {
             material.0 = next;
+        }
+
+        // Only the legs ever move relative to the body they hang under, and only while it
+        // is going down. Written unconditionally rather than behind a `Dying` check,
+        // because `leg_splay` is the identity at rest and a branch here would be a second
+        // place deciding when a collapse is happening.
+        if part.part == MobPart::Legs {
+            let splay = leg_splay(kind, down);
+            if transform.scale != splay {
+                transform.scale = splay;
+            }
         }
     }
 }
@@ -853,6 +1061,10 @@ mod tests {
     /// catching: a vargr silently built from the draugr's meshes would spawn the right
     /// number of children, be the right size in every component, and draw a corpse on two
     /// legs.
+    ///
+    /// The counts differ because the species do: a vargr's legs are a child of their own,
+    /// so that a collapse can splay them, and a draugr's are part of its torso because
+    /// nothing ever moves them separately.
     #[test]
     fn a_vargr_is_drawn_from_its_own_meshes_rather_than_the_draugrs() {
         let mut app = headless();
@@ -864,7 +1076,11 @@ mod tests {
         deliver(&mut app, 2, vec![vargr(901, 9.0, 35, MobAction::Idle)]);
         app.update();
         let drawn_vargr = parts(&mut app);
-        assert_eq!(drawn_vargr.len(), 2, "a vargr is a body and a head");
+        assert_eq!(
+            drawn_vargr.len(),
+            3,
+            "a vargr is a body, a head and its legs"
+        );
 
         for part in &drawn_vargr {
             assert!(
@@ -872,6 +1088,199 @@ mod tests {
                 "a vargr reused one of the draugr's parts: {part:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Falling over
+    // -----------------------------------------------------------------------
+
+    /// The rotation a body is actually drawn with, which is where a pose has to show.
+    fn drawn_rotation(app: &mut App) -> Quat {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Transform, With<Mob>>();
+        query.iter(world).next().expect("a body was drawn").rotation
+    }
+
+    /// The scale on the legs child, or `None` for a species drawn without one.
+    fn drawn_leg_scale(app: &mut App) -> Option<Vec3> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&MobVisual, &Transform)>();
+        query
+            .iter(world)
+            .find(|(part, _)| part.part == MobPart::Legs)
+            .map(|(_, transform)| transform.scale)
+    }
+
+    /// How long each step of a manual fall takes.
+    ///
+    /// **Comfortably under `Time<Virtual>`'s default `max_delta` of 250 ms**, which is the
+    /// trap this constant exists to avoid: a single `ManualDuration(FALL_TIME)` looks like
+    /// it advances 700 ms and advances 250, so a fall driven in one step arrives about a
+    /// sixth of the way over and every assertion about where it ended up is really an
+    /// assertion about the clamp. [`FLASH_TIME`] is under the clamp, which is why the
+    /// flash test above never had to know.
+    const FALL_STEP: Duration = Duration::from_millis(100);
+
+    /// Steps local time far enough for any fall to have finished, and then puts the clock
+    /// back to something a later assertion can hold still with.
+    fn let_the_body_land(app: &mut App) {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(FALL_STEP));
+        for _ in 0..(FALL_TIME.div_duration_f32(FALL_STEP).ceil() as u32 + 1) {
+            app.update();
+        }
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+    }
+
+    /// A draugr goes over **backwards**, and the assertion is in world space.
+    ///
+    /// **The sign is the whole test.** `DRAUGR_FALL_PITCH` is positive because the meshes
+    /// face -Z and a positive rotation about +X carries the top of a body towards +Z, and
+    /// that is two conventions multiplied together — exactly the kind of reasoning that is
+    /// right until somebody re-authors a mesh. So the claim is made about where the body's
+    /// own up axis ends up pointing rather than about the constant: a draugr at rest points
+    /// up, and a fallen one points the way it came from.
+    #[test]
+    fn a_draugr_goes_over_backwards() {
+        let mut app = headless();
+        // Yaw 0, so the creature's local frame is the world's and "behind" is +Z.
+        deliver(&mut app, 1, vec![draugr(900, 0.0, 60, MobAction::Chase)]);
+        app.update();
+        let upright = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            upright.dot(Vec3::Y) > 0.99,
+            "a living draugr is already leaning: its up axis is {upright}"
+        );
+
+        deliver(&mut app, 2, vec![draugr(900, 0.0, 0, MobAction::Dying)]);
+        app.update();
+        let_the_body_land(&mut app);
+
+        let fallen = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            fallen.z > 0.99,
+            "a draugr that fell over ended up with its head at {fallen}, want it behind at +Z"
+        );
+    }
+
+    /// A vargr collapses sideways with its legs sliding out from under it.
+    ///
+    /// Both halves, because either alone is a different animation: a body that rolls with
+    /// its legs still tucked under it is a carcass somebody pushed, and legs that splay
+    /// under a body still standing is a stance rather than a death.
+    #[test]
+    fn a_vargr_collapses_with_its_legs_splaying_out() {
+        let mut app = headless();
+        deliver(&mut app, 1, vec![vargr(901, 0.0, 35, MobAction::Chase)]);
+        app.update();
+        assert_eq!(
+            drawn_leg_scale(&mut app),
+            Some(Vec3::ONE),
+            "a living vargr already has its legs out"
+        );
+
+        deliver(&mut app, 2, vec![vargr(901, 0.0, 0, MobAction::Dying)]);
+        app.update();
+        let_the_body_land(&mut app);
+
+        // Sideways: the up axis has gone over towards one flank rather than fore or aft,
+        // which is what tells this apart from the draugr's topple.
+        let fallen = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            fallen.x.abs() > 0.9 && fallen.z.abs() < 0.1,
+            "a vargr's collapse left its up axis at {fallen}, want it over on one side"
+        );
+
+        let splayed = drawn_leg_scale(&mut app).expect("a vargr is drawn with legs");
+        assert!(
+            (splayed.x - VARGR_LEG_SPLAY).abs() < 1e-4
+                && (splayed.z - VARGR_LEG_SPLAY).abs() < 1e-4,
+            "the legs finished at {splayed}, want them out to {VARGR_LEG_SPLAY}"
+        );
+        assert!(
+            (splayed.y - 1.0).abs() < 1e-6,
+            "the collapse stretched the legs vertically to {}",
+            splayed.y
+        );
+    }
+
+    /// **Zero health is still not death**, and the fall is the proof.
+    ///
+    /// The module's oldest rule, asserted against the one animation that could break it:
+    /// a body sent with no health left and an action that is not `Dying` stands there. It
+    /// is not a state the server produces today — health reaches zero and the action
+    /// changes in the same breath — and that is exactly why it is worth pinning, because
+    /// the tempting shortcut is to read the number that is already in the struct instead of
+    /// the field that says what happened.
+    #[test]
+    fn no_health_left_is_not_a_reason_to_fall_over() {
+        let mut app = headless();
+        deliver(&mut app, 1, vec![draugr(900, 0.0, 0, MobAction::Chase)]);
+        app.update();
+        let_the_body_land(&mut app);
+
+        let standing = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            standing.dot(Vec3::Y) > 0.99,
+            "a draugr with no health the server never called dying fell over anyway: {standing}"
+        );
+    }
+
+    /// A fall is a pose and never a clock: the body goes when the *server* stops sending
+    /// it, however long it has been lying there.
+    ///
+    /// This is what keeps `MobDeathDuration` a number with no mirror on this side. A fall
+    /// that finished and then despawned its own body would be this client deciding when a
+    /// creature stopped existing — and it would be visibly wrong the moment an operator ran
+    /// a server with a longer death.
+    #[test]
+    fn a_body_lies_where_it_landed_until_the_server_stops_sending_it() {
+        let mut app = headless();
+        deliver(&mut app, 1, vec![draugr(900, 0.0, 0, MobAction::Dying)]);
+        app.update();
+        let_the_body_land(&mut app);
+
+        // Four more falls' worth of local time, with the server still naming it.
+        for tick in 2..6 {
+            deliver(&mut app, tick, vec![draugr(900, 0.0, 0, MobAction::Dying)]);
+            let_the_body_land(&mut app);
+        }
+        assert_eq!(
+            bodies(&mut app),
+            vec![(900, 0, MobAction::Dying)],
+            "the body went before the server said so"
+        );
+        let lying = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            lying.z > 0.99,
+            "the body kept turning past the end of its fall: {lying}"
+        );
+
+        // And then the server stops naming it, which is the only thing that ends a death.
+        deliver(&mut app, 6, vec![]);
+        app.update();
+        assert!(
+            bodies(&mut app).is_empty(),
+            "the body outlived the snapshot"
+        );
+    }
+
+    /// The fall accelerates and it ends, which is what makes it a topple rather than a
+    /// rotation at a constant rate that never arrives.
+    #[test]
+    fn the_fall_starts_slowly_and_stops_when_it_is_over() {
+        assert_eq!(fallen(Duration::ZERO), 0.0);
+        assert_eq!(fallen(FALL_TIME), 1.0);
+        assert_eq!(
+            fallen(FALL_TIME * 10),
+            1.0,
+            "a body kept falling past the end of its own animation"
+        );
+
+        let halfway = fallen(FALL_TIME / 2);
+        assert!(
+            halfway < 0.5,
+            "the fall was half over at half the time ({halfway}), so it does not accelerate"
+        );
     }
 
     /// **The drawn body is the box the server collides**, for every kind, exactly.
@@ -885,6 +1294,12 @@ mod tests {
     ///
     /// Asserted on the *meshes* rather than on the constants, so a part authored at the
     /// wrong offset fails here rather than looking right in a table and wrong on screen.
+    ///
+    /// **Every mesh a species is drawn from goes into the list**, which is what caught the
+    /// vargr's legs moving into a child of their own: taking them out of the body left the
+    /// box 0.83 tall against the 1.0 the server collides, and the list is the only thing
+    /// that noticed. The extents are measured at rest, before any collapse has splayed
+    /// anything — a body on its way over is deliberately outside the box it stood in.
     #[test]
     fn the_drawn_body_is_the_box_the_server_collides() {
         for (kind, meshes) in [
@@ -892,7 +1307,10 @@ mod tests {
                 MobKind::Draugr,
                 vec![draugr_body_mesh(), draugr_head_mesh()],
             ),
-            (MobKind::Vargr, vec![vargr_body_mesh(), vargr_head_mesh()]),
+            (
+                MobKind::Vargr,
+                vec![vargr_body_mesh(), vargr_head_mesh(), vargr_legs_mesh()],
+            ),
         ] {
             let expected = body(kind);
             let (min, max) = drawn_extent(&meshes);

@@ -1167,6 +1167,79 @@ fn held(app: &App) -> Option<PlayerVitals> {
     app.world().resource::<SelfVitals>().get()
 }
 
+/// This session's own body goes over backwards while the server says the player is dead,
+/// and stands back up on the respawn with nothing having animated it back.
+///
+/// **The half of a death only third person can see**, and the reason `camera.rs` leaves its
+/// camera alone in that view. The direction is asserted in world space rather than against
+/// `DEATH_BODY_PITCH`, for the reason a draugr's is: the sign is two conventions multiplied
+/// together — the rig faces -Z and a positive rotation about +X carries its top towards +Z —
+/// and a claim about where the body's own up axis ended up survives somebody re-authoring
+/// either of them.
+#[test]
+fn the_local_body_goes_over_backwards() {
+    fn drawn_up_axis(app: &mut App) -> Vec3 {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Transform, With<LocalPlayer>>();
+        let found: Vec<Vec3> = query
+            .iter(world)
+            .map(|transform| transform.rotation * Vec3::Y)
+            .collect();
+        assert_eq!(found.len(), 1, "exactly one body is this session's own");
+        found[0]
+    }
+
+    let mut app = headless_player();
+    let start = Instant::now();
+    // Yaw 0, so the body's local frame is the world's and "behind" is +Z.
+    deliver_vitals(&mut app, 1, vitals(100, LifeState::Alive, 0), start);
+    app.update();
+    assert!(
+        drawn_up_axis(&mut app).dot(Vec3::Y) > 0.999,
+        "a living body is already leaning"
+    );
+
+    deliver_vitals(
+        &mut app,
+        2,
+        vitals(0, LifeState::Dead, 60),
+        start + INTERVAL,
+    );
+    app.update();
+
+    // The whole fall, in steps under `Time<Virtual>`'s 250 ms `max_delta`: one long step
+    // is silently clamped to that, so a fall driven in one arrives part way over and every
+    // assertion below would really be about the clamp.
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        100,
+    )));
+    for _ in 0..12 {
+        app.update();
+    }
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+
+    let fallen = drawn_up_axis(&mut app);
+    assert!(
+        fallen.z > 0.99,
+        "a dead player's body ended up with its head at {fallen}, want it behind at +Z"
+    );
+
+    // And the respawn puts it upright with nothing here having to animate it: the pose is
+    // composed onto the transform `apply_snapshots` rewrites every frame, so forgetting the
+    // fall is the whole of standing back up.
+    deliver_vitals(
+        &mut app,
+        3,
+        vitals(100, LifeState::Alive, 0),
+        start + INTERVAL * 2,
+    );
+    app.update();
+    assert!(
+        drawn_up_axis(&mut app).dot(Vec3::Y) > 0.999,
+        "the body was still on its back after the respawn"
+    );
+}
+
 #[test]
 fn every_accepted_snapshot_replaces_the_vitals_whole() {
     // Replaced, never merged and never incremented. The resource is exactly what the

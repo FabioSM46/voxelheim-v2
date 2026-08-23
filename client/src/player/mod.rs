@@ -88,7 +88,7 @@ use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
     PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
 };
-use constants::{LOOK_SENSITIVITY, MAX_PITCH};
+use constants::{DEATH_BODY_PITCH, LOOK_SENSITIVITY, MAX_PITCH};
 
 /// How far the player has to move before the movement log says so again, in blocks.
 ///
@@ -201,6 +201,15 @@ impl Plugin for PlayerPlugin {
                         .chain(),
                     (
                         ingest_snapshots,
+                        // **Immediately after the vitals it reads, and ahead of both things
+                        // that read what it writes.** `camera::fall_over` lives in the
+                        // camera module and is registered here for the reason the mob and
+                        // drop systems below are: `collapse_the_local_body` is inside this
+                        // chain and `camera::follow_the_player` is ordered after the whole
+                        // set, so a fall advanced in the camera's own chain would be after
+                        // one reader and before the other — which showed as a body still on
+                        // its back for a frame after the respawn had stood the view up.
+                        camera::fall_over,
                         // Before the bodies, so an entity whose appearance and first
                         // snapshot share a frame is dressed on that frame.
                         ingest_appearances,
@@ -224,6 +233,12 @@ impl Plugin for PlayerPlugin {
                         // at it. Inside the set rather than after it, so the visibility a
                         // frame draws is the one this frame's view asked for.
                         show_the_local_body,
+                        // **After `apply_snapshots`, which is a declared order and not an
+                        // assumption.** That system writes the body's transform wholesale
+                        // from the snapshot, and this composes a rotation onto it; the
+                        // other order would have the snapshot overwrite the pose every
+                        // frame and nothing would ever visibly fall over.
+                        collapse_the_local_body,
                         drops::animate,
                         mobs::animate,
                         structures::animate,
@@ -1177,6 +1192,38 @@ fn spawn_body(
             ));
         }
     });
+}
+
+/// Tips this session's own body over while the server says the player is dead.
+///
+/// **The half of a death that only third person can see**, and the reason the camera does
+/// not fall in that view: the player is watching their own character go down, so something
+/// has to go down. First person hides this body entirely, so the composition below is drawn
+/// by nobody and costs one quaternion multiply.
+///
+/// **It follows `SelfVitals`, which is the server's `LifeState`**, and it decides nothing —
+/// the same rule `player/mobs.rs` states for a draugr. The curve is [`DeathFall`]'s, shared
+/// with the camera rather than copied, so the two halves of one death cannot drift apart.
+///
+/// **Composed onto the snapshot's transform rather than stored**, which is what makes it
+/// self-clearing: `apply_snapshots` rewrites the whole transform from the newest snapshot
+/// every frame, so a respawn puts the body upright with nothing here having to animate it
+/// back. Written unconditionally for the same reason `leg_splay` is — the rotation is the
+/// identity at rest, and a branch would be a second place deciding whether a death is
+/// happening.
+///
+/// **Only this session's own body**, because only this session's own life state is on the
+/// wire. `PlayerVitals` is per-recipient by contract, so a client cannot know that the
+/// player standing next to it has died — see the known gap in `client/AGENTS.md`. A remote
+/// player who dies therefore stands there, exactly as they did before this issue.
+fn collapse_the_local_body(
+    fall: Res<camera::DeathFall>,
+    mut bodies: Query<&mut Transform, With<LocalPlayer>>,
+) {
+    let over = Quat::from_rotation_x(DEATH_BODY_PITCH * fall.fallen());
+    for mut transform in &mut bodies {
+        transform.rotation *= over;
+    }
 }
 
 /// Shows the local player's body exactly while the camera is not inside its head.
