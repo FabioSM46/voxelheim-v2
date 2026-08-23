@@ -164,7 +164,11 @@ assert_not_contains "an unfinished DeepSeek review never prints PASS" "$out" "[P
 status_stub "$UNREAD"
 out=$(cmd_pr_status 464 2>&1)
 assert_contains "unread body findings are reported" "$out" "[FAIL] 3 DeepSeek review(s) with unread findings in the review body"
-assert_contains "the remedy names the label" "$out" "gh pr edit 464 --add-label DEEPSEEK_REVIEW_READ"
+# The remedy has to be a command the reader can actually run: `gh pr edit` is the
+# one #206 found is dead on the `gh` Ubuntu ships, so the line names this script's
+# own label helper instead — which is also the only implementation of the write.
+assert_contains "the remedy names the label" "$out" "pr-label 464 add DEEPSEEK_REVIEW_READ"
+assert_not_contains "the remedy does not send the reader to gh pr edit" "$out" "gh pr edit"
 assert_contains "the report says why threads did not catch it" "$out" "These create no review thread"
 assert_not_contains "unread body findings never print PASS" "$out" "[PASS]"
 assert_not_contains "unread findings are not blamed on DeepSeek being unfinished" "$out" "DeepSeek review not finished"
