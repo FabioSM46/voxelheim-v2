@@ -33,6 +33,7 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_STRUCTURES: ::flatbuffers::VOffsetT = 14;
     pub const VT_TICK_OF_DAY: ::flatbuffers::VOffsetT = 16;
     pub const VT_DEAD_PLAYERS: ::flatbuffers::VOffsetT = 18;
+    pub const VT_DROP_DURABILITIES: ::flatbuffers::VOffsetT = 20;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -49,6 +50,9 @@ impl<'a> EntitySnapshot<'a> {
         args: &'args EntitySnapshotArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
+        if let Some(x) = args.drop_durabilities {
+            builder.add_drop_durabilities(x);
+        }
         if let Some(x) = args.dead_players {
             builder.add_dead_players(x);
         }
@@ -257,6 +261,24 @@ impl<'a> EntitySnapshot<'a> {
                 )
         }
     }
+    /// Wear for the sparse subset of `drops` that came from durable inventory slots.
+    /// Block yields, loot rolls and structure bundles carry no entry and remain wearless.
+    /// See `ItemDropDurability` for the invariants tying the two vectors together.
+    ///
+    /// **V11 appends this field and changes no existing drop's fixed layout.** A V11
+    /// receiver interprets absence as wearless, so a V10 server would silently turn a
+    /// worn ground item pristine in presentation while the server later returned it worn.
+    /// `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
+    /// different state to the same drop after a clean handshake.
+    #[inline]
+    pub fn drop_durabilities(&self) -> Option<::flatbuffers::Vector<'a, ItemDropDurability>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ItemDropDurability>>>(EntitySnapshot::VT_DROP_DURABILITIES, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -274,6 +296,7 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<StructureState>>>>("structures", Self::VT_STRUCTURES, false)?
      .visit_field::<u32>("tick_of_day", Self::VT_TICK_OF_DAY, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("dead_players", Self::VT_DEAD_PLAYERS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ItemDropDurability>>>("drop_durabilities", Self::VT_DROP_DURABILITIES, false)?
      .finish();
         Ok(())
     }
@@ -295,6 +318,8 @@ pub struct EntitySnapshotArgs<'a> {
     >,
     pub tick_of_day: u32,
     pub dead_players: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+    pub drop_durabilities:
+        Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ItemDropDurability>>>,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -308,6 +333,7 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             structures: None,
             tick_of_day: 0,
             dead_players: None,
+            drop_durabilities: None,
         }
     }
 }
@@ -384,6 +410,16 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
         );
     }
     #[inline]
+    pub fn add_drop_durabilities(
+        &mut self,
+        drop_durabilities: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, ItemDropDurability>>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_DROP_DURABILITIES,
+            drop_durabilities,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -413,6 +449,7 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("structures", &self.structures());
         ds.field("tick_of_day", &self.tick_of_day());
         ds.field("dead_players", &self.dead_players());
+        ds.field("drop_durabilities", &self.drop_durabilities());
         ds.finish()
     }
 }

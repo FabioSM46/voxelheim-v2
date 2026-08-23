@@ -550,11 +550,17 @@ type EntityState struct {
 
 // ItemDropState is one authoritative dropped item beside the player entities in
 // a snapshot. Count and ItemID are non-zero for every value the server emits.
+//
+// Durability and MaxDurability are projected onto the sparse
+// EntitySnapshot.drop_durabilities vector. Both are zero for the wearless drops the
+// world produces; a non-zero maximum carries one authoritative inventory slot's wear.
 type ItemDropState struct {
-	EntityID uint64
-	Pos      [3]float32
-	ItemID   uint16
-	Count    uint16
+	EntityID      uint64
+	Pos           [3]float32
+	ItemID        uint16
+	Count         uint16
+	Durability    uint16
+	MaxDurability uint16
 }
 
 // Appearance is what one character looks like: four worn colours, a hair model and
@@ -1405,11 +1411,18 @@ func EncodeChunkUnload(coord ChunkCoord) []byte {
 // out. The values are not re-validated — they come from the simulation, which is the
 // only thing that produces them.
 func EncodeEntitySnapshot(s EntitySnapshot) []byte {
-	// An EntityState is 40 bytes inlined and an ItemDropState 24; a MobState is a table
+	// An EntityState is 40 bytes inlined and an ItemDropState 24; a sparse durable
+	// drop adds one 16-byte ItemDropDurability. A MobState is a table
 	// and costs an offset besides its fields; a dead player is one 8-byte id. Sizing the
 	// builder up front avoids the repeated growth of a buffer whose shape is known, on
 	// the most frequently sent payload in the game.
-	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + 128)
+	durableDrops := 0
+	for _, drop := range s.Drops {
+		if drop.MaxDurability != 0 {
+			durableDrops++
+		}
+	}
+	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + 128)
 
 	// Every table a vector points at must be finished before that vector opens, so the
 	// mob tables are built first and the vector below only carries their offsets. The
@@ -1488,12 +1501,28 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	}
 	dropsOffset := b.EndVector(len(s.Drops))
 
+	// Wear is sparse: the common block, loot and structure drops pay no vector, no
+	// vtable slot and no per-element padding. Entries remain in drop order, making the
+	// bytes deterministic while entity_id is what binds each one to the fixed drop
+	// vector beside it.
+	var dropDurabilitiesOffset flatbuffers.UOffsetT
+	if durableDrops > 0 {
+		vnet.EntitySnapshotStartDropDurabilitiesVector(b, durableDrops)
+		for i := len(s.Drops) - 1; i >= 0; i-- {
+			drop := s.Drops[i]
+			if drop.MaxDurability == 0 {
+				continue
+			}
+			vnet.CreateItemDropDurability(b, drop.EntityID, drop.Durability, drop.MaxDurability)
+		}
+		dropDurabilitiesOffset = b.EndVector(durableDrops)
+	}
+
 	// **Built only when somebody is dead, which is what makes the field free the rest of
 	// the time.** An empty FlatBuffers vector is still a vector — four bytes of length
 	// and an offset pointing at them, plus the vtable slot that reaches it — and this
 	// field is empty on almost every tick of almost every session. Skipping it leaves the
-	// snapshot byte-for-byte what it was before the field existed, because a vtable is
-	// trimmed of its trailing empty slots and this is the last field in the table.
+	// field itself free; the later sparse drop wear field follows the same rule independently.
 	var deadOffset flatbuffers.UOffsetT
 	if len(s.DeadPlayers) > 0 {
 		vnet.EntitySnapshotStartDeadPlayersVector(b, len(s.DeadPlayers))
@@ -1517,6 +1546,9 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.EntitySnapshotAddTickOfDay(b, s.TickOfDay)
 	if deadOffset != 0 {
 		vnet.EntitySnapshotAddDeadPlayers(b, deadOffset)
+	}
+	if dropDurabilitiesOffset != 0 {
+		vnet.EntitySnapshotAddDropDurabilities(b, dropDurabilitiesOffset)
 	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 

@@ -1320,14 +1320,15 @@ mod tests {
         assert!(drop_request(app.world().resource::<Inventory>(), 4, 0, 4).is_none());
     }
 
-    /// **A worn blade is asked about, and the refusal is the server's.**
+    /// **A worn blade is asked about, and the outcome is the server's.**
     ///
-    /// A drop carries an item id and a count and nothing else, so the server refuses one
-    /// that wears out. Mirroring that here would be a second copy of a server rule, risking
-    /// the failure `combat::BLADES` records — a courtesy that guesses wrong and refuses what
-    /// the server would have granted. So the frame leaves and silence answers it.
+    /// V11 lets the server carry its exact wear through the ground, but this side still
+    /// predicts no acceptance. Filtering by durability here would be a second copy of a
+    /// server rule, risking the failure `combat::BLADES` records — a courtesy that guesses
+    /// wrong and refuses what the server would have granted. So the frame leaves, and only
+    /// the authoritative inventory and snapshot can show what happened.
     #[test]
-    fn a_slot_that_wears_out_is_asked_about_rather_than_refused_here() {
+    fn a_slot_that_wears_out_is_asked_about_without_a_client_side_decision() {
         let (mut app, sent) = mend_app(pack(&[(1, worn(ITEM_IRON_SWORD, 40, 100))]));
         let before = app.world().resource::<Inventory>().clone();
 

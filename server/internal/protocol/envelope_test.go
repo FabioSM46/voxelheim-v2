@@ -206,17 +206,23 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // dies. Same conclusion as V9, arrived at from the other end of the wire — which is why the
 // rule below is written about the receiver rather than about the sender.
 //
-// The rule that generalises, now that four shapes have been argued: **ask what the receiver
+// **V11 appends another table field, and moves for the silent direction.** A missing
+// EntitySnapshot.drop_durabilities vector says every visible drop is wearless, so a V11
+// client would accept a worn drop from a V10 server as pristine while the authoritative
+// server still returned it worn on collection. The peers would silently disagree about
+// one entity after a clean handshake.
+//
+// The rule that generalises, now that five shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV10AppendsNoTagAndStillMovesToTen(t *testing.T) {
+func TestProtocolV11AppendsNoTagAndStillMovesToEleven(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 10 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 10", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 11 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 11", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -622,7 +628,7 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 
 	wantDrops := []ItemDropState{
 		{EntityID: 50, Pos: [3]float32{2.5, 65, -9.5}, ItemID: 3, Count: 1},
-		{EntityID: 51, Pos: [3]float32{-4, 12.25, 8}, ItemID: 7, Count: 65_535},
+		{EntityID: 51, Pos: [3]float32{-4, 12.25, 8}, ItemID: 7, Count: 1, Durability: 12, MaxDurability: 200},
 	}
 
 	wantMobs := []MobState{
@@ -695,7 +701,8 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 	if got := snapshot.DropsLength(); got != len(wantDrops) {
 		t.Fatalf("the snapshot holds %d drops, want %d", got, len(wantDrops))
 	}
-	for i, expected := range wantDrops {
+	gotDrops := make([]ItemDropState, len(wantDrops))
+	for i := range wantDrops {
 		var drop vnet.ItemDropState
 		if !snapshot.Drops(&drop, i) {
 			t.Fatalf("drop %d is missing", i)
@@ -704,14 +711,38 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		if pos == nil {
 			t.Fatalf("drop %d has no position", i)
 		}
-		got := ItemDropState{
+		gotDrops[i] = ItemDropState{
 			EntityID: drop.EntityId(),
 			Pos:      [3]float32{pos.X(), pos.Y(), pos.Z()},
 			ItemID:   drop.ItemId(),
 			Count:    drop.Count(),
 		}
-		if got != expected {
-			t.Errorf("drop %d decoded as %+v, want %+v", i, got, expected)
+	}
+	if got := snapshot.DropDurabilitiesLength(); got != 1 {
+		t.Fatalf("the snapshot holds %d durability entries, want 1", got)
+	}
+	for i := range snapshot.DropDurabilitiesLength() {
+		var wear vnet.ItemDropDurability
+		if !snapshot.DropDurabilities(&wear, i) {
+			t.Fatalf("drop durability %d is missing", i)
+		}
+		matched := false
+		for j := range gotDrops {
+			if gotDrops[j].EntityID != wear.EntityId() {
+				continue
+			}
+			gotDrops[j].Durability = wear.Durability()
+			gotDrops[j].MaxDurability = wear.MaxDurability()
+			matched = true
+			break
+		}
+		if !matched {
+			t.Errorf("durability entry %d names unknown drop %d", i, wear.EntityId())
+		}
+	}
+	for i, expected := range wantDrops {
+		if gotDrops[i] != expected {
+			t.Errorf("drop %d decoded as %+v, want %+v", i, gotDrops[i], expected)
 		}
 	}
 

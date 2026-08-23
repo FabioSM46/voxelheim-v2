@@ -12,7 +12,7 @@
 //! so there is no reachable state in which the rest of the client holds a
 //! `tick_rate` of zero to divide by or a `view_distance` of 255 to allocate from.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use flatbuffers::FlatBufferBuilder;
@@ -902,6 +902,10 @@ pub struct ItemDropState {
     pub pos: [f32; 3],
     pub item_id: u16,
     pub count: u16,
+    /// Zero when this drop does not wear out. A non-zero maximum is copied from
+    /// the server's sparse durability vector and always belongs to a count-one drop.
+    pub durability: u16,
+    pub max_durability: u16,
 }
 
 /// One placed structure's authoritative state in a snapshot.
@@ -1521,6 +1525,20 @@ pub enum DecodeError {
     DropWithoutItem(u64),
     /// A drop with no items is despawned, never sent.
     EmptyDrop(u64),
+    /// One id names two drops in the same snapshot, so sparse state could not name
+    /// exactly one of them.
+    DuplicateDrop(u64),
+    /// Sparse wear names no drop in the fixed drop vector beside it.
+    DropDurabilityWithoutDrop(u64),
+    /// The sparse wear vector names one drop more than once.
+    DropDurabilityNamedTwice(u64),
+    /// A durability pair has no maximum, exceeds its maximum, or belongs to a stack.
+    DropDurability {
+        entity_id: u64,
+        count: u16,
+        durability: u16,
+        max_durability: u16,
+    },
     /// One id cannot name both a player and a drop in the same snapshot.
     PlayerDropEntityConflict(u64),
     /// The inventory vector is not complete `(item id, count)` pairs.
@@ -1714,6 +1732,28 @@ impl fmt::Display for DecodeError {
                 write!(f, "drop {entity_id} carries reserved item id 0")
             }
             Self::EmptyDrop(entity_id) => write!(f, "drop {entity_id} has count zero"),
+            Self::DuplicateDrop(entity_id) => {
+                write!(
+                    f,
+                    "drop entity id {entity_id} appears twice in one snapshot"
+                )
+            }
+            Self::DropDurabilityWithoutDrop(entity_id) => write!(
+                f,
+                "drop_durabilities names {entity_id}, which is not a drop in this snapshot"
+            ),
+            Self::DropDurabilityNamedTwice(entity_id) => {
+                write!(f, "drop_durabilities names {entity_id} twice")
+            }
+            Self::DropDurability {
+                entity_id,
+                count,
+                durability,
+                max_durability,
+            } => write!(
+                f,
+                "drop {entity_id} has count {count} and durability {durability}/{max_durability}, which is not a possible durable drop"
+            ),
             Self::PlayerDropEntityConflict(entity_id) => {
                 write!(f, "entity id {entity_id} names both a player and a drop")
             }
@@ -2248,7 +2288,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
     }
 
     let mut drops = Vec::new();
-    let mut drop_ids = HashSet::new();
+    let mut drop_indexes = HashMap::new();
     let mut mob_ids = HashSet::new();
     if let Some(list) = snapshot.drops() {
         drops.reserve(list.len());
@@ -2257,8 +2297,40 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
             if player_ids.contains(&state.entity_id) {
                 return Err(DecodeError::PlayerDropEntityConflict(state.entity_id));
             }
-            drop_ids.insert(state.entity_id);
+            if drop_indexes.insert(state.entity_id, drops.len()).is_some() {
+                return Err(DecodeError::DuplicateDrop(state.entity_id));
+            }
             drops.push(state);
+        }
+    }
+
+    // Wear is keyed back onto the fixed drop vector by the server-minted identity.
+    // Absence is the common, wearless case; a malformed association refuses the whole
+    // snapshot rather than guessing which visible object the values describe.
+    let mut durability_ids = HashSet::new();
+    if let Some(list) = snapshot.drop_durabilities() {
+        for wear in &list {
+            let entity_id = wear.entity_id();
+            let Some(&index) = drop_indexes.get(&entity_id) else {
+                return Err(DecodeError::DropDurabilityWithoutDrop(entity_id));
+            };
+            if !durability_ids.insert(entity_id) {
+                return Err(DecodeError::DropDurabilityNamedTwice(entity_id));
+            }
+
+            let durability = wear.durability();
+            let max_durability = wear.max_durability();
+            let count = drops[index].count;
+            if max_durability == 0 || durability > max_durability || count != 1 {
+                return Err(DecodeError::DropDurability {
+                    entity_id,
+                    count,
+                    durability,
+                    max_durability,
+                });
+            }
+            drops[index].durability = durability;
+            drops[index].max_durability = max_durability;
         }
     }
 
@@ -2271,7 +2343,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
             // schema's "globally unique" is a claim about the whole snapshot, and an id
             // that names two things is a client that would spawn one body for both.
             if player_ids.contains(&state.entity_id)
-                || drop_ids.contains(&state.entity_id)
+                || drop_indexes.contains_key(&state.entity_id)
                 || mob_ids.contains(&state.entity_id)
             {
                 return Err(DecodeError::MobEntityConflict(state.entity_id));
@@ -2291,7 +2363,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
             // already read, exactly as a mob is checked. An id that names two things is a
             // client that would draw one of them over the other.
             if player_ids.contains(&state.structure_id)
-                || drop_ids.contains(&state.structure_id)
+                || drop_indexes.contains_key(&state.structure_id)
                 || mob_ids.contains(&state.structure_id)
                 || !structure_ids.insert(state.structure_id)
             {
@@ -2569,6 +2641,8 @@ fn item_drop_state(state: &fb::ItemDropState) -> Result<ItemDropState, DecodeErr
         ],
         item_id,
         count,
+        durability: 0,
+        max_durability: 0,
     })
 }
 
@@ -3401,6 +3475,8 @@ pub(super) mod server_side {
         pub pos: [f32; 3],
         pub item_id: u16,
         pub count: u16,
+        pub durability: u16,
+        pub max_durability: u16,
     }
 
     impl ItemDropStateWire {
@@ -3411,8 +3487,19 @@ pub(super) mod server_side {
                 pos: [1.5, 64.25, -2.0],
                 item_id,
                 count: 1,
+                durability: 0,
+                max_durability: 0,
             }
         }
+    }
+
+    /// One sparse durability entry as it sits beside the fixed drop vector.
+    /// Kept separate so decoder tests can construct orphaned and repeated entries.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ItemDropDurabilityWire {
+        pub entity_id: u64,
+        pub durability: u16,
+        pub max_durability: u16,
     }
 
     /// One mob as it sits on the wire, before validation.
@@ -3520,6 +3607,25 @@ pub(super) mod server_side {
         )
     }
 
+    /// Encodes a snapshot whose sparse wear vector is supplied independently.
+    /// Production-shaped test frames use `encode_entity_snapshot_with`; this seam exists
+    /// for associations a correct server cannot produce.
+    pub fn encode_entity_snapshot_with_drop_durabilities(
+        server_tick: u32,
+        drops: &[ItemDropStateWire],
+        durabilities: &[ItemDropDurabilityWire],
+    ) -> Vec<u8> {
+        encode_entity_snapshot_with_explicit_durabilities(
+            server_tick,
+            &[],
+            drops,
+            &[],
+            PlayerVitalsWire::default(),
+            &[],
+            durabilities,
+        )
+    }
+
     /// Encodes an `EntitySnapshot` naming some of its entities dead.
     ///
     /// Its own builder rather than a seventh parameter on the one below, whose eleven
@@ -3584,8 +3690,43 @@ pub(super) mod server_side {
         vitals: PlayerVitalsWire,
         structures: &[StructureStateWire],
     ) -> Vec<u8> {
+        let durabilities: Vec<_> = drops
+            .iter()
+            .filter(|drop| drop.max_durability != 0)
+            .map(|drop| ItemDropDurabilityWire {
+                entity_id: drop.entity_id,
+                durability: drop.durability,
+                max_durability: drop.max_durability,
+            })
+            .collect();
+        encode_entity_snapshot_with_explicit_durabilities(
+            server_tick,
+            entities,
+            drops,
+            mobs,
+            vitals,
+            structures,
+            &durabilities,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_entity_snapshot_with_explicit_durabilities(
+        server_tick: u32,
+        entities: &[EntityStateWire],
+        drops: &[ItemDropStateWire],
+        mobs: &[MobStateWire],
+        vitals: PlayerVitalsWire,
+        structures: &[StructureStateWire],
+        durabilities: &[ItemDropDurabilityWire],
+    ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(
-            entities.len() * 40 + drops.len() * 24 + mobs.len() * 64 + structures.len() * 48 + 128,
+            entities.len() * 40
+                + drops.len() * 24
+                + durabilities.len() * 16
+                + mobs.len() * 64
+                + structures.len() * 48
+                + 128,
         );
 
         // The vector must exist before the table that references it opens.
@@ -3613,6 +3754,13 @@ pub(super) mod server_side {
             })
             .collect();
         let drops = builder.create_vector(&laid_out);
+        let laid_out: Vec<fb::ItemDropDurability> = durabilities
+            .iter()
+            .map(|state| {
+                fb::ItemDropDurability::new(state.entity_id, state.durability, state.max_durability)
+            })
+            .collect();
+        let drop_durabilities = builder.create_vector(&laid_out);
 
         // A vector of *tables* holds offsets, so every mob table has to be finished
         // before the vector that points at them opens.
@@ -3672,6 +3820,9 @@ pub(super) mod server_side {
         table.add_mobs(mobs);
         table.add_self_vitals(self_vitals);
         table.add_structures(structures);
+        if !durabilities.is_empty() {
+            table.add_drop_durabilities(drop_durabilities);
+        }
         let payload = table.finish();
 
         finish_envelope(
@@ -3710,6 +3861,7 @@ pub(super) mod server_side {
                 self_vitals: Some(self_vitals),
                 structures: None,
                 dead_players: None,
+                drop_durabilities: None,
             },
         );
 
@@ -3751,6 +3903,7 @@ pub(super) mod server_side {
                 structures: None,
                 tick_of_day,
                 dead_players: None,
+                drop_durabilities: None,
             },
         );
 
@@ -3931,15 +4084,16 @@ pub(super) mod server_side {
 #[cfg(test)]
 mod tests {
     use super::server_side::{
-        AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire, ItemDropStateWire,
-        MobStateWire, PlayerVitalsWire, StructureStateWire, WelcomeWire, encode_action_refused,
-        encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
-        encode_bare_entity_snapshot, encode_block_update, encode_chunk_data, encode_chunk_unload,
-        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
-        encode_entity_snapshot_with_drops, encode_entity_snapshot_without_vitals,
-        encode_inventory_state, encode_inventory_state_with_durability, encode_mine_progress,
-        encode_player_appearance, encode_server_character_list, encode_server_reject,
-        encode_server_welcome,
+        AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
+        ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PlayerVitalsWire,
+        StructureStateWire, WelcomeWire, encode_action_refused, encode_bare_block_update,
+        encode_bare_chunk_data, encode_bare_chunk_unload, encode_bare_entity_snapshot,
+        encode_block_update, encode_chunk_data, encode_chunk_unload, encode_entity_snapshot,
+        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
+        encode_entity_snapshot_without_vitals, encode_inventory_state,
+        encode_inventory_state_with_durability, encode_mine_progress, encode_player_appearance,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
     };
     use super::*;
 
@@ -4016,14 +4170,19 @@ mod tests {
     /// and a V9 server never sends the vector — so a client built against this contract would
     /// connect perfectly, play perfectly, and end the session the first time it died.
     ///
-    /// The rule that generalises, now that four shapes have been argued: **ask what the
+    /// **V11 appends another table field, and moves for the silent direction.** A missing
+    /// `drop_durabilities` vector says every visible drop is wearless, so this decoder would
+    /// accept a worn drop from a V10 server as pristine while the authoritative server still
+    /// returned it worn on collection. The peers would silently disagree about one entity.
+    ///
+    /// The rule that generalises, now that five shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v10_appends_no_tag_and_still_moves_to_ten() {
+    fn protocol_v11_appends_no_tag_and_still_moves_to_eleven() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 10);
+        assert_eq!(fb::ProtocolVersion::Current.0, 11);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5813,12 +5972,16 @@ mod tests {
                 pos: [-1.0, 70.5, 3.0],
                 item_id: 2,
                 count: 7,
+                durability: 0,
+                max_durability: 0,
             },
             ItemDropStateWire {
                 entity_id: 41,
                 pos: [8.25, 12.0, -9.5],
                 item_id: u16::MAX,
-                count: u16::MAX,
+                count: 1,
+                durability: 12,
+                max_durability: 200,
             },
         ];
 
@@ -5833,12 +5996,16 @@ mod tests {
                         pos: [-1.0, 70.5, 3.0],
                         item_id: 2,
                         count: 7,
+                        durability: 0,
+                        max_durability: 0,
                     },
                     ItemDropState {
                         entity_id: 41,
                         pos: [8.25, 12.0, -9.5],
                         item_id: u16::MAX,
-                        count: u16::MAX,
+                        count: 1,
+                        durability: 12,
+                        max_durability: 200,
                     },
                 ],
                 ..Default::default()
@@ -5887,6 +6054,71 @@ mod tests {
             )),
             Err(DecodeError::PlayerDropEntityConflict(9))
         );
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_drops(
+                1,
+                &[],
+                &[
+                    ItemDropStateWire::item(14, 2),
+                    ItemDropStateWire::item(14, 3),
+                ],
+            )),
+            Err(DecodeError::DuplicateDrop(14))
+        );
+    }
+
+    #[test]
+    fn malformed_drop_durability_associations_are_protocol_errors() {
+        let drop = ItemDropStateWire::item(40, 3);
+        let frame = |durabilities: &[ItemDropDurabilityWire]| {
+            encode_entity_snapshot_with_drop_durabilities(1, &[drop], durabilities)
+        };
+
+        assert_eq!(
+            decode(&frame(&[ItemDropDurabilityWire {
+                entity_id: 41,
+                durability: 12,
+                max_durability: 200,
+            }])),
+            Err(DecodeError::DropDurabilityWithoutDrop(41))
+        );
+        assert_eq!(
+            decode(&frame(&[
+                ItemDropDurabilityWire {
+                    entity_id: 40,
+                    durability: 12,
+                    max_durability: 200,
+                },
+                ItemDropDurabilityWire {
+                    entity_id: 40,
+                    durability: 11,
+                    max_durability: 200,
+                },
+            ])),
+            Err(DecodeError::DropDurabilityNamedTwice(40))
+        );
+
+        for (count, durability, max_durability) in [(2, 12, 200), (1, 12, 0), (1, 201, 200)] {
+            let mut malformed = drop;
+            malformed.count = count;
+            assert_eq!(
+                decode(&encode_entity_snapshot_with_drop_durabilities(
+                    1,
+                    &[malformed],
+                    &[ItemDropDurabilityWire {
+                        entity_id: 40,
+                        durability,
+                        max_durability,
+                    }],
+                )),
+                Err(DecodeError::DropDurability {
+                    entity_id: 40,
+                    count,
+                    durability,
+                    max_durability,
+                })
+            );
+        }
     }
 
     #[test]

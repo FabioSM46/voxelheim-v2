@@ -104,6 +104,7 @@ func (c *collector) absorb(frame []byte) {
 			c.positions[entity.EntityId()] = [3]float32{pos.X(), pos.Y(), pos.Z()}
 		}
 		c.drops = c.drops[:0]
+		dropIndexes := make(map[uint64]int, snapshot.DropsLength())
 		for i := range snapshot.DropsLength() {
 			var drop vnet.ItemDropState
 			if !snapshot.Drops(&drop, i) {
@@ -115,12 +116,25 @@ func (c *collector) absorb(frame []byte) {
 				// zero position would hide that rather than report it.
 				continue
 			}
+			dropIndexes[drop.EntityId()] = len(c.drops)
 			c.drops = append(c.drops, protocol.ItemDropState{
 				EntityID: drop.EntityId(),
 				Pos:      [3]float32{pos.X(), pos.Y(), pos.Z()},
 				ItemID:   drop.ItemId(),
 				Count:    drop.Count(),
 			})
+		}
+		for i := range snapshot.DropDurabilitiesLength() {
+			var wear vnet.ItemDropDurability
+			if !snapshot.DropDurabilities(&wear, i) {
+				continue
+			}
+			index, ok := dropIndexes[wear.EntityId()]
+			if !ok {
+				continue
+			}
+			c.drops[index].Durability = wear.Durability()
+			c.drops[index].MaxDurability = wear.MaxDurability()
 		}
 
 	case vnet.PayloadChunkData:

@@ -155,6 +155,16 @@ func (h *dropHarness) spawn(item ItemID, count uint16, voxel [3]int64) *itemDrop
 	return h.drop(id)
 }
 
+func (h *dropHarness) spawnStack(stack inventoryStack, voxel [3]int64) *itemDrop {
+	h.t.Helper()
+
+	id, ok := h.sim.spawnStackDrop(stack, voxel)
+	if !ok {
+		h.t.Fatalf("spawning stack %+v at %v was refused", stack, voxel)
+	}
+	return h.drop(id)
+}
+
 // drop is the live drop with this identity, or nil once it has stopped existing.
 func (h *dropHarness) drop(id uint64) *itemDrop {
 	h.sim.mu.Lock()
@@ -219,6 +229,7 @@ func (s *dropSink) snapshotDrops(t *testing.T) []protocol.ItemDropState {
 
 		found = true
 		newest = newest[:0]
+		byID := make(map[uint64]int, snapshot.DropsLength())
 		for i := range snapshot.DropsLength() {
 			var drop vnet.ItemDropState
 			if !snapshot.Drops(&drop, i) {
@@ -228,12 +239,25 @@ func (s *dropSink) snapshotDrops(t *testing.T) []protocol.ItemDropState {
 			if pos == nil {
 				t.Fatalf("drop %d carries no position", i)
 			}
+			byID[drop.EntityId()] = len(newest)
 			newest = append(newest, protocol.ItemDropState{
 				EntityID: drop.EntityId(),
 				Pos:      [3]float32{pos.X(), pos.Y(), pos.Z()},
 				ItemID:   drop.ItemId(),
 				Count:    drop.Count(),
 			})
+		}
+		for i := range snapshot.DropDurabilitiesLength() {
+			var wear vnet.ItemDropDurability
+			if !snapshot.DropDurabilities(&wear, i) {
+				t.Fatalf("drop durability %d is missing from a snapshot that claims to hold it", i)
+			}
+			index, ok := byID[wear.EntityId()]
+			if !ok {
+				t.Fatalf("drop durability %d names unknown drop %d", i, wear.EntityId())
+			}
+			newest[index].Durability = wear.Durability()
+			newest[index].MaxDurability = wear.MaxDurability()
 		}
 	}
 	if !found {
@@ -395,6 +419,9 @@ func TestBreakingSpawnsOneDropAtTheCentreOfTheVoxel(t *testing.T) {
 	for _, drop := range sim.drops {
 		if drop.item != ItemRawCoal || drop.count != 1 {
 			t.Errorf("the drop carries %d of item %d, want one RawCoal", drop.count, drop.item)
+		}
+		if drop.durability != 0 || drop.maxDurability != 0 {
+			t.Errorf("the block yield carries durability %d/%d, want a wearless world drop", drop.durability, drop.maxDurability)
 		}
 		// The wire position is the centre of the voxel that was broken, because that is
 		// where the client draws a cube centred on it.
@@ -690,6 +717,30 @@ func TestTwoDropsOfOneItemMergeAndTwoOfDifferentItemsDoNot(t *testing.T) {
 	}
 	if kept := h.drop(other.entityID); kept == nil || kept.count != 2 {
 		t.Errorf("the Dirt drop is %+v; different items must not merge", kept)
+	}
+}
+
+func TestWornDropsWithDifferentDurabilityNeverMerge(t *testing.T) {
+	t.Parallel()
+
+	h := newDropHarness(t, dropTerrain{groundTop: 63})
+	first := h.spawnStack(inventoryStack{
+		item: ItemRustySword, count: 1, durability: 12, maxDurability: RustySwordMaxDurability,
+	}, [3]int64{0, 64, 0})
+	second := h.spawnStack(inventoryStack{
+		item: ItemRustySword, count: 1, durability: 80, maxDurability: RustySwordMaxDurability,
+	}, [3]int64{1, 64, 0})
+
+	h.step()
+
+	if got := h.dropCount(); got != 2 {
+		t.Fatalf("the two worn blades became %d drops, want two distinct objects", got)
+	}
+	if got := h.drop(first.entityID); got == nil || got.durability != 12 || got.count != 1 {
+		t.Errorf("the first worn drop became %+v", got)
+	}
+	if got := h.drop(second.entityID); got == nil || got.durability != 80 || got.count != 1 {
+		t.Errorf("the second worn drop became %+v", got)
 	}
 }
 

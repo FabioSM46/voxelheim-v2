@@ -515,7 +515,9 @@ than as a special case of the inventory.
 - **Merging keeps the older drop and the older drop's age.** The tick's list is ordered by
   identity and identities only increase, so the survivor is always the earlier one — which is
   what stops a mining spree from renewing a pile's lifetime for ever. Merging runs before
-  collecting, so a pile arrives as one insertion.
+  collecting, so a wearless pile arrives as one insertion. A durable drop never merges, even
+  with an identical item at identical wear: one durability pair describes one object, and a
+  merge would have to discard one object's condition.
 - **Identities come from the counter that names players** (`session.Registry.NextID`, injected
   into `NewSim`). One counter is what makes "an id names one thing" a fact rather than a
   coincidence; a nil source is refused rather than replaced with a local counter.
@@ -530,9 +532,9 @@ than as a special case of the inventory.
 ### A player can ask for one, and that is the fourth reason a drop exists
 
 `Player.DropItem` in `drop.go` answers a `DropItemRequest`: one slot index on the wire, and
-the whole of it decided here. It is the first caller of `spawnDrop` that answers a *request*
-rather than something that happened to the world, which is why it is the only one that has
-to decide whether the drop may happen at all.
+the whole of it decided here. It is the only caller of `spawnStackDrop` that answers a
+*request* rather than something that happened to the world; the wearless world callers use
+`spawnDrop`, and both forms reach the same core entity path.
 
 - **The wire carries a slot and nothing else, and both absences are the safety.** No count,
   because a client that could name one would be stating what leaves its own pack; no
@@ -541,18 +543,17 @@ to decide whether the drop may happen at all.
   player's feet are in, the two steps a kill's loot already takes from the creature.
 - **Two phases split by the lock, which is `RemoveStructure`'s shape.** `releaseSlot` takes
   `Sim.mu`, checks liveness, takes the inventory with `TryLock`, reads the slot, empties it
-  and returns the state; `DropItem` then spawns outside that lock, because `spawnDrop` takes
-  it. Nothing is lost in the gap: `spawnDrop` refuses exactly a zero count and an
-  unregistered item, and `releaseSlot` has already refused both before it emptied anything.
-- **A slot that wears out is refused, and the reason is that a drop cannot carry wear.**
-  `ItemDropState` is a struct and can never grow a third field; `itemDrop` mirrors it because
-  nothing has ever needed more — every block yield, loot roll and structure bundle is
-  wearless by construction. A pack is the first place a *worn* thing could reach the ground,
-  and the round trip would launder it: `Player.collect` inserts through `stackOf`, which
-  reads the maximum out of the registry, so a blade let go of at 12 durability would be
-  walked back over at 200. That is a repair granted by asking. Teaching the drop entity to
-  carry wear reaches `collect` and the insertion rule — a change to pickup, and a decision of
-  its own — so `dropAllowed` stands until then and is the one thing deleted when it lands.
+  and returns the state; `DropItem` then spawns outside that lock, because `spawnStackDrop`
+  takes it. Nothing is lost in the gap: the spawn core refuses an empty, unregistered or
+  invalid stack, and `releaseSlot` has already read a validated inventory slot before it
+  emptied anything.
+- **A worn slot reaches the ground as the exact authoritative object.** The fixed
+  `ItemDropState` remains unchanged; V11 appends sparse `drop_durabilities` entries keyed by
+  entity id, so block yields, loot rolls and structure bundles stay wearless and pay no
+  per-drop wire cost. `spawnStackDrop` carries the inventory stack through the entity, and
+  pickup inserts that exact durable stack into one empty slot instead of rebuilding it with
+  `stackOf`. A blade let go of at 12 durability therefore comes back at 12, never at the
+  registry maximum. Durable drops never merge because one wear pair describes one object.
 - **A player standing on what they put down picks it straight back up**, half a second later,
   and that is the ordinary pickup rule rather than an oversight. The issue asked for a drop
   indistinguishable from one the world produced, and `dropPickupDelayTicks` belongs to the

@@ -562,6 +562,29 @@ struct ItemDropState {
   count: ushort;
 }
 
+/// The wear carried by one dropped item, beside `ItemDropState` rather than inside it.
+///
+/// Sparse by design: almost every drop is a block yield, loot roll or structure bundle
+/// and therefore has no durability. Keeping this in a parallel vector leaves those
+/// common drops at the 24-byte fixed layout they have always had; converting every drop
+/// to a table would charge an offset and a vtable to every element in the hottest
+/// per-entity snapshot array, including all the ones with no wear to say.
+///
+/// Invariants a decoder must enforce:
+///   - `entity_id` names exactly one member of `EntitySnapshot.drops`
+///   - no entity id appears twice in `EntitySnapshot.drop_durabilities`
+///   - `max_durability` is non-zero and `durability` does not exceed it
+///   - the matching drop has count 1; two durable objects cannot share one wear value
+///
+/// Absence means the matching drop does not wear out. The client may render this state,
+/// but never supplies it: durability enters the world only from the server's authoritative
+/// inventory and returns through that same server-side rule.
+struct ItemDropDurability {
+  entity_id: ulong;
+  durability: ushort;
+  max_durability: ushort;
+}
+
 /// Whether the server considers a player alive or dead.
 ///
 /// A zero member for the reason `ProtocolVersion.Unknown` has one: FlatBuffers decodes
@@ -893,6 +916,17 @@ table EntitySnapshot {
   /// and what a receiver draws for a player it first sees already dead are presentation —
   /// the same division `MobAction.Dying` states for a creature.
   dead_players: [ulong];
+
+  /// Wear for the sparse subset of `drops` that came from durable inventory slots.
+  /// Block yields, loot rolls and structure bundles carry no entry and remain wearless.
+  /// See `ItemDropDurability` for the invariants tying the two vectors together.
+  ///
+  /// **V11 appends this field and changes no existing drop's fixed layout.** A V11
+  /// receiver interprets absence as wearless, so a V10 server would silently turn a
+  /// worn ground item pristine in presentation while the server later returned it worn.
+  /// `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
+  /// different state to the same drop after a clean handshake.
+  drop_durabilities: [ItemDropDurability];
 }
 
 /// Everything the player is carrying, as the server holds it.

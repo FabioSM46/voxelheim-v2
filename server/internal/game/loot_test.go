@@ -545,6 +545,10 @@ func TestAKillInsideTheTickNeitherDeadlocksNorMissesTheNextSnapshot(t *testing.T
 		t.Errorf("the snapshot carries %d of item %d, want 1 bone (%d)",
 			shown[0].Count, shown[0].ItemID, ItemBone)
 	}
+	if shown[0].Durability != 0 || shown[0].MaxDurability != 0 {
+		t.Errorf("the loot roll carries durability %d/%d, want a wearless world drop",
+			shown[0].Durability, shown[0].MaxDurability)
+	}
 }
 
 // Loot is an ordinary drop: it ages, it merges with what is already there, and it is
