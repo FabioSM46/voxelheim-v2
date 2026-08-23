@@ -411,6 +411,7 @@ jobs:
           bash scripts/test/deepseek-budget.test.sh
           bash scripts/test/client-ci-budget.test.sh
           bash scripts/test/client-cache-parity.test.sh
+          bash scripts/test/client-data-home-isolation.test.sh
           bash scripts/test/helpers-selector-docs.test.sh
           bash scripts/test/gate-tables.test.sh
           bash scripts/test/schema-bindings-drift.test.sh
