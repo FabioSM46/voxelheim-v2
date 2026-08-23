@@ -1665,6 +1665,11 @@ Recorded here so the next reader does not mistake them for oversights:
   Two consequences worth knowing before editing this. **`NetLink` is now removed when its channel
   closes** — it used to outlive the thread it represents, harmlessly, because every reader takes it
   as an `Option`; its absence is how a rejoin knows the previous session has let go of its socket.
+  **A retryable name answer never becomes `Rejected` or `Disconnected` while that happens**:
+  `CharacterChoice` keeps the form mounted, the server's `Ended` and the closed event channel both
+  preserve it, and the one internal list request is the only request allowed to open a connection
+  from `Choosing`. That ordering is what prevents the terminal status screen flashing between the
+  answer and the fresh list.
   And **`--name` answers one exchange only**: it is spent once a `Session` has existed, or leaving a
   world would send the player straight back into it. A name refusal keeps `CharacterChoice`
   present across the redial, so the launch's local one-shot guard also stays set and cannot submit
