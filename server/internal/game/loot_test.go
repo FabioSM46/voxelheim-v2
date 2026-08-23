@@ -292,20 +292,49 @@ func TestNothingReachesTheGroundUntilTheBodyHasGone(t *testing.T) {
 // spent by Step, and the drop does not exist until it runs out. The rate sweep is what says
 // so mechanically — an operator's -tick-rate is the only thing that changes how many ticks
 // the wait takes, and it changes nothing about how long it lasts.
+//
+// # The bound, and the three dead branches it replaced
+//
+// The review on the pull request that added this found `slack < -MobDeathDuration` to be
+// unreachable, and it was: `elapsed` is a tick count times a tick duration, so it is never
+// negative and the slack is never below -MobDeathDuration — for *any* implementation of
+// ticksFor, not merely for the current one. That is the distinction worth keeping, because
+// it is what separates a dead branch from an assertion that happens to hold: a check nobody
+// can trip is a claim nobody verifies.
+//
+// Checking it turned up two more of the same shape, which is why this comment is longer
+// than the fix:
+//
+//   - **The upper half was dead too.** ticksFor floors, and `time.Second / rate` floors
+//     again, so `elapsed = floor(2.5·rate) · floor(1e9/rate) <= 2.5e9` — the conversion
+//     cannot overshoot *at all*, and `slack > one tick` could never fire either.
+//   - **The zero guard was dead**, and the comment above it was wrong about why it existed.
+//     `ticksFor(2500ms, 1)` is 2, not 1: the `max` binds only when `d_ms × rate < 1000`,
+//     which for two and a half seconds needs a rate of zero, and NewLoop refuses one. It is
+//     gone rather than repaired, because the bound below catches a zero anyway — elapsed
+//     would be 0 and the slack -2.5 s — and the message now names the tick count.
+//
+// **What is actually true, and what is asserted: the conversion never overshoots, and never
+// undershoots by a whole tick.** Both halves fire on a real change rather than on none.
+// `slack > 0` goes off the moment ticksFor rounds to nearest instead of flooring, which is a
+// one-character edit somebody could plausibly make; `slack <= -tick` goes off if a whole
+// tick is lost.
+//
+// Swept over all 255 legal rates while working the bound out: zero overshoot, zero lost
+// ticks, and the clamp binding nowhere. The tightest undershoot is 0.5002 of a tick at
+// 247 Hz, so "one tick" is the right statement — half a tick would be false, and anything
+// looser would stop describing the rounding.
 func TestTheDeathIsTheSameLengthAtEveryRate(t *testing.T) {
 	t.Parallel()
 
 	for _, rate := range []uint8{1, 5, DefaultTickRate, 60, 255} {
-		if got := ticksFor(MobDeathDuration, rate); got == 0 {
-			t.Errorf("a death lasts no ticks at all at %d Hz; a body nobody sees is not a death", rate)
-			continue
-		}
-		// Within one tick of the duration at that rate, which is the whole of the rounding
-		// ticksFor can introduce. At 1 Hz that is the floor to a single tick, and it is the
-		// case the `max` in ticksFor exists for.
-		elapsed := time.Duration(ticksFor(MobDeathDuration, rate)) * (time.Second / time.Duration(rate))
-		if slack := elapsed - MobDeathDuration; slack > time.Second/time.Duration(rate) || slack < -MobDeathDuration {
-			t.Errorf("a death lasts %s at %d Hz, want %s", elapsed, rate, MobDeathDuration)
+		ticks := ticksFor(MobDeathDuration, rate)
+		tick := time.Second / time.Duration(rate)
+		elapsed := time.Duration(ticks) * tick
+
+		if slack := elapsed - MobDeathDuration; slack > 0 || slack <= -tick {
+			t.Errorf("a death lasts %s (%d ticks of %s) at %d Hz, want %s to within one tick",
+				elapsed, ticks, tick, rate, MobDeathDuration)
 		}
 	}
 }
