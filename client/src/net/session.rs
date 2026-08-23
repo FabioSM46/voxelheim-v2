@@ -54,7 +54,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::codec::{
     self, ActionRefused, CharacterList, InventoryState, MineProgress, PLAYER_TOKEN_LEN,
-    PlayerAppearance, PlayerToken, SessionParams, SessionTicket, Snapshot, WorldUpdate,
+    PlayerAppearance, PlayerToken, Reject, SessionParams, SessionTicket, Snapshot, WorldUpdate,
 };
 
 use super::frame::{self, FrameDecoder};
@@ -148,9 +148,10 @@ pub(super) enum Choice {
 ///
 /// `Handshaking`, `World`, `Inventory`, and `MineProgress` are admitted messages,
 /// and `Warning` is a line for the log; all other variants terminate the session.
-/// The ECS maps them onto `ConnectionState`; the mapping lives there, and the
-/// naming here is deliberately about what *happened* rather than about what should
-/// be displayed.
+/// A server rejection stays typed until the ECS maps it onto `ConnectionState`: the
+/// character-name codes are the one pair whose remedy is another character exchange,
+/// and flattening them here used to throw that distinction away. The naming remains
+/// about what *happened* rather than about what should be displayed.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum SessionEvent {
     /// The socket is up and `ClientHello` is on the wire.
@@ -226,9 +227,13 @@ pub(super) enum SessionEvent {
     ///
     /// Never carries a token: what is written here is written to a log.
     Warning(String),
-    /// There is no session, and this is the reason a player needs to read:
-    /// a `ServerReject`, an unreachable server, or a peer that is not speaking
-    /// this protocol.
+    /// The server rejected the handshake and closed the connection. Kept as a decoded
+    /// value so the ECS can distinguish the two character-name answers before rendering
+    /// the same code and detail every other refusal gets.
+    ServerRefused(Reject),
+    /// There is no session, and this locally produced reason is what a player needs to
+    /// read: an unreachable server, a TLS failure, or a peer that is not speaking this
+    /// protocol.
     Refused(String),
     /// A session that existed has ended. `Some` when something went wrong.
     Ended(Option<String>),
@@ -1326,9 +1331,10 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                         .ok()?;
                 }
                 Ok(Transition::Refused(reject)) => {
-                    // `Reject::describe` owns this format, because `ui/status.rs`
-                    // reads the code back out of the string it produces.
-                    return Some(SessionEvent::Refused(reject.describe()));
+                    // The code stays typed across the thread boundary. The ECS decides
+                    // whether this was the answer to a creation before it turns the
+                    // value into the display string `Reject::describe` owns.
+                    return Some(SessionEvent::ServerRefused(reject));
                 }
                 Ok(Transition::World(update)) => {
                     events.send(SessionEvent::World(update)).ok()?;

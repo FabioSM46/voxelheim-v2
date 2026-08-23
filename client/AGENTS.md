@@ -1243,20 +1243,23 @@ The pieces, and the boundary each stays on:
   the hello. **The writer thread starts at `Established` and not before**, which is the whole
   reason the command exists: one writer per connection is a rule this handshake would otherwise
   break by waiting for a person in the middle of it.
-- `net/mod.rs` carries `CharacterChoice` — the list, the limit, the preselection and whether the
-  answer has gone out — and turns one `ChooseCharacter` message into one command. `answered` is
-  what makes a double press harmless: a second `SelectCharacterRequest` on a welcomed session is a
-  protocol error that closes it.
+- `net/mod.rs` carries `CharacterChoice` — the list, the limit, the preselection, whether the
+  answer has gone out and the server's last retryable name refusal — and turns one
+  `ChooseCharacter` message into one command. `answered` is what makes a double press harmless: a
+  second `SelectCharacterRequest` on a welcomed session is a protocol error that closes it.
 - `ui/character.rs` draws the rows, the creation draft, the palettes and the live preview, and
   writes `ChooseCharacter`. It never touches a socket, the same way the login screen and the
   server list never do.
 
 **Nothing here decides anything, and the name is the case worth stating.** Whether a name may be
 worn is the server's rule; `CHARACTER_NAME_TAKEN` and `CHARACTER_NAME_REFUSED` are its two
-different answers, they arrive as a `ServerReject` that ends the session, and the screen renders
-what came back. A client that guessed at either would be holding an opinion about a world it can
-only see part of — and a refused creation keeps the draft, so coming back is a click rather than a
-redo.
+different answers, they arrive as a `ServerReject` that closes the connection, and the screen
+renders what came back beside the name field. The client reconnects transparently on the same
+`RejoinBy` route because the server has already closed the socket; it reads the cached ticket again
+instead of keeping credential bytes in the ECS, and the fresh `ServerCharacterList` is what makes
+the form writable again. A client that guessed at either would be holding an opinion about a world
+it can only see part of. `BAD_REQUEST`, `CHARACTER_LIMIT_REACHED` and ticket refusals do not take
+this path: typing another name is not their remedy. The draft stays in place across the one redial.
 
 **The colours are stated rather than picked freely.** `ui/character.rs` holds one table per field
 with the reasoning beside it: what a Norse dyer could reach, which is why there is no free colour
@@ -1645,13 +1648,13 @@ Recorded here so the next reader does not mistake them for oversights:
   box, or it would clip the knuckles off everybody and the knot off one of them.
 - **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
   says so and `--account-service` pointed somewhere else is a different file.
-- **No reconnect, backoff or session resumption — and leaving a world lands on its character
-  screen, which is not the same thing.** The rule is about a client that *decides on its own* to
-  dial again, and it stands: a refused or dropped connection is reported and stays reported, with
-  nothing set to try it a second time. What #184 added is a place to land after a
-  `DisconnectRequest`, which is a player pressing something. **`disconnect_on_request` is the only
-  writer of `Rejoining`**, and that is the whole of the distinction — every other way a session
-  ends arrives at `drain_session_events`, which sets nothing.
+- **No generic reconnect, backoff or session resumption.** A dropped connection is reported and
+  stays reported, with nothing set to try it a second time. `Rejoining` has exactly two writers,
+  both with a complete remedy on the same route: `disconnect_on_request`, after a player asks to
+  leave a world, and `drain_session_events`, after `CHARACTER_NAME_TAKEN` or
+  `CHARACTER_NAME_REFUSED` answered a creation. The second is request recovery rather than session
+  recovery: the server closes by contract, the client dials once, and the new list re-enables the
+  form. Every other refusal and every unasked ending sets no flag.
 
   The flag is dropped *before* the dial that consumes it can fail, so a rejoin that is itself
   refused is a refusal a player can read rather than the first turn of a loop. The list is fetched
@@ -1663,11 +1666,12 @@ Recorded here so the next reader does not mistake them for oversights:
   closes** — it used to outlive the thread it represents, harmlessly, because every reader takes it
   as an `Option`; its absence is how a rejoin knows the previous session has let go of its socket.
   And **`--name` answers one exchange only**: it is spent once a `Session` has existed, or leaving a
-  world would send the player straight back into it. A refused creation never makes a session, so
-  the retry that behaviour was written for still works.
+  world would send the player straight back into it. A name refusal keeps `CharacterChoice`
+  present across the redial, so the launch's local one-shot guard also stays set and cannot submit
+  the same refused name in a loop; the player takes over the form.
 
-  `Reject` carries the reject code's name for display; a reconnect *policy* is the thing that would
-  want to branch on the numeric code, and it can widen that struct.
+  `Reject` crosses the net-thread boundary as a typed value and is flattened for display only after
+  this classification. Branch on the code, never on the detail the server wrote for a person.
 - **`MAX_DECODE_BACKLOG` bounds chunk payloads and nothing else, so a flood of `BlockUpdate`s
   for chunks this session *holds* still grows the queue.** Each costs a decode budget unit and
   none may be refused, because nothing re-sends one. It is a narrower door than the one that was
