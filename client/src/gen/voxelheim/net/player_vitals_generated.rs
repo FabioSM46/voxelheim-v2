@@ -23,6 +23,9 @@ pub enum PlayerVitalsOffset {}
 ///   - `life_state` is a known non-zero member; `Unknown` is the absent-field case
 ///   - an `Alive` player has positive health
 ///   - only a `Dead` player may carry a non-zero `respawn_ticks`
+///   - `life_state` agrees with `EntitySnapshot.dead_players`: the recipient's own entity
+///     id is in that vector exactly when this says `Dead` — see that field, where the
+///     reason one fact is stated twice is argued
 pub struct PlayerVitals<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }

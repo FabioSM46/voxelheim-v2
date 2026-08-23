@@ -805,6 +805,28 @@ durability means.
   the one-shot's own note, where "it ran" and "something changed" are deliberately
   different questions.
 
+### Who is told about a death
+
+`PlayerVitals` is per-recipient by contract, which is why nothing could tell a client that
+the player beside it had been killed — the information was not unused, it was never sent.
+Protocol V10 adds `EntitySnapshot.dead_players`, and `Sim.Step` fills it from `Player.alive()`
+**in the same pass that fills the entity vector**: the contract says every id there names a
+player in the same snapshot's entities, and a second walk over the player list would be a
+second visibility decision to keep in step with the first.
+
+- **The viewer's own id goes in it like everybody else's.** A session is inside its own view,
+  so the body it watches go down and the bodies beside it are stated the same way. Its vitals
+  still carry the health and the countdown, which genuinely are the recipient's alone.
+- **It is a state, not an event.** A session that connects after a death is told by its first
+  snapshot, with nothing replayed and nothing to replay.
+- **It costs nothing on the ticks nobody is dead**, because the encoder writes no field at
+  all for an empty vector and a vtable is trimmed of its trailing empty slots.
+  `TestWhatADeathCostsOnTheWire` asserts that as *byte* equality against the frame with no
+  such field, and measures what the rejected table-per-player shape would have cost instead.
+- **What draws any of this is a separate change.** This is the wire and the server half; the
+  client still tips only the viewer's own body, and `client/AGENTS.md` still records that gap
+  until the half that closes it lands.
+
 ## The world's clock, and the one predicate that reads it
 
 Everything about it lives in `internal/game/clock.go` and the three constants beside

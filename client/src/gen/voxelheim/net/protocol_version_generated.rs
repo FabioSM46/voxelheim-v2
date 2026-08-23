@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 9;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 10;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -48,7 +48,18 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// the handshake. A V8 client against a server that had appended it quietly
 /// would connect perfectly and die on the first creature anybody killed.
 ///
-/// The rule that generalises, now that three shapes have been argued: **ask
+/// **V10 appends a table field, and it moves this number too.** `EntitySnapshot`
+/// gains `dead_players`, a vector of the entity ids the server holds dead. An
+/// unknown *table field* is the one shape FlatBuffers really does let a receiver
+/// drop — an older client never looks the id up — so the old-peer direction is
+/// not what decides this. The other direction is: the field's stated invariant is
+/// that the recipient's own id is in that vector exactly when `self_vitals` says
+/// `Dead`, and a V10 client enforces it. Against a V9 server the vector is absent
+/// on every frame, so that client connects perfectly, plays perfectly, and drops
+/// the session the first time it dies — which is precisely the mid-session
+/// failure this number exists to turn into a clean refusal at the handshake.
+///
+/// The rule that generalises, now that four shapes have been argued: **ask
 /// what the receiver does with the value it does not recognise, not which way
 /// it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -61,10 +72,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(9);
+    pub const Current: Self = Self(10);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 9;
+    pub const ENUM_MAX: u16 = 10;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

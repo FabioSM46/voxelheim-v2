@@ -84,7 +84,15 @@ union switch to keep exhaustive.
    frame it has already committed to reading, in a field whose stated invariant is "a known
    non-zero member", so an unrecognised value is a decode error and the session ends.
 
-   The rule that generalises, now that three shapes have been argued: **ask what the receiver
+   **V10 appends a table *field* and moves it as well.** `EntitySnapshot.dead_players` is
+   the one shape FlatBuffers genuinely lets an older receiver drop — an unknown field id is
+   never looked up — so the old-peer direction does not decide it. The new-peer direction
+   does: the field's stated invariant is that the recipient's own id appears there exactly
+   when `self_vitals` says `Dead`, and a V10 client refuses a frame where they disagree. A
+   V9 server never sends the vector, so that client would handshake cleanly and drop the
+   session the first time it died.
+
+   The rule that generalises, now that four shapes have been argued: **ask what the receiver
    does with the value it does not recognise, not which way it travelled.** Dropping it is a
    bump avoided; refusing it is a bump owed.
 4. **The client never sends authoritative state.** No client→server message may carry a

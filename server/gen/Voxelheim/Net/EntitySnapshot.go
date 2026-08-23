@@ -245,8 +245,118 @@ func (rcv *EntitySnapshot) MutateTickOfDay(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(16, n)
 }
 
+// / The entity ids of the players in `entities` the server currently holds dead.
+// /
+// / **A fact about the world, not an event.** It rides in every snapshot rather than in a
+// / message announcing a death, so a session that joined afterwards, or whose view has
+// / only just reached the body, is told exactly what the session that watched it happen
+// / was told. It says who is down *now*, and the newest snapshot is the complete answer in
+// / the same way `mobs` and `structures` are.
+// /
+// / **Why a sparse list of ids rather than a life state beside every player.**
+// / `EntityState` is a struct — inlined once per visible player per tick, and its field
+// / list can never be taken back — so the state cannot go in it; that argument is written
+// / above the struct itself. Of the two shapes that leaves, a table per player in the shape
+// / `MobState` took would charge every *living* player a vtable and an offset every tick to
+// / carry the answer "no", which is the answer almost every entry has almost all the time.
+// / This vector is empty on almost every tick of almost every session, and FlatBuffers
+// / writes nothing at all for an empty one, so an ordinary snapshot pays nothing for it and
+// / a death costs eight bytes for as long as it lasts.
+// /
+// / **The price is two structures that could disagree, and the invariants below are the
+// / answer.** They are enforced at the decode boundary rather than trusted, because both
+// / halves arrive in one frame from one server: a disagreement is a bug reporting itself,
+// / and a receiver that quietly repaired it would be hiding the only evidence — the
+// / reasoning `tick_of_day` records one field above, with the difference that this one
+// / *can* be checked where it lands, since nothing it names arrived in another message.
+// /
+// / **`self_vitals` stays the recipient's own authority and is not made redundant.** What
+// / this adds is the one bit of that state which is a property of a body standing in the
+// / world, so the recipient's own body and everybody else's are drawn from one statement
+// / instead of two that can drift apart.
+// /
+// / Decoder invariants:
+// /   - every id names a player in this snapshot's `entities`. An id for a player the
+// /     recipient cannot see is a protocol error, not a body to remember for later
+// /   - no id appears twice
+// /   - the recipient's own entity id is present **exactly when** `self_vitals.life_state`
+// /     is `Dead`. The two are the same fact stated once each way, and a frame in which
+// /     they disagree is refused
+// /   - absent and empty are the same thing, and both are ordinary: nobody in view is dead
+// /
+// / Nothing about how a body goes down is here. How long a fall takes, which way it tips,
+// / and what a receiver draws for a player it first sees already dead are presentation —
+// / the same division `MobAction.Dying` states for a creature.
+func (rcv *EntitySnapshot) DeadPlayers(j int) uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetUint64(a + flatbuffers.UOffsetT(j*8))
+	}
+	return 0
+}
+
+func (rcv *EntitySnapshot) DeadPlayersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / The entity ids of the players in `entities` the server currently holds dead.
+// /
+// / **A fact about the world, not an event.** It rides in every snapshot rather than in a
+// / message announcing a death, so a session that joined afterwards, or whose view has
+// / only just reached the body, is told exactly what the session that watched it happen
+// / was told. It says who is down *now*, and the newest snapshot is the complete answer in
+// / the same way `mobs` and `structures` are.
+// /
+// / **Why a sparse list of ids rather than a life state beside every player.**
+// / `EntityState` is a struct — inlined once per visible player per tick, and its field
+// / list can never be taken back — so the state cannot go in it; that argument is written
+// / above the struct itself. Of the two shapes that leaves, a table per player in the shape
+// / `MobState` took would charge every *living* player a vtable and an offset every tick to
+// / carry the answer "no", which is the answer almost every entry has almost all the time.
+// / This vector is empty on almost every tick of almost every session, and FlatBuffers
+// / writes nothing at all for an empty one, so an ordinary snapshot pays nothing for it and
+// / a death costs eight bytes for as long as it lasts.
+// /
+// / **The price is two structures that could disagree, and the invariants below are the
+// / answer.** They are enforced at the decode boundary rather than trusted, because both
+// / halves arrive in one frame from one server: a disagreement is a bug reporting itself,
+// / and a receiver that quietly repaired it would be hiding the only evidence — the
+// / reasoning `tick_of_day` records one field above, with the difference that this one
+// / *can* be checked where it lands, since nothing it names arrived in another message.
+// /
+// / **`self_vitals` stays the recipient's own authority and is not made redundant.** What
+// / this adds is the one bit of that state which is a property of a body standing in the
+// / world, so the recipient's own body and everybody else's are drawn from one statement
+// / instead of two that can drift apart.
+// /
+// / Decoder invariants:
+// /   - every id names a player in this snapshot's `entities`. An id for a player the
+// /     recipient cannot see is a protocol error, not a body to remember for later
+// /   - no id appears twice
+// /   - the recipient's own entity id is present **exactly when** `self_vitals.life_state`
+// /     is `Dead`. The two are the same fact stated once each way, and a frame in which
+// /     they disagree is refused
+// /   - absent and empty are the same thing, and both are ordinary: nobody in view is dead
+// /
+// / Nothing about how a body goes down is here. How long a fall takes, which way it tips,
+// / and what a receiver draws for a player it first sees already dead are presentation —
+// / the same division `MobAction.Dying` states for a creature.
+func (rcv *EntitySnapshot) MutateDeadPlayers(j int, n uint64) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateUint64(a+flatbuffers.UOffsetT(j*8), n)
+	}
+	return false
+}
+
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(8)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -280,6 +390,12 @@ func EntitySnapshotStartStructuresVector(builder *flatbuffers.Builder, numElems 
 }
 func EntitySnapshotAddTickOfDay(builder *flatbuffers.Builder, tickOfDay uint32) {
 	builder.PrependUint32Slot(6, tickOfDay, 0)
+}
+func EntitySnapshotAddDeadPlayers(builder *flatbuffers.Builder, deadPlayers flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(deadPlayers), 0)
+}
+func EntitySnapshotStartDeadPlayersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(8, numElems, 8)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

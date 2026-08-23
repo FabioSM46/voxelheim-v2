@@ -961,6 +961,22 @@ pub struct Snapshot {
     /// handshake owns that check, exactly as it owns the inventory's slot count, and
     /// for the same reason: it is the only layer that holds both halves.
     pub tick_of_day: u32,
+    /// Which of the players in `entities` the server currently holds dead.
+    ///
+    /// **A fact about the world rather than an event**, which is why it is a field of the
+    /// snapshot and not a message: a session that joined after a death is told exactly what
+    /// the session that watched it happen was told. Empty is the ordinary case.
+    ///
+    /// Two of the three invariants `schemas/player.fbs` attaches to it are enforced here —
+    /// every id names a player in `entities`, and no id appears twice. The third is not, for
+    /// the reason `tick_of_day` is not: "the recipient's own id is here exactly when
+    /// `self_vitals` says `Dead`" names an entity id that arrived in the *welcome*, and
+    /// [`decode`] sees one frame at a time. The handshake holds both halves and owns it.
+    ///
+    /// **Nothing in `player/` draws from this yet**, and that is a split rather than an
+    /// oversight: this half lands the contract, the server that fills it and the decoder that
+    /// refuses a frame breaking it. The half that tips a body on it follows.
+    pub dead_players: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -981,6 +997,7 @@ impl Default for Snapshot {
             self_vitals: PlayerVitals::unharmed(),
             structures: Vec::new(),
             tick_of_day: 0,
+            dead_players: Vec::new(),
         }
     }
 }
@@ -1573,6 +1590,11 @@ pub enum DecodeError {
         health: u16,
         max_health: u16,
     },
+    /// `dead_players` names an entity that is not a player in the same snapshot. Refused
+    /// rather than remembered: the vector describes the bodies this snapshot carries.
+    DeadPlayerNotInSnapshot(u64),
+    /// The same entity id appears twice in `dead_players`.
+    DeadPlayerNamedTwice(u64),
     /// A structure carries the reserved identity 0.
     StructureWithoutIdentity,
     /// One id names a structure and a player, a drop, a mob, or another structure, in one
@@ -1760,6 +1782,13 @@ impl fmt::Display for DecodeError {
                 f,
                 "mob {entity_id} is {health}/{max_health}, want a non-zero maximum and no more health than it"
             ),
+            Self::DeadPlayerNotInSnapshot(entity_id) => write!(
+                f,
+                "dead_players names {entity_id}, which is not a player in this snapshot"
+            ),
+            Self::DeadPlayerNamedTwice(entity_id) => {
+                write!(f, "dead_players names {entity_id} twice")
+            }
             Self::StructureWithoutIdentity => {
                 write!(f, "a structure carries the reserved structure id 0")
             }
@@ -2272,6 +2301,25 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         }
     }
 
+    // **Read against `entities` rather than beside it**, which is what stops the two vectors
+    // from disagreeing. Both cases are refused rather than skipped, for the reason the id
+    // conflicts above are: a frame that breaks its own stated invariant is a bug reporting
+    // itself, and a receiver that quietly repaired it would hide the only evidence.
+    let mut dead_players = Vec::new();
+    let mut dead_ids = HashSet::new();
+    if let Some(list) = snapshot.dead_players() {
+        dead_players.reserve(list.len());
+        for entity_id in list.iter() {
+            if !player_ids.contains(&entity_id) {
+                return Err(DecodeError::DeadPlayerNotInSnapshot(entity_id));
+            }
+            if !dead_ids.insert(entity_id) {
+                return Err(DecodeError::DeadPlayerNamedTwice(entity_id));
+            }
+            dead_players.push(entity_id);
+        }
+    }
+
     Ok(Snapshot {
         server_tick: snapshot.server_tick(),
         entities,
@@ -2282,6 +2330,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         // Copied, not checked. See the field's own documentation: the bound is against a
         // number this function has never seen.
         tick_of_day: snapshot.tick_of_day(),
+        dead_players,
     })
 }
 
@@ -3471,6 +3520,58 @@ pub(super) mod server_side {
         )
     }
 
+    /// Encodes an `EntitySnapshot` naming some of its entities dead.
+    ///
+    /// Its own builder rather than a seventh parameter on the one below, whose eleven
+    /// callers would all have gained a `&[]`. `dead_players` is settable to states no server
+    /// would emit — an id outside `entities`, or one named twice — because those are the
+    /// frames the decoder's invariants exist for.
+    pub fn encode_entity_snapshot_with_dead(
+        server_tick: u32,
+        entities: &[EntityStateWire],
+        vitals: PlayerVitalsWire,
+        dead_players: &[u64],
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(entities.len() * 40 + 128);
+
+        let laid_out: Vec<fb::EntityState> = entities
+            .iter()
+            .map(|state| {
+                fb::EntityState::new(
+                    state.entity_id,
+                    &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
+                    &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
+                    state.yaw,
+                )
+            })
+            .collect();
+        let entities = builder.create_vector(&laid_out);
+        let dead = builder.create_vector(dead_players);
+        let self_vitals = fb::PlayerVitals::create(
+            &mut builder,
+            &fb::PlayerVitalsArgs {
+                health: vitals.health,
+                max_health: vitals.max_health,
+                life_state: vitals.life_state,
+                respawn_ticks: vitals.respawn_ticks,
+                invulnerable: vitals.invulnerable,
+            },
+        );
+
+        let mut table = fb::EntitySnapshotBuilder::new(&mut builder);
+        table.add_server_tick(server_tick);
+        table.add_entities(entities);
+        table.add_self_vitals(self_vitals);
+        table.add_dead_players(dead);
+        let payload = table.finish();
+
+        finish_envelope(
+            builder,
+            fb::Payload::EntitySnapshot,
+            payload.as_union_value(),
+        )
+    }
+
     /// Encodes every vector an `EntitySnapshot` carries, plus the recipient's vitals.
     ///
     /// The three narrower helpers above delegate here with a valid living player, so a
@@ -3608,6 +3709,7 @@ pub(super) mod server_side {
                 mobs: None,
                 self_vitals: Some(self_vitals),
                 structures: None,
+                dead_players: None,
             },
         );
 
@@ -3648,6 +3750,7 @@ pub(super) mod server_side {
                 self_vitals: Some(self_vitals),
                 structures: None,
                 tick_of_day,
+                dead_players: None,
             },
         );
 
@@ -3832,10 +3935,11 @@ mod tests {
         MobStateWire, PlayerVitalsWire, StructureStateWire, WelcomeWire, encode_action_refused,
         encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
         encode_bare_entity_snapshot, encode_block_update, encode_chunk_data, encode_chunk_unload,
-        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_drops,
-        encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_mine_progress, encode_player_appearance,
-        encode_server_character_list, encode_server_reject, encode_server_welcome,
+        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        encode_entity_snapshot_with_drops, encode_entity_snapshot_without_vitals,
+        encode_inventory_state, encode_inventory_state_with_durability, encode_mine_progress,
+        encode_player_appearance, encode_server_character_list, encode_server_reject,
+        encode_server_welcome,
     };
     use super::*;
 
@@ -3904,14 +4008,22 @@ mod tests {
     /// A V8 client against a V9 server would therefore connect perfectly and drop the
     /// session on the first creature anybody killed.
     ///
-    /// The rule that generalises, now that three shapes have been argued: **ask what the
+    /// **V10 adds no tag either, and moves the version for a reason none of the four
+    /// paragraphs above reaches.** It appends a *table field* — `EntitySnapshot.dead_players`
+    /// — and an unknown table field really is dropped: a V9 peer never looks the id up, so no
+    /// argument about *this* decoder decides it. The argument runs the other way for the
+    /// first time. The field's invariant ties it to `self_vitals`, [`Handshake`] enforces it,
+    /// and a V9 server never sends the vector — so a client built against this contract would
+    /// connect perfectly, play perfectly, and end the session the first time it died.
+    ///
+    /// The rule that generalises, now that four shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v9_appends_no_tag_and_still_moves_to_nine() {
+    fn protocol_v10_appends_no_tag_and_still_moves_to_ten() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 9);
+        assert_eq!(fb::ProtocolVersion::Current.0, 10);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5640,10 +5752,57 @@ mod tests {
                     mobs: vec![],
                     self_vitals: PlayerVitals::unharmed(),
                     structures: vec![],
+                    dead_players: vec![],
                 })),
                 "{name}"
             );
         }
+    }
+
+    /// The dead arrive in the order the server gave them, and an empty vector is the ordinary
+    /// frame rather than a special one.
+    #[test]
+    fn a_snapshot_decodes_the_players_the_server_holds_dead() {
+        let entities = [EntityStateWire::at(7, 0.0), EntityStateWire::at(9, 4.0)];
+        let dead_vitals = PlayerVitalsWire {
+            health: 0,
+            life_state: fb::LifeState::Dead,
+            respawn_ticks: 40,
+            ..Default::default()
+        };
+
+        for (vitals, want) in [
+            (dead_vitals, vec![9, 7]),
+            (PlayerVitalsWire::default(), vec![]),
+        ] {
+            let frame = encode_entity_snapshot_with_dead(3, &entities, vitals, &want);
+            let Ok(Message::Snapshot(snapshot)) = decode(&frame) else {
+                panic!("a snapshot naming {want:?} did not decode");
+            };
+            assert_eq!(snapshot.dead_players, want);
+        }
+    }
+
+    /// **A dead player nobody can see is a frame this client refuses**, because
+    /// `dead_players` describes the bodies in *this* snapshot: an id outside `entities` has
+    /// nowhere to go, and remembering it would be this client keeping a fact the next
+    /// snapshot is entitled to contradict. A repeated id is refused for the reason the
+    /// entity-id conflicts above are: one id names one thing.
+    #[test]
+    fn a_dead_player_who_is_not_in_the_snapshot_is_a_protocol_error() {
+        let entities = [EntityStateWire::at(7, 0.0)];
+        let frame = |dead: &[u64]| {
+            encode_entity_snapshot_with_dead(1, &entities, PlayerVitalsWire::default(), dead)
+        };
+
+        assert_eq!(
+            decode(&frame(&[8])),
+            Err(DecodeError::DeadPlayerNotInSnapshot(8))
+        );
+        assert_eq!(
+            decode(&frame(&[7, 7])),
+            Err(DecodeError::DeadPlayerNamedTwice(7))
+        );
     }
 
     #[test]
