@@ -2,7 +2,7 @@
 # =============================================================================
 # Regression tests for pr-label — the write half of the labeler.
 #
-# The defect (#134): `cmd_pr_label add` ran `gh pr edit … 2>/dev/null || true` and
+# The defect (legacy PR 134): `cmd_pr_label add` ran `gh pr edit … 2>/dev/null || true` and
 # then printed its success line unconditionally. The reason went to /dev/null, the
 # exit status went to `true`, and the line went out regardless — so the one thing
 # the helper could never report was a label it had not applied. Found live during a
@@ -248,7 +248,7 @@ assert_contains "a successful add checks the label is defined first" "$CALLS" \
 assert_not_contains "a successful add never touches gh pr edit" "$CALLS" "pr edit"
 assert_not_contains "a successful add keeps the API payload off stdout" "$OUT" '"name"'
 
-# The regression itself. Before #134 this case exited 0 and printed the success line.
+# The regression itself. Before legacy PR 134 this case exited 0 and printed the success line.
 reset_stub
 GH_WRITE_STATUS=1
 run_label 131 add "ready-for-dev"

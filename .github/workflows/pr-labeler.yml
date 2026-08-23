@@ -11,7 +11,7 @@ name: PR Labeler
 # Event-driven, not polled. A label verdict can change when CI or the full
 # DeepSeek review finishes, so `workflow_run` listens to both. Whichever finishes
 # second performs the final relabel; this avoids leaving a clean verdict at
-# needs-review until the six-hour sweep when DeepSeek outlives CI (PR #14).
+# needs-review until the six-hour sweep when DeepSeek outlives CI (legacy PR 14).
 # Every run still processes ALL open PRs, so any single firing repairs every
 # stale label, not just the triggering PR's.
 #

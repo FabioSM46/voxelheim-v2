@@ -443,7 +443,7 @@ class GetDiffExcludesGeneratedArtifactsTests(unittest.TestCase):
         self.assertNotIn("j" * 50, diff)
 
     def test_lockfiles_never_reach_the_reviewer(self):
-        # PR #15 measured the damage: client/Cargo.lock was 5264 of 8319 non-generated
+        # Legacy PR 15 measured the damage: client/Cargo.lock was 5264 of 8319 non-generated
         # lines — 63% of the diff the model was asked to read, for a resolved version
         # graph nobody reviews.
         pr = _FakePR(
@@ -586,11 +586,11 @@ class ReportedDiffSizeTests(unittest.TestCase):
     """
     The line a human reads first when asking "did the review actually happen".
 
-    `get_diff` returned a string until #34, then a 3-field tuple. Every consumer was
+    `get_diff` returned a string until legacy PR 34, then a 3-field tuple. Every consumer was
     updated to use `.text` except this log line, which kept calling `len()` on the
     tuple — so it printed "Diff: 3 chars" for every pull request that followed,
     regardless of size. Read as a measurement it looked like total failure, and that
-    reading produced issue #43 and PR #44 against a partial-API-response that had
+    reading produced legacy issue 43 and legacy PR 44 against a partial-API-response that had
     never happened. A number nobody can act on is harmless; this one got acted on.
     """
 
@@ -695,7 +695,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         return pr.posted[0]
 
     def test_an_unreadable_diff_is_a_failure_not_an_empty_review(self):
-        # #31: the fetch failed with 403 during a GitHub incident, the script reported
+        # Legacy PR 31: the fetch failed with 403 during a GitHub incident, the script reported
         # "Empty diff — nothing to review", and the check went green with no review. A
         # read failure and an empty diff justify opposite actions, so they must not share
         # a code path.
@@ -730,7 +730,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         self.assertEqual([], pr.posted)
 
     def test_a_truncated_diff_cannot_produce_a_clean_verdict(self):
-        # #32, measured on PR #30: the budget ran out after the client files, so the whole
+        # Legacy PR 32, measured on legacy PR 30: the budget ran out after the client files, so the whole
         # server half went unread and the review said "no substantive issues found" — and
         # the frozen rule passed. A partial read has something to report by construction.
         pr = _RecordingPR([
@@ -775,7 +775,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         self.assertNotIn("…and", body, "nothing should have been collapsed at this size")
 
     def test_a_reply_is_told_which_files_it_cannot_see(self):
-        # #32's failure mode through the other door: a reply composed from a partial diff,
+        # Legacy PR 32's failure mode through the other door: a reply composed from a partial diff,
         # with nothing telling the model what is missing, is a conclusion beyond its evidence.
         files = [_FakeFile("aaa/big.rs", _patch_of(_CAP + 10_000, "c")),
                  _FakeFile("server/internal/game/collide.go", _patch_of(300, "s"))]
@@ -791,7 +791,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         self.assertIn("if fetched.dropped:", source)
 
     def test_a_withheld_patch_is_an_unreadable_diff_not_a_binary_file(self):
-        # #43, observed three times during a GitHub outage: the files endpoint answered
+        # Legacy PR 43, observed three times during a GitHub outage: the files endpoint answered
         # with entries carrying no patch, so nothing raised, and a 636-line pull request
         # became a three-character diff that read as legitimate. GitHub reports 0 changed
         # lines for a genuine binary, so the two are separable.
@@ -818,7 +818,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
 
     def test_a_network_failure_is_reported_rather_than_raised_raw(self):
         # PyGithub raises requests' exceptions when urllib3 exhausts its retries, which is
-        # what a 503 storm produces. That escaped as a traceback until #43.
+        # what a 503 storm produces. That escaped as a traceback until legacy PR 43.
         class _UnreachablePR(_FakePR):
             def get_files(self):
                 raise deepseek_review.RequestException("too many 503 error responses")
@@ -851,8 +851,8 @@ class ReviewBodyMarkerTests(unittest.TestCase):
     def test_the_prompt_requires_findings_to_be_anchored(self):
         # Pinned for the same reason the markers are: this instruction is the only thing
         # keeping findings out of the review body, and a body finding creates no thread
-        # for anyone to resolve. Measured before it existed: PRs #9 and #13 received
-        # anchored findings and closed themselves; #15 and #24 received body-only findings
+        # for anyone to resolve. Measured before it existed: legacy PRs 9 and 13 received
+        # anchored findings and closed themselves; legacy PRs 15 and 24 received body-only findings
         # and both stalled waiting on a label.
         source = Path(deepseek_review.__file__).read_text()
 
@@ -862,7 +862,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         self.assertIn("genuinely belongs to no single", source)
 
     def test_no_verdict_shape_ever_attempts_an_approve(self):
-        # The regression guard for #22. GitHub forbids Actions from approving pull
+        # The regression guard for legacy PR 22. GitHub forbids Actions from approving pull
         # requests, so an APPROVE is not a stricter verdict — it is a failed job, and it
         # failed on the one kind of PR that deserved it least: the flawless one. The
         # `"APPROVE" if review_complete else "COMMENT"` ternary is the shape that must
@@ -887,7 +887,7 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         posted = self._run('{"review_complete": true, "comments": []}')
 
         # COMMENT, not APPROVE: GitHub forbids Actions from approving pull requests, so
-        # the marker carries the meaning that the review state used to (#22).
+        # the marker carries the meaning that the review state used to (legacy PR 22).
         self.assertEqual("COMMENT", posted["event"])
         # Unstamped by the round marker on purpose — that marker is what the round
         # budget counts, and a clean pass must leave a later push reviewable.
@@ -968,24 +968,24 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         )
 
 
-# ─────────── Mode A wants an object, Mode B wants prose (#57) ───────────
+# ─────────── Mode A wants an object, Mode B wants prose (legacy PR 57) ───────────
 
 
 class _FakeDeepSeekAPI:
     """A completions endpoint that behaves the way the real one does about JSON mode.
 
     Two behaviours, both documented by the API, and both invisible to a mock that does
-    nothing but record the kwargs it was handed — which is exactly how #57 survived the
-    review that predicted it. PR #16: "the mocked client won't catch an unsupported API
+    nothing but record the kwargs it was handed — which is exactly how legacy PR 57 survived the
+    review that predicted it. Legacy PR 16: "the mocked client won't catch an unsupported API
     parameter combination… if DeepSeek V4's reasoning endpoint does not support JSON mode,
     every full review will hit the sys.exit(1) error path." That thread was resolved on the
     strength of seventeen green pull requests, which were never evidence that the call was
     legal — only that the word "json" kept turning up in the diff.
 
       1. `response_format={"type": "json_object"}` is REFUSED unless the prompt contains the
-         word "json" in some form. That 400 is what killed the reply on PR #54 at 81e874f.
+         word "json" in some form. That 400 is what killed the reply on legacy PR 54 at 81e874f.
       2. When it is accepted, the answer comes back as an object — so prose asked for this
-         way arrives wrapped, which is the `{"response": "…"}` still sitting in PR #34's
+         way arrives wrapped, which is the `{"response": "…"}` still sitting in legacy PR 34's
          review threads.
     """
 
@@ -1032,7 +1032,7 @@ class _ThreadedPR(_RecordingPR):
     None of the fixture's own material — title, description, diff, bot comment — contains the
     word "json", so by default neither does the conversation as a whole. That is not an
     oversight: it is the condition under which Mode B used to 400, so the default reproduces
-    PR #54 rather than approximating it. `dev_reply` is a parameter because the opposite
+    legacy PR 54 rather than approximating it. `dev_reply` is a parameter because the opposite
     condition — the word present by luck — is the one that used to succeed and post a wrapper.
     """
 
@@ -1059,7 +1059,7 @@ class _ThreadedPR(_RecordingPR):
 
 class JsonModeBelongsToTheCallerTests(unittest.TestCase):
     """
-    #57: `call_deepseek` carried one mode's contract and the other inherited it.
+    Legacy PR 57: `call_deepseek` carried one mode's contract and the other inherited it.
 
     Mode A parses an object, so it asks for one; the word "json" in its prompt is what makes
     that legal. Mode B answers a human in prose and must not ask at all — its own prompt
@@ -1116,8 +1116,8 @@ class JsonModeBelongsToTheCallerTests(unittest.TestCase):
         # Whether "json" turns up in the conversation used to decide whether the developer
         # got an answer at all. It must decide nothing now — and the two branches failed
         # differently under the old behaviour, which is why both are here: absent, the call
-        # 400s and no reply is posted (PR #54); present, the call succeeds and the reply is
-        # posted wrapped (PR #34).
+        # 400s and no reply is posted (legacy PR 54); present, the call succeeds and the reply is
+        # posted wrapped (legacy PR 34).
         prose = (
             "You are right — it runs once per chunk load, so the cost is amortised.\n\n"
             "```go\n// no change needed\n```"
@@ -1131,14 +1131,14 @@ class JsonModeBelongsToTheCallerTests(unittest.TestCase):
             with self.subTest(thread=label):
                 _, pr = self._run_mode_b(prose, dev_reply=dev_reply)
 
-                # Verbatim, not merely "contains": PR #34's replies contain their prose too,
+                # Verbatim, not merely "contains": legacy PR 34's replies contain their prose too,
                 # inside a wrapper that the thread renders literally.
                 self.assertEqual([(2, prose)], pr.replies)
 
     def test_json_mode_is_what_wrapped_the_replies_on_pr_34(self):
-        # The other half of the fake's fidelity, and the second symptom in #57. When the word
+        # The other half of the fake's fidelity, and the second symptom in legacy PR 57. When the word
         # IS present, JSON mode does not fail — it succeeds and hands back an object, which is
-        # what both bot replies on PR #34 still are. Same helper, same prompts, one flag: the
+        # what both bot replies on legacy PR 34 still are. Same helper, same prompts, one flag: the
         # flag is the whole difference between an answer and `{"response": "…"}`.
         api = _FakeDeepSeekAPI("Plain prose, and nobody wanted it wrapped.")
 
@@ -1157,7 +1157,7 @@ class JsonModeBelongsToTheCallerTests(unittest.TestCase):
 
     def test_the_fake_api_really_does_refuse_json_mode_without_the_word(self):
         # Non-vacuity for the two above. Without this rule the fixture cannot tell a legal
-        # call from the one that 400'd on PR #54, and Mode B's tests would pass with JSON
+        # call from the one that 400'd on legacy PR 54, and Mode B's tests would pass with JSON
         # mode switched back on.
         api = _FakeDeepSeekAPI("prose")
 
@@ -1166,7 +1166,7 @@ class JsonModeBelongsToTheCallerTests(unittest.TestCase):
                 deepseek_review.call_deepseek(api, "no such word", "nor here", json_mode=True)
 
     def test_the_log_says_which_contract_the_call_used(self):
-        # This bug was only ever visible in the Actions log, so #46's rule applies to the
+        # This bug was only ever visible in the Actions log, so legacy PR 46's rule applies to the
         # line that now names the contract: a diagnostic someone makes a decision from is an
         # output, and outputs are pinned here. "(prose)" against a full review, or its
         # absence against a reply, is a wrong call spotted without re-deriving anything.

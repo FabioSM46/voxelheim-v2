@@ -17,7 +17,7 @@ from openai import APIStatusError, APITimeoutError, AuthenticationError, OpenAI
 
 # DeepSeek V4 documents a 1M-token context and a 384K maximum output, the same for
 # flash and pro. The executable guard stays at 384,000: below the provider ceiling
-# whether the documentation's K is decimal or binary. Faithful PR #80 replays
+# whether the documentation's K is decimal or binary. Faithful legacy PR 80 replays
 # exhausted both 65,536 and 131,072 tokens entirely in reasoning, and 262,144 held
 # until MAX_CHARS was raised — a diff five times larger reasons for longer before it
 # has a verdict, so the default now *is* the documented maximum rather than a step
@@ -350,7 +350,7 @@ def is_generated_path(filename):
     diffs. Reviewing generated output is worthless in both directions: nobody acts
     on a finding about regenerated bindings, and the round budget is one. The
     clinic-deck ancestor of this rule watched generated artifacts crowd 13 real
-    source files out of a review's char budget (#399) — same failure mode.
+    source files out of a review's char budget (clinic-deck #399) — same failure mode.
 
     Convention (documented in AGENTS.md): all generated code lives under a `gen/`
     path segment, and flatc's Rust output additionally carries the `_generated.`
@@ -358,7 +358,7 @@ def is_generated_path(filename):
 
     Dependency lockfiles are the same category by a different mechanism: cargo and
     `go mod` write them, nobody reviews a resolved version graph, and they are
-    enormous. On PR #15 `client/Cargo.lock` was 5264 of the 8319 non-generated
+    enormous. On legacy PR 15 `client/Cargo.lock` was 5264 of the 8319 non-generated
     lines — 63% of the diff the model was asked to read, for a file whose only
     reviewable fact (which dependencies exist) lives in the manifest next to it.
     The manifests themselves stay in: a new dependency in `Cargo.toml` or `go.mod`
@@ -376,8 +376,8 @@ class Diff(NamedTuple):
 
     `text` alone is not enough for a caller to decide anything, and returning only
     `text` is what produced two silent failures: an unreadable diff read as an empty
-    one (#31), and a truncated diff read as a complete one, so a clean verdict was
-    published for a pull request whose entire server half was never seen (#32). The
+    one (legacy PR 31), and a truncated diff read as a complete one, so a clean verdict was
+    published for a pull request whose entire server half was never seen (legacy PR 32). The
     two extra fields exist so that neither fact can be lost between here and the
     decision that depends on it.
     """
@@ -398,7 +398,7 @@ def get_diff(pr):
     except (GithubException, RequestException) as exc:
         # RequestException as well as GithubException: PyGithub raises the former when
         # urllib3 exhausts its retries, which is what a 503 storm produces. That escaped
-        # as a raw traceback until #43 — the run failed, which was the right direction,
+        # as a raw traceback until legacy PR 43 — the run failed, which was the right direction,
         # but what a human saw was a stack trace instead of "GitHub is unavailable".
         print(f"ERROR fetching PR files (GitHub API unavailable or refusing): {exc}")
         # Not an empty diff. The caller must be able to tell the difference, because
@@ -421,8 +421,8 @@ def get_diff(pr):
             # A file with textual changes and no patch is not a binary file: it is a patch
             # the API declined to send. GitHub reports 0/0 lines for a genuine binary, so
             # the two are separable — and until they were, a degraded API produced a diff
-            # of three characters for a 636-line pull request, which #31's guard could not
-            # see because nothing had raised (#43).
+            # of three characters for a 636-line pull request, which legacy PR 31's guard could not
+            # see because nothing had raised (legacy PR 43).
             #
             # What that cost: the model was handed those three characters, and — with the
             # pull request's own description still in the prompt — improvised two findings
@@ -506,7 +506,7 @@ def call_deepseek(client, system_prompt, user_prompt, *, json_mode):
     """Call DeepSeek and return the raw response text.
 
     `json_mode` is the caller's decision and deliberately has no default. It used to be
-    this helper's, hardcoded on, and that is the whole of #57: the API refuses
+    this helper's, hardcoded on, and that is the whole of legacy PR 57: the API refuses
     `response_format={"type": "json_object"}` unless the prompt contains the word "json" in
     some form. Mode A's system prompt satisfies that by construction ("Always respond with a
     JSON object"); Mode B has no such sentence, so a reply to a review comment succeeded or
@@ -516,8 +516,8 @@ def call_deepseek(client, system_prompt, user_prompt, *, json_mode):
     Both outcomes shipped, and the successes are the reason it took so long to see. A refusal
     is a 400 and exit 1 on a `pull_request_review_comment` run, which attaches no check to the
     head commit — the pull request stays green and the developer simply never gets an answer
-    (PR #54 at 81e874f). An acceptance wraps the prose in an object, and the object is what
-    gets posted: both bot replies on PR #34 are still in their threads as literal
+    (legacy PR 54 at 81e874f). An acceptance wraps the prose in an object, and the object is what
+    gets posted: both bot replies on legacy PR 34 are still in their threads as literal
     `{"response": "…"}` and `{"body": "…"}`. That was read at the time as a formatting quirk.
     It is this same bug, succeeding instead of failing.
 
@@ -536,14 +536,14 @@ def call_deepseek(client, system_prompt, user_prompt, *, json_mode):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            # PR #80 exhausted the old 65,536-token ceiling entirely in
+            # Legacy PR 80 exhausted the old 65,536-token ceiling entirely in
             # reasoning_content while reviewing 50,963 diff characters. The
             # workflow owns this explicit ceiling; startup validation keeps it
             # within V4's documented provider maximum.
             max_tokens=DEEPSEEK_MAX_OUTPUT_TOKENS,
             # Where the caller's contract IS structured data, JSON mode makes it explicit
             # instead of relying on prompt wording alone. Where it is prose, this is absent —
-            # see the docstring, and #57.
+            # see the docstring, and legacy PR 57.
             **json_contract,
             # Thinking on, effort tuned via reasoning_effort — both per the DeepSeek
             # V4 API docs; unknown extra fields are ignored by the endpoint, so this
@@ -612,7 +612,7 @@ def call_deepseek(client, system_prompt, user_prompt, *, json_mode):
     choice = resp.choices[0]
     content = choice.message.content or ""
 
-    # reasoning_content is the chain of thought, not the final answer. PR #14 hit
+    # reasoning_content is the chain of thought, not the final answer. Legacy PR 14 hit
     # the token ceiling after 125K characters of reasoning and returned no content;
     # treating that as an empty, successful review made the workflow green without
     # publishing either an APPROVE or findings. Fail the run instead so the frozen
@@ -727,7 +727,7 @@ def mode_full_review(client, repo, pr, bot_username):
 
     diff = get_diff(pr)
     if diff.unreadable:
-        # #31: this used to fall into the branch below and report "nothing to review"
+        # Legacy PR 31: this used to fall into the branch below and report "nothing to review"
         # with a green check. A read failure is not an empty diff, and the review that
         # never happened must be visible as a failure rather than discovered by
         # unzipping the run's logs.
@@ -740,8 +740,8 @@ def mode_full_review(client, repo, pr, bot_username):
         return
 
     # len(diff) would be 3 — the field count of the Diff tuple, not the size of anything.
-    # It printed exactly that for every pull request between #34 and #46, and reading it as
-    # a three-character diff is what produced #43.
+    # It printed exactly that for every pull request between legacy PRs 34 and 46, and reading it as
+    # a three-character diff is what produced legacy PR 43.
     print(f"Diff: {len(diff.text)} chars across {pr.changed_files} files")
 
     sys_prompt = (
@@ -798,7 +798,7 @@ Rules:
     review_complete, comments = _parse_review_response(raw)
 
     # A partial read cannot produce a clean verdict, and it cannot be allowed to look
-    # like one (#32). On PR #30 the budget ran out after the client files, so the entire
+    # like one (legacy PR 32). On legacy PR 30 the budget ran out after the client files, so the entire
     # server half — collision, intent intake, the speed clamp, the snapshot broadcast —
     # was never seen, and the review said "no substantive issues found". `pr-status` then
     # passed the frozen rule.
@@ -850,7 +850,7 @@ Rules:
 
     # `review_complete=false` means there are substantive issues to report. An
     # empty list cannot satisfy that contract and must not be allowed to end the
-    # workflow successfully without creating a review, as happened on PR #14.
+    # workflow successfully without creating a review, as happened on legacy PR 14.
     if not review_complete and not comments:
         raise RuntimeError(
             "DeepSeek returned no actionable review verdict: review_complete is false "
@@ -874,7 +874,7 @@ Rules:
         # GitHub forbids Actions from approving pull requests, and the PAT is no way
         # out either because nobody may approve their own PR. On a repository with one
         # human author the APPROVE path is unreachable, so attempting it turned every
-        # flawless PR into a failed job (#22).
+        # flawless PR into a failed job (legacy PR 22).
         #
         # The marker is what carries the meaning instead of the review state. It must
         # be the very first thing in the body: gh-automation.sh exempts this review
@@ -948,7 +948,7 @@ Rules:
     # Never APPROVE, whatever the verdict. GitHub forbids Actions from approving pull
     # requests, and this branch runs when the model reported comments — so an APPROVE
     # here failed the whole run for the "complete, with observations" case exactly as it
-    # did for the clean one (#22).
+    # did for the clean one (legacy PR 22).
     #
     # A verdict with observations therefore lands as a stamped COMMENT, which does
     # consume the round. That is the honest accounting: a full review happened, and the
@@ -1038,7 +1038,7 @@ def mode_reply(client, repo, pr, comment_body, comment_id, comment_author, bot_u
     # not about the whole change — but it must not be written in ignorance of what is
     # missing. Refusing outright would break the conversation feature to prevent an
     # answer that is usually fine; telling the model what it cannot see costs a paragraph
-    # and lets it say "I cannot see that file" instead of guessing (#32's failure mode,
+    # and lets it say "I cannot see that file" instead of guessing (legacy PR 32's failure mode,
     # arriving through the other door).
     if fetched.dropped:
         diff += (
@@ -1108,8 +1108,8 @@ Do NOT claim to have performed an action — you cannot resolve this thread, lab
 change a file. Recommend, never announce."""
 
     # No JSON mode: this answer goes to a human, verbatim, in the review thread. Asking for
-    # an object here is what put `{"response": "…"}` in PR #34's threads and what 400s
-    # whenever the word "json" is absent from everything above (#57).
+    # an object here is what put `{"response": "…"}` in legacy PR 34's threads and what 400s
+    # whenever the word "json" is absent from everything above (legacy PR 57).
     reply_text = call_deepseek(client, sys_prompt, user_prompt, json_mode=False)
 
     try:

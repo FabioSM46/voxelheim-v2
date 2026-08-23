@@ -134,7 +134,7 @@ for text, label in (
         "change the constant and the prose together"
     )
 
-# The job cap is a number two documents restate in prose, and #160 moved it in the
+# The job cap is a number two documents restate in prose, and legacy PR 160 moved it in the
 # workflow while leaving process-pr telling a reader the cap was 70 minutes. Nothing
 # caught it because the pins above read `timeout-minutes` out of the workflow and
 # `DEEPSEEK_WAIT_SECONDS` out of the skill, and neither of those is the sentence an

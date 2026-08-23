@@ -3,7 +3,7 @@
 #
 # The tables in AGENTS.md and in the two canonical skills each claimed to mirror
 # ci.yml — "step for step", "exactly" — and nothing checked it. golangci-lint had been
-# a blocking server gate since the Go scaffold (#13) and appeared in none of them, so an
+# a blocking server gate since the Go scaffold (legacy PR 13) and appeared in none of them, so an
 # agent following the skill table ran four gates where CI runs five, and found out on a
 # red PR. `server/AGENTS.md` was the one copy that was right, which is the tell: the
 # tables were not wrong because someone misread ci.yml, they were wrong because nothing
@@ -50,7 +50,7 @@ process_pr = (root / ".claude/skills/process-pr/SKILL.md").read_text()
 # The token is not enough on its own, and that gap was real: a skill table could have said
 # `go vet -newflag ./...`, kept the token `go vet`, and passed — an agent would then run a
 # different gate from CI, which is the exact false local pass this file exists to stop.
-# Found by the DeepSeek review on the pull request that added this test (#125).
+# Found by the DeepSeek review on the pull request that added this test (legacy PR 125).
 GATES = {
     "server": [
         ("gofmt", "gofmt -l .", 'test -z "$(gofmt -l .)"'),

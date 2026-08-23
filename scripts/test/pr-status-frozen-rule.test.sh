@@ -439,7 +439,7 @@ assert_unread "a body that merely quotes the marker is not exempt" \
 assert_unread "an approve quoting it mid-body is not exempt either" \
   "$(payload "$(review "$BOT" APPROVED '2026-08-10T10:00:00Z' $'## General Comments\n\n*1.* Worth noting `'"${NONE_MARK}"$'` here.')" '' '')" 1
 # GitHub forbids Actions from approving, so the clean verdict is a COMMENTED review that
-# leads with the marker (#22). The state can no longer be half of the test; the
+# leads with the marker (legacy PR 22). The state can no longer be half of the test; the
 # full-review marker is, and it is strictly stronger — a review carrying findings always
 # has that marker, so it cannot be exempted whatever its body starts with.
 assert_unread "a marked clean COMMENT verdict is exempt" \
