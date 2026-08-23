@@ -12,6 +12,12 @@
 //! `player/sky.rs`, because a client cannot draw chunks it was never sent; that is a ceiling
 //! applied at the moment of drawing, not a value copied into a setting.
 //!
+//! **Every setting belongs to exactly one [`Tab`], and that is what makes a reset scopable.**
+//! [`Settings::reset`] puts one tab back to its defaults and leaves every other tab exactly
+//! where the player left it. Writing `Settings::default()` back would look correct on the tab
+//! being reset and would silently clear the other one — which is why the grouping is stated
+//! here, beside the defaults, rather than on the screen that draws the button.
+//!
 //! [`store`] owns the file.
 
 mod store;
@@ -81,6 +87,39 @@ impl Plugin for SettingsPlugin {
 struct SettingsFile {
     path: Option<PathBuf>,
     written: Settings,
+}
+
+/// One half of the settings screen, and the scope of one reset.
+///
+/// **The grouping is the model's and not the screen's**, because [`Settings::reset`] is what
+/// needs it: "put Graphics back" has to name the graphics fields and no others, and a screen
+/// that owned the answer would be a second place for it to be wrong. `ui/settings.rs` draws
+/// the strip from [`Self::ALL`] and asks [`Knob::tab`] which rows go where.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    /// The mouse sensitivity and the key bindings. What the screen opens on.
+    #[default]
+    Controls,
+    /// The six graphics values and the frame-rate readout.
+    Graphics,
+}
+
+impl Tab {
+    /// Every tab, in the order the strip draws them.
+    ///
+    /// A hand-written list, for the reason `ui/inventory.rs`'s `InventoryTab::ALL` is one:
+    /// no stable Rust enumerates an enum's variants. What keeps it honest is that
+    /// [`Self::label`] and [`Settings::reset`] both match with no wildcard arm, so a third
+    /// tab is a build failure until it has a name and a set of defaults of its own.
+    pub const ALL: [Self; 2] = [Self::Controls, Self::Graphics];
+
+    /// What a player reads on the tab.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Controls => "CONTROLS",
+            Self::Graphics => "GRAPHICS",
+        }
+    }
 }
 
 /// Where a readout may be put.
@@ -411,6 +450,21 @@ impl Knob {
             Self::FrameCap => "Frame cap",
         }
     }
+
+    /// Which tab this knob is listed on, and which reset therefore puts it back.
+    ///
+    /// No wildcard arm, so a seventh knob has to say where it belongs before it builds —
+    /// which is the same thing as saying which reset owns it.
+    pub const fn tab(self) -> Tab {
+        match self {
+            Self::LookSensitivity => Tab::Controls,
+            Self::RenderDistance
+            | Self::FieldOfView
+            | Self::Brightness
+            | Self::FogStart
+            | Self::FrameCap => Tab::Graphics,
+        }
+    }
 }
 
 /// Radians of turn per logical pixel of pointer movement, before anybody changes it.
@@ -672,6 +726,43 @@ impl Settings {
         self.bindings.rebind(control, key)
     }
 
+    /// Puts `tab`'s settings back to their defaults, and **only** `tab`'s.
+    ///
+    /// **The obvious implementation is the bug.** `*self = Self::default()` passes any test
+    /// that resets one tab and then looks at that tab; what it also does is throw away every
+    /// key binding a player has ever set, silently, from a button labelled "reset graphics".
+    /// So each arm names its own fields, [`Tab`] is matched with no wildcard, and the two
+    /// directions are asserted separately in the tests below.
+    ///
+    /// **The bindings go back through [`Bindings::from_pairs`]**, the same whole-assignment
+    /// validation `store` reads the file with, rather than a sequence of [`Self::rebind`]
+    /// calls. A reset is exactly the operation that cannot be expressed one rebinding at a
+    /// time: restoring a player who traded `Escape` and `Space` crosses over halfway
+    /// through, and the second of the pair would be refused against a binding the first had
+    /// just taken. The answer is a validated set or nothing at all — and `nothing at all` is
+    /// [`Bindings::default`], which is what a reset was asking for anyway.
+    pub fn reset(&mut self, tab: Tab) {
+        let defaults = Self::default();
+        match tab {
+            Tab::Controls => {
+                self.look_sensitivity = defaults.look_sensitivity;
+                self.bindings =
+                    Bindings::from_pairs(&CONTROLS.map(|control| (control, control.default_key())))
+                        .unwrap_or_default();
+            }
+            Tab::Graphics => {
+                self.readout_shown = defaults.readout_shown;
+                self.readout_corner = defaults.readout_corner;
+                self.render_distance = defaults.render_distance;
+                self.field_of_view = defaults.field_of_view;
+                self.vsync = defaults.vsync;
+                self.frame_cap = defaults.frame_cap;
+                self.brightness = defaults.brightness;
+                self.fog_start = defaults.fog_start;
+            }
+        }
+    }
+
     /// Puts every value back inside its bound.
     ///
     /// Called on whatever [`store`] read, so a hand-edited file cannot put a reader
@@ -897,6 +988,126 @@ mod tests {
         // to its end asks for everything the most generous server could ever stream.
         settings.adjust(Knob::RenderDistance, 10_000);
         assert_eq!(settings.render_distance(), MAX_VIEW_DISTANCE);
+    }
+
+    /// Every knob is on exactly one tab, so exactly one reset owns it. Without this a knob
+    /// added to the model but forgotten in [`Knob::tab`] would simply never be resettable —
+    /// which no other assertion here would notice.
+    #[test]
+    fn every_knob_belongs_to_a_tab_and_every_tab_has_a_reset_of_its_own() {
+        for tab in Tab::ALL {
+            let mut moved = Settings::default();
+            for knob in KNOBS.into_iter().filter(|knob| knob.tab() == tab) {
+                moved.adjust(knob, 3);
+            }
+            assert_ne!(moved, Settings::default(), "{tab:?} moved no knob at all");
+            moved.reset(tab);
+            for knob in KNOBS.into_iter().filter(|knob| knob.tab() == tab) {
+                assert_eq!(
+                    moved.reading(knob),
+                    Settings::default().reading(knob),
+                    "{knob:?} survived its own tab's reset"
+                );
+            }
+        }
+    }
+
+    /// **The assertion the obvious implementation fails.** A reset that wrote
+    /// `Settings::default()` back would pass every check on the tab it was asked about and
+    /// would quietly throw away the other tab — so both directions are asserted, and each
+    /// starts from a state where *both* tabs have been moved.
+    #[test]
+    fn a_reset_puts_back_its_own_tab_and_touches_no_other() {
+        let moved = || {
+            let mut settings = Settings::default();
+            settings.adjust(Knob::LookSensitivity, 4);
+            settings
+                .rebind(Control::Forward, KeyCode::KeyT)
+                .expect("t is free");
+            settings.adjust(Knob::RenderDistance, -3);
+            settings.adjust(Knob::FieldOfView, 2);
+            settings.adjust(Knob::Brightness, -2);
+            settings.adjust(Knob::FogStart, 2);
+            settings.adjust(Knob::FrameCap, 3);
+            settings.toggle_vsync();
+            settings.toggle_readout();
+            settings.cycle_readout_corner();
+            settings
+        };
+
+        // Graphics back, controls untouched.
+        let before = moved();
+        let mut after = moved();
+        after.reset(Tab::Graphics);
+        assert_eq!(after.render_distance(), DEFAULT_RENDER_DISTANCE);
+        assert_eq!(after.frame_cap(), NO_FRAME_CAP);
+        assert!(after.vsync());
+        assert!(!after.readout_shown());
+        assert_eq!(after.readout_corner(), Corner::default());
+        assert!((after.field_of_view() - DEFAULT_FIELD_OF_VIEW).abs() < f32::EPSILON);
+        assert!((after.fog_start() - DEFAULT_FOG_START).abs() < f32::EPSILON);
+        assert!((after.brightness() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(
+            after.bindings(),
+            before.bindings(),
+            "resetting graphics cleared a key binding"
+        );
+        assert!(
+            (after.look_sensitivity() - before.look_sensitivity()).abs() < f32::EPSILON,
+            "resetting graphics moved the mouse sensitivity"
+        );
+
+        // And the mirror: controls back, graphics untouched.
+        let mut after = moved();
+        after.reset(Tab::Controls);
+        assert_eq!(*after.bindings(), Bindings::default());
+        assert!((after.look_sensitivity() - DEFAULT_LOOK_SENSITIVITY).abs() < f32::EPSILON);
+        for knob in KNOBS.into_iter().filter(|knob| knob.tab() == Tab::Graphics) {
+            assert_eq!(
+                after.reading(knob),
+                before.reading(knob),
+                "resetting controls moved {knob:?}"
+            );
+        }
+        assert_eq!(after.vsync(), before.vsync());
+        assert_eq!(after.readout_shown(), before.readout_shown());
+        assert_eq!(after.readout_corner(), before.readout_corner());
+    }
+
+    /// **A reset is a whole assignment or nothing**, which is why it goes through
+    /// [`Bindings::from_pairs`]. Two controls that have traded keys cannot be restored one
+    /// rebinding at a time — the first of the pair takes a key the second still holds — so a
+    /// reset built out of [`Settings::rebind`] calls would leave a control on whatever it
+    /// happened to be on, and could leave two controls sharing one key.
+    #[test]
+    fn a_reset_restores_two_controls_that_have_traded_keys() {
+        let mut settings = Settings::default();
+        settings
+            .rebind(Control::Menu, KeyCode::KeyG)
+            .expect("g is free");
+        settings
+            .rebind(Control::Jump, KeyCode::Escape)
+            .expect("escape is free once the menu has left it");
+        settings
+            .rebind(Control::Menu, KeyCode::Space)
+            .expect("space is free once jump has left it");
+        assert_eq!(settings.bindings().key(Control::Jump), KeyCode::Escape);
+        assert_eq!(settings.bindings().key(Control::Menu), KeyCode::Space);
+
+        settings.reset(Tab::Controls);
+        assert_eq!(settings.bindings().key(Control::Jump), KeyCode::Space);
+        assert_eq!(settings.bindings().key(Control::Menu), KeyCode::Escape);
+
+        // And whatever it restored is a legal assignment: one offered key per control, and
+        // no control left unreachable.
+        let mut keys = CONTROLS.map(|control| settings.bindings().key(control));
+        for key in keys {
+            assert!(key_name(key).is_some(), "{key:?} is not an offered key");
+        }
+        keys.sort_by_key(|key| key_name(*key).unwrap_or_default());
+        let mut distinct = keys.to_vec();
+        distinct.dedup();
+        assert_eq!(distinct.len(), CONTROLS.len(), "a reset shared a key");
     }
 
     #[test]

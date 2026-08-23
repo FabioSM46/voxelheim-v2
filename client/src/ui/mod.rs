@@ -92,6 +92,15 @@ pub(super) const BUTTON_HOVERED: Color = Color::srgb(0.25, 0.29, 0.35);
 /// different thing from a hover rather than as more of one.
 pub(super) const BUTTON_PRESSED: Color = Color::srgb(0.42, 0.31, 0.15);
 
+/// The tab a strip currently has selected.
+///
+/// Its own state rather than one of the three [`button_colour`] answers: a selected tab is
+/// not a hovered tab and not a pressed one, and a palette with three interactions has no arm
+/// for it. It sits here rather than in the file that grew the first strip because there are
+/// two strips now — `ui/inventory.rs`'s and `ui/settings.rs`'s — and a second copy is exactly
+/// the shape the paragraph above describes.
+pub(super) const TAB_SELECTED: Color = Color::srgb(0.20, 0.24, 0.30);
+
 /// What a button wears for the interaction it is in.
 ///
 /// Total over [`Interaction`] with no wildcard arm, so a fourth interaction state is a

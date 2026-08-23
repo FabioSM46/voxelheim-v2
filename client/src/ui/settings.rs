@@ -7,12 +7,20 @@
 //! **While it is up, `ui/mod.rs`'s `choose_input_mode` reads no key at all** and
 //! [`read_settings_keys`] runs after it — so the press that closes this screen cannot also
 //! resume play, and the key being bound cannot also fire the control it is taken from.
+//!
+//! **The screen is two tabs and the area under them never changes size.** That is a stated
+//! layout decision rather than a coincidence: `ui/inventory.rs` lays its strip out above a
+//! column whose height is whatever the visible half needs, so the panel — strip included —
+//! moves when a player switches tabs, which is what #251 is about. Here the content area is
+//! [`CONTENT_HEIGHT`] tall whichever tab is up, and
+//! `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` is what keeps that true when a row
+//! is added.
 
 use bevy::prelude::*;
 
-use super::{BUTTON, button_colour};
+use super::{BUTTON, TAB_SELECTED, button_colour};
 use crate::player::InputMode;
-use crate::settings::{CONTROLS, Control, KNOBS, Knob, Settings, key_name};
+use crate::settings::{CONTROLS, Control, KNOBS, Knob, Settings, Tab, key_name};
 
 /// Whether the screen is up, and what it is waiting for.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
@@ -54,6 +62,7 @@ impl Plugin for SettingsScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsScreen>()
             .init_resource::<Settings>()
+            .init_resource::<Tab>()
             .add_systems(Startup, spawn_settings_screen)
             // Chained, and the order is what makes a press readable on the frame it
             // happened: the two systems that change something run before the one that draws
@@ -63,6 +72,8 @@ impl Plugin for SettingsScreenPlugin {
                 Update,
                 (
                     show_settings_screen,
+                    switch_settings_tabs,
+                    show_the_active_settings_tab,
                     settings_actions,
                     // After the input mode, so the frame that closes this screen is a
                     // frame `choose_input_mode` has already declined to read.
@@ -78,6 +89,26 @@ impl Plugin for SettingsScreenPlugin {
 #[derive(Component)]
 struct SettingsRoot;
 
+/// Marks the strip of tabs, whose place on the panel never changes.
+#[derive(Component)]
+struct TabStrip;
+
+/// Marks the fixed-height area a tab's contents are drawn in. See [`CONTENT_HEIGHT`].
+#[derive(Component)]
+struct TabContent;
+
+/// One tab in the strip: the half it selects.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct TabButton(Tab);
+
+/// The container holding one tab's rows, shown by `Display` and never by `Visibility`.
+///
+/// `bevy_ui` lays a hidden node out exactly as it lays out a visible one, so a `Visibility`
+/// here would leave the graphics rows occupying the area's height while the controls are up
+/// — the same trap `ui/inventory.rs` and `ui/character.rs` both record for their own halves.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct TabPanel(Tab);
+
 /// What pressing a control on this screen means.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsAction {
@@ -88,6 +119,8 @@ enum SettingsAction {
     CycleCorner,
     /// Wait for the next key press and give it to this control.
     Capture(Control),
+    /// Put one tab's settings back to their defaults — **and only that tab's**.
+    Reset(Tab),
     /// Back to the pause menu.
     Back,
 }
@@ -113,8 +146,38 @@ const STEP_BUTTON: f32 = 30.0;
 /// The height of every control on this screen, in logical pixels.
 const ROW_HEIGHT: f32 = 28.0;
 
+/// The gap between two rows, in logical pixels.
+const ROW_GAP: f32 = 6.0;
+
+/// The height of a full-width control — the reset at the foot of a tab, and `BACK`.
+const WIDE_BUTTON: f32 = 40.0;
+
+/// The most rows any one tab may draw.
+///
+/// **The number the layout is sized from, and the reason the strip does not move.** Both tabs
+/// draw eight rows today, and a content area sized to "whatever this tab needs" would be
+/// stable purely by that coincidence — until the ninth row arrived on one of them, which is
+/// how `ui/inventory.rs` ended up with the geometry #251 describes.
+/// `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails rather than the panel jumping.
+const CONTENT_ROWS: usize = 8;
+
+/// The height of the area a tab's contents are drawn in, in logical pixels.
+const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
+
 /// Font size for a row's label and its reading.
 const ROW_FONT: FontSize = FontSize::Px(15.0);
+
+/// What a tab's reset button says.
+///
+/// Its own sentence rather than a bare `RESET`, because the one thing a player must not have
+/// to guess is how far the button reaches. No wildcard arm, so a third tab has to name itself
+/// here before it builds.
+const fn reset_label(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Controls => "RESET CONTROLS",
+        Tab::Graphics => "RESET GRAPHICS",
+    }
+}
 
 fn spawn_settings_screen(mut commands: Commands) {
     commands
@@ -166,15 +229,41 @@ fn spawn_settings_screen(mut commands: Commands) {
                         },
                     ));
 
+                    spawn_tab_strip(panel);
+
+                    // The fixed-height area. Its height is [`CONTENT_HEIGHT`] and not
+                    // "whatever the visible tab needs", which is the whole of what keeps the
+                    // strip above it still when the tab changes.
                     panel
-                        .spawn(Node {
-                            width: Val::Px(COLUMN),
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(6.0),
-                            ..default()
-                        })
-                        .with_children(spawn_rows);
+                        .spawn((
+                            TabContent,
+                            Node {
+                                width: Val::Px(COLUMN),
+                                height: Val::Px(CONTENT_HEIGHT),
+                                display: Display::Flex,
+                                flex_direction: FlexDirection::Column,
+                                ..default()
+                            },
+                        ))
+                        .with_children(|content| {
+                            for tab in Tab::ALL {
+                                content
+                                    .spawn((
+                                        TabPanel(tab),
+                                        // Set by `show_the_active_settings_tab` from the
+                                        // frame the screen is built, so this is only what it
+                                        // starts as.
+                                        Node {
+                                            display: Display::None,
+                                            flex_direction: FlexDirection::Column,
+                                            row_gap: Val::Px(ROW_GAP),
+                                            height: Val::Percent(100.0),
+                                            ..default()
+                                        },
+                                    ))
+                                    .with_children(|column| spawn_tab_rows(column, tab));
+                            }
+                        });
 
                     panel.spawn((
                         Reading::Notice,
@@ -203,59 +292,144 @@ fn spawn_settings_screen(mut commands: Commands) {
         });
 }
 
-/// Every row on the panel: the numbers, each between a `-` and a `+`, then the two flags and
-/// the corner, then one button per rebindable control whose face is the key it currently
-/// answers to.
-fn spawn_rows(column: &mut ChildSpawnerCommands<'_>) {
-    for knob in KNOBS {
-        spawn_row(column, knob.label(), |controls| {
-            spawn_button(
-                controls,
-                SettingsAction::Nudge(knob, -1),
-                Val::Px(STEP_BUTTON),
-                Face::Fixed("-"),
-            );
-            spawn_reading(controls, Reading::Knob(knob));
-            spawn_button(
-                controls,
-                SettingsAction::Nudge(knob, 1),
-                Val::Px(STEP_BUTTON),
-                Face::Fixed("+"),
-            );
+/// The strip of tabs, built from [`Tab::ALL`] so a third one appears in it by existing.
+fn spawn_tab_strip(panel: &mut ChildSpawnerCommands<'_>) {
+    panel
+        .spawn((
+            TabStrip,
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(ROW_GAP),
+                ..default()
+            },
+        ))
+        .with_children(|strip| {
+            for tab in Tab::ALL {
+                strip
+                    .spawn((
+                        TabButton(tab),
+                        Button,
+                        Node {
+                            padding: UiRect::axes(Val::Px(14.0), Val::Px(7.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(BUTTON),
+                    ))
+                    .with_child((
+                        Text::new(tab.label()),
+                        TextFont {
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                        TextShadow::default(),
+                    ));
+            }
+        });
+}
+
+/// One row on a tab: what it is, and therefore what sits on its right.
+#[derive(Debug, Clone, Copy)]
+enum Row {
+    /// A number between a `-` and a `+`.
+    Knob(Knob),
+    /// A flag or a cycle: one button whose face is the value pressing it changes.
+    Toggle(&'static str, SettingsAction, Reading),
+    /// A rebindable control, whose button face is the key it answers to.
+    Binding(Control),
+}
+
+impl Row {
+    /// What the row is called on its left.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Knob(knob) => knob.label(),
+            Self::Toggle(label, _, _) => label,
+            Self::Binding(control) => control.label(),
+        }
+    }
+}
+
+/// Every row `tab` draws, in order.
+///
+/// **One list, read by the spawner and by the test that holds a tab inside its area**, so
+/// "how tall is this tab" has one answer rather than two that drift. The knobs come from
+/// [`Knob::tab`], which is the same statement [`Settings::reset`] scopes itself by — a knob
+/// cannot appear on one tab and be reset by the other.
+fn rows_of(tab: Tab) -> Vec<Row> {
+    let mut rows: Vec<Row> = KNOBS
+        .into_iter()
+        .filter(|knob| knob.tab() == tab)
+        .map(Row::Knob)
+        .collect();
+    match tab {
+        Tab::Controls => rows.extend(CONTROLS.into_iter().map(Row::Binding)),
+        Tab::Graphics => rows.extend([
+            Row::Toggle("Vertical sync", SettingsAction::ToggleVsync, Reading::Vsync),
+            Row::Toggle(
+                "FPS readout",
+                SettingsAction::ToggleReadout,
+                Reading::Readout,
+            ),
+            Row::Toggle(
+                "Readout corner",
+                SettingsAction::CycleCorner,
+                Reading::ReadoutCorner,
+            ),
+        ]),
+    }
+    rows
+}
+
+/// One tab's rows, and the reset that puts exactly those rows back.
+fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
+    for row in rows_of(tab) {
+        spawn_row(column, row.label(), |controls| match row {
+            Row::Knob(knob) => {
+                spawn_button(
+                    controls,
+                    SettingsAction::Nudge(knob, -1),
+                    Val::Px(STEP_BUTTON),
+                    Face::Fixed("-"),
+                );
+                spawn_reading(controls, Reading::Knob(knob));
+                spawn_button(
+                    controls,
+                    SettingsAction::Nudge(knob, 1),
+                    Val::Px(STEP_BUTTON),
+                    Face::Fixed("+"),
+                );
+            }
+            Row::Toggle(_, action, reading) => {
+                spawn_button(
+                    controls,
+                    action,
+                    Val::Px(STEP_BUTTON * 4.0),
+                    Face::Value(reading),
+                );
+            }
+            Row::Binding(control) => {
+                spawn_button(
+                    controls,
+                    SettingsAction::Capture(control),
+                    Val::Px(STEP_BUTTON * 4.0),
+                    Face::Value(Reading::Binding(control)),
+                );
+            }
         });
     }
-    for (label, action, reading) in [
-        ("Vertical sync", SettingsAction::ToggleVsync, Reading::Vsync),
-        (
-            "FPS readout",
-            SettingsAction::ToggleReadout,
-            Reading::Readout,
-        ),
-        (
-            "Readout corner",
-            SettingsAction::CycleCorner,
-            Reading::ReadoutCorner,
-        ),
-    ] {
-        spawn_row(column, label, |controls| {
-            spawn_button(
-                controls,
-                action,
-                Val::Px(STEP_BUTTON * 4.0),
-                Face::Value(reading),
-            );
-        });
-    }
-    for control in CONTROLS {
-        spawn_row(column, control.label(), |controls| {
-            spawn_button(
-                controls,
-                SettingsAction::Capture(control),
-                Val::Px(STEP_BUTTON * 4.0),
-                Face::Value(Reading::Binding(control)),
-            );
-        });
-    }
+
+    // At the foot of its own tab, and pushed there by the free space rather than by a count
+    // of rows: a tab with fewer rows than [`CONTENT_ROWS`] still puts its reset where the
+    // other tab's is.
+    spawn_button(
+        column,
+        SettingsAction::Reset(tab),
+        Val::Percent(100.0),
+        Face::Fixed(reset_label(tab)),
+    );
 }
 
 /// A labelled row whose controls `fill` puts on the right.
@@ -313,18 +487,20 @@ fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
 
 /// One pressable control on this screen.
 ///
-/// The three shapes differ only in width and in what is written on them: a `-` or `+`
-/// beside a number, a wide face that *is* the value it changes, and the entry at the foot
-/// of the panel. `face` carries the difference.
+/// The three shapes differ only in width and in what is written on them: a `-` or `+` beside
+/// a number, a wide face that *is* the value it changes, and a full-width entry at the foot
+/// of the column it is in. `face` carries the difference.
 fn spawn_button(
     parent: &mut ChildSpawnerCommands<'_>,
     action: SettingsAction,
     width: Val,
     face: Face,
 ) {
-    let (height, font) = match width {
-        Val::Percent(_) => (40.0, FontSize::Px(18.0)),
-        _ => (ROW_HEIGHT - 4.0, ROW_FONT),
+    let full_width = matches!(width, Val::Percent(_));
+    let (height, font) = if full_width {
+        (WIDE_BUTTON, FontSize::Px(18.0))
+    } else {
+        (ROW_HEIGHT - 4.0, ROW_FONT)
     };
     let mut button = parent.spawn((
         action,
@@ -332,6 +508,18 @@ fn spawn_button(
         Node {
             width,
             height: Val::Px(height),
+            // A full-width control sits at the foot of its column: the auto margin takes
+            // whatever space the rows above did not, which is what puts a tab's reset in the
+            // same place whether that tab drew eight rows or three. In a column with no free
+            // space — the panel `BACK` sits in — an auto margin is simply nought.
+            margin: if full_width {
+                UiRect {
+                    top: Val::Auto,
+                    ..default()
+                }
+            } else {
+                UiRect::default()
+            },
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             border_radius: BorderRadius::all(Val::Px(3.0)),
@@ -396,6 +584,74 @@ fn show_settings_screen(
     }
 }
 
+/// Reads the tab strip, and paints it.
+///
+/// **Originates nothing**, exactly as `ui/inventory.rs`'s does: a press writes a resource,
+/// and which rows have a `Display` is the whole of what changes.
+///
+/// **The tab is not reset when the screen reopens**, which is the one place this differs from
+/// that screen. A pack is a thing a player came to look at and the crafting list is a
+/// detour; two settings tabs are two halves of one errand, and a player who was adjusting the
+/// graphics and stepped back out to look at something should find the graphics again. Nothing
+/// here depends on it either way — there is no reset for a stray press to undo.
+///
+/// **A waiting capture does not survive the switch**, and that is the one thing here that is
+/// not merely painting. A capture is armed over a row on the tab it was armed from; carry it
+/// to the other tab and the next key press rebinds a control the player can no longer see,
+/// while the notice under the panel goes on asking for a key beside rows that have nothing to
+/// do with it. The binding it overwrites is one nobody chose to change. `SettingsAction::Reset`
+/// takes a capture back for the same reason and says so where it does it — the state stops
+/// being readable, so it stops being armed.
+fn switch_settings_tabs(
+    mut tabs: Query<(&TabButton, &Interaction, &mut BackgroundColor)>,
+    mut active: ResMut<Tab>,
+    mut screen: ResMut<SettingsScreen>,
+) {
+    for (tab, interaction, _) in &tabs {
+        if *interaction == Interaction::Pressed && *active != tab.0 {
+            *active = tab.0;
+            // Guarded rather than assigned unconditionally: `ResMut` marks the resource
+            // changed on any deref, and a screen that reported a change on every tab press
+            // would wake every reader of it for nothing.
+            if screen.capturing.is_some() {
+                screen.capturing = None;
+            }
+        }
+    }
+
+    for (tab, interaction, mut colour) in &mut tabs {
+        // The selected tab keeps its own colour under the pointer too: a tab that lit up like
+        // an unselected one while hovered would read as though pressing it did something, and
+        // it does not.
+        let next = if tab.0 == *active {
+            TAB_SELECTED
+        } else {
+            button_colour(interaction)
+        };
+        if colour.0 != next {
+            colour.0 = next;
+        }
+    }
+}
+
+/// Gives the active tab a `Display` and takes it from the others.
+///
+/// `Display`, never `Visibility` — see [`TabPanel`].
+fn show_the_active_settings_tab(active: Res<Tab>, mut panels: Query<(&TabPanel, &mut Node)>) {
+    for (panel, mut node) in &mut panels {
+        let next = if panel.0 == *active {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        // Written only on a change, because `Mut<Node>` marks the component changed on the
+        // first `DerefMut` and `bevy_ui` lays a changed node's subtree out again.
+        if node.display != next {
+            node.display = next;
+        }
+    }
+}
+
 type SettingsButton<'a> = (&'a Interaction, &'a SettingsAction, &'a mut BackgroundColor);
 
 /// Applies a press.
@@ -414,6 +670,13 @@ fn settings_actions(
             SettingsAction::ToggleVsync => settings.toggle_vsync(),
             SettingsAction::ToggleReadout => settings.toggle_readout(),
             SettingsAction::CycleCorner => settings.cycle_readout_corner(),
+            SettingsAction::Reset(tab) => {
+                settings.reset(tab);
+                // A capture is taken back by the reset, and has to be: it was armed over a
+                // binding that has just been replaced, so the next key press would answer a
+                // question the player can no longer see the state of.
+                screen.capturing = None;
+            }
             SettingsAction::Capture(control) => {
                 // A second press on the row that is already waiting takes the request
                 // back. It is the cancel `Escape` used to be, moved onto the mouse that
@@ -586,6 +849,51 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .reset_all();
+    }
+
+    /// Presses one tab in the strip and lets go of it.
+    fn press_tab(app: &mut App, wanted: Tab) {
+        let button = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &TabButton)>();
+            query
+                .iter(world)
+                .find(|(_, tab)| tab.0 == wanted)
+                .map(|(entity, _)| entity)
+                .unwrap_or_else(|| panic!("no tab for {wanted:?}"))
+        };
+        *app.world_mut()
+            .entity_mut(button)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Pressed;
+        app.update();
+        *app.world_mut()
+            .entity_mut(button)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::None;
+        app.update();
+    }
+
+    /// The node of the one entity carrying `C`.
+    fn marker_node<C: Component>(app: &mut App) -> Node {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Node, With<C>>();
+        let found: Vec<Node> = query.iter(world).cloned().collect();
+        assert_eq!(found.len(), 1, "exactly one node carries this marker");
+        found.into_iter().next().expect("just counted one")
+    }
+
+    /// Which tabs' rows occupy the content area, read the way `bevy_ui` decides it.
+    fn shown_tabs(app: &mut App) -> Vec<Tab> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&TabPanel, &Node)>();
+        let mut tabs: Vec<Tab> = query
+            .iter(world)
+            .filter(|(_, node)| node.display != Display::None)
+            .map(|(panel, _)| panel.0)
+            .collect();
+        tabs.sort_by_key(|tab| format!("{tab:?}"));
+        tabs
     }
 
     fn reading_of(app: &mut App, wanted: Reading) -> String {
@@ -773,8 +1081,215 @@ mod tests {
         assert_eq!(*app.world().resource::<Settings>(), changed);
     }
 
-    /// The two flags and the corner are reachable from the screen, and each reads back what
-    /// pressing it did.
+    // -------------------------------------------------------------------------
+    // The tabs
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn the_screen_opens_on_the_controls_and_shows_one_tab_at_a_time() {
+        let mut app = screen_app();
+        assert_eq!(shown_tabs(&mut app), vec![Tab::Controls]);
+        assert_eq!(*app.world().resource::<Tab>(), Tab::Controls);
+    }
+
+    #[test]
+    fn pressing_a_tab_swaps_which_rows_occupy_the_area() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Graphics);
+        assert_eq!(shown_tabs(&mut app), vec![Tab::Graphics]);
+        press_tab(&mut app, Tab::Controls);
+        assert_eq!(shown_tabs(&mut app), vec![Tab::Controls]);
+    }
+
+    /// **The acceptance criterion, and the geometry #251 records for the other screen.** The
+    /// strip and the area under it are the same nodes whichever tab is up, so nothing a
+    /// player is aiming at moves when they switch — only which rows have a `Display`.
+    #[test]
+    fn the_strip_stays_where_it_is_and_only_the_area_below_it_swaps() {
+        let mut app = screen_app();
+        let before = (
+            marker_node::<TabStrip>(&mut app),
+            marker_node::<TabContent>(&mut app),
+        );
+        press_tab(&mut app, Tab::Graphics);
+        let after = (
+            marker_node::<TabStrip>(&mut app),
+            marker_node::<TabContent>(&mut app),
+        );
+
+        assert_eq!(
+            before, after,
+            "switching tabs moved the strip or resized the area under it"
+        );
+        // And the area's height is a stated constant rather than whatever this tab needed,
+        // which is what makes the equality above hold for a tab that is not this pair.
+        assert_eq!(before.1.height, Val::Px(CONTENT_HEIGHT));
+        assert_eq!(shown_tabs(&mut app), vec![Tab::Graphics]);
+    }
+
+    /// The guard on the constant above: a ninth row on either tab is a failing test here
+    /// rather than a panel that quietly grows and takes the strip with it.
+    #[test]
+    fn no_tab_needs_more_rows_than_the_area_it_is_drawn_in() {
+        for tab in Tab::ALL {
+            let rows = rows_of(tab).len();
+            assert!(
+                rows <= CONTENT_ROWS,
+                "{tab:?} draws {rows} rows into an area sized for {CONTENT_ROWS}"
+            );
+            assert!(rows > 0, "{tab:?} draws nothing at all");
+        }
+    }
+
+    /// Every knob has a row on exactly one tab, and every rebindable control has one.
+    #[test]
+    fn every_setting_the_model_offers_has_a_row_somewhere() {
+        let all: Vec<Row> = Tab::ALL.into_iter().flat_map(rows_of).collect();
+        for knob in KNOBS {
+            let drawn = all
+                .iter()
+                .filter(|row| matches!(row, Row::Knob(drawn) if *drawn == knob))
+                .count();
+            assert_eq!(drawn, 1, "{knob:?} has {drawn} rows");
+        }
+        for control in CONTROLS {
+            let drawn = all
+                .iter()
+                .filter(|row| matches!(row, Row::Binding(drawn) if *drawn == control))
+                .count();
+            assert_eq!(drawn, 1, "{control:?} has {drawn} rows");
+        }
+
+        // **The toggles too, and they are the half this test used to miss.** `KNOBS` and
+        // `CONTROLS` are lists the model owns, so sweeping them catches a row that was never
+        // drawn; the three toggles are written into `rows_of` by hand and were therefore
+        // covered by nothing — `the_graphics_flags_read_back_what_pressing_them_did` presses
+        // the actions directly, so a row could have been deleted from the screen with every
+        // test still green.
+        for reading in [Reading::Vsync, Reading::Readout, Reading::ReadoutCorner] {
+            let drawn = all
+                .iter()
+                .filter(|row| matches!(row, Row::Toggle(_, _, shown) if *shown == reading))
+                .count();
+            assert_eq!(drawn, 1, "{reading:?} has {drawn} rows");
+        }
+        // And the count, so the sweep above cannot be satisfied by a list that has grown a
+        // fourth toggle nobody named here.
+        let toggles = all
+            .iter()
+            .filter(|row| matches!(row, Row::Toggle(..)))
+            .count();
+        assert_eq!(
+            toggles, 3,
+            "the screen draws {toggles} toggles; name the new one above rather than widening \
+             this number"
+        );
+    }
+
+    /// Leaving the tab a capture was armed on takes the capture back.
+    ///
+    /// Found in review on PR #257. A capture is armed over one row; switch tabs and that row is
+    /// no longer drawn, but the arm survived — so the next key press rebound a control the
+    /// player could not see, while the notice under the panel went on asking for a key. The
+    /// binding it overwrote was one nobody had chosen to change.
+    #[test]
+    fn switching_tabs_takes_back_a_capture_armed_on_the_one_being_left() {
+        let mut app = screen_app();
+        press(&mut app, SettingsAction::Capture(Control::Forward));
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().capturing,
+            Some(Control::Forward),
+            "the capture did not arm, so this test would pass for the wrong reason"
+        );
+
+        press_tab(&mut app, Tab::Graphics);
+
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().capturing,
+            None,
+            "a capture armed on CONTROLS survived the switch to GRAPHICS"
+        );
+
+        // And the key that would have gone to it goes nowhere: the binding it was armed over
+        // is the one it started as. Asserting the state alone would not catch a capture that
+        // was cleared and re-armed by the same press.
+        let bindings = *app.world().resource::<Settings>().bindings();
+        press_key(&mut app, KeyCode::KeyJ);
+        assert_eq!(
+            *app.world().resource::<Settings>().bindings(),
+            bindings,
+            "a key pressed after the switch still rebound something"
+        );
+    }
+
+    /// Pressing the tab already showing is not leaving it, so a capture on it survives.
+    ///
+    /// The negative that keeps the fix above honest: clearing on every tab press would pass
+    /// that test and would also cancel a capture a player armed and then clicked beside.
+    #[test]
+    fn pressing_the_tab_already_showing_leaves_a_capture_armed() {
+        let mut app = screen_app();
+        press(&mut app, SettingsAction::Capture(Control::Forward));
+
+        press_tab(&mut app, Tab::Controls);
+
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().capturing,
+            Some(Control::Forward),
+            "pressing the tab that was already showing cancelled the capture"
+        );
+    }
+
+    /// Each tab's own panel carries its own reset button, and only its own.
+    ///
+    /// `press` finds a button anywhere in the world, so every `a_reset_*` test above passes on
+    /// a screen where both reset buttons sit on one tab, or where one of them is drawn outside
+    /// any panel at all. What those tests pin is that the *action* is scoped; this pins that
+    /// the button a player can actually reach is the one for the tab they are looking at.
+    #[test]
+    fn each_tab_draws_its_own_reset_button_and_no_other() {
+        let mut app = screen_app();
+        let world = app.world_mut();
+
+        let resets: Vec<(Entity, Tab)> = world
+            .query::<(Entity, &SettingsAction)>()
+            .iter(world)
+            .filter_map(|(entity, action)| match action {
+                SettingsAction::Reset(tab) => Some((entity, *tab)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            resets.len(),
+            Tab::ALL.len(),
+            "the screen draws {} reset buttons for {} tabs",
+            resets.len(),
+            Tab::ALL.len()
+        );
+
+        for (button, tab) in resets {
+            // Up the tree to the panel the button is actually inside. A reset drawn outside
+            // every panel reaches the end with nothing found, which is the failure this walk
+            // exists to name.
+            let mut at = button;
+            let panel = loop {
+                if let Some(panel) = world.get::<TabPanel>(at) {
+                    break Some(panel.0);
+                }
+                match world.get::<ChildOf>(at) {
+                    Some(parent) => at = parent.0,
+                    None => break None,
+                }
+            };
+            assert_eq!(
+                panel,
+                Some(tab),
+                "the reset for {tab:?} is drawn inside {panel:?} rather than inside its own tab"
+            );
+        }
+    }
+
+    /// The two flags and the corner are reachable, and each says what it is.
     #[test]
     fn the_graphics_flags_read_back_what_pressing_them_did() {
         let mut app = screen_app();
@@ -797,6 +1312,117 @@ mod tests {
                 .readout_corner()
                 .name()
                 .to_owned()
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // The per-tab reset
+    // -------------------------------------------------------------------------
+
+    /// Moves something on both tabs, so a reset that took the whole struct back would be
+    /// visible from either side.
+    fn move_both_tabs(app: &mut App) {
+        press(app, SettingsAction::Nudge(Knob::LookSensitivity, 1));
+        press(app, SettingsAction::Capture(Control::Forward));
+        press_key(app, KeyCode::KeyT);
+        release_keys(app);
+        press(app, SettingsAction::Nudge(Knob::RenderDistance, -1));
+        press(app, SettingsAction::ToggleVsync);
+        press(app, SettingsAction::ToggleReadout);
+    }
+
+    /// **The bug this button is most likely to have**, pressed through the screen: resetting
+    /// graphics must leave every binding and the sensitivity exactly where the player put
+    /// them.
+    #[test]
+    fn resetting_graphics_leaves_the_controls_tab_alone() {
+        let mut app = screen_app();
+        move_both_tabs(&mut app);
+        let before = app.world().resource::<Settings>().clone();
+
+        press(&mut app, SettingsAction::Reset(Tab::Graphics));
+        let after = app.world().resource::<Settings>().clone();
+
+        assert_eq!(
+            after.render_distance(),
+            Settings::default().render_distance()
+        );
+        assert!(after.vsync(), "vsync did not come back");
+        assert!(!after.readout_shown(), "the readout did not come back");
+        assert_eq!(
+            after.bindings(),
+            before.bindings(),
+            "resetting graphics cleared a key binding"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Forward)),
+            "t",
+            "the screen shows a binding the reset should not have touched"
+        );
+        assert_eq!(
+            after.reading(Knob::LookSensitivity),
+            before.reading(Knob::LookSensitivity),
+            "resetting graphics moved the mouse sensitivity"
+        );
+    }
+
+    /// And the mirror, which is the half a happy-path test would have missed.
+    #[test]
+    fn resetting_controls_leaves_the_graphics_tab_alone() {
+        let mut app = screen_app();
+        move_both_tabs(&mut app);
+        let before = app.world().resource::<Settings>().clone();
+
+        press(&mut app, SettingsAction::Reset(Tab::Controls));
+        let after = app.world().resource::<Settings>().clone();
+
+        assert_eq!(
+            after.bindings().key(Control::Forward),
+            KeyCode::KeyW,
+            "the binding did not come back"
+        );
+        assert_eq!(
+            after.reading(Knob::LookSensitivity),
+            Settings::default().reading(Knob::LookSensitivity)
+        );
+        assert_eq!(
+            after.render_distance(),
+            before.render_distance(),
+            "resetting controls moved the render distance"
+        );
+        assert_eq!(after.vsync(), before.vsync());
+        assert_eq!(after.readout_shown(), before.readout_shown());
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Forward)),
+            "w",
+            "the screen still shows the binding that was reset away"
+        );
+    }
+
+    /// A reset takes back a capture it has just invalidated, so the next key press is not
+    /// silently answering a question about a binding that no longer exists.
+    #[test]
+    fn a_reset_takes_back_a_waiting_capture() {
+        let mut app = screen_app();
+        press(&mut app, SettingsAction::Capture(Control::Jump));
+        assert_eq!(reading_of(&mut app, Reading::Binding(Control::Jump)), "...");
+
+        press(&mut app, SettingsAction::Reset(Tab::Controls));
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Jump)),
+            "space"
+        );
+        assert_eq!(reading_of(&mut app, Reading::Notice), "");
+
+        // Nothing is waiting, so the next key is the way out rather than a binding.
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!app.world().resource::<SettingsScreen>().is_open());
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .bindings()
+                .key(Control::Jump),
+            KeyCode::Space
         );
     }
 

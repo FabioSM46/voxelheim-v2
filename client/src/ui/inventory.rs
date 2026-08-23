@@ -24,8 +24,8 @@ use bevy::window::PrimaryWindow;
 
 use super::icon::DrawnIcon;
 use super::{
-    BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, button_colour, cell_node, refresh_cell_contents,
-    spawn_cell_contents, stack_style,
+    BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, TAB_SELECTED, button_colour, cell_node,
+    refresh_cell_contents, spawn_cell_contents, stack_style,
 };
 use crate::net::{Session, StructureKind};
 use crate::player::{
@@ -174,15 +174,6 @@ struct TabButton(InventoryTab);
 /// `Display::None`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct TabPanel(InventoryTab);
-
-/// The tab currently on show.
-///
-/// Its own state rather than one of the three [`super::button_colour`] answers, for the
-/// reason the short recipe row below has one: a selected tab is not a hovered tab and not a
-/// pressed one, and a palette with three interactions has no arm for it. The three ordinary
-/// ones still come from that one function — a tab strip is exactly the fifth copy of the
-/// button palette #163 collapsed, and must not become one.
-const TAB_SELECTED: Color = Color::srgb(0.20, 0.24, 0.30);
 
 fn spawn_inventory_screen(mut commands: Commands) {
     commands
