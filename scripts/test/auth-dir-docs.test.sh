@@ -20,13 +20,13 @@ from pathlib import Path
 
 
 def temporary_auth_dir_lines(text: str) -> list[int]:
-    """Return lines whose `-auth-dir` argument points below `/tmp`."""
+    """Return lines whose `-auth-dir` or `--auth-dir` points below `/tmp`."""
     # A shell continuation is whitespace for this purpose. Normalising it keeps a
     # future two-line command from walking around the guard while preserving line
     # numbers closely enough to identify the command that must be fixed.
     normalised = re.sub(r"\\\r?\n", " ", text)
     pattern = re.compile(
-        r"(?:^|[ \t])-auth-dir(?:[ \t]*=[ \t]*|[ \t]+)[\"']?"
+        r"(?:^|[ \t])--?auth-dir(?:[ \t]*=[ \t]*|[ \t]+)[\"']?"
         r"/tmp(?:/|(?=[\"' \t\r\n`]|$))",
         re.MULTILINE,
     )
@@ -38,7 +38,11 @@ def temporary_auth_dir_lines(text: str) -> list[int]:
 assert temporary_auth_dir_lines("run -auth-dir /tmp/voxelheim-auth\n") == [1]
 assert temporary_auth_dir_lines("run -auth-dir='/tmp/accounts'\n") == [1]
 assert temporary_auth_dir_lines("run -auth-dir=/tmp/accounts\n") == [1]
+assert temporary_auth_dir_lines("run --auth-dir /tmp/voxelheim-auth\n") == [1]
+assert temporary_auth_dir_lines("run --auth-dir='/tmp/accounts'\n") == [1]
+assert temporary_auth_dir_lines("run --auth-dir=/tmp/accounts\n") == [1]
 assert not temporary_auth_dir_lines("run -auth-dir $PERSISTENT_DATA/accounts\n")
+assert not temporary_auth_dir_lines("run --auth-dir $PERSISTENT_DATA/accounts\n")
 
 readme = Path(sys.argv[1]).read_text(encoding="utf-8")
 unsafe = temporary_auth_dir_lines(readme)
