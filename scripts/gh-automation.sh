@@ -1140,6 +1140,51 @@ cmd_pr_check_label() {
 
 # ── is-ready-to-merge — Exit 0 if frozen rule met ───────────────────────────
 
+# The base branch a merge may never target. Merging into `develop` is the AI's call
+# (#217); merging into `main` is not, and a deny rule cannot express that difference —
+# `gh pr merge <n>` names no branch, because the base is a property of the pull request
+# rather than of the command line. So the check has to read the base and refuse.
+#
+# **This is a guard against an accident, not a sandbox, and the distinction is the whole
+# reason it is allowed to exist here.** `gh pr merge` and `gh api -X PUT …/merge` both
+# remain reachable and neither passes through this function. What it buys is exactly what
+# the `git push origin main` deny entries buy — an accident stopped locally rather than
+# not at all — and it claims nothing beyond that. AGENTS.md's rule is "enumerate where
+# something else is holding the line; never where the enumeration is the line"; this is
+# not an enumeration of spellings but a check on the one fact that matters, applied at the
+# one path an agent is told to use (#218).
+MERGE_FORBIDDEN_BASE="${MERGE_FORBIDDEN_BASE:-main}"
+
+cmd_pr_merge() {
+  local pr="${1:-}"
+  [ -n "$pr" ] || die "usage: pr-merge <pr> [--squash|--merge|--rebase]"
+  local method="${2:---squash}"
+  case "$method" in
+    --squash|--merge|--rebase) ;;
+    *) die "unknown merge method '${method}' (expected --squash, --merge or --rebase)" ;;
+  esac
+  require_gh
+
+  # Fails closed, for the same reason every count in cmd_pr_status_json does: a base
+  # that could not be read is not evidence that the base is `develop`. Refuse and say
+  # which read failed, rather than merging on an assumption.
+  local base
+  if ! base=$(gh pr view "$pr" --json baseRefName --jq '.baseRefName' 2>&1); then
+    die "could not read the base branch of PR #${pr} — refusing to merge: ${base}"
+  fi
+  [ -n "$base" ] || die "empty base branch for PR #${pr} — refusing to merge"
+
+  if [ "$base" = "$MERGE_FORBIDDEN_BASE" ]; then
+    die "PR #${pr} targets '${base}'. Merging into '${MERGE_FORBIDDEN_BASE}' is human-only (#217) — refusing."
+  fi
+
+  local out
+  if ! out=$(gh pr merge "$pr" "$method" 2>&1); then
+    die "merge of PR #${pr} into '${base}' failed: ${out}"
+  fi
+  echo "PR #${pr} merged into ${base} (${method#--})"
+}
+
 cmd_is_ready_to_merge() {
   local pr="$1"
   # This command reaches jq only through cmd_pr_status_json — whose stderr it
@@ -1506,6 +1551,9 @@ case "${1:-}" in
   is-ready-to-merge)
     shift; cmd_is_ready_to_merge "$@"
     ;;
+  pr-merge)
+    shift; cmd_pr_merge "$@"
+    ;;
   iteration-advance)
     shift; cmd_iteration_advance "$@"
     ;;
@@ -1524,6 +1572,8 @@ Commands:
                                        round cap (ref defaults to develop)
   pr-check-label <pr> <label>          Exit 0 present, 1 absent, 2 undetermined
   is-ready-to-merge <pr>              Exit 0 if frozen rule met
+  pr-merge <pr> [--squash|--merge|--rebase]  Merge a PR; refuses base 'main' and
+                                       fails closed on an unreadable base
   iteration-advance                   Advance completion-driven iteration ceremonies
 
 Frozen acceptance rule for READY TO MERGE:
