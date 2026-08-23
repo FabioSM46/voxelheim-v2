@@ -485,6 +485,21 @@ type EntitySnapshot struct {
 	// this type is built per recipient rather than once per tick.
 	Vitals PlayerVitals
 
+	// DeadPlayers is the entity ids in Entities the server currently holds dead — a fact
+	// about the world rather than an event, so a session that arrives after a death is
+	// told the same thing as one that watched it happen.
+	//
+	// Nil and empty are the same wire value and both are the ordinary case: the encoder
+	// writes no field at all for either, so a tick on which nobody is dead costs exactly
+	// what it cost before this vector existed.
+	//
+	// The invariant that ties it to Vitals is the caller's: the recipient's own entity id
+	// belongs here exactly when Vitals.LifeState is Dead. This package lays bytes out and
+	// does not re-check the simulation, but a client refuses a frame where the two
+	// disagree — schemas/player.fbs states it as a decoder invariant — so it is a
+	// disconnect rather than a cosmetic bug.
+	DeadPlayers []uint64
+
 	// TickOfDay is where this tick falls in the world's day, and zero for a server that
 	// keeps no clock — the same zero Welcome.DayLengthTicks uses to say so, and read
 	// only against that value.
@@ -1391,10 +1406,10 @@ func EncodeChunkUnload(coord ChunkCoord) []byte {
 // only thing that produces them.
 func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	// An EntityState is 40 bytes inlined and an ItemDropState 24; a MobState is a table
-	// and costs an offset besides its fields. Sizing the builder up front avoids the
-	// repeated growth of a buffer whose shape is known, on the most frequently sent
-	// payload in the game.
-	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + len(s.Mobs)*64 + len(s.Structures)*48 + 128)
+	// and costs an offset besides its fields; a dead player is one 8-byte id. Sizing the
+	// builder up front avoids the repeated growth of a buffer whose shape is known, on
+	// the most frequently sent payload in the game.
+	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + 128)
 
 	// Every table a vector points at must be finished before that vector opens, so the
 	// mob tables are built first and the vector below only carries their offsets. The
@@ -1473,6 +1488,21 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	}
 	dropsOffset := b.EndVector(len(s.Drops))
 
+	// **Built only when somebody is dead, which is what makes the field free the rest of
+	// the time.** An empty FlatBuffers vector is still a vector — four bytes of length
+	// and an offset pointing at them, plus the vtable slot that reaches it — and this
+	// field is empty on almost every tick of almost every session. Skipping it leaves the
+	// snapshot byte-for-byte what it was before the field existed, because a vtable is
+	// trimmed of its trailing empty slots and this is the last field in the table.
+	var deadOffset flatbuffers.UOffsetT
+	if len(s.DeadPlayers) > 0 {
+		vnet.EntitySnapshotStartDeadPlayersVector(b, len(s.DeadPlayers))
+		for i := len(s.DeadPlayers) - 1; i >= 0; i-- {
+			b.PrependUint64(s.DeadPlayers[i])
+		}
+		deadOffset = b.EndVector(len(s.DeadPlayers))
+	}
+
 	vnet.EntitySnapshotStart(b)
 	vnet.EntitySnapshotAddServerTick(b, s.Tick)
 	vnet.EntitySnapshotAddEntities(b, entitiesOffset)
@@ -1485,6 +1515,9 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.EntitySnapshotAddSelfVitals(b, vitalsOffset)
 	vnet.EntitySnapshotAddStructures(b, structuresOffset)
 	vnet.EntitySnapshotAddTickOfDay(b, s.TickOfDay)
+	if deadOffset != 0 {
+		vnet.EntitySnapshotAddDeadPlayers(b, deadOffset)
+	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadEntitySnapshot, snapshot)

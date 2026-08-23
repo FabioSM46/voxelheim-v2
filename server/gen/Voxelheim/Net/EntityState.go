@@ -22,6 +22,12 @@ import (
 // / message that carries it instead. Four fields, unchanged since V1, and the
 // / encoded size of this struct is pinned by a test on both sides — which is what
 // / catches somebody quietly adding a fifth.
+// /
+// / **V10 gave every player a death every viewer can see and added nothing here
+// / either.** Whether a player is down rides beside this vector, in
+// / `EntitySnapshot.dead_players`, where it costs nothing on the ticks nobody is
+// / dead. A fifth field here would have charged every visible player those bytes on
+// / every tick to say "no", and could never have been taken back.
 type EntityState struct {
 	_tab flatbuffers.Struct
 }

@@ -836,6 +836,13 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	visibleDrops := make([]protocol.ItemDropState, 0, len(dropped))
 	visibleMobs := make([]protocol.MobState, 0, len(prowling))
 	visibleStructures := make([]protocol.StructureState, 0, len(standing))
+	// **Filled from the same pass that fills `visible`, and that is what keeps the two
+	// agreeing.** The contract says every id here names a player in the same snapshot's
+	// entity vector, and a client refuses a frame where one does not; deriving it from a
+	// second walk over `players` would be a second visibility decision to keep in step.
+	// Nil until somebody in view is dead, so the ordinary tick allocates nothing and the
+	// encoder writes no field at all.
+	var visibleDead []uint64
 
 	// At most one encoded appearance per player per tick, built the first time a viewer
 	// turns out not to have been told about them and handed to every viewer after that.
@@ -847,11 +854,21 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 
 	for _, viewer := range players {
 		visible = visible[:0]
+		visibleDead = visibleDead[:0]
 		for i, p := range players {
 			if !withinView(viewer.chunk, p.chunk, s.viewDistance) {
 				continue
 			}
 			visible = append(visible, states[i])
+
+			// **The viewer's own death goes in this vector like everybody else's**, which
+			// is the point of the field rather than an accident of the loop: a session is
+			// inside its own view, so the body it is watching go down and the bodies
+			// beside it are stated the same way and cannot drift apart. Its vitals still
+			// carry the health and the countdown; those are per-recipient and this is not.
+			if !p.alive() {
+				visibleDead = append(visibleDead, p.entityID)
+			}
 
 			// **The appearance, once per entity per time it enters this viewer's cube**,
 			// and ahead of the snapshot that first carries the entity so a client usually
@@ -948,6 +965,11 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			// player's and nobody else's. Superseded by the next tick's, which is why
 			// health and the respawn countdown need no delivery guarantee of their own.
 			Vitals: viewer.vitalsLocked(),
+			// Who among those entities is down, the viewer included. The contract ties
+			// this to the field above — the recipient's own id is here exactly when its
+			// vitals say Dead — and both come from `p.alive()` and `p.lifeState`, which
+			// are the same variable read twice.
+			DeadPlayers: visibleDead,
 			// The world's own time, the same for every recipient and the one field in
 			// here that is not about an entity. Always less than DayLengthTicks, which
 			// is what the welcome announced and what the client checks it against —

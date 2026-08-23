@@ -195,17 +195,28 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // therefore unchanged and the number below it is not — which is exactly the shape of change
 // this test exists to make visible.
 //
-// The rule that generalises, now that three shapes have been argued: **ask what the receiver
+// **V10 adds no tag either, and moves the version for a reason V9's argument does not
+// reach.** It appends a *table field* — EntitySnapshot.dead_players — and an unknown table
+// field is the one shape FlatBuffers really does let a receiver drop, because an older peer
+// never looks the id up. So the old-peer direction, which decided every case above, decides
+// nothing here. The new-peer direction decides it instead: the field's stated invariant is
+// that the recipient's own entity id is in that vector exactly when self_vitals says Dead,
+// and a V10 client enforces it. Against a V9 server the vector is absent on every frame, so
+// that client connects perfectly, plays perfectly, and drops the session the first time it
+// dies. Same conclusion as V9, arrived at from the other end of the wire — which is why the
+// rule below is written about the receiver rather than about the sender.
+//
+// The rule that generalises, now that four shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV9AppendsNoTagAndStillMovesToNine(t *testing.T) {
+func TestProtocolV10AppendsNoTagAndStillMovesToTen(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 9 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 9", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 10 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 10", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -1883,6 +1894,128 @@ func TestASnapshotWithNoStructuresSaysSo(t *testing.T) {
 
 	if got := snapshot.StructuresLength(); got != 0 {
 		t.Fatalf("StructuresLength = %d, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protocol V10 — a death every viewer is told about
+// ---------------------------------------------------------------------------
+
+// The dead ride in the snapshot, in the order they were given and with nothing else
+// displaced. The second half matters as much as the first: an appended field that displaced
+// an existing one would satisfy every assertion about itself while breaking every frame
+// already on the wire.
+func TestASnapshotCarriesTheDeadPlayers(t *testing.T) {
+	t.Parallel()
+
+	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+		Tick: 7,
+		Entities: []EntityState{
+			{EntityID: 11, Pos: [3]float32{1, 2, 3}},
+			{EntityID: 22, Pos: [3]float32{4, 5, 6}},
+		},
+		Vitals:      PlayerVitals{Health: 0, MaxHealth: 10, LifeState: vnet.LifeStateDead, RespawnTicks: 40},
+		TickOfDay:   1234,
+		DeadPlayers: []uint64{22, 11},
+	}), 0)
+	tbl := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(tbl.Bytes, tbl.Pos)
+
+	if got := snapshot.DeadPlayersLength(); got != 2 {
+		t.Fatalf("DeadPlayersLength = %d, want 2", got)
+	}
+	for i, want := range []uint64{22, 11} {
+		if got := snapshot.DeadPlayers(i); got != want {
+			t.Errorf("DeadPlayers(%d) = %d, want %d — the vector is not in the order it was given", i, got, want)
+		}
+	}
+
+	if got := snapshot.ServerTick(); got != 7 {
+		t.Errorf("ServerTick = %d, want 7 — dead_players was appended, not inserted", got)
+	}
+	if got := snapshot.TickOfDay(); got != 1234 {
+		t.Errorf("TickOfDay = %d, want 1234 — dead_players was appended, not inserted", got)
+	}
+	if vitals := snapshot.SelfVitals(nil); vitals == nil || vitals.RespawnTicks() != 40 {
+		t.Error("self_vitals did not survive the field appended after it")
+	}
+}
+
+// **Nobody dead costs nothing at all, and that is the whole argument for this shape** — plus
+// the measurement it was chosen on, kept as a test so the numbers in the pull request can be
+// re-derived rather than believed.
+//
+// Nil and empty are the same wire value and both produce the bytes a pre-V10 encoder did: the
+// field is not written, and a FlatBuffers vtable is trimmed of its trailing empty slots, so
+// the last field in the table leaves no trace when absent. Byte equality rather than a
+// length, which would pass on two differently laid-out frames of the same size.
+//
+// Three shapes could have put a life state beside every player: a fifth field in the
+// EntityState struct, a table per player in the shape MobState took, and this sparse vector.
+// The first is unavailable — a struct's field list can never be taken back. The gap between
+// the other two is pinned at a realistic player count, deliberately as a *bound* rather than
+// an equality.
+func TestWhatADeathCostsOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	const players = 8
+
+	snapshot := func(dead int) EntitySnapshot {
+		s := EntitySnapshot{
+			Tick:   1,
+			Vitals: PlayerVitals{Health: 10, MaxHealth: 10, LifeState: vnet.LifeStateAlive},
+		}
+		for i := range players {
+			s.Entities = append(s.Entities, EntityState{
+				EntityID: uint64(i + 1),
+				Pos:      [3]float32{float32(i), 64, float32(i)},
+			})
+			if i < dead {
+				s.DeadPlayers = append(s.DeadPlayers, uint64(i+1))
+			}
+		}
+		return s
+	}
+
+	absent := EncodeEntitySnapshot(snapshot(0))
+	nobody := snapshot(0)
+	nobody.DeadPlayers = []uint64{}
+	if !bytes.Equal(absent, EncodeEntitySnapshot(nobody)) {
+		t.Error("an empty dead_players encoded differently from an absent one")
+	}
+
+	none := len(absent)
+	one := len(EncodeEntitySnapshot(snapshot(1)))
+	all := len(EncodeEntitySnapshot(snapshot(players)))
+
+	// The rejected shape, measured rather than estimated: MobState is the table-per-entity
+	// payload this contract already has, so eight of them beside the same entity vector is
+	// what a per-player table would have cost every tick, alive or dead.
+	tables := snapshot(0)
+	for i := range players {
+		tables.Mobs = append(tables.Mobs, MobState{
+			EntityID: uint64(1000 + i), Kind: vnet.MobKindDraugr, Action: vnet.MobActionIdle,
+			Pos: [3]float32{float32(i), 64, float32(i)}, MaxHealth: 10, Health: 10,
+		})
+	}
+	perTable := (len(EncodeEntitySnapshot(tables)) - none) / players
+
+	t.Logf("%d players: nobody dead %d bytes, one dead %d bytes (+%d), all dead %d bytes (+%d); "+
+		"a table per player would cost about %d bytes each, %d per tick, dead or alive",
+		players, none, one, one-none, all, all-none, perTable, perTable*players)
+
+	// A handful of bytes — its own length plus an offset and a vtable slot — rather than a
+	// per-entity charge, which is the property being pinned.
+	if cost := one - none; cost > 32 {
+		t.Errorf("one dead player costs %d bytes, want no more than 32", cost)
+	}
+	if all-none > perTable*players {
+		t.Errorf("naming every player dead costs %d bytes, more than a table per player would have (%d)",
+			all-none, perTable*players)
+	}
+	if perTable*players <= 0 {
+		t.Fatal("the table-per-player shape measured as free, so the comparison above proves nothing")
 	}
 }
 
