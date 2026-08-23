@@ -20,7 +20,7 @@ use std::time::Duration;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use super::InputMode;
@@ -30,7 +30,8 @@ use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
 use super::merge_all;
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
-use crate::net::Session;
+use crate::net::{PLACEHOLDER_APPEARANCE, Session};
+#[cfg(test)]
 use crate::world::palette;
 
 /// Close to the near plane and small enough to remain inside the camera's free
@@ -42,6 +43,13 @@ const BASE_TRANSLATION: Vec3 = Vec3::new(0.10, -0.075, -0.18);
 /// Unchanged from when the hand *was* this box, so nothing about where the hand sits or how
 /// far it swings moves — #175 replaces what fills it, not what it occupies.
 const HAND_SIZE: Vec3 = Vec3::new(0.045, 0.085, 0.045);
+
+/// How far a carried object sinks into the top of the fist holding it.
+///
+/// A gap would leave the item floating and no overlap would put two faces on the same
+/// plane. Six millimetres is enough to hide the join without swallowing the object's
+/// silhouette; [`the_item_stays_recognisable_outside_the_fist`] holds the other side.
+const HOLD_OVERLAP: f32 = 0.006;
 
 /// How far each knuckle stands proud of the palm, as a fraction of the fist's depth.
 ///
@@ -676,11 +684,109 @@ fn tinted(mesh: Mesh, colour: [f32; 4]) -> Mesh {
     mesh.with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![colour; vertices])
 }
 
+/// One wire colour as the linear vertex value Bevy's PBR shader consumes.
+///
+/// Character colours are `0x00RRGGBB` in sRGB, while item colours have already been
+/// resolved to linear values by `player/items.rs`. Keeping the conversion at this boundary
+/// gives both sources exactly one interpretation.
+fn linear_rgb(colour: u32) -> [f32; 4] {
+    let linear = Color::srgb_u8(
+        ((colour >> 16) & 0xFF) as u8,
+        ((colour >> 8) & 0xFF) as u8,
+        (colour & 0xFF) as u8,
+    )
+    .to_linear();
+    [linear.red, linear.green, linear.blue, linear.alpha]
+}
+
+/// Applies an item's resolved colour to a mesh, preserving any relative vertex tint it
+/// already carries.
+///
+/// Most item meshes have no colour attribute and receive the resolved colour whole. The
+/// rusty blade carries white and [`RUST_TINT`]; multiplying those by the item colour keeps
+/// `player/items.rs` the one answer to what the steel is while retaining the oxide as a
+/// shade of it.
+fn coloured(mut mesh: Mesh, base: [f32; 4]) -> Mesh {
+    let colours = match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+        Some(VertexAttributeValues::Float32x4(tints)) => tints
+            .iter()
+            .map(|tint| std::array::from_fn(|channel| tint[channel] * base[channel]))
+            .collect(),
+        // Every mesh in this module either has no colour or a Float32x4 one. Replacing an
+        // unexpected representation is the cosmetic, non-fatal direction to fail in.
+        _ => vec![base; mesh.count_vertices()],
+    };
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
+    mesh
+}
+
+/// The geometry one held item contributes before it is arranged against the fist.
+///
+/// Exhaustive over [`ItemShape`], so a new shape does not compile until the hand can hold
+/// it. The rusty sword remains the one item-level exception: rust belongs to that blade,
+/// not to every item sharing its shape.
+fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
+    if item_id == ITEM_RUSTY_SWORD {
+        return rusted_blade_mesh();
+    }
+    match shape {
+        ItemShape::Block => Mesh::from(Cuboid::from_size(Vec3::splat(BLOCK_EDGE))),
+        ItemShape::Material => Mesh::from(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
+        ItemShape::Blade => sword_mesh(SWORD_LENGTH),
+        ItemShape::Bundle => Mesh::from(Cuboid::from_size(BUNDLE_SIZE)),
+        ItemShape::Tool => tool_mesh(),
+    }
+}
+
+/// Where an item sits relative to the fist at the origin.
+///
+/// Blocks, materials and bundles rest on the knuckles. A sword is lifted until the centre
+/// of its grip crosses the palm, and a tool until the palm closes around the lower haft.
+/// These are translations of the approved geometry, not new shapes.
+fn item_translation(shape: ItemShape) -> Vec3 {
+    let hand_top = HAND_SIZE.y / 2.0;
+    let y = match shape {
+        ItemShape::Block => hand_top + BLOCK_EDGE / 2.0 - HOLD_OVERLAP,
+        ItemShape::Material => hand_top + MATERIAL_LENGTH / 2.0 + MATERIAL_RADIUS - HOLD_OVERLAP,
+        ItemShape::Blade => {
+            let grip_centre = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y / 2.0;
+            -grip_centre
+        }
+        ItemShape::Bundle => hand_top + BUNDLE_SIZE.y / 2.0 - HOLD_OVERLAP,
+        // The head stays above the hand and most of the haft remains visible below it.
+        ItemShape::Tool => HAND_SIZE.y * 0.35,
+    };
+    Vec3::Y * y
+}
+
+/// The complete first-person arrangement: the player's fist and, when selected, the item
+/// it holds, merged into one coloured mesh.
+///
+/// The fist is always first in the buffers. Besides making the mesh deterministic, that
+/// gives the tests a structural way to assert that every shape still contains the exact
+/// hand #175 approved instead of merely containing skin-coloured vertices somewhere.
+fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
+    let mut held = tinted(fist_mesh(), linear_rgb(skin_colour));
+    let (Some(item_id), Some(shape), Some(item_colour)) =
+        (appearance.item_id, appearance.shape, appearance.item_colour)
+    else {
+        return held;
+    };
+
+    let item =
+        coloured(item_mesh(item_id, shape), item_colour).translated_by(item_translation(shape));
+    merge_all(&mut held, [item], "hand and held item");
+    held
+}
+
 pub(super) struct HandsPlugin;
 
 impl Plugin for HandsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HandAnimation>()
+            // `PlayerPlugin` owns the appearance cache in the game. Initialised here too
+            // because the focused animation tests build this plugin on its own.
+            .init_resource::<super::Appearances>()
             // `PlayerCameraPlugin` owns it in the game. Initialised here too so this module
             // stands up headlessly on its own — the same defence `player/target.rs`,
             // `player/combat.rs`, `player/crafting.rs`, `player/inventory.rs`,
@@ -700,6 +806,9 @@ impl Plugin for HandsPlugin {
                     animate_view_model,
                 )
                     .chain()
+                    // After this frame's appearance message has been cached, so the fist
+                    // takes the local player's skin colour on the same frame as their body.
+                    .after(super::ApplySnapshots)
                     .after(ApplyInventory)
                     .after(ApplyTargetInput)
                     // After this frame's authoritative progress has been applied, so the
@@ -724,76 +833,23 @@ impl Plugin for HandsPlugin {
 struct HeldItem {
     item_id: Option<u16>,
     shape: Option<ItemShape>,
+    /// The player's own skin colour, so a late appearance message rebuilds the hand even
+    /// when the selected slot did not move.
+    skin_colour: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Appearance {
+struct HeldAppearance {
     item_id: Option<u16>,
     shape: Option<ItemShape>,
-    colour: [f32; 4],
+    item_colour: Option<[f32; 4]>,
 }
 
 #[derive(Resource, Debug)]
 struct HandVisuals {
-    hand: Handle<Mesh>,
-    /// The rusty sword's own blade, and the only item in this table that has one.
-    ///
-    /// A shape says what a *kind* of thing looks like; rust is a fact about one blade. The
-    /// iron sword is the same [`ItemShape::Blade`] and must not inherit it, which is the
-    /// whole reason this is keyed by item rather than by shape.
-    rusted_blade: Handle<Mesh>,
-    block: Handle<Mesh>,
-    material: Handle<Mesh>,
-    blade: Handle<Mesh>,
-    bundle: Handle<Mesh>,
-    tool: Handle<Mesh>,
-    materials: Vec<([f32; 4], Handle<StandardMaterial>)>,
-}
-
-impl HandVisuals {
-    fn mesh(&self, item_id: Option<u16>, shape: Option<ItemShape>) -> Handle<Mesh> {
-        // The one item whose look is not simply its shape's. Checked before the shape and
-        // not inside it, so [`ItemShape`] stays a vocabulary of kinds and this stays what it
-        // is: one exception, named, for one blade.
-        if item_id == Some(ITEM_RUSTY_SWORD) {
-            return self.rusted_blade.clone();
-        }
-        match shape {
-            None => self.hand.clone(),
-            Some(ItemShape::Block) => self.block.clone(),
-            Some(ItemShape::Material) => self.material.clone(),
-            Some(ItemShape::Blade) => self.blade.clone(),
-            Some(ItemShape::Bundle) => self.bundle.clone(),
-            Some(ItemShape::Tool) => self.tool.clone(),
-        }
-    }
-
-    fn material_for(
-        &mut self,
-        colour: [f32; 4],
-        materials: &mut Assets<StandardMaterial>,
-    ) -> Handle<StandardMaterial> {
-        if let Some((_, handle)) = self
-            .materials
-            .iter()
-            .find(|(candidate, _)| *candidate == colour)
-        {
-            return handle.clone();
-        }
-
-        let [r, g, b, a] = colour;
-        let handle = materials.add(StandardMaterial {
-            base_color: Color::linear_rgba(r, g, b, a),
-            unlit: true,
-            fog_enabled: false,
-            // Positive renders closer. Together with the near-plane placement this
-            // prevents terrain depth from slicing through the held shape.
-            depth_bias: 1_000.0,
-            ..default()
-        });
-        self.materials.push((colour, handle.clone()));
-        handle
-    }
+    /// The one mesh asset the entity draws. Its contents change only when the selected
+    /// item or the local player's skin colour changes; the handle and entity stay put.
+    mesh: Handle<Mesh>,
 }
 
 /// Which of the three arcs an attack draws.
@@ -958,24 +1014,25 @@ fn spawn_view_model(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let mut visuals = HandVisuals {
-        hand: meshes.add(fist_mesh()),
-        block: meshes.add(Cuboid::from_size(Vec3::splat(BLOCK_EDGE))),
-        material: meshes.add(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
-        blade: meshes.add(sword_mesh(SWORD_LENGTH)),
-        rusted_blade: meshes.add(rusted_blade_mesh()),
-        bundle: meshes.add(Cuboid::from_size(BUNDLE_SIZE)),
-        tool: meshes.add(tool_mesh()),
-        materials: Vec::new(),
-    };
     let appearance = selected_appearance(None);
-    let mesh = visuals.mesh(appearance.item_id, appearance.shape);
-    let material = visuals.material_for(appearance.colour, &mut materials);
+    let skin_colour = PLACEHOLDER_APPEARANCE.skin_color();
+    let mesh = meshes.add(held_mesh(skin_colour, appearance));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        fog_enabled: false,
+        // Positive renders closer. Together with the near-plane placement this prevents
+        // terrain depth from slicing through the held arrangement.
+        depth_bias: 1_000.0,
+        ..default()
+    });
+    let visuals = HandVisuals { mesh: mesh.clone() };
 
     commands.spawn((
         HeldItem {
             item_id: appearance.item_id,
             shape: appearance.shape,
+            skin_colour,
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),
@@ -1000,35 +1057,54 @@ fn attach_to_camera(
     }
 }
 
-/// The shared meshes and the assets a material is minted into, as one borrow.
+/// The stable view-model handle and the asset whose contents it names, as one borrow.
 ///
-/// The two always travel together — `HandVisuals::material_for` needs the assets to mint
-/// into, and nothing asks either of them anything on its own — so grouping them is what
-/// `player/mod.rs` already does with `Dressing` for the body's wardrobe, and for the same
-/// reason. It is also what keeps [`refresh_held_item`] inside clippy's argument count now
-/// that it reads the view: an `#[allow]` there would have suppressed the warning rather
-/// than answered it, and the two fields genuinely are one thing.
+/// Rebuilding the one asset in place avoids both a mesh cache keyed by arbitrary server
+/// colours and a second entity. The render-world handle therefore stays stable through a
+/// slot change while the hand and item remain one draw.
 #[derive(SystemParam)]
-struct HandWardrobe<'w> {
-    visuals: ResMut<'w, HandVisuals>,
-    materials: ResMut<'w, Assets<StandardMaterial>>,
+struct HandAssets<'w> {
+    visuals: Res<'w, HandVisuals>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+}
+
+/// The two facts that choose what the view model draws: the selected authoritative stack
+/// and the local player's authoritative appearance.
+///
+/// They arrive on different streams and change independently, so keeping the lookup in one
+/// parameter is what prevents a slot refresh from forgetting skin or an appearance refresh
+/// from forgetting the item.
+#[derive(SystemParam)]
+struct HandSubject<'w> {
+    inventory: Res<'w, Inventory>,
+    selected: Res<'w, SelectedSlot>,
+    session: Option<Res<'w, Session>>,
+    appearances: Res<'w, super::Appearances>,
+}
+
+impl HandSubject<'_> {
+    fn read(&self) -> (HeldAppearance, u32) {
+        let appearance = selected_appearance(self.inventory.slot(self.selected.0));
+        let skin_colour = self
+            .session
+            .as_deref()
+            .and_then(|session| self.appearances.0.get(&session.0.entity_id))
+            .map_or(PLACEHOLDER_APPEARANCE.skin_color(), |described| {
+                described.appearance.skin_color()
+            });
+        (appearance, skin_colour)
+    }
 }
 
 fn refresh_held_item(
-    inventory: Res<Inventory>,
-    selected: Res<SelectedSlot>,
+    subject: HandSubject<'_>,
     mode: Res<InputMode>,
     view: Res<ViewMode>,
-    session: Option<Res<Session>>,
-    mut wardrobe: HandWardrobe<'_>,
-    mut held: Query<(
-        &mut HeldItem,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-        &mut Visibility,
-    )>,
+    mut assets: HandAssets<'_>,
+    mut held: Query<(&mut HeldItem, &Mesh3d, &mut Visibility)>,
 ) {
-    let appearance = selected_appearance(inventory.slot(selected.0));
+    let (appearance, skin_colour) = subject.read();
+    let view_mesh = assets.visuals.mesh.clone();
     // **The view term, and it was missing.** This model is a child of the camera, sitting
     // [`BASE_TRANSLATION`] in front of it — a first-person conceit and nothing else. #172
     // moved the camera four blocks back for the third-person view and gave every other such
@@ -1040,20 +1116,28 @@ fn refresh_held_item(
     // said: a view toggle that removed the model would rebuild a mesh and a material on a
     // key press, and `animate_view_model` drives a transform on this same entity — so a
     // hidden model is a hidden animation, with nothing further to gate.
-    let visible = if *mode == InputMode::Playing && session.is_some() && view.first_person() {
+    let visible = if *mode == InputMode::Playing && subject.session.is_some() && view.first_person()
+    {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
 
-    for (mut item, mut mesh, mut material, mut visibility) in &mut held {
-        if item.item_id != appearance.item_id || item.shape != appearance.shape {
+    for (mut item, mesh, mut visibility) in &mut held {
+        if item.item_id != appearance.item_id
+            || item.shape != appearance.shape
+            || item.skin_colour != skin_colour
+        {
             item.item_id = appearance.item_id;
             item.shape = appearance.shape;
-            mesh.0 = wardrobe.visuals.mesh(appearance.item_id, appearance.shape);
-            material.0 = wardrobe
-                .visuals
-                .material_for(appearance.colour, &mut wardrobe.materials);
+            item.skin_colour = skin_colour;
+            if mesh.0 != view_mesh {
+                error!("the held entity no longer names the view-model mesh");
+            } else if let Some(mut mesh) = assets.meshes.get_mut(&view_mesh) {
+                *mesh = held_mesh(skin_colour, appearance);
+            } else {
+                error!("the held view-model mesh asset is missing");
+            }
         }
         if *visibility != visible {
             *visibility = visible;
@@ -1066,30 +1150,43 @@ fn refresh_held_item(
 /// Every fact in it comes from [`super::items`] — the one table the pack cells, the recipe
 /// panel and the tooltip read too — so a stack cannot look like one thing in the hand and
 /// another in the pack.
-fn selected_appearance(stack: Option<crate::net::InventoryStack>) -> Appearance {
+fn selected_appearance(stack: Option<crate::net::InventoryStack>) -> HeldAppearance {
     let Some(item_id) = stack
         .filter(|stack| stack.item_id != 0 && stack.count != 0)
         .map(|stack| stack.item_id)
     else {
-        return Appearance {
+        return HeldAppearance {
             item_id: None,
             shape: None,
-            // The bare hand is not an item and has no row: dirt is the closest the terrain
-            // palette comes to skin, and it is read here rather than looked up.
-            colour: palette::linear_rgba(palette::DIRT),
+            item_colour: None,
         };
     };
 
-    Appearance {
+    HeldAppearance {
         item_id: Some(item_id),
         shape: Some(items::item_shape(item_id)),
-        colour: items::item_linear_rgba(item_id),
+        item_colour: Some(items::item_linear_rgba(item_id)),
     }
+}
+
+/// The shape the first-person composition builds for one non-empty stack.
+///
+/// Test-only: `combat.rs` uses it to pin the presentation route to the blade-routing table.
+/// The running client goes through [`selected_appearance`] with the real selected stack.
+#[cfg(test)]
+pub(super) fn drawn_item_shape(item_id: u16) -> ItemShape {
+    selected_appearance(Some(crate::net::InventoryStack {
+        item_id,
+        count: 1,
+        ..Default::default()
+    }))
+    .shape
+    .expect("a non-empty stack has an item shape")
 }
 
 /// What the hand is reacting to this frame: one authoritative fact and two local presses.
 ///
-/// A bundle rather than five parameters, for the reason [`HandWardrobe`] is one —
+/// A bundle rather than five parameters, for the reason [`HandAssets`] is one —
 /// [`animate_view_model`] was already at clippy's argument bound, and *what is the hand
 /// doing* is one question that should have one place to be asked. It is also where the
 /// rule below is written down once, so the next animation this file grows has somewhere
@@ -1286,9 +1383,25 @@ mod tests {
     use super::super::crafting::ITEM_IRON_SWORD;
     use super::super::target::BlockHit;
     use super::*;
-    use crate::net::{InventoryStack, SessionParams};
+    use crate::net::{
+        Appearance as PlayerLook, AppearanceInbox, InventoryStack, PlayerAppearance, SessionParams,
+    };
     use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE};
     use crate::player::{PlayerPlugin, combat, crafting, structures};
+
+    /// Deliberately unlike every item swatch, so skin vertices can be identified in a
+    /// composite without mistaking part of the item for the hand.
+    const TEST_SKIN: u32 = 0x00E3_C4A0;
+
+    fn shape_examples() -> [(ItemShape, u16); ItemShape::ALL.len()] {
+        [
+            (ItemShape::Block, ITEM_STONE),
+            (ItemShape::Material, ITEM_RAW_COAL),
+            (ItemShape::Blade, ITEM_IRON_SWORD),
+            (ItemShape::Bundle, structures::ITEM_TENT),
+            (ItemShape::Tool, crafting::ITEM_SHOVEL),
+        ]
+    }
 
     fn session() -> Session {
         Session(SessionParams {
@@ -1307,8 +1420,7 @@ mod tests {
 
     /// The vertex colours one mesh carries, deduplicated and sorted so a failure reads the
     /// same way twice.
-    fn tints(meshes: &Assets<Mesh>, handle: &Handle<Mesh>) -> Vec<[u8; 4]> {
-        let mesh = meshes.get(handle).expect("the mesh exists");
+    fn tints(mesh: &Mesh) -> Vec<[u8; 4]> {
         let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
         else {
             return Vec::new();
@@ -1332,15 +1444,10 @@ mod tests {
     /// that table the one answer — change the sword's colour and the rust follows it.
     #[test]
     fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
-        let mut app = app();
-        app.update();
+        let rusted = rusted_blade_mesh();
+        let plain = sword_mesh(SWORD_LENGTH);
 
-        let visuals = app.world().resource::<HandVisuals>();
-        let rusted = visuals.rusted_blade.clone();
-        let plain = visuals.blade.clone();
-        let meshes = app.world().resource::<Assets<Mesh>>();
-
-        let marks = tints(meshes, &rusted);
+        let marks = tints(&rusted);
         assert_eq!(
             marks.len(),
             2,
@@ -1359,16 +1466,18 @@ mod tests {
         // attribute is how a mesh takes its material's colour whole, which is what every
         // other held shape does and what the rusted blade opts out of.
         assert_eq!(
-            tints(meshes, &plain),
+            tints(&plain),
             Vec::<[u8; 4]>::new(),
             "the plain blade carries vertex colours, so it is no longer simply its material"
         );
-        assert_ne!(rusted, plain, "both swords share one mesh");
+        assert!(
+            rusted.count_vertices() > plain.count_vertices(),
+            "the rusty sword has no mark geometry of its own"
+        );
     }
 
     /// Every vertex position one mesh carries.
-    fn positions(meshes: &Assets<Mesh>, handle: &Handle<Mesh>) -> Vec<[f32; 3]> {
-        let mesh = meshes.get(handle).expect("the mesh exists");
+    fn positions(mesh: &Mesh) -> Vec<[f32; 3]> {
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
@@ -1402,10 +1511,7 @@ mod tests {
              {SWORD_LENGTH}"
         );
 
-        let mut app = app();
-        app.update();
-        let blade = app.world().resource::<HandVisuals>().blade.clone();
-        let sword = positions(app.world().resource::<Assets<Mesh>>(), &blade);
+        let sword = positions(&sword_mesh(SWORD_LENGTH));
 
         let (low, high) = extent(&sword, 1);
         assert!(
@@ -1430,10 +1536,7 @@ mod tests {
     /// which a rectangular section fails in both directions.
     #[test]
     fn the_held_sword_is_a_gladius_and_not_one_box() {
-        let mut app = app();
-        app.update();
-        let blade = app.world().resource::<HandVisuals>().blade.clone();
-        let sword = positions(app.world().resource::<Assets<Mesh>>(), &blade);
+        let sword = positions(&sword_mesh(SWORD_LENGTH));
 
         let one_box = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
         assert!(
@@ -1534,48 +1637,59 @@ mod tests {
         );
     }
 
-    /// **One mesh and one material for the whole weapon.**
+    /// **One mesh and one material for every hand-and-item arrangement.**
     ///
     /// The cost rule the body rig set and #175 kept, and the one a sword assembled from a
-    /// dozen entities would break quietly: it would look right and animate wrong, because
+    /// extra entities would break quietly: they could look right and animate wrong, because
     /// `animate_view_model` drives one transform and a guard parented separately would be a
     /// second thing to keep in step with a swing.
     #[test]
-    fn the_held_sword_is_one_mesh_and_one_material() {
+    fn every_held_shape_is_one_mesh_one_material_and_one_transform() {
         let mut app = app();
-        *app.world_mut().resource_mut::<Inventory>() =
-            Inventory::from_stacks(vec![InventoryStack {
-                item_id: ITEM_RUSTY_SWORD,
-                count: 1,
-                ..Default::default()
-            }]);
-        *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(0);
-        app.update();
+        let view_mesh = app.world().resource::<HandVisuals>().mesh.clone();
 
-        let world = app.world_mut();
-        let mut view = world.query_filtered::<Entity, (
-            With<HeldItem>,
-            With<Mesh3d>,
-            With<MeshMaterial3d<StandardMaterial>>,
-        )>();
-        let drawn: Vec<Entity> = view.iter(world).collect();
-        assert_eq!(
-            drawn.len(),
-            1,
-            "the held sword is {} entities carrying a mesh and a material",
-            drawn.len()
-        );
+        for (shape, item_id) in shape_examples() {
+            *app.world_mut().resource_mut::<Inventory>() =
+                Inventory::from_stacks(vec![InventoryStack {
+                    item_id,
+                    count: 1,
+                    ..Default::default()
+                }]);
+            *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(0);
+            app.update();
 
-        let mut children = world.query::<(&ChildOf, Entity)>();
-        let under = children
-            .iter(world)
-            .filter(|(parent, _)| parent.parent() == drawn[0])
-            .count();
-        assert_eq!(
-            under, 0,
-            "the held sword has {under} child entities, so part of it is not on the transform \
-             `animate_view_model` drives"
-        );
+            let world = app.world_mut();
+            let mut view = world.query_filtered::<
+                (Entity, &HeldItem, &Mesh3d),
+                With<MeshMaterial3d<StandardMaterial>>,
+            >();
+            let drawn: Vec<(Entity, HeldItem, Handle<Mesh>)> = view
+                .iter(world)
+                .map(|(entity, held, mesh)| (entity, *held, mesh.0.clone()))
+                .collect();
+            assert_eq!(
+                drawn.len(),
+                1,
+                "{shape:?} is {} entities carrying a mesh and a material",
+                drawn.len()
+            );
+            assert_eq!(drawn[0].1.shape, Some(shape));
+            assert_eq!(
+                drawn[0].2, view_mesh,
+                "{shape:?} replaced the stable view-model mesh handle"
+            );
+
+            let mut children = world.query::<(&ChildOf, Entity)>();
+            let under = children
+                .iter(world)
+                .filter(|(parent, _)| parent.parent() == drawn[0].0)
+                .count();
+            assert_eq!(
+                under, 0,
+                "{shape:?} has {under} child entities, so part of it is not on the transform \
+                 `animate_view_model` drives"
+            );
+        }
     }
 
     /// **The rust is many small marks bedded into the blade.**
@@ -1605,11 +1719,7 @@ mod tests {
             );
         }
 
-        let mut app = app();
-        app.update();
-        let rusted = app.world().resource::<HandVisuals>().rusted_blade.clone();
-        let meshes = app.world().resource::<Assets<Mesh>>();
-        let mesh = meshes.get(&rusted).expect("the rusted blade mesh");
+        let mesh = rusted_blade_mesh();
 
         let Some(VertexAttributeValues::Float32x3(all)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
@@ -1755,11 +1865,7 @@ mod tests {
     /// what reversing a section produces.
     #[test]
     fn every_face_of_the_sword_looks_outward() {
-        let mut app = app();
-        app.update();
-        let blade = app.world().resource::<HandVisuals>().blade.clone();
-        let meshes = app.world().resource::<Assets<Mesh>>();
-        let mesh = meshes.get(&blade).expect("the sword mesh");
+        let mesh = sword_mesh(SWORD_LENGTH);
 
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1841,7 +1947,7 @@ mod tests {
     /// did **not** clear the near plane there while the sword does — the pommel's corner sits
     /// closer to the axis of the swing than the box's did.
     #[test]
-    fn the_sword_clears_the_near_plane_through_every_swing() {
+    fn every_held_arrangement_clears_the_near_plane_through_every_swing() {
         let mut app = app();
         app.update();
         let parent = held(&mut app).2;
@@ -1854,34 +1960,43 @@ mod tests {
         };
         let near = projection.near;
 
-        let visuals = app.world().resource::<HandVisuals>();
-        let (blade, rusted) = (visuals.blade.clone(), visuals.rusted_blade.clone());
-        let meshes = app.world().resource::<Assets<Mesh>>();
-        let mut corners = positions(meshes, &blade);
-        corners.extend(positions(meshes, &rusted));
+        let appearances = shape_examples()
+            .into_iter()
+            .map(|(_, item_id)| {
+                selected_appearance(Some(InventoryStack {
+                    item_id,
+                    count: 1,
+                    ..Default::default()
+                }))
+            })
+            .chain([selected_appearance(None)]);
 
-        let mut arcs: Vec<Option<SwingShape>> = SwingShape::ALL.map(Some).to_vec();
-        arcs.push(None);
-        for shape in arcs {
-            for step in 0..=32u8 {
-                for bump in 0..=16u8 {
-                    let animation = HandAnimation {
-                        attack: shape.map(|shape| Swing {
-                            shape,
-                            elapsed: ATTACK_SWING_TIME.mul_f32(f32::from(step) / 32.0),
-                        }),
-                        bump_elapsed: Some(PLACE_BUMP_TIME.mul_f32(f32::from(bump) / 16.0)),
-                        ..Default::default()
-                    };
-                    let transform = animated_transform(&animation);
-                    for corner in &corners {
-                        let point = transform.transform_point(Vec3::from_array(*corner));
-                        assert!(
-                            -point.z > near,
-                            "{shape:?} at {step}/32 with the bump at {bump}/16 carries \
-                             {corner:?} to z {} against a near plane at {near}",
-                            point.z
-                        );
+        for appearance in appearances {
+            let corners = positions(&held_mesh(TEST_SKIN, appearance));
+            let mut arcs: Vec<Option<SwingShape>> = SwingShape::ALL.map(Some).to_vec();
+            arcs.push(None);
+            for shape in arcs {
+                for step in 0..=32u8 {
+                    for bump in 0..=16u8 {
+                        let animation = HandAnimation {
+                            attack: shape.map(|shape| Swing {
+                                shape,
+                                elapsed: ATTACK_SWING_TIME.mul_f32(f32::from(step) / 32.0),
+                            }),
+                            bump_elapsed: Some(PLACE_BUMP_TIME.mul_f32(f32::from(bump) / 16.0)),
+                            ..Default::default()
+                        };
+                        let transform = animated_transform(&animation);
+                        for corner in &corners {
+                            let point = transform.transform_point(Vec3::from_array(*corner));
+                            assert!(
+                                -point.z > near,
+                                "{:?} in {shape:?} at {step}/32 with the bump at {bump}/16 \
+                                 carries {corner:?} to z {} against a near plane at {near}",
+                                appearance.shape,
+                                point.z
+                            );
+                        }
                     }
                 }
             }
@@ -1894,28 +2009,21 @@ mod tests {
     /// test rather than the table: holding the iron sword must not produce the rusted mesh.
     #[test]
     fn only_the_rusty_sword_is_drawn_rusted() {
-        let mut app = app();
-        app.update();
-        let rusted = app.world().resource::<HandVisuals>().rusted_blade.clone();
-
         for (item_id, want_rusted) in [(ITEM_RUSTY_SWORD, true), (ITEM_IRON_SWORD, false)] {
-            *app.world_mut().resource_mut::<Inventory>() =
-                Inventory::from_stacks(vec![InventoryStack {
-                    item_id,
-                    count: 1,
-                    ..Default::default()
-                }]);
-            *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(0);
-            app.update();
-
-            let world = app.world_mut();
-            let mut query = world.query_filtered::<&Mesh3d, With<HeldItem>>();
-            let mesh = query.single(world).expect("one held view model").0.clone();
+            let appearance = selected_appearance(Some(InventoryStack {
+                item_id,
+                count: 1,
+                ..Default::default()
+            }));
+            let mesh = held_mesh(TEST_SKIN, appearance);
+            let item_colour = appearance.item_colour.expect("an item has a colour");
+            let rust = std::array::from_fn(|channel| item_colour[channel] * RUST_TINT[channel]);
+            let rust = rust.map(|channel| (channel * 255.0).round() as u8);
             assert_eq!(
-                mesh == rusted,
+                tints(&mesh).contains(&rust),
                 want_rusted,
-                "item {item_id} drawn with the rusted blade = {}, want {want_rusted}",
-                mesh == rusted
+                "item {item_id} carries a rust tint = {}, want {want_rusted}",
+                tints(&mesh).contains(&rust)
             );
         }
     }
@@ -1927,12 +2035,7 @@ mod tests {
     /// moved, which is the half of this that could have broken the swing tests silently.
     #[test]
     fn the_empty_hand_is_a_fist_inside_the_box_the_cuboid_filled() {
-        let mut app = app();
-        app.update();
-
-        let hand = app.world().resource::<HandVisuals>().hand.clone();
-        let meshes = app.world().resource::<Assets<Mesh>>();
-        let mesh = meshes.get(&hand).expect("the hand mesh");
+        let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
 
         assert!(
             mesh.count_vertices() > 24,
@@ -1963,6 +2066,111 @@ mod tests {
                 max - min
             );
         }
+    }
+
+    /// The cause of #240 was an exclusive mesh match: five item shapes replaced the fist.
+    /// The exact fist now starts every composite, including the empty one, so this sweep
+    /// fails if any future arrangement takes that shortcut again.
+    #[test]
+    fn the_same_fist_is_present_whatever_the_hand_holds() {
+        let fist = positions(&fist_mesh());
+        let appearances = shape_examples()
+            .into_iter()
+            .map(|(shape, item_id)| {
+                let appearance = selected_appearance(Some(InventoryStack {
+                    item_id,
+                    count: 1,
+                    ..Default::default()
+                }));
+                assert_eq!(appearance.shape, Some(shape));
+                appearance
+            })
+            .chain([selected_appearance(None)]);
+
+        for appearance in appearances {
+            let composite = positions(&held_mesh(TEST_SKIN, appearance));
+            assert_eq!(
+                &composite[..fist.len()],
+                fist,
+                "{:?} replaced or moved the fist instead of composing with it",
+                appearance.shape
+            );
+        }
+    }
+
+    /// Holding is overlap, not concealment: at least a quarter of every item's vertices
+    /// remain outside the fist's box after the arrangement is applied. A sword spends many
+    /// vertices on its grip, guard and pommel inside the palm; its blade is the third that
+    /// remains outside, which is the silhouette the arrangement must preserve.
+    #[test]
+    fn the_item_stays_recognisable_outside_the_fist() {
+        let half = HAND_SIZE / 2.0;
+        for (shape, item_id) in shape_examples() {
+            let item = item_mesh(item_id, shape).translated_by(item_translation(shape));
+            let item_positions = positions(&item);
+            let outside = item_positions
+                .iter()
+                .filter(|position| {
+                    position[0].abs() > half.x + 1e-6
+                        || position[1].abs() > half.y + 1e-6
+                        || position[2].abs() > half.z + 1e-6
+                })
+                .count();
+            assert!(
+                outside * 4 >= item_positions.len(),
+                "only {outside}/{} vertices of {shape:?} remain outside the fist",
+                item_positions.len()
+            );
+        }
+    }
+
+    /// Skin comes from the local player's authoritative appearance, item colour from the
+    /// display table, and white material identity lets both coexist in one draw.
+    #[test]
+    fn the_hand_and_item_keep_their_two_authoritative_colours_on_one_material() {
+        let mut app = app();
+        let look = PlayerLook::new(
+            TEST_SKIN,
+            0x0011_2233,
+            0x0044_5566,
+            0x0077_8899,
+            crate::net::HairModel::Shaved,
+            0x000F_0E0D,
+        )
+        .expect("the test appearance is legal");
+        app.world_mut()
+            .resource_mut::<AppearanceInbox>()
+            .push(PlayerAppearance {
+                entity_id: session().0.entity_id,
+                appearance: look,
+            });
+        app.update();
+
+        let world = app.world_mut();
+        let mut query = world.query::<(&HeldItem, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
+        let (held, mesh, material) = query.single(world).expect("one held arrangement");
+        assert_eq!(held.skin_colour, TEST_SKIN);
+
+        let meshes = world.resource::<Assets<Mesh>>();
+        let colours = tints(meshes.get(&mesh.0).expect("the held mesh"));
+        let skin = linear_rgb(TEST_SKIN).map(|channel| (channel * 255.0).round() as u8);
+        let stone =
+            items::item_linear_rgba(ITEM_STONE).map(|channel| (channel * 255.0).round() as u8);
+        assert!(colours.contains(&skin), "the mesh has no local skin colour");
+        assert!(
+            colours.contains(&stone),
+            "the mesh has no item-table colour"
+        );
+
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            materials
+                .get(&material.0)
+                .expect("the held material")
+                .base_color,
+            Color::WHITE,
+            "the material tinted both vertex colours a second time"
+        );
     }
 
     fn app() -> App {
@@ -2058,15 +2266,29 @@ mod tests {
         app.update();
 
         let world = app.world_mut();
-        let mut query = world.query::<(&HeldItem, &MeshMaterial3d<StandardMaterial>)>();
-        let (held, handle) = query.single(world).expect("one held item");
+        let mut query = world.query::<(&HeldItem, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
+        let (held, mesh, material) = query.single(world).expect("one held item");
         assert_eq!(held.shape, Some(ItemShape::Material));
-        let material = world
-            .resource::<Assets<StandardMaterial>>()
-            .get(&handle.0)
-            .expect("the held material");
-        let [r, g, b, a] = palette::linear_rgba(u16::MAX);
-        assert_eq!(material.base_color, Color::linear_rgba(r, g, b, a));
+        assert_eq!(
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material.0)
+                .expect("the held material")
+                .base_color,
+            Color::WHITE
+        );
+        let colours = tints(
+            world
+                .resource::<Assets<Mesh>>()
+                .get(&mesh.0)
+                .expect("the held mesh"),
+        );
+        let fallback =
+            palette::linear_rgba(u16::MAX).map(|channel| (channel * 255.0).round() as u8);
+        assert!(
+            colours.contains(&fallback),
+            "the item vertices do not carry the palette fallback"
+        );
     }
 
     #[test]
@@ -2201,7 +2423,7 @@ mod tests {
         // apart.
         for (first, second) in [(0, 1), (0, 2), (1, 2)] {
             assert_ne!(
-                carried[first].colour, carried[second].colour,
+                carried[first].item_colour, carried[second].item_colour,
                 "items {} and {} are carried in the same colour",
                 bundles[first], bundles[second]
             );
@@ -2239,7 +2461,7 @@ mod tests {
             max_durability: 100,
         }));
         assert_ne!(
-            iron.colour, rusty.colour,
+            iron.item_colour, rusty.item_colour,
             "the two blades are carried in the same colour"
         );
 
@@ -2283,7 +2505,8 @@ mod tests {
                     count: 1,
                     ..Default::default()
                 }))
-                .colour,
+                .item_colour
+                .expect("an item has a colour"),
                 "item {item_id}"
             );
         }

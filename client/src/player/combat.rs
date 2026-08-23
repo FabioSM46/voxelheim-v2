@@ -244,9 +244,8 @@ mod tests {
     use crate::net::{
         InventoryInbox, InventoryStack, InventoryState, PlayerVitals, Session, SessionParams,
     };
-    use crate::player::camera::WorldCamera;
     use crate::player::crafting::{ITEM_IRON_SWORD, ITEM_SHARPENING_STONE};
-    use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE};
+    use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE, ItemShape};
     use crate::player::structures::{ITEM_FORGE, ITEM_TENT};
     use crate::player::{InputMode, PlayerPlugin, SelfVitals};
     use crate::wire::voxelheim::net as fb;
@@ -334,29 +333,6 @@ mod tests {
             ("the rusty sword", blade_of(ITEM_RUSTY_SWORD)),
             ("the iron sword", blade_of(ITEM_IRON_SWORD)),
         ]
-    }
-
-    /// The mesh handle the first-person hand is currently drawn from.
-    ///
-    /// The camera's one mesh child. `super::hands` parents exactly one entity there and
-    /// nothing else under `PlayerPlugin` parents anything to the camera at all, so this is
-    /// unambiguous without naming that module's private view-model component.
-    fn held_mesh(app: &mut App) -> Handle<Mesh> {
-        let world = app.world_mut();
-        let cameras: Vec<Entity> = world
-            .query_filtered::<Entity, With<WorldCamera>>()
-            .iter(world)
-            .collect();
-        assert_eq!(cameras.len(), 1, "exactly one camera owns the window");
-
-        let mut held = world.query::<(&Mesh3d, &ChildOf)>();
-        let found: Vec<Handle<Mesh>> = held
-            .iter(world)
-            .filter(|(_, parent)| parent.parent() == cameras[0])
-            .map(|(mesh, _)| mesh.0.clone())
-            .collect();
-        assert_eq!(found.len(), 1, "the camera carries exactly one held item");
-        found[0].clone()
     }
 
     /// Writing the message rather than poking the resource: `mouse_button_input_system`
@@ -693,16 +669,11 @@ mod tests {
     /// and it survives until legacy PR 128 folds them into one table; this is what holds them
     /// together in the meantime.
     ///
-    /// Read through the **mesh the hand is actually built from**, because `HeldShape` and
-    /// `item_presentation` are private to `super::hands` and this test is not in that
-    /// module. The blades name their own handles rather than this test hard-coding any.
-    ///
-    /// **There is more than one blade handle now, and there used to be exactly one.**
-    /// `HandVisuals` added one mesh per shape, so "shares a handle" meant "shares a shape"
-    /// and the rusty sword alone could stand for both. #175 gave that sword its own mesh —
-    /// rust is a fact about one blade rather than about blades — so this reads the *set* of
-    /// handles the blades produce. Asserting against one of them would have quietly stopped
-    /// covering the other, which is the direction this test exists to fail in.
+    /// Read through the **shape the hand actually builds**, rather than reading the item
+    /// table directly. The view model now keeps one stable mesh handle and rebuilds that
+    /// asset in place, so handle identity deliberately says nothing about shape; the
+    /// test-only accessor in `super::hands` reaches the same `selected_appearance` route the
+    /// running client does.
     ///
     /// Swept over a **range** rather than over the ids that exist today: a hand-written
     /// list would be a third copy of the item table, and the entry it lost would be the
@@ -713,24 +684,9 @@ mod tests {
         // item appended there without a thought for this test is still swept.
         const HIGHEST_SWEPT_ID: u16 = 64;
 
-        let (mut app, _sent) = clicking_app(blade());
-
-        // Every handle a blade produces, read off the hand rather than named here.
-        let mut blade_meshes = Vec::new();
-        for (_, stack) in blades() {
-            deliver(&mut app, stack);
-            app.update();
-            let mesh = held_mesh(&mut app);
-            if !blade_meshes.contains(&mesh) {
-                blade_meshes.push(mesh);
-            }
-        }
-
         let mut drawn_as_blades = Vec::new();
         for item_id in 1..=HIGHEST_SWEPT_ID {
-            deliver(&mut app, one(item_id));
-            app.update();
-            if blade_meshes.contains(&held_mesh(&mut app)) {
+            if super::super::hands::drawn_item_shape(item_id) == ItemShape::Blade {
                 drawn_as_blades.push(item_id);
                 assert!(
                     item_is_a_blade(item_id),
