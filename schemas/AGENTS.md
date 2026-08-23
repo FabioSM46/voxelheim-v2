@@ -158,7 +158,7 @@ warning, since generated output may differ from CI's.
 **It also checks that the committed bindings are the ones this contract produces.** That is a
 second phase, and it is newer than the first because for a long time nothing did it: phase one
 generates into a throwaway directory, so editing a contract and forgetting to regenerate passed
-every gate in the repository. PR #139 changed one comment and CI went green with both consumers'
+every gate in the repository. Legacy PR 139 changed one comment and CI went green with both consumers'
 `RepairRequest` still carrying the removed text — flatc propagates `///` documentation, so the
 contract disagreed with its own bindings and nothing could see it. Phase two runs the recipe above
 verbatim and asks git whether anything moved, which is the "must produce no diff" sentence executed

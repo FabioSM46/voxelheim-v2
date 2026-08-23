@@ -443,7 +443,7 @@ func (f *fakeConn) expireReadDeadline() {
 // WriteFrame answers a closed connection with what a real one answers — net.ErrClosed,
 // which transport.IsDisconnect recognises.
 //
-// It returned io.ErrClosedPipe until #61, and the swap is a decision rather than a tidy-up.
+// It returned io.ErrClosedPipe until legacy PR 61, and the swap is a decision rather than a tidy-up.
 // Serve now asks IsDisconnect about a write failure as well as a read one, and
 // io.ErrClosedPipe is not one of the sentinels it lists, so there were two ways to make a
 // clean disconnect end cleanly here: add that sentinel to IsDisconnect, or have the double
@@ -660,7 +660,7 @@ func TestServeAdmitsAndAcceptsInput(t *testing.T) {
 // TestServeAdmitsAndAcceptsInput reaches the write-failure path only when Close lands in the
 // window where a spawn chunk is still in flight, and the rate is a strong function of the
 // configuration: before the fix, 31 failures in 200 runs at GOMAXPROCS=1 under eight
-// busy-loops, against 0 to 1 in 200 at GOMAXPROCS 2 and 4 (#61). Enough to catch a regression
+// busy-loops, against 0 to 1 in 200 at GOMAXPROCS 2 and 4 (legacy PR 61). Enough to catch a regression
 // eventually, nowhere near enough to state a rule — so both halves of the rule get a
 // connection that always fails.
 type writeErrConn struct {
@@ -914,7 +914,7 @@ func TestServeClosesAConnectionThatNeverSaysHello(t *testing.T) {
 }
 
 // A session that goes quiet ends the way a session that hangs up ends: through the
-// ordinary teardown, with nil. The #61 lesson, arrived at from the other direction —
+// ordinary teardown, with nil. The legacy PR 61 lesson, arrived at from the other direction —
 // there it was a write finding the peer gone, here it is a read finding nobody there
 // — and the cost of getting it wrong is the same, an operator whose log warns about
 // the most routine thing a connection does.

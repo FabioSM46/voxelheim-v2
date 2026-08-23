@@ -230,7 +230,7 @@ package can avoid the import would create two truths to keep in step for no bene
   streaming goroutine does the reading, encoding and sending — deliberately, because generating
   terrain on the tick goroutine would cost every connected player a tick. So a snapshot showing a
   player over a border is **not** evidence that the chunk beyond it has been sent, and asserting
-  both in one breath is a race rather than a test: that is the whole of issue #55, worth 1 failure
+  both in one breath is a race rather than a test: that is the whole of legacy issue 55, worth 1 failure
   in 40 there and 5 in 1,200 when it was re-measured under `-race` at GOMAXPROCS 1 and 2 on a
   loaded machine. Wait for the chunk — and park the player first. Newest-wins means a
   walk that runs on while the assertion waits can carry the player out the far side of the chunk,
@@ -278,7 +278,7 @@ package can avoid the import would create two truths to keep in step for no bene
   already covered a peer who sent no `ClientHello`.
 - **A read deadline still fires through the TLS layer**, and it is pinned rather than assumed. A
   TLS record boundary is not a frame boundary and the deadline is measured on the socket
-  underneath; without the test, #150's handshake and idle timeouts could have stopped bounding
+  underneath; without the test, legacy PR 150's handshake and idle timeouts could have stopped bounding
   anything while every log line looked healthy. crypto/tls's answer to an expired deadline —
   the connection is finished — is exactly what `Conn.SetReadDeadline` already required.
 - **The certificate is generated once and kept**, under `-world-dir` as `server-cert.pem` and
@@ -1066,7 +1066,7 @@ flush are wired in `cmd/voxelheimd/main.go`.
   moving. `world.bin` therefore records `WorldgenVersion` beside the seed, and a mismatch is
   the same refusal. **Bump it whenever you reach for `-update-golden`**: the golden chunk test
   failing is the moment the generator changed, and it is the only reminder there is — this is
-  a number a human maintains, not a hash of the function. Found by the review on #65.
+  a number a human maintains, not a hash of the function. Found by the review on legacy PR 65.
 - **Writes are atomic: temporary file, flush, rename, in that order.** The temporary file is
   created in the destination directory, because rename is only atomic within one filesystem.
   Writing in place would leave a truncated file that parses perfectly as a *shorter* edit
@@ -2036,7 +2036,7 @@ Recorded here so the next reader does not mistake them for oversights:
   deliver every inventory state, with the durable retry it already has) or a version the receiver
   can compare, and both are a change to the delivery contract rather than to this code. **It
   predates item drops** — the same reorder was reachable between a placement on the read loop and a
-  mined break's insertion on the mining worker. Found by the review on #89.
+  mined break's insertion on the mining worker. Found by the review on legacy PR 89.
 - **The chunk cache is bounded by count, not by memory.** 1024 chunks is roughly 70 MiB with their
   encoded payloads; a smaller machine or a larger `ChunkSize` would want a byte budget instead.
 - **Players do not collide with each other.** Only with terrain. Entity-versus-entity collision
@@ -2110,7 +2110,7 @@ Recorded here so the next reader does not mistake them for oversights:
   it does not order a re-send against a `BlockUpdate` broadcast concurrently — from the second pass
   on the chunk is marked held, so the update is delivered anyway and arriving twice is harmless,
   but an update for an edit made between the re-read and the re-send can still reach the client
-  ahead of the chunk that predates it. Found by review on PR #54; the window is one step wider than
+  ahead of the chunk that predates it. Found by review on legacy PR 54; the window is one step wider than
   the finding said, because it opens at the read rather than at the send.
 - **A block cannot be placed inside a player, but the check is not atomic with the write.** A tick
   landing in the microseconds between them can still move somebody into the voxel. The consequence

@@ -580,7 +580,7 @@ const GHOST_BLEED: f32 = 0.006;
 /// succeed, and that is not a simplification to be improved on later: colouring a cell red
 /// requires knowing the rule, and knowing the rule on this side means either a second copy
 /// of it that can disagree with the server's, or waiting to be told. The server tells —
-/// as an `ActionRefused` that reaches the status line — which is the whole of #205.
+/// as an `ActionRefused` that reaches the status line — which is the whole of legacy PR 205.
 ///
 /// A cooler amber than the single-voxel highlight, so the two are distinguishable at a
 /// glance without either reading as a verdict.
@@ -2438,7 +2438,7 @@ mod tests {
 
         // **The one-cell footprint.** A campfire's is the anchor cell and nothing else,
         // which is why the single-voxel outline used to be right for it — accidentally,
-        // and only for it: a tent covers nine and a forge two. Since #205 the ghost draws
+        // and only for it: a tent covers nine and a forge two. Since legacy PR 205 the ghost draws
         // the footprint for every kind and the outline stands down, so what is asserted
         // here is what it always meant to assert — that the cell under the crosshair is
         // the ground the fire will stand on, and the one the press then names.

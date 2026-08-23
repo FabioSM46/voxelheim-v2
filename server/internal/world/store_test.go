@@ -204,7 +204,7 @@ func TestAnUneditedChunkWritesNoFile(t *testing.T) {
 	}
 }
 
-// The seed's twin, and the hole the review on #65 found in it. Only deltas are stored, so
+// The seed's twin, and the hole the review on legacy PR 65 found in it. Only deltas are stored, so
 // opening a world replays edits onto a base recomputed from the seed — and the seed alone
 // does not pin that base. Change the generator and the indices still all resolve, which is
 // the same silent corruption the seed check refuses, arriving by the other road.

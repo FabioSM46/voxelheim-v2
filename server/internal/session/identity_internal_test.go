@@ -134,7 +134,7 @@ func TestAClaimSetRefusesToExistWithoutAVerifier(t *testing.T) {
 // A player store that cannot be *reached* is a failure, not a refusal, and above all
 // not "this player is unknown".
 //
-// The distinction this pins is the one #147 introduced. A corrupt record will never be
+// The distinction this pins is the one legacy PR 147 introduced. A corrupt record will never be
 // readable, so refusing the connection for ever helps nobody and it is set aside — see
 // TestResolveSetsACorruptRecordAsideAndAdmitsThePlayerAsNew. An unreachable one is a
 // different animal: a permission, a failing disk, a path that is not a file at all. A

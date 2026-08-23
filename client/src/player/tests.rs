@@ -1864,7 +1864,7 @@ fn fog(app: &mut App) -> DistanceFog {
 #[test]
 fn a_server_with_no_clock_leaves_the_sky_exactly_where_it_was() {
     // The path every server in this repository takes today, and the one that keeps taking
-    // it until #167 lands. A welcome whose `day_length_ticks` is zero is a legal
+    // it until legacy PR 167 lands. A welcome whose `day_length_ticks` is zero is a legal
     // announcement rather than a missing field, and the four values it leaves alone are
     // the four this client rendered before there was a clock at all.
     let mut app = headless_player();

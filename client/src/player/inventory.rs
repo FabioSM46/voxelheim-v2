@@ -411,7 +411,7 @@ fn item_is_a_repair_kit(item_id: u16) -> bool {
 ///
 /// What it deliberately does **not** ask is whether the mend would achieve anything. A
 /// target already at full durability is refused server-side, and asking it here would be
-/// this client deciding a gameplay outcome from a state that is one message old. `#110`
+/// this client deciding a gameplay outcome from a state that is one message old. legacy PR 110
 /// makes every refusal silence, so the honest shape of a mend that did not happen is a
 /// durability bar that did not move.
 ///

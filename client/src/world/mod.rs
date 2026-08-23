@@ -1844,7 +1844,7 @@ mod tests {
 
     #[test]
     fn an_edit_that_leaves_a_border_voxel_solid_marks_nobody() {
-        // The other control, and the one the review on #66 found missing. A neighbour's
+        // The other control, and the one the review on legacy PR 66 found missing. A neighbour's
         // mesh depends on which of this chunk's boundary voxels are *solid* and on
         // nothing else, so stone becoming grass on a shared wall changes nothing across
         // it — the neighbour would be remeshed into a byte-identical mesh. The edited

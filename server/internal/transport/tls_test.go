@@ -79,7 +79,7 @@ type dialled struct {
 // clean FIN, indistinguishable from a peer that left. A caller that drops the returned
 // channel drops the only reference there is: the dialling goroutine sends into a
 // buffered channel and returns, so nothing at all points at the connection from the
-// moment the handshake completes. That is not hypothetical, it is #176 — a read
+// moment the handshake completes. That is not hypothetical, it is legacy PR 176 — a read
 // expecting its 50ms deadline got EOF after 4ms, on whichever runs a neighbouring test
 // happened to allocate enough to trigger a collection, which is why the failure
 // followed the *package* and never the test.
@@ -213,20 +213,20 @@ func TestTLSCarriesFramesUnchanged(t *testing.T) {
 }
 
 // idleReadDeadline is how long the silent read below is given. Long enough that a peer
-// hanging up is unmistakable next to it — #176's EOF landed 4ms into a 50ms window — and
+// hanging up is unmistakable next to it — legacy PR 176's EOF landed 4ms into a 50ms window — and
 // short enough to keep a parallel test cheap.
 const idleReadDeadline = 200 * time.Millisecond
 
 // **The deadline still fires through the TLS layer**, which is the one thing wrapping a
 // connection could plausibly have broken. A TLS record boundary is not a frame boundary
 // and the deadline is measured on the socket underneath, so this is pinned rather than
-// assumed: without it, #150's handshake and idle timeouts would silently stop bounding
+// assumed: without it, legacy PR 150's handshake and idle timeouts would silently stop bounding
 // anything the moment -tls was passed, and a server would hold a silent connection open
 // for ever while every log line looked healthy.
 //
 // # The handshake finishes before the deadline is armed
 //
-// What #150's idle timeout bounds is the read that comes *after* a handshake, and that
+// What legacy PR 150's idle timeout bounds is the read that comes *after* a handshake, and that
 // is what this measures. Arming the deadline first and letting the handshake complete
 // underneath it measured the two together: a handshake slow enough to exhaust the window
 // on a loaded machine also reports a timeout, so the assertion held either way and could

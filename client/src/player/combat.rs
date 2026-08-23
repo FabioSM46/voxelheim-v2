@@ -1,7 +1,7 @@
 //! Which intent the left button means, and the swing it sends.
 //!
 //! **This routing is not authority.** A modified client can emit either frame, and the
-//! server validates the slot and refuses the wrong one — `#95` checks that the named slot
+//! server validates the slot and refuses the wrong one — legacy PR 95 checks that the named slot
 //! still holds a non-broken blade before a swing resolves. What this module decides is
 //! only which intent an *honest* UI should send when the player clicks, so that one click
 //! never asks for two different things.
@@ -42,7 +42,7 @@ pub(super) const ITEM_RUSTY_SWORD: u16 = 7;
 /// an item the server would have honoured and this list omitted, which is what the iron
 /// sword silently was: drawn as a blade, worth 40 damage server-side, and never asked for.
 ///
-/// **Deliberately one list and not a second registry.** #128 collapses every per-item fact
+/// **Deliberately one list and not a second registry.** legacy PR 128 collapses every per-item fact
 /// this client holds — display name, held shape, swatch — into a single table. *The left
 /// button swings this* is one more fact of that kind, so this becomes a column of that table
 /// and [`item_is_a_blade`] its accessor, with no call site and no test changed.
@@ -478,7 +478,7 @@ mod tests {
         }
     }
 
-    /// The gate #96 added, and the reason a click that closed a menu cannot swing on the
+    /// The gate legacy PR 96 added, and the reason a click that closed a menu cannot swing on the
     /// frame play resumes.
     #[test]
     fn a_ui_mode_or_a_death_suppresses_the_swing() {
@@ -630,7 +630,7 @@ mod tests {
     /// drew the iron sword as a `Blade` while this module said it was not one, so the hand
     /// showed a weapon that mined — and the comment beside that arm named the gap on
     /// purpose rather than hiding it. Two opinions in two modules is the shape of the bug,
-    /// and it survives until #128 folds them into one table; this is what holds them
+    /// and it survives until legacy PR 128 folds them into one table; this is what holds them
     /// together in the meantime.
     ///
     /// Read through the **mesh the hand is actually built from**, because `HeldShape` and

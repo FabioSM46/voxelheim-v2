@@ -260,7 +260,7 @@ func TestARecordAfterThePenaltyDoesNotChargeItTwice(t *testing.T) {
 // The tent, because respawnPositionLocked is reused rather than copied — a record
 // written while dead has to come back to the same place a respawn would.
 //
-// It deliberately does not care *how* the tent is found. That lookup is #148's to
+// It deliberately does not care *how* the tent is found. That lookup is legacy PR 148's to
 // change from an entity id to an identity, and this test passes either way because it
 // only ever has one player.
 func TestADeadPlayersRecordComesBackToTheirTent(t *testing.T) {
