@@ -125,7 +125,14 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
 - **No new dependencies** (Go modules, crates) without explicit instruction
 - **No git submodules**: Everything is in one repository
 - **Never read `.env` files** — AI agents MUST NOT read, open, or inspect any `.env` file. Use `.env.example` exclusively for understanding required environment variables. `.env` files contain real secrets and credentials.
-- **NEVER push or merge to main** — All work targets `develop`. Merging is a human-only operation. The AI must never `git push origin main` or `gh pr merge`. PRs targeting `main` are allowed; the human performs the merge. **This is an instruction, and it is worth knowing exactly what backs it** — see "What actually stops a merge" below, because the allowlist does not.
+- **NEVER push or merge to `main`** — `main` is the release branch and it stays human-only. The AI
+  must never `git push origin main` and must never merge a pull request into `main`. PRs targeting
+  `main` are allowed; the human performs the merge.
+- **Merging into `develop` is the AI's to do** — since #217 it merges on its own judgement, and
+  `READY TO MERGE` is a signal it should read rather than a precondition it must satisfy. **This is
+  an instruction, and it is worth knowing exactly what backs it** — see "What actually stops a
+  merge" below, because for `develop` the answer is now "nothing, deliberately", and for `main` it
+  is the instruction alone.
 - **Git worktree isolation** — All file edits and git operations MUST happen inside an isolated `git worktree`, never on the main working directory. Use `<parent-directory>/voxelheim-v2-issue-<number>` when the work is tied to an issue; if no issue exists, do not invent a number — use `<parent-directory>/voxelheim-v2-issue-<short-descriptive-slug>` instead (for example, `voxelheim-v2-issue-graphify`). `/process-pr` worktrees remain `voxelheim-v2-pr-<number>`. Verify you are inside the worktree before making any changes (`git rev-parse --show-toplevel`). After the PR is opened, clean up with `git worktree remove` and `git worktree prune`. Reuse an existing worktree if one already exists for the branch.
 - **Never hand-edit generated code** — anything under a `gen/` directory or matching `*_generated.rs` is flatc output. Regenerate from `schemas/`; the review bot excludes those paths from the diff it reads for the same reason.
 
@@ -223,11 +230,13 @@ with a **wider** tool set, since a skill runs under its `allowed-tools` list and
 general-purpose subagent does not. Keep those lists narrow; they are now the reason to prefer
 a skill invocation over a hand-rolled agent.
 
-**Nothing on the merge side moved, and nothing on it may.** CI runs on the pull request
-whichever hand opened it, `READY TO MERGE` is computed by the one frozen rule, `gh pr merge`
-stays forbidden to the AI, `DEEPSEEK_REVIEW_READ` and `NO_DEEPSEEK_REVIEW` stay human-only,
-and the rulesets reject direct pushes at the remote. The human gate is the merge, and it is
-the gate that was ever load-bearing.
+**The merge side has now moved, and #217 is where.** CI still runs on the pull request whichever
+hand opened it, `READY TO MERGE` is still computed by the one frozen rule, the rulesets still
+reject direct pushes at the remote, and `DEEPSEEK_REVIEW_READ` and `NO_DEEPSEEK_REVIEW` are still
+human-only. What changed is the merge itself: into `develop` it is the AI's call, and a thread the
+AI has answered is the AI's to resolve. **The human gate was the merge, it was the gate that was
+ever load-bearing, and it is gone by decision rather than by oversight** — read the residual risk
+closing the next section before assuming otherwise.
 
 Iteration ceremonies are the deliberate exception and stay human-in-the-loop — not because a
 model cannot run them, but because choosing which issues go into the next iteration is the
@@ -235,44 +244,67 @@ user's call, not a mechanical step.
 
 #### What actually stops a merge
 
-Three things, in ascending order of how much they can be relied on.
+Since #217 the answer depends on the target, and one of the two answers is "nothing".
 
-1. **The instruction above.** Every skill repeats it. It is the only thing operating in the common case,
-   and it works because nothing is trying to get around it.
-2. **A deny rule** in `.claude/settings.json` for the literal `gh pr merge` and `git push origin main`
-   spellings, plus the common force-push shorthands. Deny takes precedence over a skill's `allowed-tools`,
-   so it needs no change to the skills. The entries are literal prefixes rather than patterns —
-   `--force-with-lease`, `HEAD:main` and `+refs/heads/main` are not among them — so it closes the
-   realistic accidental path and nothing more.
-3. **The branch rulesets**, which are the only genuinely enforced layer: a pull request is required,
-   review threads must be resolved, and `ci-gate` must be green. Whoever runs the merge, it cannot land on
-   a pull request that is not already in a mergeable state. **The same `pull_request` rule rejects every
-   direct push to `main` and `develop`, for everyone, with no bypass**, and it matches on the ref rather
-   than on the command line — so no spelling of `git push` gets past it.
+**Into `develop`: nothing, and that is the decision.** The AI merges on its own judgement. The
+frozen acceptance rule still computes `READY TO MERGE` and the AI should read it, but it is a
+signal, not a gate — a merge that ignores it is a bad call rather than a blocked one. The branch
+ruleset still applies to everyone: a pull request is required, review threads must be resolved,
+and `ci-gate` must be green, so nothing lands on a pull request that is not already in a mergeable
+state. That is the whole of what remains, and every condition in it is machine-checkable.
 
-**What is deliberately not claimed.** The allowlist is not a sandbox. The skills carry `Bash(gh *)` and
-`Bash(bash *)`, and both are load-bearing — `gh api` is how half the pipeline talks to GitHub, and every
-skill runs `bash scripts/gh-automation.sh`. Both reach a merge by another spelling:
-`gh api -X PUT repos/OWNER/REPO/pulls/N/merge`, or `bash -c` running anything at all. Enumerating gh
-subcommands would remove the one spelling a reviewer thinks to check and leave the others in place, which
-is worse than an honest description because it reads as enforcement.
+**Into `main`: the instruction, alone.** This is worth stating precisely, because the shape is the
+one this file warns about everywhere else. A deny rule can match `git push origin main` because the
+command names its ref. **`gh pr merge <n>` names no branch** — the base is a property of the pull
+request — so no `Bash(...)` prefix can distinguish a merge into `develop` from one into `main`.
+Removing the merge deny for `develop` therefore removed it for `main` too. The ruleset on `main`
+requires a pull request, resolved threads and a green `ci-gate`, and it does not distinguish a
+human from an agent; required approvals are 0 because GitHub forbids approving your own pull
+request and this is a solo repository. So nothing under `main` is enforced against an agent that
+decides to merge it. **It is an instruction, it is the only thing there, and a deny entry that
+blocked one spelling would be the exact theatre #51 removed.**
 
-**Why spellings are enumerated for `git push` and not for `gh`.** The review on #52 found
-`git push --force origin main` denied while `git push -f origin main` was not, and proposed adding the
-shorthands. They are added — `-f` is the same accident as `--force`, and an accident stopped locally beats
-one stopped at the remote. What keeps that from being the theatre described above is what sits underneath
-it: a push to `main` already has a complete backstop, ref-matched and unbypassable, so the deny entries
-there are convenience and nothing rests on them. A merge has no equivalent — `gh api -X PUT …/merge` is
-reachable and unguarded — so enumerating `gh` subcommands would *be* the claimed layer, and a partial one.
-**Enumerate where something else is holding the line; never where the enumeration is the line.**
+**What is deliberately not claimed.** The allowlist is not a sandbox and never was. The skills carry
+`Bash(gh *)` and `Bash(bash *)`, and both are load-bearing — `gh api` is how half the pipeline talks
+to GitHub, and every skill runs `bash scripts/gh-automation.sh`. Both reach a merge by another
+spelling: `gh api -X PUT repos/OWNER/REPO/pulls/N/merge`, or `bash -c` running anything at all.
+Enumerating gh subcommands would remove the one spelling a reviewer thinks to check and leave the
+others in place, which is worse than an honest description because it reads as enforcement.
 
-This was found by the DeepSeek review on the very pull request that opened the gap (#49 removed the
-human-only invocation flag; #51 corrects its claim). The resolution is the one #29 established here: **when
-a diff asserts a guarantee no machine checks, the fix is to stop asserting it** — then enforce the part that
-can be enforced, and write down the part that cannot.
+**The `git push origin main` entries stay, and their reasoning is unchanged.** The review on #52
+found `git push --force origin main` denied while `git push -f origin main` was not, and the
+shorthands were added: `-f` is the same accident as `--force`, and an accident stopped locally beats
+one stopped at the remote. What keeps that from being the theatre described above is what sits
+underneath it — a push to `main` has a complete backstop, ref-matched and unbypassable — so those
+entries are convenience and nothing rests on them. **Enumerate where something else is holding the
+line; never where the enumeration is the line.** A merge into `main` has no such backstop, which is
+exactly why there is no deny entry pretending to be one.
 
-The residual risk, stated so nobody has to rediscover it: an agent could merge a pull request that is
-genuinely ready but that the human has not read. `READY TO MERGE` and a human reviewer are what stand there.
+This section used to describe three layers and close on a residual risk: *an agent could merge a
+pull request that is genuinely ready but that the human has not read; `READY TO MERGE` and a human
+reviewer are what stand there.* #217 deleted the second of those two, deliberately, at the
+repository owner's instruction.
+
+**The residual risk now, stated so nobody has to rediscover it.** Three things changed, and they
+are not the same thing:
+
+1. **Nothing reads a pull request before it lands on `develop` unless the AI does.** `READY TO
+   MERGE` is computed from CI state, mergeability, thread counts and DeepSeek state. Not one of
+   those is a reader.
+2. **`unresolved_threads == 0` no longer means a person looked.** The AI may resolve a thread it has
+   replied to, including one whose suggestion it rejected (#217). The reply is mandatory and is the
+   whole of the audit trail; it is not a second opinion. Two machines agreeing is not verification —
+   on #209 the review's premise was false, the reply refuted it with a measurement, and the review
+   conceded; that exchange would have read identically had the measurement been wrong.
+3. **Cross-pull-request ordering is invisible to the frozen rule, and merging is now the AI's
+   call.** #214 and #215 were each `ready_to_merge: true` on their own, and merging #214 alone left
+   sign-in broken on `develop` at runtime with nothing turning red, because
+   `scripts/interop-check.sh` is not a CI step. An ordering stated in a pull-request body binds
+   whoever merges. **Read the bodies.**
+
+What still stands: `ci-gate` present and green, the rulesets, `DEEPSEEK_REVIEW_READ` as the one
+acknowledgement that a *person* read a finding, `NO_DEEPSEEK_REVIEW` beside it, and iteration
+planning as a human decision.
 
 ### Frozen Acceptance Rule
 
