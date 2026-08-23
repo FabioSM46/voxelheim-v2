@@ -85,6 +85,7 @@ type Message struct {
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
 	Repair             *RepairRequest
+	DropItem           *DropItemRequest
 	SelectCharacter    *SelectCharacterRequest
 	CreateCharacter    *CreateCharacterRequest
 }
@@ -311,6 +312,26 @@ type RepairRequest struct {
 	// TargetSlot is the authoritative slot holding the item to mend. Whether it equals
 	// KitSlot is a decision, and decisions belong to the simulation.
 	TargetSlot uint8
+
+	// ClientTick is ordering and staleness only, exactly as in PlayerInput, and never
+	// read as a clock.
+	ClientTick uint32
+}
+
+// DropItemRequest is one decoded attempt to put a whole stack back on the ground.
+// **Intent, never outcome.**
+//
+// One slot index and nothing else. No count and no position in either direction: a count
+// would let a client state what leaves its own pack, and a position would let it put an item
+// down anywhere in the world.
+//
+// Slot is copied verbatim, out-of-range values included, exactly as AttackRequest.Slot is:
+// whether a slot holds something a player may put down is a decision the simulation makes
+// against a pack this package cannot see, and refusing it here would close a connection
+// whose framing is perfectly readable.
+type DropItemRequest struct {
+	// Slot is the authoritative inventory slot to empty onto the ground.
+	Slot uint8
 
 	// ClientTick is ordering and staleness only, exactly as in PlayerInput, and never
 	// read as a clock.
@@ -987,6 +1008,22 @@ func Decode(frame []byte) (msg Message, err error) {
 		msg.Repair = &RepairRequest{
 			KitSlot:    request.KitSlot(),
 			TargetSlot: request.TargetSlot(),
+			ClientTick: request.ClientTick(),
+		}
+
+	case vnet.PayloadDropItemRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.DropItemRequest
+		request.Init(table.Bytes, table.Pos)
+
+		// Both fields copied straight through, a slot past the end of the pack included.
+		// Nothing here indexes an array with it, and whether a slot holds something a player
+		// may put down is a decision the simulation makes against state it cannot see.
+		msg.DropItem = &DropItemRequest{
+			Slot:       request.Slot(),
 			ClientTick: request.ClientTick(),
 		}
 
@@ -1727,6 +1764,22 @@ func EncodeRepairRequest(r RepairRequest) []byte {
 	request := vnet.RepairRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadRepairRequest, request)
+}
+
+// EncodeDropItemRequest builds one drop intent, for the reason EncodeRepairRequest exists:
+// the server never sends one, and the tests need the bytes a client produces.
+//
+// Nothing is validated on the way out. A slot past the end of the inventory is an input the
+// simulation must refuse, and there would otherwise be no way to build one.
+func EncodeDropItemRequest(r DropItemRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.DropItemRequestStart(b)
+	vnet.DropItemRequestAddSlot(b, r.Slot)
+	vnet.DropItemRequestAddClientTick(b, r.ClientTick)
+	request := vnet.DropItemRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadDropItemRequest, request)
 }
 
 // EncodeChunkResendRequest builds one ask for a chunk the client has lost. The server

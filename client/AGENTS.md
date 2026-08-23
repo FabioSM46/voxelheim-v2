@@ -66,7 +66,7 @@ keeps meaning "everything the client is".
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean and hit flash | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
 | `player/items.rs` | one row per item id: its display name, its held shape, the palette entry it draws as | hold a capability, a stat, or anything a rule is read from |
-| `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the two intents a cell click means | increment, decrement, move or merge a count, or move a durability |
+| `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the three intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down |
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
 | `player/interpolate.rs` | the two-snapshot buffer and the interpolation | mention a Bevy world, or extrapolate |
 | `player/camera.rs` | the one camera, and what it follows | decide a gameplay outcome |
@@ -465,9 +465,10 @@ The client samples the controls, sends what the player is *trying* to do at the 
   a courtesy must never produce: a row refusing a craft the server would have granted. The
   craft itself changes nothing locally; the complete `InventoryState` that follows is what
   moves a count, and a refusal is silence.
-- **One cell click, two possible intents, and choosing between them is routing rather
+- **One cell press, three possible intents, and choosing between them is routing rather
   than authority.** A picked sharpening stone dropped on a slot that wears out sends a
-  `RepairRequest` naming the two slots; every other pair sends the `InventoryMoveRequest`
+  `RepairRequest` naming the two slots; a shift-click sends a `DropItemRequest` naming one;
+  every other pair sends the `InventoryMoveRequest`
   it always sent. The judgement is read from the durability already beside every stack —
   `max_durability > 0` answers *does this wear out* with no registry and no second copy of
   the server's table — so the only item id in it is the kit's, and that one is presentation
@@ -488,6 +489,20 @@ The client samples the controls, sends what the player is *trying* to do at the 
   The one gesture this displaces is swapping a stone stack with a durable item by clicking,
   which the server's `moveLocked` used to answer with a swap. It is still reachable from
   the other side — pick the blade, click the stones — because a picked non-kit never mends.
+
+  **The drop is the third, and it is the one that pairs with nothing.** `drop_request` in
+  `player/inventory.rs` asks two things and no third: is the index one the contract permits,
+  and does the last complete state show something in that cell. It deliberately does *not*
+  mirror the server's rule that a slot which wears out may not be put down — that is a
+  gameplay outcome read from a pack one message old, and it is the failure direction
+  `combat::BLADES` records, where a courtesy that guesses wrong refuses what the server would
+  have granted. So a worn blade is asked about and silence answers it. The branch also runs
+  ahead of the cursor and leaves it untouched: a picked slot is a source waiting for a
+  destination, and a shift-click elsewhere is not that destination.
+
+  **Shift is read against the full-stack button and not the split one** (`ui/inventory.rs`),
+  because what the modifier changes is *where the stack goes* rather than *how much of it
+  moves*.
 - **Vitals are snapshots too, and the death countdown is not a timer.** `SelfVitals` is
   exactly the `self_vitals` of the newest snapshot the buffer *accepted* — replaced whole,
   never merged, never incremented, and never advanced by a frame. `respawn_ticks` is

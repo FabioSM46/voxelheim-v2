@@ -1084,3 +1084,110 @@ func TestARefusedRepairIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 		}
 	}
 }
+
+// A drop the simulation accepts empties the named slot and puts one entity in the world,
+// and the session answers with the complete inventory that leaves behind.
+//
+// **The routing is what this layer owns**, exactly as it is for a repair: tag 25 reached
+// handlePostHandshake's default case before this issue, which ends the connection as a
+// protocol violation. What a drop is *allowed* to be is decided in game/drop_request_test.go.
+//
+// The stack it drops is mined rather than granted, because the starter pack holds one blade
+// and a blade wears out, which is the one thing this feature refuses.
+func TestADropEmptiesItsSlotAndPutsOneItemInTheWorld(t *testing.T) {
+	t.Parallel()
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
+	surface := surfaceUnderSpawn(cfg.WorldSeed)
+
+	var clientTick uint32
+	var serverTick uint64
+	mineUntilBreak(t, conn, frames, sim, surface, &clientTick, &serverTick)
+	tickUntilDone(t, sim, &serverTick, "the mined yield to be collected", func() bool {
+		return wearlessSlot(frames) >= 0
+	})
+
+	slot := wearlessSlot(frames)
+	if slot < 0 {
+		t.Fatal("nothing was collected, so there is nothing to put back down")
+	}
+	states := len(frames.inventoryStates())
+
+	conn.in <- protocol.EncodeDropItemRequest(protocol.DropItemRequest{Slot: uint8(slot), ClientTick: clientTick})
+	waitUntil(t, "the inventory the drop left behind", func() bool {
+		all := frames.inventoryStates()
+		return len(all) > states && all[len(all)-1].Stacks[slot] == (protocol.InventoryStack{})
+	})
+
+	// Read before any further tick, because a drop lands at the player's feet and the
+	// ordinary pickup rule collects it back once its delay is spent.
+	if got := sim.DropCount(); got != 1 {
+		t.Errorf("%d drops are lying in the world after one was put down, want one", got)
+	}
+}
+
+// A drop the simulation refuses is silence, and the session survives it.
+//
+// Three refusals: the starter blade, which wears out and so cannot carry its wear onto the
+// ground; an empty slot; and a slot past the end of the pack, which the decoder carries
+// verbatim by design.
+func TestARefusedDropIsSilentAndTheSessionSurvivesIt(t *testing.T) {
+	t.Parallel()
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
+	surface := surfaceUnderSpawn(cfg.WorldSeed)
+
+	empty := frames.emptySlot()
+	if empty < 0 {
+		t.Fatal("the starter pack has no empty slot to name")
+	}
+
+	// Slot 0 is the starter blade, which wears out.
+	conn.in <- protocol.EncodeDropItemRequest(protocol.DropItemRequest{Slot: 0, ClientTick: 1})
+	conn.in <- protocol.EncodeDropItemRequest(protocol.DropItemRequest{Slot: uint8(empty), ClientTick: 2})
+	conn.in <- protocol.EncodeDropItemRequest(protocol.DropItemRequest{Slot: 200, ClientTick: 3})
+
+	// The legal break afterwards is how the test tells "refused" apart from "not processed
+	// yet": the read loop is sequential, so an update for the fourth request is proof the
+	// first three were answered.
+	clientTick := uint32(3)
+	var serverTick uint64
+	mineUntilBreak(t, conn, frames, sim, surface, &clientTick, &serverTick)
+	waitUntil(t, "the legal break to be broadcast", func() bool { return len(frames.blockUpdates()) > 0 })
+
+	if got := len(frames.blockUpdates()); got != 1 {
+		t.Errorf("the session received %d block updates, want only the legal break's", got)
+	}
+	// The break's own yield is one drop, and the three refusals must have added none.
+	if got := sim.DropCount(); got > 1 {
+		t.Errorf("%d drops are lying in the world, want at most the mined yield's one", got)
+	}
+	// And the blade never left slot 0, in any state the session was ever sent.
+	for _, state := range frames.inventoryStates() {
+		if got := state.Stacks[0].ItemID; got != uint16(game.ItemRustySword) {
+			t.Fatalf("slot 0 holds item %d; a refused drop emptied it", got)
+		}
+	}
+}
+
+// wearlessSlot is the first slot of the newest inventory holding something that does not
+// wear out, or -1.
+//
+// A shape rather than a named item id, because what the block under spawn drops is the
+// terrain generator's answer and a test that spelled it would be asserting the height field.
+func wearlessSlot(frames *collector) int {
+	states := frames.inventoryStates()
+	if len(states) == 0 {
+		return -1
+	}
+	for slot, stack := range states[len(states)-1].Stacks {
+		if stack.Count > 0 && stack.MaxDurability == 0 {
+			return slot
+		}
+	}
+	return -1
+}

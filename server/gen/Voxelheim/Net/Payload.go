@@ -51,6 +51,7 @@ const (
 	PayloadSelectCharacterRequest Payload = 22
 	PayloadCreateCharacterRequest Payload = 23
 	PayloadPlayerAppearance       Payload = 24
+	PayloadDropItemRequest        Payload = 25
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -79,6 +80,7 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadSelectCharacterRequest: "SelectCharacterRequest",
 	PayloadCreateCharacterRequest: "CreateCharacterRequest",
 	PayloadPlayerAppearance:       "PlayerAppearance",
+	PayloadDropItemRequest:        "DropItemRequest",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -107,6 +109,7 @@ var EnumValuesPayload = map[string]Payload{
 	"SelectCharacterRequest": PayloadSelectCharacterRequest,
 	"CreateCharacterRequest": PayloadCreateCharacterRequest,
 	"PlayerAppearance":       PayloadPlayerAppearance,
+	"DropItemRequest":        PayloadDropItemRequest,
 }
 
 func (v Payload) String() string {

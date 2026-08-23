@@ -306,14 +306,45 @@ table RemoveStructureRequest {
   client_tick: uint;
 }
 
+/// A player putting one whole stack back on the ground. Client -> server, and intent
+/// only.
+///
+/// **One slot index and nothing else.** What that slot holds, how much of it there is,
+/// whether the player is alive to let go of anything and where "at their feet" is are all
+/// read from state the server already owns — the shape `AttackRequest` and `RepairRequest`
+/// already have. There is deliberately no count and no position: a count would let a client
+/// state what leaves its own pack, and a position would let it put an item down anywhere in
+/// the world.
+///
+/// **A whole stack, because the message cannot say otherwise.** Dropping part of one is a
+/// field appended to this table later, like every other growth in this contract.
+///
+/// There is no acknowledgement and no rejection payload. A refused drop is silence; an
+/// accepted one becomes visible as the complete `InventoryState` that follows and as the
+/// `ItemDropState` that appears in the next `EntitySnapshot`.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `slot` is copied verbatim, out-of-range values included, exactly as
+///     `AttackRequest.slot` is. Whether a slot holds something a player may put down is a
+///     decision, and decisions belong to the simulation: it refuses a bad slot silently
+///     rather than closing a connection whose framing is still perfectly readable
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table DropItemRequest {
+  /// The authoritative inventory slot to empty onto the ground.
+  slot: ubyte;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is
 /// answered today.** Placement is the only member a server currently sends; mining,
-/// block edits, crafting and repair all answer a refused request with a debug line no
-/// player will ever read, and each becomes real in its own issue. Reserving the members
-/// now is the call `StructureKind.Campfire` records: a member is an integer on the wire,
-/// so the cheap moment to agree on the number is before anything depends on it.
+/// block edits, crafting, repair and dropping all answer a refused request with a debug
+/// line no player will ever read, and each becomes real in its own issue. Reserving the
+/// members now is the call `StructureKind.Campfire` records: a member is an integer on
+/// the wire, so the cheap moment to agree on the number is before anything depends on it.
 ///
 /// **`RemoveStructure` is deliberately absent, and its absence is a decision rather than
 /// an omission.** `RemoveStructureRequest` above says a refused removal is silence on
@@ -321,6 +352,11 @@ table RemoveStructureRequest {
 /// away" could map somebody else's camp by asking for ids it does not have. A member
 /// here would be an invitation to close that gap on some later afternoon without seeing
 /// what it opens.
+///
+/// **`DropItem` is present for exactly the reason a removal is not.** Every question a
+/// refused drop could answer is about the asking player's own pack — is that slot empty,
+/// does that item wear out, are you dead — and they already hold the complete
+/// `InventoryState` that says so. There is no third party's world state to learn by asking.
 ///
 /// Zero member for the reason every enum in this contract has one: FlatBuffers decodes
 /// an absent scalar as zero, so a refusal that names no action must read as one nobody
@@ -331,7 +367,8 @@ enum RefusedAction : ubyte {
   MineBlock = 2,
   EditBlock = 3,
   Craft = 4,
-  Repair = 5
+  Repair = 5,
+  DropItem = 6
 }
 
 /// Why a server refused an action, in an `ActionRefused`.

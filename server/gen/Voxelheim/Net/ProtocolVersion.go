@@ -11,6 +11,14 @@ import "strconv"
 // / `ProtocolVersion::Current` in Rust). Bump it whenever a message changes in a
 // / way an older peer cannot parse; a mismatch is rejected at the handshake
 // / rather than discovered as a decode error mid-session.
+// /
+// / **"A message an older peer cannot parse" is asymmetric.** Appending a union
+// / member is backward compatible only as far as the receiver is willing to drop
+// / what it cannot name — which a client is and a server is not, because
+// / direction is a protocol rule here and an unrecognised payload closes the
+// / connection. So a server→client member can be appended without moving this
+// / number (`ActionRefused`, tag 20) and a client→server one cannot
+// / (`DropItemRequest`, tag 25). Both are argued in `envelope.fbs`.
 type ProtocolVersion uint16
 
 const (
@@ -19,7 +27,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 7
+	ProtocolVersionCurrent ProtocolVersion = 8
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

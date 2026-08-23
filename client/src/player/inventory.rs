@@ -5,13 +5,14 @@
 //! is local input, like the camera direction: it chooses the slot index carried by the
 //! next request, while the server decides whether that slot exists and may be spent.
 //!
-//! **One click, two possible intents, and the choice between them is routing rather than
-//! authority.** A picked sharpening stone dropped on a slot that wears out asks for a
-//! mend; every other pair asks for the move it has always asked for. Which item is a
-//! legal kit, whether the target had room for the wear and how much comes back are the
+//! **One cell, three possible intents, and the choice between them is routing rather than
+//! authority.** A picked sharpening stone dropped on a slot that wears out asks for a mend;
+//! a shift-click asks for the stack to be put on the ground; every other pair asks for the
+//! move it has always asked for. Which item is a legal kit, how much wear comes back,
+//! whether a stack may be let go of at all and what appears on the ground when it is are the
 //! server's answers — clicking a stone onto an unworn blade sends the request and silence
 //! answers it, exactly as [`super::combat::blade_in_hand`] is a courtesy rather than a
-//! verdict. Neither branch moves a count or a durability here.
+//! verdict. No branch moves a count or a durability here.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
@@ -22,8 +23,8 @@ use super::{
     set_if_changed,
 };
 use crate::net::{
-    InventoryInbox, InventoryMoveRequest, InventoryStack, Outbound, RepairRequest, Sent, Session,
-    encode_inventory_move_request, encode_repair_request,
+    DropItemRequest, InventoryInbox, InventoryMoveRequest, InventoryStack, Outbound, RepairRequest,
+    Sent, Session, encode_drop_item_request, encode_inventory_move_request, encode_repair_request,
 };
 
 /// Number keys available to the minimal hotbar.
@@ -87,18 +88,23 @@ impl Inventory {
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SelectedSlot(pub u8);
 
-/// Which mouse button was used on an inventory cell.
+/// What a press on an inventory cell was asking for.
+///
+/// Two of the three are amount shapes and the third is not, which is why this is no longer
+/// "which mouse button": a drop names one cell and pairs with nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InventoryClickKind {
     /// Pick or move the complete authoritative stack.
     Full,
     /// Pick or move half the authoritative stack, rounded up.
     Split,
+    /// Ask the server to put this cell's whole stack on the ground.
+    Drop,
 }
 
 /// A click on one slot in the inventory screen.
 ///
-/// The UI reports only the slot and the intended amount shape. This module owns the
+/// The UI reports only the slot and what the press was asking for. This module owns the
 /// source/destination pairing and is the only place that turns it into wire intent.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InventoryClick {
@@ -239,6 +245,12 @@ fn select_hotbar(
 /// **A mend is the one pair that is not a move**, and it is also the one that keeps its
 /// cursor: the stone stays picked so a second worn item is one more click rather than
 /// another trip to the stone's slot. See [`repair_request`] for what makes a pair a mend.
+///
+/// **A drop is not a pair at all**, which is why it is answered before anything below it
+/// reads the cursor. It names one cell, sends one intent for it, and leaves the cursor
+/// exactly as it found it: a picked slot is a source waiting for a destination, and a
+/// shift-click elsewhere is not that destination. Clearing it would silently cancel a move
+/// the player was half-way through.
 fn request_inventory_move(
     mut clicks: MessageReader<InventoryClick>,
     session: Option<Res<Session>>,
@@ -280,6 +292,25 @@ fn request_inventory_move(
 
     for click in clicks.read().copied() {
         if click.slot >= slots {
+            continue;
+        }
+
+        if click.kind == InventoryClickKind::Drop {
+            // Ahead of the cursor, deliberately: a drop names one cell and pairs with
+            // nothing, so neither branch below applies to it. The cursor is left alone —
+            // see this function's own note.
+            if let Some(request) = drop_request(&inventory, click.slot, cadence.client_tick, slots)
+                && let Some(outbound) = outbound.as_deref_mut()
+            {
+                match outbound.send(encode_drop_item_request(&request)) {
+                    Sent::Queued => {}
+                    Sent::Dropped => warn!(
+                        "the outbound queue was full; a drop of slot {} never reached the server",
+                        request.slot
+                    ),
+                    Sent::Closed => {}
+                }
+            }
             continue;
         }
 
@@ -370,6 +401,34 @@ fn move_request(from: u8, to: u8, count: u16, slots: u8) -> Option<InventoryMove
         to,
         count,
     })
+}
+
+/// Whether one cell is worth asking to put on the ground, and the request if it is.
+///
+/// **Two questions and no third**, which is the whole of this client's judgement here: is
+/// the index one the contract permits, and does the last complete state the server sent show
+/// something in it. Both are re-checked for the reason [`move_request`] re-checks its own —
+/// this is the only place a [`DropItemRequest`] is built, so it is the only place they have
+/// to hold. `slots` is `ServerWelcome.inventory_slots`.
+///
+/// **What it deliberately does not ask is whether the drop would be allowed.** The server
+/// refuses a slot that wears out, because a drop carries an item id and a count and nothing
+/// else. Mirroring that here would be this client deciding a gameplay outcome from a pack one
+/// message old, and it is the failure direction [`super::combat::BLADES`] records: a courtesy
+/// that guesses wrong refuses what the server would have granted. The honest shape of a
+/// refused drop is a stack that stays where it is.
+///
+/// The empty-cell check is not that — it is the same courtesy that stops an empty slot being
+/// *picked* two branches down.
+fn drop_request(
+    inventory: &Inventory,
+    slot: u8,
+    client_tick: u32,
+    slots: u8,
+) -> Option<DropItemRequest> {
+    let stack = inventory.slot(slot)?;
+
+    (slot < slots && stack.count > 0).then_some(DropItemRequest { slot, client_tick })
 }
 
 /// Every item id this client routes a click onto a worn item to a mend for.
@@ -787,12 +846,13 @@ mod tests {
 
     /// What one frame asked the server for, read back through the generated accessors.
     ///
-    /// Both shapes in one enum on purpose: the whole feature is which of the two leaves,
+    /// Every shape in one enum on purpose: the whole feature is which of the three leaves,
     /// and a helper that could only see repairs would report a move as nothing at all.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Asked {
         Move { from: u8, to: u8, count: u16 },
         Repair { kit: u8, target: u8 },
+        Drop { slot: u8 },
     }
 
     /// Everything the client sent, in the order it left.
@@ -811,9 +871,13 @@ mod tests {
                     to: request.to(),
                     count: request.count(),
                 });
+            } else if let Some(request) = envelope.payload_as_drop_item_request() {
+                found.push(Asked::Drop {
+                    slot: request.slot(),
+                });
             } else {
                 panic!(
-                    "the inventory sent a {:?}, which is not one of its two intents",
+                    "the inventory sent a {:?}, which is not one of its three intents",
                     envelope.payload_type()
                 );
             }
@@ -1168,6 +1232,125 @@ mod tests {
 
         assert!(asked(&sent).is_empty(), "a dead player mended a blade");
         assert_eq!(app.world().resource::<PickedStack>().slot(), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Putting something back on the ground — the one click that pairs with nothing
+    // -----------------------------------------------------------------------
+
+    /// A shift-click names one cell, asks for that cell on the shared tick, and moves
+    /// nothing local.
+    ///
+    /// The stack is still on screen after the request leaves, because the count in it is the
+    /// server's: the complete `InventoryState` that follows an accepted drop is what empties
+    /// the cell, and a refusal is a cell that never changes.
+    #[test]
+    fn a_shift_click_asks_for_the_whole_cell_to_be_put_down() {
+        let (mut app, sent) = move_app();
+        let before = app.world().resource::<Inventory>().clone();
+        app.world_mut().resource_mut::<InputCadence>().client_tick = 77;
+
+        inventory_click(&mut app, 1, InventoryClickKind::Drop);
+
+        let frame = sent.try_recv().expect("one drop was sent");
+        let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+        let request = envelope
+            .payload_as_drop_item_request()
+            .expect("the payload is a drop request");
+        assert_eq!((request.slot(), request.client_tick()), (1, 77));
+        assert!(
+            sent.try_recv().is_err(),
+            "one press sent more than one frame"
+        );
+        assert_eq!(
+            *app.world().resource::<Inventory>(),
+            before,
+            "asking to put a stack down moved a count locally"
+        );
+    }
+
+    /// A drop is not a destination, so it leaves a half-finished move alone — including
+    /// when it names the picked cell itself, because the branch runs before the cursor is
+    /// read at all.
+    ///
+    /// The cursor is a source waiting to be paired and the player can see it as an outline.
+    /// Consuming it would cancel a move they were part-way through for a gesture that has
+    /// nothing to do with it, and re-pointing it at the dropped cell would be worse: that
+    /// cell may not exist a message later.
+    #[test]
+    fn a_drop_leaves_a_picked_source_exactly_where_it_was() {
+        let (mut app, sent) = move_app();
+
+        inventory_click(&mut app, 0, InventoryClickKind::Full);
+        assert_eq!(app.world().resource::<PickedStack>().slot(), Some(0));
+
+        for slot in [1, 0] {
+            inventory_click(&mut app, slot, InventoryClickKind::Drop);
+            assert_eq!(asked(&sent), vec![Asked::Drop { slot }]);
+            assert_eq!(
+                app.world().resource::<PickedStack>().slot(),
+                Some(0),
+                "a drop of slot {slot} consumed the source of an unfinished move"
+            );
+        }
+
+        // And the move it was half-way through still completes, unchanged.
+        inventory_click(&mut app, 2, InventoryClickKind::Full);
+        assert_eq!(
+            asked(&sent),
+            vec![Asked::Move {
+                from: 0,
+                to: 2,
+                count: 5
+            }]
+        );
+    }
+
+    /// An empty cell and an index past the announced pack both ask for nothing. The bound is
+    /// the contract's and the emptiness is a courtesy; neither is a verdict.
+    #[test]
+    fn a_drop_of_nothing_or_of_a_slot_that_does_not_exist_is_never_asked_for() {
+        let (mut app, sent) = move_app();
+
+        inventory_click(&mut app, 2, InventoryClickKind::Drop); // empty in move_app's pack
+        inventory_click(&mut app, 4, InventoryClickKind::Drop); // one past four slots
+
+        assert!(asked(&sent).is_empty());
+        assert!(drop_request(app.world().resource::<Inventory>(), 2, 0, 4).is_none());
+        assert!(drop_request(app.world().resource::<Inventory>(), 4, 0, 4).is_none());
+    }
+
+    /// **A worn blade is asked about, and the refusal is the server's.**
+    ///
+    /// A drop carries an item id and a count and nothing else, so the server refuses one
+    /// that wears out. Mirroring that here would be a second copy of a server rule, risking
+    /// the failure `combat::BLADES` records — a courtesy that guesses wrong and refuses what
+    /// the server would have granted. So the frame leaves and silence answers it.
+    #[test]
+    fn a_slot_that_wears_out_is_asked_about_rather_than_refused_here() {
+        let (mut app, sent) = mend_app(pack(&[(1, worn(ITEM_IRON_SWORD, 40, 100))]));
+        let before = app.world().resource::<Inventory>().clone();
+
+        inventory_click(&mut app, 1, InventoryClickKind::Drop);
+
+        assert_eq!(
+            asked(&sent),
+            vec![Asked::Drop { slot: 1 }],
+            "this client decided a gameplay outcome the server owns"
+        );
+        assert_eq!(*app.world().resource::<Inventory>(), before);
+    }
+
+    /// The same gate the move and mend paths are behind, and for the same reason: the screen
+    /// this press comes from is closed while the server says the player is dead.
+    #[test]
+    fn a_dead_player_originates_no_drop() {
+        let (mut app, sent) = move_app();
+
+        say_dead(&mut app, true);
+        inventory_click(&mut app, 0, InventoryClickKind::Drop);
+
+        assert!(asked(&sent).is_empty(), "a dead player put something down");
     }
 
     #[test]

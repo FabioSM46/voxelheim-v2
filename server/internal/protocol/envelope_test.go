@@ -169,17 +169,26 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // failure modes are different: a moved union tag silently reinterprets every frame on
 // the wire, a moved enum member silently reinterprets one field inside one.
 //
-// **Tag 20 is why the version does not move.** Union members are append-only precisely
-// so that appending one is not a break: a peer built against V6 as it shipped reads tag
-// 20 as a payload it has no name for and drops it, which costs it the refusal feedback
-// and nothing else. Bumping ProtocolVersion.Current for that would refuse every peer
-// already on the wire in exchange for a message they were never going to read — so the
-// number is asserted here rather than left to whoever edits the list below.
-func TestProtocolV7AppendsFourTagsAndMovesToSeven(t *testing.T) {
+// **Tag 20 is why the version did not move for it.** Union members are append-only
+// precisely so that appending one is not a break: a peer built against V6 as it shipped
+// reads tag 20 as a payload it has no name for and drops it, which costs it the refusal
+// feedback and nothing else. Bumping ProtocolVersion.Current for that would refuse every
+// peer already on the wire in exchange for a message they were never going to read — so
+// the number is asserted here rather than left to whoever edits the list below.
+//
+// **V8 adds one tag and does move it, and the difference is direction rather than count.**
+// "An older peer drops what it cannot name" is a claim about a *client*: this side does not
+// drop, because direction is a protocol rule here and Session.handleMessage ends the
+// connection on an unrecognised payload. So a V7 server and a V8 client would handshake
+// cleanly and die on the first stack anybody put down, which is the mid-session decode
+// failure ProtocolVersion exists to turn into a clean refusal. Read down the list below, the
+// line is consistent rather than new: every client→server member arrived with a bump, and
+// the one appended without one travels the other way.
+func TestProtocolV8AppendsADropTagAndMovesToEight(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 7 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 7", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 8 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 8", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -206,6 +215,7 @@ func TestProtocolV7AppendsFourTagsAndMovesToSeven(t *testing.T) {
 		vnet.PayloadSelectCharacterRequest,
 		vnet.PayloadCreateCharacterRequest,
 		vnet.PayloadPlayerAppearance,
+		vnet.PayloadDropItemRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -219,8 +229,10 @@ func TestProtocolV7AppendsFourTagsAndMovesToSeven(t *testing.T) {
 	// payload anywhere in this contract, and the size of the union is the only place that
 	// claim can be checked. V7's four are the handshake's new phase and the appearance
 	// that rides beside it, and none of them acknowledges anything either: a character is
-	// chosen and the answer is ServerWelcome. NONE is the implicit zero member every
-	// FlatBuffers union carries.
+	// chosen and the answer is ServerWelcome. V8's one does not break the run: a drop is
+	// answered by the complete InventoryState that follows it and by the ItemDropState in
+	// the next snapshot, both of which already existed. NONE is the implicit zero member
+	// every FlatBuffers union carries.
 	if got := len(vnet.EnumNamesPayload); got != len(want)+1 {
 		t.Errorf("Payload has %d members, want %d plus NONE — a new member needs a decision, not a test edit", got, len(want))
 	}
@@ -1117,14 +1129,16 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	if got := byte(vnet.RefusedActionPlaceStructure); got != 1 {
 		t.Errorf("RefusedAction.PlaceStructure = %d, want 1", got)
 	}
-	// Reserved rather than sent: mining, block edits, crafting and repair refuse in the
-	// same silence today and will reuse this message, and a member is an integer on the
-	// wire — so the cheap moment to agree on the number is before anything depends on it.
+	// Reserved rather than sent: mining, block edits, crafting, repair and dropping refuse
+	// in the same silence today and will reuse this message, and a member is an integer on
+	// the wire — so the cheap moment to agree on the number is before anything depends on
+	// it.
 	for name, pair := range map[string][2]byte{
 		"RefusedAction.MineBlock": {byte(vnet.RefusedActionMineBlock), 2},
 		"RefusedAction.EditBlock": {byte(vnet.RefusedActionEditBlock), 3},
 		"RefusedAction.Craft":     {byte(vnet.RefusedActionCraft), 4},
 		"RefusedAction.Repair":    {byte(vnet.RefusedActionRepair), 5},
+		"RefusedAction.DropItem":  {byte(vnet.RefusedActionDropItem), 6},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1133,9 +1147,14 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// **No member for a removal, and its absence is the decision.** A refused removal is
 	// silence on purpose: a client that could tell "no such structure" from "not yours"
 	// from "too far away" could map somebody else's camp by asking for ids it does not
-	// have. Six members is what says nobody added one.
-	if got := len(vnet.EnumNamesRefusedAction); got != 6 {
-		t.Errorf("RefusedAction has %d members, want 6 — a removal is refused in silence by design", got)
+	// have.
+	//
+	// **A drop has one for exactly that reason read the other way.** Every question a refused
+	// drop could answer — that slot is empty, that item wears out, you are dead — is about
+	// the asking player's own pack, which they already hold a complete InventoryState of. So
+	// seven is the count, and it is what says nobody added an eighth for a removal.
+	if got := len(vnet.EnumNamesRefusedAction); got != 7 {
+		t.Errorf("RefusedAction has %d members, want 7 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2623,5 +2642,74 @@ func TestDecodeIsTotalOverDamagedCharacterRequests(t *testing.T) {
 				_, _ = Decode(damaged)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protocol V8 — putting something back on the ground
+// ---------------------------------------------------------------------------
+
+// A drop intent round trips through the encoder this package owns, and it carries one slot
+// index and an ordering tick and nothing else.
+//
+// The absence is the design, exactly as it is for a repair. A count would let a client state
+// what leaves its own pack; a position would let it put an item down anywhere in the world.
+//
+// The out-of-range rows are AttackRequest's rule and not InventoryMoveRequest's — the same
+// asymmetry the repair test records, and for the same reason: nothing here indexes an array
+// with the value.
+func TestADropItemRequestRoundTripsAndNamesOnlyASlot(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []DropItemRequest{
+		{Slot: 5, ClientTick: 4242},
+		{Slot: InventorySlots, ClientTick: 1},
+		{Slot: 255, ClientTick: 2},
+		{Slot: 0, ClientTick: 0},
+	} {
+		msg, err := Decode(EncodeDropItemRequest(want))
+		if err != nil {
+			t.Fatalf("Decode of %+v: %v", want, err)
+		}
+		if msg.Kind != vnet.PayloadDropItemRequest {
+			t.Fatalf("Kind = %s, want DropItemRequest", msg.Kind)
+		}
+		if msg.DropItem == nil {
+			t.Fatalf("DropItemRequest payload is nil for %+v", want)
+		}
+		if *msg.DropItem != want {
+			t.Errorf("decoded %+v, want %+v carried through verbatim", *msg.DropItem, want)
+		}
+	}
+
+	// Two fields on the wire, measured the way the repair request's three are: a vtable is a
+	// uint16 count plus a uint16 per field, so the field count is (size - 4) / 2. Measured on
+	// a frame where neither field is zero, because FlatBuffers writes no bytes for a field
+	// equal to its default and the all-zero row above has an empty vtable by construction.
+	env := vnet.GetRootAsEnvelope(EncodeDropItemRequest(DropItemRequest{Slot: 5, ClientTick: 4242}), 0)
+	tbl := payloadTable(t, env)
+	vtableOffset := flatbuffers.UOffsetT(flatbuffers.SOffsetT(tbl.Pos) - flatbuffers.GetSOffsetT(tbl.Bytes[tbl.Pos:]))
+	vtableSize := flatbuffers.GetVOffsetT(tbl.Bytes[vtableOffset:])
+	if fields := (int(vtableSize) - 4) / 2; fields != 2 {
+		t.Errorf("DropItemRequest has %d fields on the wire, want slot and client_tick", fields)
+	}
+}
+
+// The truncation and corruption sweep for the payload tag 25 adds. Decode must stay total
+// over bytes a client chose: an error or a message, never a panic.
+func TestDecodeIsTotalOverADamagedDropItemRequest(t *testing.T) {
+	t.Parallel()
+
+	valid := EncodeDropItemRequest(DropItemRequest{Slot: 7, ClientTick: 31})
+
+	for i := range len(valid) {
+		if _, err := Decode(valid[:i]); err == nil {
+			t.Errorf("a %d-byte prefix of a %d-byte drop frame decoded successfully", i, len(valid))
+		}
+	}
+	for i := range len(valid) {
+		damaged := bytes.Clone(valid)
+		damaged[i] ^= 0xFF
+		_, _ = Decode(damaged)
 	}
 }

@@ -428,6 +428,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_drop_item_request(&self) -> Option<DropItemRequest<'a>> {
+        if self.payload_type() == Payload::DropItemRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { DropItemRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -463,6 +478,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::SelectCharacterRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SelectCharacterRequest>>("Payload::SelectCharacterRequest", pos),
           Payload::CreateCharacterRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<CreateCharacterRequest>>("Payload::CreateCharacterRequest", pos),
           Payload::PlayerAppearance => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerAppearance>>("Payload::PlayerAppearance", pos),
+          Payload::DropItemRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DropItemRequest>>("Payload::DropItemRequest", pos),
           _ => Ok(()),
         }
      })?
@@ -756,6 +772,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::PlayerAppearance => {
                 if let Some(x) = self.payload_as_player_appearance() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::DropItemRequest => {
+                if let Some(x) = self.payload_as_drop_item_request() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

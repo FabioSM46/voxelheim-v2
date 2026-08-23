@@ -71,7 +71,24 @@ union Payload {
   ServerCharacterList,    // 21
   SelectCharacterRequest, // 22
   CreateCharacterRequest, // 23
-  PlayerAppearance        // 24
+  PlayerAppearance,       // 24
+
+  // -- V8. Appended, so the tags of 1..24 are untouched.
+  //
+  //    **It carries a version bump, and the direction is the whole reason.** "What does an
+  //    older peer lose by dropping this tag" has a different answer depending on which peer
+  //    is the older one. A *client* drops what it cannot name and carries on — that is
+  //    `ActionRefused`, and it cost a player one explanation. A **server** does not drop:
+  //    direction is a protocol rule, an unrecognised payload is a protocol error, and the
+  //    session is closed. So a V7 server and a V8 client would handshake cleanly and end
+  //    the connection on the first stack anybody put down, which is the "discovered as a
+  //    decode error mid-session" failure `ProtocolVersion` exists to prevent.
+  //
+  //    That is the consistent line rather than a new one: every client→server member this
+  //    union has gained arrived with a bump, and the one appended without one travels the
+  //    other way. See `DropItemRequest` in `player.fbs`.
+
+  DropItemRequest         // 25
 }
 
 table Envelope {

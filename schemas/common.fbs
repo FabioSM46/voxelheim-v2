@@ -15,6 +15,14 @@ namespace Voxelheim.Net;
 /// `ProtocolVersion::Current` in Rust). Bump it whenever a message changes in a
 /// way an older peer cannot parse; a mismatch is rejected at the handshake
 /// rather than discovered as a decode error mid-session.
+///
+/// **"A message an older peer cannot parse" is asymmetric.** Appending a union
+/// member is backward compatible only as far as the receiver is willing to drop
+/// what it cannot name — which a client is and a server is not, because
+/// direction is a protocol rule here and an unrecognised payload closes the
+/// connection. So a server→client member can be appended without moving this
+/// number (`ActionRefused`, tag 20) and a client→server one cannot
+/// (`DropItemRequest`, tag 25). Both are argued in `envelope.fbs`.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -22,7 +30,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 7
+  Current = 8
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

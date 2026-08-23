@@ -14,7 +14,7 @@ is specific to the contract.
 | `common.fbs` | `ProtocolVersion`, `Vec3`, `ChunkCoord`, `Appearance`, `HairModel` — included by everything else |
 | `handshake.fbs` | `ClientHello`, `ServerWelcome`, `ServerReject`, `RejectReason`; from V7 also `ServerCharacterList`, `CharacterSummary`, `SelectCharacterRequest`, `CreateCharacterRequest` |
 | `world.fbs` | `ChunkData`, `ChunkUnload`, `ChunkResendRequest` — voxel streaming; `BlockCoord`, `EditAction`, `BlockEditRequest`, `BlockUpdate` — voxel edits |
-| `player.fbs` | `PlayerInput`, mining/inventory-move/attack intent, `EntityState`, item drops, `MobState`, `PlayerVitals`, `EntitySnapshot`, `InventoryState`, `PlayerAppearance` |
+| `player.fbs` | `PlayerInput`, mining/inventory-move/attack/drop intent, `EntityState`, item drops, `MobState`, `PlayerVitals`, `EntitySnapshot`, `InventoryState`, `PlayerAppearance` |
 | `envelope.fbs` | `Payload` union, `Envelope` root type, `file_identifier` |
 
 Every file declares `namespace Voxelheim.Net;` and includes by plain relative path, so each one
@@ -67,6 +67,15 @@ union switch to keep exhaustive.
 3. **A break is a version bump.** Raise `ProtocolVersion.Current` in `common.fbs`. The
    handshake then rejects mismatched peers with `PROTOCOL_MISMATCH` instead of letting them
    discover the incompatibility as a decode error mid-session.
+
+   **Whether appending a union member is a break depends on which way it travels**, and rule
+   2 alone does not say so. "Append-only" buys backward compatibility only as far as the
+   receiver is willing to drop a tag it cannot name — which a client is, and a server is not:
+   rule 5 below makes an unrecognised payload a protocol error. `ActionRefused` (tag 20) is
+   server→client and shipped without a bump, costing an older client one explanation.
+   `DropItemRequest` (tag 25) is client→server, so a newer client against an older server
+   would handshake cleanly and die on the first frame it sent — the exact mid-session failure
+   this rule exists to prevent. Every client→server member this union has gained carries one.
 4. **The client never sends authoritative state.** No client→server message may carry a
    position, a health value, an inventory, or an outcome. `PlayerInput` carries intent; the
    server simulates it and its answer is the truth. A message that lets the client state where

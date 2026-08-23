@@ -56,10 +56,10 @@ use bevy::prelude::*;
 
 pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
-    ChunkCoord, CraftRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
-    InventoryStack, InventoryState, ItemDropState, LifeState, MineProgress, MineRequest, MobAction,
-    MobKind, MobState, PLACEHOLDER_APPEARANCE, PlaceStructureRequest, PlayerAppearance,
-    PlayerInput, PlayerVitals, RecipeId, RefusalReason, RefusedAction, Reject,
+    ChunkCoord, CraftRequest, DropItemRequest, EditAction, EntityState, Facing, HairModel,
+    InventoryMoveRequest, InventoryStack, InventoryState, ItemDropState, LifeState, MineProgress,
+    MineRequest, MobAction, MobKind, MobState, PLACEHOLDER_APPEARANCE, PlaceStructureRequest,
+    PlayerAppearance, PlayerInput, PlayerVitals, RecipeId, RefusalReason, RefusedAction, Reject,
     RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
     WorldClock, WorldUpdate,
 };
@@ -71,9 +71,9 @@ pub use codec::{
 pub use codec::ANY_TOKEN;
 pub use codec::{
     encode_attack_request, encode_block_edit_request, encode_chunk_resend_request,
-    encode_craft_request, encode_inventory_move_request, encode_mine_request,
-    encode_place_structure_request, encode_player_input, encode_remove_structure_request,
-    encode_repair_request,
+    encode_craft_request, encode_drop_item_request, encode_inventory_move_request,
+    encode_mine_request, encode_place_structure_request, encode_player_input,
+    encode_remove_structure_request, encode_repair_request,
 };
 pub use servers::ListedServer;
 use servers::ServerListEvent;
