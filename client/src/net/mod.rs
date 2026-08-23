@@ -1702,7 +1702,11 @@ impl Plugin for SignInPlugin {
         // put a live credential for the wrong thing behind a screen that says "signed
         // in" and offers no control — see `tickets::world_ticket_path`.
         let ticket_path = self.ticket_path.clone().or_else(|| {
-            let env = session::Environment::read();
+            // The same fallback the session thread uses, and for the same reason: in a
+            // test build it names nowhere, so a plugin built without `with_ticket_path`
+            // cannot reach the developer's data directory. See
+            // `session::default_environment`.
+            let env = session::default_environment();
             match self.world.as_deref() {
                 Some(world) => tickets::world_ticket_path(self.service.authority(), world, &env),
                 None => tickets::default_ticket_path(self.service.authority(), &env),
