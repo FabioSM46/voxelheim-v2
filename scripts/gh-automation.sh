@@ -17,7 +17,8 @@
 #   pr-status-json <pr-number>    Same as pr-status but JSON output (for CI consumption)
 #   pr-label <pr-number> <add|remove> <label>  Add or remove a label. Adding is
 #                                 idempotent; a write that did not land exits
-#                                 non-zero rather than printing success.
+#                                 non-zero rather than printing success. Writes go
+#                                 through `gh api`, never `gh pr edit` (#206).
 #   pr-deepseek-rounds <pr-number>  DeepSeek review round status (JSON). On failure
 #                                 it prints {"error":...} and exits non-zero rather
 #                                 than a zeroed success.
@@ -294,7 +295,10 @@ cmd_pr_status() {
   elif [ "$unread_findings" != "0" ]; then
     echo "  [FAIL] ${unread_findings} DeepSeek review(s) with unread findings in the review body"
     echo "         These create no review thread, so the thread count above cannot see them."
-    echo "         Read them on the PR, then: gh pr edit ${pr} --add-label ${DEEPSEEK_REVIEW_READ_LABEL}"
+    # Not `gh pr edit --add-label`: that is the command #206 found cannot run at all
+    # on the `gh` Ubuntu ships, and a remedy an operator cannot execute is worse than
+    # none. Naming this script's own helper also keeps one implementation of the write.
+    echo "         Read them on the PR, then: bash scripts/gh-automation.sh pr-label ${pr} add ${DEEPSEEK_REVIEW_READ_LABEL}"
     explained=1
   fi
 
@@ -662,17 +666,113 @@ cmd_pr_comments() {
 # deliberately outside `REQUIRED_CHECK`, so a red run cannot make READY TO MERGE
 # unreachable. A silent no-op costs the same labels and leaves nothing to notice.
 
+# ── Why these two writes go through `gh api` and not `gh pr edit` ────────────
+#
+# `gh pr edit` pre-fetches the pull request before it applies anything, and that
+# pre-fetch asks for `projectCards` — a Projects-classic field GitHub has sunset.
+# On `gh` 2.45.0, the version Ubuntu ships, every flag therefore fails identically
+# and before doing any work:
+#
+#     $ gh pr edit 203 --add-label needs-review
+#     GraphQL: Projects (classic) is being deprecated … (repository.pullRequest.projectCards)
+#     exit=1
+#
+# Which flag was passed does not matter, so on such a machine `pr-label` could not
+# write a label at all (#206). CI never saw it — GitHub's runners carry a much newer
+# `gh` that no longer asks for the field, and `pr-labeler.yml` has been applying
+# labels throughout. It was a local toolchain failure, not a broken workflow.
+#
+# **The fix is a different endpoint, not a newer `gh`.** Pinning a version the way
+# `.flatc-version` pins flatc would put an install step in front of every local run
+# and would only hide what is actually wrong: the pipeline was depending on a
+# porcelain command's private query shape. The REST label endpoints name no Projects
+# field, so they work on old and new `gh` alike, and this script already routes half
+# its work through `gh api` for the same class of reason.
+#
+# A pull request **is** an issue, so the endpoint is `issues/<n>/labels` — the same
+# reason `gh issue edit <pr-number>` works where `gh pr edit` does not.
+#
+# **Nothing about the loud failure changes, and that is the constraint.** `gh` writes
+# its one-line reason to stderr, which `$(…)` does not capture, so it still reaches
+# the log unredirected exactly as #134 requires; the API's own error body arrives on
+# stdout, which is captured, so a failing write re-emits it to stderr rather than
+# swallowing it. A write that does not land still exits non-zero with the reason
+# beside it. The only stdout that is dropped is the payload of a write that succeeded.
+gh_label_api() {
+  local method="$1" url="$2"
+  shift 2
+  local body status=0
+  body=$(gh api -X "$method" "$url" "$@") || status=$?
+  if [ "$status" -ne 0 ] && [ -n "$body" ]; then
+    printf '%s\n' "$body" >&2
+  fi
+  return "$status"
+}
+
+# ── repo_label_defined — 0 defined, 1 not defined, 2 could not determine ─────
+#
+# The same three answers, for the same reason, as `pr-check-label` further down —
+# and this one exists because the endpoint change above silently removed a guard
+# that `gh pr edit` had been providing for free.
+#
+# `gh pr edit --add-label` REFUSED a label the repository does not define:
+# "'ready-for-dev' not found in the repository", exit 1. `POST issues/<n>/labels`
+# does the opposite — it CREATES the label and returns 200. Left unguarded, a typo
+# would therefore have invented a label, attached it to the pull request, and
+# printed the success line, which is #134's shape exactly: an output that says a
+# thing happened while a different thing did. A fix for #206 does not get to
+# reintroduce the defect #134 removed.
+#
+# The third answer fails closed, because an unreadable label list is not the same
+# as the label existing. Refusing costs the rest of that labeler pass; every later
+# firing relabels all open PRs, so the label comes back, while a guess would leave
+# a repository label nobody can tell was invented.
+repo_label_defined() {
+  local label="$1"
+  local labels
+  # Not `2>/dev/null`: the reason belongs in the caller's log, the same rule the
+  # rest of this file's reads follow.
+  if ! labels=$(gh api --paginate "repos/${REPO}/labels" --jq '.[].name'); then
+    echo "ERROR: could not read the labels defined in ${REPO}" >&2
+    return "$CHECK_LABEL_UNDETERMINED"
+  fi
+  # A here-string rather than a pipe, and `-x` rather than a substring match: the
+  # same two reasons as `cmd_pr_check_label`.
+  grep -qxF -e "$label" <<<"$labels"
+}
+
 cmd_pr_label() {
   local pr="$1" action="$2" label="$3"
   require_gh
+  resolve_repo || die "Could not resolve the repository for a label write on PR #${pr}"
 
   case "$action" in
     add)
-      # No pre-check: GitHub's addLabels mutation accepts a label the PR already
-      # carries, so `--add-label` is genuinely idempotent and re-adding is not an
-      # error. What was missing is the exit status, not a guard. gh's stderr is
-      # left unredirected so the reason lands in the log with the failure.
-      if gh pr edit "$pr" --add-label "$label"; then
+      # No pre-check against the PR's OWN labels: the REST endpoint accepts a label
+      # the pull request already carries, so the add is genuinely idempotent and
+      # re-adding is not an error. What was missing in #134 is the exit status, not
+      # that guard, and adding one here would cost a read per call to answer a
+      # question GitHub already answers correctly.
+      #
+      # The repository-level question is a different one, and it is not optional —
+      # see `repo_label_defined` above for what this endpoint would otherwise do
+      # with a label name nobody has defined.
+      local defined=0
+      repo_label_defined "$label" || defined=$?
+      case "$defined" in
+        0) ;;
+        1)
+          echo "ERROR: refusing to add label '${label}' to PR #${pr} — ${REPO} defines no such label, and this endpoint would create one rather than refuse" >&2
+          return 1
+          ;;
+        *)
+          # The reason is already on stderr from the read itself.
+          echo "ERROR: refusing to add label '${label}' to PR #${pr} — an unreadable repository label list is not the same as the label existing" >&2
+          return 1
+          ;;
+      esac
+
+      if gh_label_api POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=${label}"; then
         echo "Label '${label}' added to PR #${pr}"
       else
         echo "ERROR: failed to add label '${label}' to PR #${pr} — see gh's output above" >&2
@@ -680,16 +780,24 @@ cmd_pr_label() {
       fi
       ;;
     remove)
-      # `gh --remove-label` errors when the label is absent, so presence is read
-      # first. That read has three answers, not two: "absent" is a fact worth
-      # acting on, "could not determine" is not, and taking the second for the
-      # first is how a failed lookup became a skipped removal with no line printed
-      # at all.
+      # Removing a label the PR does not carry is a 404, so presence is read first.
+      # That read has three answers, not two: "absent" is a fact worth acting on,
+      # "could not determine" is not, and taking the second for the first is how a
+      # failed lookup became a skipped removal with no line printed at all.
       local present=0
       cmd_pr_check_label "$pr" "$label" || present=$?
       case "$present" in
         0)
-          if gh pr edit "$pr" --remove-label "$label"; then
+          # The label name is a path segment here, so it is percent-encoded rather
+          # than interpolated raw: `READY TO MERGE` is a real label in this
+          # repository and a raw space in a URL path is not something to leave to
+          # whatever `gh` happens to do with it.
+          local label_path
+          label_path=$(jq -rn --arg s "$label" '$s|@uri') || {
+            echo "ERROR: could not encode label '${label}' for PR #${pr}" >&2
+            return 1
+          }
+          if gh_label_api DELETE "repos/${REPO}/issues/${pr}/labels/${label_path}"; then
             echo "Label '${label}' removed from PR #${pr}"
           else
             echo "ERROR: failed to remove label '${label}' from PR #${pr} — see gh's output above" >&2
