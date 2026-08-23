@@ -262,6 +262,11 @@ If the failure is infrastructure (runner outage, registry timeout, expired token
 
 #### 4e — Commit and Push
 
+If feedback requires correcting the pull request's title or body, **never use `gh pr edit`**.
+On `gh` 2.45.0 its Projects-classic pre-fetch fails before any flag is applied (#206). Use
+`bash scripts/gh-automation.sh pr-edit <pr> --title "<title>" --body-file <path>`; the
+helper writes through REST and verifies every requested field by reading the pull request back.
+
 ```bash
 cd "$WORKTREE_DIR"
 git add -A

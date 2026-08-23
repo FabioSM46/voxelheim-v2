@@ -368,6 +368,11 @@ EOF
 )"
 ```
 
+**If the pull request's title or body must be corrected, never use `gh pr edit`.** On `gh`
+2.45.0 its Projects-classic pre-fetch fails before any flag is applied (#206). Use
+`bash scripts/gh-automation.sh pr-edit <pr> --title "<title>" --body-file <path>`; the
+helper writes through REST and reads both requested fields back before reporting success.
+
 Only tick a box you actually ran. An unticked box with a one-line reason is useful; a ticked box that is not true poisons every later review.
 
 **PR target**: Default is `develop`. PRs targeting `main` are allowed for hotfixes. NEVER push directly to `main`, and NEVER merge a pull request into `main` — that one stays human-only. Merging into `develop` is authorized (#217), but **not from this skill**: `/dev-issue` is stateless and exits at PR creation, before CI has reported anything. Merging is a decision for a context that has read the result.
