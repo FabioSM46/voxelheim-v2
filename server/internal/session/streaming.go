@@ -365,7 +365,7 @@ const maxChunkResends = 2
 // anywhere in the world and would re-send the whole stream because someone dug a hole a
 // kilometre away.
 //
-// Found by review on PR #54. The window is one step wider than the finding described: it
+// Found by review on legacy PR 54. The window is one step wider than the finding described: it
 // opens at the read, not at the send, because a chunk edited between the two is sent in
 // its pre-edit form and skipped by the broadcast just the same.
 func (s *Streamer) sendChunk(ctx context.Context, coord world.Coord, repairing bool) error {
@@ -471,7 +471,7 @@ const resendRefillPerSecond = game.TerminalFallSpeed / world.ChunkSize
 // it, which is the millisecond-scale part of this server and runs under a semaphore every
 // session shares. That is one client making every other client's terrain late. Trusting
 // the client on what it asks for is not the same as trusting it on how often, which is
-// the sentence #50 wrote about this server with the parties the other way round.
+// the sentence legacy PR 50 wrote about this server with the parties the other way round.
 //
 // **A bucket rather than a minimum interval, because the honest traffic is bursty and the
 // dishonest traffic is not.** A client sheds chunks when it cannot keep up, so it loses

@@ -1935,7 +1935,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // list was written. Four members added after `AttackRequest` inherited
         // `Deferred` from the fallback below — silently, because a fallback is an
         // answer for every member somebody forgets, and the answer it gave named them
-        // as server→client payloads nothing consumes yet (#131).
+        // as server→client payloads nothing consumes yet (legacy PR 131).
         fb::Payload::ClientHello
         | fb::Payload::PlayerInput
         | fb::Payload::BlockEditRequest
@@ -3958,7 +3958,7 @@ mod tests {
 
     /// Every union member resolves to the variant its direction calls for.
     ///
-    /// The sweep the four payloads of #131 would have failed: they were client→server
+    /// The sweep the four payloads of legacy PR 131 would have failed: they were client→server
     /// and decoded as `Deferred`, and nothing said so because the fallback had an
     /// answer for them.
     #[test]
@@ -4359,8 +4359,8 @@ mod tests {
 
     /// This build speaks V6's two drawable members and draws them both.
     ///
-    /// **The inverse of what this test asserted until #172, and the change is the point.**
-    /// The contract reserved the names in #166 and nothing on this side could draw them,
+    /// **The inverse of what this test asserted until legacy PR 172, and the change is the point.**
+    /// The contract reserved the names in legacy PR 166 and nothing on this side could draw them,
     /// so refusing was the honest answer: a default shape would have put a creature in the
     /// world the server never described. The renderer arrived with this commit, so the
     /// decoder accepts what the renderer can draw — and `session.rs` turns every decode
@@ -6473,7 +6473,7 @@ mod tests {
         );
     }
 
-    /// A snapshot carrying a vargr decodes, where until #172 it ended the session.
+    /// A snapshot carrying a vargr decodes, where until legacy PR 172 it ended the session.
     ///
     /// **This is the whole of the urgency behind that issue, in one frame.** The server's
     /// spawn director does not hold the vargr back for the night, so the first one to
@@ -6882,7 +6882,7 @@ mod tests {
         // as "the owner has no live session right now", not as "unowned". Until
         // this decoded, the first snapshot naming an offline owner would have ended
         // the session as a protocol failure — which is what a server that can send
-        // one is waiting on (#148).
+        // one is waiting on (legacy PR 148).
         let Ok(Message::Snapshot(snapshot)) = structures_of(&[StructureStateWire::tent(900, 0)])
         else {
             panic!("an offline owner is not a malformed structure");

@@ -1414,7 +1414,7 @@ func TestEntitySnapshotAlwaysCarriesTheRecipientsVitals(t *testing.T) {
 	}
 }
 
-// A dead player's countdown, which is the shape #93 will actually emit and the one the
+// A dead player's countdown, which is the shape legacy PR 93 will actually emit and the one the
 // client's decoder has the most invariants about.
 func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 	t.Parallel()

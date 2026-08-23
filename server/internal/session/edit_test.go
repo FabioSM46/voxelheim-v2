@@ -247,7 +247,7 @@ func TestBroadcastsRunSafelyWhileSessionsArriveAndLeave(t *testing.T) {
 		select {
 		case err := <-served:
 			// A frame already in flight when the connection went away fails to write. That is
-			// the disconnect arriving, not a protocol error, and since #61 Serve says so
+			// the disconnect arriving, not a protocol error, and since legacy PR 61 Serve says so
 			// itself — so there is nothing to tolerate here and every error is a real one.
 			if err != nil {
 				t.Fatalf("round %d: Serve returned %v", round, err)
@@ -313,7 +313,7 @@ func admit(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game.Sim,
 		_ = conn.Close()
 		// A frame already handed to the writer when the connection is closed underneath it
 		// fails to write. Serve used to report that and this cleanup used to tolerate it;
-		// since #61 it is classified as the disconnect it is and the session ends cleanly,
+		// since legacy PR 61 it is classified as the disconnect it is and the session ends cleanly,
 		// so the tolerance is gone and any error at all is a failure.
 		if err := <-served; err != nil {
 			t.Errorf("session %d ended with %v", entityID, err)
@@ -933,7 +933,7 @@ func TestAnAttackIsAcceptedAndARefusedOneIsSilence(t *testing.T) {
 // is a way to map somebody else's camp by asking. `RemoveStructureRequest` says so, and
 // `RefusedAction` deliberately has no member for it.
 //
-// **"The session survives it" is what changed at this layer in #131**: both tags landed in
+// **"The session survives it" is what changed at this layer in legacy PR 131**: both tags landed in
 // handlePostHandshake's default case before then, which ends the connection as a protocol
 // violation. The refusals themselves are the simulation's and are covered where they are
 // decided; what is covered here is that the answer reaches the wire and names the anchor

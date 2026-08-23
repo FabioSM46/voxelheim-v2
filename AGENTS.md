@@ -225,7 +225,7 @@ User reviews → merges (manual gate)
 #### Who may start a skill, and which gates are the real ones
 
 All three skills are invocable by an agent as well as by a human typist. They carried
-`disable-model-invocation: true` until #48, and removing it changed less than it looks like:
+`disable-model-invocation: true` until legacy PR 48, and removing it changed less than it looks like:
 three agents had already hit that refusal and done the work by hand anyway, from the issue
 body and this file. The flag was not preventing the work — it was routing it through a path
 with a **wider** tool set, since a skill runs under its `allowed-tools` list and a
@@ -357,7 +357,7 @@ Reading state fails closed and always has. Writing the label did not: `pr-label`
 `gh pr edit … 2>/dev/null || true` and then printed `Label 'X' added to PR #N (idempotent)`
 whatever happened — reason discarded, status discarded, success line unconditional. It was
 found the only way it could be, by hand: a `pr-label … add` printed that line, exited 0, and
-applied nothing (#134). A systematic failure — a token that lost `pull_requests: write` —
+applied nothing (legacy PR 134). A systematic failure — a token that lost `pull_requests: write` —
 would have looked exactly like a working pipeline.
 
 `pr-label` now exits non-zero when a write does not land, and `pr-check-label` answers
@@ -425,7 +425,7 @@ is the proof. Step 8 of the planning ceremony creates `Iteration N+1` before ste
 milestone recoverable — and every issue that closed inside that window killed the run with
 `Expected exactly one active iteration milestone`. `workflow_dispatch` recovered a different
 failure than this one: it is unconditional at the job level only, and the step ran the same
-helper and died on the same line (#201).
+helper and died on the same line (legacy PR 201).
 
 **One ambiguity still fails closed**: two open milestones resolving to the same sequence.
 "Lowest" has two answers there, so the helper names both milestone numbers and refuses rather
@@ -468,11 +468,11 @@ prompt carries it by construction ("Always respond with a JSON object"); Mode B'
 that flag lived in the shared `call_deepseek` helper, a reply succeeded or failed on whether the
 word happened to turn up in the diff — failing as a 400 on a `pull_request_review_comment` run,
 which attaches no check to the head commit, so nothing on the PR turned red and the developer
-simply never got an answer (PR #54); succeeding as prose wrapped in an object, which is what both
-bot replies on PR #34 still are. The contract now belongs to the caller and `json_mode` has no
-default for a third caller to inherit. **The finding was filed on PR #16 and dismissed because
+simply never got an answer (legacy PR 54); succeeding as prose wrapped in an object, which is what both
+bot replies on legacy PR 34 still are. The contract now belongs to the caller and `json_mode` has no
+default for a third caller to inherit. **The finding was filed on legacy PR 16 and dismissed because
 seventeen reviews had worked** — seventeen successes were not evidence that the call was legal,
-only that the word kept appearing by luck (#57).
+only that the word kept appearing by luck (legacy PR 57).
 
 **Review Completeness**: the model returns a `review_complete` flag. No substantive issues →
 the verdict is recorded as a COMMENT review whose body begins with
@@ -483,7 +483,7 @@ spending the round budget. Substantive issues → a stamped COMMENT that does sp
 requests, and a PAT is no way around it either, because nobody may approve their own PR and
 one human authors them all here. Attempting an APPROVE therefore did not produce a stricter
 verdict, it produced a failed job — on the one kind of PR that deserved it least, the
-flawless one (#22). The marker carries what the review state used to.
+flawless one (legacy PR 22). The marker carries what the review state used to.
 
 **Round Limit**: automatic full reviews are capped at **1 COMMENT round** per PR
 (`MAX_ROUNDS`, default 1). One pass surfaces the substantive issues; later rounds tend to
@@ -514,7 +514,7 @@ review-only. The bot ignores its own comments (anti-loop guard, enforced at job 
 before a runner boots). Diffs over 90,000 characters are truncated with every dropped file
 named in the log **and in the review itself**: a truncated pass cannot come back clean, because
 the skipped files are injected as a finding, so the pull request blocks until a human has
-acknowledged what nobody read (#32 — on PR #30 the budget ran out after the client files and the
+acknowledged what nobody read (legacy PR 32 — on legacy PR 30 the budget ran out after the client files and the
 entire server half was reported as having no issues). Splitting the pull request is still the
 reliable fix when a diff exceeds it.
 
@@ -532,7 +532,7 @@ same resolution: **when an output asserts something no machine checks, stop asse
 **The cap used to be 120,000, and the reason given for keeping it there was wrong.** This file
 said it was not raised "because the model's context is what the cap describes". V4 documents a
 **1M-token context**, flash and pro alike; 120,000 characters is roughly 35K tokens, about 3.5%
-of that window. The cap described a limit the model did not have. It cost PR #158 five unread
+of that window. The cap described a limit the model did not have. It cost legacy PR 158 five unread
 files — `session.go` and `world/store.go` among them, the two the change actually turned on —
 and the block did its job: nothing came back clean, and a human had to acknowledge the gap.
 
@@ -567,22 +567,22 @@ somewhere else entirely.
 **An unreadable diff fails the run**, and "unreadable" covers three shapes:
 
 - a fetch that **errors** — not an empty diff, and reporting it as one is how a review that never
-  happened got a green check (#31);
+  happened got a green check (legacy PR 31);
 - a fetch that **answers incompletely** — files returned with no patch. GitHub reports zero changed
   lines for a genuine binary, so a file with changes and no patch is a withheld patch, not an image
-  (#43);
+  (legacy PR 43);
 - a fetch that **fails below PyGithub** — urllib3 exhausting its retries raises `RequestException`,
-  which escaped as a stack trace until it was caught and named (#43, and this one had genuinely
+  which escaped as a stack trace until it was caught and named (legacy PR 43, and this one had genuinely
   happened: a 503 storm on `/pulls/42/reviews`).
 
 **An unreadable round count is not zero either.** Zero means "no rounds spent" and lets another
 review run, so a failed lookup during an outage could bypass the one-round cap indefinitely, each
 run blind to the ones before it. It raises instead.
 
-**A correction worth keeping, because the mistake was expensive** (#46). The withheld-patch case
+**A correction worth keeping, because the mistake was expensive** (legacy PR 46). The withheld-patch case
 above was written as a post-mortem: a 636-line pull request had supposedly arrived as a
 three-character diff, on the strength of which the model improvised findings for code it had never
-seen. **That never happened.** `get_diff` returned a string until #34 and a 3-field tuple after, and
+seen. **That never happened.** `get_diff` returned a string until legacy PR 34 and a 3-field tuple after, and
 the log line kept calling `len()` on it — so `Diff: 3 chars` was the tuple's field count, printed for
 every pull request regardless of size. The model had the full diff the whole time.
 
@@ -598,12 +598,12 @@ Generated code (`gen/` directories, `*_generated.rs`) and dependency
 lockfiles (`Cargo.lock`, `go.sum`, matched by exact basename) are excluded from the diff by
 name — announced, never reviewed. The manifests beside them (`Cargo.toml`, `go.mod`) are not
 excluded: a new dependency is exactly what a reviewer should see, and the lockfile is only
-its mechanical consequence. The measurement that motivated the lockfile half: on PR #15,
+its mechanical consequence. The measurement that motivated the lockfile half: on legacy PR 15,
 `client/Cargo.lock` was 5264 of 8319 non-generated lines — 63% of a one-round review budget
 spent on a resolved version graph.
 
 **Output budget, cost and time are one configuration.** Mode A and Mode B explicitly send
-`DEEPSEEK_MAX_OUTPUT_TOKENS=384000`. PR #80 exhausted 65,536 tokens while reasoning over a
+`DEEPSEEK_MAX_OUTPUT_TOKENS=384000`. Legacy PR 80 exhausted 65,536 tokens while reasoning over a
 measured 50,963-character / 13-file diff; a faithful measure-only replay then exhausted 131,072
 tokens too (run 32171858677: 530,226 reasoning characters, no final content). With 262,144,
 run 32175108406 reviewed that same diff on its first attempt in 8m58s and returned 1,060 final
@@ -709,7 +709,7 @@ If any gate fails, the implementation is incomplete. Fix and re-run gates before
 are machine-checked and the rest remain review responsibilities. **This table, the DoD
 bullets above and the gate tables in both canonical skills are pinned to ci.yml by
 `scripts/test/gate-tables.test.sh`** — they are not kept in step by hand. They were, once:
-golangci-lint had been a blocking server gate since the Go scaffold (#13) and appeared in
+golangci-lint had been a blocking server gate since the Go scaffold (legacy PR 13) and appeared in
 none of them, so an agent following the skills ran four server gates where CI runs five.
 
 | Job          | Gates                                                                            |

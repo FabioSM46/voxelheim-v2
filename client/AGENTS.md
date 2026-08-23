@@ -318,7 +318,7 @@ main schedule, and become one entity each. These rules hold that pipeline togeth
   which is what the mesher reads a missing neighbour as, so "arrived", "replaced" and "went
   away" are one comparison. **Both paths apply the same criterion**, and that is not a
   coincidence to be maintained by hand: the edit path was written without it and remeshed up
-  to three neighbours into byte-identical meshes until the review on #66 said so.
+  to three neighbours into byte-identical meshes until the review on legacy PR 66 said so.
 
   **That comparison is what keeps a join affordable, and it is not an optimisation to trade
   away.** Most of what the server streams is sky, and a chunk of air arriving beside a chunk
@@ -477,7 +477,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
 
   **What it deliberately does not ask is whether the mend would achieve anything.**
   Clicking a stone onto a blade at full durability sends the request and silence answers
-  it, because that is the server's decision (#110) and this side's copy of the pack is one
+  it, because that is the server's decision (legacy PR 110) and this side's copy of the pack is one
   message old. Neither branch moves a count or a bar: an accepted mend appears in the
   durability vectors of the complete `InventoryState` that follows, and a refusal is
   indistinguishable from nothing happening — the same shape a refused block edit already
@@ -642,7 +642,7 @@ with the two notches of toe the boots run past the legs.
 
 `player/sky.rs` owns the one directional light and the curve that four presentation values are
 read from: the sun's direction and illuminance, the camera's clear colour, the camera's ambient
-term, and the `DistanceFog` on the same camera. Until #171 all four were constants — two in
+term, and the `DistanceFog` on the same camera. Until legacy PR 171 all four were constants — two in
 `player/camera.rs` and two in `world/render.rs` — and `Daylight::FIXED` is those same four
 numbers, carried over unchanged.
 
@@ -677,7 +677,7 @@ is what keeps a sixty-frame second from stepping twenty times.
 
 **The ambient floor is a playability constant, and what it is *for* is not what it looks like.**
 With shadow maps off and no per-voxel light, a face the sun does not reach is lit by the ambient
-term and — since #172, and only within a dozen blocks of a campfire — by that fire, so away from
+term and — since legacy PR 172, and only within a dozen blocks of a campfire — by that fire, so away from
 one the ambient term is still the whole of it and `NIGHT_AMBIENT_BRIGHTNESS` decides whether the
 far side of a boulder is a dark shape or an invisible one. It does **not** decide how dark night feels: the measured
 day-to-night change on the ground a player stands on is sRGB 168 down to 52, and almost all of that
@@ -763,7 +763,7 @@ Three things about it are worth keeping straight.
 - **It decides nothing, and its two failure directions are not symmetric.** The server
   re-reads its own registry for every swing, so an id wrongly listed here costs a request
   that is refused — nothing granted, nothing lost. An id wrongly *omitted* costs a weapon:
-  that is precisely what the iron sword was between #109 and #127, drawn as a blade in the
+  that is precisely what the iron sword was between legacy PRs 109 and 127, drawn as a blade in the
   hand, worth 40 damage on the server, and never once asked for, because this client would
   not send the frame. A table that fails open toward asking is the honest shape.
 - **`blade_in_hand` is the stack question, `item_is_a_blade` the item question**, and they
@@ -784,7 +784,7 @@ Three things about it are worth keeping straight.
   item table, and the entry it lost would be the new one.
 
 This is one list, not a second registry. The per-item table it was written to fold into now
-exists — `player/items.rs`, landed in #128 — so the fold is available rather than hypothetical:
+exists — `player/items.rs`, landed in legacy PR 128 — so the fold is available rather than hypothetical:
 *the left button swings this* becomes a fourth column and `item_is_a_blade` its accessor, with
 no call site changed. It is deliberately **not** done here, because a fourth field on
 `ItemDisplay` is a gameplay fact sitting in a table whose own rule is that nothing in a row
@@ -905,7 +905,7 @@ genuinely costs is **`https` to the account service**, which is refused rather t
 see "Known gaps".
 
 **`rustls` is the third, and the discussion the rule asks for is on the record.** Fabio decided
-it on 2026-08-20 (issue #157) over the alternative of leaving the wire in the clear and
+it on 2026-08-20 (legacy issue 157) over the alternative of leaving the wire in the clear and
 documenting a WireGuard or VPN deployment. The reasoning is the part worth keeping: a tunnel
 protects only when every operator configures one correctly and every player joins it, and it
 silently protects nothing when either does not happen — whereas encryption in the transport
@@ -1537,7 +1537,7 @@ Recorded here so the next reader does not mistake them for oversights:
 - **No native Wayland: the client is X11-only, and on a Wayland desktop it runs through
   XWayland.** Bevy's `wayland` feature pulls `wayland-sys`, whose build script needs
   `wayland-client.pc` from **`libwayland-dev`** — a package CI's `client` job does not install,
-  and issue #6 put that job's setup out of scope. Enabling it therefore takes two changes in one
+  and legacy issue 6 put that job's setup out of scope. Enabling it therefore takes two changes in one
   PR: add `libwayland-dev` to the `Install Bevy system dependencies` step in
   `.github/workflows/ci.yml`, then add `"wayland"` to the feature list in `Cargo.toml`. Doing only
   the second reddens CI with `Package 'wayland-client' ... not found` — and it will still build

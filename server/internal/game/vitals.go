@@ -149,7 +149,7 @@ func (p *Player) advanceVitalsLocked() {
 		p.respawnTicks--
 	}
 
-	// The #92 penalty, retried until the inventory lock is free. It is applied at most
+	// The legacy PR 92 penalty, retried until the inventory lock is free. It is applied at most
 	// once per death: penaltyApplied is cleared by dieLocked and set by the charge
 	// itself, so a contended tick defers rather than skipping, and no later tick can
 	// spend the durability twice.

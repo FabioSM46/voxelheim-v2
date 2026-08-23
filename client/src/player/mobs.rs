@@ -815,7 +815,7 @@ mod tests {
 
     /// **The test the issue exists for, and the reason it was urgent.**
     ///
-    /// Until #172 a vargr never reached this module at all: `MobKind::from_wire` answered
+    /// Until legacy PR 172 a vargr never reached this module at all: `MobKind::from_wire` answered
     /// `None`, `mob_state` turned that into `DecodeError::UnknownMobEnum`, and
     /// `net/session.rs` turns any decode error into a `protocol_failure` — so the first
     /// vargr the server sent ended the connection rather than being skipped. The decoder's

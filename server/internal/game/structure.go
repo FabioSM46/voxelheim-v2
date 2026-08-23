@@ -303,7 +303,7 @@ func (s *Sim) tentOfLocked(owner identity.PlayerID) (*structure, bool) {
 // The world's counterpart to Edit for things that are entities. Every refusal is still
 // an ordinary error the session logs at debug, and a client must never treat its own
 // request as applied — the structure exists when a snapshot says it does. What changed
-// with #205 is that the refusal is no longer *only* a log line: the reason beside the
+// with legacy PR 205 is that the refusal is no longer *only* a log line: the reason beside the
 // error is what the session puts on the wire, so a placement that does not happen is an
 // answer rather than a click that vanished.
 //

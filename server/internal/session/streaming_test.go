@@ -286,7 +286,7 @@ func must(load, unload []world.Coord) []world.Coord {
 	return load
 }
 
-// TestAChunkEditedWhileInFlightIsSentAgain pins the window review found on PR #54.
+// TestAChunkEditedWhileInFlightIsSentAgain pins the window review found on legacy PR 54.
 //
 // Between reading a chunk and MarkLoaded, View.Holds is false for this session, so
 // Registry.BroadcastChunk skips it. An edit accepted in that window therefore reaches

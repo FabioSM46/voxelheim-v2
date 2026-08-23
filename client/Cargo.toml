@@ -42,7 +42,7 @@ publish = false
 # `x11` and not `wayland`, deliberately. `x11` links nothing at build time —
 # winit reaches libX11 through `x11-dl`, which dlopens at runtime — whereas
 # `wayland` pulls `wayland-sys`, whose build script needs `wayland-client.pc`
-# from libwayland-dev. That package is not installed in CI and issue #6 puts that
+# from libwayland-dev. That package is not installed in CI and legacy issue 6 puts that
 # job's setup out of scope, so the feature set matches the dependencies CI has
 # rather than the reverse. On a Wayland desktop the client runs through XWayland;
 # see "Known gaps" in client/AGENTS.md.
@@ -75,7 +75,7 @@ bevy = { version = "0.19.1", default-features = false, features = [
 flatbuffers = "=25.12.19"
 
 # The third crate, and the discussion client/AGENTS.md asks for is on the record
-# rather than waived. **Fabio decided it on 2026-08-20** (issue #157), over the
+# rather than waived. **Fabio decided it on 2026-08-20** (legacy issue 157), over the
 # alternative of leaving the wire in the clear and documenting a WireGuard or VPN
 # deployment, on the grounds that encryption in the binary is substantially more
 # solid than a tunnel. The reasoning is the part that generalises: a tunnel
