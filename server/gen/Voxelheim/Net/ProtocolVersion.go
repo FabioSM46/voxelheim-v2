@@ -19,6 +19,22 @@ import "strconv"
 // / connection. So a server→client member can be appended without moving this
 // / number (`ActionRefused`, tag 20) and a client→server one cannot
 // / (`DropItemRequest`, tag 25). Both are argued in `envelope.fbs`.
+// /
+// / **That exemption is about union *tags*, and nothing else in this contract
+// / gets it.** V9 appends `MobAction.Dying` — an enum member inside a table
+// / field, travelling server→client, and it moves this number anyway. "The
+// / receiver drops what it cannot name" is a property of the *union switch*: a
+// / tag with no arm is a whole frame nobody has to open. An enum member has no
+// / such fallback. It arrives inside a frame the receiver has already committed
+// / to reading, in a field whose invariant is "a known non-zero member", so an
+// / unrecognised value is a decode error and the session ends — which is exactly
+// / the mid-session failure this number exists to turn into a clean refusal at
+// / the handshake. A V8 client against a server that had appended it quietly
+// / would connect perfectly and die on the first creature anybody killed.
+// /
+// / The rule that generalises, now that three shapes have been argued: **ask
+// / what the receiver does with the value it does not recognise, not which way
+// / it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
 type ProtocolVersion uint16
 
 const (
@@ -27,7 +43,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 8
+	ProtocolVersionCurrent ProtocolVersion = 9
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

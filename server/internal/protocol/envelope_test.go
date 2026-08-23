@@ -184,11 +184,28 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // failure ProtocolVersion exists to turn into a clean refusal. Read down the list below, the
 // line is consistent rather than new: every client→server member arrived with a bump, and
 // the one appended without one travels the other way.
-func TestProtocolV8AppendsADropTagAndMovesToEight(t *testing.T) {
+//
+// **V9 adds no tag at all, and moves the version anyway.** It appends MobAction.Dying — an
+// enum member inside a table field, travelling server→client, which is the direction tag 20
+// took for free. It does not get that exemption, because the exemption belongs to the union
+// switch rather than to the direction: a tag with no arm is a whole frame the receiver never
+// opens, while an enum member arrives inside a frame it has already committed to reading, in
+// a field whose stated invariant is "a known non-zero member". The client refuses it, so a V8
+// client against a V9 server dies on the first creature anybody kills. The list below is
+// therefore unchanged and the number below it is not — which is exactly the shape of change
+// this test exists to make visible.
+//
+// The rule that generalises, now that three shapes have been argued: **ask what the receiver
+// does with the value it does not recognise, not which way it travelled.** Dropping it is a
+// bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
+// schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
+// them, and a rule stated in three places out of four is a rule somebody will read the wrong
+// version of.
+func TestProtocolV9AppendsNoTagAndStillMovesToNine(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 8 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 8", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 9 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 9", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -1495,6 +1512,10 @@ func TestV3EnumsFailClosedOnZero(t *testing.T) {
 		"Chase":    {byte(vnet.MobActionChase), 2},
 		"Windup":   {byte(vnet.MobActionWindup), 3},
 		"Recovery": {byte(vnet.MobActionRecovery), 4},
+		// Appended by V9, and pinned here with the four that came before it for the reason
+		// they are: the value is an integer on the wire, so a renumbering would draw one
+		// action where the server said another and no compiler would object.
+		"Dying": {byte(vnet.MobActionDying), 5},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("MobAction.%s = %d, want %d", name, pair[0], pair[1])

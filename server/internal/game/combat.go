@@ -79,33 +79,34 @@ func (p *Player) Attack(req protocol.AttackRequest) error {
 	return nil
 }
 
-// resolveSwingLocked judges this player's pending swing, if there is one, and returns
-// whatever a kill left behind.
+// resolveSwingLocked judges this player's pending swing, if there is one.
 //
 // Called from Step after every player has moved and before the mobs act, which is the
 // whole of the ordering guarantee: a swing is judged against the positions this tick
 // produced, and a draugr killed by one cannot land an attack later in the same tick.
 //
-// **The loot travels back out rather than being spawned here**, for the reason
-// damageMobLocked returns it: Sim.spawnDrop takes the lock this function is running
-// under. Every other exit is nil — a swing that misses, is refused or is postponed leaves
-// nothing on the ground, which is the same thing as saying nothing died.
+// **It returns nothing, and it used to return the loot.** A blow that kills no longer
+// produces anything to put on the ground: it starts the creature dying, and what it left
+// reaches the ground MobDeathDuration later, from the reap in Sim.advanceMobsLocked. The
+// lock argument that made the loot a return value is unchanged and now lives entirely
+// there — Sim.spawnDrop takes the lock this function is running under, so nothing inside
+// the tick may call it.
 //
 // The caller holds Sim.mu.
-func (p *Player) resolveSwingLocked() []lootDrop {
+func (p *Player) resolveSwingLocked() {
 	if p.attackCooldown > 0 {
 		p.attackCooldown--
 	}
 
 	pending := p.pendingSwing
 	if pending == nil {
-		return nil
+		return
 	}
 	if !p.alive() {
 		// Died between the click and the tick. Nothing lands, and the swing is dropped
 		// rather than held for the respawn.
 		p.pendingSwing = nil
-		return nil
+		return
 	}
 
 	damage, sampled := p.armedWithSwordLocked(pending.slot)
@@ -114,7 +115,7 @@ func (p *Player) resolveSwingLocked() []lootDrop {
 		// swing is *kept* rather than dropped — a click the player made does not stop
 		// having been made because another one of their own messages was in flight.
 		// Nothing else advances here, so the retry judges the next tick's positions.
-		return nil
+		return
 	}
 
 	// Consumed exactly once, whatever the verdict below. Held any longer it would be a
@@ -123,7 +124,7 @@ func (p *Player) resolveSwingLocked() []lootDrop {
 	if damage == 0 {
 		// An empty slot, a stack of stone, or a blade worn through. Silence is the whole
 		// of the answer: the client is told nothing and sees nothing happen.
-		return nil
+		return
 	}
 
 	// Paid before the search, so a miss costs exactly what a hit does. A client that
@@ -132,9 +133,8 @@ func (p *Player) resolveSwingLocked() []lootDrop {
 	p.attackCooldown = p.sim.attackCooldown
 
 	if target := p.sim.swingTargetLocked(p); target != nil {
-		return p.sim.damageMobLocked(target, damage)
+		p.sim.damageMobLocked(target, damage)
 	}
-	return nil
 }
 
 // armedWithSwordLocked is what the named slot's contents do to a mob, and whether the
@@ -196,6 +196,13 @@ func (p *Player) armedWithSwordLocked(slot uint8) (damage uint16, sampled bool) 
 // hardcoded box would have given it a draugr's reach in both directions — reaching a
 // vargr that was too far away and missing one standing at its own edge.
 //
+// **A body that is already going down is not a target.** damageMobLocked would refuse the
+// blow anyway — zero health is its first guard — but the swing would have been *spent* on
+// it: the search returns the nearest candidate, so a corpse lying between a player and the
+// draugr behind it would absorb every swing until it stopped existing. A dying creature is
+// therefore skipped here rather than merely being immune, which is the same distinction
+// `huntable` draws for a player who has died.
+//
 // O(mobs) per swing, on the same explicit trade the mob's own target selection records.
 // The caller holds Sim.mu.
 func (s *Sim) swingTargetLocked(p *Player) *mob {
@@ -209,6 +216,9 @@ func (s *Sim) swingTargetLocked(p *Player) *mob {
 	// Sorted, so two mobs at the same distance resolve by identity rather than by
 	// whichever the map happened to yield first.
 	for _, m := range s.sortedMobsLocked() {
+		if m.dying() {
+			continue
+		}
 		body := m.species().body.boxAt(m.pos)
 
 		distance := boxDistance(reach, body)

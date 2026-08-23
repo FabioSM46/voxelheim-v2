@@ -21,6 +21,23 @@ const (
 	MobActionWindup MobAction = 3
 	/// Cannot attack again until this expires. The server's answer to attack cadence.
 	MobActionRecovery MobAction = 4
+	/// Killed, and going down. The creature has no health left and is not coming back;
+	/// the server holds the body here for a fixed span and then stops sending it, and
+	/// what the kill left behind reaches the ground at that moment and not before.
+	///
+	/// **It is the only statement of death this contract makes about a mob, and it is
+	/// what a receiver must animate on.** There is no `LifeState` beside a `MobState` and
+	/// there is no removal event: a creature that leaves a snapshot may have been killed,
+	/// may have walked out of the streamed cube, or may have been taken away by the
+	/// daylight, and those three are indistinguishable from the outside. Zero `health` is
+	/// not the signal either — it is a *consequence* of this member, sent alongside it,
+	/// and a receiver that read the number instead of this field would be inferring a
+	/// gameplay fact the server is already stating.
+	///
+	/// Nothing about the pose is here. How long a body takes to go down, and which way it
+	/// falls, are presentation; how long the server keeps sending this action, and when
+	/// the drop exists, are not.
+	MobActionDying MobAction = 5
 )
 
 var EnumNamesMobAction = map[MobAction]string{
@@ -29,6 +46,7 @@ var EnumNamesMobAction = map[MobAction]string{
 	MobActionChase:    "Chase",
 	MobActionWindup:   "Windup",
 	MobActionRecovery: "Recovery",
+	MobActionDying:    "Dying",
 }
 
 var EnumValuesMobAction = map[string]MobAction{
@@ -37,6 +55,7 @@ var EnumValuesMobAction = map[string]MobAction{
 	"Chase":    MobActionChase,
 	"Windup":   MobActionWindup,
 	"Recovery": MobActionRecovery,
+	"Dying":    MobActionDying,
 }
 
 func (v MobAction) String() string {

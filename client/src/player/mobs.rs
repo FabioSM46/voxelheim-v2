@@ -395,11 +395,22 @@ fn mob_visibility(mode: InputMode) -> Visibility {
 }
 
 /// The lean an action poses at. Bounded, and a function of the action alone.
+///
+/// **`Dying` leans at nothing yet, and that is a placeholder rather than a decision.** This
+/// change is the server half of #176: a killed creature now stays in the world for
+/// `MobDeathDuration` and its loot waits for the body to go, and the wire says so with
+/// `MobAction.Dying`. What a body *looks like* on the way down is the follow-up, and the arm
+/// is here because the match is total over [`MobAction`] — which is exactly the property
+/// worth keeping, since it is what made a new member impossible to ignore.
+///
+/// Until then a body going down stands still for two and a half seconds and then stops
+/// existing. Odd to watch, and correct in every other respect: nothing is inferred, nothing
+/// is timed locally, and the drop appears when the server says it does.
 fn lean_for(action: MobAction) -> f32 {
     match action {
         MobAction::Windup => WINDUP_LEAN,
         MobAction::Recovery => RECOVERY_LEAN,
-        MobAction::Idle | MobAction::Chase => 0.0,
+        MobAction::Idle | MobAction::Chase | MobAction::Dying => 0.0,
     }
 }
 

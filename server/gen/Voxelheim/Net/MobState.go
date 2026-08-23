@@ -27,6 +27,11 @@ import (
 // /     through interpolation into a transform and never leave
 // /   - `kind` and `action` are known non-zero members
 // /   - `max_health` is non-zero and `health` never exceeds it
+// /
+// / **Zero `health` is legal and always has been** — there is no "an alive mob has
+// / positive health" invariant here, unlike `PlayerVitals` — and since `MobAction.Dying`
+// / it is also reachable, because a body on its way down is sent with nothing left. It
+// / still says nothing on its own: see `Dying`.
 type MobState struct {
 	_tab flatbuffers.Table
 }

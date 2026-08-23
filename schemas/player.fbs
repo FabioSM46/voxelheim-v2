@@ -599,7 +599,25 @@ enum MobAction : ubyte {
   Windup = 3,
 
   /// Cannot attack again until this expires. The server's answer to attack cadence.
-  Recovery = 4
+  Recovery = 4,
+
+  /// Killed, and going down. The creature has no health left and is not coming back;
+  /// the server holds the body here for a fixed span and then stops sending it, and
+  /// what the kill left behind reaches the ground at that moment and not before.
+  ///
+  /// **It is the only statement of death this contract makes about a mob, and it is
+  /// what a receiver must animate on.** There is no `LifeState` beside a `MobState` and
+  /// there is no removal event: a creature that leaves a snapshot may have been killed,
+  /// may have walked out of the streamed cube, or may have been taken away by the
+  /// daylight, and those three are indistinguishable from the outside. Zero `health` is
+  /// not the signal either — it is a *consequence* of this member, sent alongside it,
+  /// and a receiver that read the number instead of this field would be inferring a
+  /// gameplay fact the server is already stating.
+  ///
+  /// Nothing about the pose is here. How long a body takes to go down, and which way it
+  /// falls, are presentation; how long the server keeps sending this action, and when
+  /// the drop exists, are not.
+  Dying = 5
 }
 
 /// The recipient's own health and life state, as the server holds them.
@@ -664,6 +682,11 @@ table PlayerVitals {
 ///     through interpolation into a transform and never leave
 ///   - `kind` and `action` are known non-zero members
 ///   - `max_health` is non-zero and `health` never exceeds it
+///
+/// **Zero `health` is legal and always has been** — there is no "an alive mob has
+/// positive health" invariant here, unlike `PlayerVitals` — and since `MobAction.Dying`
+/// it is also reachable, because a body on its way down is sent with nothing left. It
+/// still says nothing on its own: see `Dying`.
 table MobState {
   entity_id: ulong;
 

@@ -145,23 +145,58 @@ func (s *Sim) sortedMobsLocked() []*mob {
 	return mobs
 }
 
-// advanceMobsLocked steps every mob by one tick and returns them in identity order.
+// advanceMobsLocked steps every mob by one tick, takes away the bodies whose time is up,
+// and returns the survivors in identity order together with what those bodies left behind.
 //
 // Runs after the players have moved, so a chase steers at the position this tick
 // produced rather than the last one's — and, once players can swing, after their swings,
 // so a draugr killed this tick cannot land an attack in it. The spawn director runs
 // after this, so what it decides is decided against the targets chosen here.
-func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
+//
+// **The reap is the one place a killed creature stops existing, and it is where the loot
+// is rolled.** A kill sets [vnet.MobActionDying] and a countdown; nothing leaves the world
+// and nothing reaches the ground until that countdown runs out here. The roll happens at
+// this moment rather than at the blow, which is what makes the drop land where the body
+// came to rest — a draugr killed on a ledge falls off it first, and its bones belong at the
+// bottom rather than in the air it was hit in.
+//
+// **The body is taken away *before* it is stepped again**, which is what makes the count
+// exact rather than approximate: a creature killed on tick N is in the snapshots of ticks
+// N through N+mobDeathTicks-1 and in no later one. Stepping it first and reaping after
+// would spend the tick of the kill on the countdown and leave the body one snapshot short.
+//
+// **The loot leaves through the return value**, exactly as it did when the blow produced
+// it: [Sim.spawnDrop] takes the lock this function is running under. See loot.go, and
+// [Sim.Step], which is where the pair is put back together.
+//
+// The caller holds Sim.mu.
+func (s *Sim) advanceMobsLocked(players []*Player) ([]*mob, []lootDrop) {
 	mobs := s.sortedMobsLocked()
+
+	// In place over the list the sort just allocated, the shape keepLiveDrops uses. Nil
+	// loot for every tick nothing finished dying in, which is almost all of them.
+	kept := mobs[:0]
+	var loot []lootDrop
 	for _, m := range mobs {
+		if m.dying() && m.actionTicks == 0 {
+			delete(s.mobs, m.entityID)
+			left := s.rollLootLocked(m)
+			loot = append(loot, left...)
+			s.log.Debug("a body stopped existing", "entity_id", m.entityID, "kind", m.kind,
+				"pos", m.pos, "loot", len(left))
+			continue
+		}
 		m.step(s, players)
+		kept = append(kept, m)
 	}
-	return mobs
+	return kept, loot
 }
 
 // step advances one mob by one tick, whatever species it is. The caller holds Sim.mu.
 func (m *mob) step(s *Sim, players []*Player) {
 	switch m.action {
+	case vnet.MobActionDying:
+		m.stepDying()
 	case vnet.MobActionWindup:
 		// The *committed* target, not a fresh choice. A telegraph is aimed at somebody,
 		// and one that landed on whoever happened to walk nearer while it played out
@@ -287,6 +322,33 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery
 	m.actionTicks = s.mobTimings[m.kind].recovery
+}
+
+// dying reports whether this creature has been killed and is on its way out of the world.
+//
+// The one predicate that answers it, for the reason [Player.alive] is the one that answers
+// the other side: a corpse is a state several systems have to refuse, and a second spelling
+// of the comparison is a second answer to the same question. The caller holds Sim.mu.
+func (m *mob) dying() bool { return m.action == vnet.MobActionDying }
+
+// stepDying counts a killed creature's body towards the moment it stops existing.
+//
+// It chooses nothing, hunts nobody and never leaves this state: the transition out of it is
+// the reap in [Sim.advanceMobsLocked], not another action. The target was dropped at the
+// blow, so there is nothing for the pursuit branch to steer at even if it ran.
+//
+// **[mob.physics] still runs**, because a body is still a body: a draugr killed standing on
+// a ledge falls off it rather than lying in the air where it was hit, and the loot then
+// lands where it came to rest. The horizontal velocity is zeroed here for the reason a
+// windup zeroes it — whatever it was doing, it has stopped.
+//
+// The countdown is spent before it is tested, which is [mob.stepWindup]'s rule and the
+// death countdown's: see the reap for what makes the total exact.
+func (m *mob) stepDying() {
+	m.vel[0], m.vel[2] = 0, 0
+	if m.actionTicks > 0 {
+		m.actionTicks--
+	}
 }
 
 // stepRecovery counts down the pause after a swing.
@@ -440,14 +502,13 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 	return true
 }
 
-// damageMobLocked takes health from a mob, removes it if it runs out, and returns what
-// the kill left behind for the caller to put on the ground.
+// damageMobLocked takes health from a mob and starts it dying if it runs out.
 //
 // The one path a mob loses health by, for the reason damageLocked is the one path a
 // player does: one place clamps, one place decides what death means, and there is one
-// answer rather than one per caller. **That is also what makes this the one place loot is
-// rolled** — a creature the director takes away never comes through here, which is the
-// whole of "a despawn leaves nothing".
+// answer rather than one per caller. **That is also what makes a kill the only thing that
+// ever produces loot** — a creature the director takes away never comes through here and
+// never reaches the reap, which is the whole of "a despawn leaves nothing".
 //
 // **Species-agnostic, deliberately.** Nothing here asks what it is hitting: a blow is
 // worth what the blade is worth, and what it kills is whatever ran out of health. The
@@ -455,38 +516,45 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 // at the one place a creature is created — and the table it leaves behind, which is read
 // through the registry by rollLootLocked rather than named here.
 //
-// **The loot is returned rather than spawned.** Sim.spawnDrop takes Sim.mu itself and the
-// caller of this function is already holding it, so spawning here would deadlock the tick
-// on the first kill. See loot.go, and Sim.Step, which is where the pair is put back
-// together.
+// **A kill no longer removes anything, and nothing reaches the ground here.** The creature
+// is put into [vnet.MobActionDying] with a countdown, stays in Sim.mobs and stays in every
+// snapshot for MobDeathDuration, and [Sim.advanceMobsLocked] is what takes the body away
+// and rolls what it left. The body used to vanish on the tick of the blow, on the argument
+// that "a corpse with a timer would be a second kind of thing for every consumer to know
+// about" — which was true, and the cost of not having one was that nothing could show a
+// creature falling over and the drop had to appear on the instant of death. A dying mob is
+// therefore exactly what that comment refused, deliberately: one extra action a consumer
+// must handle, and the wire says so rather than leaving it to be inferred from health.
+//
+// **Nothing is scheduled to replace it.** A kill used to start a countdown to a fresh
+// draugr at the same anchor, which made killing one a way of moving it rather than of
+// removing it. What refills the world now is the director, and only where a player actually
+// is — see spawn.go.
+//
+// A second blow lands on nothing: zero health is the guard at the top, and swingTargetLocked
+// refuses a dying creature as a target so a corpse cannot absorb a swing meant for what is
+// standing beside it.
 //
 // The caller holds Sim.mu.
-func (s *Sim) damageMobLocked(m *mob, amount uint16) []lootDrop {
+func (s *Sim) damageMobLocked(m *mob, amount uint16) {
 	if amount == 0 || m.health == 0 {
-		return nil
+		return
 	}
 
 	if amount >= m.health {
 		m.health = 0
-		delete(s.mobs, m.entityID)
-		// Removed from the map rather than left in it dead. The newest snapshot is the
-		// complete set of what exists, so a mob nobody is told about has stopped
-		// existing — and a corpse with a timer would be a second kind of thing for every
-		// consumer to know about.
-		//
-		// **Nothing is scheduled to replace it.** A kill used to start a countdown to a
-		// fresh draugr at the same anchor, which made killing one a way of moving it
-		// rather than of removing it. What refills the world now is the director, and
-		// only where a player actually is — see spawn.go.
-		//
-		// Rolled after the deletion but from the mob itself, which still holds the
-		// position it died at: the map no longer names it, and nothing else will.
-		loot := s.rollLootLocked(m)
-		s.log.Debug("mob died", "entity_id", m.entityID, "kind", m.kind, "loot", len(loot))
-		return loot
+		m.action = vnet.MobActionDying
+		m.actionTicks = s.mobDeathTicks
+		// The hunt ends with the creature. Cleared rather than left pointing at whoever it
+		// was chasing, so nothing reads a corpse as still hunting — the director's dawn rule
+		// asks exactly that question of every mob it considers.
+		m.target = 0
+		m.vel[0], m.vel[2] = 0, 0
+		s.log.Debug("mob died", "entity_id", m.entityID, "kind", m.kind,
+			"death_ticks", m.actionTicks)
+		return
 	}
 	m.health -= amount
-	return nil
 }
 
 // mobStates is the wire form of every mob, in the order it was given.

@@ -76,6 +76,17 @@ union switch to keep exhaustive.
    `DropItemRequest` (tag 25) is client→server, so a newer client against an older server
    would handshake cleanly and die on the first frame it sent — the exact mid-session failure
    this rule exists to prevent. Every client→server member this union has gained carries one.
+
+   **That exemption belongs to the union switch, and nothing else in this contract gets
+   it.** V9 appends `MobAction.Dying` — an enum member inside a table field, travelling
+   server→client, the direction tag 20 got away with — and moves the version anyway. A tag
+   with no arm is a whole frame the receiver never opens; an enum member arrives inside a
+   frame it has already committed to reading, in a field whose stated invariant is "a known
+   non-zero member", so an unrecognised value is a decode error and the session ends.
+
+   The rule that generalises, now that three shapes have been argued: **ask what the receiver
+   does with the value it does not recognise, not which way it travelled.** Dropping it is a
+   bump avoided; refusing it is a bump owed.
 4. **The client never sends authoritative state.** No client→server message may carry a
    position, a health value, an inventory, or an outcome. `PlayerInput` carries intent; the
    server simulates it and its answer is the truth. A message that lets the client state where
