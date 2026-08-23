@@ -92,12 +92,18 @@ pub(super) const IDENTITY_DIR: &[&str] = &["voxelheim", "identity"];
 pub(super) const CHARACTER_DIR: &[&str] = &["voxelheim", "characters"];
 
 /// The XDG base directory for per-user data, when it is set to an absolute path.
+///
+/// Guarded the same way [`Environment::read`] is, and only because that is its one
+/// reader: a name a test build has no way to look up is a name a test build has no use
+/// for.
+#[cfg(not(test))]
 const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 
-/// The home directory, used when [`XDG_DATA_HOME`] says nothing usable.
+/// The home directory, used when `$XDG_DATA_HOME` says nothing usable.
+#[cfg(not(test))]
 const HOME: &str = "HOME";
 
-/// The XDG default for `$XDG_DATA_HOME`, relative to [`HOME`].
+/// The XDG default for `$XDG_DATA_HOME`, relative to `$HOME`.
 const DEFAULT_DATA_HOME: &[&str] = &[".local", "share"];
 
 /// Distinguishes one process's temporary identity file from another's, so two
@@ -427,7 +433,7 @@ pub(super) fn run(
     // a lost file into a lost game.
     let env = match data_home {
         Some(path) => Environment::rooted_at(&path),
-        None => Environment::read(),
+        None => default_environment(),
     };
     let (identity, complaint) = match expected {
         tls::Expectation::Listed(_) => IdentityFile::open(&addr, identity_override, &env),
@@ -527,6 +533,18 @@ pub(super) struct Environment {
 
 impl Environment {
     /// What this process was started with.
+    ///
+    /// **Absent from a test build, and that is the whole of the fix for #230.** A test
+    /// that stands up a loopback server drives the same `run` a player's launch does,
+    /// and every per-server file that session writes is named from this value — so for
+    /// as long as a test build could call this, `cargo test` wrote into the developer's
+    /// own `$XDG_DATA_HOME`, one file per ephemeral port, forever. The `#[cfg]` is what
+    /// turns "remember to inject an environment" into a compile error: under
+    /// `cargo test` this function does not exist, so a call site that reaches for the
+    /// real data directory cannot be written by accident and cannot be added later
+    /// without the build saying so. [`default_environment`] is the fallback both call
+    /// sites use, and it is where the two builds differ.
+    #[cfg(not(test))]
     pub(super) fn read() -> Self {
         Self {
             xdg_data_home: std::env::var(XDG_DATA_HOME).ok(),
@@ -542,6 +560,34 @@ impl Environment {
             home: None,
         }
     }
+}
+
+/// The environment per-server files are named from when no caller named a directory.
+///
+/// One function with two bodies, because the two builds want opposite things from the
+/// same question. A shipped client falls back to the process environment, which is the
+/// only place a player's data directory is written down. A test build falls back to
+/// [`Environment::default`] — an environment naming neither `XDG_DATA_HOME` nor `HOME`,
+/// which [`data_home`] answers `None` for — so a session a test forgot to give a
+/// directory writes **nothing, nowhere**, rather than writing into the developer's own.
+///
+/// **Naming nowhere rather than a temporary directory is the deliberate half.** A
+/// fallback that quietly picked somewhere writable would keep every existing test
+/// passing and leave the next one just as easy to get wrong; this one is silent only for
+/// a test that does not care, and a test that *does* care about the remembered character
+/// already names its own root through [`Target::data_home`] and would fail loudly
+/// without it. There is deliberately no cleanup anywhere in this file: nothing here
+/// removes a file it did not create, least of all one under a path a developer chose.
+#[cfg(not(test))]
+pub(super) fn default_environment() -> Environment {
+    Environment::read()
+}
+
+/// See the shipped half above: under `cargo test` there is no process environment to
+/// fall back to, so the fallback names nowhere.
+#[cfg(test)]
+pub(super) fn default_environment() -> Environment {
+    Environment::default()
 }
 
 /// The ticket in `path`, or `None` after a refusal has been sent explaining why there
