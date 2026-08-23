@@ -467,9 +467,9 @@ func (s *service) signInFinish(w http.ResponseWriter, r *http.Request) {
 	// cache, a proxy an operator configured, the client's own disk — is that account until
 	// it expires, and there is no way to withdraw it in the meantime. `no-store` is the
 	// only directive that says so; sending none left the answer to whatever heuristic the
-	// intermediary preferred. It is independent of TLS (#131): transport encryption stops
-	// somebody reading the response in flight and says nothing about who may write it down
-	// at either end.
+	// intermediary preferred. **It is independent of the TLS this hop now has**, and #131
+	// landing changed nothing here: transport encryption stops somebody reading the
+	// response in flight and says nothing about who may write it down at either end.
 	s.writeJSON(w, http.StatusOK, cacheNoStore, finishResponse{
 		AccountID:   account.ID.String(),
 		DisplayName: account.DisplayName,

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/certs"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/ticket"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -38,10 +41,64 @@ func accountService(t *testing.T, body string, status int) *httptest.Server {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	})
-	srv := httptest.NewServer(mux)
+	return startTLS(t, mux)
+}
+
+// startTLS stands handler up behind TLS, holding a certificate of its own.
+//
+// **TLS, because there is no other way to reach an account service** (#131). A plaintext
+// fake would test a hop this server refuses to make: `parseAccountService` requires https
+// and `accountServiceClient` pins the certificate, so a fake standing up
+// `httptest.NewServer` would be exercising nothing that exists.
+//
+// **And a certificate of its own, which `httptest.NewTLSServer` would not give it.** That
+// helper presents one built-in certificate for every server it starts, so two of them are
+// the same identity to a pin — and telling two services apart is the entire property under
+// test. `certs.Ephemeral` is what the real services generate with.
+func startTLS(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	cert, err := certs.Ephemeral()
+	if err != nil {
+		t.Fatalf("certs.Ephemeral: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
+
+// fingerprintOf is what -account-service-fingerprint has to carry for srv.
+//
+// Computed the same way `certs.Fingerprint` computes it — SHA-256 over the leaf's DER —
+// rather than read from any helper this server ships, because the whole point of the
+// number is that two programs arrive at it independently and get one string.
+func fingerprintOf(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+
+	cert := srv.Certificate()
+	if cert == nil {
+		t.Fatal("the fake account service presents no certificate")
+	}
+	sum := sha256.Sum256(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// clientFor is the pinned client this server would build for srv.
+func clientFor(t *testing.T, srv *httptest.Server) *http.Client {
+	t.Helper()
+
+	client, err := accountServiceClient(options{accountServiceFingerprint: fingerprintOf(t, srv)})
+	if err != nil {
+		t.Fatalf("accountServiceClient: %v", err)
+	}
+	return client
+}
+
+// unmatchedFingerprint is a well-formed SHA-256 that no certificate has. Used where the
+// flags have to parse and the connection is never expected to succeed.
+func unmatchedFingerprint() string { return strings.Repeat("ab", sha256.Size) }
 
 // publishedKey is what the account service answers for a working pair.
 func publishedKey() string {
@@ -61,8 +118,9 @@ func TestAPlayerIsAdmittedWithTheAccountServiceGone(t *testing.T) {
 
 	service := accountService(t, publishedKey(), http.StatusOK)
 	verifier, err := openVerifier(context.Background(), options{
-		worldName:      testWorldName,
-		accountService: service.URL,
+		worldName:                 testWorldName,
+		accountService:            service.URL,
+		accountServiceFingerprint: fingerprintOf(t, service),
 	}, discard())
 	if err != nil {
 		t.Fatalf("openVerifier: %v", err)
@@ -101,16 +159,56 @@ func TestAServerWithNoWayToCheckATicketRefusesToStart(t *testing.T) {
 	valid := validOptions()
 	cases := map[string]func(*options){
 		"no key at all":         func(o *options) { o.ticketKey = "" },
-		"both key sources":      func(o *options) { o.accountService = "http://127.0.0.1:1" },
+		"both key sources":      func(o *options) { o.accountService = "https://127.0.0.1:1" },
 		"a key that is not hex": func(o *options) { o.ticketKey = "not a key" },
 		"a key of the wrong length": func(o *options) {
 			o.ticketKey = hex.EncodeToString(make([]byte, ed25519.PublicKeySize-1))
 		},
 		"no world name": func(o *options) { o.worldName = "" },
 		"a world name this service would not mint for": func(o *options) { o.worldName = "Midgard" },
-		"an account service with no scheme":            func(o *options) { o.ticketKey, o.accountService = "", "127.0.0.1:8080" },
-		"an account service with no host":              func(o *options) { o.ticketKey, o.accountService = "", "http://" },
-		"an account service carrying a query":          func(o *options) { o.ticketKey, o.accountService = "", "http://127.0.0.1:8080/?key=1" },
+		"an account service with no scheme": func(o *options) {
+			o.ticketKey, o.accountService = "", "127.0.0.1:8080"
+			o.accountServiceFingerprint = unmatchedFingerprint()
+		},
+		"an account service with no host": func(o *options) {
+			o.ticketKey, o.accountService = "", "https://"
+			o.accountServiceFingerprint = unmatchedFingerprint()
+		},
+		"an account service carrying a query": func(o *options) {
+			o.ticketKey, o.accountService = "", "https://127.0.0.1:8080/?key=1"
+			o.accountServiceFingerprint = unmatchedFingerprint()
+		},
+		// **The four #131 added, and every one of them is a start that would otherwise
+		// have been silently unauthenticated.** A plaintext address is the hop this
+		// design no longer has; an account service with no fingerprint is a fetch with
+		// nothing to check against, which is precisely the hole; and a fingerprint that
+		// is not a SHA-256 is a check that could never match, so a start that accepted it
+		// would fail later and blame the network.
+		"an account service reached over plaintext": func(o *options) {
+			o.ticketKey, o.accountService = "", "http://127.0.0.1:8080"
+			o.accountServiceFingerprint = unmatchedFingerprint()
+		},
+		"an account service with no fingerprint to check": func(o *options) {
+			o.ticketKey, o.accountService = "", "https://127.0.0.1:8080"
+		},
+		"a fingerprint that is not hex": func(o *options) {
+			o.ticketKey, o.accountService = "", "https://127.0.0.1:8080"
+			o.accountServiceFingerprint = "not a fingerprint"
+		},
+		"a fingerprint of the wrong length": func(o *options) {
+			o.ticketKey, o.accountService = "", "https://127.0.0.1:8080"
+			o.accountServiceFingerprint = hex.EncodeToString(make([]byte, sha256.Size-1))
+		},
+		// And the mirror of it: a fingerprint with nothing to check. Refused rather than
+		// ignored, because an operator who wrote one there has a picture of this
+		// deployment that is not the one they have.
+		"a fingerprint beside a hand-copied key": func(o *options) {
+			o.accountServiceFingerprint = unmatchedFingerprint()
+		},
+		"a fingerprint and nothing else": func(o *options) {
+			o.ticketKey = ""
+			o.accountServiceFingerprint = unmatchedFingerprint()
+		},
 	}
 
 	for name, mutate := range cases {
@@ -149,7 +247,7 @@ func TestReadingTheTicketKey(t *testing.T) {
 		t.Parallel()
 
 		service := accountService(t, publishedKey(), http.StatusOK)
-		key, err := fetchTicketKey(context.Background(), mustParseService(t, service.URL), discard())
+		key, err := fetchTicketKey(context.Background(), clientFor(t, service), mustParseService(t, service.URL))
 		if err != nil {
 			t.Fatalf("fetchTicketKey: %v", err)
 		}
@@ -203,7 +301,7 @@ func TestReadingTheTicketKey(t *testing.T) {
 			}
 			service := accountService(t, tc.body, status)
 
-			key, err := fetchTicketKey(context.Background(), mustParseService(t, service.URL), discard())
+			key, err := fetchTicketKey(context.Background(), clientFor(t, service), mustParseService(t, service.URL))
 			if err == nil {
 				t.Fatal("the answer was accepted as this service's signing key")
 			}
@@ -226,31 +324,101 @@ func TestReadingTheTicketKeyFromNobodyFails(t *testing.T) {
 
 	service := accountService(t, publishedKey(), http.StatusOK)
 	base := mustParseService(t, service.URL)
+	client := clientFor(t, service)
 	service.Close()
 
-	if _, err := fetchTicketKey(context.Background(), base, discard()); err == nil {
+	if _, err := fetchTicketKey(context.Background(), client, base); err == nil {
 		t.Fatal("a key was read from an address nobody is answering on")
 	}
 }
 
-// The plaintext hop is a known gap, and an operator is told about it every time.
+// **The whole of #131, stated as the two outcomes it distinguishes.** A service
+// presenting the pinned certificate answers; one presenting any other is refused before a
+// byte of its answer is read.
 //
-// #131 is where it is closed. What this pins is the honest half in the meantime: this
-// server cannot tell that it reached the right account service, and the warning is what
-// stops that being a silent property of the deployment.
-func TestReadingTheKeyOverPlaintextWarns(t *testing.T) {
+// The second half is the one that matters, and it is the substitution the plaintext hop
+// used to allow: the endpoint is unauthenticated on purpose, so anybody who could answer
+// for that address handed this server their own public key — and this server would then
+// admit every ticket they minted and refuse every real one, for as long as it ran,
+// because the key is read once and kept.
+//
+// Both fingerprints are named in the refusal, because "the operator regenerated the
+// service's certificate" and "somebody is answering for that address" are the same
+// observation from here and nothing can tell them apart.
+func TestReadingTheKeyRefusesAServiceThatIsNotTheOnePinned(t *testing.T) {
 	t.Parallel()
 
-	service := accountService(t, publishedKey(), http.StatusOK)
-
-	var logged strings.Builder
-	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if _, err := fetchTicketKey(context.Background(), mustParseService(t, service.URL), log); err != nil {
-		t.Fatalf("fetchTicketKey: %v", err)
+	pinned := accountService(t, publishedKey(), http.StatusOK)
+	if _, err := fetchTicketKey(context.Background(), clientFor(t, pinned), mustParseService(t, pinned.URL)); err != nil {
+		t.Fatalf("the pinned account service was refused: %v", err)
 	}
 
-	if !strings.Contains(logged.String(), "unauthenticated") {
-		t.Errorf("reading the key over http logged %q, which does not warn about the connection", logged.String())
+	// A second service, publishing exactly the same key. It differs in one thing only —
+	// the certificate — which is the whole of what a pin can see, and it is what an
+	// attacker able to answer for the address would differ in too.
+	other := accountService(t, publishedKey(), http.StatusOK)
+	client, err := accountServiceClient(options{accountServiceFingerprint: fingerprintOf(t, pinned)})
+	if err != nil {
+		t.Fatalf("accountServiceClient: %v", err)
+	}
+
+	_, err = fetchTicketKey(context.Background(), client, mustParseService(t, other.URL))
+	if err == nil {
+		t.Fatal("a key was read from a service presenting a certificate nobody pinned")
+	}
+	for what, want := range map[string]string{
+		"the fingerprint that was expected":  fingerprintOf(t, pinned),
+		"the fingerprint that was presented": fingerprintOf(t, other),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %s", what)
+		}
+	}
+}
+
+// A fingerprint is read the same way whichever case it was written in, and refused when
+// it is not a SHA-256 at all.
+//
+// Folded rather than refused, which is parseTicketKey's call and not internal/registry's:
+// this value is decoded to bytes and compared as bytes, so a capital letter cannot
+// silently mean a different certificate. A registry fingerprint is compared as text,
+// where two spellings are two values that eventually fail to match.
+func TestAFingerprintIsReadAsBytesAndNotAsText(t *testing.T) {
+	t.Parallel()
+
+	want := unmatchedFingerprint()
+	for name, written := range map[string]string{
+		"lowercase, as it is printed": want,
+		"uppercase":                   strings.ToUpper(want),
+		"with whitespace around it":   "  " + want + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, err := parseFingerprint(written)
+			if err != nil {
+				t.Fatalf("parseFingerprint: %v", err)
+			}
+			if hex.EncodeToString(raw) != want {
+				t.Error("the fingerprint read back is not the one written down")
+			}
+		})
+	}
+
+	for name, written := range map[string]string{
+		"not hex":        "not a fingerprint",
+		"a short digest": hex.EncodeToString(make([]byte, sha256.Size-1)),
+		"a long digest":  hex.EncodeToString(make([]byte, sha256.Size+1)),
+		"nothing at all": "",
+		"an ed25519 key": testPair.PublicHex()[:sha256.Size], // right alphabet, wrong length
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := parseFingerprint(written); err == nil {
+				t.Error("a value that is not a SHA-256 was accepted as a certificate fingerprint")
+			}
+		})
 	}
 }
 
@@ -331,8 +499,9 @@ func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
 		var logged strings.Builder
 		log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		if _, err := openVerifier(context.Background(), options{
-			worldName:      testWorldName,
-			accountService: withPassword(t, service.URL),
+			worldName:                 testWorldName,
+			accountService:            withPassword(t, service.URL),
+			accountServiceFingerprint: fingerprintOf(t, service),
 		}, log); err != nil {
 			t.Fatalf("openVerifier: %v", err)
 		}
@@ -351,8 +520,9 @@ func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
 		service := accountService(t, publishedKey(), http.StatusInternalServerError)
 
 		_, err := openVerifier(context.Background(), options{
-			worldName:      testWorldName,
-			accountService: withPassword(t, service.URL),
+			worldName:                 testWorldName,
+			accountService:            withPassword(t, service.URL),
+			accountServiceFingerprint: fingerprintOf(t, service),
 		}, discard())
 		if err == nil {
 			t.Fatal("a key was read from a service that answered 500")
@@ -391,15 +561,15 @@ func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
 		var logged strings.Builder
 		log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		if _, err := openVerifier(context.Background(), options{
-			worldName:      testWorldName,
-			accountService: withToken(t, service.URL),
+			worldName:                 testWorldName,
+			accountService:            withToken(t, service.URL),
+			accountServiceFingerprint: fingerprintOf(t, service),
 		}, log); err != nil {
 			t.Fatalf("openVerifier: %v", err)
 		}
 
-		// Both lines this start writes about the address land in this one buffer: the
-		// plaintext warning fetchTicketKey opens with, which always fires here because
-		// httptest speaks http, and the startup line's ticket_key_source.
+		// The one line this start writes about the address: the startup line's
+		// ticket_key_source, which is the loggable spelling of the endpoint.
 		if strings.Contains(logged.String(), token) {
 			t.Error("the token in -account-service's username was written to the startup log")
 		}
@@ -415,37 +585,48 @@ func TestAPasswordInTheAccountServiceAddressIsNeverWrittenDown(t *testing.T) {
 	t.Run("a token in the username position, in every refusal", func(t *testing.T) {
 		t.Parallel()
 
-		for name, address := range map[string]func(t *testing.T) string{
-			"the service cannot be reached": func(t *testing.T) string {
-				return withToken(t, "http://"+deadAddress(t))
+		// Each case answers with the address to reach and the fingerprint to expect
+		// there, because the two now travel together everywhere: a refusal reached with
+		// no fingerprint would be a refusal about the flags rather than about the answer.
+		for name, address := range map[string]func(t *testing.T) (string, string){
+			"the service cannot be reached": func(t *testing.T) (string, string) {
+				return withToken(t, "https://"+deadAddress(t)), unmatchedFingerprint()
 			},
-			"it answers with a status that is not 200": func(t *testing.T) string {
+			"it presents a certificate nobody pinned": func(t *testing.T) (string, string) {
+				service := accountService(t, publishedKey(), http.StatusOK)
+				return withToken(t, service.URL), unmatchedFingerprint()
+			},
+			"it answers with a status that is not 200": func(t *testing.T) (string, string) {
 				service := accountService(t, publishedKey(), http.StatusInternalServerError)
-				return withToken(t, service.URL)
+				return withToken(t, service.URL), fingerprintOf(t, service)
 			},
-			"its answer is longer than a key response can be": func(t *testing.T) string {
+			"its answer is longer than a key response can be": func(t *testing.T) (string, string) {
 				service := accountService(t, strings.Repeat("x", maxTicketKeyResponseBytes+1), http.StatusOK)
-				return withToken(t, service.URL)
+				return withToken(t, service.URL), fingerprintOf(t, service)
 			},
-			"its answer is not the JSON this endpoint publishes": func(t *testing.T) string {
+			"its answer is not the JSON this endpoint publishes": func(t *testing.T) (string, string) {
 				service := accountService(t, "{not json", http.StatusOK)
-				return withToken(t, service.URL)
+				return withToken(t, service.URL), fingerprintOf(t, service)
 			},
-			"the key it publishes is for another algorithm": func(t *testing.T) string {
+			"the key it publishes is for another algorithm": func(t *testing.T) (string, string) {
 				body := fmt.Sprintf(`{"algorithm":"rsa","public_key":%q}`, testPair.PublicHex())
-				return withToken(t, accountService(t, body, http.StatusOK).URL)
+				service := accountService(t, body, http.StatusOK)
+				return withToken(t, service.URL), fingerprintOf(t, service)
 			},
-			"the key it publishes is not hex": func(t *testing.T) string {
+			"the key it publishes is not hex": func(t *testing.T) (string, string) {
 				body := fmt.Sprintf(`{"algorithm":%q,"public_key":"not a key"}`, ticket.Algorithm)
-				return withToken(t, accountService(t, body, http.StatusOK).URL)
+				service := accountService(t, body, http.StatusOK)
+				return withToken(t, service.URL), fingerprintOf(t, service)
 			},
 		} {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 
+				raw, fingerprint := address(t)
 				_, err := openVerifier(context.Background(), options{
-					worldName:      testWorldName,
-					accountService: address(t),
+					worldName:                 testWorldName,
+					accountService:            raw,
+					accountServiceFingerprint: fingerprint,
 				}, discard())
 				if err == nil {
 					t.Fatal("a key was read from a service that could not publish one")
@@ -555,10 +736,27 @@ func TestTheKeyFetchIsBounded(t *testing.T) {
 func TestAStallingAccountServiceDoesNotCostTheStartBudget(t *testing.T) {
 	t.Parallel()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// A TLS listener rather than a plain one, and its certificate is what the fetch is
+	// pinned to below: `accountServiceClient` is the only client this server has for an
+	// account service, so a fake speaking plaintext would never get as far as the stall
+	// this test is about. certs.Ephemeral is the same generator the real services use.
+	cert, err := certs.Ephemeral()
+	if err != nil {
+		t.Fatalf("certs.Ephemeral: %v", err)
+	}
+	fingerprint, err := certs.Fingerprint(cert)
+	if err != nil {
+		t.Fatalf("certs.Fingerprint: %v", err)
+	}
+
+	plain, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	listener := tls.NewListener(plain, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	})
 	t.Cleanup(func() { _ = listener.Close() })
 
 	// Closed before the listener is, because cleanups run in reverse: the handler below
@@ -589,10 +787,14 @@ func TestAStallingAccountServiceDoesNotCostTheStartBudget(t *testing.T) {
 	// slow.
 	const patience = 2 * time.Second
 
-	base := mustParseService(t, "http://"+listener.Addr().String())
+	base := mustParseService(t, "https://"+listener.Addr().String())
+	client, err := accountServiceClient(options{accountServiceFingerprint: fingerprint})
+	if err != nil {
+		t.Fatalf("accountServiceClient: %v", err)
+	}
 	refused := make(chan error, 1)
 	go func() {
-		_, ferr := fetchTicketKey(context.Background(), base, discard())
+		_, ferr := fetchTicketKey(context.Background(), client, base)
 		refused <- ferr
 	}()
 

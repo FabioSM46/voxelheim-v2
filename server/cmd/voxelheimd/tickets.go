@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -59,8 +63,9 @@ const fetchTicketKeyTimeout = 10 * time.Second
 // it is refused rather than buffered.
 const maxTicketKeyResponseBytes = 4096
 
-// validateTicketKeySource enforces the one rule about where the key comes from that can
-// be checked without asking anybody: exactly one source, named.
+// validateTicketKeySource enforces the two rules about where the key comes from that can
+// be checked without asking anybody: exactly one source, named — and, when that source is
+// the account service, a fingerprint to check the connection against.
 //
 // **Mutually exclusive rather than ordered**, which is `internal/registry`'s rule for its
 // two key sources and it is here for the same reason: a precedence rule is something an
@@ -71,17 +76,43 @@ const maxTicketKeyResponseBytes = 4096
 // saying why it is not a warning: the alternative to a key is a server that admits people
 // it cannot check, which is the second way in this whole design exists to remove. A server
 // that cannot verify a ticket should be visibly broken rather than quietly open.
+//
+// **-account-service-fingerprint is required beside -account-service, and that is a
+// refusal rather than a default** (#131). A fetch with nothing to check against is the
+// hole this rule exists to close: the endpoint is unauthenticated on purpose — a public
+// key is public — so the exposure is not confidentiality but substitution, and a
+// substituted key outlives whoever performed it because the key is read once and kept.
+// Making the flag optional would leave that reachable by omission, which is the shape of
+// mistake nobody notices, so there is no trust-on-first-use here and no plaintext form of
+// this hop at all.
 func (o options) validateTicketKeySource() error {
+	fingerprint := strings.TrimSpace(o.accountServiceFingerprint)
 	switch {
 	case o.accountService != "" && o.ticketKey != "":
 		return errors.New("-account-service and -ticket-key are mutually exclusive: give the address to read the " +
 			"key from, or the key itself, and not both")
 	case o.ticketKey != "":
+		if fingerprint != "" {
+			return errors.New("-account-service-fingerprint has nothing to check: it names the certificate the " +
+				"account service presents, and -ticket-key means this server never connects to one")
+		}
 		_, err := parseTicketKey(o.ticketKey)
 		return err
 	case o.accountService != "":
-		_, err := parseAccountService(o.accountService)
+		if _, err := parseAccountService(o.accountService); err != nil {
+			return err
+		}
+		if fingerprint == "" {
+			return errors.New("-account-service needs -account-service-fingerprint beside it: the SHA-256 of the " +
+				"certificate that service presents, which it prints as certificate_sha256=… at every start. " +
+				"Without it this server cannot tell that it reached the right service, and a substituted " +
+				"signing key would admit every ticket an attacker mints and refuse every real one")
+		}
+		_, err := parseFingerprint(fingerprint)
 		return err
+	case fingerprint != "":
+		return errors.New("-account-service-fingerprint was given with no -account-service to reach; give the " +
+			"account service's base URL beside it, or drop it")
 	default:
 		return errors.New("this server has no ticket key: give it -account-service to read one from, or " +
 			"-ticket-key to use one that was copied by hand. A server that cannot verify a session ticket " +
@@ -106,7 +137,7 @@ func openVerifier(ctx context.Context, opts options, log *slog.Logger) (*session
 		return nil, fmt.Errorf("invalid -world-name: %w", err)
 	}
 
-	key, source, err := ticketKey(ctx, opts, log)
+	key, source, err := ticketKey(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +167,7 @@ func openVerifier(ctx context.Context, opts options, log *slog.Logger) (*session
 // "Where" is the *loggable* spelling of the endpoint. This string exists in order to be
 // logged, and `-account-service` is a flag value that may carry userinfo, so the one
 // thing it must not be is the address verbatim.
-func ticketKey(ctx context.Context, opts options, log *slog.Logger) (ed25519.PublicKey, string, error) {
+func ticketKey(ctx context.Context, opts options) (ed25519.PublicKey, string, error) {
 	if err := opts.validateTicketKeySource(); err != nil {
 		return nil, "", err
 	}
@@ -149,7 +180,17 @@ func ticketKey(ctx context.Context, opts options, log *slog.Logger) (ed25519.Pub
 	if err != nil {
 		return nil, "", err
 	}
-	key, err := fetchTicketKey(ctx, base, log)
+	client, err := accountServiceClient(opts)
+	if err != nil {
+		return nil, "", err
+	}
+	// **This client is used once and then let go**, which is the property `openVerifier`
+	// exists to establish: from here on nothing on the admission path touches the network.
+	// A pooled connection left idle would be a socket to that service outliving the one
+	// question this server ever asks it.
+	defer client.CloseIdleConnections()
+
+	key, err := fetchTicketKey(ctx, client, base)
 	return key, redacted(base.JoinPath(ticketKeyPath)), err
 }
 
@@ -181,20 +222,114 @@ func parseTicketKey(encoded string) (ed25519.PublicKey, error) {
 // request with a message about a URL rather than about a flag, and a path this server
 // appends to is required to be a path — a query or a fragment on a base is somebody
 // having pasted the wrong thing.
+//
+// **`https` and nothing else** (#131). The account service has no plaintext listener to
+// reach, so `http://` cannot work — and refusing it here turns what would otherwise be a
+// connection error into a sentence naming the flag. It is the same refusal the client
+// makes on its own copy of this address, and it is the reason there is no `--insecure`
+// anywhere: the alternative to a pinned connection is not a weaker check, it is none.
 func parseAccountService(raw string) (*url.URL, error) {
 	base, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return nil, fmt.Errorf("invalid -account-service: %w", err)
 	}
 	switch {
-	case base.Scheme != "http" && base.Scheme != "https":
-		return nil, fmt.Errorf("invalid -account-service: the scheme must be http or https, got %q", base.Scheme)
+	case base.Scheme != "https":
+		return nil, fmt.Errorf("invalid -account-service: the scheme must be https, got %q. The account service "+
+			"listens over TLS and this server pins the certificate it presents; there is no plaintext form "+
+			"of this hop", base.Scheme)
 	case base.Host == "":
 		return nil, errors.New("invalid -account-service: it names no host")
 	case base.RawQuery != "" || base.Fragment != "":
 		return nil, errors.New("invalid -account-service: it is a base address, so it carries no query and no fragment")
 	}
 	return base, nil
+}
+
+// parseFingerprint reads the SHA-256 an operator copied out of the account service's
+// startup line.
+//
+// Case is folded rather than refused, which is `parseTicketKey`'s rule three lines up and
+// is here for its reason: the value is decoded to bytes and compared as bytes, so a
+// capital letter cannot silently mean a different certificate. `internal/registry`
+// refuses uppercase instead, and the difference is not an inconsistency — a registry
+// fingerprint is *compared as text*, so two spellings there are two values that
+// eventually fail to match.
+//
+// The input is not echoed. It is not a secret — it is a hash of a certificate handed to
+// everyone who connects — but an error message reaches a log, and quoting a whole flag
+// value into one buys nothing a length does not.
+func parseFingerprint(encoded string) ([]byte, error) {
+	trimmed := strings.TrimSpace(encoded)
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("the account service fingerprint is not hex: %w", err)
+	}
+	if len(raw) != sha256.Size {
+		// The trimmed length, not the raw one: an operator who pasted a newline in has
+		// not typed a 65-character digest, and a message saying so would send them
+		// counting.
+		return nil, fmt.Errorf("the account service fingerprint must be a SHA-256, so %d hex characters, got %d",
+			sha256.Size*2, len(trimmed))
+	}
+	return raw, nil
+}
+
+// accountServiceClient is the only way this server talks to the account service: TLS,
+// pinned to the certificate `-account-service-fingerprint` names.
+//
+// **`InsecureSkipVerify` here is a replacement, not a bypass, and the name is the worst
+// thing about it.** What it turns off is web PKI — a chain to a root store and a hostname
+// match — neither of which can say anything about a self-signed certificate on an address
+// an operator typed. `VerifyPeerCertificate` runs regardless of it, and what it does is
+// strictly stronger than the check it replaces: a certificate for the right name issued
+// to somebody who took over a dynamic-DNS account passes web PKI and fails this.
+//
+// Both callers share it — `fetchTicketKey` at startup and the announcer every minute —
+// because there is one account service and one number that identifies it. A second client
+// built somewhere else would be a second chance to build one that checks nothing.
+func accountServiceClient(opts options) (*http.Client, error) {
+	want, err := parseFingerprint(opts.accountServiceFingerprint)
+	if err != nil {
+		return nil, err
+	}
+
+	return &http.Client{Transport: &http.Transport{
+		// What http.DefaultTransport does, restated because this transport is built
+		// rather than inherited. A CONNECT proxy tunnels the TLS rather than terminating
+		// it, so the pin below still sees the account service's own certificate — an
+		// operator whose network needs a proxy keeps it, and gains nothing that weakens
+		// the check.
+		Proxy: http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{
+			// The floor is stated rather than inherited, as it is on this server's own
+			// listener: crypto/tls's default has moved between releases and will again.
+			MinVersion: tls.VersionTLS13,
+			// Replaced by the comparison below. See this function's comment before reading
+			// this line as a hole.
+			InsecureSkipVerify: true,
+			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				// The leaf, which is what the account service's own certs.Fingerprint
+				// hashes. There is no chain to walk — the certificate is its own issuer.
+				if len(rawCerts) == 0 {
+					return errors.New("the account service presented no certificate")
+				}
+				sum := sha256.Sum256(rawCerts[0])
+				if !bytes.Equal(sum[:], want) {
+					// Both numbers, because the two things this can mean are "the operator
+					// regenerated the service's certificate and did not tell this server"
+					// and "somebody is answering for that address", and nothing here can
+					// tell them apart. The remedy is the same either way and it is a
+					// deliberate act: read certificate_sha256=… out of the account
+					// service's own startup line and pass that.
+					return fmt.Errorf("the account service presented a certificate that is not the one "+
+						"-account-service-fingerprint names.\n  expected: %s\n  presented: %s",
+						hex.EncodeToString(want), hex.EncodeToString(sum[:]))
+				}
+				return nil
+			},
+		},
+	}}, nil
 }
 
 // redacted is a URL as it may be written down: userinfo removed entirely rather than
@@ -228,23 +363,17 @@ func redacted(u *url.URL) string {
 
 // fetchTicketKey reads the key from the account service, once.
 //
-// **What this call cannot tell you is that it reached the right service, and that is a
-// known gap rather than an oversight** (#131). The endpoint is deliberately
-// unauthenticated — a public key is public — so the exposure is not confidentiality but
-// substitution: anybody able to answer for that address hands this server their own
-// public key, and this server then admits tickets they minted for any account and
-// refuses every real one. Because the documented pattern is to read the key once and
-// keep it, that substitution outlives whoever performed it. Nothing here closes that,
-// and nothing here pretends to; the warning below is what an operator gets today, and
-// -ticket-key is the way to avoid the fetch entirely until #131 lands.
-func fetchTicketKey(ctx context.Context, base *url.URL, log *slog.Logger) (ed25519.PublicKey, error) {
-	if base.Scheme != "https" {
-		log.Warn("the account service's key is being read over an unauthenticated connection; anybody able to "+
-			"answer for that address can hand this server a key of their own, and this server would then admit "+
-			"the tickets they mint and refuse every real one",
-			"account_service", redacted(base))
-	}
-
+// **What makes this call worth trusting is `client`, and nothing in this function.** The
+// endpoint is deliberately unauthenticated — a public key is public — so the exposure was
+// never confidentiality but substitution: anybody able to answer for that address hands
+// this server their own public key, and this server then admits tickets they minted for
+// any account and refuses every real one. Because the key is read once and kept, that
+// substitution would outlive whoever performed it. What closes it is that the connection
+// is TLS pinned to a fingerprint an operator supplied out of band, so "whoever answers
+// for that address" is not enough — see [accountServiceClient], which is the only client
+// this server ever reaches that service with, and `validateTicketKeySource`, which is why
+// there is no configuration that omits the fingerprint.
+func fetchTicketKey(ctx context.Context, client *http.Client, base *url.URL) (ed25519.PublicKey, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTicketKeyTimeout)
 	defer cancel()
 
@@ -271,7 +400,7 @@ func fetchTicketKey(ctx context.Context, base *url.URL, log *slog.Logger) (ed255
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("reading the ticket key from %s: %w", endpoint, stripURL(err))
 	}

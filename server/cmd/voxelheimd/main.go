@@ -66,7 +66,11 @@ type options struct {
 	worldDir       string
 	worldName      string
 	accountService string
-	ticketKey      string
+	// accountServiceFingerprint is the SHA-256 of the certificate the account service
+	// presents, copied out of that service's own startup line. Required whenever
+	// accountService is given and meaningless without it — see validateTicketKeySource.
+	accountServiceFingerprint string
+	ticketKey                 string
 	// Where this server tells the account service it can be reached, and the file its
 	// registration key is read from. The key itself is never a flag — see announce.go.
 	announceAddress     string
@@ -96,9 +100,15 @@ func parseFlags() options {
 			"presented here must name. Required: a server that does not know which world it is cannot tell a "+
 			"ticket for it from a ticket for somebody else's")
 	flag.StringVar(&opts.accountService, "account-service", "",
-		"base URL of the account service, whose signing key is read once from "+ticketKeyPath+" at startup and "+
-			"then kept. Nothing is asked of it again: admitting a player is a signature check, so the service "+
-			"being down costs nobody a game. Mutually exclusive with -ticket-key")
+		"https base URL of the account service, whose signing key is read once from "+ticketKeyPath+" at startup "+
+			"and then kept. Nothing is asked of it again: admitting a player is a signature check, so the service "+
+			"being down costs nobody a game. Mutually exclusive with -ticket-key, and requires "+
+			"-account-service-fingerprint beside it")
+	flag.StringVar(&opts.accountServiceFingerprint, "account-service-fingerprint", "",
+		"the SHA-256 of the certificate the account service presents, in hex, as that service prints it at "+
+			"startup under certificate_sha256. Required with -account-service and refused without it. There is "+
+			"no trust on first use and no way to skip the check: a fetch that cannot tell which service "+
+			"answered is one an attacker can answer, and the key it returns is kept for the life of this server")
 	flag.StringVar(&opts.ticketKey, "ticket-key", "",
 		"the account service's Ed25519 public key in hex, as GET "+ticketKeyPath+" publishes it and as that "+
 			"service prints it at startup. Use it instead of -account-service when the key is copied by hand "+

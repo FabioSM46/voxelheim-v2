@@ -377,6 +377,17 @@ func configureAnnouncer(opts options, fingerprint string) (*announcer, error) {
 		return nil, errors.New("this server has no certificate fingerprint to announce")
 	}
 
+	// **The same pinned client the key fetch uses**, built from the same flag. Both hops
+	// go to the same service, so a registration that reached somebody else would put this
+	// server's address and certificate into an attacker's list — and the announcement
+	// carries the registration key, which is the one credential this process presents.
+	// There is no plaintext form of it either; `parseAccountService` above has already
+	// refused anything that is not https (#131).
+	client, err := accountServiceClient(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	endpoint := base.JoinPath(serversPath)
 	return &announcer{
 		endpoint:    endpoint,
@@ -387,7 +398,7 @@ func configureAnnouncer(opts options, fingerprint string) (*announcer, error) {
 		fingerprint: fingerprint,
 		every:       announceEvery,
 		timeout:     announceTimeout,
-		client:      http.DefaultClient,
+		client:      client,
 	}, nil
 }
 

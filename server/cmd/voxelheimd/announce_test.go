@@ -79,9 +79,16 @@ func newFakeRegistry(t *testing.T) *fakeRegistry {
 		_, _ = w.Write([]byte(publishedKey()))
 	})
 
-	f.srv = httptest.NewServer(mux)
-	t.Cleanup(f.srv.Close)
+	// TLS with a certificate of its own, because there is no plaintext way to reach an
+	// account service any more and two fakes have to be distinguishable to a pin (#131).
+	f.srv = startTLS(t, mux)
 	return f
+}
+
+// pin is the fingerprint -account-service-fingerprint must carry for this fake.
+func (f *fakeRegistry) pin(t *testing.T) string {
+	t.Helper()
+	return fingerprintOf(t, f.srv)
 }
 
 func (f *fakeRegistry) handle(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +187,13 @@ func withoutRegistrationKeyEnv(t *testing.T) {
 // announceOptions is a configuration that announces: an account service to announce to, an
 // address to announce, and a world to announce it under. The key comes from the environment,
 // because it never comes from a flag.
-func announceOptions(t *testing.T, service string) options {
+// announceOptions is a configuration that announces to service.
+//
+// `servicePrint` is the account service's own certificate fingerprint, which is a
+// different number from the `fingerprint` a test hands testAnnouncer below: that one is
+// what this game server announces about *itself*. Two digests, two directions, and the
+// parameter names are what keeps them apart.
+func announceOptions(t *testing.T, service, servicePrint string) options {
 	t.Helper()
 
 	t.Setenv(registrationKeyEnv, testRegistrationKey)
@@ -188,15 +201,16 @@ func announceOptions(t *testing.T, service string) options {
 	opts := validOptions()
 	opts.ticketKey = ""
 	opts.accountService = service
+	opts.accountServiceFingerprint = servicePrint
 	opts.announceAddress = testAnnounceAddress
 	return opts
 }
 
 // testAnnouncer is an announcer pointed at service, with the intervals a test can wait on.
-func testAnnouncer(t *testing.T, service, fingerprint string, log *slog.Logger) *announcer {
+func testAnnouncer(t *testing.T, service, servicePrint, fingerprint string, log *slog.Logger) *announcer {
 	t.Helper()
 
-	a := newAnnouncer(announceOptions(t, service), fingerprint, log)
+	a := newAnnouncer(announceOptions(t, service, servicePrint), fingerprint, log)
 	if a == nil {
 		t.Fatal("newAnnouncer refused a configuration that names a service, a key and an address")
 	}
@@ -264,7 +278,7 @@ func TestAnAnnouncementCarriesTheFingerprintTheCertificateActuallyHas(t *testing
 	defer closeListener()
 
 	registry := newFakeRegistry(t)
-	a := testAnnouncer(t, registry.srv.URL, fingerprint, discard())
+	a := testAnnouncer(t, registry.srv.URL, registry.pin(t), fingerprint, discard())
 	a.announce(context.Background())
 
 	got, presented, ok := registry.last()
@@ -312,7 +326,7 @@ func TestTheAnnouncedAddressIsHonouredOverTheListenAddress(t *testing.T) {
 	defer func() { _ = tr.Close() }()
 
 	registry := newFakeRegistry(t)
-	opts := announceOptions(t, registry.srv.URL)
+	opts := announceOptions(t, registry.srv.URL, registry.pin(t))
 	opts.listen = tr.Addr()
 	opts.announceAddress = otherTestAddress
 
@@ -338,7 +352,7 @@ func TestTheAnnouncedAddressIsHonouredOverTheListenAddress(t *testing.T) {
 // without a restart, so the loop has to fire more than once on its own.
 func TestTheAnnounceRepeatsOnItsInterval(t *testing.T) {
 	registry := newFakeRegistry(t)
-	a := testAnnouncer(t, registry.srv.URL, strings.Repeat("ab", 32), discard())
+	a := testAnnouncer(t, registry.srv.URL, registry.pin(t), strings.Repeat("ab", 32), discard())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -380,39 +394,48 @@ func TestTheAnnounceRepeatsOnItsInterval(t *testing.T) {
 // connection and then says nothing. The last is the one a timeout is the only defence
 // against — without it the worker sits on a socket for the life of the process.
 func TestAFailedAnnounceIsLoggedAndSurvived(t *testing.T) {
-	shapes := map[string]func(t *testing.T) (service string, cleanup func()){
-		"nobody is listening": func(t *testing.T) (string, func()) {
+	shapes := map[string]func(t *testing.T) (service, servicePrint string, cleanup func()){
+		"nobody is listening": func(t *testing.T) (string, string, func()) {
 			// Gone rather than slow: stood up so the URL is a real one, then closed with its
 			// listener released.
 			registry := newFakeRegistry(t)
-			url := registry.srv.URL
+			url, pin := registry.srv.URL, registry.pin(t)
 			registry.srv.Close()
-			return url, func() {}
+			return url, pin, func() {}
 		},
-		"the service answers a refusal": func(t *testing.T) (string, func()) {
+		"the service answers a refusal": func(t *testing.T) (string, string, func()) {
 			registry := newFakeRegistry(t)
 			registry.answer(http.StatusServiceUnavailable, `{"error":"registry_unavailable"}`)
-			return registry.srv.URL, func() {}
+			return registry.srv.URL, registry.pin(t), func() {}
 		},
-		"the service stalls": func(t *testing.T) (string, func()) {
+		"the service stalls": func(t *testing.T) (string, string, func()) {
 			registry := newFakeRegistry(t)
 			release := registry.stall()
-			return registry.srv.URL, release
+			return registry.srv.URL, registry.pin(t), release
 		},
-		"the service answers nonsense": func(t *testing.T) (string, func()) {
+		"the service answers nonsense": func(t *testing.T) (string, string, func()) {
 			registry := newFakeRegistry(t)
 			registry.answer(http.StatusOK, "this is not JSON, and it is not an acknowledgement either")
-			return registry.srv.URL, func() {}
+			return registry.srv.URL, registry.pin(t), func() {}
+		},
+		// **A service answering for the address that is not the one pinned**, which is
+		// the shape #131 closed and the one an announcer has to survive like any other:
+		// the registration key travels in that request, so a handshake that failed is a
+		// credential that was not presented. It costs no player anything — the game runs
+		// and this server simply does not appear in the list.
+		"the service presents a certificate nobody pinned": func(t *testing.T) (string, string, func()) {
+			registry := newFakeRegistry(t)
+			return registry.srv.URL, strings.Repeat("ab", 32), func() {}
 		},
 	}
 
 	for name, stand := range shapes {
 		t.Run(name, func(t *testing.T) {
-			service, cleanup := stand(t)
+			service, servicePrint, cleanup := stand(t)
 			defer cleanup()
 
 			log, logged := capturingLogger("text")
-			a := testAnnouncer(t, service, strings.Repeat("cd", 32), log)
+			a := testAnnouncer(t, service, servicePrint, strings.Repeat("cd", 32), log)
 			// Short enough that a stall costs a test a moment rather than the whole budget,
 			// and long enough that a loopback request is not raced by its own deadline.
 			a.timeout = 150 * time.Millisecond
@@ -458,7 +481,7 @@ func TestAPersistentFailureIsOneWarningRatherThanOnePerInterval(t *testing.T) {
 	registry.answer(http.StatusServiceUnavailable, `{"error":"registry_unavailable"}`)
 
 	log, logged := capturingLogger("text")
-	a := testAnnouncer(t, registry.srv.URL, strings.Repeat("ef", 32), log)
+	a := testAnnouncer(t, registry.srv.URL, registry.pin(t), strings.Repeat("ef", 32), log)
 
 	for range 5 {
 		a.announce(context.Background())
@@ -625,7 +648,7 @@ func TestAnUnusableAnnounceConfigurationDisablesAnnouncingRatherThanTheServer(t 
 
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			opts := announceOptions(t, "http://127.0.0.1:1")
+			opts := announceOptions(t, "https://127.0.0.1:1", strings.Repeat("00", 32))
 			mutate(t, &opts)
 
 			log, logged := capturingLogger("text")
@@ -653,7 +676,7 @@ func TestAnUnusableAnnounceConfigurationDisablesAnnouncingRatherThanTheServer(t 
 func TestABrokenAnnounceConfigurationDoesNotRefuseTheStart(t *testing.T) {
 	registry := newFakeRegistry(t)
 
-	opts := announceOptions(t, registry.srv.URL)
+	opts := announceOptions(t, registry.srv.URL, registry.pin(t))
 	opts.worldDir = t.TempDir()
 	opts.announceAddress = "0.0.0.0:7777" // every interface: refused by the announcer
 	opts.logLevel = "info"
@@ -715,6 +738,7 @@ func TestAKeyIsReadFromAFileAndTrimmed(t *testing.T) {
 	opts := validOptions()
 	opts.ticketKey = ""
 	opts.accountService = registry.srv.URL
+	opts.accountServiceFingerprint = registry.pin(t)
 	opts.announceAddress = testAnnounceAddress
 	opts.registrationKeyFile = writeKeyFile(t, testRegistrationKey)
 
@@ -752,7 +776,7 @@ func TestTheRegistrationKeyNeverReachesTheLog(t *testing.T) {
 			registry := newFakeRegistry(t)
 			log, logged := capturingLogger(format)
 
-			a := testAnnouncer(t, registry.srv.URL, strings.Repeat("ab", 32), log)
+			a := testAnnouncer(t, registry.srv.URL, registry.pin(t), strings.Repeat("ab", 32), log)
 
 			// A success, then every shape of refusal, then a service that is gone: the paths
 			// an operator actually investigates are the ones a secret leaks on.
@@ -823,7 +847,7 @@ func TestTheAnnouncedAddressIsNotLogged(t *testing.T) {
 	registry := newFakeRegistry(t)
 	log, logged := capturingLogger("text")
 
-	a := testAnnouncer(t, registry.srv.URL, strings.Repeat("ab", 32), log)
+	a := testAnnouncer(t, registry.srv.URL, registry.pin(t), strings.Repeat("ab", 32), log)
 	a.announce(context.Background())
 	registry.answer(http.StatusBadRequest, `{"error":"address_refused"}`)
 	a.announce(context.Background())
@@ -890,7 +914,7 @@ func TestAStalledAnnounceEndsWithTheServer(t *testing.T) {
 	release := registry.stall()
 	defer release()
 
-	a := testAnnouncer(t, registry.srv.URL, strings.Repeat("ab", 32), discard())
+	a := testAnnouncer(t, registry.srv.URL, registry.pin(t), strings.Repeat("ab", 32), discard())
 	// Far longer than this test is allowed to take: what must end the announce is the
 	// cancellation, not the deadline.
 	a.timeout = time.Hour

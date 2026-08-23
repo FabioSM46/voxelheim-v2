@@ -1225,6 +1225,18 @@ and not again while they stay there.
 shares nothing else with the game server: not a port, not a directory, not a package the
 simulation uses.
 
+- **It listens over TLS and there is no plaintext form of that either** (#131). The certificate
+  is `internal/certs`' — self-signed, kept under `-auth-dir` beside the accounts and the signing
+  key, generated on first start and read back after — and its SHA-256 is logged at every start as
+  `certificate_sha256`, spelled exactly as `cmd/voxelheimd` spells its own so an operator reads
+  one attribute name out of two logs. Both callers are given that number out of band and refuse
+  anything else: `-account-service-fingerprint` on a game server,
+  `--account-service-fingerprint` on a client. **This hop is the root of the whole chain** — a
+  game server's fingerprint reaches a client inside `/v1/servers`, which is worth nothing unless
+  the connection that carried the list was the right one — so it is the one identity that can
+  inherit trust from nothing above it, and the one number an operator has to hand out.
+  `certs.Ephemeral` is deliberately not used here: a service that keeps accounts by definition
+  cannot present a new fingerprint on every restart.
 - **A second command rather than a second workspace.** A top-level `auth/` would need its own
   CI job, its own `AGENTS.md`, a rule in `scripts/changed-areas.sh`, an entry in `ci-gate`'s
   selector audit and a row in `scripts/test/gate-tables.test.sh`. That is pipeline construction
@@ -1583,12 +1595,20 @@ of the section above, and every rule in it follows from that one sentence.
   still requires it present and exactly 32 bytes, so the honest value is the right shape carrying
   nothing. No V6 client is ever on the far end of a welcome — the version check refuses them first
   — and a V7 server reads past the field on the way in, so nothing can be resumed with it.
-- **Reading the key over plaintext HTTP is a tracked gap and is not solved here** (#131). The
-  endpoint is deliberately unauthenticated, so the exposure is not confidentiality but
-  *substitution*: whoever can answer for that address hands this server their own public key, and
-  this server then admits the tickets they mint and refuses every real one — for as long as the key
-  is kept, which is for ever. A warning is logged on every non-`https` fetch, and `-ticket-key` is
-  the way around it in the meantime. Do not read the warning as mitigation.
+- **The fetch is pinned, and that is what closed the substitution** (#131). The endpoint is
+  deliberately unauthenticated, so the exposure was never confidentiality but *substitution*:
+  whoever could answer for that address handed this server their own public key, and this server
+  then admitted the tickets they minted and refused every real one — for as long as the key is
+  kept, which is for ever. `-account-service` is now `https` only and **requires
+  `-account-service-fingerprint` beside it**; `accountServiceClient` is the one client this
+  server reaches that service with, and it compares the SHA-256 of the leaf against that flag.
+  `InsecureSkipVerify` is set there and is a *replacement* rather than a bypass — what it turns
+  off is a chain to a root store and a hostname match, neither of which can say anything about a
+  self-signed certificate at an address an operator typed, while `VerifyPeerCertificate` runs
+  regardless. A missing or malformed fingerprint is a refusal at startup, because a flag that
+  could be omitted is the hole reachable by omission. `-ticket-key` remains the way to avoid the
+  fetch entirely, and is now a choice about whether to depend on that service at startup rather
+  than a way around an unauthenticated hop.
 - **The bound before the work, at the one call this server makes**: the response is read through an
   `io.LimitReader` and refused if it exceeds `maxTicketKeyResponseBytes` before any JSON is parsed,
   and the published `algorithm` is compared rather than assumed. It is `ticket.Decode`'s ordering
@@ -1805,7 +1825,8 @@ for any contract diff — so regenerate here and in the client in the same PR.
 ```bash
 # -world-name and one of the two key flags are required: a server that cannot verify a
 # session ticket cannot admit anybody, and refuses to start rather than opening its door.
-go run ./cmd/voxelheimd -world-name midgard -account-service http://127.0.0.1:8080
+go run ./cmd/voxelheimd -world-name midgard \
+  -account-service https://127.0.0.1:7778 -account-service-fingerprint <64 hex characters>
 go run ./cmd/voxelheimd -world-name midgard -ticket-key <64 hex characters>
 
 go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -listen 0.0.0.0:7777  # reachable from another machine
@@ -1816,13 +1837,17 @@ go run ./cmd/voxelheimd -world-name midgard -ticket-key <key> -log-level debug -
 # In the list players choose from. The key is never a flag; announcing is off without all three,
 # and a failed announce is logged and survived rather than being a reason not to start.
 VOXELHEIM_REGISTRATION_KEY=<key> go run ./cmd/voxelheimd -world-name midgard \
-  -account-service http://127.0.0.1:8080 -listen 0.0.0.0:7777 -announce-address <host>:7777
+  -account-service https://127.0.0.1:7778 -account-service-fingerprint <sha256> \
+  -listen 0.0.0.0:7777 -announce-address <host>:7777
 go run ./cmd/voxelheimd -h                                                          # every flag, with the default it actually holds
 ```
 
 The account service prints the key it publishes at startup, and `GET /v1/ticket-key` serves the
 same 64 characters — so `-ticket-key` is one copy of one string, and `-account-service` is that
-copy made by the machine.
+copy made by the machine. **It prints two numbers, and they are not interchangeable**: the
+`public_key` is what a ticket's signature is checked against, and the `certificate_sha256` is
+what the connection that fetches it is checked against. The second is the one
+`-account-service-fingerprint` takes.
 
 `-h` is the list, deliberately: the defaults are constants in `internal/game`, `internal/world`
 and `internal/session`, and a table here restating them would be a copy that drifts. What the
@@ -1834,7 +1859,8 @@ flags decide is the part worth writing down.
 | `-seed` | the terrain. It is regenerated from the seed, never read from disk |
 | `-world-dir` | where edits, player records, the clock and the TLS key are kept. Empty runs an ephemeral world |
 | `-world-name` | which world this is. A ticket names one world and is useless at any other, so this is what every ticket presented here must name. **Required** |
-| `-account-service` | where to read the signing key from, once, at startup. Mutually exclusive with `-ticket-key`; exactly one is **required** |
+| `-account-service` | the `https` base URL to read the signing key from, once, at startup. Mutually exclusive with `-ticket-key`; exactly one is **required** |
+| `-account-service-fingerprint` | the SHA-256 of the certificate that service presents, as it logs it. **Required with `-account-service`** and refused without it; there is no way to skip the check |
 | `-ticket-key` | that key in hex, when it is copied by hand instead of fetched |
 | `-announce-address` | the `host:port` players dial, announced to `-account-service`. **Separate from `-listen`**; announcing is off without it |
 | `-registration-key-file` | a file holding the registration key. The key is never a flag; `VOXELHEIM_REGISTRATION_KEY` is the other source, and never both |
@@ -2105,13 +2131,15 @@ Recorded here so the next reader does not mistake them for oversights:
   `MobKind.Vargr` is still in — but it is also what a gap between two halves of one contract costs
   while it is open, and the only thing that made it survivable was that the client failed by name
   rather than hanging. The check is green again and asserts the phase itself (check 6).
-- **A game server cannot tell that it reached the right account service** when it fetches
-
-  `/v1/ticket-key` over plaintext HTTP, and #131 is where that is closed. The substitution it
-  allows outlives the attacker, because the key is read once and kept: a server holding somebody
-  else's public key admits every ticket they mint and refuses every real one, and nothing about it
-  looks wrong. `-ticket-key` avoids the fetch; the warning logged on every non-`https` fetch is a
-  statement of the gap and not a mitigation of it.
+- **A game server can now tell that it reached the right account service**, and #131 is where
+  that was closed. The substitution the plaintext hop allowed outlived the attacker, because the
+  key is read once and kept: a server holding somebody else's public key admits every ticket they
+  mint and refuses every real one, and nothing about it looks wrong. Both hops to that service —
+  the key fetch and every announcement — now go over TLS pinned to
+  `-account-service-fingerprint`, which the account service prints as `certificate_sha256` at
+  every start. **What has not moved is that the root is supplied rather than discovered**: there
+  is no trust on first use and no plaintext fallback on either side, because first contact is
+  precisely when a substitution happens.
 - **Key rotation is still nowhere, and it now costs two sides.** One operator, one pair, and every
   game server holding a copy. Rotating means publishing two keys and a window in which both verify;
   until then, replacing the pair refuses every player on every world at once until each server is

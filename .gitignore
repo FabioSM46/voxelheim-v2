@@ -31,6 +31,13 @@ server/authdata/
 signing-key.bin
 verifying-key.bin
 
+# The TLS identity, by file name for the reason the two above are: both services keep one
+# — the game server under -world-dir, the account service under -auth-dir (#131) — and
+# both flags take whatever an operator types. `server-key.pem` is a **private key**, and
+# the directory rules only cover the paths this repository suggests.
+server-cert.pem
+server-key.pem
+
 # Rust (client/)
 client/target/
 target/
