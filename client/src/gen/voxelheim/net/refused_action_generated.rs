@@ -11,29 +11,30 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 5;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 6;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 6] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 7] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
     RefusedAction::EditBlock,
     RefusedAction::Craft,
     RefusedAction::Repair,
+    RefusedAction::DropItem,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is
 /// answered today.** Placement is the only member a server currently sends; mining,
-/// block edits, crafting and repair all answer a refused request with a debug line no
-/// player will ever read, and each becomes real in its own issue. Reserving the members
-/// now is the call `StructureKind.Campfire` records: a member is an integer on the wire,
-/// so the cheap moment to agree on the number is before anything depends on it.
+/// block edits, crafting, repair and dropping all answer a refused request with a debug
+/// line no player will ever read, and each becomes real in its own issue. Reserving the
+/// members now is the call `StructureKind.Campfire` records: a member is an integer on
+/// the wire, so the cheap moment to agree on the number is before anything depends on it.
 ///
 /// **`RemoveStructure` is deliberately absent, and its absence is a decision rather than
 /// an omission.** `RemoveStructureRequest` above says a refused removal is silence on
@@ -41,6 +42,11 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 6] = [
 /// away" could map somebody else's camp by asking for ids it does not have. A member
 /// here would be an invitation to close that gap on some later afternoon without seeing
 /// what it opens.
+///
+/// **`DropItem` is present for exactly the reason a removal is not.** Every question a
+/// refused drop could answer is about the asking player's own pack — is that slot empty,
+/// does that item wear out, are you dead — and they already hold the complete
+/// `InventoryState` that says so. There is no third party's world state to learn by asking.
 ///
 /// Zero member for the reason every enum in this contract has one: FlatBuffers decodes
 /// an absent scalar as zero, so a refusal that names no action must read as one nobody
@@ -56,9 +62,10 @@ impl RefusedAction {
     pub const EditBlock: Self = Self(3);
     pub const Craft: Self = Self(4);
     pub const Repair: Self = Self(5);
+    pub const DropItem: Self = Self(6);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 5;
+    pub const ENUM_MAX: u8 = 6;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -66,6 +73,7 @@ impl RefusedAction {
         Self::EditBlock,
         Self::Craft,
         Self::Repair,
+        Self::DropItem,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -76,6 +84,7 @@ impl RefusedAction {
             Self::EditBlock => Some("EditBlock"),
             Self::Craft => Some("Craft"),
             Self::Repair => Some("Repair"),
+            Self::DropItem => Some("DropItem"),
             _ => None,
         }
     }

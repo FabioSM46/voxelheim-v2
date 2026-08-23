@@ -267,6 +267,25 @@ func (i *inventory) stackAtLocked(slot uint8) (inventoryStack, bool) {
 	return stack, true
 }
 
+// emptySlotLocked takes everything out of the named slot and returns what was in it.
+//
+// **The whole stack, not a count**, which makes it a different operation from
+// consumeOneLocked rather than a generalisation of it: that one spends *an item*, leaves the
+// rest where it was, and takes an `expected` id precisely because it runs after a world write
+// that may have raced. This one empties a slot the caller has already read under the same
+// lock, so there is no window and nothing to revalidate against.
+//
+// It reports whether anything moved, so a caller can refuse rather than announce an inventory
+// that did not change. The bound is stackAtLocked's.
+func (i *inventory) emptySlotLocked(slot uint8) (inventoryStack, bool) {
+	stack, held := i.stackAtLocked(slot)
+	if !held {
+		return inventoryStack{}, false
+	}
+	i.slots[slot] = inventoryStack{}
+	return stack, true
+}
+
 // stateLocked returns all authoritative slots. Empty slots stay as the zero pair
 // (0, 0), and the slice length always matches what ServerWelcome announced.
 //

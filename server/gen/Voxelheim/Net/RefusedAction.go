@@ -8,10 +8,10 @@ import "strconv"
 // /
 // / **Declared for every action that refuses in silence, not only the one that is
 // / answered today.** Placement is the only member a server currently sends; mining,
-// / block edits, crafting and repair all answer a refused request with a debug line no
-// / player will ever read, and each becomes real in its own issue. Reserving the members
-// / now is the call `StructureKind.Campfire` records: a member is an integer on the wire,
-// / so the cheap moment to agree on the number is before anything depends on it.
+// / block edits, crafting, repair and dropping all answer a refused request with a debug
+// / line no player will ever read, and each becomes real in its own issue. Reserving the
+// / members now is the call `StructureKind.Campfire` records: a member is an integer on
+// / the wire, so the cheap moment to agree on the number is before anything depends on it.
 // /
 // / **`RemoveStructure` is deliberately absent, and its absence is a decision rather than
 // / an omission.** `RemoveStructureRequest` above says a refused removal is silence on
@@ -19,6 +19,11 @@ import "strconv"
 // / away" could map somebody else's camp by asking for ids it does not have. A member
 // / here would be an invitation to close that gap on some later afternoon without seeing
 // / what it opens.
+// /
+// / **`DropItem` is present for exactly the reason a removal is not.** Every question a
+// / refused drop could answer is about the asking player's own pack — is that slot empty,
+// / does that item wear out, are you dead — and they already hold the complete
+// / `InventoryState` that says so. There is no third party's world state to learn by asking.
 // /
 // / Zero member for the reason every enum in this contract has one: FlatBuffers decodes
 // / an absent scalar as zero, so a refusal that names no action must read as one nobody
@@ -32,6 +37,7 @@ const (
 	RefusedActionEditBlock      RefusedAction = 3
 	RefusedActionCraft          RefusedAction = 4
 	RefusedActionRepair         RefusedAction = 5
+	RefusedActionDropItem       RefusedAction = 6
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -41,6 +47,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionEditBlock:      "EditBlock",
 	RefusedActionCraft:          "Craft",
 	RefusedActionRepair:         "Repair",
+	RefusedActionDropItem:       "DropItem",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -50,6 +57,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"EditBlock":      RefusedActionEditBlock,
 	"Craft":          RefusedActionCraft,
 	"Repair":         RefusedActionRepair,
+	"DropItem":       RefusedActionDropItem,
 }
 
 func (v RefusedAction) String() string {

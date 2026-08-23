@@ -80,6 +80,8 @@ pub mod voxelheim {
         pub use self::place_structure_request_generated::*;
         mod remove_structure_request_generated;
         pub use self::remove_structure_request_generated::*;
+        mod drop_item_request_generated;
+        pub use self::drop_item_request_generated::*;
         mod action_refused_generated;
         pub use self::action_refused_generated::*;
         mod entity_state_generated;

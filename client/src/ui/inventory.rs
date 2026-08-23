@@ -809,9 +809,20 @@ fn hover_tooltip(
     }
 }
 
+/// Reports one press per cell, and says which of the three things it was asking for.
+///
+/// **Nothing is decided here.** A reported press becomes an `InventoryMoveRequest`, a
+/// `RepairRequest` or a `DropItemRequest` in `player::inventory`, which is the only module
+/// that pairs cells and the only one that builds a frame.
+///
+/// **Shift is read against the full-stack button and not the split one**, because what the
+/// modifier changes is *where the stack goes* rather than *how much of it moves*: a drop is
+/// the whole cell, exactly as a plain left press picks the whole cell. Right-clicking keeps
+/// meaning half with shift held or without.
 fn inventory_clicks(
     mode: Res<InputMode>,
     buttons: Option<Res<ButtonInput<MouseButton>>>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
     cells: Query<(&Interaction, &InventoryCell)>,
     mut clicks: MessageWriter<InventoryClick>,
 ) {
@@ -821,10 +832,16 @@ fn inventory_clicks(
     let Some(buttons) = buttons else {
         return;
     };
+    let dropping = keys
+        .is_some_and(|keys| keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight));
     let kind = if buttons.just_pressed(MouseButton::Right) {
         Some(InventoryClickKind::Split)
     } else if buttons.just_pressed(MouseButton::Left) {
-        Some(InventoryClickKind::Full)
+        Some(if dropping {
+            InventoryClickKind::Drop
+        } else {
+            InventoryClickKind::Full
+        })
     } else {
         None
     };
@@ -1225,6 +1242,81 @@ mod tests {
                 kind: InventoryClickKind::Split,
             }]
         );
+    }
+
+    /// Shift held over a left press reports a drop; the split button and an unheld shift
+    /// report what they always did.
+    ///
+    /// One table because the claim is the *pair*: what shift changes is where the stack
+    /// goes, so it applies to the button that already means the whole cell and not to the
+    /// one that means half. The unheld row keeps the keyboard resource present rather than
+    /// absent — a build where shift exists and is simply not down is the case a modifier
+    /// wired backwards would pass with the resource missing.
+    ///
+    /// Nothing here decides whether that cell may be put down: `player::inventory` builds
+    /// the frame and the server answers it.
+    #[test]
+    fn shift_over_a_left_press_is_a_drop_and_nothing_else_changes_meaning() {
+        for (shift, button, want) in [
+            (
+                Some(KeyCode::ShiftLeft),
+                MouseButton::Left,
+                InventoryClickKind::Drop,
+            ),
+            (
+                Some(KeyCode::ShiftRight),
+                MouseButton::Left,
+                InventoryClickKind::Drop,
+            ),
+            (
+                Some(KeyCode::ShiftLeft),
+                MouseButton::Right,
+                InventoryClickKind::Split,
+            ),
+            (None, MouseButton::Left, InventoryClickKind::Full),
+        ] {
+            let mut app = app();
+            app.insert_resource(ButtonInput::<MouseButton>::default());
+            app.insert_resource(ButtonInput::<KeyCode>::default());
+            app.update();
+
+            let cell = {
+                let world = app.world_mut();
+                let mut query = world.query::<(Entity, &InventoryCell)>();
+                query
+                    .iter(world)
+                    .find(|(_, cell)| cell.slot == 1)
+                    .map(|(entity, _)| entity)
+                    .expect("slot 1 exists")
+            };
+            *app.world_mut()
+                .entity_mut(cell)
+                .get_mut::<Interaction>()
+                .expect("buttons carry Interaction") = Interaction::Hovered;
+            if let Some(shift) = shift {
+                app.world_mut()
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(shift);
+            }
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(button);
+            app.update();
+
+            let clicks: Vec<InventoryClick> = app
+                .world_mut()
+                .resource_mut::<Messages<InventoryClick>>()
+                .drain()
+                .collect();
+            assert_eq!(
+                clicks,
+                vec![InventoryClick {
+                    slot: 1,
+                    kind: want,
+                }],
+                "{shift:?} with {button:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

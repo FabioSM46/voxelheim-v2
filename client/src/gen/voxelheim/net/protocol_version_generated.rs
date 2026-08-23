@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 7;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 8;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -27,6 +27,14 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// `ProtocolVersion::Current` in Rust). Bump it whenever a message changes in a
 /// way an older peer cannot parse; a mismatch is rejected at the handshake
 /// rather than discovered as a decode error mid-session.
+///
+/// **"A message an older peer cannot parse" is asymmetric.** Appending a union
+/// member is backward compatible only as far as the receiver is willing to drop
+/// what it cannot name — which a client is and a server is not, because
+/// direction is a protocol rule here and an unrecognised payload closes the
+/// connection. So a server→client member can be appended without moving this
+/// number (`ActionRefused`, tag 20) and a client→server one cannot
+/// (`DropItemRequest`, tag 25). Both are argued in `envelope.fbs`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -37,10 +45,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(7);
+    pub const Current: Self = Self(8);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 7;
+    pub const ENUM_MAX: u16 = 8;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

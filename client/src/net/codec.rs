@@ -1271,6 +1271,25 @@ pub struct InventoryMoveRequest {
     pub count: u16,
 }
 
+/// Intent to put one whole stack back on the ground. One slot index and nothing else.
+///
+/// There is no count and no position, and both absences are the safety: a count would let
+/// this client state what leaves its own pack, and a position would let it put an item down
+/// anywhere in the world. What the slot holds and where the player's feet are is read
+/// server-side, so the index travels verbatim and is refused by the simulation rather than
+/// by the framing.
+///
+/// A refused drop is silence. An accepted one arrives as the complete `InventoryState` that
+/// follows and as an `ItemDropState` in the next snapshot — indistinguishable there from a
+/// drop the world produced, which is the point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DropItemRequest {
+    /// The authoritative inventory slot to empty onto the ground.
+    pub slot: u8,
+    /// This client's own tick counter — the same one `PlayerInput` uses.
+    pub client_tick: u32,
+}
+
 /// A decoded `ServerReject`.
 ///
 /// [`Self::describe`] is the one place the code and the detail become a single
@@ -1948,7 +1967,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::PlaceStructureRequest
         | fb::Payload::RemoveStructureRequest
         | fb::Payload::SelectCharacterRequest
-        | fb::Payload::CreateCharacterRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::CreateCharacterRequest
+        | fb::Payload::DropItemRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -2870,6 +2890,30 @@ pub fn encode_repair_request(request: &RepairRequest) -> Vec<u8> {
     finish_envelope(
         builder,
         fb::Payload::RepairRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one drop intent.
+///
+/// The whole message: one authoritative slot index and this client's own tick counter. No
+/// count, because the contract has no field for one — a whole stack is what leaves, and how
+/// much that is is read from the slot server-side. No position either: the stack lands where
+/// the *server* says the player's feet are.
+///
+/// The index is sent exactly as given, out-of-range values included, because
+/// `schemas/player.fbs` asks for that. A refused drop is silence.
+pub fn encode_drop_item_request(request: &DropItemRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+
+    let mut table = fb::DropItemRequestBuilder::new(&mut builder);
+    table.add_slot(request.slot);
+    table.add_client_tick(request.client_tick);
+    let payload = table.finish();
+
+    finish_envelope(
+        builder,
+        fb::Payload::DropItemRequest,
         payload.as_union_value(),
     )
 }
@@ -3834,10 +3878,17 @@ mod tests {
     /// character and waits for ever on a welcome that is not coming — which is precisely
     /// the mid-session decode failure `ProtocolVersion` exists to turn into a clean
     /// refusal at the handshake.
+    ///
+    /// **V8 adds one tag and moves the version, and there the deciding fact is
+    /// direction.** "A peer drops a tag it cannot name" is a property of *this* decoder,
+    /// which is a client's — the sweep below is what makes it one. A server does not drop,
+    /// so tag 25 travelling client→server means a V7 server and a V8 client would handshake
+    /// cleanly and die on the first stack anybody put down. Every client→server tag arrived
+    /// with a bump; the one appended without one goes the other way.
     #[test]
-    fn protocol_v7_appends_four_union_tags_and_moves_to_seven() {
+    fn protocol_v8_appends_a_drop_tag_and_moves_to_eight() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 7);
+        assert_eq!(fb::ProtocolVersion::Current.0, 8);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -3863,6 +3914,7 @@ mod tests {
             (fb::Payload::SelectCharacterRequest, 22),
             (fb::Payload::CreateCharacterRequest, 23),
             (fb::Payload::PlayerAppearance, 24),
+            (fb::Payload::DropItemRequest, 25),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -3871,11 +3923,13 @@ mod tests {
         // and nothing else, and so is a craft and a repair; a *refused* placement is now
         // answered by `ActionRefused`, and an accepted one is not — there is still no
         // acknowledgement payload anywhere in this contract, and the size of the union is
-        // the only place that claim can be checked. The extra member is `NONE`, the
-        // implicit zero every FlatBuffers union carries.
+        // the only place that claim can be checked. V8's one does not break that run: a
+        // drop is answered by the complete `InventoryState` that follows and by the
+        // `ItemDropState` in the next snapshot, both of which already existed. The extra
+        // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            25,
+            26,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -3905,7 +3959,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 25] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 26] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -3931,6 +3985,7 @@ mod tests {
         (fb::Payload::SelectCharacterRequest, Handling::ClientOnly),
         (fb::Payload::CreateCharacterRequest, Handling::ClientOnly),
         (fb::Payload::PlayerAppearance, Handling::Consumed),
+        (fb::Payload::DropItemRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -4122,12 +4177,18 @@ mod tests {
         assert_eq!(fb::RefusedAction::EditBlock.0, 3);
         assert_eq!(fb::RefusedAction::Craft.0, 4);
         assert_eq!(fb::RefusedAction::Repair.0, 5);
+        assert_eq!(fb::RefusedAction::DropItem.0, 6);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
+        //
+        // A drop has one for that same reason read the other way, which is why the pair is
+        // worth keeping in one assertion: every question a refused drop could answer — that
+        // slot is empty, that item wears out, you are dead — is about the asking player's
+        // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            6,
+            7,
             "a removal is refused in silence by design"
         );
 
@@ -6421,6 +6482,44 @@ mod tests {
             assert_eq!(request.kit_slot(), kit_slot);
             assert_eq!(request.target_slot(), target_slot);
             assert_eq!(request.client_tick(), client_tick);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V8 — drop intent
+    // -----------------------------------------------------------------------
+
+    /// One slot index and a tick and nothing that could be a count or a position, read back
+    /// through the generated accessors for the reason a repair is: this is an outbound
+    /// message and one never arrives here.
+    ///
+    /// The out-of-range index is in the table deliberately — `schemas/player.fbs` asks for it
+    /// verbatim, so a slot past the end of the pack is an ordinary refusal in the simulation
+    /// rather than something this encoder gets to clamp.
+    ///
+    /// The field count is the absence asserted rather than described: a vtable is a `u16`
+    /// count plus a `u16` per field, and two is what says nobody added a count for how much
+    /// leaves the pack or a position for where it lands. It is measured on the one case
+    /// where neither field is zero, because FlatBuffers writes no bytes for a field equal to
+    /// its default — the all-zero frame below has an empty vtable and always will.
+    #[test]
+    fn a_drop_item_request_carries_one_slot_and_a_tick_verbatim() {
+        for (slot, client_tick) in [(0, 0), (7, 41), (255, u32::MAX)] {
+            let frame = encode_drop_item_request(&DropItemRequest { slot, client_tick });
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            assert_eq!(envelope.payload_type(), fb::Payload::DropItemRequest);
+            let request = envelope
+                .payload_as_drop_item_request()
+                .expect("the payload is a drop request");
+            assert_eq!(request.slot(), slot);
+            assert_eq!(request.client_tick(), client_tick);
+            if slot != 0 && client_tick != 0 {
+                assert_eq!(
+                    (request._tab.vtable().num_bytes() - 4) / 2,
+                    2,
+                    "DropItemRequest carries something besides a slot and a tick"
+                );
+            }
         }
     }
 

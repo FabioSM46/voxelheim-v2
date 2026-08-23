@@ -1,6 +1,8 @@
 package game
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -96,10 +98,20 @@ func dropLifetimeTicks(tickRate uint8) int {
 // spawnDrop puts one stack of items in the world at the centre of a voxel and returns
 // the identity it was given.
 //
-// Called from a session goroutine, off the tick, immediately after the world write
-// that produced the yield. It refuses an empty or unregistered item rather than
-// creating an entity the wire forbids: schemas/player.fbs states that a drop's
-// item_id and count are never zero.
+// **The one way a drop comes into existence, and every reason for one goes through it
+// unchanged.** Four today — a mined block's yield, a structure taken back or brought down,
+// what a kill left behind, and a stack a player asked to put down ([Player.DropItem] below)
+// — and none is a special case here: each hands over an item, a count and a voxel and gets
+// an ordinary drop, which merges, ages out after [DropLifetime] and is collected by walking
+// over it. A fifth reason is a fifth caller, not a second spawn path and not a second
+// lifetime; whatever is different about it belongs in the caller that decided it.
+//
+// **Called with Sim.mu not held**, because this takes it. Anything that decides a drop
+// inside the tick hands what it decided out through a return value and lets a caller outside
+// the lock spawn it — [Sim.spawnLoot] and [Sim.dropCollapsed]; the argument is in loot.go.
+//
+// It refuses an empty or unregistered item rather than creating an entity the wire
+// forbids: schemas/player.fbs states that a drop's item_id and count are never zero.
 func (s *Sim) spawnDrop(item ItemID, count uint16, voxel [3]int64) (uint64, bool) {
 	if item == ItemNone || count == 0 {
 		return 0, false
@@ -383,4 +395,146 @@ func dropStates(drops []*itemDrop) []protocol.ItemDropState {
 		}
 	}
 	return states
+}
+
+// Putting something back on the ground.
+//
+// The fourth reason a drop exists and the first a *player* asks for directly: every other
+// caller of spawnDrop answers something that happened to the world, so this is the only one
+// that has to decide whether it may happen. The wire carries one slot index and nothing
+// else, the shape AttackRequest and RepairRequest have, and every refusal is silence.
+
+// droppedStack is what a player let go of and where it lands: everything spawnDrop needs,
+// decided under the lock and carried out of it.
+//
+// The same three fields as lootDrop in loot.go and deliberately not the same type — that one
+// is what a *kill* left behind, gathered inside the tick. What they share is the only reason
+// either is a value at all: a drop is spawned with Sim.mu released.
+type droppedStack struct {
+	item  ItemID
+	count uint16
+	voxel [3]int64
+}
+
+// DropItem resolves one DropItemRequest against the authoritative pack, empties the slot
+// it names and returns the inventory that leaves behind.
+//
+// **Two phases, and the split is the lock**, exactly as [Player.RemoveStructure]'s is:
+// releaseSlot below decides the whole thing under Sim.mu, and the drop is spawned after
+// that lock is gone because [Sim.spawnDrop] takes it.
+//
+// **The item cannot be lost between the two halves**, and that is a property rather than a
+// hope: spawnDrop refuses exactly an empty count and an unregistered item, and releaseSlot
+// has already refused both before it emptied anything.
+//
+// Every refusal is an ordinary error the session logs at debug and answers with silence.
+func (p *Player) DropItem(req protocol.DropItemRequest) (protocol.InventoryState, error) {
+	state, dropped, err := p.releaseSlot(req.Slot)
+	if err != nil {
+		return protocol.InventoryState{}, err
+	}
+
+	// Outside the lock, because spawnDrop takes it.
+	if _, spawned := p.sim.spawnDrop(dropped.item, dropped.count, dropped.voxel); !spawned {
+		// Unreachable, and logged as the server bug it would be rather than reported to a
+		// client that can do nothing about it. The pack has already changed, so the state
+		// captured above is still the truth and is still what the session sends.
+		p.sim.log.Error("dropped stack was refused by the spawn path",
+			"entity_id", p.entityID, "slot", req.Slot,
+			"item_id", uint16(dropped.item), "count", dropped.count)
+	}
+
+	p.sim.log.Debug("stack dropped",
+		"entity_id", p.entityID, "slot", req.Slot, "item_id", uint16(dropped.item),
+		"count", dropped.count, "voxel", dropped.voxel, "client_tick", req.ClientTick)
+
+	return state, nil
+}
+
+// releaseSlot takes one whole stack out of the pack and says where it should land.
+//
+// Split from [Player.DropItem] so the whole authoritative decision is one critical section
+// and the spawn that follows is outside it — Player.removeOwnStructure's shape.
+//
+// **One critical section**, for the reason Craft and Repair have one: liveness, the slot and
+// the position the drop lands at are one decision, and splitting them leaves a window in
+// which a player killed between the two still empties a slot, or one in which the stack
+// lands where they were rather than where they are.
+func (p *Player) releaseSlot(slot uint8) (protocol.InventoryState, droppedStack, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if !p.alive() {
+		// Consistent with mining, editing, placing, attacking, crafting and repairing: a
+		// corpse does nothing. What a *death* puts on the ground is a different question,
+		// and it is not asked here.
+		return protocol.InventoryState{}, droppedStack{}, errors.New("the player is dead")
+	}
+
+	// TryLock, never Lock, and the same argument Craft and Repair record: every other holder
+	// of this inventory is either this session's own read goroutine or the tick, and the tick
+	// only ever takes it under the lock this function is holding.
+	if !p.inventory.mu.TryLock() {
+		return protocol.InventoryState{}, droppedStack{}, errors.New("the inventory is busy")
+	}
+	defer p.inventory.mu.Unlock()
+
+	// stackAtLocked is what bounds the index. The decoder copies it verbatim, out-of-range
+	// values included, exactly as schemas/player.fbs says it should: a slot past the end of
+	// the pack is an ordinary refusal here, not a malformed frame.
+	stack, held := p.inventory.stackAtLocked(slot)
+	if !held {
+		return protocol.InventoryState{}, droppedStack{}, fmt.Errorf("inventory slot %d holds nothing", slot)
+	}
+	if err := dropAllowed(stack); err != nil {
+		return protocol.InventoryState{}, droppedStack{}, err
+	}
+
+	// Cannot fail after the read above, and written as a refusal anyway for the reason
+	// every other one in this package is: "cannot fail" is a property of today's callers
+	// rather than of the function.
+	dropped, emptied := p.inventory.emptySlotLocked(slot)
+	if !emptied {
+		return protocol.InventoryState{}, droppedStack{}, fmt.Errorf("inventory slot %d could not be emptied", slot)
+	}
+
+	return p.inventory.stateLocked(), droppedStack{
+		item: dropped.item,
+		// The whole stack: there is no count on the wire to ask for less with, because a
+		// client that could state one would be stating what leaves its own pack.
+		count: dropped.count,
+		// The player's own position rather than anything they sent, and voxelAt rather than
+		// a truncation: p.pos is the bottom of their box, so this is the cell their feet are
+		// in, and dropSpawnPos centres the drop inside it — the two steps a kill's loot
+		// already takes from the creature's position.
+		voxel: voxelAt(p.pos),
+	}, nil
+}
+
+// dropAllowed reports why one slot may not be put on the ground, or nil.
+//
+// **A worn thing cannot be dropped, and the reason is that a drop cannot remember wear.** A
+// drop is an item id and a count — ItemDropState is a struct and can never grow a third
+// field, and itemDrop mirrors it because nothing has needed more: every block yield, loot
+// roll and structure bundle is wearless by construction. A pack is the first place a *worn*
+// thing could reach the ground, and the round trip would launder it, because Player.collect
+// inserts through stackOf and stackOf reads the maximum out of the registry. A blade let go
+// of at 12 durability would be walked back over at 200, which is a repair granted by asking.
+//
+// Refused here rather than by teaching the drop entity to carry wear: that reaches
+// Player.collect and the insertion rule, which is a change to pickup and a decision of its
+// own. See server/AGENTS.md; delete this when a drop can carry what it is worth.
+//
+// The caller holds the inventory lock.
+func dropAllowed(stack inventoryStack) error {
+	if stack.durable() {
+		return fmt.Errorf("item %d wears out, and a drop cannot carry wear", uint16(stack.item))
+	}
+	if _, registered := itemByID(stack.item); !registered {
+		// Unreachable through stackOf, the only constructor of a slot, which reads the
+		// registry to build one. Checked anyway because the spawn happens after the stack has
+		// left the pack, where an unregistered item would be an item that stopped existing.
+		return fmt.Errorf("item %d is not registered", uint16(stack.item))
+	}
+	return nil
 }

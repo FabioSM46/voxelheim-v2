@@ -527,6 +527,44 @@ than as a special case of the inventory.
   rather than a change to the world — persisting it would also mean deciding what a drop's
   five-minute lifetime means across a server that was off for a day.
 
+### A player can ask for one, and that is the fourth reason a drop exists
+
+`Player.DropItem` in `drop.go` answers a `DropItemRequest`: one slot index on the wire, and
+the whole of it decided here. It is the first caller of `spawnDrop` that answers a *request*
+rather than something that happened to the world, which is why it is the only one that has
+to decide whether the drop may happen at all.
+
+- **The wire carries a slot and nothing else, and both absences are the safety.** No count,
+  because a client that could name one would be stating what leaves its own pack; no
+  position, because one would let it put an item down anywhere in the world. The stack is
+  whatever the slot holds, and it lands at `voxelAt(p.pos)` — the cell the server says the
+  player's feet are in, the two steps a kill's loot already takes from the creature.
+- **Two phases split by the lock, which is `RemoveStructure`'s shape.** `releaseSlot` takes
+  `Sim.mu`, checks liveness, takes the inventory with `TryLock`, reads the slot, empties it
+  and returns the state; `DropItem` then spawns outside that lock, because `spawnDrop` takes
+  it. Nothing is lost in the gap: `spawnDrop` refuses exactly a zero count and an
+  unregistered item, and `releaseSlot` has already refused both before it emptied anything.
+- **A slot that wears out is refused, and the reason is that a drop cannot carry wear.**
+  `ItemDropState` is a struct and can never grow a third field; `itemDrop` mirrors it because
+  nothing has ever needed more — every block yield, loot roll and structure bundle is
+  wearless by construction. A pack is the first place a *worn* thing could reach the ground,
+  and the round trip would launder it: `Player.collect` inserts through `stackOf`, which
+  reads the maximum out of the registry, so a blade let go of at 12 durability would be
+  walked back over at 200. That is a repair granted by asking. Teaching the drop entity to
+  carry wear reaches `collect` and the insertion rule — a change to pickup, and a decision of
+  its own — so `dropAllowed` stands until then and is the one thing deleted when it lands.
+- **A player standing on what they put down picks it straight back up**, half a second later,
+  and that is the ordinary pickup rule rather than an oversight. The issue asked for a drop
+  indistinguishable from one the world produced, and `dropPickupDelayTicks` belongs to the
+  drop rather than to who spawned it — the same thing already happens to a block broken at
+  your own feet. So dropping is "put it down and step away", and
+  `TestADroppedStackIsCollectedBackByAPlayerWhoStaysOnIt` is what says that was chosen rather
+  than missed. Making it otherwise needs a per-drop delay or some velocity.
+- **`RefusedAction.DropItem` exists on the wire and nothing sends it**, exactly like
+  `MineBlock`, `EditBlock`, `Craft` and `Repair`. It has a member where a removal deliberately
+  does not, and the contrast is the rule: every question a refused drop could answer is about
+  the asking player's own pack, which they already hold a complete `InventoryState` of.
+
 ## Structures, and the entity that does not move
 
 A tent, a forge and a campfire are the third entity kind, and the first one the tick does

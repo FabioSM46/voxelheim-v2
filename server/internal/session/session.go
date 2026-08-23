@@ -1188,6 +1188,38 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		log.Debug("repair applied", "kit_slot", request.KitSlot, "target_slot", request.TargetSlot)
 		return nil
 
+	case vnet.PayloadDropItemRequest:
+		if player == nil || msg.DropItem == nil {
+			// Unreachable for the reason the cases above are, and stated for the same one:
+			// the alternative to a log line is a nil dereference in the goroutine holding a
+			// socket.
+			log.Debug("drop arrived with no player to attribute it to; discarding")
+			return nil
+		}
+
+		request := *msg.DropItem
+		state, dErr := player.DropItem(request)
+		if dErr != nil {
+			// Refusal is silence plus a debug line, exactly as a refused repair is: a pack
+			// that did not change and a ground with nothing new on it.
+			log.Debug("refusing drop",
+				"reason", dErr.Error(),
+				"slot", request.Slot,
+				"client_tick", request.ClientTick,
+			)
+			return nil
+		}
+
+		// Unlike a snapshot, an inventory state is not superseded on the next tick. Use the
+		// blocking session send so a full queue cannot leave the client still holding a stack
+		// that is now on the ground. The drop needs no frame of its own — it is an entity,
+		// and the next snapshot carries it like every other one.
+		if sErr := send(protocol.EncodeInventoryState(state)); sErr != nil {
+			return fmt.Errorf("session: send inventory after drop: %w", sErr)
+		}
+		log.Debug("drop applied", "slot", request.Slot)
+		return nil
+
 	case vnet.PayloadClientHello:
 		return fmt.Errorf("session: %w: second %s on an admitted session", protocol.ErrMalformed, msg.Kind)
 	default:
