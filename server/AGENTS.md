@@ -736,6 +736,37 @@ parts of it were already decided by the registry and by the slot invariants abov
   arithmetic are one decision, and splitting them leaves a window in which a player killed
   between the two still spends a stone.
 
+## What a death costs, and the one question that decides it
+
+`applyDeathPenaltyLocked` in `internal/game/inventory.go` is the whole of it, and death is
+the whole of wear: nothing in this game wears out from being used, so this penalty is what
+durability means.
+
+- **It reaches what the player has *on them*, and `carriedOnPerson` is the one answer to
+  which slots those are.** The pack behind them is untouched, so a spare blade stowed away
+  outlives the death that spent the one in hand. Today the answer is the hotbar —
+  `protocol.HotbarSlots` is the *leading* subset of the inventory, so a slot's own index is
+  the whole of it and the server needs nothing from the client to compute it.
+- **A function rather than a `slot < protocol.HotbarSlots` inline in the loop**, for the
+  reason `meleeDamage` is a registry field rather than a list of item ids in the combat
+  path. Worn armour is the next thing that will be on a player, and it joins this rule by
+  widening that one answer — a second comparison elsewhere is a second answer that can
+  disagree, and the disagreement is a death that costs two different things.
+- **"What is on the player" was never the selected slot, and an earlier draft of #199 read
+  it that way.** There is no selection in `internal/game` and none on the wire: a slot
+  reaches this server only inside a request that names one. That draft concluded
+  `PlayerInput` would have to carry it. It does not — the range is a server constant the
+  server already holds and already sends in the welcome, so the change was a condition
+  inside a loop rather than a field on a message.
+- **The arithmetic did not move.** `wornByDeath` is still `floor(current * 4/5)`, still
+  integer for the reason `deathDurabilityKept` records, still one pass under one lock so no
+  snapshot can show half a player penalised. What changed is which slots the loop reaches.
+- **An empty hotbar is a normal death**, not a special case: the penalty finds nothing on
+  the player to spend and reports no change, which is the same answer a pack of worn-out
+  blades already gave. `chargeDeathPenaltyLocked` still marks it charged either way — see
+  the one-shot's own note, where "it ran" and "something changed" are deliberately
+  different questions.
+
 ## The world's clock, and the one predicate that reads it
 
 Everything about it lives in `internal/game/clock.go` and the three constants beside
