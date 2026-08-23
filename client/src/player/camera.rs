@@ -40,8 +40,8 @@
 //!   it rests there until the server respawns the player. Nothing about the fall is
 //!   reversible from here; the respawn is what ends it, and the respawn is the server's.
 //! - **Third person: the view does not move at all.** The camera is an observer rather
-//!   than an eye, and what falls is the *character* — `super::collapse_the_local_body` tips
-//!   the rig over on the same clock this resource holds. Tipping the camera as well would
+//!   than an eye, and what falls is the *character* — `super::collapse_bodies` tips every
+//!   rig the server names dead, this session's included. Tipping the camera as well would
 //!   be tipping the thing that is watching, which is the one view where that is nonsense:
 //!   the player is looking at their own body going down, and the camera's job is to keep
 //!   it in frame. The boom, the orbit and the pitch are all untouched, so it does.
@@ -52,11 +52,11 @@
 //!   that was not already closed by [`super::SelfVitals::dead`], and a view swap is a
 //!   thing a corpse does not do.
 //!
-//! **None of it decides anything.** The fall follows [`super::SelfVitals::dead`], which is
-//! the server's `LifeState` and nothing else; a client that skipped the whole animation
-//! would be dead for the same length of time, respawn at the same moment and see the same
-//! world, because the only thing the server is told is that this player's controls went
-//! quiet — which they do whether the view fell or not.
+//! **None of it decides anything.** Every fall follows `EntitySnapshot.dead_players`, the
+//! server's complete answer for the bodies in view; [`super::SelfVitals::dead`] only closes
+//! controls and the view toggle for this session's own player. A client that skipped the
+//! whole animation would be dead for the same length of time, respawn at the same moment
+//! and see the same world, because no pose is ever sent back.
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::system::SystemParam;
@@ -90,7 +90,6 @@ impl Plugin for PlayerCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewMode>()
             .init_resource::<Orbit>()
-            .init_resource::<DeathFall>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -195,7 +194,6 @@ struct Aim<'w> {
     look: Res<'w, LookState>,
     orbit: Res<'w, Orbit>,
     view: Res<'w, ViewMode>,
-    fall: Res<'w, DeathFall>,
 }
 
 /// Keeps the camera at the player's eyes, looking where the player is looking.
@@ -208,10 +206,14 @@ fn follow_the_player(
     aim: Aim<'_>,
     session: Option<Res<Session>>,
     store: Option<Res<ChunkStore>>,
-    player: Query<&Transform, With<LocalPlayer>>,
+    player: Query<(&Transform, &DeathFall), With<LocalPlayer>>,
     mut cameras: Query<&mut Transform, (With<WorldCamera>, Without<LocalPlayer>)>,
 ) {
-    let Some(feet) = player.iter().next().map(|transform| transform.translation) else {
+    let Some((feet, fallen)) = player
+        .iter()
+        .next()
+        .map(|(transform, fall)| (transform.translation, fall.fallen()))
+    else {
         // No snapshot has named this session's own entity yet. The spawn placement above
         // is what the player is looking at until one does.
         return;
@@ -224,25 +226,18 @@ fn follow_the_player(
         .as_deref()
         .zip(store.as_deref())
         .map(|(session, store)| (store, usize::from(session.0.chunk_size)));
-    let placed = camera_placement(
-        feet,
-        *aim.look,
-        *aim.orbit,
-        *aim.view,
-        aim.fall.fallen(),
-        |voxel| {
-            solid.is_some_and(|(store, size)| {
-                store.solid_at(
-                    BlockCoord {
-                        x: voxel.x,
-                        y: voxel.y,
-                        z: voxel.z,
-                    },
-                    size,
-                )
-            })
-        },
-    );
+    let placed = camera_placement(feet, *aim.look, *aim.orbit, *aim.view, fallen, |voxel| {
+        solid.is_some_and(|(store, size)| {
+            store.solid_at(
+                BlockCoord {
+                    x: voxel.x,
+                    y: voxel.y,
+                    z: voxel.z,
+                },
+                size,
+            )
+        })
+    });
     for mut transform in &mut cameras {
         *transform = placed;
     }
@@ -394,57 +389,50 @@ fn settle_the_orbit(time: Res<Time>, mut orbit: ResMut<Orbit>) {
 // Going over
 // ---------------------------------------------------------------------------
 
-/// How long this player has been lying where they died, or `None` while the server says
-/// they are alive.
+/// How long one player body has been lying where it died, or `None` while the server says
+/// it is alive.
 ///
-/// **It exists exactly while [`SelfVitals::dead`] is true**, and it is recomputed from that
-/// every frame rather than started by an edge this side detected — the same shape a mob's
-/// fall has, and for the same reason: a transition that has to be *noticed* is a transition
-/// that can be missed. A respawn clears it in one assignment, so nothing has to animate the
-/// view back upright; the server has already moved the player somewhere else.
+/// One component per body, driven by `EntitySnapshot.dead_players` in
+/// `super::collapse_bodies`. The local body's component also drives the first-person camera,
+/// so the body seen in third person and the eye seen in first person cannot run on two clocks.
+/// A respawn clears it in one assignment, so nothing has to animate the view back upright;
+/// the server has already moved the player somewhere else.
 ///
 /// Nothing reads it as a fact. It feeds a pose and a rig rotation and reaches no request,
 /// no snapshot and no decision.
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
-pub struct DeathFall(Option<Duration>);
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq)]
+pub(super) struct DeathFall(Option<Duration>);
 
 impl DeathFall {
+    /// The pose of a body entering view for the first time.
+    ///
+    /// An already-dead body starts on the ground rather than replaying an event the viewer
+    /// was not present for. A living body starts upright. Later transitions are advanced by
+    /// [`Self::advance`].
+    pub(super) fn newly_seen(dead: bool) -> Self {
+        Self(dead.then_some(DEATH_FALL_TIME))
+    }
+
+    /// Advances or clears the presentation according to the newest server snapshot.
+    pub(super) fn advance(&mut self, dead: bool, delta: Duration) {
+        self.0 = if dead {
+            Some(self.0.unwrap_or(Duration::ZERO) + delta)
+        } else {
+            None
+        };
+    }
+
     /// How far over the view has gone, from nought to one.
     ///
     /// Squared, so it accelerates, and clamped, so it *ends* — the same curve a mob's fall
     /// uses, which is deliberate: a player watching their own body go down in third person
     /// is watching two falls, and two curves would be visible as one lagging the other.
-    pub fn fallen(self) -> f32 {
+    pub(super) fn fallen(self) -> f32 {
         let Some(elapsed) = self.0 else {
             return 0.0;
         };
         let progress = (elapsed.as_secs_f32() / DEATH_FALL_TIME.as_secs_f32()).clamp(0.0, 1.0);
         progress * progress
-    }
-}
-
-/// Advances the fall while the server says this player is dead, and forgets it otherwise.
-///
-/// Reads `SelfVitals` and writes only on a change, because `ResMut` marks a resource
-/// changed on every deref and this runs every frame for the rest of the session.
-///
-/// **Registered by `PlayerPlugin` rather than by this plugin, and inside the
-/// `ApplySnapshots` chain**, which is not a filing decision. Two systems in two different
-/// modules read what it writes — [`follow_the_player`] here and
-/// `super::collapse_the_local_body` there — and the second of those runs inside that set,
-/// so a `fall_over` sitting in this plugin's own chain would be *after* one of its readers
-/// and before the other. That is not hypothetical: it left the body a frame behind the
-/// camera in both directions, which showed up as a corpse still on its back for one frame
-/// after the respawn had already stood the view up. Chained after `ingest_snapshots`, which
-/// is what writes the `SelfVitals` it reads, it is ahead of both.
-pub(super) fn fall_over(time: Res<Time>, vitals: Res<SelfVitals>, mut fall: ResMut<DeathFall>) {
-    let next = if vitals.dead() {
-        DeathFall(Some(fall.0.unwrap_or(Duration::ZERO) + time.delta()))
-    } else {
-        DeathFall(None)
-    };
-    if *fall != next {
-        *fall = next;
     }
 }
 
@@ -745,10 +733,10 @@ mod tests {
         );
     }
 
-    /// The fall exists exactly while the server says the player is dead, and a respawn
-    /// clears it in one assignment rather than animating anything back.
+    /// The curve exists exactly while the newest server state says the body is dead, and a
+    /// respawn clears it in one assignment rather than animating anything back.
     #[test]
-    fn the_fall_follows_the_servers_life_state_and_nothing_else() {
+    fn the_fall_curve_stops_and_clears_with_server_state() {
         assert_eq!(DeathFall::default().fallen(), 0.0);
         assert_eq!(DeathFall(Some(Duration::ZERO)).fallen(), 0.0);
         assert_eq!(DeathFall(Some(DEATH_FALL_TIME)).fallen(), 1.0);
@@ -764,6 +752,18 @@ mod tests {
         assert!(
             halfway < 0.5,
             "the fall was half over at half the time ({halfway}), so it does not accelerate"
+        );
+
+        let mut fall = DeathFall::default();
+        fall.advance(true, DEATH_FALL_TIME);
+        assert_eq!(fall.fallen(), 1.0);
+        fall.advance(false, Duration::ZERO);
+        assert_eq!(fall, DeathFall::default(), "a respawn left the fall behind");
+
+        assert_eq!(
+            DeathFall::newly_seen(true).fallen(),
+            1.0,
+            "a body first seen dead replayed its fall from standing"
         );
     }
 

@@ -1706,21 +1706,21 @@ Recorded here so the next reader does not mistake them for oversights:
   inherited.** In **first person** the camera is the eye, so the eye goes over: the pitch
   swings up to `MAX_PITCH` and the eye sinks to `DEATH_EYE_HEIGHT`, and it rests on the sky
   until the server respawns the player. In **third person** the camera does not move at all —
-  it is an observer, and what falls is the character, tipped by `collapse_the_local_body` on
-  the same `DeathFall` curve. A camera that fell here would take the body out of frame at
-  exactly the moment the player is watching it go down, which is the case that view is most
-  worth having for. **The F5 toggle is refused while dead**, in both directions: the two views
-  resolve a death into two different things, and flipping mid-death would either stand a
-  fallen camera up or drop an upright one on its back. It was also the last playing-mode key
-  `SelfVitals::dead` did not already close.
-- **None of that decides anything, and the drop is the proof.** The fall follows the server's
-  `LifeState` and the mob fall follows `MobAction.Dying`; a client that drew neither would be
-  dead for the same three seconds, respawn at the same moment, and pick up a draugr's bones at
-  the same moment, because the wait before a kill's loot exists is `MobDeathDuration` on the
-  server and nothing here is asked about it. There is deliberately **no mirror of that number
-  on this side**: a body's fall is a curve that finishes, and what ends a death is the server
-  no longer sending the creature, which despawns it through the branch one that walked out of
-  view takes.
+  it is an observer, and what falls is the character, tipped by `collapse_bodies` on the
+  same `DeathFall` curve every player rig carries. A camera that fell here would take the body
+  out of frame at exactly the moment the player is watching it go down, which is the case that
+  view is most worth having for. **The F5 toggle is refused while dead**, in both directions:
+  the two views resolve a death into two different things, and flipping mid-death would either
+  stand a fallen camera up or drop an upright one on its back. It was also the last playing-mode
+  key `SelfVitals::dead` did not already close.
+- **None of that decides anything, and the drop is the proof.** Player falls follow the
+  server's complete `EntitySnapshot.dead_players` list and mob falls follow `MobAction.Dying`;
+  a client that drew neither would be dead for the same three seconds, respawn at the same
+  moment, and pick up a draugr's bones at the same moment, because the wait before a kill's loot
+  exists is `MobDeathDuration` on the server and nothing here is asked about it. There is
+  deliberately **no mirror of that number on this side**: a body's fall is a curve that
+  finishes, and what ends a death is the server no longer sending the creature, which despawns
+  it through the branch one that walked out of view takes.
 - **A draugr topples backwards and a vargr slumps sideways with its legs splaying**, which is
   the one thing about a death that differs by species and the only place `player/mobs.rs`
   matches on the kind to decide a pose. Both pivot at the feet, because every mesh in that
@@ -1733,9 +1733,9 @@ Recorded here so the next reader does not mistake them for oversights:
   why the camera sits behind a turning character with nothing chasing anything, and why releasing
   the key is an animation back to zero rather than back to a remembered angle. Nothing about the
   view crosses the wire and the server cannot tell which one a client is in.
-- **Other players are the rig and nothing else.** No animation of any kind, no name plate, no
-  equipment on the body, no faces beyond the two eye boxes, and no texture anywhere — it is coloured
-  geometry. Each of those is its own issue.
+- **Other players are the rig and one server-driven death pose.** There is no movement or combat
+  animation, no name plate, no equipment on the body, no faces beyond the two eye boxes, and no
+  texture anywhere — it is coloured geometry. Each of those is its own issue.
 - **An entity can be drawn before it has been described, and is never re-spawned when it is.** The
   appearance stream and the snapshot stream are not ordered against each other, so a body whose
   `PlayerAppearance` has not landed wears `codec::PLACEHOLDER_APPEARANCE` — the neutral grey
@@ -1767,17 +1767,6 @@ Recorded here so the next reader does not mistake them for oversights:
   probe, and the screen says as much rather than implying reachability it did not measure. The
   list is read when the sign-in completes and when the retry is pressed — there is no automatic
   refresh, so a server that comes up while the panel is open appears on the next press.
-- **A remote player who dies stands there — #224.** `PlayerVitals` is per-recipient by
-  contract, carried inside `EntitySnapshot` as `self_vitals`, so this client is told its
-  *own* life state and nobody else's. `collapse_the_local_body` therefore tips exactly one
-  body, and the player beside it keeps standing after it is killed. **Mobs do not have this
-  problem, and the asymmetry is the useful part**: `MobState.action` is in every snapshot for
-  every creature, so a draugr's death is a fact about the world while a player's is a fact
-  about the recipient. Closing it means a life state beside every entity — `EntityState` is a
-  struct and can never gain a field, so it is either a table alongside it in the shape
-  `MobState` already took, or a second per-entity vector — which is a wire change with a
-  version bump and a choice between two shapes. That is #224 and not a widening of the issue
-  that found it.
 - **Interpolation holds the last position for ever when a server goes quiet.** There is no timeout
   that fades an entity out, and none that says "this session is stale": a quiet server is a
   legitimate state, and the read timeout in `session.rs` is a poll interval rather than a session

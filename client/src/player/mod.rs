@@ -207,15 +207,6 @@ impl Plugin for PlayerPlugin {
                         .chain(),
                     (
                         ingest_snapshots,
-                        // **Immediately after the vitals it reads, and ahead of both things
-                        // that read what it writes.** `camera::fall_over` lives in the
-                        // camera module and is registered here for the reason the mob and
-                        // drop systems below are: `collapse_the_local_body` is inside this
-                        // chain and `camera::follow_the_player` is ordered after the whole
-                        // set, so a fall advanced in the camera's own chain would be after
-                        // one reader and before the other — which showed as a body still on
-                        // its back for a frame after the respawn had stood the view up.
-                        camera::fall_over,
                         // Before the bodies, so an entity whose appearance and first
                         // snapshot share a frame is dressed on that frame.
                         ingest_appearances,
@@ -244,7 +235,12 @@ impl Plugin for PlayerPlugin {
                         // from the snapshot, and this composes a rotation onto it; the
                         // other order would have the snapshot overwrite the pose every
                         // frame and nothing would ever visibly fall over.
-                        collapse_the_local_body,
+                        // **Inside this chain, after the snapshot and the body spawn it
+                        // drives, and before the camera reads the local body's fall.** An
+                        // independent system has already left the body a frame behind the
+                        // camera on respawn once; the declared order is what makes every
+                        // viewer see one answer on one frame.
+                        collapse_bodies,
                         drops::animate,
                         mobs::animate,
                         structures::animate,
@@ -1003,6 +999,7 @@ fn apply_snapshots(
             session.0.entity_id,
             worn,
             placement(state),
+            buffer.player_is_dead(*entity_id),
         );
     }
 
@@ -1187,10 +1184,18 @@ fn spawn_body(
     local_entity_id: u64,
     worn: Appearance,
     placed: Transform,
+    dead: bool,
 ) {
     let local = entity_id == local_entity_id;
     let parts = wardrobe.outfit(worn);
-    let owner = commands.spawn((Body(entity_id), Worn(worn), placed)).id();
+    let owner = commands
+        .spawn((
+            Body(entity_id),
+            Worn(worn),
+            camera::DeathFall::newly_seen(dead),
+            placed,
+        ))
+        .id();
     if local {
         // Hidden until `show_the_local_body` says otherwise, which is the honest starting
         // value: the client starts in first person.
@@ -1210,35 +1215,34 @@ fn spawn_body(
     });
 }
 
-/// Tips this session's own body over while the server says the player is dead.
+/// Tips every body the newest snapshot says is dead.
 ///
-/// **The half of a death that only third person can see**, and the reason the camera does
-/// not fall in that view: the player is watching their own character go down, so something
-/// has to go down. First person hides this body entirely, so the composition below is drawn
-/// by nobody and costs one quaternion multiply.
+/// `EntitySnapshot.dead_players` is the only input. Health, missing entities and local
+/// vitals decide nothing here: the server names a body dead, this presents the existing
+/// fall, and the same body stands upright on the first snapshot that stops naming it.
 ///
-/// **It follows `SelfVitals`, which is the server's `LifeState`**, and it decides nothing —
-/// the same rule `player/mobs.rs` states for a draugr. The curve is [`DeathFall`]'s, shared
-/// with the camera rather than copied, so the two halves of one death cannot drift apart.
+/// **One code path for the viewer and everybody beside them.** The local body carries the
+/// same [`camera::DeathFall`] component every remote body does, and the first-person camera
+/// reads that component after this set. Its eye and its third-person rig therefore share one
+/// clock rather than two implementations of the same fall.
 ///
 /// **Composed onto the snapshot's transform rather than stored**, which is what makes it
 /// self-clearing: `apply_snapshots` rewrites the whole transform from the newest snapshot
 /// every frame, so a respawn puts the body upright with nothing here having to animate it
-/// back. Written unconditionally for the same reason `leg_splay` is — the rotation is the
-/// identity at rest, and a branch would be a second place deciding whether a death is
-/// happening.
-///
-/// **Only this session's own body**, because only this session's own life state is on the
-/// wire. `PlayerVitals` is per-recipient by contract, so a client cannot know that the
-/// player standing next to it has died — see the known gap in `client/AGENTS.md`. A remote
-/// player who dies therefore stands there, exactly as they did before this issue.
-fn collapse_the_local_body(
-    fall: Res<camera::DeathFall>,
-    mut bodies: Query<&mut Transform, With<LocalPlayer>>,
+/// back. A body first seen already dead starts at the end of the curve — the state is a
+/// fact the viewer arrived after, not an event to replay from standing.
+fn collapse_bodies(
+    time: Res<Time>,
+    buffer: Res<SnapshotBuffer>,
+    mut bodies: Query<(&Body, &mut camera::DeathFall, &mut Transform)>,
 ) {
-    let over = Quat::from_rotation_x(DEATH_BODY_PITCH * fall.fallen());
-    for mut transform in &mut bodies {
-        transform.rotation *= over;
+    for (body, mut fall, mut transform) in &mut bodies {
+        let mut next = *fall;
+        next.advance(buffer.player_is_dead(body.0), time.delta());
+        if *fall != next {
+            *fall = next;
+        }
+        transform.rotation *= Quat::from_rotation_x(DEATH_BODY_PITCH * next.fallen());
     }
 }
 
