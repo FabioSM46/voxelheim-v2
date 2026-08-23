@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::KeyCode;
 
-use super::{Bindings, Control, Settings, key_from_name, key_name};
+use super::{Bindings, Control, Corner, Settings, key_from_name, key_name};
 
 /// The environment variable naming the XDG data directory.
 ///
@@ -180,6 +180,17 @@ fn render(settings: &Settings) -> String {
     // silently, and only for a value that landed a fraction away from a round number.
     // `every_setting_survives_a_restart` is what caught it.
     out.push_str(&format!("look-sensitivity {}\n", settings.look_sensitivity));
+    out.push_str(&format!("render-distance {}\n", settings.render_distance));
+    out.push_str(&format!("field-of-view {}\n", settings.field_of_view));
+    out.push_str(&format!("brightness {}\n", settings.brightness));
+    out.push_str(&format!("fog-start {}\n", settings.fog_start));
+    out.push_str(&format!("frame-cap {}\n", settings.frame_cap));
+    out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
+    out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
+    out.push_str(&format!(
+        "readout-corner {}\n",
+        settings.readout_corner.name()
+    ));
     for control in super::CONTROLS {
         // Unreachable: `Bindings::rebind` refuses a key the table does not name, and
         // every default is in it — `every_default_binding_is_a_key_this_screen_will_bind`
@@ -189,6 +200,11 @@ fn render(settings: &Settings) -> String {
         out.push_str(&format!("bind {} {name}\n", control.name()));
     }
     out
+}
+
+/// How a flag is spelled in the file.
+const fn on_or_off(flag: bool) -> &'static str {
+    if flag { "on" } else { "off" }
 }
 
 /// The settings `text` describes, plus a line for the log for everything ignored.
@@ -225,6 +241,38 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
                 Ok(parsed) if parsed.is_finite() => settings.look_sensitivity = parsed,
                 _ => refuse("a mouse sensitivity"),
             },
+            "render-distance" => match value.parse::<u8>() {
+                Ok(parsed) => settings.render_distance = parsed,
+                Err(_) => refuse("a render distance"),
+            },
+            "field-of-view" => match value.parse::<f32>() {
+                Ok(parsed) if parsed.is_finite() => settings.field_of_view = parsed,
+                _ => refuse("a field of view"),
+            },
+            "brightness" => match value.parse::<f32>() {
+                Ok(parsed) if parsed.is_finite() => settings.brightness = parsed,
+                _ => refuse("a brightness"),
+            },
+            "fog-start" => match value.parse::<f32>() {
+                Ok(parsed) if parsed.is_finite() => settings.fog_start = parsed,
+                _ => refuse("a fog start"),
+            },
+            "frame-cap" => match value.parse::<u16>() {
+                Ok(parsed) => settings.frame_cap = parsed,
+                Err(_) => refuse("a frame cap"),
+            },
+            "vsync" => match flag(value) {
+                Some(parsed) => settings.vsync = parsed,
+                None => refuse("on or off"),
+            },
+            "readout" => match flag(value) {
+                Some(parsed) => settings.readout_shown = parsed,
+                None => refuse("on or off"),
+            },
+            "readout-corner" => match Corner::from_name(value) {
+                Some(parsed) => settings.readout_corner = parsed,
+                None => refuse("a corner"),
+            },
             "bind" => match (Control::from_name(value), extra.and_then(key_from_name)) {
                 (Some(control), Some(bound)) => named.push((control, bound)),
                 _ => refuse("a control and a key"),
@@ -251,6 +299,15 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
     // settings module promises its readers.
     settings.clamp();
     (settings, complaints)
+}
+
+/// The flag `value` spells, if it spells one.
+fn flag(value: &str) -> Option<bool> {
+    match value {
+        "on" | "true" | "yes" => Some(true),
+        "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// Replaces `path` with `bytes`, or leaves it exactly as it was.
@@ -341,6 +398,14 @@ mod tests {
     fn every_field_moved() -> Settings {
         let mut settings = Settings::default();
         settings.adjust(Knob::LookSensitivity, 4);
+        settings.adjust(Knob::RenderDistance, -3);
+        settings.adjust(Knob::FieldOfView, 3);
+        settings.adjust(Knob::Brightness, -2);
+        settings.adjust(Knob::FogStart, 2);
+        settings.adjust(Knob::FrameCap, 3);
+        settings.toggle_vsync();
+        settings.toggle_readout();
+        settings.cycle_readout_corner();
         for (control, key) in [
             (Control::Forward, KeyCode::KeyT),
             (Control::Menu, KeyCode::KeyG),
@@ -437,6 +502,37 @@ mod tests {
                 settings.look_sensitivity()
             );
         }
+
+        fs::write(
+            &path,
+            "render-distance 255\nfield-of-view -5\nbrightness 100\nfog-start 9\n\
+             frame-cap 5000\n",
+        )
+        .expect("a scratch file");
+        let (settings, _) = load(&path);
+        assert_eq!(
+            settings.render_distance(),
+            super::super::MAX_RENDER_DISTANCE
+        );
+        assert!(settings.field_of_view() >= super::super::MIN_FIELD_OF_VIEW);
+        assert!(settings.brightness() <= super::super::MAX_BRIGHTNESS);
+        assert!(settings.fog_start() <= super::super::MAX_FOG_START);
+        assert!(settings.frame_cap() <= super::super::MAX_FRAME_CAP);
+    }
+
+    /// Zero is "uncapped" rather than the bottom of the range, so the clamp has to leave it
+    /// alone — a file that says `frame-cap 0` describes a client that does not pace itself,
+    /// not one asking for thirty frames a second.
+    #[test]
+    fn an_uncapped_frame_rate_survives_the_clamp_the_others_go_through() {
+        let scratch = Scratch::new("settings-uncapped");
+        let path = scratch.join("settings");
+        fs::write(&path, "frame-cap 0\n").expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(settings.frame_cap(), 0);
+        assert_eq!(settings.reading(Knob::FrameCap), "uncapped");
     }
 
     /// A file cannot smuggle in the state the refusal rule exists to prevent, and the

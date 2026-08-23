@@ -57,11 +57,11 @@ use bevy::prelude::*;
 pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
     ChunkCoord, CraftRequest, DropItemRequest, EditAction, EntityState, Facing, HairModel,
-    InventoryMoveRequest, InventoryStack, InventoryState, ItemDropState, LifeState, MineProgress,
-    MineRequest, MobAction, MobKind, MobState, PLACEHOLDER_APPEARANCE, PlaceStructureRequest,
-    PlayerAppearance, PlayerInput, PlayerVitals, RecipeId, RefusalReason, RefusedAction, Reject,
-    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
-    WorldClock, WorldUpdate,
+    InventoryMoveRequest, InventoryStack, InventoryState, ItemDropState, LifeState,
+    MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction, MobKind, MobState,
+    PLACEHOLDER_APPEARANCE, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
+    RecipeId, RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest,
+    SessionParams, Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the

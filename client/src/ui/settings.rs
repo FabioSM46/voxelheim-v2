@@ -83,6 +83,9 @@ struct SettingsRoot;
 enum SettingsAction {
     /// Move one numeric setting by the given number of its own steps.
     Nudge(Knob, i32),
+    ToggleVsync,
+    ToggleReadout,
+    CycleCorner,
     /// Wait for the next key press and give it to this control.
     Capture(Control),
     /// Back to the pause menu.
@@ -93,6 +96,9 @@ enum SettingsAction {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum Reading {
     Knob(Knob),
+    Vsync,
+    Readout,
+    ReadoutCorner,
     Binding(Control),
     /// The line under the panel.
     Notice,
@@ -197,8 +203,9 @@ fn spawn_settings_screen(mut commands: Commands) {
         });
 }
 
-/// Every row on the panel: the numbers, each between a `-` and a `+`, then one button per
-/// rebindable control whose face is the key it currently answers to.
+/// Every row on the panel: the numbers, each between a `-` and a `+`, then the two flags and
+/// the corner, then one button per rebindable control whose face is the key it currently
+/// answers to.
 fn spawn_rows(column: &mut ChildSpawnerCommands<'_>) {
     for knob in KNOBS {
         spawn_row(column, knob.label(), |controls| {
@@ -214,6 +221,28 @@ fn spawn_rows(column: &mut ChildSpawnerCommands<'_>) {
                 SettingsAction::Nudge(knob, 1),
                 Val::Px(STEP_BUTTON),
                 Face::Fixed("+"),
+            );
+        });
+    }
+    for (label, action, reading) in [
+        ("Vertical sync", SettingsAction::ToggleVsync, Reading::Vsync),
+        (
+            "FPS readout",
+            SettingsAction::ToggleReadout,
+            Reading::Readout,
+        ),
+        (
+            "Readout corner",
+            SettingsAction::CycleCorner,
+            Reading::ReadoutCorner,
+        ),
+    ] {
+        spawn_row(column, label, |controls| {
+            spawn_button(
+                controls,
+                action,
+                Val::Px(STEP_BUTTON * 4.0),
+                Face::Value(reading),
             );
         });
     }
@@ -382,6 +411,9 @@ fn settings_actions(
         }
         match *action {
             SettingsAction::Nudge(knob, steps) => settings.adjust(knob, steps),
+            SettingsAction::ToggleVsync => settings.toggle_vsync(),
+            SettingsAction::ToggleReadout => settings.toggle_readout(),
+            SettingsAction::CycleCorner => settings.cycle_readout_corner(),
             SettingsAction::Capture(control) => {
                 // A second press on the row that is already waiting takes the request
                 // back. It is the cancel `Escape` used to be, moved onto the mouse that
@@ -477,12 +509,20 @@ fn refresh_readings(
 fn describe(settings: &Settings, screen: &SettingsScreen, reading: Reading) -> String {
     match reading {
         Reading::Knob(knob) => settings.reading(knob),
+        Reading::Vsync => on_or_off(settings.vsync()),
+        Reading::Readout => on_or_off(settings.readout_shown()),
+        Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
         Reading::Binding(control) if screen.capturing == Some(control) => "...".to_owned(),
         Reading::Binding(control) => key_name(settings.bindings().key(control))
             .unwrap_or("unbound")
             .to_owned(),
         Reading::Notice => screen.notice.clone(),
     }
+}
+
+/// How a flag reads on a button face.
+fn on_or_off(flag: bool) -> String {
+    if flag { "on" } else { "off" }.to_owned()
 }
 
 #[cfg(test)]
@@ -731,6 +771,33 @@ mod tests {
         press(&mut app, SettingsAction::Back);
         assert!(!app.world().resource::<SettingsScreen>().is_open());
         assert_eq!(*app.world().resource::<Settings>(), changed);
+    }
+
+    /// The two flags and the corner are reachable from the screen, and each reads back what
+    /// pressing it did.
+    #[test]
+    fn the_graphics_flags_read_back_what_pressing_them_did() {
+        let mut app = screen_app();
+        assert_eq!(reading_of(&mut app, Reading::Vsync), "on");
+        press(&mut app, SettingsAction::ToggleVsync);
+        assert_eq!(reading_of(&mut app, Reading::Vsync), "off");
+
+        assert_eq!(reading_of(&mut app, Reading::Readout), "off");
+        press(&mut app, SettingsAction::ToggleReadout);
+        assert_eq!(reading_of(&mut app, Reading::Readout), "on");
+
+        let first = reading_of(&mut app, Reading::ReadoutCorner);
+        press(&mut app, SettingsAction::CycleCorner);
+        let second = reading_of(&mut app, Reading::ReadoutCorner);
+        assert_ne!(first, second, "the corner did not move");
+        assert_eq!(
+            second,
+            app.world()
+                .resource::<Settings>()
+                .readout_corner()
+                .name()
+                .to_owned()
+        );
     }
 
     #[test]

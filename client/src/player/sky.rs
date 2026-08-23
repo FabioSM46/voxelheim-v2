@@ -52,6 +52,7 @@ use bevy::prelude::*;
 
 use super::camera::WorldCamera;
 use crate::net::{Session, WorldClock};
+use crate::settings::Settings;
 
 /// How long dusk and dawn take, in seconds of real time.
 ///
@@ -408,6 +409,7 @@ pub(super) fn drive_the_sky(
     >,
     mut commands: Commands,
     mut announced: Local<bool>,
+    settings: Option<Res<Settings>>,
 ) {
     let Some(session) = session else {
         return;
@@ -457,17 +459,41 @@ pub(super) fn drive_the_sky(
         }
     }
 
-    // How far the fog reaches is how far the server streams, not what hour it is, so only
-    // its colour follows the clock. `max(1.0)` keeps `start` strictly below `end` for a
-    // server that streams a single chunk, which would otherwise divide by zero in the
-    // shader.
-    let end = (f32::from(params.view_distance) * f32::from(params.chunk_size)).max(1.0);
-    let start = end * FOG_START_FRACTION;
+    // How far the fog reaches is a distance rather than an hour, so only its colour follows
+    // the clock.
+    //
+    // **Two numbers meet here and only one of them is a setting.** The player's render
+    // distance is the client's own choice — `crate::settings` says why, and never reads
+    // `ServerWelcome.view_distance` into it — and what the server streams is a *ceiling* on
+    // it, applied here at the moment of drawing rather than copied into the setting: fog that
+    // reached past the last chunk the server sent would put an edge of nothing where the
+    // horizon should be.
+    let (chosen_distance, fog_start, brightness_scale) = match settings.as_deref() {
+        Some(settings) => (
+            settings.render_distance(),
+            settings.fog_start(),
+            settings.brightness(),
+        ),
+        None => (params.view_distance, FOG_START_FRACTION, 1.0),
+    };
+    let (start, end) = fog_span(
+        chosen_distance,
+        params.view_distance,
+        params.chunk_size,
+        fog_start,
+    );
+    let ambient_brightness = light.ambient_brightness * brightness_scale;
 
     for (entity, mut camera, mut ambient, fog) in &mut cameras {
         if declared {
             camera.clear_color = ClearColorConfig::Custom(light.sky);
-            ambient.brightness = light.ambient_brightness;
+        }
+        // Outside the `declared` gate and guarded instead, because the brightness setting
+        // moves on a server with no clock too — and the guard is what keeps an undeclared sky
+        // from marking the component changed on every frame, which is the property the gate
+        // was there for.
+        if ambient.brightness != ambient_brightness {
+            ambient.brightness = ambient_brightness;
         }
         match fog {
             // Read through `Deref` and written only on a difference. `Mut` marks a
@@ -489,6 +515,24 @@ pub(super) fn drive_the_sky(
             }
         }
     }
+}
+
+/// Where the fog begins and where it is total, in blocks.
+///
+/// **The nearer of the two distances wins, and only one of them is a setting.** `chosen` is
+/// the client's own render distance — `crate::settings` owns it, persists it, and never takes
+/// it from a server — while `streamed` is `ServerWelcome.view_distance`, how far the server
+/// actually sends chunks. Fog that reached past the last chunk that arrived would draw an
+/// edge of nothing where the horizon belongs, so the server's number is a ceiling applied
+/// here, at the moment of drawing. It is never copied into the setting: turn the slider down
+/// on a generous server and the horizon comes in; turn it up on a stingy one and nothing
+/// moves, because there is nothing further out to show.
+///
+/// `max(1.0)` keeps `start` strictly below `end` for a server that streams a single chunk,
+/// which would otherwise divide by zero in the shader.
+fn fog_span(chosen: u8, streamed: u8, chunk_size: u16, fog_start: f32) -> (f32, f32) {
+    let end = (f32::from(chosen.min(streamed)) * f32::from(chunk_size)).max(1.0);
+    (end * fog_start, end)
 }
 
 /// Whether a falloff is already the linear fade this module would write.
@@ -524,6 +568,25 @@ mod tests {
 
     fn night_at(tick: f32) -> f32 {
         night_fraction(&clock(), tick, RAMP)
+    }
+
+    /// The client's render distance can bring the horizon in, and the server's can hold it
+    /// back — and the setting is never the server's number wearing a different name.
+    #[test]
+    fn the_fog_stops_at_the_nearer_of_the_two_distances() {
+        const CHUNK: u16 = 32;
+
+        // A player who wants less than the server sends gets less.
+        assert_eq!(fog_span(3, 8, CHUNK, 0.5), (48.0, 96.0));
+        // A player who wants more than the server sends gets what arrived, because there is
+        // nothing beyond it to draw.
+        assert_eq!(fog_span(16, 3, CHUNK, 0.5), (48.0, 96.0));
+        // And the fog control moves where the fade begins without moving the horizon.
+        assert_eq!(fog_span(4, 4, CHUNK, 0.25), (32.0, 128.0));
+        assert_eq!(fog_span(4, 4, CHUNK, 0.9), (115.2, 128.0));
+        // One chunk still leaves `start` strictly below `end`.
+        let (start, end) = fog_span(1, 1, 1, 0.5);
+        assert!(start < end, "{start} is not below {end}");
     }
 
     /// The acceptance criterion that matters most today, because it is the only path any

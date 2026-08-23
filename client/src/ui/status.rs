@@ -25,6 +25,7 @@ use crate::net::{
     ServerAddress, Session,
 };
 use crate::player::PlayerStats;
+use crate::settings::{Corner, Settings};
 use crate::world::MeshStats;
 
 /// Distance from the top-left corner, in logical pixels.
@@ -42,6 +43,22 @@ const THIRD_LINE: f32 = MARGIN + 48.0;
 
 /// Vertical offset of the transient notice, one row below the player line.
 const FOURTH_LINE: f32 = MARGIN + 72.0;
+
+/// Where the readout sits when it is in the **top-left** corner: one row below the notice.
+///
+/// The other three corners take [`MARGIN`] flat. This one cannot: the four debug lines own
+/// the top-left already, and a readout laid over them would be two sentences in one place.
+/// It is still the top-left corner in the sense the setting means — it is simply the first
+/// free row of it.
+const READOUT_LINE: f32 = MARGIN + 96.0;
+
+/// How much of each frame's measurement the frame-rate reading takes.
+///
+/// A tenth: enough that a single long frame does not make the number jump, little enough
+/// that a real change is on screen within a fifth of a second. The reading is a smoothed
+/// average and says so — an instantaneous frame rate is unreadable, because it changes
+/// faster than an eye can follow it.
+const FRAME_RATE_SMOOTHING: f32 = 0.1;
 
 /// How long a notice stays on screen.
 ///
@@ -62,7 +79,11 @@ pub struct StatusUiPlugin;
 
 impl Plugin for StatusUiPlugin {
     fn build(&self, app: &mut App) {
+        // The settings own whether the readout is drawn and where. Initialised here as well
+        // as by `SettingsScreenPlugin`, for the reason `Notice` is beside it: this plugin has
+        // to stand on its own, and its own tests build it that way.
         app.init_resource::<Notice>()
+            .init_resource::<Settings>()
             .add_systems(Startup, spawn_status_text)
             .add_systems(
                 Update,
@@ -71,6 +92,7 @@ impl Plugin for StatusUiPlugin {
                     refresh_world_text,
                     refresh_player_text,
                     refresh_notice_text,
+                    refresh_readout,
                 ),
             );
     }
@@ -92,6 +114,10 @@ struct PlayerText;
 /// Marks the transient notice line.
 #[derive(Component)]
 struct NoticeText;
+
+/// Marks the frame-rate readout.
+#[derive(Component)]
+struct ReadoutText;
 
 /// The transient sentence on screen, and when it goes away.
 ///
@@ -203,6 +229,123 @@ fn spawn_status_text(mut commands: Commands) {
             ..default()
         },
     ));
+
+    // Spawned hidden, because the readout is off until a player switches it on. The node
+    // exists either way so that switching it on is a visibility change rather than a spawn —
+    // the same reasoning the notice line's empty node carries.
+    commands.spawn((
+        ReadoutText,
+        Text::new(String::new()),
+        TextFont {
+            font_size: FONT_SIZE,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Visibility::Hidden,
+        corner_node(Settings::default().readout_corner()),
+    ));
+}
+
+/// Where a readout sits, as a node.
+///
+/// A pure function of the corner, so the placement is testable without a window — which
+/// matters more here than usual, since the failure it prevents is a readout drawn over the
+/// four debug lines rather than beside them.
+fn corner_node(corner: Corner) -> Node {
+    let (top, bottom) = match corner {
+        Corner::TopLeft => (Val::Px(READOUT_LINE), Val::Auto),
+        Corner::TopRight => (Val::Px(MARGIN), Val::Auto),
+        Corner::BottomLeft | Corner::BottomRight => (Val::Auto, Val::Px(MARGIN)),
+    };
+    let (left, right) = match corner {
+        Corner::TopLeft | Corner::BottomLeft => (Val::Px(MARGIN), Val::Auto),
+        Corner::TopRight | Corner::BottomRight => (Val::Auto, Val::Px(MARGIN)),
+    };
+    Node {
+        position_type: PositionType::Absolute,
+        top,
+        bottom,
+        left,
+        right,
+        ..default()
+    }
+}
+
+/// What the readout says.
+///
+/// **The second number is the age of the newest snapshot, and it is deliberately not called
+/// a round trip.** A round-trip time would need a message on the wire to measure it against,
+/// and this issue puts the wire out of scope — so what is shown is the one thing this side
+/// can observe without asking anything: how long ago the server last said where everybody
+/// is. A network that has gone quiet and a server that has stopped sending look the same in
+/// it, which is honest, because from here they are.
+fn describe_readout(frame_rate: f32, snapshot_age: Option<Duration>) -> String {
+    let age = match snapshot_age {
+        Some(age) => format!("{} ms", age.as_millis()),
+        None => "-".to_owned(),
+    };
+    format!("{frame_rate:.0} fps · snapshot {age}")
+}
+
+/// Keeps the readout current, and out of the way when it is switched off.
+///
+/// Both counters are measured here rather than read from a resource somebody else keeps: the
+/// frame rate is this schedule's own `Time`, and the snapshot age is the moment
+/// `PlayerStats.server_tick` last moved. Neither is a decision and neither is on the wire —
+/// this is a line of text about the client's own clock.
+fn refresh_readout(
+    time: Option<Res<Time>>,
+    settings: Res<Settings>,
+    stats: Option<Res<PlayerStats>>,
+    mut nodes: Query<(&mut Text, &mut Node, &mut Visibility), With<ReadoutText>>,
+    mut smoothed: Local<f32>,
+    mut newest: Local<Option<(u32, Duration)>>,
+) {
+    let Some(time) = time else {
+        return;
+    };
+    let now = time.elapsed();
+
+    let delta = time.delta_secs();
+    if delta > 0.0 {
+        let instant = 1.0 / delta;
+        *smoothed = if *smoothed > 0.0 {
+            *smoothed + (instant - *smoothed) * FRAME_RATE_SMOOTHING
+        } else {
+            instant
+        };
+    }
+
+    // The tick, not the resource's change flag: `PlayerStats` is rewritten on frames when
+    // nothing about it moved, and an age measured from that would read zero for ever.
+    if let Some(tick) = stats.as_ref().and_then(|stats| stats.server_tick)
+        && newest.map(|(held, _)| held) != Some(tick)
+    {
+        *newest = Some((tick, now));
+    }
+    let age = newest.map(|(_, at)| now.saturating_sub(at));
+
+    let shown = if settings.readout_shown() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    let placement = corner_node(settings.readout_corner());
+    let line = describe_readout(*smoothed, age);
+
+    for (mut text, mut node, mut visibility) in &mut nodes {
+        if *visibility != shown {
+            *visibility = shown;
+        }
+        if *node != placement {
+            *node = placement.clone();
+        }
+        // Only while it is on screen: a hidden readout that rewrote its `String` every frame
+        // would be the allocation the three lines above it are careful to avoid.
+        if shown == Visibility::Visible && text.0 != line {
+            text.0.clone_from(&line);
+        }
+    }
 }
 
 /// What the world line says before the world module has been built at all.
@@ -1334,5 +1477,109 @@ mod tests {
         steps(&mut app, 2);
 
         assert_eq!(notice_line(&mut app), "");
+    }
+
+    // -------------------------------------------------------------------------
+    // The frame-rate readout
+    // -------------------------------------------------------------------------
+
+    /// The readout's visibility, its node and its text, in one look.
+    fn readout(app: &mut App) -> (Visibility, Node, String) {
+        let world = app.world_mut();
+        let mut nodes = world.query_filtered::<(&Visibility, &Node, &Text), With<ReadoutText>>();
+        let found: Vec<(Visibility, Node, String)> = nodes
+            .iter(world)
+            .map(|(visibility, node, text)| (*visibility, node.clone(), text.0.clone()))
+            .collect();
+        assert_eq!(found.len(), 1, "exactly one readout node exists");
+        found.into_iter().next().expect("just counted one")
+    }
+
+    #[test]
+    fn the_readout_is_off_until_a_player_asks_for_it() {
+        let mut app = headless_ui(ConnectionState::Connected);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        steps(&mut app, 2);
+        let (visibility, _, line) = readout(&mut app);
+        assert_eq!(visibility, Visibility::Hidden);
+        assert_eq!(line, "", "a hidden readout still built a string");
+
+        app.world_mut().resource_mut::<Settings>().toggle_readout();
+        steps(&mut app, 1);
+        let (visibility, _, line) = readout(&mut app);
+        assert_eq!(visibility, Visibility::Visible);
+        assert!(line.contains("fps"), "{line}");
+    }
+
+    /// A readout with no session says so rather than claiming a latency of nought.
+    #[test]
+    fn the_snapshot_age_is_a_dash_until_a_snapshot_has_arrived() {
+        assert_eq!(describe_readout(60.0, None), "60 fps · snapshot -");
+        assert_eq!(
+            describe_readout(59.6, Some(Duration::from_millis(48))),
+            "60 fps · snapshot 48 ms"
+        );
+    }
+
+    /// It moves to the corner the setting names, and the top-left one clears the four debug
+    /// lines rather than being drawn over them.
+    #[test]
+    fn the_readout_sits_in_the_corner_the_setting_names() {
+        let mut app = headless_ui(ConnectionState::Connected);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.world_mut().resource_mut::<Settings>().toggle_readout();
+        steps(&mut app, 1);
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let corner = app.world().resource::<Settings>().readout_corner();
+            let (_, node, _) = readout(&mut app);
+            assert_eq!(node, corner_node(corner), "{corner:?} was not applied");
+            seen.push(corner);
+            app.world_mut()
+                .resource_mut::<Settings>()
+                .cycle_readout_corner();
+            steps(&mut app, 1);
+        }
+        seen.sort_by_key(|corner| corner.name());
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "the four corners are not four places");
+
+        assert_eq!(corner_node(Corner::TopLeft).top, Val::Px(READOUT_LINE));
+        assert_eq!(corner_node(Corner::TopRight).top, Val::Px(MARGIN));
+        const {
+            assert!(
+                READOUT_LINE > FOURTH_LINE,
+                "the top-left readout would be drawn over the notice line"
+            );
+        }
+    }
+
+    /// The age is measured from the moment the tick moved, not from the frame the resource
+    /// was written: `PlayerStats` is rewritten on frames when nothing in it changed, and an
+    /// age read from that would be zero for ever.
+    #[test]
+    fn the_snapshot_age_grows_while_the_server_tick_stands_still() {
+        let mut app = headless_ui(ConnectionState::Connected);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
+            .insert_resource(player_stats());
+        app.world_mut().resource_mut::<Settings>().toggle_readout();
+        steps(&mut app, 1);
+        let (_, _, first) = readout(&mut app);
+        assert!(first.contains("snapshot 0 ms"), "{first}");
+
+        // Touched but not moved: the same tick, several frames later.
+        for _ in 0..3 {
+            app.world_mut().resource_mut::<PlayerStats>().entities += 1;
+            steps(&mut app, 1);
+        }
+        let (_, _, later) = readout(&mut app);
+        assert!(later.contains("snapshot 300 ms"), "{later}");
+
+        // And a new tick puts it back to nothing.
+        app.world_mut().resource_mut::<PlayerStats>().server_tick = Some(1235);
+        steps(&mut app, 1);
+        let (_, _, fresh) = readout(&mut app);
+        assert!(fresh.contains("snapshot 0 ms"), "{fresh}");
     }
 }
