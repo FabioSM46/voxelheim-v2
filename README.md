@@ -84,7 +84,8 @@ a supported state and looks exactly like having forgotten.
 
 ```bash
 # terminal 1 — the account service (listens on 127.0.0.1:7778, over TLS)
-cd server && go run ./cmd/voxelheim-auth -auth-dir /tmp/voxelheim-auth
+cd server && go run ./cmd/voxelheim-auth \
+  -auth-dir "${XDG_DATA_HOME:-$HOME/.local/share}/voxelheim-auth"
 # ... voxelheim-auth listening addr=127.0.0.1:7778 certificate_sha256=<64 hex characters>
 #                                                  ^^^^^^^^^^^^^^^^^^ copy this
 
@@ -120,11 +121,23 @@ changes, both consumers refuse and say so, naming what they expected and what th
 which is the same refusal a substituted service would produce, because nothing on either side can
 tell the two apart.
 
-**`-auth-dir` is deliberately outside the checkout above.** It holds the account service's
-Ed25519 signing key, and its own default (`auth`) resolves against the working directory — so
-running that command from `server/` puts a private key inside this repository, one `git add -A`
-away from a public commit. `.gitignore` covers the default and the two key file names for that
-reason, and the path here points somewhere a mistake cannot reach.
+**`-auth-dir` is deliberately outside the checkout above and in persistent per-user data.**
+`$XDG_DATA_HOME/voxelheim-auth` is used when that variable is set, otherwise the command falls
+back to `$HOME/.local/share/voxelheim-auth`. Both survive a reboot and routine temporary-file
+cleanup. The directory holds the provider-to-account mapping as well as the Ed25519 signing key
+and TLS certificate, so losing it makes existing characters unreachable even when the world
+itself survives.
+
+The flag's own default (`auth`) resolves against the working directory — so running that command
+from `server/` puts a private key inside this repository, one `git add -A` away from a public
+commit. `.gitignore` covers the default and the two key file names for that reason, and the path
+above keeps the data somewhere that mistake cannot reach.
+
+If an earlier run still has `/tmp/voxelheim-auth`, stop the service and move that whole directory
+to the persistent path before using the command above. Moving the whole directory preserves the
+accounts, signing key and certificate together. If temporary cleanup has already deleted it, the
+random account ids it held cannot be reconstructed from the surviving characters; starting with
+an empty directory does not recover them.
 
 **The client needs all four of those flags on this path, and none of them has a default that
 would do.** A server admits a player on a signed ticket and nothing else, so a client with no
