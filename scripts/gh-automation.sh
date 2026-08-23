@@ -15,6 +15,9 @@
 # Commands:
 #   pr-status <pr-number>         Comprehensive PR status (CI + threads)
 #   pr-status-json <pr-number>    Same as pr-status but JSON output (for CI consumption)
+#   pr-edit <pr-number> [--title <title>] [--body <body>|--body-file <path>]
+#                                 Edit a pull request through REST and read it back;
+#                                 a write that did not persist exits non-zero.
 #   pr-label <pr-number> <add|remove> <label>  Add or remove a label. Adding is
 #                                 idempotent; a write that did not land exits
 #                                 non-zero rather than printing success. Writes go
@@ -670,6 +673,114 @@ cmd_pr_comments() {
   gh api "repos/${REPO}/pulls/${pr}/comments" \
     --jq '.[] | "[" + .user.login + "] [" + .path + ":" + (.line // "?" | tostring) + "] " + .body' 2>/dev/null \
     || echo "  (no comments or API error)"
+}
+
+# ── pr-edit — PR metadata writes with a checked postcondition ──────────────────
+#
+# `gh pr edit` cannot run on gh 2.45.0 because its pre-fetch still asks for the
+# retired Projects-classic `projectCards` field (#206). The label helper below
+# already routes around that porcelain command; title and body edits need the same
+# reachable path. This one uses the pull-request REST endpoint directly.
+#
+# A zero exit from the PATCH is not the postcondition. The subject of #235 is a
+# write reported as landed when the field was unchanged, so this helper reads the
+# pull request back and compares every requested field byte-for-byte. An unreadable
+# response and a mismatch both fail closed, without printing either field's value.
+gh_pr_edit_api() {
+  local method="$1" url="$2"
+  shift 2
+  local response status=0
+  response=$(gh api -X "$method" "$url" "$@") || status=$?
+  if [ "$status" -ne 0 ] && [ -n "$response" ]; then
+    printf '%s\n' "$response" >&2
+  fi
+  return "$status"
+}
+
+cmd_pr_edit() {
+  local pr="${1:-}"
+  [ -n "$pr" ] || die "Usage: pr-edit <pr> [--title <title>] [--body <body>|--body-file <path>]"
+  shift
+
+  local title="" body="" body_file=""
+  local title_set="false" body_set="false"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --title)
+        [ "$#" -ge 2 ] || die "--title requires a value"
+        [ "$title_set" = "false" ] || die "--title may be supplied only once"
+        title="$2"
+        title_set="true"
+        shift 2
+        ;;
+      --body)
+        [ "$#" -ge 2 ] || die "--body requires a value"
+        [ "$body_set" = "false" ] || die "Use only one of --body and --body-file"
+        body="$2"
+        body_set="true"
+        shift 2
+        ;;
+      --body-file)
+        [ "$#" -ge 2 ] || die "--body-file requires a path"
+        [ "$body_set" = "false" ] || die "Use only one of --body and --body-file"
+        body_file="$2"
+        [ -r "$body_file" ] || die "Cannot read PR body file: $body_file"
+
+        # Command substitution strips trailing newlines. A marker after the file
+        # keeps them inside the value; removing that one marker restores the exact
+        # bytes the caller supplied.
+        local body_with_marker
+        body_with_marker=$( { cat -- "$body_file" || exit $?; printf '\034'; } ) \
+          || die "Could not read PR body file: $body_file"
+        body="${body_with_marker%?}"
+        body_set="true"
+        shift 2
+        ;;
+      *)
+        die "Unknown pr-edit argument: $1"
+        ;;
+    esac
+  done
+
+  [ "$title_set" = "true" ] || [ "$body_set" = "true" ] \
+    || die "pr-edit requires --title, --body, or --body-file"
+
+  require_gh
+  require_jq
+  resolve_repo || die "Could not resolve the repository for a metadata write on PR #${pr}"
+
+  local -a fields=()
+  [ "$title_set" = "false" ] || fields+=(-f "title=${title}")
+  [ "$body_set" = "false" ] || fields+=(-f "body=${body}")
+
+  if ! gh_pr_edit_api PATCH "repos/${REPO}/pulls/${pr}" "${fields[@]}"; then
+    echo "ERROR: failed to edit PR #${pr} — see gh's output above" >&2
+    return 1
+  fi
+
+  local persisted read_status=0
+  persisted=$(gh api "repos/${REPO}/pulls/${pr}") || read_status=$?
+  if [ "$read_status" -ne 0 ]; then
+    [ -z "$persisted" ] || printf '%s\n' "$persisted" >&2
+    echo "ERROR: could not verify the edit on PR #${pr} — the read-back failed" >&2
+    return 1
+  fi
+
+  local mismatch=""
+  if [ "$title_set" = "true" ] \
+    && ! printf '%s\n' "$persisted" | jq -e --arg expected "$title" '.title == $expected' >/dev/null 2>&1; then
+    mismatch="title"
+  fi
+  if [ "$body_set" = "true" ] \
+    && ! printf '%s\n' "$persisted" | jq -e --arg expected "$body" '.body == $expected' >/dev/null 2>&1; then
+    mismatch="${mismatch:+${mismatch} and }body"
+  fi
+  if [ -n "$mismatch" ]; then
+    echo "ERROR: PR #${pr} ${mismatch} did not match after the write; refusing to report success" >&2
+    return 1
+  fi
+
+  echo "PR #${pr} metadata updated and verified"
 }
 
 # ── pr-label — Label writes that report what actually happened ───────────────
@@ -1536,6 +1647,9 @@ case "${1:-}" in
   pr-comments)
     shift; cmd_pr_comments "$@"
     ;;
+  pr-edit)
+    shift; cmd_pr_edit "$@"
+    ;;
   pr-label)
     shift; cmd_pr_label "$@"
     ;;
@@ -1565,6 +1679,8 @@ Commands:
   pr-status <pr>         Human-readable PR status (CI + threads)
   pr-status-json <pr>    Machine-readable JSON PR status
   pr-comments <pr>       List review comments on PR
+  pr-edit <pr> [--title <title>] [--body <body>|--body-file <path>]
+                          Edit PR metadata through REST and verify it persisted
   pr-label <pr> <add|remove> <label>   Add or remove a label; adding is idempotent
                                        and a failed write exits non-zero
   pr-deepseek-rounds <pr>              DeepSeek review round status (JSON)
