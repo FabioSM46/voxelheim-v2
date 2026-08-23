@@ -403,6 +403,7 @@ jobs:
           bash scripts/test/pr-labeler-step.test.sh
           bash scripts/test/pr-label-writes.test.sh
           bash scripts/test/pr-status-frozen-rule.test.sh
+          bash scripts/test/pr-merge-guard.test.sh
           bash scripts/test/pr-mergeable-retry.test.sh
           bash scripts/test/changed-areas.test.sh
           bash scripts/test/ci-gate.test.sh

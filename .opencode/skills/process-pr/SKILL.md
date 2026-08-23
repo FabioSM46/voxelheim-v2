@@ -247,7 +247,9 @@ A timeout here is a real signal, not noise. A job cancelled by the 100-minute ca
    gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' -f id="<THREAD_ID>"
    ```
 
-   Never auto-resolve a thread whose suggestion you rejected — reply and leave it for the human.
+   A thread whose suggestion you **rejected** may be resolved too (#217) — but only after a reply
+   that states the evidence, because that reply is the whole of the audit trail once no human is
+   required to read it. Never resolve a thread you have not answered.
 
 5. **Findings in the review body** (general comments) create no thread and cannot be resolved. Address them in code where valid, then tell the user to read the review and apply the `DEEPSEEK_REVIEW_READ` label — that acknowledgement is a human-only action; never apply it yourself.
 
@@ -339,7 +341,13 @@ Report each line from what `pr-status` actually printed. Remind the user: "PR is
   how a 15-minute wait gets spent on a PR that landed two minutes in.
 - If DeepSeek does not arrive within `DEEPSEEK_WAIT_SECONDS` (5700), report it as a probable job-cap timeout and exit the loop — do not treat it as "no findings".
 - **GraphQL rate limits**: one wait is at most 190 polls (5700s ÷ 30s) at ~3–5 points each — under 950 points. GitHub allows 5000 points/hour. Avoid concurrent force-cycles across multiple PRs.
-- NEVER push directly to `main` (`git push origin main`) or merge (`gh pr merge`). Merging is a human-only operation.
+- NEVER push directly to `main` (`git push origin main`), and never merge a pull request into
+  `main` — human-only. Merging into `develop` is authorized (#217), through
+  **`bash scripts/gh-automation.sh pr-merge <pr>`**: it refuses a `main` base by name and fails
+  closed on one it cannot read (#218). Read the pull-request body before you merge — an ordering
+  stated against another PR binds whoever merges, and the frozen rule cannot see it (#214 and #215
+  were each `ready_to_merge: true`, and merging one alone broke `develop` at runtime with nothing
+  turning red).
 - Never force-push or rebase without explicit user instruction (the `git pull --rebase` of your own feature branch in 4e is the sanctioned exception).
 - Always run quality gates locally before pushing fixes.
 - Never apply `DEEPSEEK_REVIEW_READ` or `NO_DEEPSEEK_REVIEW` yourself — both are human-only acknowledgements.
