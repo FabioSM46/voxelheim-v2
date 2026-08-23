@@ -315,6 +315,92 @@ func TestTheDeathPenaltyWearsOnlyEquipment(t *testing.T) {
 	}
 }
 
+// The pack behind a player is not on them. Dying costs the condition of what was being
+// carried, and a spare comes out of the pack exactly as it went in.
+//
+// This is the assertion the old penalty failed: it reached every slot, so a player who
+// stowed a second blade lost condition on both. Everything on the hotbar still pays.
+func TestTheDeathPenaltySparesThePack(t *testing.T) {
+	t.Parallel()
+
+	hotbar := int(protocol.HotbarSlots) - 1
+	stowed := int(protocol.HotbarSlots)
+	last := int(protocol.InventorySlots) - 1
+
+	inventory := newStarterInventory()
+	// On them: the far end of the hotbar, so the rule is not passing by only reaching
+	// slot 0, and a resource beside it that has nothing to lose either way.
+	inventory.slots[hotbar] = stackOf(ItemPickaxe, 1)
+	inventory.slots[1] = stackOf(ItemStone, 64)
+	// Stowed: the first slot past the hotbar, and the last slot of the inventory.
+	inventory.slots[stowed] = stackOf(ItemIronSword, 1)
+	inventory.slots[last] = stackOf(ItemAxe, 1)
+
+	if !inventory.applyDeathPenaltyLocked() {
+		t.Fatal("the penalty reported no change on a player carrying a full blade")
+	}
+
+	for slot, want := range map[int]inventoryStack{
+		0:      {item: ItemRustySword, count: 1, durability: wornByDeath(RustySwordMaxDurability), maxDurability: RustySwordMaxDurability},
+		1:      {item: ItemStone, count: 64},
+		hotbar: {item: ItemPickaxe, count: 1, durability: wornByDeath(ToolMaxDurability), maxDurability: ToolMaxDurability},
+		stowed: {item: ItemIronSword, count: 1, durability: IronSwordMaxDurability, maxDurability: IronSwordMaxDurability},
+		last:   {item: ItemAxe, count: 1, durability: ToolMaxDurability, maxDurability: ToolMaxDurability},
+	} {
+		if got := inventory.slots[slot]; got != want {
+			t.Errorf("slot %d is %+v, want %+v", slot, got, want)
+		}
+	}
+}
+
+// The boundary itself, swept rather than sampled: a durable item in every slot, one
+// death, and every slot read back against the hotbar's own bound.
+//
+// The expectation is written as protocol.HotbarSlots rather than as carriedOnPerson, so
+// that widening the rule back to the whole inventory fails here instead of quietly
+// widening the assertion with it. That mutation is the one this issue exists to prevent.
+func TestTheDeathPenaltyReachesExactlyWhatIsOnThePlayer(t *testing.T) {
+	t.Parallel()
+
+	inventory := newInventory()
+	for slot := range inventory.slots {
+		inventory.slots[slot] = stackOf(ItemPickaxe, 1)
+	}
+
+	if !inventory.applyDeathPenaltyLocked() {
+		t.Fatal("the penalty reported no change on a pack of full pickaxes")
+	}
+
+	for slot, stack := range inventory.slots {
+		want := ToolMaxDurability
+		if slot < int(protocol.HotbarSlots) {
+			want = wornByDeath(ToolMaxDurability)
+		}
+		if stack.durability != want {
+			t.Errorf("slot %d durability is %d, want %d", slot, stack.durability, want)
+		}
+	}
+}
+
+// An empty hotbar is a normal death, not a special case: the penalty has nothing on the
+// player to spend and says so, and the pack it may not reach is left whole.
+func TestTheDeathPenaltyOnAnEmptyHotbarChangesNothing(t *testing.T) {
+	t.Parallel()
+
+	stowed := int(protocol.HotbarSlots)
+
+	inventory := newInventory()
+	inventory.slots[stowed] = stackOf(ItemIronSword, 1)
+
+	if inventory.applyDeathPenaltyLocked() {
+		t.Error("the penalty reported a change on a player carrying nothing")
+	}
+	want := inventoryStack{item: ItemIronSword, count: 1, durability: IronSwordMaxDurability, maxDurability: IronSwordMaxDurability}
+	if got := inventory.slots[stowed]; got != want {
+		t.Errorf("the stowed slot is %+v, want %+v", got, want)
+	}
+}
+
 // An inventory with nothing left to lose has still been penalised. The operation reports
 // "did anything change", and a caller must not read that as "it did not run" — see
 // tryApplyDeathPenaltyLocked, whose answer is deliberately the other question.

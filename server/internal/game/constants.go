@@ -71,8 +71,9 @@ const (
 	PlayerMaxHealth = 100
 
 	// deathDurabilityKept over deathDurabilityScale is the approved death penalty on
-	// equipment: a player who dies keeps four fifths of every durable item's remaining
-	// condition, losing the GDD's 20%.
+	// equipment: a player who dies keeps four fifths of the remaining condition of every
+	// durable item they had on them, losing the GDD's 20%. Which items those are is
+	// carriedOnPerson's answer, not this constant's — this pair is only the fraction.
 	//
 	// A fraction rather than a float, so the arithmetic in wornByDeath is exact and its
 	// boundaries are decidable — floor(1 * 4/5) is 0, and a blade can be worn out by

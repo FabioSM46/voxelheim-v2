@@ -287,15 +287,44 @@ func (i *inventory) stateLocked() protocol.InventoryState {
 	return protocol.InventoryState{Stacks: stacks}
 }
 
-// applyDeathPenaltyLocked wears every durable slot by the approved death penalty and
-// reports whether any of them changed.
+// carriedOnPerson reports whether a slot is one the player has *on them*, as opposed to
+// stowed in the pack behind them.
 //
-// Every durable slot in one pass under one lock, so there is no moment at which a
-// snapshot could show half a player's equipment penalised. It touches no item id, no
-// count and no slot index: death costs condition, never possessions.
+// It is the one answer to that question, and it is a function rather than a comparison
+// for the reason meleeDamage is a registry field rather than a list of item ids in the
+// combat path: worn armour is the next thing that will be on a player, and when it
+// arrives it joins every rule that asks this by widening this answer — not by a second
+// `slot < protocol.HotbarSlots` appearing somewhere that can disagree with this one.
+//
+// Today the answer is the hotbar, and the server needs nothing from the client to give
+// it: protocol.HotbarSlots is the *leading* subset of the inventory, so a slot's own
+// index is the whole of it. There is no selection in this package and none on the wire,
+// deliberately — a slot reaches this server only inside a request that names one — so
+// "what is on the player" could never have meant the one slot a client had highlighted.
+func carriedOnPerson(slot int) bool {
+	return slot < int(protocol.HotbarSlots)
+}
+
+// applyDeathPenaltyLocked wears by the approved death penalty every durable slot the
+// player has on them, and reports whether any of them changed.
+//
+// **What it reaches is carriedOnPerson's answer and nothing else's.** Dying costs the
+// condition of what was being carried; the pack behind the player is untouched, so a
+// spare blade stowed away outlives the death that spent the one in hand. That is the
+// whole of the narrowing — the arithmetic below it did not move.
+//
+// Every such slot in one pass under one lock, so there is no moment at which a snapshot
+// could show half a player's equipment penalised. It touches no item id, no count and no
+// slot index: death costs condition, never possessions.
 func (i *inventory) applyDeathPenaltyLocked() bool {
 	changed := false
 	for slot := range i.slots {
+		// Stowed rather than carried: the penalty never reaches it. An empty hotbar
+		// needs no special case for the same reason a pack of resources does not — it
+		// simply has nothing this loop can spend.
+		if !carriedOnPerson(slot) {
+			continue
+		}
 		stack := &i.slots[slot]
 		// Resources are skipped by the maximum, not by the item id: what a slot holds
 		// is the registry's business, and "does it wear out" is already recorded here.
@@ -396,8 +425,8 @@ func (i *inventory) state() protocol.InventoryState {
 	return i.stateLocked()
 }
 
-// chargeDeathPenaltyLocked wears every durable slot by the approved death penalty, at
-// most once per death.
+// chargeDeathPenaltyLocked wears what the player has on them by the approved death
+// penalty, at most once per death. applyDeathPenaltyLocked owns which slots those are.
 //
 // The caller holds sim.mu **and the inventory lock**. penaltyApplied is what makes it a
 // one-shot, and it is set here rather than by each caller so that "charged exactly once"
