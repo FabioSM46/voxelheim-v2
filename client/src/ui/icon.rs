@@ -27,7 +27,7 @@ use crate::player::ItemShape;
 /// The picture one cell is drawing: a shape, in the item's colour.
 ///
 /// Both fields come from the same registry row — [`crate::player::item_shape`] and
-/// [`crate::player::item_palette_id`] — so a cell cannot disagree with the hand about
+/// [`crate::player::item_linear_rgba`] — so a cell cannot disagree with the hand about
 /// either half.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct StackIcon {

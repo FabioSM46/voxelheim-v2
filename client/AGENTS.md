@@ -65,7 +65,7 @@ keeps meaning "everything the client is".
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
-| `player/items.rs` | one row per item id: its display name, its held shape, the palette entry it draws as | hold a capability, a stat, or anything a rule is read from |
+| `player/items.rs` | one row per item id: its display name, its held shape, and the block-derived or item-only colour it draws as | hold a capability, a stat, or anything a rule is read from |
 | `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the three intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down |
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
 | `player/interpolate.rs` | the two-snapshot buffer and the interpolation | mention a Bevy world, or extrapolate |
@@ -104,22 +104,22 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are four**:
+**Every edge from `player` to `world` is narrow and read-only, and there are three**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
-the authority on which of those exist; `player/drops.rs` asks `palette` for the colour of an item
-the server named; `player/items.rs` names the palette entry each item presents as; and
-`player/hands.rs` asks `palette` for the linear colour that entry stands for, plus the one it
-draws an empty hand in. None writes world state, and no edge points back from `world` to `player`.
-A fifth, in either direction, is a design question rather than an import.
+the authority on which of those exist; `player/items.rs` asks `palette` for a terrain swatch when
+an item deliberately reuses one; and `player/hands.rs` asks it for the one colour it draws an
+empty hand in. None writes world state, and no edge points back from `world` to `player`. A
+fourth, in either direction, is a design question rather than an import.
 
-**The third of those is the client's one opinion about what an item looks like, and `ui` reads it
-rather than owning a second one.** `items::item_palette_id` answers "which palette entry does this
-*item* id present as", and `ui/mod.rs`'s `stack_style` calls it for the pack and hotbar cells. It
-used to hand the item id straight to `palette::linear_rgba`, which reads it as a **block** id —
-two registries that agree only on stone and dirt, so a log drew snow-white in the pack while it
-drew as bark in the hand. One table, every reader, no second edge to `world`. The fourth is the
-mechanical half of the same answer and holds no opinion at all: `hands.rs` turns a palette entry
-into the material it draws with, exactly as `ui` turns one into a swatch colour.
+**The second of those is the client's one opinion about what an item looks like, and every
+renderer reads it rather than owning a second one.** `items::item_linear_rgba` answers which
+linear colour an *item* id presents as: a block-like item may reuse a real block swatch, while an
+item with no honest block counterpart names an item-only colour in the same row. The block id
+space stays entirely the wire's — no client-only reservation can collide with a block the server
+appends later. `ui/mod.rs`, `hands.rs` and `drops.rs` all consume the resolved colour. The UI used
+to hand an item id straight to `palette::linear_rgba`, which reads it as a **block** id — two
+registries that agree only on stone and dirt, so a log drew snow-white in the pack while it drew
+as bark in the hand. One table and one resolved answer keep all three surfaces together.
 
 **`player/target.rs` keeps its tests inline, and it has to.** A submodule of `target.rs` lives in
 a directory called `target/`, and `.gitignore` ignores `target/` at any depth because that is
@@ -682,8 +682,8 @@ numbers, carried over unchanged.
 camera that follows a gameplay entity belongs to the module that reads the snapshots; so does a
 sun that follows `EntitySnapshot.tick_of_day`. It was in `world/render.rs` for as long as it was
 a constant, which is to say for as long as where it lived did not matter. Moving it is also what
-keeps the count of `player` → `world` edges at the four enumerated above rather than adding a
-fifth: the alternative was a `world` system reading a `player` resource, which is the same edge
+keeps the count of `player` → `world` edges at the three enumerated above rather than adding a
+fourth: the alternative was a `world` system reading a `player` resource, which is the same edge
 pointing the other way.
 
 **The boundaries are the server's and there is exactly one copy of them.** `ServerWelcome`
@@ -729,11 +729,19 @@ is set either way: how far the world is streamed is not a time of day.
 ## One display registry per item
 
 **`player/items.rs` holds every display fact this client has about an item, one row per id,
-and every reader goes through it.** A row is a `name`, an `ItemShape` and a `palette_id`; the
+and every reader goes through it.** A row is a `name`, an `ItemShape` and an `ItemColour`; the
 held view model in `hands.rs` is built from the shape and the colour, `ui/mod.rs`'s
 `stack_style` draws the colour on a pack or hotbar cell, the recipe panel spells the name, and
 a hovered slot reports it. Adding an item to this client means adding a row, and there is
 nowhere else to add half of one.
+
+**The item colour source is deliberately beside the block palette rather than inside its id
+space.** `ItemColour::Block` reuses an existing terrain swatch for a block-like item;
+`WornSteel` and `ForgedSteel` are client-only presentation colours for things no block honestly
+represents. `item_linear_rgba` resolves both, and unknown item ids still use the block palette's
+loud magenta placeholder. Adding a client-only integer to `world/palette.rs` would make that
+integer collide with a future wire block unless somebody remembered a reservation forever; this
+shape gives the two registries different types instead.
 
 **The split it replaces is worth remembering, because the gap it left was invisible by
 construction.** `hands::item_presentation` used to own the shape and the colour and
@@ -747,7 +755,7 @@ a player can hold, which is why the gap surfaced when it did.
 three mandatory fields, so a row missing a fact does not compile — that is the shape column
 entirely, since `ItemShape` has no unknown variant. What the compiler cannot see is a field
 filled in with a placeholder, so `every_known_item_has_a_name_a_shape_and_a_colour` sweeps the
-table for a name left at the fallback and a `palette_id` no colour answers to, and
+table for a name left at the fallback and a block-derived colour no palette entry answers to, and
 `the_sweep_rejects_a_row_that_is_missing_a_fact` runs that predicate over fixtures so the
 sweep's teeth are asserted rather than inferred from rows that already pass. The ids are also
 required to be the contiguous `1..N` block an append-only server registry issues, which is what
@@ -1761,8 +1769,10 @@ Recorded here so the next reader does not mistake them for oversights:
   border culling put them in the mesher's hands. What to *do* with them is still a rendering
   decision rather than a plumbing one, and greedy merging works against per-vertex occlusion —
   which is exactly the design that issue owes.
-- **No texture atlas, no UVs.** `palette.rs` is the whole material system: a colour per block id,
-  carried as vertex colours. Art assets are a later issue.
+- **No texture atlas, no UVs.** `palette.rs` is the whole terrain material system: a colour per
+  block id, carried as vertex colours. Item-only swatches live in `player/items.rs` beside the
+  rows that name them and resolve to the same linear RGBA shape every renderer consumes. Art
+  assets are a later issue.
 - **The list is a list and not a browser.** No favourites, no sorting, no player counts and no
   ping column; "online" is the account service saying it heard from that server recently, not a
   probe, and the screen says as much rather than implying reachability it did not measure. The

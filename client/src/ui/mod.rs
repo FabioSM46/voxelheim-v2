@@ -29,10 +29,11 @@ use crate::net::{
 
 use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals, ViewMode,
-    item_palette_id, item_shape,
+    item_linear_rgba, item_shape,
 };
 use crate::settings::{Control, Settings};
 
+#[cfg(test)]
 use crate::world::palette;
 use settings::SettingsScreen;
 
@@ -363,7 +364,7 @@ pub(super) struct StackStyle {
 /// Everything a cell needs to know about one authoritative slot.
 ///
 /// **Both halves of the picture come from the same registry row the hand is built from** —
-/// [`item_shape`] and [`item_palette_id`] — rather than from a second opinion held on this
+/// [`item_shape`] and [`item_linear_rgba`] — rather than from a second opinion held on this
 /// side. That is the rule the colour already followed, extended to the whole entry: a stack
 /// cannot be a sword in the hand and a square in the pack, because there is one table and
 /// it is read twice.
@@ -379,7 +380,7 @@ pub(super) fn stack_style(stack: Option<InventoryStack>) -> StackStyle {
             count: String::new(),
         };
     };
-    let [r, g, b, a] = palette::linear_rgba(item_palette_id(stack.item_id));
+    let [r, g, b, a] = item_linear_rgba(stack.item_id);
     StackStyle {
         background: FILLED_CELL,
         icon: Some(StackIcon {
@@ -615,7 +616,7 @@ mod tests {
                 .icon
                 .unwrap_or_else(|| panic!("item {item_id} draws no picture"));
             assert_eq!(icon.shape, item_shape(item_id), "item {item_id}");
-            let [r, g, b, a] = palette::linear_rgba(item_palette_id(item_id));
+            let [r, g, b, a] = item_linear_rgba(item_id);
             assert_eq!(
                 icon.colour,
                 Color::linear_rgba(r, g, b, a),

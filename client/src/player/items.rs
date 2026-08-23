@@ -24,7 +24,7 @@ use super::crafting::{
     ITEM_AXE, ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
-use crate::world::palette;
+use crate::world::{BlockId, palette};
 
 // Presentation-only item ids. The server registry remains the sole authority on whether
 // any of these can be placed and which block an action actually creates.
@@ -138,6 +138,44 @@ impl ItemShape {
     ];
 }
 
+/// Where one item's colour comes from.
+///
+/// Block-like items deliberately reuse the terrain swatch they represent. Items that are
+/// not blocks have their own presentation colours here instead of borrowing a wire block
+/// id: the server is free to append that id space, and a forged blade is not ore in stone.
+/// Keeping both cases in this enum lets every renderer ask this table one question without
+/// teaching the world palette about client-only ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemColour {
+    /// Reuse one real block palette entry.
+    Block(BlockId),
+    /// Dark, cool steel whose wear and oxide remain visible. sRGB `#59636D`.
+    WornSteel,
+    /// Cleaner, brighter forged steel. sRGB `#8997A3`.
+    ForgedSteel,
+}
+
+/// `#59636D`, converted from sRGB to the linear space vertex colours use.
+const WORN_STEEL_LINEAR: [f32; 3] = [0.099_899, 0.124_772, 0.152_926];
+/// `#8997A3`, converted from sRGB to the linear space vertex colours use.
+const FORGED_STEEL_LINEAR: [f32; 3] = [0.250_158, 0.309_469, 0.366_253];
+
+impl ItemColour {
+    fn linear_rgba(self) -> [f32; 4] {
+        match self {
+            Self::Block(block) => palette::linear_rgba(block),
+            Self::WornSteel => {
+                let [r, g, b] = WORN_STEEL_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::ForgedSteel => {
+                let [r, g, b] = FORGED_STEEL_LINEAR;
+                [r, g, b, 1.0]
+            }
+        }
+    }
+}
+
 /// Everything this client has an opinion about for one item id.
 ///
 /// Three facts, all mandatory, which is the compiler's half of *every item has a complete
@@ -159,13 +197,12 @@ pub(super) struct ItemDisplay {
     /// it as it stands.
     pub(super) name: &'static str,
     pub(super) shape: ItemShape,
-    /// The `world::palette` entry this item presents as.
+    /// The colour this item presents as.
     ///
-    /// A palette entry rather than a colour, because `palette` is where a colour is
-    /// written down once. Item ids and block ids are two registries that agree only on
-    /// stone and dirt, so this column is a translation and never an identity: a log is
-    /// item 4 and draws as block [`palette::LOG`].
-    pub(super) palette_id: u16,
+    /// A block-like item names the terrain swatch it represents; an item with no honest
+    /// block counterpart names an item-only swatch. Item ids and block ids remain two
+    /// registries: a log is item 4 and draws as [`ItemColour::Block`]`(`[`palette::LOG`]`)`.
+    colour: ItemColour,
 }
 
 /// Every item id this client knows, in the order the server's registry appends them.
@@ -178,37 +215,37 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         item_id: ITEM_STONE,
         name: "stone",
         shape: ItemShape::Block,
-        palette_id: palette::STONE,
+        colour: ItemColour::Block(palette::STONE),
     },
     ItemDisplay {
         item_id: ITEM_DIRT,
         name: "dirt",
         shape: ItemShape::Block,
-        palette_id: palette::DIRT,
+        colour: ItemColour::Block(palette::DIRT),
     },
     ItemDisplay {
         item_id: ITEM_SNOW,
         name: "snow",
         shape: ItemShape::Block,
-        palette_id: palette::SNOW,
+        colour: ItemColour::Block(palette::SNOW),
     },
     ItemDisplay {
         item_id: ITEM_LOG,
         name: "log",
         shape: ItemShape::Block,
-        palette_id: palette::LOG,
+        colour: ItemColour::Block(palette::LOG),
     },
     ItemDisplay {
         item_id: ITEM_RAW_COAL,
         name: "coal",
         shape: ItemShape::Material,
-        palette_id: palette::COAL_ORE,
+        colour: ItemColour::Block(palette::COAL_ORE),
     },
     ItemDisplay {
         item_id: ITEM_RAW_IRON,
         name: "raw iron",
         shape: ItemShape::Material,
-        palette_id: palette::IRON_ORE,
+        colour: ItemColour::Block(palette::IRON_ORE),
     },
     // The starter blade. `super::combat` reads the same id to decide what a click asks
     // for; the row here is only what it looks like and what it is called.
@@ -216,7 +253,7 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         item_id: ITEM_RUSTY_SWORD,
         name: "rusty sword",
         shape: ItemShape::Blade,
-        palette_id: palette::SNOW,
+        colour: ItemColour::WornSteel,
     },
     // The two items that plant an entity rather than a voxel. Iron for the forge, canvas
     // for the tent, so a player can see which of the two they are carrying.
@@ -224,28 +261,28 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         item_id: ITEM_FORGE,
         name: "forge",
         shape: ItemShape::Bundle,
-        palette_id: palette::IRON_ORE,
+        colour: ItemColour::Block(palette::IRON_ORE),
     },
     ItemDisplay {
         item_id: ITEM_TENT,
         name: "tent",
         shape: ItemShape::Bundle,
-        palette_id: palette::SNOW,
+        colour: ItemColour::Block(palette::SNOW),
     },
-    // The forge's two products. The iron blade is a `Blade` beside the rusty one, in iron
-    // rather than worn steel so the two are told apart in the hand as well as in the pack;
-    // the sharpening stone is a consumable and reads as raw material.
+    // The forge's two products. The iron blade is a `Blade` beside the rusty one, in clean
+    // forged steel rather than worn steel so the two are told apart in the hand as well as
+    // in the pack; the sharpening stone is a consumable and reads as raw material.
     ItemDisplay {
         item_id: ITEM_IRON_SWORD,
         name: "iron sword",
         shape: ItemShape::Blade,
-        palette_id: palette::IRON_ORE,
+        colour: ItemColour::ForgedSteel,
     },
     ItemDisplay {
         item_id: ITEM_SHARPENING_STONE,
         name: "sharpening stone",
         shape: ItemShape::Material,
-        palette_id: palette::STONE,
+        colour: ItemColour::Block(palette::STONE),
     },
     // The third bundle, and the first whose point is the ground *around* it. A `Bundle`
     // beside the tent and the forge because the place press means the same thing while
@@ -255,7 +292,7 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         item_id: ITEM_CAMPFIRE,
         name: "campfire",
         shape: ItemShape::Bundle,
-        palette_id: palette::LOG,
+        colour: ItemColour::Block(palette::LOG),
     },
     // What a hunt leaves, and what it is worked into. All three are `Material`, because
     // that is what the shape vocabulary has for a thing you carry and spend — and because
@@ -271,19 +308,19 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         item_id: ITEM_BONE,
         name: "bone",
         shape: ItemShape::Material,
-        palette_id: palette::SNOW,
+        colour: ItemColour::Block(palette::SNOW),
     },
     ItemDisplay {
         item_id: ITEM_VARGR_PELT,
         name: "vargr pelt",
         shape: ItemShape::Material,
-        palette_id: palette::DIRT,
+        colour: ItemColour::Block(palette::DIRT),
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_PATCH,
         name: "leather patch",
         shape: ItemShape::Material,
-        palette_id: palette::LOG,
+        colour: ItemColour::Block(palette::LOG),
     },
     // The three implements, one shape and three swatches — which is what stops them being
     // three identical cells, exactly as it does for the bone, the pelt and the patch above.
@@ -294,19 +331,19 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         item_id: ITEM_SHOVEL,
         name: "shovel",
         shape: ItemShape::Tool,
-        palette_id: palette::DIRT,
+        colour: ItemColour::Block(palette::DIRT),
     },
     ItemDisplay {
         item_id: ITEM_PICKAXE,
         name: "pickaxe",
         shape: ItemShape::Tool,
-        palette_id: palette::STONE,
+        colour: ItemColour::Block(palette::STONE),
     },
     ItemDisplay {
         item_id: ITEM_AXE,
         name: "axe",
         shape: ItemShape::Tool,
-        palette_id: palette::LOG,
+        colour: ItemColour::Block(palette::LOG),
     },
 ];
 
@@ -328,14 +365,16 @@ pub fn item_label(item_id: u16) -> &'static str {
     display(item_id).map_or("unknown item", |row| row.name)
 }
 
-/// The palette entry one item id presents as, for the panels that draw a stack and for the
-/// material the held view model is built with.
+/// The linear colour one item id presents as, for every renderer that draws it.
 ///
-/// The unknown fallback is the id itself, which reaches [`palette::linear_rgba`]'s loud
-/// placeholder for anything past the block palette — the honest answer to a version skew,
-/// rather than a plausible shade this module invented.
-pub(crate) fn item_palette_id(item_id: u16) -> u16 {
-    display(item_id).map_or(item_id, |row| row.palette_id)
+/// An unknown id reaches the block palette's loud placeholder — the honest answer to a
+/// version skew, rather than a plausible shade this module invented. Known items resolve
+/// here too, so held meshes, dropped meshes and flat icons cannot choose different sources.
+pub(crate) fn item_linear_rgba(item_id: u16) -> [f32; 4] {
+    display(item_id).map_or_else(
+        || palette::linear_rgba(BlockId::MAX),
+        |row| row.colour.linear_rgba(),
+    )
 }
 
 /// The shape one item id is drawn in.
@@ -369,7 +408,7 @@ pub(crate) fn known_item_ids() -> impl Iterator<Item = u16> {
 fn row_is_complete(row: &ItemDisplay) -> bool {
     !row.name.is_empty()
         && row.name != item_label(u16::MAX)
-        && palette::linear_rgba(row.palette_id) != palette::linear_rgba(u16::MAX)
+        && row.colour.linear_rgba() != palette::linear_rgba(BlockId::MAX)
 }
 
 #[cfg(test)]
@@ -393,8 +432,8 @@ mod tests {
             assert_eq!(display(row.item_id), Some(&row), "item {}", row.item_id);
             assert_eq!(item_label(row.item_id), row.name, "item {}", row.item_id);
             assert_eq!(
-                item_palette_id(row.item_id),
-                row.palette_id,
+                item_linear_rgba(row.item_id),
+                row.colour.linear_rgba(),
                 "item {}",
                 row.item_id
             );
@@ -467,6 +506,57 @@ mod tests {
         assert_eq!(item_label(ITEM_RUSTY_SWORD), "rusty sword");
     }
 
+    /// The decision this bug carries: blades have item colours, not borrowed terrain ids.
+    ///
+    /// Pin both names rather than merely asserting that the rusty sword is no longer snow.
+    /// Otherwise a later edit could move either blade back onto another plausible-looking
+    /// block swatch and quietly recreate the same category mistake one shade over.
+    #[test]
+    fn blades_name_worn_and_forged_steel_colours() {
+        let rusty = display(ITEM_RUSTY_SWORD).expect("the starter blade is registered");
+        let iron = display(ITEM_IRON_SWORD).expect("the forged blade is registered");
+        assert_eq!(rusty.colour, ItemColour::WornSteel);
+        assert_eq!(iron.colour, ItemColour::ForgedSteel);
+
+        let worn = item_linear_rgba(ITEM_RUSTY_SWORD);
+        let forged = item_linear_rgba(ITEM_IRON_SWORD);
+        assert_ne!(worn, palette::linear_rgba(palette::SNOW));
+        assert_ne!(forged, palette::linear_rgba(palette::IRON_ORE));
+        assert_ne!(worn, forged, "the two blades need distinct swatches");
+        for channel in 0..3 {
+            assert!(
+                worn[channel] < forged[channel],
+                "worn steel channel {channel} is not darker than forged steel"
+            );
+        }
+    }
+
+    /// The readable sRGB declarations and the linear constants the renderers consume agree.
+    #[test]
+    fn steel_linear_values_match_their_srgb() {
+        fn srgb_to_linear(byte: u8) -> f32 {
+            let value = f32::from(byte) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        for (name, srgb, linear) in [
+            ("worn steel", [0x59, 0x63, 0x6D], WORN_STEEL_LINEAR),
+            ("forged steel", [0x89, 0x97, 0xA3], FORGED_STEEL_LINEAR),
+        ] {
+            for (channel, (got, byte)) in linear.iter().zip(srgb).enumerate() {
+                let want = srgb_to_linear(byte);
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "{name} channel {channel}: the constant says {got}, sRGB {srgb:?} says {want}"
+                );
+            }
+        }
+    }
+
     /// The three a hunt puts in the pack, at the ids the server appended them at.
     ///
     /// The contiguity check in the sweep above is what says there is no hole behind 15;
@@ -497,7 +587,7 @@ mod tests {
         // And no two of them are the same cell. They share a shape, so the swatch is the
         // only thing left to tell them apart, and a pack holding all three would
         // otherwise be three slots a player has to count.
-        let swatch = |item_id| palette::linear_rgba(item_palette_id(item_id));
+        let swatch = item_linear_rgba;
         assert_ne!(swatch(ITEM_BONE), swatch(ITEM_VARGR_PELT));
         assert_ne!(swatch(ITEM_BONE), swatch(ITEM_LEATHER_PATCH));
         assert_ne!(swatch(ITEM_VARGR_PELT), swatch(ITEM_LEATHER_PATCH));
@@ -513,10 +603,9 @@ mod tests {
         assert_eq!(display(NO_SUCH_ITEM), None);
         assert_eq!(item_label(NO_SUCH_ITEM), "unknown item");
         assert_eq!(item_shape(NO_SUCH_ITEM), ItemShape::Material);
-        assert_eq!(item_palette_id(NO_SUCH_ITEM), NO_SUCH_ITEM);
         assert_eq!(
-            palette::linear_rgba(item_palette_id(NO_SUCH_ITEM)),
-            palette::linear_rgba(u16::MAX),
+            item_linear_rgba(NO_SUCH_ITEM),
+            palette::linear_rgba(BlockId::MAX),
             "an unknown item drew a plausible colour instead of the placeholder"
         );
     }
@@ -533,7 +622,7 @@ mod tests {
             item_id: NO_SUCH_ITEM,
             name: "unknown item",
             shape: ItemShape::Material,
-            palette_id: palette::STONE,
+            colour: ItemColour::Block(palette::STONE),
         };
         assert!(
             !row_is_complete(&nameless),
@@ -551,7 +640,7 @@ mod tests {
 
         let colourless = ItemDisplay {
             name: "mystery",
-            palette_id: u16::MAX,
+            colour: ItemColour::Block(BlockId::MAX),
             ..nameless
         };
         assert!(

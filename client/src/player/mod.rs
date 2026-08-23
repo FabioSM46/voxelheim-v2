@@ -80,7 +80,7 @@ pub use inventory::{
 pub use items::item_label;
 #[cfg(test)]
 pub(crate) use items::known_item_ids;
-pub(crate) use items::{ItemShape, item_palette_id, item_shape};
+pub(crate) use items::{ItemShape, item_linear_rgba, item_shape};
 pub(crate) use sky::Daylight;
 pub use target::{ApplyMiningFeedback, MiningFeedback};
 
