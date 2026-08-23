@@ -13,6 +13,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::InputMode;
+use super::hands::sword_mesh;
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_palette_id, item_shape};
 use super::merge_all;
@@ -29,6 +30,13 @@ const BOB_HEIGHT: f32 = 0.08;
 
 /// One bob every two seconds.
 const BOB_RADIANS_PER_SECOND: f32 = TAU / 2.0;
+
+/// How long a dropped sword is, in [`DROP_EDGE`]s, tip to pommel.
+///
+/// Unchanged from when the drop *was* one box, so nothing about how far a sword on the
+/// ground reaches or how it tumbles moves — [`sword_mesh`] fills the same length with a
+/// weapon.
+const BLADE_DROP_LENGTH: f32 = 1.25;
 
 /// One full turn every eight seconds: visible, but not a propeller.
 const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
@@ -145,6 +153,14 @@ pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<M
 /// in the world at world scale. What the two share is the table that says which shape an
 /// item presents as, which is the thing that must not disagree.
 ///
+/// **[`ItemShape::Blade`] is the one exception, and it proves the rule rather than breaking
+/// it** (#204). A sword is a gladius — a bevelled blade tapering to a point, a cross guard,
+/// a grip and a pommel — and *which weapon it is* is not a per-surface retuning any more
+/// than which colour it is. So the arm calls [`sword_mesh`] with a drop-scale length
+/// and gets the same weapon at a different size. Nothing is shared but the shape: this
+/// module still mints its own asset, at its own scale, with its own materials, and the four
+/// other arms below still author their own boxes.
+///
 /// Wildcard-free, so a fifth [`ItemShape`] does not compile until it can be dropped — the
 /// same guarantee `ui::icon::parts` and `hands::HandVisuals::mesh` already give.
 fn drop_mesh(shape: ItemShape) -> Mesh {
@@ -154,11 +170,9 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
         // A stub of something: rounded, so a pelt and a stone are not the same silhouette.
         ItemShape::Material => Mesh::from(Capsule3d::new(DROP_EDGE * 0.30, DROP_EDGE * 0.62)),
         // Long, thin, and lying at an angle — see `spin_and_bob`, which is what turns it.
-        ItemShape::Blade => Mesh::from(Cuboid::from_size(Vec3::new(
-            DROP_EDGE * 0.12,
-            DROP_EDGE * 1.25,
-            DROP_EDGE * 0.28,
-        ))),
+        // The length is what it was when this was one box, so nothing about how far a
+        // dropped sword reaches or how it tumbles moves.
+        ItemShape::Blade => sword_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         // A carried structure: wider than it is tall, so a tent never reads as a cube.
         ItemShape::Bundle => Mesh::from(Cuboid::from_size(Vec3::new(
             DROP_EDGE * 1.15,
@@ -529,6 +543,92 @@ mod tests {
                 "{shape:?} is drawn from nothing"
             );
         }
+    }
+
+    /// **The sword on the ground is the same weapon as the sword in the hand** (#204).
+    ///
+    /// #182 made a drop look like the thing it is; this one is a case that criterion did not
+    /// reach, because a sword and a bar had the same silhouette until the held view model
+    /// stopped being a bar. So the arm reads the shape from `player::hands` at drop scale
+    /// rather than authoring a second gladius that would drift from the first.
+    ///
+    /// Asserted as properties of the geometry rather than against the held mesh, because
+    /// comparing the two meshes would pass for any pair of scaled copies of *anything* —
+    /// a box included. A blade that tapers to a point, a guard wider than it, and a length
+    /// unchanged from when this arm was one box are the three things a player would notice.
+    #[test]
+    fn a_dropped_sword_is_the_weapon_and_not_a_bar() {
+        let mut app = headless_player();
+        app.update();
+
+        let world = app.world_mut();
+        let handle = world
+            .resource::<DropVisuals>()
+            .shapes
+            .iter()
+            .find(|(shape, _)| *shape == ItemShape::Blade)
+            .map(|(_, mesh)| mesh.clone())
+            .expect("the blade has a drop mesh");
+        let meshes = world.resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&handle).expect("the blade's drop mesh");
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the blade's drop mesh must carry Float32x3 positions");
+        };
+
+        assert!(
+            positions.len() > Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices(),
+            "a dropped sword is {} vertices, which is one box",
+            positions.len()
+        );
+
+        let span = |axis: usize| -> (f32, f32) {
+            positions
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), p| {
+                    (low.min(p[axis]), high.max(p[axis]))
+                })
+        };
+        let (bottom, top) = span(1);
+        assert!(
+            (top - bottom - DROP_EDGE * BLADE_DROP_LENGTH).abs() < 1e-6,
+            "a dropped sword is {} long, and BLADE_DROP_LENGTH says {}",
+            top - bottom,
+            DROP_EDGE * BLADE_DROP_LENGTH
+        );
+
+        // It tapers to a point: what is left of the section at the very top is a fraction of
+        // the widest the sword ever is. Read from the mesh's own extremes rather than at
+        // named heights, so this stays a statement about the silhouette and not a second
+        // copy of `hands`' constants.
+        let widest = |low: f32, high: f32| {
+            positions
+                .iter()
+                .filter(|p| p[1] >= low && p[1] <= high)
+                .map(|p| p[2].abs())
+                .fold(0.0f32, f32::max)
+        };
+        let point = widest(top - 1e-6, top);
+        let anywhere = widest(bottom, top);
+        assert!(
+            point < anywhere * 0.2,
+            "a dropped sword is {point} across at its tip against {anywhere} at its widest, so \
+             it is still a bar"
+        );
+
+        // And the widest part is down at the hilt rather than out at the tip, which is what
+        // a cross guard is and what tells a sword from a paddle.
+        let guard = positions
+            .iter()
+            .filter(|p| p[2].abs() > anywhere - 1e-6)
+            .map(|p| p[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            guard < (bottom + top) / 2.0,
+            "a dropped sword is widest at {guard}, above the middle of a sword spanning \
+             {bottom}..{top}, so whatever is widest about it is not a guard"
+        );
     }
 
     /// The colour comes through the item table, never straight into the palette.

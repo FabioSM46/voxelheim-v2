@@ -17,8 +17,10 @@
 use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::InputMode;
@@ -125,8 +127,111 @@ const LATERAL_ROLL_RADIANS: f32 = 0.75;
 const THRUST_REACH: f32 = 0.11;
 const THRUST_LEVEL_RADIANS: f32 = 0.35;
 
-/// The blade's shape, in the same camera-space units as the block and material meshes.
-const BLADE_SIZE: Vec3 = Vec3::new(0.012, 0.115, 0.030);
+/// The whole sword, pommel to tip, in the same camera-space units as the block and
+/// material meshes.
+///
+/// **The budget, and every part below is spent out of it**: it is exactly what the single
+/// box occupied before #204, so nothing about where the hand sits or how far it swings
+/// moves — the same constraint #175's fist met against [`HAND_SIZE`]. Grow one part and
+/// another gives the length back, which is what
+/// [`the_sword_spends_exactly_the_length_the_box_did`] holds.
+const SWORD_LENGTH: f32 = 0.115;
+
+/// How much of that length is blade, once the pommel, the grip and the guard have taken
+/// theirs.
+const BLADE_LENGTH: f32 = 0.075;
+
+/// The blade across the flats, at the guard. It narrows from here — see
+/// [`POINT_WIDTH_FRACTION`].
+const BLADE_WIDTH: f32 = 0.030;
+
+/// The blade through the ridge, which is the thickest it ever is: the section is knife-thin
+/// at both edges and full thickness only along the central flat.
+const BLADE_THICKNESS: f32 = 0.012;
+
+/// How much of the blade's half-width the central flat occupies, the rest being bevel.
+///
+/// **This is what makes the section a hexagon rather than a rectangle**, and it is the whole
+/// of why the blade reads as bevelled: six side faces per span instead of four, so the light
+/// catches a different pair as the hand turns.
+const BLADE_RIDGE_FRACTION: f32 = 0.34;
+
+/// How wide the blade is where the point begins, as a fraction of its width at the guard.
+///
+/// Under one, so the blade is waisted rather than parallel — the taper a gladius has before
+/// the point starts at all.
+const POINT_WIDTH_FRACTION: f32 = 0.76;
+
+/// How much of the blade's length is the taper to the tip.
+const POINT_LENGTH: f32 = 0.020;
+
+/// What is left of the section at the very tip, as a fraction of the section at the
+/// shoulder.
+///
+/// **Small rather than zero, and that is a renderer's constraint rather than a shape
+/// decision.** A section that collapses to one vertex turns six quads into six zero-area
+/// slivers, and a zero-area triangle has no normal to compute — so the tip converges to a
+/// hexagon a tenth the size instead, which is a tenth of two and a half millimetres of
+/// camera space and reads as a point.
+const POINT_TIP_FRACTION: f32 = 0.10;
+
+/// The cross guard: thicker than the blade so it stands out from it in the hand, thin in
+/// length, and wide enough across to read as a guard rather than a collar.
+const GUARD_SIZE: Vec3 = Vec3::new(0.019, 0.006, 0.044);
+
+/// The grip the hand closes on: leather, narrower than everything around it.
+const GRIP_SIZE: Vec3 = Vec3::new(0.014, 0.024, 0.014);
+
+/// The pommel: brass, wider than the grip, which is what stops the sword ending in a stub.
+const POMMEL_SIZE: Vec3 = Vec3::new(0.018, 0.010, 0.017);
+
+/// How far the blade's root is buried in the guard.
+///
+/// Half the guard, so the blade's own end cap sits *inside* the guard's volume rather than
+/// flush with its top face. Flush would be two coplanar quads facing the same way, which is
+/// the flicker rule 2 in `client/AGENTS.md` names for the body rig — and the reason a rust
+/// mark stands proud of the blade rather than sitting on it.
+const BLADE_TANG: f32 = GUARD_SIZE.y / 2.0;
+
+/// How many rust marks the rusty blade carries.
+///
+/// **Several small ones rather than three large ones**, which is the difference between
+/// oxide and damage: rust takes hold in freckles across a blade, and three patches at fixed
+/// heights read as somebody having hit it with something.
+const RUST_MARKS: u32 = 14;
+
+/// The longest side of one mark, before [`scatter`] varies it down.
+const RUST_MARK_SIZE: f32 = 0.010;
+
+/// How much of each end of the blade stays clear of rust.
+///
+/// The whole mark, not its centre: a mark's own length is taken out of the range before it
+/// is placed, so nothing overhangs the tip or disappears into the guard.
+const RUST_MARK_MARGIN: f32 = 0.05;
+
+/// How far a mark stands proud of the blade's surface, as a fraction of
+/// [`BLADE_THICKNESS`].
+///
+/// The same twentieth #175 used, and for the same reason: two surfaces sharing a plane is
+/// where a renderer has to choose, and it chooses per frame.
+const RUST_MARK_PROUD: f32 = 0.05;
+
+/// How deep a mark is bedded into the blade, as a fraction of the surface's own offset from
+/// the mid-plane at that point.
+///
+/// **Both bounds are load-bearing and neither is a taste.** A mark is an axis-aligned box on
+/// a surface that tilts away from it across the bevel, so the surface under one end of the
+/// mark sits lower than under its middle; bedding it shallower than that drop would leave
+/// the far end floating off the blade. Under one, so the mark can never reach through to the
+/// other face and appear on both. The arithmetic that makes the first bound hold is in
+/// [`rusted_blade_mesh`], and [`every_rust_mark_stays_on_the_blade_it_freckles`] measures it.
+const RUST_MARK_SINK: f32 = 0.6;
+
+/// The seed the marks are scattered from.
+///
+/// **Deterministic, so the same sword looks the same every run** — a blade whose freckles
+/// moved between sessions would be the one thing about it a player could not learn.
+const RUST_SEED: u32 = 0x5EED_0204;
 
 /// A carried structure: a bundle, wider than it is tall, so a tent under the arm does not
 /// read as another stackable cube.
@@ -139,7 +244,7 @@ const TOOL_HAFT_SIZE: Vec3 = Vec3::new(0.014, 0.130, 0.014);
 
 /// And its head, across the top of that haft. Wider than the haft in x and z and short in
 /// y, which is the T a shovel, a pickaxe and an axe all share — and the whole of what
-/// distinguishes the silhouette from [`BLADE_SIZE`]'s single tapering box.
+/// distinguishes the silhouette from [`sword_mesh`]'s guard, grip and tapering blade.
 const TOOL_HEAD_SIZE: Vec3 = Vec3::new(0.052, 0.020, 0.026);
 
 /// A haft with a head across the top of it: one mesh, two boxes.
@@ -202,7 +307,275 @@ fn fist_mesh() -> Mesh {
     merged
 }
 
-/// The rusty sword's blade: iron with rust on it.
+/// One cross-section of the blade: where it sits along the sword, how far it reaches to
+/// either edge, and how thick it is through the central ridge.
+///
+/// **The blade is lofted from three of these**, which is what "bevelled" means in a form the
+/// renderer can hold: knife-thin at both edges and full thickness only along a central flat.
+#[derive(Debug, Clone, Copy)]
+struct BladeSection {
+    y: f32,
+    half_width: f32,
+    half_thickness: f32,
+}
+
+impl BladeSection {
+    /// The six corners of the section, in order around its perimeter.
+    ///
+    /// **The order is load-bearing rather than a convention.** [`MeshBuild::quad`] takes the
+    /// outward normal from the corners it is handed, so walking a section the other way
+    /// round turns the whole blade inside out — visible only as a sword that vanishes when
+    /// you look at it, which is the failure that costs the most to diagnose.
+    fn perimeter(self) -> [Vec3; 6] {
+        let Self {
+            y,
+            half_width: w,
+            half_thickness: t,
+        } = self;
+        let ridge = w * BLADE_RIDGE_FRACTION;
+        [
+            Vec3::new(0.0, y, w),
+            Vec3::new(t, y, ridge),
+            Vec3::new(t, y, -ridge),
+            Vec3::new(0.0, y, -w),
+            Vec3::new(-t, y, -ridge),
+            Vec3::new(-t, y, ridge),
+        ]
+    }
+}
+
+/// The buffers one hand-authored mesh is accumulated into.
+///
+/// **Hand-authored positions rather than merged primitives, and only for the blade.** The
+/// guard, the grip and the pommel are boxes and stay boxes; a bevelled section that tapers
+/// to a point is not something `Cuboid`, `Cone` or `ConicalFrustum` can express — a cone is
+/// round and a frustum is round, and what this needs is a hexagon that narrows in width
+/// faster than in thickness. `world/render.rs` builds the entire terrain this way, so the
+/// mechanism is the established one rather than a new one.
+#[derive(Debug, Default)]
+struct MeshBuild {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl MeshBuild {
+    /// One flat-shaded quad, wound around its perimeter.
+    ///
+    /// Flat rather than smooth, deliberately: six faces per span that each catch the light
+    /// separately is the whole reason the section is a hexagon, and averaging the normals at
+    /// the ridge would put a soft gradient exactly where the highlight should break.
+    fn quad(&mut self, corners: [Vec3; 4]) {
+        let [a, b, c, d] = corners;
+        // From the diagonals rather than from one triangle's two edges: a quad lofted
+        // between sections of different widths is not exactly planar, and the diagonals
+        // give the normal both of its triangles are nearest to instead of the first one's.
+        let normal = (c - a).cross(d - b).normalize_or_zero();
+        let first = self.push(corners.into_iter().zip(UNIT_UVS), normal);
+        self.indices
+            .extend([first, first + 1, first + 3, first + 1, first + 2, first + 3]);
+    }
+
+    /// One flat-shaded polygon, as a fan from its first corner.
+    ///
+    /// The corners must already be wound so that `normal` is the outward one; the caller
+    /// reverses them for the end that faces the other way.
+    fn fan(&mut self, corners: [Vec3; 6], normal: Vec3) {
+        // The cap is never seen — the root is buried in the guard and the tip is a tenth of
+        // a section — so its texture coordinates carry no information and say so.
+        let first = self.push(corners.into_iter().zip([[0.0, 0.0]; 6]), normal);
+        for corner in 1..corners.len() as u32 - 1 {
+            self.indices
+                .extend([first, first + corner, first + corner + 1]);
+        }
+    }
+
+    /// Appends vertices sharing one normal, and answers the index the first of them landed
+    /// at.
+    fn push(&mut self, corners: impl Iterator<Item = (Vec3, [f32; 2])>, normal: Vec3) -> u32 {
+        let first = self.positions.len() as u32;
+        for (corner, uv) in corners {
+            self.positions.push(corner.to_array());
+            self.normals.push(normal.to_array());
+            self.uvs.push(uv);
+        }
+        first
+    }
+
+    /// The three attributes and the indices, as the asset the renderer draws.
+    ///
+    /// **All three attributes, and that is not decoration.** `Mesh::merge` walks the
+    /// attributes of the mesh being merged *into* and silently skips any the other side
+    /// lacks, which leaves the buffers different lengths rather than raising — so a blade
+    /// missing `ATTRIBUTE_UV_0` would merge with a `Cuboid` guard and corrupt it quietly.
+    fn finish(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+/// One texture coordinate per corner of a quad, in the order [`MeshBuild::quad`] walks them.
+///
+/// Nothing samples them — this client has no texture and `client/AGENTS.md` says the palette
+/// is the whole material system — but the attribute has to be *present*, because a merge
+/// drops any attribute one side is missing and leaves the buffers unequal lengths.
+const UNIT_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// Where the blade starts: the top of the guard, in the sword's own space.
+///
+/// The sword is centred on its own origin, exactly as every `Cuboid` in this file is, so
+/// that swapping the held mesh moves nothing about where the hand sits.
+fn blade_base() -> f32 {
+    -SWORD_LENGTH / 2.0 + POMMEL_SIZE.y + GRIP_SIZE.y + GUARD_SIZE.y
+}
+
+/// The three sections the blade is lofted from: at the guard, at the shoulder where the
+/// point begins, and at the tip.
+fn blade_sections() -> [BladeSection; 3] {
+    let base = blade_base();
+    let half_width = BLADE_WIDTH / 2.0;
+    let half_thickness = BLADE_THICKNESS / 2.0;
+    [
+        // Sunk into the guard by [`BLADE_TANG`], so the blade's own end cap is inside the
+        // guard's volume rather than flush with its top face.
+        BladeSection {
+            y: base - BLADE_TANG,
+            half_width,
+            half_thickness,
+        },
+        // The shoulder. The blade has narrowed to [`POINT_WIDTH_FRACTION`] by here and is
+        // still full thickness: a gladius is waisted long before it is pointed.
+        BladeSection {
+            y: base + BLADE_LENGTH - POINT_LENGTH,
+            half_width: half_width * POINT_WIDTH_FRACTION,
+            half_thickness,
+        },
+        // The tip, where both give way together.
+        BladeSection {
+            y: base + BLADE_LENGTH,
+            half_width: half_width * POINT_WIDTH_FRACTION * POINT_TIP_FRACTION,
+            half_thickness: half_thickness * POINT_TIP_FRACTION,
+        },
+    ]
+}
+
+/// The section the blade has at a given height, interpolated along the loft.
+///
+/// Read by [`rusted_blade_mesh`] so a mark sits on the surface the blade actually has there
+/// rather than on the one it has at the guard.
+fn blade_at(y: f32) -> BladeSection {
+    let [root, shoulder, tip] = blade_sections();
+    let (lower, upper) = if y <= shoulder.y {
+        (root, shoulder)
+    } else {
+        (shoulder, tip)
+    };
+    let along = ((y - lower.y) / (upper.y - lower.y)).clamp(0.0, 1.0);
+    let between = |from: f32, to: f32| from + (to - from) * along;
+    BladeSection {
+        y,
+        half_width: between(lower.half_width, upper.half_width),
+        half_thickness: between(lower.half_thickness, upper.half_thickness),
+    }
+}
+
+/// How far the blade's surface stands off its mid-plane, `z` across a given section.
+///
+/// Flat at [`BLADE_THICKNESS`] over the ridge, then falling away linearly to nothing at the
+/// edge — the bevel, read as a number.
+fn blade_surface(section: BladeSection, z: f32) -> f32 {
+    let ridge = section.half_width * BLADE_RIDGE_FRACTION;
+    let across = z.abs();
+    if across <= ridge {
+        section.half_thickness
+    } else {
+        section.half_thickness * (section.half_width - across) / (section.half_width - ridge)
+    }
+}
+
+/// A gladius: a bevelled blade that tapers to a point, a cross guard, a grip and a pommel,
+/// merged into one mesh at whatever length the caller draws it.
+///
+/// **One mesh, for the reason [`tool_mesh`] and [`fist_mesh`] are one each**: the view model
+/// is a single entity with a single transform that `animate_view_model` drives, and a guard
+/// parented separately would be a second thing to keep in step with a swing.
+///
+/// **The length is a parameter because two renderers draw this weapon and they must draw the
+/// same one.** `player/drops.rs` calls it too, at drop scale. That is deliberately *not* the
+/// shared-mesh arrangement its `drop_mesh` note rules out — each surface still mints its own
+/// asset, at its own size, with its own materials — it is the shape being one answer instead
+/// of two that somebody has to keep in step, which is exactly the relationship
+/// `player/items.rs` already has with its readers.
+pub(super) fn sword_mesh(length: f32) -> Mesh {
+    let base = blade_base();
+    let sections = blade_sections();
+
+    let mut build = MeshBuild::default();
+    for pair in sections.windows(2) {
+        let [lower, upper] = pair else {
+            unreachable!("windows(2) yields pairs")
+        };
+        let low = lower.perimeter();
+        let high = upper.perimeter();
+        for corner in 0..low.len() {
+            let next = (corner + 1) % low.len();
+            build.quad([low[corner], low[next], high[next], high[corner]]);
+        }
+    }
+    // The two ends. The root's winding is reversed because its face looks the other way,
+    // and a cap wound like the tip's would be culled from outside and visible from within.
+    let mut root = sections[0].perimeter();
+    root.reverse();
+    build.fan(root, Vec3::NEG_Y);
+    build.fan(sections[2].perimeter(), Vec3::Y);
+    let mut sword = build.finish();
+
+    // The furniture, in boxes, down from the base. Each sits directly under the last: two
+    // solid boxes meeting on a plane present that plane's two quads back to back, and a
+    // back-facing quad is culled — which is why *these* joins need no overlap and the
+    // blade's root, whose cap would face the same way as the guard's, does.
+    let guard = Mesh::from(Cuboid::from_size(GUARD_SIZE))
+        .translated_by(Vec3::Y * (base - GUARD_SIZE.y / 2.0));
+    let grip = Mesh::from(Cuboid::from_size(GRIP_SIZE))
+        .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y / 2.0));
+    let pommel = Mesh::from(Cuboid::from_size(POMMEL_SIZE))
+        .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y - POMMEL_SIZE.y / 2.0));
+    merge_all(&mut sword, [guard, grip, pommel], "sword");
+
+    // Uniform, so the normals computed above stay unit vectors — `Mesh::scale_by` leaves
+    // them alone for exactly that case and rebuilds them for every other.
+    sword.scaled_by(Vec3::splat(length / SWORD_LENGTH))
+}
+
+/// A deterministic value in `0.0..1.0` for one rust mark and one of its dimensions.
+///
+/// **A seeded hash rather than a crate and rather than a table of hand-placed numbers.**
+/// Fourteen scattered boxes are not worth a fourth dependency (`client/AGENTS.md` is
+/// explicit about the budget), and an integer hash is reproducible on every platform, which
+/// is what [`RUST_SEED`]'s promise of the same sword every run actually requires.
+fn scatter(mark: u32, channel: u32) -> f32 {
+    let mut bits = mark
+        .wrapping_mul(0x9E37_79B1)
+        .wrapping_add(channel.wrapping_mul(0x85EB_CA6B))
+        ^ RUST_SEED;
+    bits ^= bits >> 16;
+    bits = bits.wrapping_mul(0x7FEB_352D);
+    bits ^= bits >> 15;
+    bits = bits.wrapping_mul(0x846C_A68B);
+    bits ^= bits >> 16;
+    // The top 24 bits over their own range: every value of that width is exactly
+    // representable in an f32, so the division is the only rounding anywhere in here.
+    (bits >> 8) as f32 / 16_777_216.0
+}
+
+/// The rusty sword: [`sword_mesh`] with oxide on the blade.
 ///
 /// **Two colours on one mesh and one material**, which is what the cost note in
 /// `client/AGENTS.md` asks for — the alternative was a second entity per held item, or a
@@ -215,41 +588,55 @@ fn fist_mesh() -> Mesh {
 /// marks carry [`RUST_TINT`], so they are a shade *of* that base rather than a second
 /// opinion about it.
 ///
-/// Three marks rather than a wash, at different heights and not touching the edge: rust
-/// takes hold in patches, and a blade evenly discoloured reads as painted.
+/// **Fourteen small marks scattered from a seed, where there used to be three large ones at
+/// hand-picked heights.** Three patches a seventh of the blade tall read as damage; oxide is
+/// freckles. Each is bedded into the surface it sits on rather than laid over it, which is
+/// what lets a mark straddle the ridge and the bevel without either floating clear of the
+/// blade or reaching through to the far face.
 fn rusted_blade_mesh() -> Mesh {
-    let mut merged = plain(Mesh::from(Cuboid::from_size(BLADE_SIZE)));
+    let mut merged = plain(sword_mesh(SWORD_LENGTH));
+    let base = blade_base();
+    let proud = BLADE_THICKNESS * RUST_MARK_PROUD;
 
-    // Each mark stands a hair proud of the blade's faces, for the reason the rig's hair does:
-    // two surfaces sharing a plane is where a renderer has to choose, and it chooses per
-    // frame. A twentieth of the blade's thinnest dimension is enough and is invisible.
-    //
-    // The mark is therefore thicker than the blade and centred on it, so **one mark wraps
-    // both flat faces** rather than sitting on one of them. That is what `proud` forces
-    // rather than something it permits: a mark pushed onto a single face travels half of
-    // `proud` to get there, which lands its *other* face exactly on the plane of the
-    // blade's — coplanar, differently coloured, overlapping, which is the flicker rule 2 in
-    // `client/AGENTS.md` names for the body rig, arriving here by the same door.
-    let proud = BLADE_SIZE.x * 0.05;
-    let mark = Vec3::new(
-        BLADE_SIZE.x + proud,
-        BLADE_SIZE.y * 0.13,
-        BLADE_SIZE.z * 0.55,
-    );
-    let marks = [-0.24, 0.02, 0.29]
-        .into_iter()
-        .enumerate()
-        .map(|(index, height)| {
-            // Alternating across the blade's *width*, so the three do not read as one
-            // stripe down the middle of it as it turns. Not across its two faces: every
-            // mark is on both of those, for the reason above.
-            let side = if index % 2 == 0 { 1.0 } else { -1.0 };
-            rusted(Mesh::from(Cuboid::from_size(mark)).translated_by(Vec3::new(
-                0.0,
-                BLADE_SIZE.y * height,
-                side * BLADE_SIZE.z * 0.10,
-            )))
-        });
+    let marks = (0..RUST_MARKS).map(|mark| {
+        // The longest side, half to all of `RUST_MARK_SIZE`. The whole mark is kept out of
+        // the margin at each end rather than merely its centre, so nothing overhangs the
+        // tip or disappears into the guard however large it came out.
+        let length = RUST_MARK_SIZE * (0.5 + 0.5 * scatter(mark, 0));
+        let lowest = base + BLADE_LENGTH * RUST_MARK_MARGIN + length / 2.0;
+        let highest = base + BLADE_LENGTH * (1.0 - RUST_MARK_MARGIN) - length / 2.0;
+        // **One mark per stratum of the blade, jittered inside its own** — rather than
+        // fourteen independent draws over the whole length. Fourteen samples of a hash
+        // clump: the first cut of this left the top third and the bottom tenth bare and put
+        // nine marks in the middle, which reads as a band rather than as weathering.
+        // Stratifying makes *spread over the blade* a property of the placement instead of a
+        // hope about the seed, and the jitter is what keeps it from being a row.
+        let stratum = (mark as f32 + scatter(mark, 1)) / RUST_MARKS as f32;
+        let y = lowest + (highest - lowest) * stratum;
+
+        // **Two bounds, and they are what make the bedding below sufficient rather than
+        // approximate.** The mark spans at most a quarter of the local half-width to each
+        // side of its centre, and its centre stays inside half of it — so the blade's
+        // surface can fall away under the mark by at most `0.38 × half_thickness`, while
+        // the shallowest surface a mark can sit on is `0.76 × half_thickness` and
+        // `RUST_MARK_SINK` of that is more. A mark therefore never lifts off the blade at
+        // its far edge, and never reaches the far face either, because the sink is a
+        // fraction of the surface's own offset and that fraction is under one.
+        let section = blade_at(y);
+        let width = (length * 0.5).min(section.half_width * 0.5);
+        let room = (section.half_width * 0.5 - width / 2.0).max(0.0);
+        let z = room * (scatter(mark, 2) * 2.0 - 1.0);
+
+        // Alternating faces, so a blade turning in the hand shows freckles on whichever one
+        // it presents rather than a stripe down one side of it.
+        let face = if mark % 2 == 0 { 1.0 } else { -1.0 };
+        let surface = blade_surface(section, z);
+        let sink = surface * RUST_MARK_SINK;
+        rusted(
+            Mesh::from(Cuboid::from_size(Vec3::new(sink + proud, length, width)))
+                .translated_by(Vec3::new(face * (surface + (proud - sink) / 2.0), y, z)),
+        )
+    });
     merge_all(&mut merged, marks, "rusted blade");
     merged
 }
@@ -560,7 +947,7 @@ fn spawn_view_model(
         hand: meshes.add(fist_mesh()),
         block: meshes.add(Cuboid::from_size(Vec3::splat(BLOCK_EDGE))),
         material: meshes.add(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
-        blade: meshes.add(Cuboid::from_size(BLADE_SIZE)),
+        blade: meshes.add(sword_mesh(SWORD_LENGTH)),
         rusted_blade: meshes.add(rusted_blade_mesh()),
         bundle: meshes.add(Cuboid::from_size(BUNDLE_SIZE)),
         tool: meshes.add(tool_mesh()),
@@ -964,26 +1351,252 @@ mod tests {
         assert_ne!(rusted, plain, "both swords share one mesh");
     }
 
-    /// **Every rust mark wraps the blade; what alternates is where the three sit across it.**
+    /// Every vertex position one mesh carries.
+    fn positions(meshes: &Assets<Mesh>, handle: &Handle<Mesh>) -> Vec<[f32; 3]> {
+        let mesh = meshes.get(handle).expect("the mesh exists");
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the mesh must carry Float32x3 positions");
+        };
+        positions.clone()
+    }
+
+    /// The lowest and highest value a set of vertices reaches on one axis.
+    fn extent(positions: &[[f32; 3]], axis: usize) -> (f32, f32) {
+        positions
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), p| {
+                (low.min(p[axis]), high.max(p[axis]))
+            })
+    }
+
+    /// **The sword spends exactly the length the box did**, and is still centred on its own
+    /// origin.
     ///
-    /// Pinned because neither half is what a reader guesses from `side`. A mark is thicker
-    /// than the blade and centred on it, so it stands proud of *both* flat faces; offsetting
-    /// one onto a single face instead would land its other face exactly on the plane of the
-    /// blade's — coplanar, differently coloured, overlapping — which is the flicker `proud`
-    /// exists to prevent. So this fails in that direction as readily as in the direction of
-    /// losing the stagger, which is the point of asserting the geometry rather than the
-    /// comment.
+    /// This is the half most likely to break the swing tests without anybody noticing, so it
+    /// is asserted twice over: once against the parts, so growing one has to take the length
+    /// from another, and once against the mesh, so an arithmetic slip in the stacking cannot
+    /// pass by agreeing with itself.
     #[test]
-    fn every_rust_mark_wraps_the_blade_and_the_three_stagger_across_its_width() {
+    fn the_sword_spends_exactly_the_length_the_box_did() {
+        let parts = POMMEL_SIZE.y + GRIP_SIZE.y + GUARD_SIZE.y + BLADE_LENGTH;
+        assert!(
+            (parts - SWORD_LENGTH).abs() < 1e-6,
+            "the pommel, grip, guard and blade come to {parts} against a budget of \
+             {SWORD_LENGTH}"
+        );
+
         let mut app = app();
         app.update();
+        let blade = app.world().resource::<HandVisuals>().blade.clone();
+        let sword = positions(app.world().resource::<Assets<Mesh>>(), &blade);
 
+        let (low, high) = extent(&sword, 1);
+        assert!(
+            (high - low - SWORD_LENGTH).abs() < 1e-5,
+            "the sword spans {} on y, and SWORD_LENGTH says {SWORD_LENGTH}",
+            high - low
+        );
+        assert!(
+            (high + low).abs() < 1e-5,
+            "the sword is not centred on its own origin: it spans {low}..{high}, so swapping \
+             the held mesh would move where the hand sits"
+        );
+    }
+
+    /// **A gladius rather than a bar**: a blade that narrows and thins to a point, bevelled
+    /// from a central ridge, with a cross guard, a grip and a pommel under it.
+    ///
+    /// Every clause is a property rather than a vertex list. *Tapers* is the cross-section at
+    /// the tip being smaller than at the guard on both axes, which is what "has a point"
+    /// means in a form a test can read and which a box fails by construction. *Bevelled* is
+    /// the section reaching its full thickness somewhere other than at its widest point,
+    /// which a rectangular section fails in both directions.
+    #[test]
+    fn the_held_sword_is_a_gladius_and_not_one_box() {
+        let mut app = app();
+        app.update();
+        let blade = app.world().resource::<HandVisuals>().blade.clone();
+        let sword = positions(app.world().resource::<Assets<Mesh>>(), &blade);
+
+        let one_box = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
+        assert!(
+            sword.len() > one_box,
+            "the sword is {} vertices, which is one box",
+            sword.len()
+        );
+
+        // The vertices sitting on one horizontal plane, which is how a section is read out of
+        // a merged mesh: the loft puts blade vertices at exactly three heights and the
+        // furniture's boxes at four more, and no two of the seven coincide.
+        let on = |y: f32| -> Vec<[f32; 3]> {
+            let found: Vec<[f32; 3]> = sword
+                .iter()
+                .copied()
+                .filter(|p| (p[1] - y).abs() < 1e-6)
+                .collect();
+            assert!(!found.is_empty(), "no vertex sits at y {y}");
+            found
+        };
+        let across = |section: &[[f32; 3]]| section.iter().map(|p| p[2].abs()).fold(0.0, f32::max);
+        let through = |section: &[[f32; 3]]| section.iter().map(|p| p[0].abs()).fold(0.0, f32::max);
+
+        let [root, shoulder, tip] = blade_sections().map(|section| on(section.y));
+
+        // It tapers, and twice over: waisted from the guard to the shoulder, then converging
+        // in both axes at once over the point.
+        assert!(
+            across(&tip) < across(&shoulder) && across(&shoulder) < across(&root),
+            "the blade does not narrow: {} at the guard, {} at the shoulder, {} at the tip",
+            across(&root),
+            across(&shoulder),
+            across(&tip)
+        );
+        assert!(
+            through(&tip) < through(&root),
+            "the blade is {} thick at the tip against {} at the guard, so it ends in a chisel",
+            through(&tip),
+            through(&root)
+        );
+
+        // It is bevelled: thickest along a central ridge and knife-thin at both edges, so the
+        // vertex reaching furthest *across* is not the one reaching furthest *through*.
+        let widest = root.iter().copied().fold([0.0f32; 3], |best, p| {
+            if p[2].abs() > best[2].abs() { p } else { best }
+        });
+        assert!(
+            widest[0].abs() < through(&root) * 0.5,
+            "the blade is {} thick at its widest point against {} at the ridge: the section is \
+             a rectangle rather than a bevel",
+            widest[0].abs(),
+            through(&root)
+        );
+        let ridge: Vec<[f32; 3]> = root
+            .iter()
+            .copied()
+            .filter(|p| (p[0].abs() - through(&root)).abs() < 1e-6)
+            .collect();
+        assert!(
+            across(&ridge) < across(&root),
+            "the ridge is as wide as the blade, so there is no bevel to run from"
+        );
+
+        // A cross guard wider than the blade, a grip narrower than it, and a pommel wider
+        // than the grip. Each part meets its neighbour on a shared plane, so a joint carries
+        // two widths — the part above it and the part below — and reading both is what tells
+        // three stacked parts from one box of the right height.
+        let base = blade_base();
+        let widths = |y: f32| -> (f32, f32) {
+            let plane = on(y);
+            (
+                plane
+                    .iter()
+                    .map(|p| p[2].abs())
+                    .fold(f32::INFINITY, f32::min),
+                across(&plane),
+            )
+        };
+        let (_, guard) = widths(base);
+        assert!(
+            guard > across(&root),
+            "the part on top of the grip reaches {guard} across against the blade's {}, so it \
+             is not a cross guard",
+            across(&root)
+        );
+        let (grip, _) = widths(base - GUARD_SIZE.y);
+        assert!(
+            grip < across(&root),
+            "the part under the guard is {grip} across against a blade of {}, so there is no \
+             grip for a hand to close on",
+            across(&root)
+        );
+        let (heel, pommel) = widths(base - GUARD_SIZE.y - GRIP_SIZE.y);
+        assert!(
+            pommel > heel,
+            "the grip runs into the bottom of the sword at {heel} with nothing wider under it, \
+             so there is no pommel"
+        );
+    }
+
+    /// **One mesh and one material for the whole weapon.**
+    ///
+    /// The cost rule the body rig set and #175 kept, and the one a sword assembled from a
+    /// dozen entities would break quietly: it would look right and animate wrong, because
+    /// `animate_view_model` drives one transform and a guard parented separately would be a
+    /// second thing to keep in step with a swing.
+    #[test]
+    fn the_held_sword_is_one_mesh_and_one_material() {
+        let mut app = app();
+        *app.world_mut().resource_mut::<Inventory>() =
+            Inventory::from_stacks(vec![InventoryStack {
+                item_id: ITEM_RUSTY_SWORD,
+                count: 1,
+                ..Default::default()
+            }]);
+        *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(0);
+        app.update();
+
+        let world = app.world_mut();
+        let mut view = world.query_filtered::<Entity, (
+            With<HeldItem>,
+            With<Mesh3d>,
+            With<MeshMaterial3d<StandardMaterial>>,
+        )>();
+        let drawn: Vec<Entity> = view.iter(world).collect();
+        assert_eq!(
+            drawn.len(),
+            1,
+            "the held sword is {} entities carrying a mesh and a material",
+            drawn.len()
+        );
+
+        let mut children = world.query::<(&ChildOf, Entity)>();
+        let under = children
+            .iter(world)
+            .filter(|(parent, _)| parent.parent() == drawn[0])
+            .count();
+        assert_eq!(
+            under, 0,
+            "the held sword has {under} child entities, so part of it is not on the transform \
+             `animate_view_model` drives"
+        );
+    }
+
+    /// **The rust is many small marks bedded into the blade.**
+    ///
+    /// It was three patches, each an eighth of the sword tall and more than half the blade
+    /// wide, at hand-picked heights — which reads as damage rather than as oxide. What this
+    /// pins is the shape of the replacement: [`RUST_MARKS`] of them, none longer than
+    /// [`RUST_MARK_SIZE`], spread over the blade rather than banded across a third of it, and
+    /// each *bedded into* the face it sits on rather than laid over it.
+    ///
+    /// That last clause is the one that needs measuring, because it is the only part not
+    /// obvious from reading the constants. A mark is an axis-aligned box on a surface that
+    /// tilts away across the bevel, so there are two ways to get it wrong and they fail in
+    /// opposite directions: bedded too shallow and the far end lifts off the blade, bedded
+    /// too deep and it comes through on the other face. Both are checked against the surface
+    /// the blade actually has under each mark.
+    #[test]
+    fn every_rust_mark_is_bedded_into_the_blade_it_freckles() {
+        // What three marks used to be, so "smaller" is measured against something rather than
+        // asserted about nothing: 13% of the sword's length by 55% of the blade's width.
+        const WAS_LONG: f32 = 0.115 * 0.13;
+        const WAS_WIDE: f32 = 0.030 * 0.55;
+        const {
+            assert!(
+                RUST_MARKS > 3 && RUST_MARK_SIZE < WAS_LONG && RUST_MARK_SIZE < WAS_WIDE,
+                "the rust is not more numerous and smaller than the three patches it replaced"
+            );
+        }
+
+        let mut app = app();
+        app.update();
         let rusted = app.world().resource::<HandVisuals>().rusted_blade.clone();
         let meshes = app.world().resource::<Assets<Mesh>>();
         let mesh = meshes.get(&rusted).expect("the rusted blade mesh");
 
-        let Some(VertexAttributeValues::Float32x3(positions)) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        let Some(VertexAttributeValues::Float32x3(all)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
             panic!("the rusted blade must carry Float32x3 positions");
         };
@@ -991,72 +1604,262 @@ mod tests {
         else {
             panic!("the rusted blade must carry Float32x4 colours");
         };
-
-        // Quantised for the reason `tints` quantises: these pick vertices out by identity
+        // Quantised for the reason `tints` quantises: this picks vertices out by identity
         // rather than measuring them.
         let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
-        let marks: Vec<[f32; 3]> = positions
+        let marked: Vec<[f32; 3]> = all
             .iter()
             .zip(colours)
             .filter(|(_, colour)| colour.map(|channel| (channel * 255.0).round() as u8) == rust)
             .map(|(position, _)| *position)
             .collect();
-        assert!(!marks.is_empty(), "no vertex carries the rust tint");
 
-        // Grouped into marks by the y planes they sit on: a box contributes exactly two,
-        // and the three heights do not meet. Asked of each mark rather than of all of them
-        // together, because the aggregate span is wide enough to pass while every single
-        // mark sits on one face — which is exactly the shape being ruled out.
-        let plane = |value: f32| (value * 1e6).round() as i32;
-        let mut heights: Vec<i32> = marks.iter().map(|p| plane(p[1])).collect();
-        heights.sort_unstable();
-        heights.dedup();
-        assert!(
-            heights.len() >= 2 && heights.len().is_multiple_of(2),
-            "the rust sits on {} y planes, which is not a whole number of marks",
-            heights.len()
+        // One mark is one box and `merge` appends, so the tinted vertices arrive in whole
+        // marks, in the order they were built.
+        let per_mark = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
+        assert_eq!(
+            marked.len(),
+            RUST_MARKS as usize * per_mark,
+            "the rust is {} vertices, which is not {RUST_MARKS} boxes of {per_mark}",
+            marked.len()
         );
 
-        // Both faces: each mark reaches past the blade's own thickness on each side of it.
-        let half = BLADE_SIZE.x / 2.0;
-        for (index, bounds) in heights.chunks(2).enumerate() {
-            let [bottom, top] = bounds else {
-                unreachable!("an even number of planes chunks into pairs")
-            };
-            let one: Vec<[f32; 3]> = marks
-                .iter()
-                .copied()
-                .filter(|p| plane(p[1]) == *bottom || plane(p[1]) == *top)
-                .collect();
-            let min_x = one.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
-            let max_x = one.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        let proud = BLADE_THICKNESS * RUST_MARK_PROUD;
+        let base = blade_base();
+        let mut faces = [false; 2];
+        let mut centres: Vec<f32> = Vec::new();
+        for (index, one) in marked.chunks(per_mark).enumerate() {
+            let (low_x, high_x) = extent(one, 0);
+            let (low_y, high_y) = extent(one, 1);
+            let (low_z, high_z) = extent(one, 2);
+
+            let longest = [high_x - low_x, high_y - low_y, high_z - low_z]
+                .into_iter()
+                .fold(0.0, f32::max);
             assert!(
-                min_x < -half && max_x > half,
-                "mark {index} spans x {min_x}..{max_x} against a blade of ±{half}, so it \
-                 sits on one face instead of wrapping both"
+                (RUST_MARK_SIZE * 0.5 - 1e-6..=RUST_MARK_SIZE + 1e-6).contains(&longest),
+                "mark {index} is {longest} on its longest side, outside half to all of \
+                 {RUST_MARK_SIZE}"
             );
+
+            // Inside the blade lengthwise and off the last few per cent at each end: a mark
+            // overhanging the tip blunts it, one inside the guard is invisible.
+            assert!(
+                low_y > base + BLADE_LENGTH * RUST_MARK_MARGIN - 1e-6
+                    && high_y < base + BLADE_LENGTH * (1.0 - RUST_MARK_MARGIN) + 1e-6,
+                "mark {index} spans y {low_y}..{high_y}, outside the blade's rustable length"
+            );
+
+            // On one face rather than wrapped across both: that is what alternating faces
+            // means, and a mark straddling the mid-plane would satisfy every other clause.
+            assert!(
+                low_x * high_x > 0.0,
+                "mark {index} spans x {low_x}..{high_x}, so it wraps the blade rather than \
+                 sitting on one face of it"
+            );
+            faces[usize::from(high_x > 0.0)] = true;
+
+            let section = blade_at((low_y + high_y) / 2.0);
+            let centre = (low_z + high_z) / 2.0;
+            let surface = blade_surface(section, centre);
+            let outer = low_x.abs().max(high_x.abs());
+            let inner = low_x.abs().min(high_x.abs());
+            assert!(
+                (outer - (surface + proud)).abs() < 1e-6,
+                "mark {index} reaches {outer} from the mid-plane where the blade's surface is \
+                 at {surface}, so it is not bedded into the face it sits on"
+            );
+
+            // Under the far edge of the mark the bevel has fallen away furthest; bedded
+            // shallower than that, the mark lifts off the blade there.
+            let far = centre.abs() + (high_z - low_z) / 2.0;
+            assert!(
+                far < section.half_width,
+                "mark {index} reaches {far} across a blade half {} wide, so it overhangs an edge",
+                section.half_width
+            );
+            assert!(
+                inner <= blade_surface(section, far) + 1e-9,
+                "mark {index} is bedded to {inner} where the blade's surface under its far edge \
+                 is {}, so it floats clear of the blade",
+                blade_surface(section, far)
+            );
+            assert!(
+                inner > 0.0,
+                "mark {index} reaches through the mid-plane, so it shows on the far face too"
+            );
+
+            centres.push((low_y + high_y) / 2.0);
         }
 
-        // Staggered: three marks in one column would put every rust vertex on the same two
-        // z planes.
-        let mut planes: Vec<i32> = marks.iter().map(|p| plane(p[2])).collect();
-        planes.sort_unstable();
-        planes.dedup();
-        assert!(
-            planes.len() > 2,
-            "the rust sits on {} z planes, so the three marks are one column down the width",
-            planes.len()
-        );
+        assert_eq!(faces, [true; 2], "every mark is on one face of the blade");
 
-        // And clear of both edges, which is what keeps a mark reading as a patch rather
-        // than as a chipped edge.
-        let edge = BLADE_SIZE.z / 2.0;
-        let min_z = marks.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
-        let max_z = marks.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
-        assert!(
-            min_z > -edge && max_z < edge,
-            "the rust spans z {min_z}..{max_z} against edges at ±{edge}, so a mark touches one"
+        let (lowest, highest) = (
+            centres.iter().copied().fold(f32::INFINITY, f32::min),
+            centres.iter().copied().fold(f32::NEG_INFINITY, f32::max),
         );
+        assert!(
+            highest - lowest > BLADE_LENGTH * 0.6,
+            "the marks span {} of a {BLADE_LENGTH} blade, so they are a band rather than \
+             weathering",
+            highest - lowest
+        );
+        let mut heights: Vec<i32> = centres.iter().map(|y| (y * 1e6) as i32).collect();
+        heights.sort_unstable();
+        heights.dedup();
+        assert_eq!(
+            heights.len(),
+            RUST_MARKS as usize,
+            "two marks share a height, so the scatter is not scattering"
+        );
+    }
+
+    /// **The sword is not inside out**, which is the one failure in here that costs the most
+    /// to diagnose.
+    ///
+    /// A lofted section walked the wrong way round produces a mesh that is geometrically
+    /// perfect and invisible: back-face culling removes every triangle you can see and keeps
+    /// every triangle you cannot, so the sword disappears when you look at it and reappears
+    /// from inside. Nothing else in this file's tests would notice — the extents, the taper,
+    /// the bevel and the rust are all statements about positions.
+    ///
+    /// Two independent readings, because they fail apart. The winding check says the stored
+    /// normal agrees with the order the triangle's own corners are in; the radial check says
+    /// that order is the outward one rather than a consistent inward one, which is exactly
+    /// what reversing a section produces.
+    #[test]
+    fn every_face_of_the_sword_looks_outward() {
+        let mut app = app();
+        app.update();
+        let blade = app.world().resource::<HandVisuals>().blade.clone();
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&blade).expect("the sword mesh");
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the sword must carry Float32x3 positions");
+        };
+        let Some(VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+        else {
+            panic!("the sword must carry Float32x3 normals");
+        };
+        let indices: Vec<usize> = mesh
+            .indices()
+            .expect("the sword is indexed")
+            .iter()
+            .collect();
+
+        let point = |index: usize| Vec3::from_array(positions[index]);
+        for corner in indices.chunks(3) {
+            let [a, b, c] = corner else {
+                panic!("the sword's indices are not whole triangles")
+            };
+            let wound = (point(*b) - point(*a)).cross(point(*c) - point(*a));
+            let stored = Vec3::from_array(normals[*a]);
+            assert!(
+                wound.dot(stored) > 0.0,
+                "the triangle at {a} is wound against the normal it carries, so it draws from \
+                 the wrong side"
+            );
+
+            // Away from the sword's own axis, for every face that has an opinion about it.
+            // The two end caps do not — they look along the axis — and they are the ones
+            // this term skips rather than the ones it fails on.
+            let middle = (point(*a) + point(*b) + point(*c)) / 3.0;
+            let radial = Vec3::new(middle.x, 0.0, middle.z);
+            if radial.length() > 1e-4 && stored.xz().length() > 1e-4 {
+                assert!(
+                    radial.dot(stored) > 0.0,
+                    "the triangle at {a} faces in toward the sword's axis, so the mesh is \
+                     inside out"
+                );
+            }
+        }
+    }
+
+    /// **The same sword every run**, which is what a seeded generator buys over a random one.
+    ///
+    /// A blade whose freckles moved between sessions would be the one thing about it a player
+    /// could not learn, and the failure is invisible inside any single run.
+    #[test]
+    fn the_rusty_sword_is_scattered_the_same_way_every_time() {
+        let read = |mesh: &Mesh| {
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("the rusted blade must carry Float32x3 positions");
+            };
+            positions.clone()
+        };
+        assert_eq!(
+            read(&rusted_blade_mesh()),
+            read(&rusted_blade_mesh()),
+            "two builds of one sword put the rust in different places"
+        );
+    }
+
+    /// **The sword still fits the motion that already exists**, in all three of its arcs.
+    ///
+    /// #174 replaced the one swing with three, and a shape that ends in a point is exactly the
+    /// kind of change that reads well in a cut and slices through the camera in a thrust. So
+    /// this walks the *real vertices* — not a bounding box, whose corners no vertex of this
+    /// shape occupies — through every arc frame by frame and asks the one question a near
+    /// plane asks.
+    ///
+    /// The placement bump is swept alongside, because it is the only animation that carries
+    /// the model *toward* the camera and it can coincide with a swing: a right click and a
+    /// left click inside the same 220 ms both play. That combination is the tightest pose the
+    /// view model ever reaches, and it is worth recording that the single box this replaced
+    /// did **not** clear the near plane there while the sword does — the pommel's corner sits
+    /// closer to the axis of the swing than the box's did.
+    #[test]
+    fn the_sword_clears_the_near_plane_through_every_swing() {
+        let mut app = app();
+        app.update();
+        let parent = held(&mut app).2;
+        let Projection::Perspective(projection) = app
+            .world()
+            .get::<Projection>(parent)
+            .expect("the world camera has a projection")
+        else {
+            panic!("the world camera is perspective");
+        };
+        let near = projection.near;
+
+        let visuals = app.world().resource::<HandVisuals>();
+        let (blade, rusted) = (visuals.blade.clone(), visuals.rusted_blade.clone());
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mut corners = positions(meshes, &blade);
+        corners.extend(positions(meshes, &rusted));
+
+        let mut arcs: Vec<Option<SwingShape>> = SwingShape::ALL.map(Some).to_vec();
+        arcs.push(None);
+        for shape in arcs {
+            for step in 0..=32u8 {
+                for bump in 0..=16u8 {
+                    let animation = HandAnimation {
+                        attack: shape.map(|shape| Swing {
+                            shape,
+                            elapsed: ATTACK_SWING_TIME.mul_f32(f32::from(step) / 32.0),
+                        }),
+                        bump_elapsed: Some(PLACE_BUMP_TIME.mul_f32(f32::from(bump) / 16.0)),
+                        ..Default::default()
+                    };
+                    let transform = animated_transform(&animation);
+                    for corner in &corners {
+                        let point = transform.transform_point(Vec3::from_array(*corner));
+                        assert!(
+                            -point.z > near,
+                            "{shape:?} at {step}/32 with the bump at {bump}/16 carries \
+                             {corner:?} to z {} against a near plane at {near}",
+                            point.z
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The rust reaches the screen only for the sword it belongs to.
@@ -1212,7 +2015,10 @@ mod tests {
             .z
             .max(BLOCK_EDGE)
             .max(MATERIAL_RADIUS * 2.0)
-            .max(BUNDLE_SIZE.z);
+            .max(BUNDLE_SIZE.z)
+            // The sword's widest point is its cross guard, not its blade — the one held
+            // shape whose depth is not the constant naming it.
+            .max(GUARD_SIZE.z);
         assert!(
             -BASE_TRANSLATION.z - largest_depth / 2.0 > projection.near,
             "the held mesh crosses the camera near plane"

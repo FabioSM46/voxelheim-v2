@@ -138,6 +138,18 @@ const MATERIAL: [IconPart; 3] = [
 /// The guard is perpendicular *by construction* rather than by a second angle — it is a
 /// bar drawn across the cell where the blade is drawn along it, and the same quarter turn
 /// then takes them to right angles. One number to change if the tilt ever moves.
+///
+/// **Checked against the sword `player::hands` builds and deliberately left alone** (#204).
+/// That issue gave the two 3D renderers a bevelled blade tapering to a point, a cross guard,
+/// a grip and a pommel, where they had had a single box; this drawing already had three of
+/// those four and was the renderer the other two were catching up to, so the criterion it
+/// answers is that the three stop disagreeing rather than that a third one changes.
+///
+/// The two the flat picture does not carry are the two a cell has no room for. It is
+/// [`super::CELL_SIZE`] pixels square and the blade part is 12% of that — six pixels across
+/// — so a taper would be one pixel a side and a pommel would be two by two, which is a
+/// smudge on the end of the grip rather than a pommel. The structural agreement is pinned by
+/// `the_flat_sword_draws_the_parts_the_held_one_does`.
 const BLADE: [IconPart; 3] = [
     IconPart {
         left: 44.0,
@@ -415,6 +427,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The flat sword and the 3D one draw the same weapon** (#204).
+    ///
+    /// `player::hands` and `player::drops` build a gladius; this cell draws one. Nothing here
+    /// can reach across to those constants — `player::hands` is private to `player` and
+    /// `ui::icon` is private to `ui`, which is the module boundary working — so what this
+    /// pins is the structure a reader can check against them by eye: three parts, one long
+    /// one crossed by a shorter one, with the grip on the far side of the cross from the tip.
+    ///
+    /// It is the assertion that fails if somebody "simplifies" this drawing back to a bar,
+    /// which is the direction the three renderers drifted apart in last time.
+    #[test]
+    fn the_flat_sword_draws_the_parts_the_held_one_does() {
+        let [blade, guard, grip] = <[IconPart; 3]>::try_from(parts(ItemShape::Blade))
+            .expect("the sword is drawn as a blade, a guard and a grip");
+
+        // One angle for all three: the guard is perpendicular to the blade because both are
+        // turned by the same quarter turn, not because a second number says so.
+        for (name, part) in [("blade", blade), ("guard", guard), ("grip", grip)] {
+            assert!(
+                (part.rotation - QUARTER_TURN).abs() < f32::EPSILON,
+                "the sword's {name} is turned by {} rather than the one quarter turn the \
+                 drawing shares",
+                part.rotation
+            );
+        }
+
+        assert!(
+            blade.height > guard.height * 4.0 && blade.height > grip.height * 2.0,
+            "the sword's blade is {} long against a guard of {} and a grip of {}, so it does \
+             not read as mostly edge",
+            blade.height,
+            guard.height,
+            grip.height
+        );
+        assert!(
+            guard.width > blade.width * 2.0,
+            "the sword's guard is {} across against a blade of {}, so it is a collar rather \
+             than a cross guard",
+            guard.width,
+            blade.width
+        );
+        assert!(
+            grip.width < guard.width && grip.height < blade.height,
+            "the sword's grip is not the smallest part of it: {}x{} against a guard {} across \
+             and a blade {} long",
+            grip.width,
+            grip.height,
+            guard.width,
+            blade.height
+        );
+
+        // Down the cell is toward the hilt, and the parts arrive in that order: point, then
+        // guard, then grip. A grip drawn on the tip side of the guard would be a sword held
+        // by its blade, and every assertion above would still pass.
+        let along = |part: IconPart| part.top + part.height / 2.0;
+        assert!(
+            along(blade) < along(guard) && along(guard) < along(grip),
+            "the sword's parts run blade {}, guard {}, grip {} down the cell, so the hand is \
+             not at the hilt end of it",
+            along(blade),
+            along(guard),
+            along(grip)
+        );
     }
 
     /// The sweep's teeth, on fixtures rather than on the drawings that already pass.
