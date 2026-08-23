@@ -614,14 +614,14 @@ fn rusted_blade_mesh() -> Mesh {
         let stratum = (mark as f32 + scatter(mark, 1)) / RUST_MARKS as f32;
         let y = lowest + (highest - lowest) * stratum;
 
-        // **Two bounds, and they are what make the bedding below sufficient rather than
-        // approximate.** The mark spans at most a quarter of the local half-width to each
-        // side of its centre, and its centre stays inside half of it — so the blade's
-        // surface can fall away under the mark by at most `0.38 × half_thickness`, while
-        // the shallowest surface a mark can sit on is `0.76 × half_thickness` and
-        // `RUST_MARK_SINK` of that is more. A mark therefore never lifts off the blade at
-        // its far edge, and never reaches the far face either, because the sink is a
-        // fraction of the surface's own offset and that fraction is under one.
+        // **Two bounds, and they are what keep a mark from overhanging the edge it sits
+        // beside.** The mark spans at most a quarter of the local half-width to each side of
+        // its centre, and its centre stays inside half of it — so the blade's surface can
+        // fall away *across* the bevel under the mark by at most `0.38 × half_thickness`.
+        //
+        // They are not what makes the bedding below sufficient, which is what this comment
+        // used to claim: the fall-off across the bevel is only one of the two directions the
+        // surface drops in, and the bedding answers both. See `footing`.
         let section = blade_at(y);
         let width = (length * 0.5).min(section.half_width * 0.5);
         let room = (section.half_width * 0.5 - width / 2.0).max(0.0);
@@ -631,7 +631,23 @@ fn rusted_blade_mesh() -> Mesh {
         // it presents rather than a stripe down one side of it.
         let face = if mark % 2 == 0 { 1.0 } else { -1.0 };
         let surface = blade_surface(section, z);
-        let sink = surface * RUST_MARK_SINK;
+        // **Bedded from the shallowest surface under the whole mark, rather than from the one
+        // under its centre.** The blade thins along its length as well as across the bevel,
+        // and on the point it does so fast enough to outrun `RUST_MARK_SINK`: measured on the
+        // fourteenth mark, bedded to 0.00122 from the section at its own centre while the
+        // surface under its upper, outer corner is 0.00088 — so that corner floated 0.00034
+        // clear of the blade it is meant to be sunk into, and a fleck of rust hung off the
+        // point with daylight behind it.
+        //
+        // **Which corner answers is never in doubt**, which is what makes one sample enough:
+        // the surface falls as `y` rises and as `|z|` grows, so the highest and farthest
+        // corner is the shallowest of the four. On the flat this changes nothing — the
+        // section at the mark's top and the section at its centre are the same numbers there,
+        // and `RUST_MARK_SINK` still decides — so the deeper bedding is spent only where the
+        // taper actually takes the surface away.
+        let footing = blade_surface(blade_at(y + length / 2.0), z.abs() + width / 2.0)
+            .min(surface * (1.0 - RUST_MARK_SINK));
+        let sink = surface - footing;
         rusted(
             Mesh::from(Cuboid::from_size(Vec3::new(sink + proud, length, width)))
                 .translated_by(Vec3::new(face * (surface + (proud - sink) / 2.0), y, z)),
@@ -1670,20 +1686,31 @@ mod tests {
                  at {surface}, so it is not bedded into the face it sits on"
             );
 
-            // Under the far edge of the mark the bevel has fallen away furthest; bedded
-            // shallower than that, the mark lifts off the blade there.
+            // **The shallowest corner, not the middle.** The surface falls in two directions
+            // under a mark — across the bevel as `|z|` grows, and along the blade as it
+            // tapers toward the point — so the corner that decides whether the mark is bedded
+            // is the highest and the farthest, and the section under *that* is the one to ask.
+            // Measuring the middle instead is what let the fourteenth mark float 0.00034 clear
+            // of the point while this test passed: at its own centre the blade is 0.00242 deep
+            // and it was bedded to 0.00122, which looks bedded until you look 0.0038 higher up,
+            // where the blade has thinned to 0.00088. Both sections are checked; they are the
+            // same number for every mark on the flat, and differ only where the taper is real.
             let far = centre.abs() + (high_z - low_z) / 2.0;
-            assert!(
-                far < section.half_width,
-                "mark {index} reaches {far} across a blade half {} wide, so it overhangs an edge",
-                section.half_width
-            );
-            assert!(
-                inner <= blade_surface(section, far) + 1e-9,
-                "mark {index} is bedded to {inner} where the blade's surface under its far edge \
-                 is {}, so it floats clear of the blade",
-                blade_surface(section, far)
-            );
+            let top = blade_at(high_y);
+            for (where_, at) in [("its centre", section), ("its upper edge", top)] {
+                assert!(
+                    far < at.half_width,
+                    "mark {index} reaches {far} across a blade half {} wide at {where_}, so it \
+                     overhangs an edge",
+                    at.half_width
+                );
+                assert!(
+                    inner <= blade_surface(at, far) + 1e-9,
+                    "mark {index} is bedded to {inner} where the blade's surface under its far \
+                     edge at {where_} is {}, so it floats clear of the blade",
+                    blade_surface(at, far)
+                );
+            }
             assert!(
                 inner > 0.0,
                 "mark {index} reaches through the mid-plane, so it shows on the far face too"
