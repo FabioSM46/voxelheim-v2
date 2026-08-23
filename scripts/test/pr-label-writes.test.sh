@@ -103,10 +103,29 @@ assert_nonzero() {
 CALL_LOG="$(mktemp)"
 trap 'rm -f "$CALL_LOG"' EXIT
 
-# Preset so `resolve_repo` answers without a `gh repo view`, which is also what a
-# GitHub Actions run does through GITHUB_REPOSITORY. It makes every asserted URL
-# below deterministic.
-REPO="voxelheim-test/repo"
+# The fixture repository, injected through BOTH variables `resolve_repo` reads.
+#
+# `REPO` alone is not enough, and getting that wrong is what made this file pass
+# locally and fail on the runner. `resolve_repo` reads
+# `${GITHUB_REPOSITORY:-${REPO:-}}`, so the Actions event repository deliberately
+# OUTRANKS a local `REPO` override — a rule `gh-automation-deepseek-rounds.test.sh`
+# pins on purpose ("the Actions event repository wins"). Every GitHub Actions job
+# exports `GITHUB_REPOSITORY`, so on the runner the ambient real slug beat the
+# fixture and the `gh api repos/<slug>/…` assertions below saw
+# `FabioSM46/voxelheim-v2`. On a workstation the variable is unset, `REPO` won, and
+# the same assertions passed. A test whose verdict depends on where it is standing
+# is not a test, and this one had that shape for exactly one push.
+#
+# `gh pr edit <n> --add-label` never named a repository — it inferred one from the
+# working directory — so no slug reached this harness before the endpoint change and
+# nothing here had to be right about it.
+#
+# Setting the higher-precedence variable is what actually fixes it; setting both
+# says so unambiguously and leaves no ordering for a later edit to get wrong.
+FIXTURE_REPO="voxelheim-test/repo"
+REPO="$FIXTURE_REPO"
+GITHUB_REPOSITORY="$FIXTURE_REPO"
+export GITHUB_REPOSITORY
 
 GH_AUTH_STATUS=0
 GH_VIEW_STATUS=0
@@ -181,6 +200,10 @@ run_label() {
 }
 
 reset_stub() {
+  # Re-asserted every time: a case that perturbs either variable must not be able
+  # to hand the next one a different repository.
+  REPO="$FIXTURE_REPO"
+  GITHUB_REPOSITORY="$FIXTURE_REPO"
   GH_AUTH_STATUS=0
   GH_VIEW_STATUS=0
   GH_VIEW_LABELS=""
@@ -191,6 +214,24 @@ reset_stub() {
   GH_WRITE_STATUS=0
 }
 
+echo "the harness — the fixture repository reaches the code under test"
+
+# This assertion exists because its absence cost a red CI run. Everything below
+# asserts a `repos/<slug>/…` path, so all of it is worthless if the slug the code
+# resolves is not the slug the harness injected. Pinning it directly means the next
+# person sees "the fixture repository did not survive" instead of four confusing
+# diffs against URLs that look almost right.
+reset_stub
+resolve_repo
+assert_eq "the injected slug survives resolve_repo" "$FIXTURE_REPO" "$REPO"
+# And specifically that it survives an Actions environment, which is the exact
+# direction that broke: GITHUB_REPOSITORY is set on every runner and outranks REPO.
+GITHUB_REPOSITORY="ambient-owner/ambient-repo" REPO="$FIXTURE_REPO"
+( resolve_repo; [ "$REPO" = "ambient-owner/ambient-repo" ] )
+assert_eq "  and an ambient GITHUB_REPOSITORY is what would have overridden it" 0 $?
+reset_stub
+
+echo
 echo "pr-label add — a write that landed, and one that did not"
 
 reset_stub
@@ -376,7 +417,12 @@ exit 1
 STUB
 chmod +x "${STUB_BIN}/gh"
 
-run_cli() { PATH="${STUB_BIN}:${PATH}" REPO="voxelheim-test/repo" bash "${SCRIPT_DIR}/gh-automation.sh" "$@"; }
+# Both variables again, and for the reason spelled out at the top: under Actions an
+# inherited GITHUB_REPOSITORY would outrank the REPO passed here.
+run_cli() {
+  PATH="${STUB_BIN}:${PATH}" REPO="$FIXTURE_REPO" GITHUB_REPOSITORY="$FIXTURE_REPO" \
+    bash "${SCRIPT_DIR}/gh-automation.sh" "$@"
+}
 
 cli_out="$(run_cli pr-label 99999 add ready-for-dev 2>/dev/null)"
 cli_status=$?
