@@ -774,6 +774,96 @@ mod tests {
         }
     }
 
+    /// **And on every snapshot of the session, not only the first one after the welcome.**
+    ///
+    /// The check above builds a fresh handshake per row, so on its own it cannot tell
+    /// "checked once, when the session starts" from "checked always" — and the two differ
+    /// by the entire lifetime of a connection. This drives *one* established handshake
+    /// through a run of frames the contract allows, a death and its respawn among them,
+    /// and only then hands it the frame a V9 server sends. The refusal arrives there,
+    /// deep in the session, which is where a player actually dies.
+    ///
+    /// It pins a property of where the check sits rather than one of this test.
+    /// `Message::Snapshot` is admitted in `Phase::Established` and in no other — every
+    /// earlier phase answers `Premature("EntitySnapshot")` — and `session::pump` feeds
+    /// every frame it decodes, for the whole life of the connection, through
+    /// [`Handshake::apply`]. There is no second path a snapshot can take. An edit that
+    /// moved this agreement to a one-shot check beside the welcome would leave the test
+    /// above green and fail this one, which is the whole reason it is written separately.
+    #[test]
+    fn the_own_death_agreement_is_checked_on_every_snapshot_not_just_the_first() {
+        let dead = PlayerVitals {
+            health: 0,
+            max_health: 100,
+            life_state: LifeState::Dead,
+            respawn_ticks: 40,
+            invulnerable: false,
+        };
+        let frame = |self_vitals: PlayerVitals, dead_players: Vec<u64>| Snapshot {
+            self_vitals,
+            dead_players,
+            entities: vec![
+                super::super::codec::EntityState {
+                    entity_id: 7,
+                    pos: [0.5, 64.0, 0.5],
+                    vel: [0.0, 0.0, 0.0],
+                    yaw: 0.0,
+                },
+                super::super::codec::EntityState {
+                    entity_id: 9,
+                    pos: [4.5, 64.0, 0.5],
+                    vel: [0.0, 0.0, 0.0],
+                    yaw: 0.0,
+                },
+            ],
+            ..snapshot()
+        };
+
+        let mut handshake = established();
+
+        // A session's worth of legal frames, in the order a player lives them: standing,
+        // a neighbour goes down, this player goes down and is named for it, and the
+        // respawn clears both. Every one of them passes through the same check.
+        for (name, self_vitals, dead_players) in [
+            ("alive, nobody down", PlayerVitals::unharmed(), vec![]),
+            ("alive, a neighbour down", PlayerVitals::unharmed(), vec![9]),
+            ("dead, and named", dead, vec![7]),
+            ("dead, and named beside the neighbour", dead, vec![9, 7]),
+            ("respawned, nobody down", PlayerVitals::unharmed(), vec![]),
+        ] {
+            let snapshot = frame(self_vitals, dead_players);
+            assert_eq!(
+                handshake.apply(Message::Snapshot(snapshot.clone())),
+                Ok(Transition::Snapshot(snapshot)),
+                "{name}"
+            );
+            assert_eq!(handshake.phase(), Phase::Established, "{name}");
+        }
+
+        // The sixth frame of the session rather than the first, and the point of the
+        // test: this is what a V9 server sends on the tick this player dies, and it is
+        // refused here exactly as it would have been immediately after the welcome.
+        assert_eq!(
+            handshake.apply(Message::Snapshot(frame(dead, vec![]))),
+            Err(HandshakeError::OwnDeathDisagrees {
+                vitals_say_dead: true,
+                entity_id: 7,
+            }),
+            "a death the server forgot to name, six frames into the session"
+        );
+
+        // And the mirror direction is still live that late too — a server that lays out
+        // a player who is still playing is the same lost track of the same fact.
+        assert_eq!(
+            handshake.apply(Message::Snapshot(frame(PlayerVitals::unharmed(), vec![7]))),
+            Err(HandshakeError::OwnDeathDisagrees {
+                vitals_say_dead: false,
+                entity_id: 7,
+            }),
+            "a living recipient named among the dead, late in the session"
+        );
+    }
+
     #[test]
     fn mining_progress_requires_a_session_then_reaches_its_consumer() {
         let message = || {
