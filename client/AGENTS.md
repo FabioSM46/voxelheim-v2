@@ -110,12 +110,13 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are three**:
+**Every edge from `player` to `world` is narrow and read-only, and there are two**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
 the authority on which of those exist; `player/items.rs` asks `palette` for a terrain swatch when
-an item deliberately reuses one; and `player/hands.rs` asks it for the one colour it draws an
-empty hand in. None writes world state, and no edge points back from `world` to `player`. A
-fourth, in either direction, is a design question rather than an import.
+an item deliberately reuses one. The first-person hand takes its skin colour from the local
+player's server-sent `Appearance`, not from a terrain approximation. Neither edge writes world
+state, and no edge points back from `world` to `player`. A third, in either direction, is a design
+question rather than an import.
 
 **The second of those is the client's one opinion about what an item looks like, and every
 renderer reads it rather than owning a second one.** `items::item_linear_rgba` answers which
@@ -741,6 +742,14 @@ held view model in `hands.rs` is built from the shape and the colour, `ui/mod.rs
 a hovered slot reports it. Adding an item to this client means adding a row, and there is
 nowhere else to add half of one.
 
+**The held view model is a hand-and-item composition, not an exclusive choice between them.**
+`hands.rs` puts the same fist at the origin for an empty hand and every `ItemShape`, then places a
+block, material or bundle on its knuckles and a blade or tool through its grip. The two are merged
+into one mesh and carry absolute vertex colours — skin from the local player's `Appearance`, item
+from this table — under one white material. One stable mesh asset is rebuilt in place only when
+the selected item or skin colour changes, so arbitrary server colours cannot grow a cache and all
+three swing shapes still move one transform.
+
 **The item colour source is deliberately beside the block palette rather than inside its id
 space.** `ItemColour::Block` reuses an existing terrain swatch for a block-like item;
 `WornSteel` and `ForgedSteel` are client-only presentation colours for things no block honestly
@@ -839,12 +848,12 @@ is a decision, and decisions of that shape get their own issue rather than ridin
 
 ## Two renderers, one shape vocabulary
 
-**`ItemShape` is decided once and drawn twice.** `player/hands.rs` builds a mesh per variant for
+**`ItemShape` is decided once and drawn twice.** `player/hands.rs` builds geometry per variant for
 the held view model; `ui/icon.rs` builds a flat picture per variant for a pack or hotbar cell.
 Both read the shape out of the row in `player/items.rs`, so what a player sees in a cell is what
-they see in their hand, and neither surface re-decides what an item is. Twelve items share four
-pictures, and a thirteenth inherits one by being registered at all — the campfire did exactly
-that, arriving as a `Bundle` beside the tent and the forge and needing no new drawing.
+they see in their hand, and neither surface re-decides what an item is. Items share five pictures,
+and a new item inherits one by being registered at all — the campfire did exactly that, arriving
+as a `Bundle` beside the tent and the forge and needing no new drawing.
 
 **Keying the drawing on the shape rather than on item ids is the whole design.** The alternative
 that keeps the two surfaces honest by construction is rendering the held meshes to a texture — and
