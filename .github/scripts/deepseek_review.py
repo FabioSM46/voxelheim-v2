@@ -747,6 +747,10 @@ def mode_full_review(client, repo, pr, bot_username):
     sys_prompt = (
         "You are a senior code reviewer. You provide thorough, constructive feedback. "
         "You NEVER suggest creating commits, pushing code, or modifying files — you only review. "
+        "You NEVER claim to have performed an action either — you cannot resolve a review thread, "
+        "apply a label, merge, or change a file, so writing that you have is false. Saying what you "
+        "examined is fine (\"I checked the callers\"); asserting a change to the pull request or to "
+        "the code is not — describe what should change, never what you changed. "
         "Focus on SUBSTANTIVE issues only: bugs, security vulnerabilities, performance problems, "
         "architectural concerns, type safety gaps. SKIP minor style preferences, cosmetic formatting, "
         "and variable naming nitpicks unless they cause confusion. "
@@ -1061,11 +1065,23 @@ def mode_reply(client, repo, pr, comment_body, comment_id, comment_author, bot_u
     except GithubException:
         threads_context = "(could not fetch review comments)"
 
+    # The three writes this script can make are `create_issue_comment`, `create_review` and
+    # the `create_review_comment_reply` below. Resolving a thread is not among them, and on
+    # PR #209 a reply announced one anyway — 72 seconds after a human had already resolved it.
+    # The two clauses that existed forbade *suggesting* an action; a false claim is not a
+    # suggestion, and it is worse, because a suggestion invites a decision and a claim
+    # forecloses one. The clause below closes that gap without muzzling a reviewer who says
+    # what it looked at, which is a legitimate and useful thing for a reply to say (#212).
     sys_prompt = (
         "You are a senior code reviewer responding to a developer's reply. "
         "Be helpful, constructive, and concise. "
         "If you suggest a code fix, ALWAYS include the corrected code snippet in a markdown code block — "
-        "NEVER suggest making a commit, pushing, or modifying files. You are a reviewer only."
+        "NEVER suggest making a commit, pushing, or modifying files. You are a reviewer only. "
+        "NEVER claim to have performed an action either — you cannot resolve or close this thread, "
+        "apply a label, merge, or change a file, so writing that you have is false. Saying what you "
+        "examined is fine (\"I checked the callers\"); asserting a change to the thread or to the code "
+        "is not. Recommend, never announce: \"I agree, this thread can be closed\" is correct, "
+        "\"I'm closing this thread as resolved\" is false."
     )
 
     user_prompt = f"""A developer replied to your review comment. Respond thoughtfully.
@@ -1087,7 +1103,9 @@ Full diff for reference:
 
 Respond directly to the developer. If you agree, say so. If you disagree, explain why politely.
 When suggesting a code fix, include a markdown code block with the corrected snippet.
-Do NOT suggest git commands, commits, or file modifications — only provide the corrected code."""
+Do NOT suggest git commands, commits, or file modifications — only provide the corrected code.
+Do NOT claim to have performed an action — you cannot resolve this thread, label it, merge, or
+change a file. Recommend, never announce."""
 
     # No JSON mode: this answer goes to a human, verbatim, in the review thread. Asking for
     # an object here is what put `{"response": "…"}` in PR #34's threads and what 400s

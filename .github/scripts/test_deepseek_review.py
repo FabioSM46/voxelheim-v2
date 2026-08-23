@@ -1192,5 +1192,93 @@ class JsonModeBelongsToTheCallerTests(unittest.TestCase):
         self.assertIs(inspect.Parameter.KEYWORD_ONLY, parameter.kind)
 
 
+class ReviewsNeverClaimAnActionTests(unittest.TestCase):
+    """
+    #212: both prompts forbade *suggesting* an action; neither forbade *claiming* one.
+
+    On PR #209 a Mode B reply wrote "I'm closing this thread as resolved". It closed nothing —
+    the script's entire write surface is `create_issue_comment`, `create_review` and
+    `create_review_comment_reply` — and the thread had already been resolved by a human 72
+    seconds earlier. That sentence is not a suggestion, not a git command and not a file
+    modification, so it fell outside all three clauses that existed, while being a worse
+    failure than any of them: a suggestion invites a decision, a false claim forecloses one.
+
+    Third instance of one family. #134 (`pr-label` printing "Label 'X' added to PR #N"
+    whatever happened) and #46 (`Diff: 3 chars`, a `len()` over a 3-field tuple) were both
+    outputs a reader made a decision from, asserting something no machine checked. AGENTS.md
+    records one resolution for that family — stop asserting it — and these tests pin it.
+    """
+
+    CLAUSE = "claim to have performed an action"
+    ALLOWANCE = '"I checked the callers"'
+
+    def _mode_a_request(self):
+        # Getting a recorded request back at all is the #57 guard riding along: Mode A sends
+        # json_mode=True, and the fake refuses that unless the prompt contains the word
+        # "json". Edit that word out of these prompts and this helper raises rather than
+        # quietly testing nothing. `test_mode_a_asks_for_a_json_object_and_its_prompt_earns_it`
+        # remains the test that says so on purpose; this one only must not undermine it.
+        api = _FakeDeepSeekAPI('{"review_complete": true, "comments": []}')
+        with contextlib.redirect_stdout(io.StringIO()):
+            deepseek_review.mode_full_review(api, None, _RecordingPR(), _BOT_USERNAME)
+        return " ".join(m["content"] for m in api.kwargs["messages"])
+
+    def _mode_b_request(self):
+        api = _FakeDeepSeekAPI("You are right — it runs once per chunk load.")
+        pr = _ThreadedPR()
+        with contextlib.redirect_stdout(io.StringIO()):
+            deepseek_review.mode_reply(
+                api,
+                None,
+                pr,
+                pr.dev_reply.body,
+                pr.dev_reply.id,
+                pr.dev_reply.user.login,
+                _BOT_USERNAME,
+            )
+        return " ".join(m["content"] for m in api.kwargs["messages"])
+
+    def test_both_prompts_forbid_claiming_a_completed_action(self):
+        # Read off the messages the modes actually send, not off the module source: a clause
+        # sitting in a docstring or a comment would satisfy a grep and reach no model.
+        #
+        # Pinned in both even though only Mode B can mislead about thread state — a Mode A
+        # verdict creates threads rather than closing them. The rule is identical in intent
+        # and the clause is cheap, so the two prompts must not drift apart on it.
+        for mode, prompt in (("A", self._mode_a_request()), ("B", self._mode_b_request())):
+            with self.subTest(mode=mode):
+                self.assertIn(self.CLAUSE, prompt)
+
+    def test_the_clause_forbids_the_claim_without_forbidding_first_person_review(self):
+        # The half a later editor is likeliest to trim as padding, and the half that keeps
+        # this from becoming a general muzzle. "I checked the callers" is a reviewer doing its
+        # job and saying so; "I closed the thread" is a reviewer reporting something that did
+        # not happen. Only the second is forbidden, and without the worked example the model
+        # has no line between them and hedges both away.
+        for mode, prompt in (("A", self._mode_a_request()), ("B", self._mode_b_request())):
+            with self.subTest(mode=mode):
+                self.assertIn("Saying what you examined is fine", prompt)
+                self.assertIn(self.ALLOWANCE, prompt)
+
+    def test_mode_b_carries_the_rule_twice_like_the_suggestion_rule_it_extends(self):
+        # The "do not suggest" rule it sits beside is stated in Mode B's system prompt AND
+        # repeated at the tail of its user prompt. Stating the new one in only one of the two
+        # would make it the weaker of the pair on the mode that actually recurs: MAX_ROUNDS
+        # caps Mode A at one automatic round, while Mode B replies indefinitely.
+        self.assertEqual(2, self._mode_b_request().count(self.CLAUSE))
+
+    def test_the_script_still_cannot_resolve_a_thread(self):
+        # The fact the prose contradicted, and what makes the clause honest rather than merely
+        # cautious. Resolving a review thread is the GraphQL `resolveReviewThread` mutation,
+        # and this module makes no GraphQL call of any kind. If it ever gains one, this test
+        # failing is the right way to be told: the prompt clause would need revisiting the
+        # same day, and the frozen acceptance rule has a strong opinion about a bot that can
+        # clear its own findings — `unresolved_threads == 0` must keep meaning a human looked.
+        source = Path(deepseek_review.__file__).read_text().lower()
+
+        self.assertNotIn("graphql", source)
+        self.assertNotIn("resolvereviewthread", source)
+
+
 if __name__ == "__main__":
     unittest.main()
