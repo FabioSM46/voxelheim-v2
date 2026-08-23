@@ -85,12 +85,45 @@ const MINE_PUNCH_DISTANCE: f32 = 0.045;
 const PLACE_BUMP_TIME: Duration = Duration::from_millis(150);
 const PLACE_BUMP_DISTANCE: f32 = 0.025;
 
-/// How long one attack swing plays for, and how far it carries the view model.
+/// How long one attack swing plays for, whichever of the three shapes is playing.
 ///
 /// A one-shot, unlike the mining loop above, which repeats while the server reports
 /// progress: an attack is an event the server judges once, so its feedback happens once.
+///
+/// **One duration for all three shapes, and that is a decision rather than a convenience.**
+/// A cut that took longer than a thrust would put the drawn shape into the *timing* of the
+/// hand, and timing is the one presentation channel a cooldown also lives in. Three arcs
+/// that differ in geometry alone cannot be read as three tempos, so nothing a player sees
+/// here can be mistaken for the server changing its mind about how often a blade swings.
 const ATTACK_SWING_TIME: Duration = Duration::from_millis(220);
-const ATTACK_SWING_RADIANS: f32 = 0.9;
+
+/// The overhead cut: how far it carries the blade down and over.
+///
+/// Unchanged from when this was the only swing there was, so the arc a player already knows
+/// is still one of the three and is still the first one drawn.
+const OVERHEAD_PITCH_RADIANS: f32 = 0.9;
+
+/// The lateral slash: how far it sweeps across the view, and how far the edge turns over
+/// into that sweep.
+///
+/// Two terms because one of them is what makes it a slash rather than a pan — a blade held
+/// upright and moved sideways reads as a wiper blade, and the roll is what puts an edge on
+/// the front of the motion.
+const LATERAL_YAW_RADIANS: f32 = 1.05;
+const LATERAL_ROLL_RADIANS: f32 = 0.75;
+
+/// The thrust: how far it drives along the view, and how far the tip levels out of the rest
+/// pose's lean on the way.
+///
+/// **The reach is the shape and the level-out is a detail**, which is deliberately the
+/// opposite balance to [`OVERHEAD_PITCH_RADIANS`] above. The two arcs share the pitch axis,
+/// so if they shared its magnitude as well a thrust would read as a smaller chop; what tells
+/// them apart is that one is almost all rotation and the other almost all travel.
+///
+/// Along -Z, the direction [`MINE_PUNCH_DISTANCE`] already established for *toward the thing
+/// being hit*, and the opposite of [`PLACE_BUMP_DISTANCE`]'s draw-back.
+const THRUST_REACH: f32 = 0.11;
+const THRUST_LEVEL_RADIANS: f32 = 0.35;
 
 /// The blade's shape, in the same camera-space units as the block and material meshes.
 const BLADE_SIZE: Vec3 = Vec3::new(0.012, 0.115, 0.030);
@@ -361,6 +394,129 @@ impl HandVisuals {
     }
 }
 
+/// Which of the three arcs an attack draws.
+///
+/// **Presentation, and it is worth being exact about how far that goes.** The shape is
+/// chosen in this module, from a counter in [`HandAnimation`] that [`swing_pose`] is the
+/// only reader of; it reaches no request, no predicate and no other module. `super::combat`
+/// routes the left button on the item id and sends the same `AttackRequest` whichever arc is
+/// about to play, and the server judges the blow against its own registry — so which picture
+/// played cannot change reach, damage, cooldown or what was asked for. It is the rule
+/// `client/AGENTS.md` states for the item table, arriving by a different door: drawing an
+/// item as a blade no more swings it than holding it as one does, and drawing a thrust
+/// reaches no further than drawing a cut.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SwingShape {
+    /// Down and over: the arc this file had when it had one.
+    #[default]
+    Overhead,
+    /// Across the view, with the edge turning over into the sweep.
+    Lateral,
+    /// Straight along the view, with the tip levelling as it goes.
+    Thrust,
+}
+
+impl SwingShape {
+    /// Every shape, for the sweeps that must cover the whole vocabulary.
+    ///
+    /// The same hand-written list, for the same reason, as `items::ItemShape::ALL`: no
+    /// stable Rust enumerates variants. And as there, the list is not what makes a shape
+    /// *drawn* — [`swing_pose`] and [`Self::after`] both match with no wildcard arm, so a
+    /// fourth variant fails to build until it has been given an arc and a place in the
+    /// rotation. What the list buys is the other half: a sweep that catches an arm filled
+    /// in with a copy of its neighbour.
+    ///
+    /// `#[cfg(test)]` because nothing in the running client enumerates the shapes — the
+    /// rotation walks them one at a time and never needs the set. That is where
+    /// `ItemShape::ALL` also sat until a runtime reader turned up for it, and the day one
+    /// turns up here the attribute comes off rather than the list changing.
+    #[cfg(test)]
+    const ALL: [Self; 3] = [Self::Overhead, Self::Lateral, Self::Thrust];
+
+    /// The shape that follows this one.
+    ///
+    /// **A fixed rotation rather than a random pick**, and the acceptance criterion is why:
+    /// what a player must stop seeing is the same arc twice in a row, and random repeats.
+    /// A cycle also makes *consecutive swings differ* a property one test can hold, rather
+    /// than a distribution somebody has to sample.
+    ///
+    /// Exhaustive with no wildcard, so a fourth shape cannot be added without deciding
+    /// where in the rotation it goes — the compiler's half of the guarantee, exactly as
+    /// `items::ItemShape` arranges for the two renderers.
+    fn after(self) -> Self {
+        match self {
+            Self::Overhead => Self::Lateral,
+            Self::Lateral => Self::Thrust,
+            Self::Thrust => Self::Overhead,
+        }
+    }
+}
+
+/// One attack swing in flight: which shape is playing, and how far into it the hand is.
+///
+/// The pair travels together because neither answers anything on its own — an elapsed time
+/// with no shape draws nothing, and a shape with no elapsed time is a swing that is not
+/// happening. Keeping them in one `Option` is what makes *no swing* a single state rather
+/// than two fields that could disagree about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Swing {
+    shape: SwingShape,
+    elapsed: Duration,
+}
+
+/// How far one attack shape has carried the view model, as an offset from rest.
+///
+/// Four loose terms rather than a `Transform`, because they are *added* to whatever the
+/// mining loop and the placement bump are already doing and two quaternions cannot be added.
+/// Every term is zero at both ends of the arc, so a swing that finishes leaves the hand
+/// exactly where it found it whichever shape played — which is the property
+/// `a_sent_swing_moves_the_view_model_and_then_settles` has held since there was one arc,
+/// and now holds three times over.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct SwingPose {
+    /// About the camera's X axis. **Negative carries the blade over toward what is being
+    /// hit** — the convention [`mine_punch`]'s caller set and the one this file keeps, so a
+    /// third and a fourth animation never have to argue about which way *out* is.
+    pitch: f32,
+    /// About Y: across the view. Positive turns the blade toward -X, which is the far side
+    /// of the screen from the hand — [`BASE_TRANSLATION`] puts it on the right — so a slash
+    /// crosses the body instead of opening outward off the edge of the view.
+    yaw: f32,
+    /// About Z: the edge turning over.
+    roll: f32,
+    /// Along the view, in the same units as [`MINE_PUNCH_DISTANCE`]. **Negative reaches away
+    /// from the camera**, toward what is being hit, for the same reason and on the same axis.
+    reach: f32,
+}
+
+/// Where one shape has carried the hand, a given fraction of the way through its arc.
+///
+/// One envelope for all three — `sin(fraction * PI)`, out and back, zero at both ends — and
+/// three sets of terms to apply it to. The shapes are told apart by *which* degree of freedom
+/// each one is mostly made of: the cut is pitch, the slash is yaw, the thrust is reach. That
+/// is what `each_shape_leads_with_a_channel_of_its_own` pins, and it is a stronger statement
+/// than "the three poses differ", which three near-identical arcs would also satisfy.
+fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
+    let fraction = (elapsed.as_secs_f32() / ATTACK_SWING_TIME.as_secs_f32()).clamp(0.0, 1.0);
+    let arc = (fraction * PI).sin();
+    match shape {
+        SwingShape::Overhead => SwingPose {
+            pitch: -arc * OVERHEAD_PITCH_RADIANS,
+            ..default()
+        },
+        SwingShape::Lateral => SwingPose {
+            yaw: arc * LATERAL_YAW_RADIANS,
+            roll: -arc * LATERAL_ROLL_RADIANS,
+            ..default()
+        },
+        SwingShape::Thrust => SwingPose {
+            pitch: -arc * THRUST_LEVEL_RADIANS,
+            reach: -arc * THRUST_REACH,
+            ..default()
+        },
+    }
+}
+
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct HandAnimation {
     /// How long the mining loop has been running, and zero the moment it is not.
@@ -372,10 +528,27 @@ struct HandAnimation {
     mine_elapsed: Duration,
     bump_elapsed: Option<Duration>,
 
-    /// How long the current attack swing has been running, if one is. Started by a
-    /// `SwingSent` message and by nothing else, so it plays exactly when a request left
-    /// this client — whether that request later hits, misses or is refused.
-    attack_elapsed: Option<Duration>,
+    /// The attack swing playing right now, if one is. Started by a `SwingSent` message and
+    /// by nothing else, so it plays exactly when a request left this client — whether that
+    /// request later hits, misses or is refused.
+    attack: Option<Swing>,
+
+    /// Which shape the *next* swing will take.
+    ///
+    /// **The alternation is one field of local presentation state, and it is advanced by a
+    /// request leaving rather than by any answer to one.** That is what makes it survive a
+    /// swing the server refuses: a refusal is silence on this side — nothing comes back for
+    /// a blow that is declined, the same silence a refused block edit produces — so there is
+    /// no answer to wait for and none is waited for. Three clicks the server declines draw
+    /// three different arcs, because all three requests left.
+    ///
+    /// It outlives the swing it belongs to on purpose. [`Self::attack`] is `None` between
+    /// swings, so a cursor kept inside it would forget which arc had just played and the
+    /// next press could repeat it.
+    ///
+    /// Nothing outside this module can read the field — [`HandAnimation`] is private — and
+    /// nothing inside it consults the field for anything but which arc to draw.
+    next_swing: SwingShape,
 }
 
 fn spawn_view_model(
@@ -611,13 +784,24 @@ fn animate_view_model(
     // One swing per message, restarted rather than queued: two clicks inside one
     // animation should look like two swings, and the second server-side request is
     // refused by the cooldown either way.
+    //
+    // **This is where the shape is chosen, and it is the only place it is.** The cursor
+    // advances on the request having left — the same message, on the same frame, that
+    // starts the arc — so a swing that is refused, missed or answered by nothing at all
+    // still moves the rotation on. Restarting a swing therefore takes the next shape too,
+    // which is what makes two clicks inside one animation read as two swings rather than
+    // as one arc that stuttered.
     if intent.swing_sent() {
-        next_animation.attack_elapsed = Some(Duration::ZERO);
+        next_animation.attack = Some(Swing {
+            shape: next_animation.next_swing,
+            elapsed: Duration::ZERO,
+        });
+        next_animation.next_swing = next_animation.next_swing.after();
     }
-    if let Some(elapsed) = next_animation.attack_elapsed.as_mut() {
-        *elapsed += time.delta();
-        if *elapsed >= ATTACK_SWING_TIME {
-            next_animation.attack_elapsed = None;
+    if let Some(swing) = next_animation.attack.as_mut() {
+        swing.elapsed += time.delta();
+        if swing.elapsed >= ATTACK_SWING_TIME {
+            next_animation.attack = None;
         }
     }
     if intent.placing() {
@@ -643,29 +827,33 @@ fn animate_view_model(
 
 fn animated_transform(animation: &HandAnimation) -> Transform {
     let punch = mine_punch(animation.mine_elapsed);
-    // Negative, which is the direction the attack arc below also drives: both carry the
-    // hand over toward the thing it is hitting. One convention for *out* is what keeps a
-    // second and a third animation in this file from arguing about which way that is.
-    let mut swing = -punch * MINE_PUNCH_RADIANS;
-    // One arc, out and back, added to whatever the mining loop is doing. The two never
-    // run together in practice — a blade suppresses mining — and summing rather than
-    // branching keeps the transform one expression.
-    if let Some(elapsed) = animation.attack_elapsed {
-        let fraction = (elapsed.as_secs_f32() / ATTACK_SWING_TIME.as_secs_f32()).clamp(0.0, 1.0);
-        swing -= (fraction * PI).sin() * ATTACK_SWING_RADIANS;
-    }
+    // Whichever arc is in flight, out and back, added to whatever the mining loop is doing.
+    // The two never run together in practice — a blade suppresses mining — and summing
+    // rather than branching keeps the transform one expression, which is what lets a third
+    // and a fourth animation land here without a precedence rule.
+    let swing = animation.attack.map_or_else(SwingPose::default, |attack| {
+        swing_pose(attack.shape, attack.elapsed)
+    });
     let bump = animation.bump_elapsed.map_or(0.0, |elapsed| {
         let fraction = (elapsed.as_secs_f32() / PLACE_BUMP_TIME.as_secs_f32()).clamp(0.0, 1.0);
         (fraction * PI).sin()
     });
 
-    // Two animations on one axis, pulling opposite ways on purpose: a placement draws back
-    // from the block it just set down, a punch reaches for the one it is breaking.
-    let along_view = bump * PLACE_BUMP_DISTANCE - punch * MINE_PUNCH_DISTANCE;
+    // Three animations on one axis, and the signs are the convention rather than an
+    // accident: a placement draws back from the block it just set down, a punch reaches for
+    // the one it is breaking, and a thrust reaches the same way a punch does.
+    let along_view = bump * PLACE_BUMP_DISTANCE - punch * MINE_PUNCH_DISTANCE + swing.reach;
 
     Transform {
         translation: BASE_TRANSLATION + Vec3::Z * along_view,
-        rotation: Quat::from_rotation_x(-0.18 + swing) * Quat::from_rotation_z(-0.12 - bump * 0.18),
+        // The mining punch is negative here for the reason `SwingPose::pitch` is negative
+        // for a cut: one convention for *over toward what is being hit*, kept by every
+        // animation in this file.
+        rotation: Quat::from_rotation_x(-0.18 - punch * MINE_PUNCH_RADIANS + swing.pitch)
+            // Identity at rest and for two of the three shapes, so nothing about where the
+            // hand sits or how it mines moves for the sake of the slash that needs it.
+            * Quat::from_rotation_y(swing.yaw)
+            * Quat::from_rotation_z(-0.12 - bump * 0.18 + swing.roll),
         ..default()
     }
 }
@@ -1276,37 +1464,131 @@ mod tests {
         assert_eq!(items::item_palette_id(u16::MAX), u16::MAX);
     }
 
-    /// One swing per message, on the frame the request left.
+    /// One transform for a swing of the named shape, `fraction` of the way through its arc.
+    fn mid_swing(shape: SwingShape, fraction: f32) -> Transform {
+        animated_transform(&HandAnimation {
+            attack: Some(Swing {
+                shape,
+                elapsed: ATTACK_SWING_TIME.mul_f32(fraction),
+            }),
+            ..Default::default()
+        })
+    }
+
+    /// One swing per message, on the frame the request left — and every shape settles.
+    ///
+    /// Swept over [`SwingShape::ALL`] rather than over the one arc this used to be: three
+    /// shapes are three chances to leave the hand leaning, and the whole reason the pose is
+    /// four loose terms added to rest is that each of them returns to zero.
     #[test]
     fn a_sent_swing_moves_the_view_model_and_then_settles() {
         let resting = animated_transform(&HandAnimation::default());
-        let swinging = animated_transform(&HandAnimation {
-            attack_elapsed: Some(ATTACK_SWING_TIME / 2),
-            ..Default::default()
-        });
-        assert_ne!(
-            resting, swinging,
-            "a swing left the view model exactly where it was"
-        );
 
-        // The arc is out and back: its ends match rest, so nothing is left leaning.
-        let started = animated_transform(&HandAnimation {
-            attack_elapsed: Some(Duration::ZERO),
-            ..Default::default()
-        });
-        let finished = animated_transform(&HandAnimation {
-            attack_elapsed: Some(ATTACK_SWING_TIME),
-            ..Default::default()
-        });
-        // Compared with a tolerance rather than exactly: `sin(PI)` is an ulp away from
-        // zero, not zero, so an exact comparison here would be asserting the accuracy of
-        // the sine rather than the shape of the arc.
-        assert!(started.rotation.abs_diff_eq(resting.rotation, 1e-5));
-        assert!(
-            finished.rotation.abs_diff_eq(resting.rotation, 1e-5),
-            "the swing left the view model leaning at {:?}",
-            finished.rotation
-        );
+        for shape in SwingShape::ALL {
+            let swinging = mid_swing(shape, 0.5);
+            assert_ne!(
+                resting, swinging,
+                "{shape:?} left the view model exactly where it was"
+            );
+
+            // The arc is out and back: its ends match rest, so nothing is left leaning.
+            // Compared with a tolerance rather than exactly: `sin(PI)` is an ulp away from
+            // zero, not zero, so an exact comparison here would be asserting the accuracy
+            // of the sine rather than the shape of the arc.
+            for (edge, at) in [("started", 0.0), ("finished", 1.0)] {
+                let pose = mid_swing(shape, at);
+                assert!(
+                    pose.rotation.abs_diff_eq(resting.rotation, 1e-5),
+                    "{shape:?} {edge} leaning at {:?}",
+                    pose.rotation
+                );
+                assert!(
+                    pose.translation.abs_diff_eq(resting.translation, 1e-5),
+                    "{shape:?} {edge} reaching at {:?}",
+                    pose.translation
+                );
+            }
+        }
+    }
+
+    /// **Three shapes, and each leads with a degree of freedom the other two do not.**
+    ///
+    /// The acceptance criterion asks for an overhead cut, a lateral slash and a thrust —
+    /// three *different* things, not one arc scaled three ways. So what is asserted is not
+    /// merely that the poses differ, which three near-identical arcs would also satisfy,
+    /// but that each shape moves its own named channel furthest: the cut is pitch, the slash
+    /// is yaw, the thrust is reach. A fourth shape that copied one of them would land on a
+    /// channel already spoken for and this would fail.
+    #[test]
+    fn each_shape_leads_with_a_channel_of_its_own() {
+        let peak: Vec<(SwingShape, SwingPose)> = SwingShape::ALL
+            .into_iter()
+            .map(|shape| (shape, swing_pose(shape, ATTACK_SWING_TIME / 2)))
+            .collect();
+
+        for (shape, name, channel, of) in [
+            (
+                SwingShape::Overhead,
+                "the cut",
+                "pitch",
+                (|pose: &SwingPose| pose.pitch.abs()) as fn(&SwingPose) -> f32,
+            ),
+            (SwingShape::Lateral, "the slash", "yaw", |pose| {
+                pose.yaw.abs()
+            }),
+            (SwingShape::Thrust, "the thrust", "reach", |pose| {
+                pose.reach.abs()
+            }),
+        ] {
+            let mine = peak
+                .iter()
+                .find(|(candidate, _)| *candidate == shape)
+                .map(|(_, pose)| of(pose))
+                .expect("every shape has a peak pose");
+            assert!(mine > 0.0, "{name} does not move in {channel} at all");
+            for (other, other_pose) in &peak {
+                if *other == shape {
+                    continue;
+                }
+                assert!(
+                    of(other_pose) < mine,
+                    "{name} was supposed to own {channel}, and {other:?} moves it as far"
+                );
+            }
+        }
+
+        // And no two poses are the same pose, which the channel argument implies but which
+        // a reader should not have to derive.
+        for (index, (shape, pose)) in peak.iter().enumerate() {
+            for (other, other_pose) in &peak[index + 1..] {
+                assert_ne!(pose, other_pose, "{shape:?} and {other:?} draw one arc");
+            }
+        }
+    }
+
+    /// The rotation visits all three and never repeats one back to back.
+    ///
+    /// Held over twice the length of the cycle, because a rotation that alternated between
+    /// two shapes and dropped the third would satisfy "no two in a row" perfectly.
+    #[test]
+    fn the_rotation_never_draws_one_shape_twice_running() {
+        let mut shape = SwingShape::default();
+        let mut drawn = vec![shape];
+        for _ in 0..(SwingShape::ALL.len() * 2) {
+            shape = shape.after();
+            assert_ne!(
+                shape,
+                *drawn.last().expect("the first shape is already in"),
+                "the rotation repeated a shape: {drawn:?}"
+            );
+            drawn.push(shape);
+        }
+        for shape in SwingShape::ALL {
+            assert!(
+                drawn.contains(&shape),
+                "{shape:?} is in the vocabulary and never drawn: {drawn:?}"
+            );
+        }
     }
 
     /// **A punch, not a wobble.** The hand reaches for the block, comes back, and the
@@ -1515,5 +1797,107 @@ mod tests {
                 "{mode:?}: the server's progress was cleared, so the mode gate proved nothing"
             );
         }
+    }
+
+    /// Runs frames until the arc in flight has finished, or gives up and says so.
+    ///
+    /// Bounded rather than a `while`: a test that hangs when the animation stops ending
+    /// tells nobody anything, and the bound is comfortably past the frames one swing takes.
+    fn let_the_swing_finish(app: &mut App) {
+        for _ in 0..256 {
+            if app.world().resource::<HandAnimation>().attack.is_none() {
+                return;
+            }
+            app.update();
+        }
+        panic!("a swing was still in flight after 256 frames");
+    }
+
+    /// **The alternation is driven by the request leaving, and by nothing coming back.**
+    ///
+    /// There is no session here, no snapshot, no inbound frame of any kind — which is
+    /// exactly the state a player is in when the server refuses a swing, because a refused
+    /// blow produces no reply at all. Six presses still draw six arcs and the rotation still
+    /// visits all three, because what advanced it was the asking.
+    ///
+    /// The two halves are asserted separately on purpose. *No two in a row* is the
+    /// criterion; *all three appear* is what stops a rotation that quietly dropped one from
+    /// satisfying it.
+    #[test]
+    fn every_swing_takes_the_next_shape_with_no_answer_from_any_server() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+        let mut drawn = Vec::new();
+        for press in 0..(SwingShape::ALL.len() * 2) {
+            app.world_mut().write_message(SwingSent);
+            app.update();
+            let swing = app
+                .world()
+                .resource::<HandAnimation>()
+                .attack
+                .unwrap_or_else(|| panic!("press {press} sent a swing that never played"));
+            drawn.push(swing.shape);
+            let_the_swing_finish(&mut app);
+        }
+
+        for pair in drawn.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "two swings running drew one arc: {drawn:?}"
+            );
+        }
+        for shape in SwingShape::ALL {
+            assert!(drawn.contains(&shape), "{shape:?} never played: {drawn:?}");
+        }
+
+        // The half that makes the paragraph above mean anything: nothing ever answered.
+        assert!(
+            app.world().get_resource::<Session>().is_none(),
+            "a session turned up, so this test says nothing about a refused swing"
+        );
+    }
+
+    /// A second press inside a running arc restarts the swing *and* takes the next shape.
+    ///
+    /// Two clicks are two swings, and the criterion is about consecutive attacks rather
+    /// than about consecutive completed animations — a restart that redrew the same arc
+    /// would be the repetition this issue exists to remove, arriving through the one door
+    /// the rotation could have been left open at.
+    #[test]
+    fn a_swing_cut_short_by_the_next_press_still_changes_shape() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+        app.world_mut().write_message(SwingSent);
+        app.update();
+        let first = app
+            .world()
+            .resource::<HandAnimation>()
+            .attack
+            .expect("the first press played nothing");
+
+        // Part way in, and deliberately not to the end.
+        app.update();
+        app.world_mut().write_message(SwingSent);
+        app.update();
+        let second = app
+            .world()
+            .resource::<HandAnimation>()
+            .attack
+            .expect("the second press played nothing");
+
+        assert_ne!(
+            first.shape, second.shape,
+            "the interrupted swing was redrawn as the same shape"
+        );
+        assert_eq!(
+            second.elapsed, STEP,
+            "the second press continued the first arc instead of restarting it"
+        );
     }
 }
