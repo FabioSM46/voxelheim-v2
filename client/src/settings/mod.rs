@@ -4,11 +4,13 @@
 //! preference. None reaches the wire and none decides a gameplay outcome — a knob that
 //! changed what the server was *told* would be a knob that had escaped this module.
 //!
-//! **This is the first half of #179**: the settings a player changes about their own hands
-//! — the mouse sensitivity that replaces the constant `player/constants.rs` used to hold,
-//! and the key bindings, with the one rule that refuses a rebinding rather than leave a
-//! control unreachable. The graphics options and the frame-rate readout are the second
-//! half, and they are additive: rows on this screen, fields in this file.
+//! **Render distance is where that would be easiest to get wrong**, and it is the one the
+//! issue singles out. `ServerWelcome.view_distance` is how far the server *streams*, and it
+//! is never read into [`Settings::render_distance`] — the setting is this client's own
+//! number, loaded from this client's own file, exactly as `world/mod.rs`'s
+//! `BACKLOG_VIEW_DISTANCE` is. What the server's number does is cap what can be *drawn*, in
+//! `player/sky.rs`, because a client cannot draw chunks it was never sent; that is a ceiling
+//! applied at the moment of drawing, not a value copied into a setting.
 //!
 //! [`store`] owns the file.
 
@@ -17,12 +19,18 @@ mod store;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
+use bevy::window::{PresentMode, PrimaryWindow};
+use bevy::winit::{UpdateMode, WinitSettings};
 
-/// Loads the settings and keeps the file in step with them.
+use crate::net::MAX_VIEW_DISTANCE;
+
+/// Loads the settings, keeps the file in step with them, and applies the ones the renderer
+/// reads from a component rather than from [`Settings`] itself.
 ///
-/// It pushes nothing at anybody: `player/mod.rs` reads the sensitivity and the bindings
-/// straight out of the resource, on a system that already runs every frame over the state
-/// it owns, so a second writer would buy nothing.
+/// The halves that are *not* here: `player/mod.rs` reads the sensitivity and the bindings
+/// straight out of the resource, `player/sky.rs` reads the three numbers the fog and the
+/// ambient term are built from, and `ui/status.rs` reads the readout's two. All of them
+/// already run every frame over the state they own, so a second writer would buy nothing.
 pub struct SettingsPlugin {
     /// The file to load from and save to, or `None` when the environment names no data
     /// directory — in which case the settings are still adjustable, they simply do not
@@ -61,7 +69,7 @@ impl Plugin for SettingsPlugin {
             written: settings.clone(),
         })
         .insert_resource(settings)
-        .add_systems(Update, save_when_changed);
+        .add_systems(Update, (save_when_changed, apply_to_the_display));
     }
 }
 
@@ -73,6 +81,51 @@ impl Plugin for SettingsPlugin {
 struct SettingsFile {
     path: Option<PathBuf>,
     written: Settings,
+}
+
+/// Where a readout may be put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Corner {
+    /// Under the debug lines, which own the top-left corner already.
+    TopLeft,
+    #[default]
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    /// The next corner clockwise from this one.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::TopLeft => Self::TopRight,
+            Self::TopRight => Self::BottomRight,
+            Self::BottomRight => Self::BottomLeft,
+            Self::BottomLeft => Self::TopLeft,
+        }
+    }
+
+    /// What the settings screen calls it, and what the file records.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopRight => "top-right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomRight => "bottom-right",
+        }
+    }
+
+    /// The corner `name` denotes, if it denotes one.
+    fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::TopLeft,
+            Self::TopRight,
+            Self::BottomLeft,
+            Self::BottomRight,
+        ]
+        .into_iter()
+        .find(|corner| corner.name() == name)
+    }
 }
 
 /// A control a key can be bound to.
@@ -325,21 +378,37 @@ impl Bindings {
 ///
 /// One enum and one [`Settings::adjust`] rather than a setter apiece, so the bound and the
 /// step of each are stated in exactly one place — the screen says "up" and the model says
-/// how far up that is and where it stops. One member today; the graphics half of #179 adds
-/// the rest, and adds no other machinery to do it.
+/// how far up that is and where it stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Knob {
     LookSensitivity,
+    RenderDistance,
+    FieldOfView,
+    Brightness,
+    FogStart,
+    FrameCap,
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 1] = [Knob::LookSensitivity];
+pub const KNOBS: [Knob; 6] = [
+    Knob::LookSensitivity,
+    Knob::RenderDistance,
+    Knob::FieldOfView,
+    Knob::Brightness,
+    Knob::FogStart,
+    Knob::FrameCap,
+];
 
 impl Knob {
     /// What the settings screen calls it.
     pub const fn label(self) -> &'static str {
         match self {
             Self::LookSensitivity => "Mouse sensitivity",
+            Self::RenderDistance => "Render distance",
+            Self::FieldOfView => "Field of view",
+            Self::Brightness => "Brightness",
+            Self::FogStart => "Fog starts at",
+            Self::FrameCap => "Frame cap",
         }
     }
 }
@@ -360,6 +429,56 @@ const MAX_LOOK_SENSITIVITY: f32 = 0.02;
 /// One press of the sensitivity control.
 const LOOK_SENSITIVITY_STEP: f32 = 0.0005;
 
+/// The closest the horizon may be drawn, in chunks. Below two the world is a corridor.
+const MIN_RENDER_DISTANCE: u8 = 2;
+/// The furthest, in chunks. The protocol's own ceiling, so the setting can always ask for
+/// everything the most generous server would stream and never for more than one could.
+///
+/// **A bound, not a value.** It is the one thing this module takes from `net`, and it is a
+/// compile-time constant of the contract rather than anything a server said — what a server
+/// said is applied in `player/sky.rs`, as a ceiling on drawing.
+const MAX_RENDER_DISTANCE: u8 = MAX_VIEW_DISTANCE;
+/// What the client draws to before anybody changes it, in chunks. `world/mod.rs` sizes its
+/// decode backlog from the same client-chosen number.
+const DEFAULT_RENDER_DISTANCE: u8 = 8;
+
+/// The narrowest vertical field of view this screen offers, in degrees.
+const MIN_FIELD_OF_VIEW: f32 = 40.0;
+/// The widest. Past this the edges of the frame distort more than the extra view is worth.
+const MAX_FIELD_OF_VIEW: f32 = 110.0;
+/// One press of the field-of-view control, in degrees.
+const FIELD_OF_VIEW_STEP: f32 = 5.0;
+/// Bevy's own default perspective, in degrees — π/4. The default is this number so that a
+/// client whose player never opens this screen renders exactly as it did before it existed.
+const DEFAULT_FIELD_OF_VIEW: f32 = 45.0;
+
+/// The dimmest the ambient term may be scaled to.
+const MIN_BRIGHTNESS: f32 = 0.5;
+/// And the brightest. Past double, `player/sky.rs`'s night stops reading as night at all.
+const MAX_BRIGHTNESS: f32 = 2.0;
+/// One press of the brightness control.
+const BRIGHTNESS_STEP: f32 = 0.05;
+
+/// The earliest the fog may begin, as a fraction of the distance at which it is total.
+const MIN_FOG_START: f32 = 0.1;
+/// And the latest. At 1.0 there is no fade at all, only an edge.
+const MAX_FOG_START: f32 = 0.95;
+/// One press of the fog control.
+const FOG_START_STEP: f32 = 0.05;
+/// Where the fog begins by default. `player/sky.rs` held this as a constant until this
+/// screen existed: clear for the near half, dissolving across the far half.
+const DEFAULT_FOG_START: f32 = 0.5;
+
+/// The slowest frame cap this screen offers, in frames per second.
+const MIN_FRAME_CAP: u16 = 30;
+/// And the fastest.
+const MAX_FRAME_CAP: u16 = 240;
+/// One press of the frame-cap control, in frames per second.
+const FRAME_CAP_STEP: u16 = 10;
+/// The frame cap that means "no cap" — and the default, because the app loop runs
+/// continuously until somebody asks it not to.
+const NO_FRAME_CAP: u16 = 0;
+
 /// Everything a player may change, as one resource.
 ///
 /// The fields are private and every one of them is inside its stated bound, always: the
@@ -370,6 +489,14 @@ const LOOK_SENSITIVITY_STEP: f32 = 0.0005;
 pub struct Settings {
     look_sensitivity: f32,
     bindings: Bindings,
+    readout_shown: bool,
+    readout_corner: Corner,
+    render_distance: u8,
+    field_of_view: f32,
+    vsync: bool,
+    frame_cap: u16,
+    brightness: f32,
+    fog_start: f32,
 }
 
 impl Default for Settings {
@@ -377,6 +504,14 @@ impl Default for Settings {
         Self {
             look_sensitivity: DEFAULT_LOOK_SENSITIVITY,
             bindings: Bindings::default(),
+            readout_shown: false,
+            readout_corner: Corner::default(),
+            render_distance: DEFAULT_RENDER_DISTANCE,
+            field_of_view: DEFAULT_FIELD_OF_VIEW,
+            vsync: true,
+            frame_cap: NO_FRAME_CAP,
+            brightness: 1.0,
+            fog_start: DEFAULT_FOG_START,
         }
     }
 }
@@ -390,6 +525,50 @@ impl Settings {
     /// Which key answers for each control.
     pub const fn bindings(&self) -> &Bindings {
         &self.bindings
+    }
+
+    /// Whether the frame-rate readout is on screen.
+    pub const fn readout_shown(&self) -> bool {
+        self.readout_shown
+    }
+
+    /// Which corner it sits in.
+    pub const fn readout_corner(&self) -> Corner {
+        self.readout_corner
+    }
+
+    /// How far the client draws before the world fades out, in chunks.
+    ///
+    /// **The client's own number.** `ServerWelcome.view_distance` is never read into it —
+    /// what that number does is cap the *drawing*, in `player/sky.rs`, because chunks the
+    /// server never sent cannot be drawn however far this says.
+    pub const fn render_distance(&self) -> u8 {
+        self.render_distance
+    }
+
+    /// The camera's vertical field of view, in degrees.
+    pub const fn field_of_view(&self) -> f32 {
+        self.field_of_view
+    }
+
+    /// Whether presentation waits for the vertical blank.
+    pub const fn vsync(&self) -> bool {
+        self.vsync
+    }
+
+    /// The frame cap in frames per second, or [`NO_FRAME_CAP`] for none.
+    pub const fn frame_cap(&self) -> u16 {
+        self.frame_cap
+    }
+
+    /// What the ambient term is scaled by.
+    pub const fn brightness(&self) -> f32 {
+        self.brightness
+    }
+
+    /// Where the fog begins, as a fraction of the distance at which it is total.
+    pub const fn fog_start(&self) -> f32 {
+        self.fog_start
     }
 
     /// Moves `knob` by `steps` of its own size, stopping at its bounds.
@@ -421,6 +600,42 @@ impl Settings {
                     4,
                 );
             }
+            Knob::RenderDistance => {
+                self.render_distance = step_u8(
+                    self.render_distance,
+                    steps,
+                    MIN_RENDER_DISTANCE,
+                    MAX_RENDER_DISTANCE,
+                );
+            }
+            Knob::FieldOfView => {
+                self.field_of_view = shift(
+                    self.field_of_view,
+                    FIELD_OF_VIEW_STEP,
+                    MIN_FIELD_OF_VIEW,
+                    MAX_FIELD_OF_VIEW,
+                    1,
+                );
+            }
+            Knob::Brightness => {
+                self.brightness = shift(
+                    self.brightness,
+                    BRIGHTNESS_STEP,
+                    MIN_BRIGHTNESS,
+                    MAX_BRIGHTNESS,
+                    2,
+                );
+            }
+            Knob::FogStart => {
+                self.fog_start = shift(
+                    self.fog_start,
+                    FOG_START_STEP,
+                    MIN_FOG_START,
+                    MAX_FOG_START,
+                    2,
+                );
+            }
+            Knob::FrameCap => self.frame_cap = step_frame_cap(self.frame_cap, steps),
         }
     }
 
@@ -428,7 +643,28 @@ impl Settings {
     pub fn reading(&self, knob: Knob) -> String {
         match knob {
             Knob::LookSensitivity => format!("{:.4}", self.look_sensitivity),
+            Knob::RenderDistance => format!("{} chunks", self.render_distance),
+            Knob::FieldOfView => format!("{:.0}°", self.field_of_view),
+            Knob::Brightness => format!("{:.2}x", self.brightness),
+            Knob::FogStart => format!("{:.0}%", self.fog_start * 100.0),
+            Knob::FrameCap if self.frame_cap == NO_FRAME_CAP => "uncapped".to_owned(),
+            Knob::FrameCap => format!("{} fps", self.frame_cap),
         }
+    }
+
+    /// Turns the vertical sync on or off.
+    pub const fn toggle_vsync(&mut self) {
+        self.vsync = !self.vsync;
+    }
+
+    /// Shows or hides the frame-rate readout.
+    pub const fn toggle_readout(&mut self) {
+        self.readout_shown = !self.readout_shown;
+    }
+
+    /// Moves the readout one corner clockwise.
+    pub const fn cycle_readout_corner(&mut self) {
+        self.readout_corner = self.readout_corner.next();
     }
 
     /// Makes `control` answer to `key`, or refuses and changes nothing.
@@ -444,7 +680,44 @@ impl Settings {
         self.look_sensitivity = self
             .look_sensitivity
             .clamp(MIN_LOOK_SENSITIVITY, MAX_LOOK_SENSITIVITY);
+        self.render_distance = self
+            .render_distance
+            .clamp(MIN_RENDER_DISTANCE, MAX_RENDER_DISTANCE);
+        self.field_of_view = self
+            .field_of_view
+            .clamp(MIN_FIELD_OF_VIEW, MAX_FIELD_OF_VIEW);
+        self.brightness = self.brightness.clamp(MIN_BRIGHTNESS, MAX_BRIGHTNESS);
+        self.fog_start = self.fog_start.clamp(MIN_FOG_START, MAX_FOG_START);
+        if self.frame_cap != NO_FRAME_CAP {
+            self.frame_cap = self.frame_cap.clamp(MIN_FRAME_CAP, MAX_FRAME_CAP);
+        }
     }
+}
+
+/// `value` moved `steps` places, saturating at both ends of `low..=high`.
+fn step_u8(value: u8, steps: i32, low: u8, high: u8) -> u8 {
+    let moved = i32::from(value).saturating_add(steps);
+    let clamped = moved.clamp(i32::from(low), i32::from(high));
+    u8::try_from(clamped).unwrap_or(low)
+}
+
+/// The frame cap `steps` presses away from `current`.
+///
+/// Zero is "uncapped" rather than "nought frames a second", so it is not simply the bottom
+/// of the range: stepping down off [`MIN_FRAME_CAP`] reaches it, and stepping up off it
+/// lands back on [`MIN_FRAME_CAP`] instead of on ten.
+fn step_frame_cap(current: u16, steps: i32) -> u16 {
+    let mut cap = current;
+    for _ in 0..steps.abs() {
+        cap = match (steps > 0, cap) {
+            (true, NO_FRAME_CAP) => MIN_FRAME_CAP,
+            (true, held) => held.saturating_add(FRAME_CAP_STEP).min(MAX_FRAME_CAP),
+            (false, NO_FRAME_CAP) => NO_FRAME_CAP,
+            (false, held) if held <= MIN_FRAME_CAP => NO_FRAME_CAP,
+            (false, held) => held.saturating_sub(FRAME_CAP_STEP).max(MIN_FRAME_CAP),
+        };
+    }
+    cap
 }
 
 /// Writes the settings back to their file when, and only when, they have moved.
@@ -463,6 +736,55 @@ fn save_when_changed(settings: Res<Settings>, mut file: ResMut<SettingsFile>) {
     file.written = settings.clone();
 }
 
+/// Pushes the three settings that live in somebody else's component rather than being read
+/// out of this resource every frame.
+///
+/// The camera is queried by `Camera3d` rather than by `player/camera.rs`'s own marker,
+/// because this module has no business depending on that one and there is exactly one camera
+/// in this client by rule. `WinitSettings` is absent in every headless test, and a missing
+/// resource is "there is no window to pace", not a panic.
+fn apply_to_the_display(
+    settings: Res<Settings>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut projections: Query<&mut Projection, With<Camera3d>>,
+    winit: Option<ResMut<WinitSettings>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+
+    let present_mode = if settings.vsync() {
+        PresentMode::Fifo
+    } else {
+        PresentMode::AutoNoVsync
+    };
+    for mut window in &mut windows {
+        if window.present_mode != present_mode {
+            window.present_mode = present_mode;
+        }
+    }
+
+    let fov = settings.field_of_view().to_radians();
+    for mut projection in &mut projections {
+        // Only the perspective case: an orthographic projection has no field of view, and
+        // replacing one with a perspective because a slider moved would be this module
+        // deciding what kind of camera the client has.
+        if let Projection::Perspective(perspective) = projection.as_mut()
+            && perspective.fov != fov
+        {
+            perspective.fov = fov;
+        }
+    }
+
+    if let Some(mut winit) = winit {
+        let focused = match settings.frame_cap() {
+            NO_FRAME_CAP => UpdateMode::Continuous,
+            cap => UpdateMode::reactive(std::time::Duration::from_secs_f32(1.0 / f32::from(cap))),
+        };
+        winit.focused_mode = focused;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +796,12 @@ mod tests {
     fn the_defaults_are_what_the_client_had_before_this_screen_existed() {
         let settings = Settings::default();
         assert!((settings.look_sensitivity() - DEFAULT_LOOK_SENSITIVITY).abs() < f32::EPSILON);
+        assert!((settings.fog_start() - DEFAULT_FOG_START).abs() < f32::EPSILON);
+        assert!((settings.field_of_view() - DEFAULT_FIELD_OF_VIEW).abs() < f32::EPSILON);
+        assert_eq!(settings.render_distance(), DEFAULT_RENDER_DISTANCE);
+        assert_eq!(settings.frame_cap(), NO_FRAME_CAP);
+        assert!(settings.vsync());
+        assert!(!settings.readout_shown());
         for (control, key) in [
             (Control::Forward, KeyCode::KeyW),
             (Control::Back, KeyCode::KeyS),
@@ -525,6 +853,50 @@ mod tests {
             assert_eq!(low, lower, "{knob:?} kept falling past its floor");
             assert_eq!(high, higher, "{knob:?} kept climbing past its ceiling");
         }
+    }
+
+    #[test]
+    fn the_frame_cap_steps_off_uncapped_rather_than_through_zero() {
+        assert_eq!(step_frame_cap(NO_FRAME_CAP, 1), MIN_FRAME_CAP);
+        assert_eq!(step_frame_cap(MIN_FRAME_CAP, -1), NO_FRAME_CAP);
+        assert_eq!(step_frame_cap(NO_FRAME_CAP, -1), NO_FRAME_CAP);
+        assert_eq!(
+            step_frame_cap(MIN_FRAME_CAP, 1),
+            MIN_FRAME_CAP + FRAME_CAP_STEP
+        );
+        assert_eq!(step_frame_cap(MAX_FRAME_CAP, 1), MAX_FRAME_CAP);
+    }
+
+    #[test]
+    fn the_corners_cycle_through_all_four_and_come_back() {
+        let mut corner = Corner::default();
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(corner);
+            corner = corner.next();
+        }
+        assert_eq!(corner, Corner::default(), "four steps is not a full turn");
+        seen.sort_by_key(|corner| corner.name());
+        seen.dedup();
+        assert_eq!(seen.len(), 4, "the cycle misses a corner");
+    }
+
+    /// The assertion the issue asks for by name: what the slider writes is the client's own
+    /// number. Nothing in this module takes a `SessionParams`, so there is no code path on
+    /// which a welcome could reach the setting; the structural half of that claim is
+    /// `no_setting_is_sourced_from_anything_the_server_sent` below, which is what keeps it
+    /// true as the module grows.
+    #[test]
+    fn the_render_distance_is_the_clients_own_number() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.render_distance(), DEFAULT_RENDER_DISTANCE);
+        settings.adjust(Knob::RenderDistance, -3);
+        assert_eq!(settings.render_distance(), DEFAULT_RENDER_DISTANCE - 3);
+
+        // And the ceiling it stops at is the protocol's own, not a server's: a slider run
+        // to its end asks for everything the most generous server could ever stream.
+        settings.adjust(Knob::RenderDistance, 10_000);
+        assert_eq!(settings.render_distance(), MAX_VIEW_DISTANCE);
     }
 
     #[test]

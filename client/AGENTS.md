@@ -74,20 +74,26 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings, and the one rule that refuses a rebinding rather than leaving a control unreachable — each with its bound, its step and the default it starts from | reach the wire, take a value from something the server sent, or decide any outcome |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the six graphics values and the frame-rate readout — each with its bound, its step and the default it starts from | reach the wire, take a value from something the server sent, or decide any outcome |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
-| `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory | reach into another module's internals, or grow a health bar |
+| `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — and the frame-rate readout in whichever of the four corners the setting names | reach into another module's internals, grow a health bar, or call the snapshot age a round trip |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the rows, the steppers, the rebinding capture and the refusal it prints | hold a bound, a step or a default of its own, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the rows, the steppers, the two flags and the corner, the rebinding capture and the refusal it prints | hold a bound, a step or a default of its own, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
-`ui` both *read* it and only `ui` writes it, from the one screen; the code it ships imports
-nothing from either and nothing from `net` at all. **The default a setting starts from is
+`ui` both *read* it — the sensitivity and the bindings in `sample_input`, the fog, the render
+distance and the brightness in `player/sky.rs`, the readout in `ui/status.rs` — and only `ui`
+writes it, from the one screen. It imports nothing from either, and it imports from `net`
+exactly one thing: `MAX_VIEW_DISTANCE`, the protocol's ceiling, so the render distance can
+never ask for more chunks than any server could stream. **That is a bound, not a value**, and
+the distinction is the whole of the rule: `ServerWelcome.view_distance` is never read into a
+setting, and `no_setting_is_sourced_from_anything_the_server_sent` is what keeps that true as
+the module grows. **The default a setting starts from is
 why that is stated here rather than assumed** — `DEFAULT_LOOK_SENSITIVITY` began in
 `player/constants.rs`, which made this module import `player` while this file said it did
 not, and a documented invariant contradicted by the code beneath it is worse than either
@@ -1600,11 +1606,16 @@ Recorded here so the next reader does not mistake them for oversights:
   `TcpListener::bind` takes one address, and a browser may connect to the other. Naming the
   literal address in the service's `-discord-redirect-uri` avoids it entirely, which is what its
   own default does.
-- **The settings screen holds two settings so far, and #179's second half is the rest.**
-  The graphics options — render distance, field of view, vertical sync, frame cap,
-  brightness and where the fog begins — and the frame-rate readout are additive: rows on
-  this screen, fields in this file. Not coming with them: *cursor capture*, which belongs to
-  the camera-control issue this file has named for a while and that still does not exist;
+- **The settings screen is one column, and #247 owes it tabs and a reset per tab.** The
+  graphics half of #179 landed here — render distance, field of view, vertical sync, frame
+  cap, brightness, where the fog begins, and the frame-rate readout in any of the four
+  corners — and it landed as rows on the one column this screen has always been. What #247
+  still owes is the `CONTROLS` / `GRAPHICS` strip over them and a reset that puts back **one
+  tab's** settings: a reset that wrote `Settings::default()` back would look right on the tab
+  it was asked about and would silently clear the other, and restoring bindings has to go
+  through `Bindings::from_pairs` because two controls that traded keys cannot be put back one
+  rebinding at a time. Not coming with any of it: *cursor capture*, which belongs to the
+  camera-control issue this file has named for a while and that still does not exist;
   *audio*; and *shadows, ambient occlusion and texture quality*, which have no shadow map,
   no AO pass and no texture behind them. Nor the pitch limit, which `player/constants.rs`
   explains is an invariant rather than a preference.
