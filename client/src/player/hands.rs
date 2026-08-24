@@ -23,13 +23,13 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
-use super::InputMode;
 use super::camera::{ViewMode, WorldCamera};
 use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
 use super::merge_all;
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
+use super::{HeldItemSurface, InputMode, held_item_surface, stack_item_id};
 use crate::net::{PLACEHOLDER_APPEARANCE, Session};
 #[cfg(test)]
 use crate::world::palette;
@@ -830,7 +830,7 @@ impl Plugin for HandsPlugin {
 /// `None` in both fields is the empty hand — not an item with a missing entry, which is
 /// why [`ItemShape`] has no variant for it and this field is an `Option` instead.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct HeldItem {
+pub(super) struct HeldItem {
     item_id: Option<u16>,
     shape: Option<ItemShape>,
     /// The player's own skin colour, so a late appearance message rebuilds the hand even
@@ -1116,7 +1116,8 @@ fn refresh_held_item(
     // said: a view toggle that removed the model would rebuild a mesh and a material on a
     // key press, and `animate_view_model` drives a transform on this same entity — so a
     // hidden model is a hidden animation, with nothing further to gate.
-    let visible = if *mode == InputMode::Playing && subject.session.is_some() && view.first_person()
+    let visible = if held_item_surface(*mode, *view, subject.session.is_some())
+        == HeldItemSurface::ViewModel
     {
         Visibility::Visible
     } else {
@@ -1151,10 +1152,7 @@ fn refresh_held_item(
 /// panel and the tooltip read too — so a stack cannot look like one thing in the hand and
 /// another in the pack.
 fn selected_appearance(stack: Option<crate::net::InventoryStack>) -> HeldAppearance {
-    let Some(item_id) = stack
-        .filter(|stack| stack.item_id != 0 && stack.count != 0)
-        .map(|stack| stack.item_id)
-    else {
+    let Some(item_id) = stack_item_id(stack) else {
         return HeldAppearance {
             item_id: None,
             shape: None,

@@ -45,16 +45,16 @@ const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 /// Modes whose UI owns the view instead of the 3D world.
 const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
-/// The shared meshes and the small set of item colours created so far.
+/// The shared world-space meshes and the small set of item colours created so far.
 ///
 /// Materials are keyed by their actual colour rather than by item id. Every
 /// unknown id therefore shares the one placeholder material instead of letting a peer
 /// grow this resource by walking through all 65,535 unknown ids over time.
 #[derive(Resource, Debug)]
 pub(super) struct DropVisuals {
-    /// One mesh per [`ItemShape`], shared by every drop presenting as that shape — the
-    /// same bound the body rig keeps, and the reason a hundred dropped stones cost one
-    /// mesh rather than a hundred.
+    /// One mesh per [`ItemShape`], shared by every drop and local body presenting as that
+    /// shape — the reason a hundred dropped stones and one carried stone still cost one
+    /// mesh rather than a hundred and one.
     shapes: Vec<(ItemShape, Handle<Mesh>)>,
     materials: Vec<([f32; 4], Handle<StandardMaterial>)>,
 }
@@ -66,7 +66,7 @@ impl DropVisuals {
     /// cell read, and this is its third reader rather than a second opinion. An id with no
     /// row answers [`ItemShape::Material`], which that function documents as the least
     /// wrong guess.
-    fn mesh_for(&self, item_id: u16) -> Handle<Mesh> {
+    pub(super) fn mesh_for(&self, item_id: u16) -> Handle<Mesh> {
         let shape = item_shape(item_id);
         self.shapes
             .iter()
@@ -82,7 +82,7 @@ impl DropVisuals {
             })
     }
 
-    fn material_for(
+    pub(super) fn material_for(
         &mut self,
         item_id: u16,
         materials: &mut Assets<StandardMaterial>,
@@ -147,11 +147,10 @@ pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<M
 /// The geometry one shape is drawn from on the ground, at [`DROP_EDGE`] scale.
 ///
 /// **Its own geometry rather than the held view model's, deliberately.** `player::hands`
-/// builds a mesh per shape too, and sharing them would look like the saving it is not:
-/// those are authored in camera space against the near plane, sized so a fist does not
-/// fill the screen, and they are retuned for how the *hand* reads. A drop is a thing lying
-/// in the world at world scale. What the two share is the table that says which shape an
-/// item presents as, which is the thing that must not disagree.
+/// composes a mesh in camera space against the near plane, sized so a fist does not fill
+/// the screen and retuned for how the *hand* reads. A drop and a body-held item are things
+/// in the world at world scale, so those two share this asset. All three read the table
+/// that says which shape an item presents as, which is the thing that must not disagree.
 ///
 /// **[`ItemShape::Blade`] is the one exception, and it proves the rule rather than breaking
 /// it** (#204). A sword is a gladius — a bevelled blade tapering to a point, a cross guard,
@@ -162,7 +161,7 @@ pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<M
 /// other arms below still author their own boxes.
 ///
 /// Wildcard-free, so a fifth [`ItemShape`] does not compile until it can be dropped — the
-/// same guarantee `ui::icon::parts` and `hands::HandVisuals::mesh` already give.
+/// same guarantee `ui::icon::parts` and `hands::item_mesh` already give.
 fn drop_mesh(shape: ItemShape) -> Mesh {
     match shape {
         // A voxel on the ground is a small voxel.
