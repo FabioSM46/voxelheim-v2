@@ -125,6 +125,12 @@ func TestARecordRestoresAWornChestItemAndRejectsItInTheWrongSlot(t *testing.T) {
 	if err := misplaced.Validate(); err == nil {
 		t.Fatal("Validate accepted a chest item in the head slot")
 	}
+
+	stacked := life
+	stacked.Slots[equipmentChest].Count = 2
+	if err := stacked.Validate(); err == nil {
+		t.Fatal("Validate accepted more than one item in an equipment slot")
+	}
 }
 
 // A restored player settles the same way a new one does, and keeps facing where they

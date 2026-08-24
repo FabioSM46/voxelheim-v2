@@ -455,11 +455,15 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 	if source.count == 0 || source.item == ItemNone || !registered {
 		return false
 	}
-	if place, equipment := wornAtForSlot(req.To); equipment && definition.wornAt != place {
+	toPlace, toEquipment := wornAtForSlot(req.To)
+	if toEquipment && definition.wornAt != toPlace {
 		return false
 	}
 
 	moveCount := min(req.Count, source.count)
+	if toEquipment && moveCount != 1 {
+		return false
+	}
 	switch {
 	case target.count == 0:
 		// A durable item moves whole or not at all. Its wear belongs to the one object,
@@ -482,7 +486,7 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 	case target.item == source.item:
 		// Never for equipment, for the reason insertLocked does not merge it: two
 		// blades have two different amounts of wear left and one slot to record it in.
-		if source.durable() || target.durable() {
+		if toEquipment || source.durable() || target.durable() {
 			return false
 		}
 		if target.count >= definition.maxStack {
@@ -504,7 +508,7 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 		if !ok {
 			return false
 		}
-		if place, equipment := wornAtForSlot(req.From); equipment && targetDefinition.wornAt != place {
+		if place, equipment := wornAtForSlot(req.From); equipment && (targetDefinition.wornAt != place || target.count != 1) {
 			return false
 		}
 		*source, *target = *target, *source

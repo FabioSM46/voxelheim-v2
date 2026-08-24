@@ -250,16 +250,19 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		testOtherHead
 		testChest
 		testLegs
+		testStackableHead
 	)
 	itemRegistry[testHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
 	itemRegistry[testOtherHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
 	itemRegistry[testChest] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornChest}
 	itemRegistry[testLegs] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornLegs}
+	itemRegistry[testStackableHead] = itemDefinition{places: world.Air, maxStack: 4, wornAt: wornHead}
 	t.Cleanup(func() {
 		delete(itemRegistry, testHead)
 		delete(itemRegistry, testOtherHead)
 		delete(itemRegistry, testChest)
 		delete(itemRegistry, testLegs)
+		delete(itemRegistry, testStackableHead)
 	})
 
 	refusedByteIdentical := func(t *testing.T, inventory *inventory, request protocol.InventoryMoveRequest) {
@@ -327,6 +330,26 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		if inventory.slots[equipmentHead].item != testOtherHead || inventory.slots[4].item != testHead {
 			t.Errorf("swap produced head=%d pack=%d", inventory.slots[equipmentHead].item, inventory.slots[4].item)
 		}
+	})
+
+	t.Run("equipment refuses a stack larger than one", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[4] = stackOf(testStackableHead, 2)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentHead), Count: 2})
+	})
+
+	t.Run("equipment refuses merging a second item", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[4] = stackOf(testStackableHead, 1)
+		inventory.slots[equipmentHead] = stackOf(testStackableHead, 1)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentHead), Count: 1})
+	})
+
+	t.Run("a swap cannot return a stack into equipment", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[equipmentHead] = stackOf(testHead, 1)
+		inventory.slots[4] = stackOf(testStackableHead, 2)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1})
 	})
 }
 
