@@ -225,17 +225,20 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // client intent, and the vitals append carries a new non-zero denominator the client
 // validates; without the bump either mismatch would surface only after admission.
 //
-// The rule that generalises, now that six shapes have been argued: **ask what the receiver
+// **V16 appends RecipeID.CookedMeat.** It travels client to server in CraftRequest, so a
+// V15 server would reject it only after a clean handshake.
+//
+// The rule that generalises, now that seven shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV15NamesConsumptionAndHunger(t *testing.T) {
+func TestProtocolV16NamesCampfireCooking(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 15 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 15", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 16 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 16", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -1685,9 +1688,10 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 
 		// V8's three, appended after LeatherPatch = 6. The value is a byte on the wire,
 		// so a renumbering turns every craft a client asks for into a different one.
-		"RecipeID.Shovel":  {byte(vnet.RecipeIDShovel), 7},
-		"RecipeID.Pickaxe": {byte(vnet.RecipeIDPickaxe), 8},
-		"RecipeID.Axe":     {byte(vnet.RecipeIDAxe), 9},
+		"RecipeID.Shovel":     {byte(vnet.RecipeIDShovel), 7},
+		"RecipeID.Pickaxe":    {byte(vnet.RecipeIDPickaxe), 8},
+		"RecipeID.Axe":        {byte(vnet.RecipeIDAxe), 9},
+		"RecipeID.CookedMeat": {byte(vnet.RecipeIDCookedMeat), 10},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1700,7 +1704,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]int{
 		"MobKind":       {len(vnet.EnumNamesMobKind), 4},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 10},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 11},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])

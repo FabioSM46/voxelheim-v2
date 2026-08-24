@@ -16,7 +16,7 @@
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
-use super::crafting::{ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
+use super::crafting::{ITEM_COOKED_MEAT, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
 use super::items::ITEM_RAW_MEAT;
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
@@ -462,7 +462,7 @@ fn drop_request(
 /// authority. The server re-reads its `restoresHunger` registry column and may refuse any
 /// request silently; an extra entry here can grant nothing, while a missing entry would
 /// make server-supported food unreachable from this UI.
-const FOODS: &[u16] = &[ITEM_RAW_MEAT];
+const FOODS: &[u16] = &[ITEM_RAW_MEAT, ITEM_COOKED_MEAT];
 
 fn item_is_food(item_id: u16) -> bool {
     FOODS.contains(&item_id)

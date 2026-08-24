@@ -632,8 +632,9 @@ with time, so `Step` reads them and never advances them.
   paths the other two kinds already take. **What a fire does is keep spawns off the ground
   around it**, through `Sim.nearACampfireLocked` and `CampfireSafeRadius` — both declared by
   the spawn director and read here, never redeclared (see the spawn section). It has no
-  fuel, does not burn down, cannot be put out, cooks nothing, lights nothing in the mesher
-  and hurts nobody who stands in it; the entity and the radius are the whole feature.
+  fuel, does not burn down and cannot be put out. It cooks raw meat immediately through
+  the ordinary crafting transaction, lights nothing in the mesher and hurts nobody who
+  stands in it; fuel, burn time and lit state remain absent.
 - **Ownership decides removal and respawn, and nothing else.** Any player may walk into any
   tent, and the crafting issue reads this registry for a nearby forge without consulting the
   owner at all.
@@ -719,10 +720,13 @@ Everything here lives in `internal/game/craft.go`, beside the registry it reads.
   current value alone would make a weapon that does not wear out permanently unusable the
   moment somebody registered one, because a wearless item carries `(0, 0)` like every
   resource does.
-- **Forge proximity is a scan of the structure registry, never of voxels.** A handful of
+- **Station proximity is a scan of the structure registry, never of voxels.** Forges and
+  campfires each have an explicit five-block crafting radius; an unknown station kind has
+  no radius and fails closed rather than inheriting one. A handful of
   entries at craft frequency, on the same explicit trade the drops and the mobs record.
   Ownership is deliberately not consulted: a forge is a place, not a possession, and the owner
-  field exists for removal and respawn.
+  field exists for removal and respawn. Cooking therefore works at another player's fire
+  on exactly the same terms forging works at another player's forge.
 - **One critical section**, for the reason placement has one: liveness, the station scan and
   the slot arithmetic are one decision, and splitting them leaves a window in which the player
   walks away from the forge between the check and the spend. Nothing in it blocks — the

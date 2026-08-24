@@ -76,6 +76,9 @@ namespace Voxelheim.Net;
 /// **V15 adds `ConsumeRequest` and appends hunger to `PlayerVitals`.** An older server
 /// refuses the new client payload, while a V15 client requires a non-zero `max_hunger`
 /// that a V14 server never sends. Either skew would fail only after a clean handshake.
+///
+/// **V16 appends `RecipeID.CookedMeat`.** A V16 client may send that new enum value in a
+/// `CraftRequest`; a V15 server cannot name it and would fail only after a clean handshake.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -83,7 +86,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 15
+  Current = 16
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

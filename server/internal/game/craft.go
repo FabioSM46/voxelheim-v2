@@ -29,7 +29,23 @@ import (
 // Five rather than `EditReach`'s 4.5: standing *at* a forge is a looser idea than reaching
 // a voxel with your hands, and a radius under the reach would make a forge you can touch
 // one you cannot work at.
-const ForgeCraftRadius = 5.0
+const (
+	ForgeCraftRadius   = 5.0
+	CampfireCookRadius = 5.0
+)
+
+// craftRadius is the complete station-to-radius policy. Unknown and future station
+// kinds fail closed instead of inheriting a forge radius by accident.
+func craftRadius(kind vnet.StructureKind) (float64, bool) {
+	switch kind {
+	case vnet.StructureKindForge:
+		return ForgeCraftRadius, true
+	case vnet.StructureKindCampfire:
+		return CampfireCookRadius, true
+	default:
+		return 0, false
+	}
+}
 
 // ingredient is one line of a recipe's cost.
 type ingredient struct {
@@ -56,12 +72,13 @@ type recipe struct {
 // absent-field `Unknown` are one lookup and one refusal. `RecipeIDUnknown` is deliberately
 // absent from the table for exactly that reason.
 //
-// The six recipes are a chain rather than a list: logs make a tent and a fire, stone and
+// The recipes are a chain rather than a list: logs make a tent and a fire, stone and
 // coal make the forge, the forge is what turns raw iron into a blade and stone into the
 // means of keeping it, and what a hunt leaves behind is the other way of keeping it —
 // mended where you are standing rather than where you built. Nothing here smelts — raw
 // iron and coal go straight to the edge, with the coal as the fuel — because an
 // intermediate metallurgy chain is a later design and this one has to be playable first.
+// The fire also turns raw meat into cooked food, immediately and without a fuel state.
 var recipeTable = map[vnet.RecipeID]recipe{
 	// No station: the forge is the thing you build before you have one.
 	vnet.RecipeIDForge: {
@@ -152,6 +169,15 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		productCount: 1,
 		station:      vnet.StructureKindForge,
 	},
+
+	// Cooking is immediate crafting for now: one raw piece becomes one cooked piece at
+	// any campfire in reach. Fuel, lighting state and burn time are deliberately absent.
+	vnet.RecipeIDCookedMeat: {
+		ingredients:  []ingredient{{ItemRawMeat, 1}},
+		product:      ItemCookedMeat,
+		productCount: 1,
+		station:      vnet.StructureKindCampfire,
+	},
 }
 
 // craft spends a recipe's ingredients and inserts its product, or changes nothing.
@@ -239,8 +265,12 @@ func (p *Player) Craft(req protocol.CraftRequest) (protocol.InventoryState, erro
 	}
 
 	if r.station != vnet.StructureKindUnknown {
-		if !p.sim.stationWithinLocked(r.station, p.pos, ForgeCraftRadius) {
-			return protocol.InventoryState{}, fmt.Errorf("no %s stands within %.1f blocks", r.station, ForgeCraftRadius)
+		radius, configured := craftRadius(r.station)
+		if !configured {
+			return protocol.InventoryState{}, fmt.Errorf("station %s has no crafting radius", r.station)
+		}
+		if !p.sim.stationWithinLocked(r.station, p.pos, radius) {
+			return protocol.InventoryState{}, fmt.Errorf("no %s stands within %.1f blocks", r.station, radius)
 		}
 	}
 

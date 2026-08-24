@@ -168,7 +168,12 @@ enum RecipeID : ubyte {
   // every craft a client asks for into a different one.
   Shovel = 7,
   Pickaxe = 8,
-  Axe = 9
+  Axe = 9,
+
+  // Raw meat cooked at a campfire, appended in V16. This travels client -> server in a
+  // CraftRequest, so an older server must be rejected at the handshake rather than on
+  // the first attempt to cook.
+  CookedMeat = 10
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.
