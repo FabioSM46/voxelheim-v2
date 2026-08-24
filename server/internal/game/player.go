@@ -1114,8 +1114,12 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// Horizontal velocity is *set* from the intent, not accumulated into. There is no
 	// momentum in this issue, so releasing the controls stops the player on the same
 	// tick and there is no acceleration curve to exploit.
-	p.vel[0] = (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * WalkSpeed
-	p.vel[2] = (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * WalkSpeed
+	speed := WalkSpeed
+	if p.hunger == 0 {
+		speed *= StarvingSpeedScale
+	}
+	p.vel[0] = (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * speed
+	p.vel[2] = (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * speed
 
 	// Whether a jump *happens* is the server's decision, and ground contact is the
 	// part of it a client cannot know. onGround is last tick's answer, which is the

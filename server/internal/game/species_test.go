@@ -234,6 +234,10 @@ func TestAVargrIsFasterThanAWalkingPlayerAndDiesQuicker(t *testing.T) {
 		t.Errorf("a draugr closes at %v against a walk of %v, so running is no longer an answer to it",
 			draugrRow.speed, WalkSpeed)
 	}
+	if draugrRow.speed >= WalkSpeed*StarvingSpeedScale {
+		t.Errorf("a draugr closes at %v against a starving walk of %v, so zero hunger makes escape impossible",
+			draugrRow.speed, WalkSpeed*StarvingSpeedScale)
+	}
 	if vargrRow.nocturnal {
 		t.Error("the vargr is nocturnal, and the dark is not supposed to be what brings it out")
 	}

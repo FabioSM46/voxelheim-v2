@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -997,6 +998,40 @@ func TestHungerDrainsFromFullToEmptyInTwelveHoursOfLivingPlay(t *testing.T) {
 			player.hunger, player.hungerTicks, before)
 	}
 	h.sim.mu.Unlock()
+}
+
+// Zero is the exact boundary of the movement penalty: one remaining point preserves
+// the ordinary walk, while an empty reserve scales both horizontal axes and nothing
+// vertical. A diagonal intent exercises both assignments in Player.step; the held
+// jump makes the equal vertical result observable at the same time.
+func TestOnlyAnEmptyStomachSlowsTheHorizontalWalk(t *testing.T) {
+	t.Parallel()
+
+	terrain := dropTerrain{groundTop: 63}
+	velocityAt := func(hunger uint16) [3]float64 {
+		h := newVitalsHarness(t, DefaultTickRate, terrain)
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+		h.sim.mu.Lock()
+		defer h.sim.mu.Unlock()
+		player.hunger = hunger
+		player.current = intent{moveX: 0.6, moveZ: 0.8, jump: true}
+		player.onGround = true
+		player.step(1/float64(DefaultTickRate), terrain)
+		return player.vel
+	}
+
+	fed := velocityAt(1)
+	starving := velocityAt(0)
+	if got := math.Hypot(fed[0], fed[2]); math.Abs(got-WalkSpeed) > 1e-12 {
+		t.Errorf("fed horizontal speed = %v, want %v", got, WalkSpeed)
+	}
+	if got, want := math.Hypot(starving[0], starving[2]), WalkSpeed*StarvingSpeedScale; math.Abs(got-want) > 1e-12 {
+		t.Errorf("starving horizontal speed = %v, want %v", got, want)
+	}
+	if starving[1] != fed[1] {
+		t.Errorf("starvation changed vertical velocity from %v to %v", fed[1], starving[1])
+	}
 }
 
 // A leaving body stays alive in Sim for the server-owned linger, including after EOF.

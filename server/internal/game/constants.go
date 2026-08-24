@@ -26,6 +26,12 @@ const (
 	// with the one that gives the client prediction.
 	WalkSpeed = 4.3
 
+	// StarvingSpeedScale is the fraction of WalkSpeed available at zero hunger.
+	// WalkSpeed's 4.3 multiplied by 0.8 is 3.44, which still — barely — outruns
+	// the draugr's 3.2: starvation costs mobility without handing the slowest
+	// predator a guaranteed kill.
+	StarvingSpeedScale = 0.8
+
 	// Gravity is the downward acceleration, in blocks per second squared.
 	//
 	// Well above the real 9.81: a physically accurate fall over one block takes
