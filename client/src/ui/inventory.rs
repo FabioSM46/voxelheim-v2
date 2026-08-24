@@ -41,6 +41,8 @@ impl Plugin for InventoryUiPlugin {
         // headlessly testable on its own. `add_message` is idempotent.
         app.add_message::<CraftClick>()
             .init_resource::<InventoryTab>()
+            .init_resource::<InventoryWindowPosition>()
+            .init_resource::<InventoryDrag>()
             .add_systems(Startup, spawn_inventory_screen)
             .add_systems(
                 Update,
@@ -52,6 +54,8 @@ impl Plugin for InventoryUiPlugin {
                     show_inventory,
                     // After `show_inventory`, which resets the tab when the screen opens,
                     // so the frame it appears on is already showing the pack.
+                    place_inventory_window_on_open,
+                    drag_inventory_window,
                     switch_tabs,
                     show_the_active_tab,
                     hover_tooltip,
@@ -66,6 +70,30 @@ impl Plugin for InventoryUiPlugin {
 
 #[derive(Component)]
 struct InventoryRoot;
+
+/// The inventory's frame, positioned in logical window pixels.
+#[derive(Component)]
+struct InventoryWindow;
+
+/// The one area from which a drag can begin.
+#[derive(Component)]
+struct InventoryGrabArea;
+
+/// The strip's identity is useful beyond its buttons: its laid-out position is the
+/// stability contract between the two content panels.
+#[derive(Component)]
+struct InventoryTabStrip;
+
+/// Where the inventory was last put during this run.
+///
+/// Deliberately a resource and deliberately absent from `settings`: this is session state,
+/// not a preference. `None` means the window has not opened yet and should start centred.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct InventoryWindowPosition(Option<Vec2>);
+
+/// The cursor-to-window offset captured at the start of one drag.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct InventoryDrag(Option<Vec2>);
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum InventoryGrid {
@@ -129,6 +157,20 @@ const TOOLTIP_TEXT: Color = Color::srgb(0.92, 0.94, 0.97);
 /// How far from the pointer the tooltip sits, in logical pixels. Enough that the cursor
 /// glyph never covers the first letter.
 const TOOLTIP_GAP: f32 = 14.0;
+
+/// A fixed frame is the layout decision that keeps the tab strip stable: tab contents may
+/// differ, but neither participates in sizing this node.
+const INVENTORY_WINDOW_SIZE: Vec2 = Vec2::new(700.0, 720.0);
+
+/// Space between the frame edge and the grab bar. The clamp accounts for it rather than
+/// mistaking visible frame padding for visible grab area.
+const INVENTORY_WINDOW_PADDING: f32 = 24.0;
+
+/// The grab bar stays this tall regardless of which tab is active.
+const GRAB_AREA_HEIGHT: f32 = 34.0;
+
+/// Enough horizontal grab bar to recover a window left past either side of the viewport.
+const MIN_VISIBLE_GRAB_WIDTH: f32 = 96.0;
 
 /// Which half of the inventory screen is on show.
 ///
@@ -194,61 +236,102 @@ fn spawn_inventory_screen(mut commands: Commands) {
         .with_children(|overlay| {
             overlay
                 .spawn((
+                    InventoryWindow,
                     Node {
+                        position_type: PositionType::Absolute,
                         display: Display::Flex,
                         flex_direction: FlexDirection::Column,
+                        width: Val::Px(INVENTORY_WINDOW_SIZE.x),
+                        height: Val::Px(INVENTORY_WINDOW_SIZE.y),
+                        flex_shrink: 0.0,
                         row_gap: Val::Px(10.0),
-                        padding: UiRect::all(Val::Px(24.0)),
+                        padding: UiRect::all(Val::Px(INVENTORY_WINDOW_PADDING)),
                         border_radius: BorderRadius::all(Val::Px(8.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgb(0.075, 0.085, 0.105)),
                 ))
                 .with_children(|panel| {
+                    panel
+                        .spawn((
+                            InventoryGrabArea,
+                            Button,
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(GRAB_AREA_HEIGHT),
+                                flex_shrink: 0.0,
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgb(0.10, 0.115, 0.14)),
+                        ))
+                        .with_child((
+                            Text::new("INVENTORY  —  DRAG"),
+                            TextFont {
+                                font_size: FontSize::Px(15.0),
+                                ..default()
+                            },
+                            TextColor(Color::srgb(0.72, 0.75, 0.80)),
+                            FocusPolicy::Pass,
+                        ));
                     spawn_tab_strip(panel);
 
-                    // The pack half. `Display` is set by `show_the_active_tab` from the
-                    // frame the screen is built, so the value here is only what it starts
-                    // as — and it starts as the tab the screen opens on.
                     panel
-                        .spawn((
-                            TabPanel(InventoryTab::Pack),
-                            Node {
-                                display: Display::Flex,
-                                flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(10.0),
-                                ..default()
-                            },
-                        ))
-                        .with_children(|pack| {
-                            pack.spawn(section_title("PACK"));
-                            pack.spawn((InventoryGrid::Pack, grid_node()));
-                            pack.spawn(section_title("HOTBAR"));
-                            pack.spawn((InventoryGrid::Hotbar, grid_node()));
-                            pack.spawn(hint(
-                                "Left click: move stack    Right click: split    E: close",
-                            ));
-                        });
+                        .spawn(Node {
+                            position_type: PositionType::Relative,
+                            width: Val::Percent(100.0),
+                            flex_grow: 1.0,
+                            min_height: Val::Px(0.0),
+                            ..default()
+                        })
+                        .with_children(|content| {
+                            // Both halves occupy the same fixed content area. The visible
+                            // one is still selected with `Display`; absolute positioning is
+                            // what stops its natural height resizing the window around it.
+                            content
+                                .spawn((
+                                    TabPanel(InventoryTab::Pack),
+                                    tab_panel_node(Display::Flex),
+                                ))
+                                .with_children(|pack| {
+                                    pack.spawn(section_title("PACK"));
+                                    pack.spawn((InventoryGrid::Pack, grid_node()));
+                                    pack.spawn(section_title("HOTBAR"));
+                                    pack.spawn((InventoryGrid::Hotbar, grid_node()));
+                                    pack.spawn(hint(
+                                        "Left click: move stack    Right click: split    E: close",
+                                    ));
+                                });
 
-                    // And the crafting half, holding exactly the rows that used to be a
-                    // third section of the panel above.
-                    panel
-                        .spawn((
-                            TabPanel(InventoryTab::Crafting),
-                            Node {
-                                display: Display::None,
-                                flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(10.0),
-                                ..default()
-                            },
-                        ))
-                        .with_children(|crafting| {
-                            spawn_recipe_rows(crafting);
-                            crafting.spawn(hint("Click a recipe to craft    E: close"));
+                            content
+                                .spawn((
+                                    TabPanel(InventoryTab::Crafting),
+                                    tab_panel_node(Display::None),
+                                ))
+                                .with_children(|crafting| {
+                                    spawn_recipe_rows(crafting);
+                                    crafting.spawn(hint("Click a recipe to craft    E: close"));
+                                });
                         });
                 });
             overlay.spawn(tooltip_bundle());
         });
+}
+
+/// Both tab bodies start at the same point and are taken out of their parent's sizing.
+fn tab_panel_node(display: Display) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        display,
+        flex_direction: FlexDirection::Column,
+        width: Val::Percent(100.0),
+        left: Val::Px(0.0),
+        top: Val::Px(0.0),
+        row_gap: Val::Px(10.0),
+        ..default()
+    }
 }
 
 /// The single tooltip node: absolutely positioned, empty, and hidden until a cell is
@@ -393,12 +476,16 @@ fn hint(text: &str) -> impl Bundle {
 /// existing.
 fn spawn_tab_strip(panel: &mut ChildSpawnerCommands<'_>) {
     panel
-        .spawn(Node {
-            display: Display::Flex,
-            flex_direction: FlexDirection::Row,
-            column_gap: Val::Px(6.0),
-            ..default()
-        })
+        .spawn((
+            InventoryTabStrip,
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                flex_shrink: 0.0,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+        ))
         .with_children(|strip| {
             for tab in InventoryTab::ALL {
                 strip
@@ -659,6 +746,93 @@ fn show_the_active_tab(active: Res<InventoryTab>, mut panels: Query<(&TabPanel, 
     }
 }
 
+/// Keeps enough of the grab bar in the current viewport to recover the window.
+///
+/// Horizontally the frame may go mostly off-screen, but never so far that the grab bar
+/// cannot be caught again. Vertically the grab bar never leaves the viewport: content may
+/// extend below a small window, while the control that moves it cannot.
+fn clamp_window_position(position: Vec2, viewport: Vec2) -> Vec2 {
+    let viewport = viewport.max(Vec2::ZERO);
+    let grab_width = (INVENTORY_WINDOW_SIZE.x - 2.0 * INVENTORY_WINDOW_PADDING).max(0.0);
+    let visible_width = MIN_VISIBLE_GRAB_WIDTH.min(grab_width).min(viewport.x);
+    let minimum = Vec2::new(
+        visible_width - (INVENTORY_WINDOW_SIZE.x - INVENTORY_WINDOW_PADDING),
+        -INVENTORY_WINDOW_PADDING,
+    );
+    let maximum = Vec2::new(
+        viewport.x - visible_width - INVENTORY_WINDOW_PADDING,
+        (viewport.y - INVENTORY_WINDOW_PADDING - GRAB_AREA_HEIGHT).max(-INVENTORY_WINDOW_PADDING),
+    );
+    position.clamp(minimum, maximum)
+}
+
+/// The old centred position, now only the first position of the session.
+fn centred_window_position(viewport: Vec2) -> Vec2 {
+    clamp_window_position((viewport - INVENTORY_WINDOW_SIZE) / 2.0, viewport)
+}
+
+fn set_window_position(node: &mut Node, position: Vec2) {
+    let (left, top) = (Val::Px(position.x), Val::Px(position.y));
+    if node.left != left {
+        node.left = left;
+    }
+    if node.top != top {
+        node.top = top;
+    }
+}
+
+/// Moves the inventory while the primary button remains held after a press on the grab
+/// bar. Once begun, the drag follows the pointer even after it leaves the bar.
+fn drag_inventory_window(
+    mode: Res<InputMode>,
+    buttons: Option<Res<ButtonInput<MouseButton>>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    grabs: Query<&Interaction, With<InventoryGrabArea>>,
+    mut position: ResMut<InventoryWindowPosition>,
+    mut drag: ResMut<InventoryDrag>,
+    mut frames: Query<&mut Node, With<InventoryWindow>>,
+) {
+    let held = buttons
+        .as_deref()
+        .is_some_and(|buttons| buttons.pressed(MouseButton::Left));
+    if *mode != InputMode::Inventory || !held {
+        if drag.0.is_some() {
+            drag.0 = None;
+        }
+        return;
+    }
+
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let viewport = Vec2::new(window.width(), window.height());
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let current = position
+        .0
+        .unwrap_or_else(|| centred_window_position(viewport));
+
+    if drag.0.is_none()
+        && grabs
+            .iter()
+            .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        drag.0 = Some(cursor - current);
+    }
+    let Some(offset) = drag.0 else {
+        return;
+    };
+
+    let next = clamp_window_position(cursor - offset, viewport);
+    if position.0 != Some(next) {
+        position.0 = Some(next);
+    }
+    for mut frame in &mut frames {
+        set_window_position(&mut frame, next);
+    }
+}
+
 fn show_inventory(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
@@ -680,6 +854,43 @@ fn show_inventory(
             }
             *visibility = next;
         }
+    }
+}
+
+/// Restores the session position on an opening and clamps it against the viewport that
+/// exists now, not the one in which it was last dragged.
+fn place_inventory_window_on_open(
+    roots: Query<&Visibility, (With<InventoryRoot>, Changed<Visibility>)>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut position: ResMut<InventoryWindowPosition>,
+    mut drag: ResMut<InventoryDrag>,
+    mut frames: Query<&mut Node, With<InventoryWindow>>,
+) {
+    let Some(visibility) = roots.iter().next() else {
+        return;
+    };
+    if *visibility != Visibility::Visible {
+        // Closing while held ends that gesture; reopening cannot inherit a stale cursor
+        // offset even though it deliberately inherits the position.
+        if drag.0.is_some() {
+            drag.0 = None;
+        }
+        return;
+    }
+
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let viewport = Vec2::new(window.width(), window.height());
+    let wanted = position
+        .0
+        .unwrap_or_else(|| centred_window_position(viewport));
+    let placed = clamp_window_position(wanted, viewport);
+    if position.0 != Some(placed) {
+        position.0 = Some(placed);
+    }
+    for mut frame in &mut frames {
+        set_window_position(&mut frame, placed);
     }
 }
 
@@ -990,6 +1201,36 @@ mod tests {
             .0
     }
 
+    fn inventory_window(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<InventoryWindow>>();
+        query.single(world).expect("exactly one inventory window")
+    }
+
+    fn grab_area(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<InventoryGrabArea>>();
+        query
+            .single(world)
+            .expect("exactly one inventory grab area")
+    }
+
+    fn position(app: &App) -> Vec2 {
+        app.world()
+            .resource::<InventoryWindowPosition>()
+            .0
+            .expect("an opened inventory has a position")
+    }
+
+    fn add_window(app: &mut App, size: UVec2, cursor: Vec2) -> Entity {
+        let mut window = Window {
+            resolution: bevy::window::WindowResolution::new(size.x, size.y),
+            ..default()
+        };
+        window.set_cursor_position(Some(cursor));
+        app.world_mut().spawn((PrimaryWindow, window)).id()
+    }
+
     #[test]
     fn the_screen_opens_on_the_pack_and_shows_one_tab_at_a_time() {
         let mut app = app();
@@ -1029,6 +1270,147 @@ mod tests {
         app.update();
 
         assert_eq!(shown(&mut app), vec![InventoryTab::Pack]);
+    }
+
+    /// The regression this issue closes, asserted on the layout inputs rather than a
+    /// screenshot: the frame has one explicit size and both tab bodies occupy the same
+    /// absolute origin. A tab body whose natural height participated here would make one
+    /// of these properties false and move the strip when the centred frame was laid out.
+    #[test]
+    fn the_tab_strip_keeps_one_layout_when_the_content_switches() {
+        let mut app = app();
+        add_window(&mut app, UVec2::new(1280, 900), Vec2::new(640.0, 450.0));
+        app.update();
+
+        let frame = inventory_window(&mut app);
+        let before = app
+            .world()
+            .get::<Node>(frame)
+            .expect("the frame is a node")
+            .clone();
+        let before_position = position(&app);
+
+        let crafting = tab_button(&mut app, InventoryTab::Crafting);
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("a tab is a button") = Interaction::Pressed;
+        app.update();
+
+        let after = app.world().get::<Node>(frame).expect("the frame is a node");
+        assert_eq!(
+            position(&app),
+            before_position,
+            "the frame moved with its content"
+        );
+        assert_eq!(after.left, before.left);
+        assert_eq!(after.top, before.top);
+        assert_eq!(after.width, Val::Px(INVENTORY_WINDOW_SIZE.x));
+        assert_eq!(after.height, Val::Px(INVENTORY_WINDOW_SIZE.y));
+
+        let world = app.world_mut();
+        let mut strips = world.query_filtered::<&Node, With<InventoryTabStrip>>();
+        assert_eq!(strips.iter(world).count(), 1, "the strip was replaced");
+        let mut panels = world.query::<(&TabPanel, &Node)>();
+        for (_, node) in panels.iter(world) {
+            assert_eq!(node.position_type, PositionType::Absolute);
+            assert_eq!((node.left, node.top), (Val::Px(0.0), Val::Px(0.0)));
+            assert_eq!(node.width, Val::Percent(100.0));
+        }
+    }
+
+    #[test]
+    fn dragging_moves_by_the_pointer_delta_and_release_leaves_it_there() {
+        let mut app = app();
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        let window = add_window(&mut app, UVec2::new(1280, 900), Vec2::new(640.0, 200.0));
+        app.update();
+        let start = position(&app);
+
+        let grab = grab_area(&mut app);
+        *app.world_mut()
+            .entity_mut(grab)
+            .get_mut::<Interaction>()
+            .expect("the grab area is a button") = Interaction::Pressed;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("the primary window exists")
+            .set_cursor_position(Some(Vec2::new(760.0, 275.0)));
+        app.update();
+        assert_eq!(position(&app), start + Vec2::new(120.0, 75.0));
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.update();
+        let released = position(&app);
+        assert_eq!(app.world().resource::<InventoryDrag>().0, None);
+
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("the primary window exists")
+            .set_cursor_position(Some(Vec2::new(900.0, 400.0)));
+        app.update();
+        assert_eq!(
+            position(&app),
+            released,
+            "a released drag kept following the pointer"
+        );
+    }
+
+    #[test]
+    fn the_drag_clamp_keeps_the_grab_area_recoverable_at_every_edge() {
+        let viewport = Vec2::new(800.0, 600.0);
+        assert_eq!(
+            clamp_window_position(Vec2::splat(-10_000.0), viewport),
+            Vec2::new(
+                MIN_VISIBLE_GRAB_WIDTH - (INVENTORY_WINDOW_SIZE.x - INVENTORY_WINDOW_PADDING),
+                -INVENTORY_WINDOW_PADDING,
+            )
+        );
+        assert_eq!(
+            clamp_window_position(Vec2::splat(10_000.0), viewport),
+            Vec2::new(
+                viewport.x - MIN_VISIBLE_GRAB_WIDTH - INVENTORY_WINDOW_PADDING,
+                viewport.y - INVENTORY_WINDOW_PADDING - GRAB_AREA_HEIGHT,
+            )
+        );
+    }
+
+    #[test]
+    fn reopening_keeps_the_session_position_and_reclamps_it_to_the_current_window() {
+        let mut app = app();
+        let window = add_window(&mut app, UVec2::new(1920, 1080), Vec2::new(0.0, 0.0));
+        app.update();
+
+        let left_on_large_window = Vec2::new(1500.0, 900.0);
+        app.world_mut().resource_mut::<InventoryWindowPosition>().0 = Some(left_on_large_window);
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("the primary window exists")
+            .resolution = bevy::window::WindowResolution::new(800, 600);
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+
+        let expected = clamp_window_position(left_on_large_window, Vec2::new(800.0, 600.0));
+        assert_eq!(position(&app), expected);
+        let frame = inventory_window(&mut app);
+        let node = app.world().get::<Node>(frame).expect("the frame is a node");
+        assert_eq!(
+            (node.left, node.top),
+            (Val::Px(expected.x), Val::Px(expected.y))
+        );
     }
 
     /// **Switching tabs originates nothing**, which is the acceptance criterion that keeps
