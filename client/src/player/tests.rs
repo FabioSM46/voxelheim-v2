@@ -279,6 +279,198 @@ fn local_visibility(app: &mut App) -> Visibility {
     found[0]
 }
 
+#[derive(Debug, Clone)]
+struct DrawnBodyItem {
+    entity: Entity,
+    item: BodyHeldItem,
+    parent: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+    visibility: Visibility,
+}
+
+/// The one item parented to the local body, if its authoritative selected slot is full.
+fn body_held_item(app: &mut App) -> Vec<DrawnBodyItem> {
+    let world = app.world_mut();
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<BodyHeldItem>>()
+        .iter(world)
+        .collect();
+    let world = app.world();
+    entities
+        .into_iter()
+        .map(|entity| DrawnBodyItem {
+            entity,
+            item: *world.get::<BodyHeldItem>(entity).expect("the held item"),
+            parent: world
+                .get::<ChildOf>(entity)
+                .expect("the body-held item has a parent")
+                .parent(),
+            mesh: world
+                .get::<Mesh3d>(entity)
+                .expect("the held mesh")
+                .0
+                .clone(),
+            material: world
+                .get::<MeshMaterial3d<StandardMaterial>>(entity)
+                .expect("the held material")
+                .0
+                .clone(),
+            transform: *world.get::<Transform>(entity).expect("the held transform"),
+            visibility: *world
+                .get::<Visibility>(entity)
+                .expect("the held visibility"),
+        })
+        .collect()
+}
+
+fn view_model_visibility(app: &mut App) -> Visibility {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<&Visibility, With<hands::HeldItem>>();
+    *query.single(world).expect("one first-person view model")
+}
+
+#[test]
+fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
+    let mut app = headless_player();
+    *app.world_mut().resource_mut::<Inventory>() =
+        Inventory::from_stacks(vec![crate::net::InventoryStack {
+            item_id: combat::ITEM_RUSTY_SWORD,
+            count: 1,
+            ..Default::default()
+        }]);
+    *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let drawn = body_held_item(&mut app);
+    assert_eq!(
+        drawn.len(),
+        1,
+        "only the local body knows its selected slot"
+    );
+    let drawn = &drawn[0];
+    assert_eq!(drawn.item.item_id, combat::ITEM_RUSTY_SWORD);
+    assert_eq!(drawn.item.shape, ItemShape::Blade);
+    assert_eq!(Some(drawn.parent), body_of(&mut app, LOCAL_ID));
+    assert_ne!(Some(drawn.parent), body_of(&mut app, 99));
+    assert_eq!(drawn.transform.translation, body_held_item_anchor());
+    assert_eq!(drawn.visibility, Visibility::Inherited);
+
+    let drop_mesh = app
+        .world()
+        .resource::<drops::DropVisuals>()
+        .mesh_for(combat::ITEM_RUSTY_SWORD);
+    assert_eq!(
+        drawn.mesh, drop_mesh,
+        "the body item is exactly the drop-scale world asset, not the camera-space view model"
+    );
+    let expected = item_linear_rgba(combat::ITEM_RUSTY_SWORD);
+    let actual = app
+        .world()
+        .resource::<Assets<StandardMaterial>>()
+        .get(&drawn.material)
+        .expect("the body-held material")
+        .base_color;
+    assert_eq!(
+        actual,
+        Color::linear_rgba(expected[0], expected[1], expected[2], expected[3])
+    );
+}
+
+#[test]
+fn the_body_item_follows_selection_and_an_empty_slot_leaves_no_child() {
+    let mut app = headless_player();
+    *app.world_mut().resource_mut::<Inventory>() = Inventory::from_stacks(vec![
+        crate::net::InventoryStack {
+            item_id: items::ITEM_STONE,
+            count: 1,
+            ..Default::default()
+        },
+        crate::net::InventoryStack {
+            item_id: items::ITEM_RAW_COAL,
+            count: 2,
+            ..Default::default()
+        },
+        crate::net::InventoryStack::default(),
+    ]);
+    *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+    deliver(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+
+    let stone = body_held_item(&mut app);
+    assert_eq!(stone.len(), 1);
+    assert_eq!(stone[0].item.item_id, items::ITEM_STONE);
+    assert_eq!(stone[0].item.shape, ItemShape::Block);
+    let entity = stone[0].entity;
+
+    *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(1);
+    app.update();
+    let coal = body_held_item(&mut app);
+    assert_eq!(coal.len(), 1);
+    assert_eq!(
+        coal[0].entity, entity,
+        "a slot change updates the seventh child in place"
+    );
+    assert_eq!(coal[0].item.item_id, items::ITEM_RAW_COAL);
+    assert_eq!(coal[0].item.shape, ItemShape::Material);
+
+    *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(2);
+    app.update();
+    assert!(
+        body_held_item(&mut app).is_empty(),
+        "an empty authoritative stack leaves the body hand empty"
+    );
+}
+
+#[test]
+fn exactly_one_held_item_renderer_owns_each_playing_view() {
+    let mut app = headless_player();
+    *app.world_mut().resource_mut::<Inventory>() =
+        Inventory::from_stacks(vec![crate::net::InventoryStack {
+            item_id: items::ITEM_STONE,
+            count: 1,
+            ..Default::default()
+        }]);
+    deliver(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+
+    assert_eq!(view_model_visibility(&mut app), Visibility::Visible);
+    assert_eq!(body_held_item(&mut app)[0].visibility, Visibility::Hidden);
+
+    *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+    app.update();
+    assert_eq!(view_model_visibility(&mut app), Visibility::Hidden);
+    assert_eq!(
+        body_held_item(&mut app)[0].visibility,
+        Visibility::Inherited
+    );
+
+    *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+    app.update();
+    assert_eq!(view_model_visibility(&mut app), Visibility::Hidden);
+    assert_eq!(body_held_item(&mut app)[0].visibility, Visibility::Hidden);
+}
+
 /// A session, two players and an appearance for each, one frame in.
 fn a_world_with_a_body(app: &mut App) {
     describe(app, LOCAL_ID, an_appearance(HairModel::Braided));

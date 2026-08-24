@@ -1772,9 +1772,11 @@ Recorded here so the next reader does not mistake them for oversights:
   why the camera sits behind a turning character with nothing chasing anything, and why releasing
   the key is an animation back to zero rather than back to a remembered angle. Nothing about the
   view crosses the wire and the server cannot tell which one a client is in.
-- **Other players are the rig and one server-driven death pose.** There is no movement or combat
-  animation, no name plate, no equipment on the body, no faces beyond the two eye boxes, and no
-  texture anywhere — it is coloured geometry. Each of those is its own issue.
+- **Other players are the rig and one server-driven death pose.** The local body mirrors the
+  selected authoritative pack item into its hand in third person; other players still carry no
+  held-item fact on the wire, so drawing one for them would be a guess. There is no movement or
+  combat animation, no name plate, no other equipment on the body, no faces beyond the two eye
+  boxes, and no texture anywhere — it is coloured geometry. Each of those is its own issue.
 - **An entity can be drawn before it has been described, and is never re-spawned when it is.** The
   appearance stream and the snapshot stream are not ordered against each other, so a body whose
   `PlayerAppearance` has not landed wears `codec::PLACEHOLDER_APPEARANCE` — the neutral grey

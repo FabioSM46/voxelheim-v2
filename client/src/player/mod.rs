@@ -66,7 +66,8 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
 pub(crate) use appearance::{
-    BodyPart, PlacedBox, boxes as body_boxes, envelope as body_envelope, placed as placed_box,
+    BodyPart, PlacedBox, boxes as body_boxes, envelope as body_envelope,
+    held_item_anchor as body_held_item_anchor, placed as placed_box,
 };
 
 pub use camera::{Orbit, ViewMode, WorldCamera};
@@ -251,6 +252,12 @@ impl Plugin for PlayerPlugin {
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
                     forget_bodies_without_a_session.after(ApplySnapshots),
+                    // The selected slot can change in `ApplyInventory`, and the local body
+                    // is materialised in `ApplySnapshots`. Read both answers only after
+                    // their owners have published this frame's values.
+                    refresh_body_held_item
+                        .after(ApplySnapshots)
+                        .after(ApplyInventory),
                 )
                     .after(crate::net::DrainNetwork),
             )
@@ -675,6 +682,49 @@ struct Worn(Appearance);
 /// One drawn part of one body — the six children a body has.
 #[derive(Component, Debug, Clone, Copy)]
 struct BodyVisual(BodyPart);
+
+/// The item drawn in this session's body hand.
+///
+/// It exists only for a non-empty authoritative selected stack. The selected index is
+/// local input, but the item id comes from [`Inventory`], which is replaced only by a
+/// complete state from the server.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyHeldItem {
+    item_id: u16,
+    shape: ItemShape,
+}
+
+/// Which one of the two held-item renderers owns the current view.
+///
+/// One answer is read by both renderers, so a view or pause condition cannot be added to
+/// one and forgotten by the other. `Hidden` is the honest answer outside a live playing
+/// session: neither a camera-space model nor its world-space mirror is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldItemSurface {
+    Hidden,
+    ViewModel,
+    Body,
+}
+
+fn held_item_surface(mode: InputMode, view: ViewMode, session_exists: bool) -> HeldItemSurface {
+    if mode != InputMode::Playing || !session_exists {
+        HeldItemSurface::Hidden
+    } else if view.first_person() {
+        HeldItemSurface::ViewModel
+    } else {
+        HeldItemSurface::Body
+    }
+}
+
+/// The item id in a non-empty stack, or the empty-hand answer.
+///
+/// Shared by the first-person composition and the body mirror so zero-count and zero-id
+/// stacks cannot become two different pictures in the two views.
+fn stack_item_id(stack: Option<crate::net::InventoryStack>) -> Option<u16> {
+    stack
+        .filter(|stack| stack.item_id != 0 && stack.count != 0)
+        .map(|stack| stack.item_id)
+}
 
 // ---------------------------------------------------------------------------
 // Input
@@ -1263,6 +1313,130 @@ fn show_the_local_body(view: Res<ViewMode>, mut bodies: Query<&mut Visibility, W
             *visibility = next;
         }
     }
+}
+
+/// The authoritative selected stack and the local state that chooses its renderer.
+///
+/// Grouped because they are one subject: the item comes from the server-sent pack, while
+/// the selected index and camera view decide only where that presentation appears.
+#[derive(SystemParam)]
+struct BodyHeldSubject<'w> {
+    inventory: Res<'w, Inventory>,
+    selected: Res<'w, SelectedSlot>,
+    mode: Res<'w, InputMode>,
+    view: Res<'w, ViewMode>,
+    session: Option<Res<'w, Session>>,
+}
+
+impl BodyHeldSubject<'_> {
+    fn item_id(&self) -> Option<u16> {
+        stack_item_id(self.inventory.slot(self.selected.0))
+    }
+
+    fn visibility(&self) -> Visibility {
+        if held_item_surface(*self.mode, *self.view, self.session.is_some())
+            == HeldItemSurface::Body
+        {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    }
+}
+
+/// The shared world-space item assets as one borrow.
+#[derive(SystemParam)]
+struct BodyHeldAssets<'w> {
+    visuals: Option<ResMut<'w, drops::DropVisuals>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+}
+
+impl BodyHeldAssets<'_> {
+    fn presentation(
+        &mut self,
+        item_id: u16,
+    ) -> Option<(ItemShape, Handle<Mesh>, Handle<StandardMaterial>)> {
+        let visuals = self.visuals.as_deref_mut()?;
+        Some((
+            item_shape(item_id),
+            visuals.mesh_for(item_id),
+            visuals.material_for(item_id, &mut self.materials),
+        ))
+    }
+}
+
+/// Mirrors the authoritative selected item into the local body's right hand.
+///
+/// The item is a seventh child beside the six coloured rig parts. Its mesh is the same
+/// world-scale asset a drop of that shape uses, its colour comes through
+/// `player/items.rs`, and its parent is the snapshot-driven body transform. Nothing here
+/// states an item to the server or changes what it can do.
+fn refresh_body_held_item(
+    subject: BodyHeldSubject<'_>,
+    mut assets: BodyHeldAssets<'_>,
+    local_body: Query<Entity, With<LocalPlayer>>,
+    held: Query<(Entity, &BodyHeldItem, &ChildOf)>,
+    held_visibility: Query<&Visibility, With<BodyHeldItem>>,
+    mut commands: Commands,
+) {
+    let Some(body) = local_body.iter().next() else {
+        return;
+    };
+    let selected_item = subject.item_id();
+    let visibility = subject.visibility();
+
+    let mut current = None;
+    for (entity, item, parent) in &held {
+        if parent.parent() == body {
+            current = Some((entity, *item));
+            break;
+        }
+    }
+
+    let Some(item_id) = selected_item else {
+        if let Some((entity, _)) = current {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+
+    if let Some((entity, current_item)) = current
+        && current_item.item_id == item_id
+    {
+        if held_visibility
+            .get(entity)
+            .is_ok_and(|current| *current != visibility)
+        {
+            commands.entity(entity).insert(visibility);
+        }
+        return;
+    }
+
+    let Some((shape, mesh, material)) = assets.presentation(item_id) else {
+        return;
+    };
+    if let Some((entity, _)) = current {
+        commands.entity(entity).insert((
+            BodyHeldItem { item_id, shape },
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+        ));
+        if held_visibility
+            .get(entity)
+            .is_ok_and(|current| *current != visibility)
+        {
+            commands.entity(entity).insert(visibility);
+        }
+        return;
+    }
+
+    commands.entity(body).with_child((
+        BodyHeldItem { item_id, shape },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(body_held_item_anchor()),
+        visibility,
+    ));
 }
 
 /// Republishes what the overlay reports.
