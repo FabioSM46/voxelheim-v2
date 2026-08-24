@@ -145,11 +145,12 @@ func (p *Player) advanceVitalsLocked() {
 	if p.alive() {
 		// A leaving body remains in the simulation for the server-owned linger, but its
 		// player can no longer act and may already be disconnected. That is not connected
-		// play, so the ordinary hunger clock pauses with the controls it was charging for.
+		// play, so both the ordinary hunger clock and the regeneration it pays for pause
+		// with the controls they were charging for.
 		if !p.leaving {
 			p.drainHungerLocked()
+			p.regenerateLocked()
 		}
-		p.regenerateLocked()
 		return
 	}
 

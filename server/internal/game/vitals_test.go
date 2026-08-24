@@ -1000,26 +1000,34 @@ func TestHungerDrainsFromFullToEmptyInTwelveHoursOfLivingPlay(t *testing.T) {
 }
 
 // A leaving body stays alive in Sim for the server-owned linger, including after EOF.
-// Those ticks are no longer connected play, so even a counter one tick from its interval
-// must pause until the player is removed rather than charging the stored life at logout.
-func TestLeavingDoesNotAdvanceTheOrdinaryHungerDrain(t *testing.T) {
+// Those ticks are no longer connected play, so neither ordinary drain nor regeneration
+// may change the stored life even when both are one tick from spending hunger.
+func TestLeavingDoesNotAdvanceHungerOrRegeneration(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
 	h.sim.mu.Lock()
-	player.hunger = 1
+	player.health = 90
+	player.hunger = 2
 	player.hungerTicks = h.sim.hungerDrainTicks - 1
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+	player.regenTicks = h.sim.regenIntervalTicks - 1
+	player.regenPoints = HealthRegenPointsPerHunger - 1
 	h.sim.mu.Unlock()
 	player.BeginLeaving()
 
 	h.sim.mu.Lock()
-	before := player.hungerTicks
+	beforeDrain, beforeRegen := player.hungerTicks, player.regenTicks
 	player.advanceVitalsLocked()
-	if player.hunger != 1 || player.hungerTicks != before {
-		t.Errorf("a leaving tick changed hunger to %d or its clock to %d; want 1 and %d",
-			player.hunger, player.hungerTicks, before)
+	if player.health != 90 || player.hunger != 2 {
+		t.Errorf("a leaving tick changed health/hunger to %d/%d, want 90/2",
+			player.health, player.hunger)
+	}
+	if player.hungerTicks != beforeDrain || player.regenTicks != beforeRegen {
+		t.Errorf("a leaving tick advanced drain/regen clocks to %d/%d, want %d/%d",
+			player.hungerTicks, player.regenTicks, beforeDrain, beforeRegen)
 	}
 	h.sim.mu.Unlock()
 }
