@@ -86,9 +86,14 @@ func (p *Player) awardExperienceLocked(amount uint32) (leveledUp bool) {
 		return false
 	}
 
-	// Every crossed level grows the current bar with its maximum, so a full player
-	// stays full even when one award crosses several boundaries.
-	p.health += HealthPerLevel * (after - before)
+	// Every crossed level grows a living player's current bar with its maximum, so a
+	// full player stays full even when one award crosses several boundaries. A mining
+	// completion may land after its player died while the world write held no Sim lock;
+	// that lifetime experience still counts, but a dead player's zero health is an
+	// invariant and only respawn may make it positive again.
+	if p.alive() {
+		p.health += HealthPerLevel * (after - before)
+	}
 	return true
 }
 

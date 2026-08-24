@@ -260,6 +260,17 @@ func (p *Player) breakMined(ctx context.Context, pos [3]int32, expected world.Bl
 	if dropped := itemDroppedBy(expected); dropped != ItemNone {
 		p.sim.spawnDrop(dropped, 1, target)
 	}
+	if amount := blockExperience[expected]; amount > 0 {
+		// Mining completes off the tick, so unlike combat and crafting it arrives without
+		// Sim.mu. No inventory lock is held here; taking only the simulation lock preserves
+		// the repository's sim.mu -> inventory.mu order.
+		p.sim.mu.Lock()
+		p.sim.awardExperienceLocked(p, uint32(amount))
+		p.sim.log.Debug("experience awarded",
+			"entity_id", p.entityID, "source", "block break", "amount", amount,
+			"block", uint16(expected))
+		p.sim.mu.Unlock()
+	}
 
 	// Anything that was standing on this voxel stops standing. Here rather than in the
 	// simulation's tick because this is the moment the ground stopped being ground, and

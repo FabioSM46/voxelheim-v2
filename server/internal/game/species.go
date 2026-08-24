@@ -49,6 +49,11 @@ type mobDefinition struct {
 	// carries for it.
 	maxHealth uint16
 
+	// experience is the lifetime progress one kill is worth. It is required even for
+	// passive prey: hunting a deer still spends time and durability, and a zero here
+	// would make forgetting the reward indistinguishable from choosing none.
+	experience uint16
+
 	// speed is how fast it closes on a target, in blocks per second. Read against
 	// [WalkSpeed], which is what decides whether running away is an answer.
 	speed float64
@@ -140,9 +145,12 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// away is a decision rather than a formality. Its box is the player's dimensions,
 	// because a draugr is a humanoid corpse, but stated here in full rather than written
 	// as PlayerWidth and PlayerHeight: narrowing a corridor for players must not silently
-	// narrow the thing that hunts them down it.
+	// narrow the thing that hunts them down it. Fifteen experience is the baseline reward
+	// for that 60-health fight: meaningful progress, but deliberately short of a level
+	// after three kills.
 	vnet.MobKindDraugr: {
 		maxHealth:   60,
+		experience:  15,
 		speed:       3.2,
 		aggroRange:  16.0,
 		attackRange: 2.0,
@@ -178,8 +186,11 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// than a corpse on two — and the width is what makes the box worth reading from this
 	// table rather than assuming: at the same standing distance a vargr is inside a
 	// sword's reach where a draugr is not, because a swing is measured body to body.
+	// Twenty experience prices that speed above the draugr's fifteen even though the
+	// vargr has less health: the fight is worth more because walking away is not an answer.
 	vnet.MobKindVargr: {
 		maxHealth:   35,
+		experience:  20,
 		speed:       5.4,
 		aggroRange:  20.0,
 		attackRange: 1.8,
@@ -197,9 +208,12 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 
 	// The deer is prey rather than an enemy. Its aggro range is awareness: inside it a
 	// live player makes the deer flee, and the wider release radius in mob.go prevents a
-	// body standing on the boundary from switching state every tick.
+	// body standing on the boundary from switching state every tick. Five experience is
+	// the low end of the hunt: only 20 health, below both predators, but its speed still
+	// makes bringing down food an active pursuit rather than free progress.
 	vnet.MobKindDeer: {
 		maxHealth:  20,
+		experience: 5,
 		speed:      4.0,
 		aggroRange: 12.0,
 		passive:    true,

@@ -133,7 +133,13 @@ func (p *Player) resolveSwingLocked() {
 	p.attackCooldown = p.sim.attackCooldown
 
 	if target := p.sim.swingTargetLocked(p); target != nil {
-		p.sim.damageMobLocked(target, damage)
+		if p.sim.damageMobLocked(target, damage) {
+			amount := target.species().experience
+			p.sim.awardExperienceLocked(p, uint32(amount))
+			p.sim.log.Debug("experience awarded",
+				"entity_id", p.entityID, "source", "mob kill", "amount", amount,
+				"mob_kind", target.kind.String())
+		}
 	}
 }
 

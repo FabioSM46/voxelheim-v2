@@ -119,3 +119,39 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		t.Errorf("Air drops item %d, want nothing", got)
 	}
 }
+
+func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
+	t.Parallel()
+
+	want := map[world.Block]uint16{
+		world.Stone:   0,
+		world.Dirt:    0,
+		world.Grass:   0,
+		world.Snow:    0,
+		world.Log:     2,
+		world.Leaves:  0,
+		world.CoalOre: 4,
+		world.IronOre: 6,
+	}
+	if len(blockExperience) != len(want) {
+		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))
+	}
+	for block, amount := range want {
+		got, present := blockExperience[block]
+		if !present {
+			t.Errorf("block %d has no explicit experience decision", block)
+			continue
+		}
+		if got != amount {
+			t.Errorf("block %d awards %d experience, want %d", block, got, amount)
+		}
+		if _, breakable := blockDrops[block]; !breakable {
+			t.Errorf("block %d has an experience row but no break outcome", block)
+		}
+	}
+	for block := range blockDrops {
+		if _, present := blockExperience[block]; !present {
+			t.Errorf("breakable block %d has no experience row", block)
+		}
+	}
+}

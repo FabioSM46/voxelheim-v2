@@ -214,11 +214,11 @@ func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
 		},
 		vnet.RecipeIDIronSword: {
 			ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 2}, {ItemLog, 1}},
-			product:     ItemIronSword, productCount: 1, station: vnet.StructureKindForge,
+			product:     ItemIronSword, productCount: 1, station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDSharpeningStone: {
 			ingredients: []ingredient{{ItemStone, 2}, {ItemRawCoal, 1}},
-			product:     ItemSharpeningStone, productCount: 1, station: vnet.StructureKindForge,
+			product:     ItemSharpeningStone, productCount: 1, station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDCampfire: {
 			ingredients: []ingredient{{ItemLog, 4}, {ItemRawCoal, 1}},
@@ -235,19 +235,19 @@ func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
 		// own comment argues for.
 		vnet.RecipeIDShovel: {
 			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
-			product:     ItemShovel, productCount: 1, station: vnet.StructureKindForge,
+			product:     ItemShovel, productCount: 1, station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDPickaxe: {
 			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
-			product:     ItemPickaxe, productCount: 1, station: vnet.StructureKindForge,
+			product:     ItemPickaxe, productCount: 1, station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDAxe: {
 			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
-			product:     ItemAxe, productCount: 1, station: vnet.StructureKindForge,
+			product:     ItemAxe, productCount: 1, station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDCookedMeat: {
 			ingredients: []ingredient{{ItemRawMeat, 1}},
-			product:     ItemCookedMeat, productCount: 1, station: vnet.StructureKindCampfire,
+			product:     ItemCookedMeat, productCount: 1, station: vnet.StructureKindCampfire, experience: 3,
 		},
 	}
 
@@ -274,6 +274,9 @@ func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
 		if got.station != expected.station {
 			t.Errorf("%s needs station %s, want %s", id, got.station, expected.station)
 		}
+		if got.experience != expected.experience {
+			t.Errorf("%s awards %d experience, want %d", id, got.experience, expected.experience)
+		}
 		if len(got.ingredients) != len(expected.ingredients) {
 			t.Errorf("%s costs %d ingredients, want %d", id, len(got.ingredients), len(expected.ingredients))
 			continue
@@ -284,6 +287,53 @@ func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
 					id, i, got.ingredients[i].count, got.ingredients[i].item, line.count, line.item)
 			}
 		}
+	}
+}
+
+// A station is the boundary between assembly and progression: every forge or campfire
+// recipe earns experience, while every recipe made by hand earns none. The iff makes a
+// new station recipe with a forgotten reward and a hand recipe with an accidental one
+// fail the same sweep.
+func TestOnlyStationRecipesAwardExperience(t *testing.T) {
+	t.Parallel()
+
+	for id, r := range recipeTable {
+		hasStation := r.station != vnet.StructureKindUnknown
+		hasExperience := r.experience > 0
+		if hasStation != hasExperience {
+			t.Errorf("%s station=%s experience=%d; want experience > 0 iff it needs a station",
+				id, r.station, r.experience)
+		}
+	}
+}
+
+func TestStationCraftAwardsExperienceAndHandCraftDoesNot(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		id   vnet.RecipeID
+		want uint32
+	}{
+		"at the forge": {id: vnet.RecipeIDIronSword, want: 10},
+		"by hand":      {id: vnet.RecipeIDTent, want: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			r := recipeTable[tc.id]
+			if r.station != vnet.StructureKindUnknown {
+				h.plantCraftingStation(player, r.station, [3]int32{0, 63, 0})
+			}
+			h.stockPack(player, r.ingredients...)
+			if _, err := h.craft(player, tc.id); err != nil {
+				t.Fatalf("Craft: %v", err)
+			}
+			if got := experienceOf(player); got != tc.want {
+				t.Errorf("%s awarded %d experience, want %d", tc.id, got, tc.want)
+			}
+		})
 	}
 }
 
