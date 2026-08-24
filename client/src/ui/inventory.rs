@@ -1062,16 +1062,17 @@ fn hover_tooltip(
     }
 }
 
-/// Reports one press per cell, and says which of the three things it was asking for.
+/// Reports one press per cell, and says which of the four things it was asking for.
 ///
 /// **Nothing is decided here.** A reported press becomes an `InventoryMoveRequest`, a
-/// `RepairRequest` or a `DropItemRequest` in `player::inventory`, which is the only module
-/// that pairs cells and the only one that builds a frame.
+/// `RepairRequest`, a `DropItemRequest` or a `ConsumeRequest` in `player::inventory`, which
+/// is the only module that pairs cells, checks its routing lists and builds a frame.
 ///
 /// **Shift is read against the full-stack button and not the split one**, because what the
 /// modifier changes is *where the stack goes* rather than *how much of it moves*: a drop is
 /// the whole cell, exactly as a plain left press picks the whole cell. Right-clicking keeps
-/// meaning half with shift held or without.
+/// meaning half with shift held or without. Middle-click is the independent consume
+/// gesture and therefore never becomes a source or destination for either one.
 fn inventory_clicks(
     mode: Res<InputMode>,
     buttons: Option<Res<ButtonInput<MouseButton>>>,
@@ -1087,7 +1088,9 @@ fn inventory_clicks(
     };
     let dropping = keys
         .is_some_and(|keys| keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight));
-    let kind = if buttons.just_pressed(MouseButton::Right) {
+    let kind = if buttons.just_pressed(MouseButton::Middle) {
+        Some(InventoryClickKind::Consume)
+    } else if buttons.just_pressed(MouseButton::Right) {
         Some(InventoryClickKind::Split)
     } else if buttons.just_pressed(MouseButton::Left) {
         Some(if dropping {
@@ -1749,8 +1752,7 @@ mod tests {
         );
     }
 
-    /// Shift held over a left press reports a drop; the split button and an unheld shift
-    /// report what they always did.
+    /// Shift held over a left press reports a drop; split and consume remain independent.
     ///
     /// One table because the claim is the *pair*: what shift changes is where the stack
     /// goes, so it applies to the button that already means the whole cell and not to the
@@ -1761,7 +1763,7 @@ mod tests {
     /// Nothing here decides whether that cell may be put down: `player::inventory` builds
     /// the frame and the server answers it.
     #[test]
-    fn shift_over_a_left_press_is_a_drop_and_nothing_else_changes_meaning() {
+    fn every_mouse_gesture_has_one_meaning_with_or_without_shift() {
         for (shift, button, want) in [
             (
                 Some(KeyCode::ShiftLeft),
@@ -1778,7 +1780,13 @@ mod tests {
                 MouseButton::Right,
                 InventoryClickKind::Split,
             ),
+            (
+                Some(KeyCode::ShiftLeft),
+                MouseButton::Middle,
+                InventoryClickKind::Consume,
+            ),
             (None, MouseButton::Left, InventoryClickKind::Full),
+            (None, MouseButton::Middle, InventoryClickKind::Consume),
         ] {
             let mut app = app();
             app.insert_resource(ButtonInput::<MouseButton>::default());

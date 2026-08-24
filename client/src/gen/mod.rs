@@ -76,6 +76,8 @@ pub mod voxelheim {
         pub use self::craft_request_generated::*;
         mod repair_request_generated;
         pub use self::repair_request_generated::*;
+        mod consume_request_generated;
+        pub use self::consume_request_generated::*;
         mod place_structure_request_generated;
         pub use self::place_structure_request_generated::*;
         mod remove_structure_request_generated;

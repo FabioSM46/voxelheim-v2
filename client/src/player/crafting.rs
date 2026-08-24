@@ -426,6 +426,8 @@ mod tests {
         app.insert_resource(SelfVitals::from_server(PlayerVitals {
             health: if dead { 0 } else { 100 },
             max_health: 100,
+            hunger: 100,
+            max_hunger: 100,
             life_state: if dead {
                 LifeState::Dead
             } else {

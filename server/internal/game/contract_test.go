@@ -78,6 +78,14 @@ func checkVitals(t *testing.T, vitals *vnet.PlayerVitals) {
 	if ticks := vitals.RespawnTicks(); ticks != 0 && vitals.LifeState() != vnet.LifeStateDead {
 		t.Errorf("respawn_ticks = %d for a player who is not dead", ticks)
 	}
+
+	hunger, maxHunger := vitals.Hunger(), vitals.MaxHunger()
+	if maxHunger == 0 {
+		t.Error("max_hunger is zero, which is the division every hunger display performs")
+	}
+	if hunger > maxHunger {
+		t.Errorf("hunger %d exceeds max_hunger %d", hunger, maxHunger)
+	}
 }
 
 // The vitals every snapshot carries are a value the client refuses to decode when it is

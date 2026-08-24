@@ -705,6 +705,8 @@ mod tests {
                 .insert_resource(SelfVitals::from_server(PlayerVitals {
                     health: if life_state == LifeState::Dead { 0 } else { 60 },
                     max_health: 60,
+                    hunger: 100,
+                    max_hunger: 100,
                     life_state,
                     respawn_ticks: 0,
                     invulnerable: false,

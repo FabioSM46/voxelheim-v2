@@ -221,17 +221,21 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // **V14 appends MobKind.Deer and MobAction.Flee.** Both travel inside MobState and the
 // client refuses unknown enum members, so an older client would fail mid-session.
 //
-// The rule that generalises, now that five shapes have been argued: **ask what the receiver
+// **V15 appends ConsumeRequest and hunger to PlayerVitals.** The request is a new
+// client intent, and the vitals append carries a new non-zero denominator the client
+// validates; without the bump either mismatch would surface only after admission.
+//
+// The rule that generalises, now that six shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV14NamesTheDeerAndItsFlight(t *testing.T) {
+func TestProtocolV15NamesConsumptionAndHunger(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 14 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 14", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 15 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 15", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -261,6 +265,7 @@ func TestProtocolV14NamesTheDeerAndItsFlight(t *testing.T) {
 		vnet.PayloadDropItemRequest,
 		vnet.PayloadLeaveRequest,
 		vnet.PayloadLeaveStarted,
+		vnet.PayloadConsumeRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -681,7 +686,7 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 	}
 	wantVitals := PlayerVitals{
 		Health: 35, MaxHealth: 100, LifeState: vnet.LifeStateAlive,
-		RespawnTicks: 0, Invulnerable: true,
+		RespawnTicks: 0, Invulnerable: true, Hunger: 47, MaxHunger: 100,
 	}
 
 	frame := EncodeEntitySnapshot(EntitySnapshot{
@@ -822,6 +827,8 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		LifeState:    vitals.LifeState(),
 		RespawnTicks: vitals.RespawnTicks(),
 		Invulnerable: vitals.Invulnerable(),
+		Hunger:       vitals.Hunger(),
+		MaxHunger:    vitals.MaxHunger(),
 	}
 	if gotVitals != wantVitals {
 		t.Errorf("self_vitals decoded as %+v, want %+v", gotVitals, wantVitals)
@@ -1533,7 +1540,10 @@ func TestEntitySnapshotAlwaysCarriesTheRecipientsVitals(t *testing.T) {
 func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 	t.Parallel()
 
-	want := PlayerVitals{Health: 0, MaxHealth: 100, LifeState: vnet.LifeStateDead, RespawnTicks: 60}
+	want := PlayerVitals{
+		Health: 0, MaxHealth: 100, LifeState: vnet.LifeStateDead, RespawnTicks: 60,
+		Hunger: 17, MaxHunger: 100,
+	}
 
 	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{Tick: 9, Vitals: want}), 0)
 	tbl := payloadTable(t, env)
@@ -1550,6 +1560,8 @@ func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 		LifeState:    vitals.LifeState(),
 		RespawnTicks: vitals.RespawnTicks(),
 		Invulnerable: vitals.Invulnerable(),
+		Hunger:       vitals.Hunger(),
+		MaxHunger:    vitals.MaxHunger(),
 	}
 	if got != want {
 		t.Errorf("self_vitals decoded as %+v, want %+v", got, want)
@@ -2288,6 +2300,75 @@ func TestDecodeIsTotalOverADamagedRepairRequest(t *testing.T) {
 	for i := range len(valid) {
 		if _, err := Decode(valid[:i]); err == nil {
 			t.Errorf("a %d-byte prefix of a %d-byte repair frame decoded successfully", i, len(valid))
+		}
+	}
+	for i := range len(valid) {
+		damaged := bytes.Clone(valid)
+		damaged[i] ^= 0xFF
+		_, _ = Decode(damaged)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protocol V15 — consumption and hunger
+// ---------------------------------------------------------------------------
+
+// A consume intent round trips through the encoder this package owns and carries only
+// the authoritative slot plus the client's ordering tick. Hunger restoration and item
+// identity are deliberately absent: both are server-owned registry facts.
+func TestAConsumeRequestRoundTripsAndNamesOnlyOneSlot(t *testing.T) {
+	t.Parallel()
+
+	want := ConsumeRequest{Slot: 35, ClientTick: 909}
+	msg, err := Decode(EncodeConsumeRequest(want))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if msg.Kind != vnet.PayloadConsumeRequest {
+		t.Fatalf("Kind = %s, want ConsumeRequest", msg.Kind)
+	}
+	if msg.Consume == nil {
+		t.Fatal("ConsumeRequest payload is nil")
+	}
+	if *msg.Consume != want {
+		t.Errorf("decoded %+v, want %+v", *msg.Consume, want)
+	}
+
+	env := vnet.GetRootAsEnvelope(EncodeConsumeRequest(want), 0)
+	tbl := payloadTable(t, env)
+	vtableOffset := flatbuffers.UOffsetT(flatbuffers.SOffsetT(tbl.Pos) - flatbuffers.GetSOffsetT(tbl.Bytes[tbl.Pos:]))
+	vtableSize := flatbuffers.GetVOffsetT(tbl.Bytes[vtableOffset:])
+	if fields := (int(vtableSize) - 4) / 2; fields != 2 {
+		t.Errorf("ConsumeRequest has %d fields on the wire, want slot and client_tick", fields)
+	}
+}
+
+// A uint16 slot outside the announced inventory is valid framing. It reaches the
+// simulation whole so gameplay can refuse it without ending the session.
+func TestAConsumeRequestCarriesSlotsTheSimulationHasToRefuse(t *testing.T) {
+	t.Parallel()
+
+	for _, slot := range []uint16{uint16(InventorySlots), 255, 256, 65_535} {
+		want := ConsumeRequest{Slot: slot, ClientTick: uint32(slot) + 1}
+		msg, err := Decode(EncodeConsumeRequest(want))
+		if err != nil {
+			t.Fatalf("Decode of %+v: %v", want, err)
+		}
+		if msg.Consume == nil || *msg.Consume != want {
+			t.Errorf("decoded %+v, want %+v carried through verbatim", msg.Consume, want)
+		}
+	}
+}
+
+// The truncation and corruption sweep for payload tag 28. Decode must stay total over
+// bytes a client chose: an error or a message, never a panic.
+func TestDecodeIsTotalOverADamagedConsumeRequest(t *testing.T) {
+	t.Parallel()
+
+	valid := EncodeConsumeRequest(ConsumeRequest{Slot: 2, ClientTick: 77})
+	for i := range len(valid) {
+		if _, err := Decode(valid[:i]); err == nil {
+			t.Errorf("a %d-byte prefix of a %d-byte consume frame decoded successfully", i, len(valid))
 		}
 	}
 	for i := range len(valid) {

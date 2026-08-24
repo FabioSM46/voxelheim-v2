@@ -68,6 +68,10 @@ import "strconv"
 // / **V14 appends `MobKind.Deer` and `MobAction.Flee`.** Both values travel inside a
 // / `MobState`, whose client decoder refuses unknown enum members. A V13 client would
 // / therefore handshake cleanly and end the session as soon as a deer entered view.
+// /
+// / **V15 adds `ConsumeRequest` and appends hunger to `PlayerVitals`.** An older server
+// / refuses the new client payload, while a V15 client requires a non-zero `max_hunger`
+// / that a V14 server never sends. Either skew would fail only after a clean handshake.
 type ProtocolVersion uint16
 
 const (
@@ -76,7 +80,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 14
+	ProtocolVersionCurrent ProtocolVersion = 15
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

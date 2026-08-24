@@ -494,6 +494,8 @@ mod tests {
                     SelfVitals::from_server(PlayerVitals {
                         health: 0,
                         max_health: 100,
+                        hunger: 50,
+                        max_hunger: 100,
                         life_state: crate::net::LifeState::Dead,
                         respawn_ticks: 40,
                         invulnerable: false,

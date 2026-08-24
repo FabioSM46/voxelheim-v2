@@ -473,6 +473,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_consume_request(&self) -> Option<ConsumeRequest<'a>> {
+        if self.payload_type() == Payload::ConsumeRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { ConsumeRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -511,6 +526,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::DropItemRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DropItemRequest>>("Payload::DropItemRequest", pos),
           Payload::LeaveRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveRequest>>("Payload::LeaveRequest", pos),
           Payload::LeaveStarted => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveStarted>>("Payload::LeaveStarted", pos),
+          Payload::ConsumeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ConsumeRequest>>("Payload::ConsumeRequest", pos),
           _ => Ok(()),
         }
      })?
@@ -834,6 +850,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::LeaveStarted => {
                 if let Some(x) = self.payload_as_leave_started() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::ConsumeRequest => {
+                if let Some(x) = self.payload_as_consume_request() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

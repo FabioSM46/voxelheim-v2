@@ -564,10 +564,10 @@ pub struct PlayerStats {
 /// The vitals the newest accepted snapshot carried, or `None` before one has arrived.
 ///
 /// Replaced wholesale, exactly as [`Inventory`] is. `self_vitals` is present in every
-/// snapshot by contract, so there is nothing to merge and nothing to advance: health is
-/// never incremented here, damage is never applied here, and the respawn count is never
-/// run down from local time. A dropped snapshot costs nothing, because the next one
-/// carries the complete answer.
+/// snapshot by contract, so there is nothing to merge and nothing to advance: health and
+/// hunger are never incremented or drained here, damage is never applied here, and the
+/// respawn count is never run down from local time. A dropped snapshot costs nothing,
+/// because the next one carries the complete answer.
 ///
 /// `None` is the honest encoding of *the server has not said yet*, and it is what the end
 /// of a session restores. It deliberately does **not** read as dead — see [`Self::dead`].

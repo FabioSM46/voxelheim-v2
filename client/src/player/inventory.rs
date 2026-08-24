@@ -5,26 +5,27 @@
 //! is local input, like the camera direction: it chooses the slot index carried by the
 //! next request, while the server decides whether that slot exists and may be spent.
 //!
-//! **One cell, three possible intents, and the choice between them is routing rather than
-//! authority.** A picked sharpening stone dropped on a slot that wears out asks for a mend;
-//! a shift-click asks for the stack to be put on the ground; every other pair asks for the
-//! move it has always asked for. Which item is a legal kit, how much wear comes back,
-//! whether a stack may be let go of at all and what appears on the ground when it is are the
-//! server's answers — clicking a stone onto an unworn blade sends the request and silence
-//! answers it, exactly as [`super::combat::blade_in_hand`] is a courtesy rather than a
-//! verdict. No branch moves a count or a durability here.
+//! **One cell, four possible intents, and the choice between them is routing rather than
+//! authority.** A middle-click on known food asks to eat one; a picked sharpening stone
+//! dropped on a slot that wears out asks for a mend; a shift-click asks for the stack to be
+//! put on the ground; every other pair asks for the move it has always asked for. Which item
+//! is edible or a legal kit, how much hunger or wear comes back, whether a stack may be let
+//! go of at all and what appears on the ground are the server's answers. No branch moves a
+//! count, durability or vital here.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
 use super::crafting::{ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
+use super::items::ITEM_RAW_MEAT;
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
     set_if_changed,
 };
 use crate::net::{
-    DropItemRequest, InventoryInbox, InventoryMoveRequest, InventoryStack, Outbound, RepairRequest,
-    Sent, Session, encode_drop_item_request, encode_inventory_move_request, encode_repair_request,
+    ConsumeRequest, DropItemRequest, InventoryInbox, InventoryMoveRequest, InventoryStack,
+    Outbound, RepairRequest, Sent, Session, encode_consume_request, encode_drop_item_request,
+    encode_inventory_move_request, encode_repair_request,
 };
 
 /// Number keys available to the minimal hotbar.
@@ -90,8 +91,9 @@ pub struct SelectedSlot(pub u8);
 
 /// What a press on an inventory cell was asking for.
 ///
-/// Two of the three are amount shapes and the third is not, which is why this is no longer
-/// "which mouse button": a drop names one cell and pairs with nothing.
+/// Two variants are amount shapes and two are one-cell actions, which is why this is no
+/// longer "which mouse button": a drop and a consume both name one cell and pair with
+/// nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InventoryClickKind {
     /// Pick or move the complete authoritative stack.
@@ -100,6 +102,8 @@ pub enum InventoryClickKind {
     Split,
     /// Ask the server to put this cell's whole stack on the ground.
     Drop,
+    /// Ask the server to consume one item from this cell.
+    Consume,
 }
 
 /// A click on one slot in the inventory screen.
@@ -156,7 +160,7 @@ impl Plugin for InventoryPlugin {
             .init_resource::<InventoryInbox>()
             .add_systems(
                 Update,
-                (ingest_inventory, select_hotbar, request_inventory_move)
+                (ingest_inventory, select_hotbar, request_inventory_action)
                     .chain()
                     .in_set(ApplyInventory)
                     .after(crate::net::DrainNetwork)
@@ -246,12 +250,12 @@ fn select_hotbar(
 /// cursor: the stone stays picked so a second worn item is one more click rather than
 /// another trip to the stone's slot. See [`repair_request`] for what makes a pair a mend.
 ///
-/// **A drop is not a pair at all**, which is why it is answered before anything below it
-/// reads the cursor. It names one cell, sends one intent for it, and leaves the cursor
-/// exactly as it found it: a picked slot is a source waiting for a destination, and a
-/// shift-click elsewhere is not that destination. Clearing it would silently cancel a move
-/// the player was half-way through.
-fn request_inventory_move(
+/// **A drop and a consume are not pairs at all**, which is why both are answered before
+/// anything below them reads the cursor. Each names one cell, sends at most one intent, and
+/// leaves the cursor exactly as it found it: a picked slot is a source waiting for a
+/// destination, and neither independent gesture is that destination. Clearing it would
+/// silently cancel a move the player was half-way through.
+fn request_inventory_action(
     mut clicks: MessageReader<InventoryClick>,
     session: Option<Res<Session>>,
     inventory: Res<Inventory>,
@@ -292,6 +296,26 @@ fn request_inventory_move(
 
     for click in clicks.read().copied() {
         if click.slot >= slots {
+            continue;
+        }
+
+        if click.kind == InventoryClickKind::Consume {
+            // Like a drop, eating names one cell and is unrelated to the source cursor.
+            // It runs ahead of the pair below and leaves that cursor untouched, so a
+            // middle-click cannot silently cancel a move or repair in progress.
+            if let Some(request) =
+                consume_request(&inventory, click.slot, cadence.client_tick, slots)
+                && let Some(outbound) = outbound.as_deref_mut()
+            {
+                match outbound.send(encode_consume_request(&request)) {
+                    Sent::Queued => {}
+                    Sent::Dropped => warn!(
+                        "the outbound queue was full; consuming from slot {} never reached the server",
+                        request.slot
+                    ),
+                    Sent::Closed => {}
+                }
+            }
             continue;
         }
 
@@ -429,6 +453,38 @@ fn drop_request(
     let stack = inventory.slot(slot)?;
 
     (slot < slots && stack.count > 0).then_some(DropItemRequest { slot, client_tick })
+}
+
+/// Every item id this client routes a middle-click to consumption for.
+///
+/// A table rather than an `item_id == ITEM_RAW_MEAT` comparison, following [`KITS`]: a
+/// second food is an entry, not another branch. This remains routing, never eligibility
+/// authority. The server re-reads its `restoresHunger` registry column and may refuse any
+/// request silently; an extra entry here can grant nothing, while a missing entry would
+/// make server-supported food unreachable from this UI.
+const FOODS: &[u16] = &[ITEM_RAW_MEAT];
+
+fn item_is_food(item_id: u16) -> bool {
+    FOODS.contains(&item_id)
+}
+
+/// Whether one cell is worth asking the server to consume from.
+///
+/// Bounds, a non-empty stack and the routing table are the whole courtesy. Hunger, life
+/// state and restoration capacity are deliberately absent: they are gameplay decisions
+/// made against server-owned state. `slots` is `ServerWelcome.inventory_slots`.
+fn consume_request(
+    inventory: &Inventory,
+    slot: u8,
+    client_tick: u32,
+    slots: u8,
+) -> Option<ConsumeRequest> {
+    let stack = inventory.slot(slot)?;
+
+    (slot < slots && stack.count > 0 && item_is_food(stack.item_id)).then_some(ConsumeRequest {
+        slot: u16::from(slot),
+        client_tick,
+    })
 }
 
 /// Every item id this client routes a click onto a worn item to a mend for.
@@ -802,6 +858,8 @@ mod tests {
         app.insert_resource(SelfVitals::from_server(crate::net::PlayerVitals {
             health: if dead { 0 } else { 100 },
             max_health: 100,
+            hunger: 100,
+            max_hunger: 100,
             life_state: if dead {
                 crate::net::LifeState::Dead
             } else {
@@ -846,13 +904,14 @@ mod tests {
 
     /// What one frame asked the server for, read back through the generated accessors.
     ///
-    /// Every shape in one enum on purpose: the whole feature is which of the three leaves,
+    /// Every shape in one enum on purpose: the whole feature is which of the four leaves,
     /// and a helper that could only see repairs would report a move as nothing at all.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Asked {
         Move { from: u8, to: u8, count: u16 },
         Repair { kit: u8, target: u8 },
         Drop { slot: u8 },
+        Consume { slot: u16 },
     }
 
     /// Everything the client sent, in the order it left.
@@ -875,9 +934,13 @@ mod tests {
                 found.push(Asked::Drop {
                     slot: request.slot(),
                 });
+            } else if let Some(request) = envelope.payload_as_consume_request() {
+                found.push(Asked::Consume {
+                    slot: request.slot(),
+                });
             } else {
                 panic!(
-                    "the inventory sent a {:?}, which is not one of its three intents",
+                    "the inventory sent a {:?}, which is not one of its four intents",
                     envelope.payload_type()
                 );
             }
@@ -1232,6 +1295,143 @@ mod tests {
 
         assert!(asked(&sent).is_empty(), "a dead player mended a blade");
         assert_eq!(app.world().resource::<PickedStack>().slot(), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Eating — the other one-cell gesture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn every_food_is_named_routed_and_appears_once() {
+        assert!(!FOODS.is_empty(), "no id routes consumption at all");
+
+        for &food in FOODS {
+            assert!(item_is_food(food), "food {food} is not routed by its list");
+            assert_ne!(
+                item_label(food),
+                "unknown item",
+                "food {food} can be eaten but the inventory cannot name it"
+            );
+            let inventory = Inventory::from_stacks(vec![stack(food, 1)]);
+            assert!(
+                consume_request(&inventory, 0, 7, 1).is_some(),
+                "food {food} does not produce a consume request"
+            );
+        }
+
+        for not_food in [ITEM_STONE, ITEM_VARGR_PELT, ITEM_LEATHER_PATCH, u16::MAX] {
+            assert!(
+                !item_is_food(not_food),
+                "item {not_food} routes consumption"
+            );
+        }
+
+        let mut once = FOODS.to_vec();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(
+            once.len(),
+            FOODS.len(),
+            "an id appears twice in the food list"
+        );
+    }
+
+    #[test]
+    fn only_a_nonempty_food_slot_inside_the_pack_is_asked_to_be_consumed() {
+        for (name, inventory, slot, slots, want) in [
+            (
+                "raw meat",
+                Inventory::from_stacks(vec![stack(ITEM_RAW_MEAT, 2)]),
+                0,
+                1,
+                true,
+            ),
+            (
+                "an empty food stack",
+                Inventory::from_stacks(vec![stack(ITEM_RAW_MEAT, 0)]),
+                0,
+                1,
+                false,
+            ),
+            (
+                "a non-food",
+                Inventory::from_stacks(vec![stack(ITEM_STONE, 2)]),
+                0,
+                1,
+                false,
+            ),
+            (
+                "a slot past the announced pack",
+                Inventory::from_stacks(vec![stack(ITEM_RAW_MEAT, 2)]),
+                0,
+                0,
+                false,
+            ),
+        ] {
+            assert_eq!(
+                consume_request(&inventory, slot, 77, slots),
+                want.then_some(ConsumeRequest {
+                    slot: u16::from(slot),
+                    client_tick: 77,
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    /// Each gesture keeps its old meaning, and consuming is independent of a picked
+    /// source just like dropping is. This is the routing boundary the issue adds.
+    #[test]
+    fn consume_does_not_shadow_move_repair_or_drop() {
+        let (mut app, sent) = mend_app(pack(&[
+            (0, stack(ITEM_RAW_MEAT, 2)),
+            (1, stack(ITEM_LEATHER_PATCH, 1)),
+            (2, worn(ITEM_IRON_SWORD, 40, 100)),
+        ]));
+        let before = app.world().resource::<Inventory>().clone();
+
+        inventory_click(&mut app, 0, InventoryClickKind::Full);
+        inventory_click(&mut app, 3, InventoryClickKind::Full);
+        assert_eq!(
+            asked(&sent),
+            vec![Asked::Move {
+                from: 0,
+                to: 3,
+                count: 2,
+            }]
+        );
+
+        inventory_click(&mut app, 1, InventoryClickKind::Full);
+        inventory_click(&mut app, 2, InventoryClickKind::Full);
+        assert_eq!(asked(&sent), vec![Asked::Repair { kit: 1, target: 2 }]);
+        assert_eq!(app.world().resource::<PickedStack>().slot(), Some(1));
+
+        inventory_click(&mut app, 0, InventoryClickKind::Drop);
+        assert_eq!(asked(&sent), vec![Asked::Drop { slot: 0 }]);
+        assert_eq!(app.world().resource::<PickedStack>().slot(), Some(1));
+
+        inventory_click(&mut app, 0, InventoryClickKind::Consume);
+        assert_eq!(asked(&sent), vec![Asked::Consume { slot: 0 }]);
+        assert_eq!(
+            app.world().resource::<PickedStack>().slot(),
+            Some(1),
+            "consuming cancelled the unfinished repair cursor"
+        );
+        assert_eq!(
+            *app.world().resource::<Inventory>(),
+            before,
+            "one of the four requests changed authoritative state locally"
+        );
+    }
+
+    #[test]
+    fn a_dead_player_originates_no_consume_request() {
+        let (mut app, sent) = mend_app(pack(&[(0, stack(ITEM_RAW_MEAT, 1))]));
+        say_dead(&mut app, true);
+
+        inventory_click(&mut app, 0, InventoryClickKind::Consume);
+
+        assert!(asked(&sent).is_empty(), "a dead player asked to eat");
     }
 
     // -----------------------------------------------------------------------

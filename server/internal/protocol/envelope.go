@@ -86,6 +86,7 @@ type Message struct {
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
 	Repair             *RepairRequest
+	Consume            *ConsumeRequest
 	DropItem           *DropItemRequest
 	LeaveRequest       *LeaveRequest
 	SelectCharacter    *SelectCharacterRequest
@@ -324,6 +325,21 @@ type RepairRequest struct {
 	ClientTick uint32
 }
 
+// ConsumeRequest is one decoded attempt to eat a carried item. **Intent, never
+// outcome.**
+//
+// It names one authoritative slot and nothing else: whether that slot exists, whether
+// it holds food, how much hunger that food restores and whether the player is alive are
+// all decisions the simulation makes against state this package cannot see. Slot is a
+// uint16 on the wire and is copied verbatim, including values outside the inventory.
+type ConsumeRequest struct {
+	Slot uint16
+
+	// ClientTick is ordering and staleness only, exactly as in PlayerInput, and never
+	// read as a clock.
+	ClientTick uint32
+}
+
 // DropItemRequest is one decoded attempt to put a whole stack back on the ground.
 // **Intent, never outcome.**
 //
@@ -450,6 +466,8 @@ type PlayerVitals struct {
 	LifeState    vnet.LifeState
 	RespawnTicks uint32
 	Invulnerable bool
+	Hunger       uint16
+	MaxHunger    uint16
 }
 
 // MobState is one mob's authoritative state, as a snapshot carries it.
@@ -1044,6 +1062,22 @@ func Decode(frame []byte) (msg Message, err error) {
 			ClientTick: request.ClientTick(),
 		}
 
+	case vnet.PayloadConsumeRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.ConsumeRequest
+		request.Init(table.Bytes, table.Pos)
+
+		// Both fields are copied straight through. Nothing here indexes an array with the
+		// slot, and whether its stack is edible is a decision the simulation makes against
+		// state this package cannot see.
+		msg.Consume = &ConsumeRequest{
+			Slot:       request.Slot(),
+			ClientTick: request.ClientTick(),
+		}
+
 	case vnet.PayloadDropItemRequest:
 		table, tErr := unionPayload(env, msg.Kind)
 		if tErr != nil {
@@ -1503,6 +1537,8 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.PlayerVitalsAddLifeState(b, s.Vitals.LifeState)
 	vnet.PlayerVitalsAddRespawnTicks(b, s.Vitals.RespawnTicks)
 	vnet.PlayerVitalsAddInvulnerable(b, s.Vitals.Invulnerable)
+	vnet.PlayerVitalsAddHunger(b, s.Vitals.Hunger)
+	vnet.PlayerVitalsAddMaxHunger(b, s.Vitals.MaxHunger)
 	vitalsOffset := vnet.PlayerVitalsEnd(b)
 
 	// A vector of structs must be complete before the table that references it
@@ -1857,6 +1893,23 @@ func EncodeRepairRequest(r RepairRequest) []byte {
 	request := vnet.RepairRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadRepairRequest, request)
+}
+
+// EncodeConsumeRequest builds one consume intent, for the reason
+// EncodeRepairRequest exists: the server never sends one, and the tests need the bytes
+// a client produces.
+//
+// Nothing is validated on the way out. A slot past the end of the inventory is an
+// input the simulation must refuse, and there would otherwise be no way to build one.
+func EncodeConsumeRequest(r ConsumeRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.ConsumeRequestStart(b)
+	vnet.ConsumeRequestAddSlot(b, r.Slot)
+	vnet.ConsumeRequestAddClientTick(b, r.ClientTick)
+	request := vnet.ConsumeRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadConsumeRequest, request)
 }
 
 // EncodeDropItemRequest builds one drop intent, for the reason EncodeRepairRequest exists:

@@ -56,6 +56,8 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 		LifeState:    p.lifeState,
 		RespawnTicks: p.respawnTicks,
 		Invulnerable: p.protectionTicks > 0,
+		Hunger:       p.hunger,
+		MaxHunger:    PlayerMaxHunger,
 	}
 }
 

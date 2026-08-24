@@ -1239,6 +1239,37 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		log.Debug("repair applied", "kit_slot", request.KitSlot, "target_slot", request.TargetSlot)
 		return nil
 
+	case vnet.PayloadConsumeRequest:
+		if player == nil || msg.Consume == nil {
+			// Unreachable for the reason the cases above are, and stated for the same one:
+			// the alternative to a log line is a nil dereference in the goroutine holding a
+			// socket.
+			log.Debug("consume arrived with no player to attribute it to; discarding")
+			return nil
+		}
+
+		request := *msg.Consume
+		state, cErr := player.Consume(request)
+		if cErr != nil {
+			// Refusal is silence plus a debug line, exactly as a refused repair is. Food
+			// that was not consumed leaves both the pack and the hunger reserve unchanged.
+			log.Debug("refusing consume",
+				"reason", cErr.Error(),
+				"slot", request.Slot,
+				"client_tick", request.ClientTick,
+			)
+			return nil
+		}
+
+		// Unlike a snapshot, an inventory state is not superseded on the next tick. Use
+		// the blocking session send so a full queue cannot leave the client showing food
+		// the server has already spent. Hunger follows in the next ordinary snapshot.
+		if sErr := send(protocol.EncodeInventoryState(state)); sErr != nil {
+			return fmt.Errorf("session: send inventory after consume: %w", sErr)
+		}
+		log.Debug("item consumed", "slot", request.Slot)
+		return nil
+
 	case vnet.PayloadDropItemRequest:
 		if player == nil || msg.DropItem == nil {
 			// Unreachable for the reason the cases above are, and stated for the same one:

@@ -823,15 +823,15 @@ impl RecipeId {
     }
 }
 
-/// The recipient's own health and life state, from the newest snapshot.
+/// The recipient's own health, hunger and life state, from the newest snapshot.
 ///
 /// Replaces the previous value wholesale, exactly as an [`InventoryState`] does. There
 /// is nothing to merge and nothing to advance locally: a dropped snapshot is harmless
 /// because the next one carries the complete answer.
 ///
 /// Every invariant `schemas/player.fbs` documents has already been checked by the time
-/// one of these exists — `max_health` is non-zero, so the ratio a health bar draws
-/// cannot divide by zero.
+/// one of these exists — both maxima are non-zero and neither current value exceeds
+/// its maximum, so a presentation may divide by either without trusting the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerVitals {
     /// Current health. Zero is legal and means dead — but it is `life_state` that says
@@ -839,6 +839,10 @@ pub struct PlayerVitals {
     pub health: u16,
     /// Maximum health. Guaranteed non-zero.
     pub max_health: u16,
+    /// Current hunger reserve. Zero is legal and stops server-side regeneration.
+    pub hunger: u16,
+    /// Maximum hunger. Guaranteed non-zero.
+    pub max_hunger: u16,
     pub life_state: LifeState,
     /// Server ticks until the server respawns this player, at
     /// [`SessionParams::tick_rate`]. Zero unless `life_state` is [`LifeState::Dead`].
@@ -862,6 +866,8 @@ impl PlayerVitals {
         Self {
             health: 100,
             max_health: 100,
+            hunger: 100,
+            max_hunger: 100,
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
@@ -1265,6 +1271,19 @@ pub struct RepairRequest {
     pub client_tick: u32,
 }
 
+/// Intent to consume one item from one authoritative inventory slot.
+///
+/// The item id, the amount restored and whether the request succeeds are deliberately
+/// absent: the server reads all three from its own inventory and item registry. The slot
+/// travels verbatim and an unusable one is an ordinary silent gameplay refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumeRequest {
+    /// The authoritative inventory slot whose item the player is trying to consume.
+    pub slot: u16,
+    /// This client's own tick counter — the same one `PlayerInput` uses.
+    pub client_tick: u32,
+}
+
 /// Intent to plant one structure. It carries no kind and no id.
 ///
 /// The kind follows from whatever the server's own inventory holds in `slot`, and the id
@@ -1602,6 +1621,9 @@ pub enum DecodeError {
     /// `max_health` is zero, or `health` exceeds it. The first is the division a health
     /// bar performs, and an honestly buggy server reaches it as easily as a hostile one.
     VitalsHealth { health: u16, max_health: u16 },
+    /// `max_hunger` is zero, or `hunger` exceeds it. A zero reserve is legal; a zero
+    /// denominator is not.
+    VitalsHunger { hunger: u16, max_hunger: u16 },
     /// An `Alive` player with no health left. Zero health is what the server's own
     /// transition to `Dead` means, so this is a server that has lost track of one of its
     /// own players.
@@ -1823,6 +1845,10 @@ impl fmt::Display for DecodeError {
             Self::VitalsHealth { health, max_health } => write!(
                 f,
                 "vitals are {health}/{max_health}, want a non-zero maximum and no more health than it"
+            ),
+            Self::VitalsHunger { hunger, max_hunger } => write!(
+                f,
+                "hunger is {hunger}/{max_hunger}, want a non-zero maximum and no more hunger than it"
             ),
             Self::AliveWithoutHealth => write!(f, "vitals say alive with no health left"),
             Self::RespawnWhileAlive { respawn_ticks } => write!(
@@ -2098,7 +2124,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::SelectCharacterRequest
         | fb::Payload::CreateCharacterRequest
         | fb::Payload::DropItemRequest
-        | fb::Payload::LeaveRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::LeaveRequest
+        | fb::Payload::ConsumeRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -2593,8 +2620,8 @@ fn mob_state(state: &fb::MobState) -> Result<MobState, DecodeError> {
 ///
 /// The field is `(required)` on the wire, so an absent one never reaches here: the
 /// verifier [`decode`] runs has already refused the buffer. What is left are the value
-/// invariants, and they are the ones a health bar depends on — `max_health` is what it
-/// divides by.
+/// invariants, and they are the ones any vitals presentation depends on: both maxima are
+/// denominators and neither peer-owned current value may exceed its maximum.
 fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError> {
     let life_state =
         LifeState::from_wire(vitals.life_state()).ok_or(DecodeError::UnknownLifeState)?;
@@ -2602,6 +2629,10 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
     let (health, max_health) = (vitals.health(), vitals.max_health());
     if max_health == 0 || health > max_health {
         return Err(DecodeError::VitalsHealth { health, max_health });
+    }
+    let (hunger, max_hunger) = (vitals.hunger(), vitals.max_hunger());
+    if max_hunger == 0 || hunger > max_hunger {
+        return Err(DecodeError::VitalsHunger { hunger, max_hunger });
     }
     if life_state == LifeState::Alive && health == 0 {
         return Err(DecodeError::AliveWithoutHealth);
@@ -2615,6 +2646,8 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
     Ok(PlayerVitals {
         health,
         max_health,
+        hunger,
+        max_hunger,
         life_state,
         respawn_ticks,
         invulnerable: vitals.invulnerable(),
@@ -3074,6 +3107,29 @@ pub fn encode_repair_request(request: &RepairRequest) -> Vec<u8> {
     finish_envelope(
         builder,
         fb::Payload::RepairRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one consume intent.
+///
+/// The whole message is one authoritative slot index and this client's tick counter.
+/// There is no item id or restored amount: both come from server-owned state, and an
+/// ineligible item, a full reserve or a dead player is answered with silence.
+///
+/// The index is sent exactly as given, including values outside the announced pack,
+/// because the simulation treats those as gameplay refusals rather than malformed frames.
+pub fn encode_consume_request(request: &ConsumeRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+
+    let mut table = fb::ConsumeRequestBuilder::new(&mut builder);
+    table.add_slot(request.slot);
+    table.add_client_tick(request.client_tick);
+    let payload = table.finish();
+
+    finish_envelope(
+        builder,
+        fb::Payload::ConsumeRequest,
         payload.as_union_value(),
     )
 }
@@ -3629,6 +3685,8 @@ pub(super) mod server_side {
     pub struct PlayerVitalsWire {
         pub health: u16,
         pub max_health: u16,
+        pub hunger: u16,
+        pub max_hunger: u16,
         pub life_state: fb::LifeState,
         pub respawn_ticks: u32,
         pub invulnerable: bool,
@@ -3640,6 +3698,8 @@ pub(super) mod server_side {
             Self {
                 health: 100,
                 max_health: 100,
+                hunger: 100,
+                max_hunger: 100,
                 life_state: fb::LifeState::Alive,
                 respawn_ticks: 0,
                 invulnerable: false,
@@ -3720,6 +3780,8 @@ pub(super) mod server_side {
             &fb::PlayerVitalsArgs {
                 health: vitals.health,
                 max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -3869,6 +3931,8 @@ pub(super) mod server_side {
             &fb::PlayerVitalsArgs {
                 health: vitals.health,
                 max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -3906,6 +3970,8 @@ pub(super) mod server_side {
             &fb::PlayerVitalsArgs {
                 health: vitals.health,
                 max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -3948,6 +4014,8 @@ pub(super) mod server_side {
             &fb::PlayerVitalsArgs {
                 health: vitals.health,
                 max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -4262,14 +4330,18 @@ mod tests {
     /// `MobState`; this decoder refuses either unknown member, so an older client would
     /// otherwise connect and then end its session when a deer entered view.
     ///
-    /// The rule that generalises, now that five shapes have been argued: **ask what the
+    /// **V15 appends `ConsumeRequest` and hunger to `PlayerVitals`.** The request is a
+    /// union member an older server refuses, and the new maximum is a decoder invariant:
+    /// its absent-field zero is not a usable V15 snapshot.
+    ///
+    /// The rule that generalises, now that six shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v14_names_the_deer_and_its_flight() {
+    fn protocol_v15_names_consumption_and_hunger() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 14);
+        assert_eq!(fb::ProtocolVersion::Current.0, 15);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4298,6 +4370,7 @@ mod tests {
             (fb::Payload::DropItemRequest, 25),
             (fb::Payload::LeaveRequest, 26),
             (fb::Payload::LeaveStarted, 27),
+            (fb::Payload::ConsumeRequest, 28),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -4313,7 +4386,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            28,
+            29,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -4343,7 +4416,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 28] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 29] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -4372,6 +4445,7 @@ mod tests {
         (fb::Payload::DropItemRequest, Handling::ClientOnly),
         (fb::Payload::LeaveRequest, Handling::ClientOnly),
         (fb::Payload::LeaveStarted, Handling::Consumed),
+        (fb::Payload::ConsumeRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -7031,6 +7105,35 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Protocol V15 — consume intent
+    // -----------------------------------------------------------------------
+
+    /// One slot and a tick, with no item id, count or restoration claim.
+    ///
+    /// The largest slot proves the `ushort` contract is preserved rather than narrowed
+    /// to the current pack-size type. The server decides that such a slot is unusable.
+    #[test]
+    fn a_consume_request_carries_one_slot_and_a_tick_verbatim() {
+        for (slot, client_tick) in [(0, 0), (7, 41), (u16::MAX, u32::MAX)] {
+            let frame = encode_consume_request(&ConsumeRequest { slot, client_tick });
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            assert_eq!(envelope.payload_type(), fb::Payload::ConsumeRequest);
+            let request = envelope
+                .payload_as_consume_request()
+                .expect("the payload is a consume request");
+            assert_eq!(request.slot(), slot);
+            assert_eq!(request.client_tick(), client_tick);
+            if slot != 0 && client_tick != 0 {
+                assert_eq!(
+                    (request._tab.vtable().num_bytes() - 4) / 2,
+                    2,
+                    "ConsumeRequest carries something besides a slot and a tick"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Protocol V8 — drop intent
     // -----------------------------------------------------------------------
 
@@ -7268,6 +7371,8 @@ mod tests {
             PlayerVitalsWire {
                 health: 0,
                 max_health: 100,
+                hunger: 40,
+                max_hunger: 100,
                 life_state: fb::LifeState::Dead,
                 respawn_ticks: 60,
                 invulnerable: false,
@@ -7281,6 +7386,8 @@ mod tests {
             PlayerVitals {
                 health: 0,
                 max_health: 100,
+                hunger: 40,
+                max_hunger: 100,
                 life_state: LifeState::Dead,
                 respawn_ticks: 60,
                 invulnerable: false,
@@ -7346,6 +7453,30 @@ mod tests {
                 DecodeError::VitalsHealth {
                     health: 101,
                     max_health: 100,
+                },
+            ),
+            (
+                "a zero hunger maximum, which no presentation may divide by",
+                PlayerVitalsWire {
+                    hunger: 0,
+                    max_hunger: 0,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsHunger {
+                    hunger: 0,
+                    max_hunger: 0,
+                },
+            ),
+            (
+                "more hunger than the maximum",
+                PlayerVitalsWire {
+                    hunger: 101,
+                    max_hunger: 100,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsHunger {
+                    hunger: 101,
+                    max_hunger: 100,
                 },
             ),
             (

@@ -1085,6 +1085,36 @@ func TestARefusedRepairIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 	}
 }
 
+// A consume the simulation refuses is silence, and the session survives it. The
+// starter pack holds only a blade, so slot 0 is not food, slot 1 is empty, and a uint16
+// slot outside the pack exercises the decoder's deliberate carry-through rule.
+//
+// The routing is what this layer owns: before payload tag 28 had a handler, the default
+// branch treated a valid consume intent as a protocol violation and ended the session.
+func TestARefusedConsumeIsSilentAndTheSessionSurvivesIt(t *testing.T) {
+	t.Parallel()
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
+	surface := surfaceUnderSpawn(cfg.WorldSeed)
+
+	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 0, ClientTick: 1})
+	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 1, ClientTick: 2})
+	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 65_535, ClientTick: 3})
+
+	// The legal break afterwards proves the sequential read loop processed every
+	// refusal and kept the connection alive.
+	clientTick := uint32(3)
+	var serverTick uint64
+	mineUntilBreak(t, conn, frames, sim, surface, &clientTick, &serverTick)
+	waitUntil(t, "the legal break to be broadcast", func() bool { return len(frames.blockUpdates()) > 0 })
+
+	if got := len(frames.blockUpdates()); got != 1 {
+		t.Errorf("the session received %d block updates, want only the legal break's", got)
+	}
+}
+
 // A durable drop the simulation accepts empties the named slot and puts one entity in the
 // world, and the session answers with the complete inventory that leaves behind.
 //

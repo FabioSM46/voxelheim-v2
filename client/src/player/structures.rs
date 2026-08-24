@@ -2944,6 +2944,8 @@ mod tests {
         *app.world_mut().resource_mut::<SelfVitals>() = SelfVitals::from_server(PlayerVitals {
             health: 0,
             max_health: 100,
+            hunger: 50,
+            max_hunger: 100,
             life_state: LifeState::Dead,
             respawn_ticks: 40,
             invulnerable: false,

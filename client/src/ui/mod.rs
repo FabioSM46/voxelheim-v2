@@ -676,6 +676,8 @@ mod tests {
                 100
             },
             max_health: 100,
+            hunger: 100,
+            max_hunger: 100,
             life_state,
             respawn_ticks: if life_state == LifeState::Dead { 40 } else { 0 },
             invulnerable: false,
