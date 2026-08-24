@@ -240,6 +240,81 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 	}
 }
 
+// Persistence is after the linger, not a snapshot taken when the socket dies. A body
+// keeps falling during those ten production seconds; this shorter test window advances
+// the same simulation and proves the stored position is the final authoritative one.
+func TestLeavePersistsSimulationChangesFromTheLinger(t *testing.T) {
+	const linger = 200 * time.Millisecond
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities := identitiesOver(store)
+	account := testAccount(24)
+	cfg := serveConfig()
+	ground := world.SpawnAt(cfg.WorldSeed)
+	cfg.Spawn = [3]float32{ground[0], ground[1] + 20, ground[2]}
+	chunks := world.NewCache(cfg.WorldSeed, 4, 512)
+	generateAround(t, chunks, cfg.Spawn, 2)
+	peers := session.NewRegistry()
+	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, discard())
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+
+	conn := newFakeConn()
+	done := make(chan error, 1)
+	timeouts := longTimeouts()
+	timeouts.Leave = linger
+	go func() {
+		done <- session.Serve(context.Background(), conn, cfg, timeouts, chunks, sim, peers, identities, 1, discard())
+	}()
+	conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, conn, "Eivor")
+	welcome := welcomeFrom(t, vnet.GetRootAsEnvelope(nextFrameOfKind(t, conn, vnet.PayloadServerWelcome), 0))
+	_ = nextFrameOfKind(t, conn, vnet.PayloadInventoryState)
+	spawn := welcome.Spawn(nil)
+	if spawn == nil {
+		t.Fatal("welcome has no spawn")
+	}
+	startY := float64(spawn.Y())
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Well inside the leave window, and enough ticks for gravity to make the final
+	// position observably different from the disconnect position.
+	time.Sleep(linger / 5)
+	for tick := uint64(1); tick <= 10; tick++ {
+		sim.Step(tick)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("session returned %v before the linger completed", err)
+	default:
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("session returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not finish the leave")
+	}
+	saved, found, err := store.Load(onlyCharacter(t, store, account).ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("leave wrote no character record")
+	}
+	if saved.Pos[1] >= startY {
+		t.Errorf("saved y = %v, want below disconnect y %v after linger gravity", saved.Pos[1], startY)
+	}
+}
+
 // An ephemeral world keeps nothing, and a reconnect within one process is a new life.
 //
 // The claim the -world-dir help text makes, checked rather than described. **What it is

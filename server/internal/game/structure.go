@@ -377,8 +377,8 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
-		return protocol.InventoryState{}, vnet.RefusalReasonPlayerIsDead, errors.New("the player is dead")
+	if err := p.cannotActLocked(); err != nil {
+		return protocol.InventoryState{}, vnet.RefusalReasonPlayerIsDead, err
 	}
 	if distance := distanceToVoxel(p.pos, anchor); distance > EditReach {
 		return protocol.InventoryState{}, vnet.RefusalReasonOutOfReach, fmt.Errorf("the anchor is %.2f blocks from the player, past the reach of %.1f", distance, EditReach)
@@ -469,8 +469,8 @@ func (p *Player) removeOwnStructure(structureID uint64) (structure, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
-		return structure{}, errors.New("the player is dead")
+	if err := p.cannotActLocked(); err != nil {
+		return structure{}, err
 	}
 
 	held, standing := p.sim.structures[structureID]

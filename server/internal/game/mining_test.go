@@ -720,7 +720,7 @@ func TestMiningSilenceExpiresAndMissingTerrainHoldsPaidProgress(t *testing.T) {
 	}
 }
 
-func TestLeavingClearsMiningAndProducesNoLaterProgress(t *testing.T) {
+func TestBeginLeavingClearsMiningAndProducesNoLaterProgress(t *testing.T) {
 	t.Parallel()
 
 	target := [3]int32{3, 200, 0}
@@ -730,14 +730,17 @@ func TestLeavingClearsMiningAndProducesNoLaterProgress(t *testing.T) {
 	}
 	sim.Step(1)
 	before := len(out.progress(t))
-	sim.Leave(player)
+	player.BeginLeaving()
+	if err := player.Mine(activeMine(target, 2), true); err == nil {
+		t.Fatal("a leaving player started another mine")
+	}
 	sim.Step(2)
 	sim.Step(3)
 	sim.mu.Lock()
 	active := player.mining != nil || player.mineCompleting || player.mineReset != nil
 	sim.mu.Unlock()
 	if active {
-		t.Fatal("Leave retained per-session mining state")
+		t.Fatal("BeginLeaving retained per-session mining state")
 	}
 	if got := len(out.progress(t)); got != before {
 		t.Errorf("session received %d progress frames after Leave, want 0", got-before)

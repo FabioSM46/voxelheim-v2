@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -86,9 +87,14 @@ type Message struct {
 	Craft              *CraftRequest
 	Repair             *RepairRequest
 	DropItem           *DropItemRequest
+	LeaveRequest       *LeaveRequest
 	SelectCharacter    *SelectCharacterRequest
 	CreateCharacter    *CreateCharacterRequest
 }
+
+// LeaveRequest is an intentionally empty leave intent. The absence of a duration
+// is the authority boundary: the server owns how long the character remains.
+type LeaveRequest struct{}
 
 // ClientHello is a decoded handshake request.
 type ClientHello struct {
@@ -1048,6 +1054,15 @@ func Decode(frame []byte) (msg Message, err error) {
 			ClientTick: request.ClientTick(),
 		}
 
+	case vnet.PayloadLeaveRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.LeaveRequest
+		request.Init(table.Bytes, table.Pos)
+		msg.LeaveRequest = &LeaveRequest{}
+
 	case vnet.PayloadSelectCharacterRequest:
 		table, tErr := unionPayload(env, msg.Kind)
 		if tErr != nil {
@@ -1845,6 +1860,28 @@ func EncodeDropItemRequest(r DropItemRequest) []byte {
 	request := vnet.DropItemRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadDropItemRequest, request)
+}
+
+// EncodeLeaveRequest builds the empty leave intent. It exists for tests and parity
+// with every other client request; production clients build the same contract frame.
+func EncodeLeaveRequest() []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.LeaveRequestStart(b)
+	request := vnet.LeaveRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadLeaveRequest, request)
+}
+
+// EncodeLeaveStarted acknowledges the server-owned linger duration.
+func EncodeLeaveStarted(remaining time.Duration) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.LeaveStartedStart(b)
+	vnet.LeaveStartedAddRemainingMs(b, uint32(remaining/time.Millisecond))
+	started := vnet.LeaveStartedEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadLeaveStarted, started)
 }
 
 // EncodeChunkResendRequest builds one ask for a chunk the client has lost. The server

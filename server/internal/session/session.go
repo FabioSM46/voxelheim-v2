@@ -91,6 +91,10 @@ const (
 	DefaultHandshakeTimeout = 5 * time.Second
 	DefaultCharacterTimeout = 2 * time.Minute
 	DefaultIdleTimeout      = 20 * time.Second
+	// DefaultLeaveLinger is how long an admitted character remains after every kind
+	// of connection end. It is not a flag: ten seconds is a gameplay rule, not an
+	// operator tuning knob. Tests may provide a shorter Timeouts.Leave directly.
+	DefaultLeaveLinger = 10 * time.Second
 )
 
 // Timeouts bounds how long a connection may say nothing.
@@ -121,6 +125,12 @@ type Timeouts struct {
 
 	// Idle bounds every read after the welcome, re-armed on each frame.
 	Idle time.Duration
+
+	// Leave is the server-owned linger after an in-world session ends. It begins only
+	// after the idle deadline (or another disconnect) has ended the connection, so the
+	// two timers are sequential and an idle timeout can never reap the body early.
+	// Zero disables the wait in tests; production always uses DefaultLeaveLinger.
+	Leave time.Duration
 }
 
 // DefaultTimeouts is the policy the flags default to.
@@ -129,6 +139,7 @@ func DefaultTimeouts() Timeouts {
 		Handshake: DefaultHandshakeTimeout,
 		Character: DefaultCharacterTimeout,
 		Idle:      DefaultIdleTimeout,
+		Leave:     DefaultLeaveLinger,
 	}
 }
 
@@ -155,6 +166,8 @@ func (t Timeouts) Validate() error {
 		return fmt.Errorf("character timeout must be greater than zero, got %s", t.Character)
 	case t.Idle <= 0:
 		return fmt.Errorf("idle timeout must be greater than zero, got %s", t.Idle)
+	case t.Leave <= 0:
+		return fmt.Errorf("leave linger must be greater than zero, got %s", t.Leave)
 	case t.Handshake > t.Idle:
 		return fmt.Errorf("handshake timeout %s must not exceed the idle timeout %s", t.Handshake, t.Idle)
 	case t.Handshake > t.Character:
@@ -350,6 +363,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		writeFailure error
 		player       *game.Player
 		streamer     *Streamer
+		leavingAt    time.Time
 
 		// Declared up here rather than beside the read loop because the deferred
 		// teardown below reads them, and a closure can only see what already exists.
@@ -385,6 +399,32 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	}()
 
 	defer func() {
+		// Every in-world ending converges on the same authoritative state: a polite
+		// request, EOF, an idle deadline, a dead writer and a process-level socket close
+		// all leave the character present but inert. A polite request starts the clock
+		// before its acknowledgement; every other path starts it here.
+		if current == phaseInWorld && player != nil {
+			if leavingAt.IsZero() {
+				player.BeginLeaving()
+				leavingAt = time.Now()
+			}
+			if remaining := time.Until(leavingAt.Add(timeouts.Leave)); remaining > 0 {
+				timer := time.NewTimer(remaining)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					// The world itself is stopping, so there is no simulation for a body
+					// to remain visible in. Persistence still runs below before release.
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+				}
+			}
+		}
+
 		// Order matters, and there are now four producers to stop before the channel
 		// they produce into can be closed. Closing it first would make a send on a
 		// closed channel — a panic, in a goroutine, taking the process with it.
@@ -746,6 +786,17 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		}
 
 		if hErr := handlePostHandshake(ctx, msg, player, streamer, peers, enqueue, log); hErr != nil {
+			if errors.Is(hErr, errLeaveRequested) {
+				// Inert before the acknowledgement is queued: once the server accepts the
+				// request, no input already behind it can become one last action.
+				player.BeginLeaving()
+				leavingAt = time.Now()
+				if sErr := enqueue(protocol.EncodeLeaveStarted(timeouts.Leave)); sErr != nil {
+					return fmt.Errorf("session: announce the leave: %w", sErr)
+				}
+				log.Info("character is leaving", "linger", timeouts.Leave.String())
+				return nil
+			}
 			return hErr
 		}
 
@@ -1220,12 +1271,23 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		log.Debug("drop applied", "slot", request.Slot)
 		return nil
 
+	case vnet.PayloadLeaveRequest:
+		if player == nil || msg.LeaveRequest == nil {
+			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)
+		}
+		return errLeaveRequested
+
 	case vnet.PayloadClientHello:
 		return fmt.Errorf("session: %w: second %s on an admitted session", protocol.ErrMalformed, msg.Kind)
 	default:
 		return fmt.Errorf("session: %w: client sent %s", protocol.ErrMalformed, msg.Kind)
 	}
 }
+
+// errLeaveRequested is control flow inside Serve, not a failure. Keeping it distinct
+// lets the shared post-handshake router stay exhaustive while Serve owns the session
+// lifecycle, acknowledgement and timer.
+var errLeaveRequested = errors.New("session: leave requested")
 
 // Registry tracks live connections so shutdown can close them all, hands out the
 // identities that name them, and knows which sessions hold which chunks.

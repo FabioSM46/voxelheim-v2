@@ -209,12 +209,12 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
+	if err := p.cannotActLocked(); err != nil {
 		// Refused, not fatal, for the same reason a dead player's movement is: the frame
 		// is well formed and the client is entitled to keep sending while it waits out
 		// the respawn it has been told about. dieLocked already dropped whatever was
 		// being mined, so there is nothing here to cancel — only something to decline.
-		return errors.New("the player is dead")
+		return err
 	}
 
 	if p.haveMineTick && !newerTick(req.ClientTick, p.lastMineTick) {

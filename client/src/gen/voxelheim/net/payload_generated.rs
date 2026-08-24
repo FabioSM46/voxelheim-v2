@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 25;
+pub const ENUM_MAX_PAYLOAD: u8 = 27;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 26] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 28] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -44,6 +44,8 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 26] = [
     Payload::CreateCharacterRequest,
     Payload::PlayerAppearance,
     Payload::DropItemRequest,
+    Payload::LeaveRequest,
+    Payload::LeaveStarted,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -96,9 +98,11 @@ impl Payload {
     pub const CreateCharacterRequest: Self = Self(23);
     pub const PlayerAppearance: Self = Self(24);
     pub const DropItemRequest: Self = Self(25);
+    pub const LeaveRequest: Self = Self(26);
+    pub const LeaveStarted: Self = Self(27);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 25;
+    pub const ENUM_MAX: u8 = 27;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -126,6 +130,8 @@ impl Payload {
         Self::CreateCharacterRequest,
         Self::PlayerAppearance,
         Self::DropItemRequest,
+        Self::LeaveRequest,
+        Self::LeaveStarted,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -156,6 +162,8 @@ impl Payload {
             Self::CreateCharacterRequest => Some("CreateCharacterRequest"),
             Self::PlayerAppearance => Some("PlayerAppearance"),
             Self::DropItemRequest => Some("DropItemRequest"),
+            Self::LeaveRequest => Some("LeaveRequest"),
+            Self::LeaveStarted => Some("LeaveStarted"),
             _ => None,
         }
     }

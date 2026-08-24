@@ -1052,6 +1052,52 @@ func TestASnapshotReachesOnlyTheSessionsThatCanSeeTheEntity(t *testing.T) {
 	}
 }
 
+// Leaving changes agency, not existence. The body stays in the authoritative tick and
+// in other players' snapshots until the session lifecycle calls Sim.Leave; meanwhile
+// queued movement is cleared and later input is refused. Gravity continuing is the
+// smallest direct proof that the body did not become a frozen client-side ghost.
+func TestALeavingPlayerIsVisibleAndSimulatedButCannotAct(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, emptyWorld{})
+	leaver, _ := h.join(1, [3]float32{0.5, 80, 0.5})
+	_, watcherOut := h.join(2, [3]float32{2.5, 80, 0.5})
+
+	// Accepted before leave, then cleared by the authoritative transition before a
+	// tick can apply it.
+	h.submit(leaver, walking(yawNorth))
+	before := leaver.State()
+	leaver.BeginLeaving()
+	h.clientTick++
+	if err := leaver.Submit(protocol.PlayerInput{
+		ClientTick: h.clientTick,
+		MoveZ:      forward,
+		Yaw:        yawNorth,
+	}); err == nil {
+		t.Fatal("the simulation accepted movement from a leaving player")
+	}
+
+	h.advance(10)
+	after := leaver.State()
+	if horizontalDistance(after.Pos, before.Pos) > tolerance {
+		t.Errorf("leaving movement changed position from %v to %v", before.Pos, after.Pos)
+	}
+	if after.Pos[1] >= before.Pos[1] {
+		t.Errorf("leaving body did not keep falling: y %v then %v", before.Pos[1], after.Pos[1])
+	}
+	if got := h.sim.Count(); got != 2 {
+		t.Fatalf("simulation holds %d players during leave, want 2", got)
+	}
+
+	_, states := decodeSnapshot(t, watcherOut.last())
+	for _, state := range states {
+		if state.EntityID == leaver.EntityID() {
+			return
+		}
+	}
+	t.Fatalf("watcher's snapshot omits leaving entity %d", leaver.EntityID())
+}
+
 // Two players in view of each other must each see the other move, which is the whole
 // point of the fan-out: the second player's capsule is driven by the first player's
 // authoritative position and by nothing the first client claimed.

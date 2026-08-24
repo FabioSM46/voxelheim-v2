@@ -126,14 +126,14 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 
 	p.sim.mu.Lock()
 	origin := p.pos
-	dead := !p.alive()
+	actErr := p.cannotActLocked()
 	p.sim.mu.Unlock()
 
-	if dead {
+	if actErr != nil {
 		// Before the reach check and before any world read, so a dead player's request
 		// cannot make the server generate a chunk. Refused rather than fatal, exactly as
 		// a movement or mining intent from a corpse is.
-		return EditResult{}, errors.New("the player is dead")
+		return EditResult{}, actErr
 	}
 
 	if distance := distanceToVoxel(origin, target); distance > EditReach {
@@ -179,10 +179,10 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 		// player misses. That is the same residual the occupancy check above accepts,
 		// for the same reason.
 		p.sim.mu.Lock()
-		diedWaiting := !p.alive()
+		actErr := p.cannotActLocked()
 		p.sim.mu.Unlock()
-		if diedWaiting {
-			return errors.New("the player died while the target chunk was loading")
+		if actErr != nil {
+			return fmt.Errorf("the player became unable to act while the target chunk was loading: %w", actErr)
 		}
 
 		p.inventory.mu.Lock()

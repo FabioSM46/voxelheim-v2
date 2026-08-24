@@ -56,6 +56,13 @@ namespace Voxelheim.Net;
 /// The rule that generalises, now that five shapes have been argued: **ask
 /// what the receiver does with the value it does not recognise, not which way
 /// it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
+///
+/// **V12 adds the leaving exchange.** `LeaveRequest` travels client -> server, and an
+/// older server treats an unknown client payload as a protocol error rather than
+/// dropping it. A V12 client against a V11 server would therefore handshake cleanly
+/// and be disconnected the first time it asked to leave. `LeaveStarted` travels back
+/// with the server-owned duration; its direction alone could have avoided a bump, but
+/// it is the answer to the request that already owes one.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -63,7 +70,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 11
+  Current = 12
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

@@ -149,6 +149,16 @@ package can avoid the import would create two truths to keep in step for no bene
   than it used to be, and the record write is still the last thing that happens before it is given
   back. A session that never chose a character writes nothing and releases anyway.
 
+- **Leaving is an irrevocable ten-second server lifecycle, not a socket state.** A polite
+  `LeaveRequest`, EOF, a dead writer and the post-welcome idle deadline all call
+  `Player.BeginLeaving` and start the same `DefaultLeaveLinger`; idle and leave are sequential,
+  so the idle timeout cannot remove the body early. During the linger the player stays in
+  `Sim`: snapshots, gravity, damage and world interaction continue, while movement, mining and
+  every other player action are cleared or refused. There is no cancel and no resumption. The
+  account claim remains held, so a reconnect receives `ALREADY_CONNECTED` until `sim.Leave`, the
+  final post-linger record write and claim release complete. Server shutdown may skip the wait
+  because the world itself is ending, but it still performs that persistence ordering.
+
 - **One reader, one writer per connection.** `transport.Conn` promises to survive that and nothing
   more. The writer goroutine keeps draining its queue even after a write fails, because a producer
   blocked on a dead writer is a deadlock.

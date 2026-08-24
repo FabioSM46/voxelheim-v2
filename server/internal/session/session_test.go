@@ -486,6 +486,27 @@ func nextFrame(t *testing.T, conn *fakeConn) []byte {
 	}
 }
 
+// nextFrameOfKind skips asynchronous world frames until the lifecycle frame under
+// test arrives. A session starts its streamer after admission, so a ChunkData may
+// legitimately be ahead of a LeaveStarted even when the leave request was the next
+// client frame.
+func nextFrameOfKind(t *testing.T, conn *fakeConn, want vnet.Payload) []byte {
+	t.Helper()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case frame := <-conn.out:
+			if vnet.GetRootAsEnvelope(frame, 0).PayloadType() == want {
+				return frame
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", want)
+			return nil
+		}
+	}
+}
+
 func TestWelcome(t *testing.T) {
 	t.Parallel()
 
@@ -962,6 +983,153 @@ func TestServeEndsAnIdleSessionCleanly(t *testing.T) {
 	}
 }
 
+// Every way an admitted connection ends enters the same server-owned lifecycle. The
+// socket is deliberately not the lifetime of the body: EOF and the idle deadline have
+// no acknowledgement to carry, while a polite LeaveRequest does, but all three keep the
+// player in the simulation for the complete linger and remove it only afterwards.
+func TestEveryInWorldEndingUsesTheAuthoritativeLeaveLinger(t *testing.T) {
+	const linger = 150 * time.Millisecond
+
+	for _, ending := range []struct {
+		name    string
+		trigger func(*testing.T, *fakeConn)
+		polite  bool
+	}{
+		{
+			name: "polite leave request",
+			trigger: func(_ *testing.T, conn *fakeConn) {
+				conn.in <- protocol.EncodeLeaveRequest()
+			},
+			polite: true,
+		},
+		{
+			name: "dead socket",
+			trigger: func(t *testing.T, conn *fakeConn) {
+				t.Helper()
+				if err := conn.Close(); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			},
+		},
+		{
+			name: "idle deadline",
+			trigger: func(_ *testing.T, conn *fakeConn) {
+				conn.expireReadDeadline()
+			},
+		},
+	} {
+		t.Run(ending.name, func(t *testing.T) {
+			chunks, sim, peers := serveDeps(t)
+			conn := newFakeConn()
+			done := make(chan error, 1)
+			timeouts := longTimeouts()
+			timeouts.Leave = linger
+			go func() {
+				done <- session.Serve(context.Background(), conn, serveConfig(), timeouts, chunks, sim, peers, ephemeralIdentities(), 3, discard())
+			}()
+
+			conn.in <- hello(1)
+			chooseCharacter(t, conn, "Eivor")
+			_ = nextFrameOfKind(t, conn, vnet.PayloadServerWelcome)
+			_ = nextFrameOfKind(t, conn, vnet.PayloadInventoryState)
+			if got := sim.Count(); got != 1 {
+				t.Fatalf("simulation holds %d players after admission, want 1", got)
+			}
+
+			ending.trigger(t, conn)
+			if ending.polite {
+				frame := nextFrameOfKind(t, conn, vnet.PayloadLeaveStarted)
+				table := payloadTable(t, vnet.GetRootAsEnvelope(frame, 0))
+				started := new(vnet.LeaveStarted)
+				started.Init(table.Bytes, table.Pos)
+				if got := started.RemainingMs(); got != uint32(linger/time.Millisecond) {
+					t.Errorf("LeaveStarted remaining = %dms, want %dms", got, linger/time.Millisecond)
+				}
+			}
+
+			select {
+			case err := <-done:
+				t.Fatalf("Serve returned %v before the leave linger elapsed", err)
+			case <-time.After(linger / 3):
+			}
+			if got := sim.Count(); got != 1 {
+				t.Errorf("simulation holds %d players during leave, want the visible body", got)
+			}
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Serve returned %v after leave", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Serve did not return after the leave linger")
+			}
+			if got := sim.Count(); got != 0 {
+				t.Errorf("simulation holds %d players after leave, want 0", got)
+			}
+		})
+	}
+}
+
+// A reconnect during leave is a new admission, not resumption. The existing session
+// keeps its account claim until the body has left and its final record has been written,
+// so the new socket receives the ordinary exclusivity refusal instead of taking control
+// of the inert body.
+func TestReconnectIsRefusedUntilLeaveCompletes(t *testing.T) {
+	const linger = 250 * time.Millisecond
+
+	chunks, sim, peers := serveDeps(t)
+	identities := ephemeralIdentities()
+	timeouts := longTimeouts()
+	timeouts.Leave = linger
+
+	first := newFakeConn()
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- session.Serve(context.Background(), first, serveConfig(), timeouts, chunks, sim, peers, identities, 3, discard())
+	}()
+	first.in <- hello(7)
+	chooseCharacter(t, first, "Eivor")
+	_ = nextFrameOfKind(t, first, vnet.PayloadServerWelcome)
+	_ = nextFrameOfKind(t, first, vnet.PayloadInventoryState)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first connection: %v", err)
+	}
+
+	second := newFakeConn()
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- session.Serve(context.Background(), second, serveConfig(), timeouts, chunks, sim, peers, identities, 4, discard())
+	}()
+	second.in <- hello(7)
+	rejectFrame := nextFrameOfKind(t, second, vnet.PayloadServerReject)
+	if got := rejectFrom(t, vnet.GetRootAsEnvelope(rejectFrame, 0)).Reason(); got != vnet.RejectReasonALREADY_CONNECTED {
+		t.Errorf("reconnect refusal = %s, want %s", got, vnet.RejectReasonALREADY_CONNECTED)
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("refused reconnect returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("refused reconnect did not finish")
+	}
+	select {
+	case err := <-firstDone:
+		t.Fatalf("first session returned %v before its leave linger elapsed", err)
+	default:
+	}
+
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first session returned %v after leave", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first session did not finish its leave")
+	}
+}
+
 // The other half, and the one that decides whether the idle default is a timeout or a
 // disconnect generator: a client sending input at the tick rate is never closed by it.
 //
@@ -1034,8 +1202,15 @@ func TestServeKeepsASessionThatKeepsTalking(t *testing.T) {
 func TestTimeoutsValidate(t *testing.T) {
 	t.Parallel()
 
-	if err := session.DefaultTimeouts().Validate(); err != nil {
+	defaults := session.DefaultTimeouts()
+	if err := defaults.Validate(); err != nil {
 		t.Fatalf("the defaults are invalid: %v", err)
+	}
+	if defaults.Leave != 10*time.Second {
+		t.Errorf("default leave linger = %s, want the exact 10s gameplay rule", defaults.Leave)
+	}
+	if defaults.Leave != session.DefaultLeaveLinger {
+		t.Errorf("default leave linger = %s, constant = %s", defaults.Leave, session.DefaultLeaveLinger)
 	}
 
 	// A policy every field of which is set, so that each case below is refused for the
@@ -1044,6 +1219,7 @@ func TestTimeoutsValidate(t *testing.T) {
 		Handshake: 5 * time.Second,
 		Character: 2 * time.Minute,
 		Idle:      20 * time.Second,
+		Leave:     session.DefaultLeaveLinger,
 	}
 	without := func(change func(*session.Timeouts)) session.Timeouts {
 		broken := sound
@@ -1055,6 +1231,7 @@ func TestTimeoutsValidate(t *testing.T) {
 		"no handshake window":       without(func(t *session.Timeouts) { t.Handshake = 0 }),
 		"no character window":       without(func(t *session.Timeouts) { t.Character = 0 }),
 		"no idle window":            without(func(t *session.Timeouts) { t.Idle = 0 }),
+		"no leave linger":           without(func(t *session.Timeouts) { t.Leave = 0 }),
 		"none at all":               {},
 		"negative idle window":      without(func(t *session.Timeouts) { t.Idle = -time.Second }),
 		"negative character window": without(func(t *session.Timeouts) { t.Character = -time.Second }),
@@ -1077,7 +1254,7 @@ func TestTimeoutsValidate(t *testing.T) {
 	// Equal is the boundary and it is allowed: a handshake window the same length as
 	// the idle window means every read gets the same budget, which is a policy rather
 	// than a mistake.
-	same := session.Timeouts{Handshake: 20 * time.Second, Character: 20 * time.Second, Idle: 20 * time.Second}
+	same := session.Timeouts{Handshake: 20 * time.Second, Character: 20 * time.Second, Idle: 20 * time.Second, Leave: session.DefaultLeaveLinger}
 	if err := same.Validate(); err != nil {
 		t.Errorf("Validate rejected the boundary %+v: %v", same, err)
 	}
@@ -1085,7 +1262,7 @@ func TestTimeoutsValidate(t *testing.T) {
 	// And a character window well past the idle one is the *expected* shape rather than
 	// a mistake: a character screen is not an idle session, and there is deliberately no
 	// rule tying the two together.
-	patient := session.Timeouts{Handshake: 5 * time.Second, Character: time.Hour, Idle: 20 * time.Second}
+	patient := session.Timeouts{Handshake: 5 * time.Second, Character: time.Hour, Idle: 20 * time.Second, Leave: session.DefaultLeaveLinger}
 	if err := patient.Validate(); err != nil {
 		t.Errorf("Validate rejected a character window longer than the idle one: %v", err)
 	}

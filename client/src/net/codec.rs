@@ -1319,6 +1319,13 @@ pub struct DropItemRequest {
     pub client_tick: u32,
 }
 
+/// The server-owned linger window acknowledged after a leave request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaveStarted {
+    /// Remaining server time when the acknowledgement was produced.
+    pub remaining_ms: u32,
+}
+
 /// A decoded `ServerReject`.
 ///
 /// [`Self::describe`] is the one place the code and the detail become a single
@@ -1426,6 +1433,8 @@ pub enum Message {
     /// consumes it until the appearance-rendering issue, exactly as `MineProgress` was
     /// decoded from V2 and drawn later.
     PlayerAppearance(PlayerAppearance),
+    /// The server has made this session inert and begun its removal countdown.
+    LeaveStarted(LeaveStarted),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -1676,6 +1685,8 @@ pub enum DecodeError {
     /// Distinct from having no matching entity, which is **not** an error: the two
     /// streams are not ordered against each other. Zero names nobody at all.
     AppearanceWithoutEntity,
+    /// `LeaveStarted.remaining_ms` is zero, which describes a countdown already over.
+    LeaveWithoutTime,
 }
 
 impl fmt::Display for DecodeError {
@@ -1885,6 +1896,7 @@ impl fmt::Display for DecodeError {
             Self::AppearanceWithoutEntity => {
                 write!(f, "a PlayerAppearance carries the reserved entity id 0")
             }
+            Self::LeaveWithoutTime => write!(f, "LeaveStarted carries no time remaining"),
         }
     }
 }
@@ -2040,6 +2052,16 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 appearance: appearance(payload.appearance(), "PlayerAppearance")?,
             }))
         }
+        fb::Payload::LeaveStarted => {
+            let payload = envelope
+                .payload_as_leave_started()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let remaining_ms = payload.remaining_ms();
+            if remaining_ms == 0 {
+                return Err(DecodeError::LeaveWithoutTime);
+            }
+            Ok(Message::LeaveStarted(LeaveStarted { remaining_ms }))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -2059,7 +2081,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::RemoveStructureRequest
         | fb::Payload::SelectCharacterRequest
         | fb::Payload::CreateCharacterRequest
-        | fb::Payload::DropItemRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::DropItemRequest
+        | fb::Payload::LeaveRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -3061,6 +3084,15 @@ pub fn encode_drop_item_request(request: &DropItemRequest) -> Vec<u8> {
         fb::Payload::DropItemRequest,
         payload.as_union_value(),
     )
+}
+
+/// Builds the empty leave intent. The missing duration and cancellation are the point:
+/// this client asks, and the server answers how long the body remains.
+pub fn encode_leave_request() -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+
+    let payload = fb::LeaveRequest::create(&mut builder, &fb::LeaveRequestArgs::default());
+    finish_envelope(builder, fb::Payload::LeaveRequest, payload.as_union_value())
 }
 
 /// Builds one request to plant a structure.
@@ -4093,6 +4125,15 @@ pub(super) mod server_side {
             payload.as_union_value(),
         )
     }
+
+    /// A server-owned leave countdown, including zero for the decoder's malformed
+    /// boundary test.
+    pub fn encode_leave_started(remaining_ms: u32) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let payload =
+            fb::LeaveStarted::create(&mut builder, &fb::LeaveStartedArgs { remaining_ms });
+        finish_envelope(builder, fb::Payload::LeaveStarted, payload.as_union_value())
+    }
 }
 
 #[cfg(test)]
@@ -4106,8 +4147,9 @@ mod tests {
         encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_mine_progress, encode_player_appearance,
-        encode_server_character_list, encode_server_reject, encode_server_welcome,
+        encode_inventory_state_with_durability, encode_leave_started, encode_mine_progress,
+        encode_player_appearance, encode_server_character_list, encode_server_reject,
+        encode_server_welcome,
     };
     use super::*;
 
@@ -4194,9 +4236,9 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v11_appends_no_tag_and_still_moves_to_eleven() {
+    fn protocol_v12_appends_the_leaving_exchange_and_moves_to_twelve() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 11);
+        assert_eq!(fb::ProtocolVersion::Current.0, 12);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4223,21 +4265,24 @@ mod tests {
             (fb::Payload::CreateCharacterRequest, 23),
             (fb::Payload::PlayerAppearance, 24),
             (fb::Payload::DropItemRequest, 25),
+            (fb::Payload::LeaveRequest, 26),
+            (fb::Payload::LeaveStarted, 27),
         ] {
             assert_eq!(tag.0, value);
         }
 
         // Membership, not just ordering. A swing is still answered by the next snapshot
         // and nothing else, and so is a craft and a repair; a *refused* placement is now
-        // answered by `ActionRefused`, and an accepted one is not — there is still no
-        // acknowledgement payload anywhere in this contract, and the size of the union is
-        // the only place that claim can be checked. V8's one does not break that run: a
+        // answered by `ActionRefused`, and an accepted one is not. V12's `LeaveStarted`
+        // is the deliberate exception: an acknowledgement carrying the server's timer,
+        // never a client-owned outcome. The size of the union is the only place that
+        // membership can be checked. V8's one does not break that run: a
         // drop is answered by the complete `InventoryState` that follows and by the
         // `ItemDropState` in the next snapshot, both of which already existed. The extra
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            26,
+            28,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -4267,7 +4312,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 26] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 28] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -4294,6 +4339,8 @@ mod tests {
         (fb::Payload::CreateCharacterRequest, Handling::ClientOnly),
         (fb::Payload::PlayerAppearance, Handling::Consumed),
         (fb::Payload::DropItemRequest, Handling::ClientOnly),
+        (fb::Payload::LeaveRequest, Handling::ClientOnly),
+        (fb::Payload::LeaveStarted, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -6952,6 +6999,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V12 — authoritative leave
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_leave_request_carries_no_client_decision() {
+        let frame = encode_leave_request();
+        let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+        assert_eq!(envelope.payload_type(), fb::Payload::LeaveRequest);
+        let request = envelope
+            .payload_as_leave_request()
+            .expect("the payload is a leave request");
+        assert_eq!(
+            (request._tab.vtable().num_bytes() - 4) / 2,
+            0,
+            "LeaveRequest must not carry a duration, cancellation or client outcome"
+        );
+    }
+
+    #[test]
+    fn a_leave_started_carries_the_server_s_remaining_time() {
+        assert_eq!(
+            decode(&encode_leave_started(10_000)),
+            Ok(Message::LeaveStarted(LeaveStarted {
+                remaining_ms: 10_000,
+            }))
+        );
+        assert_eq!(
+            decode(&encode_leave_started(0)),
+            Err(DecodeError::LeaveWithoutTime)
+        );
     }
 
     #[test]
