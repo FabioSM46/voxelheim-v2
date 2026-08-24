@@ -3,6 +3,7 @@
 mod character;
 mod crosshair;
 mod health;
+mod hunger;
 
 mod hotbar;
 mod icon;
@@ -150,6 +151,7 @@ impl Plugin for UiPlugin {
                 character::CharacterUiPlugin,
                 crosshair::CrosshairPlugin,
                 health::HealthUiPlugin,
+                hunger::HungerUiPlugin,
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
                 login::LoginPlugin,
