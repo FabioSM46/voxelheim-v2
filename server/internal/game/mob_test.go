@@ -269,6 +269,65 @@ func TestADraugrClosesTheDistanceToItsTarget(t *testing.T) {
 	_ = player
 }
 
+func TestADeerFleesDirectlyAwayAndStopsBeyondItsReleaseRange(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	id := h.spawnMobAt(vnet.MobKindDeer, [3]float32{0.5, 64, 0.5})
+	player, _ := h.join(1, [3]float32{10.5, 64, 0.5})
+
+	h.step()
+	fleeing := h.mob(id)
+	if fleeing.action != vnet.MobActionFlee {
+		t.Fatalf("action = %s, want Flee inside the deer's awareness", fleeing.action)
+	}
+	if fleeing.vel[0] >= 0 || fleeing.vel[2] != 0 {
+		t.Errorf("velocity = %v, want directly away from the player on -X", fleeing.vel)
+	}
+	if fleeing.target != 0 {
+		t.Errorf("a passive deer stored hostile target %d", fleeing.target)
+	}
+
+	h.sim.mu.Lock()
+	player.pos = [3]float64{passiveFleeReleaseRange + 30, 64, 0.5}
+	h.sim.mu.Unlock()
+	h.step()
+	stopped := h.mob(id)
+	if stopped.action != vnet.MobActionIdle || stopped.vel[0] != 0 || stopped.vel[2] != 0 {
+		t.Errorf("deer beyond release range is action=%s velocity=%v, want stationary Idle",
+			stopped.action, stopped.vel)
+	}
+}
+
+func TestDamageStartsADeerFleeingWithoutGivingItAnAttack(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	id := h.spawnMobAt(vnet.MobKindDeer, [3]float32{0.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	m := h.sim.mobs[id]
+	h.sim.damageMobLocked(m, 1)
+	damaged := *m
+	h.sim.mu.Unlock()
+	if damaged.action != vnet.MobActionFlee {
+		t.Fatalf("damage left the deer in %s, want Flee", damaged.action)
+	}
+
+	// Even a corrupt prior combat state is routed back through the passive branch rather
+	// than allowed to count down or land an attack.
+	for _, forbidden := range []vnet.MobAction{vnet.MobActionWindup, vnet.MobActionRecovery} {
+		h.sim.mu.Lock()
+		h.sim.mobs[id].action = forbidden
+		h.sim.mobs[id].actionTicks = 1
+		h.sim.mu.Unlock()
+		h.step()
+		if got := h.mob(id).action; got == vnet.MobActionWindup || got == vnet.MobActionRecovery {
+			t.Errorf("passive deer remained in attack state %s", got)
+		}
+	}
+}
+
 // One block is what a player steps over without thinking, so it is what a draugr clears.
 // Anything taller is a wall it is allowed to be stuck behind — pathfinding is a separate
 // system and this one must not quietly contain half of it.

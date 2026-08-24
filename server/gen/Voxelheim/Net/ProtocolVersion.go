@@ -64,6 +64,10 @@ import "strconv"
 // / server-owned label for one visible entity and refuses a description that omits it.
 // / A V12 server would omit the field, so the newer client would otherwise handshake
 // / cleanly and end the session as soon as the first player entered view.
+// /
+// / **V14 appends `MobKind.Deer` and `MobAction.Flee`.** Both values travel inside a
+// / `MobState`, whose client decoder refuses unknown enum members. A V13 client would
+// / therefore handshake cleanly and end the session as soon as a deer entered view.
 type ProtocolVersion uint16
 
 const (
@@ -72,7 +76,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 13
+	ProtocolVersionCurrent ProtocolVersion = 14
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

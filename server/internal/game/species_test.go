@@ -25,6 +25,7 @@ import (
 var (
 	draugrRow = mobRegistry[vnet.MobKindDraugr]
 	vargrRow  = mobRegistry[vnet.MobKindVargr]
+	deerRow   = mobRegistry[vnet.MobKindDeer]
 )
 
 // ---------------------------------------------------------------------------
@@ -67,17 +68,24 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 		if def.aggroRange <= 0 {
 			t.Errorf("%s has an aggro range of %v, so it never notices a player", kind, def.aggroRange)
 		}
-		if def.attackRange <= 0 {
-			t.Errorf("%s has an attack range of %v, so it can never reach anybody", kind, def.attackRange)
-		}
-		if def.damage == 0 {
-			t.Errorf("%s does no damage, so its swing is scenery", kind)
-		}
-		if def.windup <= 0 {
-			t.Errorf("%s has a windup of %v: an attack with no telegraph cannot be reacted to", kind, def.windup)
-		}
-		if def.recovery <= 0 {
-			t.Errorf("%s has a recovery of %v, so its cadence is the tick rate's answer", kind, def.recovery)
+		if def.passive {
+			if def.attackRange != 0 || def.damage != 0 || def.windup != 0 || def.recovery != 0 {
+				t.Errorf("passive %s carries an attack: range=%v damage=%d windup=%v recovery=%v",
+					kind, def.attackRange, def.damage, def.windup, def.recovery)
+			}
+		} else {
+			if def.attackRange <= 0 {
+				t.Errorf("hostile %s has an attack range of %v", kind, def.attackRange)
+			}
+			if def.damage == 0 {
+				t.Errorf("hostile %s does no damage", kind)
+			}
+			if def.windup <= 0 {
+				t.Errorf("hostile %s has a windup of %v", kind, def.windup)
+			}
+			if def.recovery <= 0 {
+				t.Errorf("hostile %s has a recovery of %v", kind, def.recovery)
+			}
 		}
 		if def.body.width <= 0 || def.body.height <= 0 {
 			t.Errorf("%s has a body of %v by %v, which occupies nothing", kind, def.body.width, def.body.height)
@@ -108,17 +116,33 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 		}
 
 		// The relationships each row has to hold inside itself, rather than the values.
-		if def.attackRange > def.aggroRange {
+		if !def.passive && def.attackRange > def.aggroRange {
 			t.Errorf("%s reaches %v blocks and notices you at %v: it could swing at somebody it has not seen",
 				kind, def.attackRange, def.aggroRange)
 		}
-		if def.attackRange >= SwordReach {
+		if !def.passive && def.attackRange >= SwordReach {
 			t.Errorf("%s reaches %v blocks against a sword's %v, so keeping your distance buys nothing",
 				kind, def.attackRange, SwordReach)
 		}
-		if def.damage >= PlayerMaxHealth {
+		if !def.passive && def.damage >= PlayerMaxHealth {
 			t.Errorf("%s takes %d of a player's %d health in one blow", kind, def.damage, PlayerMaxHealth)
 		}
+	}
+}
+
+func TestTheDeerRowIsPassivePrey(t *testing.T) {
+	t.Parallel()
+
+	want := mobDefinition{
+		maxHealth:  20,
+		speed:      4.0,
+		aggroRange: 12.0,
+		passive:    true,
+		body:       body{width: 0.9, height: 1.4},
+		loot:       []lootRoll{{item: ItemRawMeat, min: 1, max: 2}},
+	}
+	if !reflect.DeepEqual(deerRow, want) {
+		t.Errorf("the deer's row is %+v, want %+v", deerRow, want)
 	}
 }
 
@@ -309,6 +333,12 @@ func TestEverySpeciesTelegraphSurvivesEveryTickRate(t *testing.T) {
 		}
 		for kind, def := range mobRegistry {
 			got := timings[kind]
+			if def.passive {
+				if got != (mobTicks{}) {
+					t.Errorf("passive %s has attack timings %+v at %d Hz", kind, got, rate)
+				}
+				continue
+			}
 			if got.windup == 0 {
 				t.Errorf("%s has a windup of no ticks at %d Hz", kind, rate)
 			}

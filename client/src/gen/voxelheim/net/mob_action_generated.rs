@@ -11,19 +11,20 @@ pub const ENUM_MIN_MOB_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_ACTION: u8 = 5;
+pub const ENUM_MAX_MOB_ACTION: u8 = 6;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_ACTION: [MobAction; 6] = [
+pub const ENUM_VALUES_MOB_ACTION: [MobAction; 7] = [
     MobAction::Unknown,
     MobAction::Idle,
     MobAction::Chase,
     MobAction::Windup,
     MobAction::Recovery,
     MobAction::Dying,
+    MobAction::Flee,
 ];
 
 /// What a mob is doing this tick, as the server's finite-state machine holds it.
@@ -62,9 +63,11 @@ impl MobAction {
     /// falls, are presentation; how long the server keeps sending this action, and when
     /// the drop exists, are not.
     pub const Dying: Self = Self(5);
+    /// Moving directly away from the nearest live player the server chose as a threat.
+    pub const Flee: Self = Self(6);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 5;
+    pub const ENUM_MAX: u8 = 6;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Idle,
@@ -72,6 +75,7 @@ impl MobAction {
         Self::Windup,
         Self::Recovery,
         Self::Dying,
+        Self::Flee,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -82,6 +86,7 @@ impl MobAction {
             Self::Windup => Some("Windup"),
             Self::Recovery => Some("Recovery"),
             Self::Dying => Some("Dying"),
+            Self::Flee => Some("Flee"),
             _ => None,
         }
     }

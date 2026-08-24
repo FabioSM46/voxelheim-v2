@@ -38,6 +38,8 @@ const (
 	/// falls, are presentation; how long the server keeps sending this action, and when
 	/// the drop exists, are not.
 	MobActionDying MobAction = 5
+	/// Moving directly away from the nearest live player the server chose as a threat.
+	MobActionFlee MobAction = 6
 )
 
 var EnumNamesMobAction = map[MobAction]string{
@@ -47,6 +49,7 @@ var EnumNamesMobAction = map[MobAction]string{
 	MobActionWindup:   "Windup",
 	MobActionRecovery: "Recovery",
 	MobActionDying:    "Dying",
+	MobActionFlee:     "Flee",
 }
 
 var EnumValuesMobAction = map[string]MobAction{
@@ -56,6 +59,7 @@ var EnumValuesMobAction = map[string]MobAction{
 	"Windup":   MobActionWindup,
 	"Recovery": MobActionRecovery,
 	"Dying":    MobActionDying,
+	"Flee":     MobActionFlee,
 }
 
 func (v MobAction) String() string {

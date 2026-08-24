@@ -630,7 +630,10 @@ enum LifeState : ubyte {
 enum MobKind : ubyte {
   Unknown = 0,
   Draugr = 1,
-  Vargr = 2
+  Vargr = 2,
+
+  /// A passive animal that runs from nearby live players rather than attacking them.
+  Deer = 3
 }
 
 /// What a mob is doing this tick, as the server's finite-state machine holds it.
@@ -669,7 +672,10 @@ enum MobAction : ubyte {
   /// Nothing about the pose is here. How long a body takes to go down, and which way it
   /// falls, are presentation; how long the server keeps sending this action, and when
   /// the drop exists, are not.
-  Dying = 5
+  Dying = 5,
+
+  /// Moving directly away from the nearest live player the server chose as a threat.
+  Flee = 6
 }
 
 /// The recipient's own health and life state, as the server holds them.

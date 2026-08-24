@@ -8,14 +8,14 @@
 //!
 //! Everything animated below is cosmetic and follows an authoritative transition rather
 //! than deciding one. A windup pose plays because the server said `Windup`, and it ends
-//! when the server says something else. **The two kinds share every one of those rules**:
+//! when the server says something else. **Every kind shares those presentation rules**:
 //! a vargr leans and flashes through exactly the code a draugr does, on the timings the
 //! server's registry chose, because a second copy of them here would be a second thing to
 //! keep in step and would decide nothing either way.
 //!
 //! ## The bodies are mirrored from the server, and must stay in step with it
 //!
-//! [`DRAUGR_BODY`] and [`VARGR_BODY`] are copies of the `body` field of each row in
+//! [`DRAUGR_BODY`], [`VARGR_BODY`] and [`DEER_BODY`] are copies of each row's `body` in
 //! `server/internal/game/species.go`, which is where collision, the swing's reach and the
 //! spawn separation all read it from. The server collides that box and this side draws
 //! inside it, so a mismatch is a creature that visibly does not fill the space a swing
@@ -55,13 +55,18 @@ const VARGR_BODY: Body = Body {
     width: 0.9,
     height: 1.0,
 };
+const DEER_BODY: Body = Body {
+    width: 0.9,
+    height: 1.4,
+};
 
 /// The box the server collides for one kind. Total over [`MobKind`], with no wildcard
-/// arm, so a third species does not compile until it has been given a body.
+/// arm, so a new species does not compile until it has been given a body.
 const fn body(kind: MobKind) -> Body {
     match kind {
         MobKind::Draugr => DRAUGR_BODY,
         MobKind::Vargr => VARGR_BODY,
+        MobKind::Deer => DEER_BODY,
     }
 }
 
@@ -82,6 +87,17 @@ const VARGR_HACKLES: Vec3 = Vec3::new(0.34, 0.38, 0.30);
 const VARGR_HEAD: Vec3 = Vec3::new(0.42, 0.34, 0.34);
 const VARGR_LEG: Vec3 = Vec3::new(0.16, 0.24, 0.16);
 const VARGR_LEG_SPREAD: Vec3 = Vec3::new(0.26, 0.0, 0.26);
+
+/// A deer's raised body, slim legs, upright neck and broad ears. The torso spans the
+/// collision box front-to-back; the ears span it side-to-side, making the complete mesh
+/// fill the server-owned 0.9 by 1.4 body without pretending the animal is a cuboid.
+const DEER_TORSO: Vec3 = Vec3::new(0.55, 0.50, DEER_BODY.width);
+const DEER_TORSO_CENTRE: Vec3 = Vec3::new(0.0, 0.70, 0.0);
+const DEER_LEG: Vec3 = Vec3::new(0.12, 0.48, 0.12);
+const DEER_LEG_SPREAD: Vec3 = Vec3::new(0.20, 0.0, 0.30);
+const DEER_NECK: Vec3 = Vec3::new(0.24, 0.55, 0.24);
+const DEER_HEAD: Vec3 = Vec3::new(0.36, 0.30, 0.38);
+const DEER_EARS: Vec3 = Vec3::new(DEER_BODY.width, 0.08, 0.12);
 
 /// How long a hit flash lasts. Short enough to read as an impact rather than a state.
 const FLASH_TIME: Duration = Duration::from_millis(180);
@@ -143,6 +159,10 @@ const DRAUGR_HEAD_COLOUR: Color = Color::srgb(0.46, 0.48, 0.44);
 const VARGR_BODY_COLOUR: Color = Color::srgb(0.26, 0.22, 0.20);
 const VARGR_HEAD_COLOUR: Color = Color::srgb(0.38, 0.33, 0.29);
 
+/// Warm hide and a lighter face distinguish prey from both hostile species.
+const DEER_BODY_COLOUR: Color = Color::srgb(0.48, 0.30, 0.18);
+const DEER_HEAD_COLOUR: Color = Color::srgb(0.66, 0.46, 0.28);
+
 /// The red a hit flashes. Shared by every kind: an impact reads the same whatever was hit.
 const FLASH_COLOUR: Color = Color::srgb(0.85, 0.20, 0.18);
 
@@ -184,22 +204,24 @@ struct SpeciesVisuals {
 pub(super) struct MobVisuals {
     draugr: SpeciesVisuals,
     vargr: SpeciesVisuals,
+    deer: SpeciesVisuals,
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
 }
 
 impl MobVisuals {
     /// The pair one kind is drawn from. Total over [`MobKind`] with no wildcard arm, so a
-    /// third species does not compile until it has been given meshes and colours.
+    /// new species does not compile until it has been given meshes and colours.
     fn of(&self, kind: MobKind) -> &SpeciesVisuals {
         match kind {
             MobKind::Draugr => &self.draugr,
             MobKind::Vargr => &self.vargr,
+            MobKind::Deer => &self.deer,
         }
     }
 }
 
-/// One live mob of either kind, keyed by the identity the server gave it.
+/// One live mob of any known kind, keyed by the identity the server gave it.
 #[derive(Component, Debug)]
 pub(super) struct Mob {
     entity_id: u64,
@@ -289,6 +311,13 @@ pub(super) fn create_visuals(
             body_material: materials.add(StandardMaterial::from_color(VARGR_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(VARGR_HEAD_COLOUR)),
         },
+        deer: SpeciesVisuals {
+            body: meshes.add(deer_body_mesh()),
+            head: meshes.add(deer_head_mesh()),
+            legs: Some(meshes.add(deer_legs_mesh())),
+            body_material: materials.add(StandardMaterial::from_color(DEER_BODY_COLOUR)),
+            head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
+        },
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
     });
 }
@@ -374,6 +403,41 @@ fn vargr_head_mesh() -> Mesh {
         VARGR_TORSO_CENTRE.y - VARGR_TORSO.y / 5.0,
         -(body(MobKind::Vargr).width - VARGR_HEAD.z) / 2.0,
     ))
+}
+
+/// The deer's long torso, aligned with the canonical -Z facing.
+fn deer_body_mesh() -> Mesh {
+    Mesh::from(Cuboid::from_size(DEER_TORSO)).translated_by(DEER_TORSO_CENTRE)
+}
+
+/// Four slim legs standing on the snapshot position.
+fn deer_legs_mesh() -> Mesh {
+    let leg = Cuboid::from_size(DEER_LEG);
+    let mut standing = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+        .map(|(sx, sz): (f32, f32)| {
+            Mesh::from(leg).translated_by(Vec3::new(
+                sx * DEER_LEG_SPREAD.x,
+                DEER_LEG.y / 2.0,
+                sz * DEER_LEG_SPREAD.z,
+            ))
+        })
+        .into_iter();
+    let mut legs = standing.next().expect("a deer has four legs");
+    merge_all(&mut legs, standing, "deer legs");
+    legs
+}
+
+/// The neck, face and ears, merged so the hit flash remains one material swap.
+fn deer_head_mesh() -> Mesh {
+    let mut head = Mesh::from(Cuboid::from_size(DEER_HEAD)).translated_by(Vec3::new(
+        0.0,
+        DEER_BODY.height - DEER_HEAD.y / 2.0,
+        -(DEER_BODY.width - DEER_HEAD.z) / 2.0,
+    ));
+    let neck = Mesh::from(Cuboid::from_size(DEER_NECK)).translated_by(Vec3::new(0.0, 1.02, -0.16));
+    let ears = Mesh::from(Cuboid::from_size(DEER_EARS)).translated_by(Vec3::new(0.0, 1.32, -0.24));
+    merge_all(&mut head, [neck, ears], "deer head");
+    head
 }
 
 /// Spawns, places and despawns bodies from the latest authoritative snapshot.
@@ -525,7 +589,7 @@ fn lean_for(action: MobAction) -> f32 {
     match action {
         MobAction::Windup => WINDUP_LEAN,
         MobAction::Recovery => RECOVERY_LEAN,
-        MobAction::Idle | MobAction::Chase | MobAction::Dying => 0.0,
+        MobAction::Idle | MobAction::Chase | MobAction::Flee | MobAction::Dying => 0.0,
     }
 }
 
@@ -548,7 +612,7 @@ fn fallen(elapsed: Duration) -> f32 {
 /// there — so a draugr goes over backwards about its heels and a vargr rolls sideways off
 /// its legs, and neither needs anything translated.
 ///
-/// Total over [`MobKind`] with no wildcard arm, for the reason [`body`] is: a third species
+/// Total over [`MobKind`] with no wildcard arm, for the reason [`body`] is: a new species
 /// does not compile until somebody has decided how it falls over.
 ///
 /// The identity at `fallen == 0` is what lets this be composed unconditionally, whether the
@@ -557,6 +621,7 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
     match kind {
         MobKind::Draugr => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
+        MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
     }
 }
 
@@ -572,6 +637,10 @@ fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
         MobKind::Draugr => Vec3::ONE,
         MobKind::Vargr => {
+            let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
+            Vec3::new(out, 1.0, out)
+        }
+        MobKind::Deer => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
             Vec3::new(out, 1.0, out)
         }
@@ -732,6 +801,14 @@ mod tests {
         }
     }
 
+    fn deer(entity_id: u64, x: f32, health: u16, action: MobAction) -> MobState {
+        MobState {
+            kind: MobKind::Deer,
+            max_health: 20,
+            ..draugr(entity_id, x, health, action)
+        }
+    }
+
     fn headless() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
@@ -827,6 +904,17 @@ mod tests {
             bodies(&mut app),
             vec![(900, 60, MobAction::Idle), (901, 60, MobAction::Chase)]
         );
+    }
+
+    #[test]
+    fn a_fleeing_deer_is_drawn_from_the_authoritative_snapshot() {
+        let mut app = headless();
+        deliver(&mut app, 1, vec![deer(903, 4.0, 20, MobAction::Flee)]);
+        app.update();
+
+        assert_eq!(kinds(&mut app), vec![(903, MobKind::Deer)]);
+        assert_eq!(bodies(&mut app), vec![(903, 20, MobAction::Flee)]);
+        assert_eq!(lean_for(MobAction::Flee), 0.0);
     }
 
     /// The newest snapshot is the complete existence set, exactly as it is for drops.
@@ -1310,6 +1398,10 @@ mod tests {
             (
                 MobKind::Vargr,
                 vec![vargr_body_mesh(), vargr_head_mesh(), vargr_legs_mesh()],
+            ),
+            (
+                MobKind::Deer,
+                vec![deer_body_mesh(), deer_head_mesh(), deer_legs_mesh()],
             ),
         ] {
             let expected = body(kind);

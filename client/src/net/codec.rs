@@ -392,6 +392,7 @@ impl LifeState {
 pub enum MobKind {
     Draugr,
     Vargr,
+    Deer,
 }
 
 impl MobKind {
@@ -405,6 +406,7 @@ impl MobKind {
         match value {
             fb::MobKind::Draugr => Some(Self::Draugr),
             fb::MobKind::Vargr => Some(Self::Vargr),
+            fb::MobKind::Deer => Some(Self::Deer),
             _ => None,
         }
     }
@@ -418,6 +420,7 @@ impl MobKind {
 pub enum MobAction {
     Idle,
     Chase,
+    Flee,
     Windup,
     Recovery,
     /// Killed, and going down. **The only statement of death this contract makes about a
@@ -437,6 +440,7 @@ impl MobAction {
             fb::MobAction::Windup => Some(Self::Windup),
             fb::MobAction::Recovery => Some(Self::Recovery),
             fb::MobAction::Dying => Some(Self::Dying),
+            fb::MobAction::Flee => Some(Self::Flee),
             _ => None,
         }
     }
@@ -4254,14 +4258,18 @@ mod tests {
     /// string this decoder refuses when absent. Both would fail only after a clean handshake
     /// without their bumps.
     ///
+    /// **V14 appends `MobKind::Deer` and `MobAction::Flee`.** Both are enum members in a
+    /// `MobState`; this decoder refuses either unknown member, so an older client would
+    /// otherwise connect and then end its session when a deer entered view.
+    ///
     /// The rule that generalises, now that five shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v13_requires_the_player_name_and_moves_to_thirteen() {
+    fn protocol_v14_names_the_deer_and_its_flight() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 13);
+        assert_eq!(fb::ProtocolVersion::Current.0, 14);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4645,6 +4653,8 @@ mod tests {
 
         assert_eq!(fb::MobKind::Unknown.0, 0);
         assert_eq!(fb::MobKind::Draugr.0, 1);
+        assert_eq!(fb::MobKind::Vargr.0, 2);
+        assert_eq!(fb::MobKind::Deer.0, 3);
 
         assert_eq!(fb::MobAction::Unknown.0, 0);
         assert_eq!(fb::MobAction::Idle.0, 1);
@@ -4654,6 +4664,7 @@ mod tests {
         // Appended by V9, pinned with the four before it: the value is an integer on the
         // wire, so a renumbering would draw one action where the server said another.
         assert_eq!(fb::MobAction::Dying.0, 5);
+        assert_eq!(fb::MobAction::Flee.0, 6);
     }
 
     /// The same guarantee for V4's vocabulary, and the zero carries more weight here:
@@ -4833,7 +4844,7 @@ mod tests {
     #[test]
     fn a_kind_this_build_has_never_heard_of_is_still_refused() {
         assert_eq!(MobKind::from_wire(fb::MobKind::Unknown), None);
-        assert_eq!(MobKind::from_wire(fb::MobKind(3)), None);
+        assert_eq!(MobKind::from_wire(fb::MobKind(4)), None);
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);
@@ -7172,6 +7183,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(900, MobKind::Draugr), (902, MobKind::Vargr)]
         );
+    }
+
+    #[test]
+    fn a_snapshot_carrying_a_fleeing_deer_decodes() {
+        let deer = MobStateWire {
+            kind: fb::MobKind::Deer,
+            health: 20,
+            max_health: 20,
+            action: fb::MobAction::Flee,
+            ..MobStateWire::draugr(903, 4.0)
+        };
+
+        let Ok(Message::Snapshot(snapshot)) = snapshot_of(&[deer], PlayerVitalsWire::default())
+        else {
+            panic!("a snapshot carrying a fleeing deer did not decode");
+        };
+        assert_eq!(snapshot.mobs[0].kind, MobKind::Deer);
+        assert_eq!(snapshot.mobs[0].action, MobAction::Flee);
     }
 
     /// The campfire's half of the same statement, at the same layer.

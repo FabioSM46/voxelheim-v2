@@ -218,17 +218,20 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // newer client refuses when absent. Both would fail only after a clean handshake without
 // their bumps.
 //
+// **V14 appends MobKind.Deer and MobAction.Flee.** Both travel inside MobState and the
+// client refuses unknown enum members, so an older client would fail mid-session.
+//
 // The rule that generalises, now that five shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV13RequiresThePlayerNameAndMovesToThirteen(t *testing.T) {
+func TestProtocolV14NamesTheDeerAndItsFlight(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 13 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 13", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 14 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 14", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -1660,6 +1663,8 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]byte{
 		// Appended after Draugr = 1.
 		"MobKind.Vargr": {byte(vnet.MobKindVargr), 2},
+		// Appended in V14 after Vargr = 2.
+		"MobKind.Deer": {byte(vnet.MobKindDeer), 3},
 		// Appended after Forge = 2.
 		"StructureKind.Campfire": {byte(vnet.StructureKindCampfire), 3},
 		// Appended after Tent = 4.
@@ -1681,7 +1686,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	// a decision fails here rather than reaching the wire. Each count includes the
 	// zero member every one of these enums carries to fail closed.
 	for name, pair := range map[string][2]int{
-		"MobKind":       {len(vnet.EnumNamesMobKind), 3},
+		"MobKind":       {len(vnet.EnumNamesMobKind), 4},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
 		"RecipeID":      {len(vnet.EnumNamesRecipeID), 10},
 	} {

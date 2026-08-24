@@ -11,13 +11,18 @@ pub const ENUM_MIN_MOB_KIND: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_KIND: u8 = 2;
+pub const ENUM_MAX_MOB_KIND: u8 = 3;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_KIND: [MobKind; 3] = [MobKind::Unknown, MobKind::Draugr, MobKind::Vargr];
+pub const ENUM_VALUES_MOB_KIND: [MobKind; 4] = [
+    MobKind::Unknown,
+    MobKind::Draugr,
+    MobKind::Vargr,
+    MobKind::Deer,
+];
 
 /// What kind of creature a `MobState` describes.
 ///
@@ -35,16 +40,20 @@ impl MobKind {
     pub const Unknown: Self = Self(0);
     pub const Draugr: Self = Self(1);
     pub const Vargr: Self = Self(2);
+    /// A passive animal that runs from nearby live players rather than attacking them.
+    pub const Deer: Self = Self(3);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 2;
-    pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Draugr, Self::Vargr];
+    pub const ENUM_MAX: u8 = 3;
+    pub const ENUM_VALUES: &'static [Self] =
+        &[Self::Unknown, Self::Draugr, Self::Vargr, Self::Deer];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
         match self {
             Self::Unknown => Some("Unknown"),
             Self::Draugr => Some("Draugr"),
             Self::Vargr => Some("Vargr"),
+            Self::Deer => Some("Deer"),
             _ => None,
         }
     }
