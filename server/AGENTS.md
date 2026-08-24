@@ -532,35 +532,36 @@ than as a special case of the inventory.
 ### A player can ask for one, and that is the fourth reason a drop exists
 
 `Player.DropItem` in `drop.go` answers a `DropItemRequest`: one slot index on the wire, and
-the whole of it decided here. It is the only caller of `spawnStackDrop` that answers a
+the whole of it decided here. It is the only caller of `spawnPlayerStackDrop` that answers a
 *request* rather than something that happened to the world; the wearless world callers use
 `spawnDrop`, and both forms reach the same core entity path.
 
 - **The wire carries a slot and nothing else, and both absences are the safety.** No count,
   because a client that could name one would be stating what leaves its own pack; no
-  position, because one would let it put an item down anywhere in the world. The stack is
-  whatever the slot holds, and it lands at `voxelAt(p.pos)` — the cell the server says the
-  player's feet are in, the two steps a kill's loot already takes from the creature.
+  position or direction, because either would let it decide where an item lands. The stack
+  is whatever the slot holds, and its landing displacement comes from the movement basis's
+  forward vector computed from `p.yaw` and the server's `dropPlacementDistance`.
 - **Two phases split by the lock, which is `RemoveStructure`'s shape.** `releaseSlot` takes
   `Sim.mu`, checks liveness, takes the inventory with `TryLock`, reads the slot, empties it
-  and returns the state; `DropItem` then spawns outside that lock, because `spawnStackDrop`
-  takes it. Nothing is lost in the gap: the spawn core refuses an empty, unregistered or
-  invalid stack, and `releaseSlot` has already read a validated inventory slot before it
-  emptied anything.
+  and returns the state; `DropItem` then spawns outside that lock, because
+  `spawnPlayerStackDrop` takes it. Nothing is lost in the gap: the spawn core refuses an
+  empty, unregistered or invalid stack, and `releaseSlot` has already read a validated
+  inventory slot before it emptied anything.
 - **A worn slot reaches the ground as the exact authoritative object.** The fixed
   `ItemDropState` remains unchanged; V11 appends sparse `drop_durabilities` entries keyed by
   entity id, so block yields, loot rolls and structure bundles stay wearless and pay no
-  per-drop wire cost. `spawnStackDrop` carries the inventory stack through the entity, and
+  per-drop wire cost. The shared spawn core carries the inventory stack through the entity, and
   pickup inserts that exact durable stack into one empty slot instead of rebuilding it with
   `stackOf`. A blade let go of at 12 durability therefore comes back at 12, never at the
   registry maximum. Durable drops never merge because one wear pair describes one object.
-- **A player standing on what they put down picks it straight back up**, half a second later,
-  and that is the ordinary pickup rule rather than an oversight. The issue asked for a drop
-  indistinguishable from one the world produced, and `dropPickupDelayTicks` belongs to the
-  drop rather than to who spawned it — the same thing already happens to a block broken at
-  your own feet. So dropping is "put it down and step away", and
-  `TestADroppedStackIsCollectedBackByAPlayerWhoStaysOnIt` is what says that was chosen rather
-  than missed. Making it otherwise needs a per-drop delay or some velocity.
+- **A player-authored drop is collision-placed once, before it appears.** Its horizontal
+  displacement goes through the existing axis-by-axis `moveAndCollide`, so a wall stops it on
+  this side and may shorten or slide the placement along an unblocked axis. In open terrain it
+  begins outside the player's pickup radius on every configured tick rate, while the unchanged
+  `dropPickupDelayTicks` remains the only answer to when any drop may be collected. World-produced
+  drops enter the same creation core with no displacement and stay exactly where the world put
+  them. Because nothing carries horizontal velocity into `mergeDropsLocked`, a mixed player/world
+  merge cannot cancel a throw or drag a world pile after either has appeared.
 - **`RefusedAction.DropItem` exists on the wire and nothing sends it**, exactly like
   `MineBlock`, `EditBlock`, `Craft` and `Repair`. It has a member where a removal deliberately
   does not, and the contrast is the rule: every question a refused drop could answer is about

@@ -110,8 +110,13 @@ func newDropHarness(t *testing.T, terrain Terrain) *dropHarness {
 
 func newDropHarnessAt(t *testing.T, terrain Terrain, viewDistance uint8) *dropHarness {
 	t.Helper()
+	return newDropHarnessAtTickRate(t, terrain, viewDistance, DefaultTickRate)
+}
 
-	sim, err := NewSim(DefaultTickRate, viewDistance, testWorldSeed, terrain, refusedEdits{}, testEntityIDs(),
+func newDropHarnessAtTickRate(t *testing.T, terrain Terrain, viewDistance, tickRate uint8) *dropHarness {
+	t.Helper()
+
+	sim, err := NewSim(tickRate, viewDistance, testWorldSeed, terrain, refusedEdits{}, testEntityIDs(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
@@ -429,6 +434,21 @@ func TestBreakingSpawnsOneDropAtTheCentreOfTheVoxel(t *testing.T) {
 		if got := drop.wirePos(); got != want {
 			t.Errorf("the drop is sent at %v, want the centre of the broken voxel %v", got, want)
 		}
+	}
+}
+
+// A throw belongs only to Player.DropItem. A yield produced by the world keeps the
+// exact x/z chosen by that world event while gravity settles it vertically.
+func TestAWorldProducedDropHasNoHorizontalMotion(t *testing.T) {
+	t.Parallel()
+
+	h := newDropHarness(t, dropTerrain{groundTop: 63})
+	drop := h.spawn(ItemStone, 1, [3]int64{4, 70, -3})
+	startX, startZ := drop.pos[0], drop.pos[2]
+	h.advance(100)
+
+	if drop.pos[0] != startX || drop.pos[2] != startZ {
+		t.Errorf("the world drop moved horizontally from (%v, %v) to (%v, %v)", startX, startZ, drop.pos[0], drop.pos[2])
 	}
 }
 
