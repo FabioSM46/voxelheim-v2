@@ -30,18 +30,25 @@ use crate::net::{LifeState, PlayerVitals, Session};
 use crate::player::{ApplySnapshots, InputMode, SelfVitals};
 
 /// Width of the bar, in logical pixels.
-const BAR_WIDTH: f32 = 260.0;
+pub(super) const BAR_WIDTH: f32 = 260.0;
 
 /// Height of the bar, in logical pixels.
-const BAR_HEIGHT: f32 = 18.0;
+pub(super) const BAR_HEIGHT: f32 = 18.0;
 
 /// Thickness of the bar's edge. Thinner than a cell border: this is one long node rather
 /// than a grid, and the same weight would read as a frame around it.
-const BAR_BORDER: f32 = 2.0;
+pub(super) const BAR_BORDER: f32 = 2.0;
 
-/// Distance from the bottom of the window, in logical pixels. Clears the hotbar, which is
-/// [`CELL_SIZE`] tall and sits 18 px up, with a gap of the same order between them.
-const BAR_BOTTOM: f32 = 18.0 + CELL_SIZE + 14.0;
+/// Distance from the bottom of the window to the hunger bar, in logical pixels. It clears
+/// the hotbar, which is [`CELL_SIZE`] tall and sits 18 px up.
+pub(super) const HUNGER_BAR_BOTTOM: f32 = 18.0 + CELL_SIZE + 14.0;
+
+/// Vertical space between the two vital bars.
+pub(super) const VITAL_BAR_GAP: f32 = 8.0;
+
+/// Distance from the bottom of the window to this health bar. Hunger takes the lower
+/// position nearest the hotbar; health moves up by exactly one bar and the documented gap.
+pub(super) const HEALTH_BAR_BOTTOM: f32 = HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
 
 /// The empty part of the bar. The same near-black the empty inventory cells use, so the
 /// HUD reads as one surface.
@@ -126,7 +133,7 @@ fn spawn_health_bar(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
                 right: Val::Px(0.0),
-                bottom: Val::Px(BAR_BOTTOM),
+                bottom: Val::Px(HEALTH_BAR_BOTTOM),
                 display: Display::Flex,
                 column_gap: Val::Px(10.0),
                 align_items: AlignItems::Center,
