@@ -752,10 +752,11 @@ pub struct CharacterList {
 /// An appearance for an entity this client has never seen is **not** an error: the two
 /// streams are not ordered against each other, so either can arrive first and a
 /// receiver holds whichever half it has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerAppearance {
     pub entity_id: u64,
     pub appearance: Appearance,
+    pub name: String,
 }
 
 /// One character a client asks the server to create. **Intent only.**
@@ -1685,6 +1686,9 @@ pub enum DecodeError {
     /// Distinct from having no matching entity, which is **not** an error: the two
     /// streams are not ordered against each other. Zero names nobody at all.
     AppearanceWithoutEntity,
+    /// A V13 description omitted its server-owned display text. Empty is legal;
+    /// absence is a pre-V13 message shape and is not.
+    AppearanceWithoutName(u64),
     /// `LeaveStarted.remaining_ms` is zero, which describes a countdown already over.
     LeaveWithoutTime,
 }
@@ -1896,6 +1900,9 @@ impl fmt::Display for DecodeError {
             Self::AppearanceWithoutEntity => {
                 write!(f, "a PlayerAppearance carries the reserved entity id 0")
             }
+            Self::AppearanceWithoutName(entity_id) => {
+                write!(f, "PlayerAppearance for entity {entity_id} carries no name")
+            }
             Self::LeaveWithoutTime => write!(f, "LeaveStarted carries no time remaining"),
         }
     }
@@ -2043,6 +2050,10 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             if entity_id == 0 {
                 return Err(DecodeError::AppearanceWithoutEntity);
             }
+            let name = payload
+                .name()
+                .ok_or(DecodeError::AppearanceWithoutName(entity_id))?
+                .to_owned();
             // Nothing here asks whether the client knows this entity, and nothing may:
             // `schemas/player.fbs` is explicit that the appearance stream and the
             // snapshot stream are not ordered against each other, so an appearance for
@@ -2050,6 +2061,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             Ok(Message::PlayerAppearance(PlayerAppearance {
                 entity_id,
                 appearance: appearance(payload.appearance(), "PlayerAppearance")?,
+                name,
             }))
         }
         fb::Payload::LeaveStarted => {
@@ -4109,14 +4121,20 @@ pub(super) mod server_side {
 
     /// A `PlayerAppearance`. `appearance` of `None` omits the table, which is the
     /// frame the decoder must refuse rather than fill in with a placeholder.
-    pub fn encode_player_appearance(entity_id: u64, appearance: Option<AppearanceWire>) -> Vec<u8> {
+    pub fn encode_player_appearance(
+        entity_id: u64,
+        appearance: Option<AppearanceWire>,
+        name: Option<&str>,
+    ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
+        let name = name.map(|name| builder.create_string(name));
         let payload = fb::PlayerAppearance::create(
             &mut builder,
             &fb::PlayerAppearanceArgs {
                 entity_id,
                 appearance,
+                name,
             },
         );
         finish_envelope(
@@ -4231,14 +4249,19 @@ mod tests {
     /// accept a worn drop from a V10 server as pristine while the authoritative server still
     /// returned it worn on collection. The peers would silently disagree about one entity.
     ///
+    /// **V12 appends the leaving exchange and V13 appends `PlayerAppearance.name`.** The
+    /// former adds a client request an older server would reject; the latter is a required
+    /// string this decoder refuses when absent. Both would fail only after a clean handshake
+    /// without their bumps.
+    ///
     /// The rule that generalises, now that five shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v12_appends_the_leaving_exchange_and_moves_to_twelve() {
+    fn protocol_v13_requires_the_player_name_and_moves_to_thirteen() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 12);
+        assert_eq!(fb::ProtocolVersion::Current.0, 13);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5260,10 +5283,11 @@ mod tests {
     }
 
     #[test]
-    fn a_player_appearance_decodes_into_its_entity_and_its_face() {
+    fn a_player_appearance_decodes_into_its_entity_face_and_name() {
         let decoded = decode(&encode_player_appearance(
             4242,
             Some(AppearanceWire::default()),
+            Some("Brynhildr"),
         ));
 
         assert_eq!(
@@ -5271,8 +5295,25 @@ mod tests {
             Ok(Message::PlayerAppearance(PlayerAppearance {
                 entity_id: 4242,
                 appearance: an_appearance(),
+                name: "Brynhildr".to_owned(),
             }))
         );
+    }
+
+    #[test]
+    fn an_empty_or_unbounded_unicode_name_is_still_display_text() {
+        let long = "ᚠe\u{301}".repeat(2_048);
+        for name in ["", long.as_str()] {
+            let decoded = decode(&encode_player_appearance(
+                7,
+                Some(AppearanceWire::default()),
+                Some(name),
+            ));
+            let Ok(Message::PlayerAppearance(described)) = decoded else {
+                panic!("the display text was refused: {decoded:?}");
+            };
+            assert_eq!(described.name, name);
+        }
     }
 
     /// **An appearance for an entity this client has never seen is not an error**, and
@@ -5287,6 +5328,7 @@ mod tests {
         let decoded = decode(&encode_player_appearance(
             u64::MAX,
             Some(AppearanceWire::default()),
+            Some("Unseen"),
         ));
 
         assert!(
@@ -5300,15 +5342,24 @@ mod tests {
         assert_eq!(
             decode(&encode_player_appearance(
                 0,
-                Some(AppearanceWire::default())
+                Some(AppearanceWire::default()),
+                Some("Nobody"),
             )),
             Err(DecodeError::AppearanceWithoutEntity)
         );
         assert_eq!(
-            decode(&encode_player_appearance(1, None)),
+            decode(&encode_player_appearance(1, None, Some("No face"))),
             Err(DecodeError::MissingAppearance {
                 at: "PlayerAppearance"
             })
+        );
+        assert_eq!(
+            decode(&encode_player_appearance(
+                1,
+                Some(AppearanceWire::default()),
+                None,
+            )),
+            Err(DecodeError::AppearanceWithoutName(1))
         );
     }
 
@@ -5337,7 +5388,7 @@ mod tests {
                 "shoes_color" => wire.shoes_color |= 0xAB00_0000,
                 _ => wire.hair_color |= 0x7F00_0000,
             }
-            match decode(&encode_player_appearance(1, Some(wire))) {
+            match decode(&encode_player_appearance(1, Some(wire), Some("Colour"))) {
                 Err(DecodeError::AppearanceColorReserved { field: got, .. }) => {
                     assert_eq!(got, field)
                 }
@@ -5404,7 +5455,7 @@ mod tests {
                 ..AppearanceWire::default()
             };
             assert_eq!(
-                decode(&encode_player_appearance(1, Some(wire))),
+                decode(&encode_player_appearance(1, Some(wire), Some("Hair"))),
                 Err(DecodeError::UnknownHairModel(value.0))
             );
         }
@@ -5441,10 +5492,15 @@ mod tests {
         };
 
         assert_eq!(
-            decode(&encode_player_appearance(1, Some(wire))),
+            decode(&encode_player_appearance(
+                1,
+                Some(wire),
+                Some("Placeholder")
+            )),
             Ok(Message::PlayerAppearance(PlayerAppearance {
                 entity_id: 1,
                 appearance: PLACEHOLDER_APPEARANCE,
+                name: "Placeholder".to_owned(),
             }))
         );
     }
@@ -5502,7 +5558,7 @@ mod tests {
     fn every_truncation_and_corruption_of_a_v7_payload_survives_decoding() {
         let frames = [
             encode_server_character_list(Some(&[CharacterSummaryWire::default()]), 3),
-            encode_player_appearance(1, Some(AppearanceWire::default())),
+            encode_player_appearance(1, Some(AppearanceWire::default()), Some("Corruption")),
         ];
 
         for frame in frames {

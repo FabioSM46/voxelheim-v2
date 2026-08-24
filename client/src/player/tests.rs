@@ -86,13 +86,18 @@ fn an_appearance(model: HairModel) -> Appearance {
 }
 
 /// Queues an appearance as the net thread would.
-fn describe(app: &mut App, entity_id: u64, appearance: Appearance) {
+fn describe_as(app: &mut App, entity_id: u64, name: &str, appearance: Appearance) {
     app.world_mut()
         .resource_mut::<AppearanceInbox>()
         .push(PlayerAppearance {
             entity_id,
             appearance,
+            name: name.to_owned(),
         });
+}
+
+fn describe(app: &mut App, entity_id: u64, appearance: Appearance) {
+    describe_as(app, entity_id, "Test Character", appearance);
 }
 
 /// The entity drawing one of the server's, if there is one.
@@ -103,6 +108,15 @@ fn body_of(app: &mut App, entity_id: u64) -> Option<Entity> {
         .iter(world)
         .find(|(_, body)| body.0 == entity_id)
         .map(|(entity, _)| entity)
+}
+
+fn name_plate_of(app: &mut App, entity_id: u64) -> Option<(Entity, String)> {
+    let world = app.world_mut();
+    let mut query = world.query::<(Entity, &NamePlate, &Text)>();
+    query
+        .iter(world)
+        .find(|(_, plate, _)| plate.0 == entity_id)
+        .map(|(entity, _, text)| (entity, text.0.clone()))
 }
 
 /// Every drawn part of one body, sorted by part so a failure reads the same way twice.
@@ -1137,6 +1151,131 @@ fn an_appearance_that_arrives_late_dresses_the_body_that_is_already_there() {
     assert_ne!(
         dressed, grey,
         "the appearance that arrived is the one drawn"
+    );
+}
+
+#[test]
+fn only_a_described_remote_body_gets_a_fixed_size_name_plate() {
+    let mut app = headless_player();
+    describe_as(
+        &mut app,
+        LOCAL_ID,
+        "This session",
+        an_appearance(HairModel::Braided),
+    );
+    describe_as(&mut app, 99, "Astrid", an_appearance(HairModel::Topknot));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(98, [2.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    assert!(
+        name_plate_of(&mut app, LOCAL_ID).is_none(),
+        "the local name is not drawn over the player's own view in either camera mode"
+    );
+    assert!(
+        name_plate_of(&mut app, 98).is_none(),
+        "a body is not labelled with a name the server has not described"
+    );
+    let (plate, text) = name_plate_of(&mut app, 99).expect("the described remote has a plate");
+    assert_eq!(text, "Astrid");
+
+    let world = app.world();
+    let node = world.entity(plate).get::<Node>().expect("the plate is UI");
+    assert_eq!(node.width, Val::Px(NAME_PLATE_WIDTH));
+    assert_eq!(node.height, Val::Px(NAME_PLATE_HEIGHT));
+    let font = world
+        .entity(plate)
+        .get::<TextFont>()
+        .expect("the plate has a fixed font");
+    assert_eq!(font.font_size, FontSize::Px(NAME_PLATE_FONT_SIZE));
+}
+
+#[test]
+fn a_description_that_arrives_late_adds_a_plate_without_replacing_the_body() {
+    let mut app = headless_player();
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let body = body_of(&mut app, 99).expect("the undescribed body is drawn");
+    assert!(name_plate_of(&mut app, 99).is_none());
+
+    describe_as(&mut app, 99, "Bjorn", an_appearance(HairModel::Cropped));
+    app.update();
+
+    assert_eq!(body_of(&mut app, 99), Some(body));
+    assert_eq!(
+        name_plate_of(&mut app, 99).map(|(_, text)| text),
+        Some("Bjorn".to_owned())
+    );
+}
+
+#[test]
+fn a_player_who_leaves_takes_their_name_plate_with_them() {
+    let mut app = headless_player();
+    let start = Instant::now();
+    describe_as(&mut app, 99, "Freya", an_appearance(HairModel::Loose));
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+    assert!(name_plate_of(&mut app, 99).is_some());
+
+    deliver(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        start + INTERVAL,
+    );
+    app.update();
+
+    assert!(body_of(&mut app, 99).is_none());
+    assert!(
+        name_plate_of(&mut app, 99).is_none(),
+        "a screen-space root cannot outlive the body it labels"
+    );
+}
+
+#[test]
+fn hostile_and_unicode_names_remain_bounded_valid_single_line_text() {
+    assert_eq!(name_plate_text(""), "");
+    assert_eq!(name_plate_text("Sigrid\nJarl"), "Sigrid\u{fffd}Jarl");
+    assert_eq!(name_plate_text("石のᚠe\u{301}"), "石のᚠe\u{301}");
+
+    let long = "界".repeat(NAME_PLATE_CHARACTERS + 20);
+    let shown = name_plate_text(&long);
+    assert_eq!(shown.chars().count(), NAME_PLATE_CHARACTERS + 1);
+    assert!(shown.ends_with('…'));
+}
+
+#[test]
+fn a_name_plate_anchor_follows_the_body_transform() {
+    let at_origin = name_plate_anchor(&Transform::IDENTITY);
+    let moved = Transform::from_translation(Vec3::new(3.0, 8.0, -5.0));
+    assert!(
+        name_plate_anchor(&moved).abs_diff_eq(at_origin + moved.translation, 1e-6),
+        "the label anchor did not follow the body"
     );
 }
 

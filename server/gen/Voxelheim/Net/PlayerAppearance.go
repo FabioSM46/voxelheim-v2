@@ -6,7 +6,8 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-// / What one player entity looks like. **Server -> client, and static per character.**
+// / What one player entity looks like and is called. **Server -> client, and static per
+// / character.**
 // /
 // / Sent once, when a player enters this session's view, and cached by the client
 // / against the entity id for as long as the entity is known. It is not resent every
@@ -18,7 +19,8 @@ import (
 // / hair model are *static per character*: they are chosen once, at creation, and then
 // / never change for the life of that character. Putting them in the hot struct would
 // / pay for them at the tick rate, for every visible player, for ever, to carry a
-// / value that is identical in every frame. It would also make `EntityState` a
+// / value that is identical in every frame. The character's name follows the same
+// / lifetime and would be still more expensive there. It would also make `EntityState` a
 // / different size, and a struct's field list can never be taken back.
 // /
 // / **An appearance for an entity the client has never seen is not an error.** The two
@@ -40,6 +42,9 @@ import (
 // / Decoder invariants:
 // /   - `entity_id` is never 0, which names no entity anywhere in this contract
 // /   - `appearance` is present and satisfies every invariant `Appearance` documents
+// /   - `name` is present. It may be empty or arbitrarily long: this message carries the
+// /     stored display text verbatim, and a renderer must bound its layout rather than
+// /     changing what names the server accepts. It is never parsed or used as identity
 // /   - nothing here is required to name an entity in any snapshot, in either
 // /     direction; see above
 type PlayerAppearance struct {
@@ -112,14 +117,31 @@ func (rcv *PlayerAppearance) Appearance(obj *Appearance) *Appearance {
 
 // / What that player looks like. See `Appearance` in `common.fbs`, which is
 // / authoritative for the colour encoding.
+// / The character's stored name, from the server and from nothing this session said.
+// / Display text only: shown, never parsed, and never used as an identifier — that is
+// / what `entity_id` is for.
+func (rcv *PlayerAppearance) Name() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+// / The character's stored name, from the server and from nothing this session said.
+// / Display text only: shown, never parsed, and never used as an identifier — that is
+// / what `entity_id` is for.
 func PlayerAppearanceStart(builder *flatbuffers.Builder) {
-	builder.StartObject(2)
+	builder.StartObject(3)
 }
 func PlayerAppearanceAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
 }
 func PlayerAppearanceAddAppearance(builder *flatbuffers.Builder, appearance flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(appearance), 0)
+}
+func PlayerAppearanceAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(name), 0)
 }
 func PlayerAppearanceEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

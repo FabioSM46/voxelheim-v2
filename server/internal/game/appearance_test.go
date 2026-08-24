@@ -47,7 +47,7 @@ func TestAnAppearanceIsSentOnceWhenAPlayerComesIntoView(t *testing.T) {
 	}
 }
 
-func TestTheAppearanceSentIsTheOneTheCharacterJoinedWith(t *testing.T) {
+func TestTheDescriptionSentIsTheOneTheCharacterJoinedWith(t *testing.T) {
 	t.Parallel()
 
 	h := newHarness(t, flatWorld{groundTop: 63})
@@ -64,6 +64,12 @@ func TestTheAppearanceSentIsTheOneTheCharacterJoinedWith(t *testing.T) {
 	}
 	if got := sent[0].Appearance; got != testAppearance() {
 		t.Errorf("the appearance sent is %+v, want the one the character joined with, %+v", got, testAppearance())
+	}
+	if !sent[0].HasName {
+		t.Fatal("the name was omitted; a client may not invent one")
+	}
+	if got := sent[0].Name; got != testCharacterName {
+		t.Errorf("the name sent is %q, want the stored character name %q", got, testCharacterName)
 	}
 }
 
@@ -185,7 +191,7 @@ func TestJoinRefusesAnAppearanceTheContractForbids(t *testing.T) {
 	}
 	for name, appearance := range forbidden {
 		t.Run(name, func(t *testing.T) {
-			if _, err := h.sim.Join(9, testPlayerID(9), [3]float32{0.5, 67, 0.5}, appearance, nil, deliver); err == nil {
+			if _, err := h.sim.Join(9, testPlayerID(9), testCharacterName, [3]float32{0.5, 67, 0.5}, appearance, nil, deliver); err == nil {
 				t.Error("Join admitted a character wearing it")
 			}
 		})

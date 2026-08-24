@@ -213,17 +213,22 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // server still returned it worn on collection. The peers would silently disagree about
 // one entity after a clean handshake.
 //
+// **V12 appends the leaving exchange and V13 appends PlayerAppearance.name.** The former
+// adds a client request an older server would reject; the latter is a required string the
+// newer client refuses when absent. Both would fail only after a clean handshake without
+// their bumps.
+//
 // The rule that generalises, now that five shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV12AppendsTheLeavingExchangeAndMovesToTwelve(t *testing.T) {
+func TestProtocolV13RequiresThePlayerNameAndMovesToThirteen(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 12 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 12", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 13 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 13", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -2578,10 +2583,16 @@ func TestAnEmptyCharacterListIsStillACharacterList(t *testing.T) {
 	}
 }
 
-func TestPlayerAppearanceCarriesTheEntityAndTheFace(t *testing.T) {
+func TestPlayerAppearanceCarriesTheEntityTheFaceAndTheName(t *testing.T) {
 	t.Parallel()
 
-	want := PlayerAppearance{EntityID: 4242, Appearance: anAppearance(), HasAppearance: true}
+	want := PlayerAppearance{
+		EntityID:      4242,
+		Appearance:    anAppearance(),
+		Name:          "Brynhildr",
+		HasAppearance: true,
+		HasName:       true,
+	}
 
 	frame := EncodePlayerAppearance(want)
 	env := vnet.GetRootAsEnvelope(frame, 0)
@@ -2602,6 +2613,9 @@ func TestPlayerAppearanceCarriesTheEntityAndTheFace(t *testing.T) {
 	if got := decodeAppearance(appearance); got != want.Appearance {
 		t.Errorf("Appearance = %+v, want %+v", got, want.Appearance)
 	}
+	if got := string(payload.Name()); got != want.Name {
+		t.Errorf("Name = %q, want %q", got, want.Name)
+	}
 }
 
 // The encoder honours HasAppearance so a test can build the frame a client has to
@@ -2618,6 +2632,28 @@ func TestAPlayerAppearanceWithNoAppearanceIsAbsentRatherThanBlack(t *testing.T) 
 
 	if got := payload.Appearance(nil); got != nil {
 		t.Error("an omitted appearance came back as a table")
+	}
+}
+
+// Present-empty and absent are different contract values: an empty name remains display
+// text, while an absent name is a pre-V13 description the client refuses.
+func TestAPlayerAppearanceCanCarryAnEmptyNameWithoutOmittingIt(t *testing.T) {
+	t.Parallel()
+
+	present := EncodePlayerAppearance(PlayerAppearance{EntityID: 1, HasName: true})
+	presentTable := payloadTable(t, vnet.GetRootAsEnvelope(present, 0))
+	var presentPayload vnet.PlayerAppearance
+	presentPayload.Init(presentTable.Bytes, presentTable.Pos)
+	if got := presentPayload.Name(); got == nil || string(got) != "" {
+		t.Fatalf("present empty name = %q, want a present empty string", got)
+	}
+
+	absent := EncodePlayerAppearance(PlayerAppearance{EntityID: 1})
+	absentTable := payloadTable(t, vnet.GetRootAsEnvelope(absent, 0))
+	var absentPayload vnet.PlayerAppearance
+	absentPayload.Init(absentTable.Bytes, absentTable.Pos)
+	if got := absentPayload.Name(); got != nil {
+		t.Fatalf("omitted name = %q, want nil", got)
 	}
 }
 

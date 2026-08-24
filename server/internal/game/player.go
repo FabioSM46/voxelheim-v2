@@ -344,6 +344,11 @@ type Player struct {
 	// Immutable after Join, so it needs no lock: every reader is the tick, and there is
 	// no writer at all.
 	appearance protocol.Appearance
+	// name has the same lifetime and authority as appearance: the stored character's
+	// display text, never a value restated by this live client. It rides in the same
+	// once-per-view description because paying for a string in every snapshot would be
+	// indefensible.
+	name string
 
 	// Everything below is guarded by sim.mu.
 	pos      [3]float64
@@ -457,8 +462,9 @@ type Player struct {
 // point — where a player with no tent comes back to. Restoring a position is not moving
 // somebody's respawn to wherever they happened to log out.
 //
-// **appearance is the chosen character's, read from the store by the handshake.** It is
-// checked here for the reason resume is checked here: this is the boundary a stored
+// **name and appearance are the chosen character's, read from the store by the
+// handshake.** The appearance is checked here for the reason resume is checked here:
+// this is the boundary a stored
 // value crosses into the simulation, and from here it goes out on the wire in a
 // PlayerAppearance every viewer is required to refuse if it breaks the contract. A
 // caller that hands in one nobody validated gets an error rather than a session that
@@ -466,7 +472,7 @@ type Player struct {
 //
 // deliver is how a snapshot reaches that session, and it must not block — Step calls
 // it under the simulation's lock. It returns false for a frame it dropped.
-func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
+func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
 	if deliver == nil {
 		return nil, errors.New("game: deliver must not be nil")
 	}
@@ -507,6 +513,7 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, spawn [3]float32
 		sim:        s,
 		entityID:   entityID,
 		playerID:   playerID,
+		name:       name,
 		appearance: appearance,
 		// Empty, and that is the reconnect rule rather than an initialisation detail: a
 		// new session has described nobody to this client, so everything it can see is
@@ -930,7 +937,9 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 				faces[i] = protocol.EncodePlayerAppearance(protocol.PlayerAppearance{
 					EntityID:      p.entityID,
 					Appearance:    p.appearance,
+					Name:          p.name,
 					HasAppearance: true,
+					HasName:       true,
 				})
 			}
 			if viewer.deliver(faces[i]) {

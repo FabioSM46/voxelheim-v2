@@ -2141,6 +2141,7 @@ mod tests {
             .push(PlayerAppearance {
                 entity_id: session().0.entity_id,
                 appearance: look,
+                name: "Test Character".to_owned(),
             });
         app.update();
 

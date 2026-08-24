@@ -62,6 +62,8 @@ func testAppearance() protocol.Appearance {
 	}
 }
 
+const testCharacterName = "Test Character"
+
 // dropTerrain is solid at and below groundTop and air above it, with an optional
 // region the server has not generated yet.
 //
@@ -141,7 +143,7 @@ func (h *dropHarness) join(entityID uint64, pos [3]float32) (*Player, *dropSink)
 	h.t.Helper()
 
 	out := &dropSink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, testAppearance(), nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), testCharacterName, pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}
@@ -485,7 +487,7 @@ func TestDropIdentitiesComeFromTheCounterThatNamesPlayers(t *testing.T) {
 
 	// A session mints its player's entity id from the same source before it joins.
 	entityID := mint()
-	if _, err := sim.Join(entityID, testPlayerID(entityID), [3]float32{0.5, 64, 0.5}, testAppearance(), nil, func([]byte) bool { return true }); err != nil {
+	if _, err := sim.Join(entityID, testPlayerID(entityID), testCharacterName, [3]float32{0.5, 64, 0.5}, testAppearance(), nil, func([]byte) bool { return true }); err != nil {
 		t.Fatalf("Join: %v", err)
 	}
 
@@ -690,7 +692,7 @@ func TestAPickupHoldsTheInventoryLockAcrossItsDelivery(t *testing.T) {
 
 	// Assigned before any tick can run, and read on the tick goroutine, which in this
 	// test is this one: Step calls deliver synchronously.
-	admitted, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 64, 0.5}, testAppearance(), nil, deliver)
+	admitted, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 64, 0.5}, testAppearance(), nil, deliver)
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
