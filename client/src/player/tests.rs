@@ -109,7 +109,7 @@ fn body_of(app: &mut App, entity_id: u64) -> Option<Entity> {
 fn parts_of(
     app: &mut App,
     entity_id: u64,
-) -> Vec<(BodyPart, Handle<Mesh>, Handle<StandardMaterial>)> {
+) -> Vec<(BodyPiece, Handle<Mesh>, Handle<StandardMaterial>)> {
     let world = app.world_mut();
     let mut owners = world.query::<(&Body, &Children)>();
     let children: Vec<Entity> = owners
@@ -119,7 +119,7 @@ fn parts_of(
         .unwrap_or_default();
 
     let mut parts = world.query::<(&BodyVisual, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
-    let mut found: Vec<(BodyPart, Handle<Mesh>, Handle<StandardMaterial>)> = children
+    let mut found: Vec<(BodyPiece, Handle<Mesh>, Handle<StandardMaterial>)> = children
         .into_iter()
         .filter_map(|child| parts.get(world, child).ok())
         .map(|(visual, mesh, material)| (visual.0, mesh.0.clone(), material.0.clone()))
@@ -154,6 +154,23 @@ fn body_up_axis(app: &mut App, entity_id: u64) -> Vec3 {
         .find(|(body, _)| body.0 == entity_id)
         .map(|(_, transform)| transform.rotation * Vec3::Y)
         .unwrap_or_else(|| panic!("entity {entity_id} has no body"))
+}
+
+fn piece_transform(app: &mut App, entity_id: u64, piece: BodyPiece) -> Transform {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_else(|| panic!("entity {entity_id} has no body"));
+    let mut pieces = world.query::<(&BodyVisual, &Transform)>();
+    children
+        .into_iter()
+        .filter_map(|child| pieces.get(world, child).ok())
+        .find(|(visual, _)| visual.0 == piece)
+        .map(|(_, transform)| *transform)
+        .unwrap_or_else(|| panic!("entity {entity_id} has no {piece:?}"))
 }
 
 /// Advances past the complete death curve without hitting virtual time's delta clamp.
@@ -290,7 +307,7 @@ struct DrawnBodyItem {
     visibility: Visibility,
 }
 
-/// The one item parented to the local body, if its authoritative selected slot is full.
+/// The one item parented to the local body's right fist, if its selected slot is full.
 fn body_held_item(app: &mut App) -> Vec<DrawnBodyItem> {
     let world = app.world_mut();
     let entities: Vec<Entity> = world
@@ -361,9 +378,15 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     let drawn = &drawn[0];
     assert_eq!(drawn.item.item_id, combat::ITEM_RUSTY_SWORD);
     assert_eq!(drawn.item.shape, ItemShape::Blade);
-    assert_eq!(Some(drawn.parent), body_of(&mut app, LOCAL_ID));
-    assert_ne!(Some(drawn.parent), body_of(&mut app, 99));
-    assert_eq!(drawn.transform.translation, body_held_item_anchor());
+    let parent_visual = app
+        .world()
+        .get::<BodyVisual>(drawn.parent)
+        .expect("the item is attached to a body piece");
+    assert_eq!(parent_visual.0, BodyPiece::RightFist);
+    assert_eq!(
+        drawn.transform.translation,
+        body_held_item_anchor() - BodyPiece::RightFist.pivot()
+    );
     assert_eq!(drawn.visibility, Visibility::Inherited);
 
     let drop_mesh = app
@@ -424,7 +447,7 @@ fn the_body_item_follows_selection_and_an_empty_slot_leaves_no_child() {
     assert_eq!(coal.len(), 1);
     assert_eq!(
         coal[0].entity, entity,
-        "a slot change updates the seventh child in place"
+        "a slot change updates the fist-held child in place"
     );
     assert_eq!(coal[0].item.item_id, items::ITEM_RAW_COAL);
     assert_eq!(coal[0].item.shape, ItemShape::Material);
@@ -786,10 +809,11 @@ fn there_is_still_exactly_one_camera_in_both_views() {
 }
 
 #[test]
-fn a_body_is_drawn_from_parts_that_each_take_their_own_colour() {
+fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
     // The acceptance criterion, part by part: head and hands the skin, torso the shirt,
     // legs the trousers, feet the shoes, hair its own — and the eyes a colour nobody
-    // picked. Six parts, six materials, and no part wearing another's field.
+    // picked. Twelve independently moving pieces, six materials, and no piece wearing
+    // another part's field.
     let mut app = headless_player();
     let worn = an_appearance(HairModel::Braided);
     describe(&mut app, 99, worn);
@@ -805,11 +829,11 @@ fn a_body_is_drawn_from_parts_that_each_take_their_own_colour() {
     app.update();
 
     let drawn = parts_of(&mut app, 99);
-    let mut parts: Vec<BodyPart> = drawn.iter().map(|(part, _, _)| *part).collect();
-    parts.sort_by_key(|part| format!("{part:?}"));
-    let mut expected = BodyPart::IN_DRAWING_ORDER.to_vec();
-    expected.sort_by_key(|part| format!("{part:?}"));
-    assert_eq!(parts, expected, "every part of the rig is drawn");
+    let mut pieces: Vec<BodyPiece> = drawn.iter().map(|(piece, _, _)| *piece).collect();
+    pieces.sort_by_key(|piece| format!("{piece:?}"));
+    let mut expected = BodyPiece::ALL.to_vec();
+    expected.sort_by_key(|piece| format!("{piece:?}"));
+    assert_eq!(pieces, expected, "every piece of the rig is drawn");
 
     let materials: HashSet<Handle<StandardMaterial>> = drawn
         .iter()
@@ -823,6 +847,162 @@ fn a_body_is_drawn_from_parts_that_each_take_their_own_colour() {
 
     let meshes: HashSet<Handle<Mesh>> = drawn.iter().map(|(_, mesh, _)| mesh.clone()).collect();
     assert_eq!(meshes.len(), drawn.len(), "no two parts share geometry");
+}
+
+#[test]
+fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
+    let mut app = headless_player();
+    let start = Instant::now() - INTERVAL;
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+
+    deliver(
+        &mut app,
+        2,
+        vec![
+            state(LOCAL_ID, [0.3, 64.0, 0.0], 0.0),
+            state(99, [4.3, 64.0, 0.0], 0.0),
+        ],
+        Instant::now() - INTERVAL / 2,
+    );
+    app.update();
+
+    let local = piece_transform(&mut app, LOCAL_ID, BodyPiece::LeftTrouser);
+    let remote = piece_transform(&mut app, 99, BodyPiece::LeftTrouser);
+    assert_ne!(
+        local.rotation,
+        Quat::IDENTITY,
+        "the local leg did not swing"
+    );
+    assert!(
+        local.rotation.abs_diff_eq(remote.rotation, 1e-4),
+        "identical authoritative travel produced different local and remote strides"
+    );
+
+    let right_leg = piece_transform(&mut app, 99, BodyPiece::RightTrouser);
+    let left_arm = piece_transform(&mut app, 99, BodyPiece::LeftSleeve);
+    let right_arm = piece_transform(&mut app, 99, BodyPiece::RightSleeve);
+    assert!(
+        local.rotation.abs_diff_eq(right_arm.rotation, 1e-4),
+        "the opposite arm did not counter-swing with the leg"
+    );
+    assert!(
+        right_leg.rotation.abs_diff_eq(left_arm.rotation, 1e-4),
+        "the other arm and leg are not paired"
+    );
+    assert_ne!(
+        local.rotation, right_leg.rotation,
+        "both legs swung together"
+    );
+}
+
+#[test]
+fn a_body_that_covers_no_horizontal_ground_keeps_its_limbs_at_rest() {
+    let mut app = headless_player();
+    let start = Instant::now() - INTERVAL;
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+    deliver(
+        &mut app,
+        2,
+        vec![
+            state(LOCAL_ID, [0.0, 70.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now() - INTERVAL / 2,
+    );
+    app.update();
+
+    for id in [LOCAL_ID, 99] {
+        for piece in [
+            BodyPiece::LeftTrouser,
+            BodyPiece::RightTrouser,
+            BodyPiece::LeftSleeve,
+            BodyPiece::RightSleeve,
+        ] {
+            assert_eq!(
+                piece_transform(&mut app, id, piece),
+                resting_piece_transform(piece),
+                "body {id}'s {piece:?} animated without horizontal travel"
+            );
+        }
+    }
+}
+
+#[test]
+fn death_clears_a_mid_stride_pose_before_the_body_falls() {
+    let mut app = headless_player();
+    let start = Instant::now() - INTERVAL;
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        start,
+    );
+    app.update();
+    deliver(
+        &mut app,
+        2,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.3, 64.0, 0.0], 0.0),
+        ],
+        Instant::now() - INTERVAL / 2,
+    );
+    app.update();
+    assert_ne!(
+        piece_transform(&mut app, 99, BodyPiece::LeftTrouser).rotation,
+        Quat::IDENTITY,
+        "the fixture never reached mid-stride"
+    );
+
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 3,
+            entities: vec![
+                state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+                state(99, [4.6, 64.0, 0.0], 0.0),
+            ],
+            dead_players: vec![99],
+            ..Default::default()
+        },
+        Instant::now() - INTERVAL / 2,
+    );
+    app.update();
+
+    for piece in [
+        BodyPiece::LeftTrouser,
+        BodyPiece::RightTrouser,
+        BodyPiece::LeftSleeve,
+        BodyPiece::RightSleeve,
+    ] {
+        assert_eq!(
+            piece_transform(&mut app, 99, piece),
+            resting_piece_transform(piece),
+            "{piece:?} kept walking while the body fell"
+        );
+    }
+    finish_body_fall(&mut app);
+    assert!(body_up_axis(&mut app, 99).z > 0.99);
 }
 
 #[test]
@@ -868,17 +1048,19 @@ fn every_body_shares_the_geometry_and_two_in_the_same_clothes_share_the_material
 
     let one = parts_of(&mut app, 1);
     let two = parts_of(&mut app, 2);
-    let shirt = |drawn: &[(BodyPart, Handle<Mesh>, Handle<StandardMaterial>)]| {
+    let shirt = |drawn: &[(BodyPiece, Handle<Mesh>, Handle<StandardMaterial>)]| {
         drawn
             .iter()
-            .find(|(part, _, _)| *part == BodyPart::Shirt)
+            .find(|(piece, _, _)| piece.part() == BodyPart::Shirt)
             .map(|(_, _, material)| material.clone())
             .expect("a body has a shirt")
     };
     assert_ne!(shirt(&one), shirt(&two), "two shirts, two materials");
     assert_eq!(
-        one.iter().find(|(part, _, _)| *part == BodyPart::Skin),
-        two.iter().find(|(part, _, _)| *part == BodyPart::Skin),
+        one.iter()
+            .find(|(piece, _, _)| piece.part() == BodyPart::Skin),
+        two.iter()
+            .find(|(piece, _, _)| piece.part() == BodyPart::Skin),
         "and the skin they still share is still one material"
     );
 }
@@ -915,7 +1097,7 @@ fn an_appearance_that_arrives_late_dresses_the_body_that_is_already_there() {
     let grey = parts_of(&mut app, 99);
     let placeholder = |part: BodyPart| {
         grey.iter()
-            .find(|(drawn, _, _)| *drawn == part)
+            .find(|(drawn, _, _)| drawn.part() == part)
             .map(|(_, _, material)| material.clone())
             .expect("every part is drawn")
     };
@@ -978,7 +1160,7 @@ fn the_hair_a_player_chose_is_the_mesh_their_body_wears() {
     let hair = |app: &mut App| {
         parts_of(app, 99)
             .into_iter()
-            .find(|(part, _, _)| *part == BodyPart::Hair)
+            .find(|(piece, _, _)| piece.part() == BodyPart::Hair)
             .map(|(_, mesh, _)| mesh)
             .expect("a body has hair, even shaved")
     };
@@ -1021,12 +1203,13 @@ fn a_body_stands_on_the_feet_position_the_snapshot_carries() {
     assert_eq!(transform.translation, feet);
 
     let children: Vec<Entity> = children.iter().collect();
-    let mut parts = world.query_filtered::<&Transform, With<BodyVisual>>();
+    let mut parts = world.query::<(&BodyVisual, &Transform)>();
     for child in children {
+        let (visual, transform) = parts.get(world, child).expect("every child is a piece");
         assert_eq!(
-            *parts.get(world, child).expect("every child is a part"),
-            Transform::default(),
-            "a part carries no offset: the mesh is authored at the feet"
+            *transform,
+            resting_piece_transform(visual.0),
+            "a piece is resting at its authored pivot"
         );
     }
 }

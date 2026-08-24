@@ -32,6 +32,7 @@ use crate::net::{Appearance, CharacterChoice, ChooseCharacter, HairModel, Sessio
 
 use crate::player::{
     BodyPart, BodyVisualsPlugin, Daylight, Dressing, PlacedBox, WorldCamera, body_envelope,
+    resting_piece_transform,
 };
 
 pub(super) struct CharacterUiPlugin;
@@ -470,7 +471,8 @@ struct PreviewStage;
 /// The turning body itself: a world entity, not a node.
 ///
 /// One per character screen, spawned when the screen goes up and despawned when the world
-/// arrives. Its children are the six parts, exactly as [`crate::player`] builds a body's.
+/// arrives. Its children are the independently drawn pieces, exactly as [`crate::player`]
+/// builds a body's, resting on their authored pivots.
 #[derive(Component)]
 struct PreviewModel;
 
@@ -1005,12 +1007,12 @@ fn keep_the_preview(
     // this cannot disagree with what a player will see of themselves.
     let outfit = wardrobe.outfit(worn);
     commands.entity(model).with_children(|parent| {
-        for (_, mesh, material) in outfit {
+        for (piece, mesh, material) in outfit {
             parent.spawn((
                 PreviewPart,
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
-                Transform::default(),
+                resting_piece_transform(piece),
             ));
         }
     });
@@ -2436,7 +2438,7 @@ mod tests {
         assert_eq!(parts.len(), 1, "one model stands on the screen");
         assert_eq!(
             parts[0],
-            BodyPart::IN_DRAWING_ORDER.len(),
+            crate::player::BodyPiece::ALL.len(),
             "the model is drawn from every part of the rig"
         );
 
