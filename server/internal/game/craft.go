@@ -233,9 +233,9 @@ func (p *Player) Craft(req protocol.CraftRequest) (protocol.InventoryState, erro
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
+	if err := p.cannotActLocked(); err != nil {
 		// Consistent with mining, editing, placing and attacking: a corpse does nothing.
-		return protocol.InventoryState{}, errors.New("the player is dead")
+		return protocol.InventoryState{}, err
 	}
 
 	if r.station != vnet.StructureKindUnknown {

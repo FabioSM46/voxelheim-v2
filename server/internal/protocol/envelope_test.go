@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"testing"
+	"time"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -218,11 +219,11 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV11AppendsNoTagAndStillMovesToEleven(t *testing.T) {
+func TestProtocolV12AppendsTheLeavingExchangeAndMovesToTwelve(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 11 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 11", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 12 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 12", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -250,6 +251,8 @@ func TestProtocolV11AppendsNoTagAndStillMovesToEleven(t *testing.T) {
 		vnet.PayloadCreateCharacterRequest,
 		vnet.PayloadPlayerAppearance,
 		vnet.PayloadDropItemRequest,
+		vnet.PayloadLeaveRequest,
+		vnet.PayloadLeaveStarted,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -259,9 +262,10 @@ func TestProtocolV11AppendsNoTagAndStillMovesToEleven(t *testing.T) {
 
 	// Membership, not just ordering. A swing is still answered by the next snapshot and
 	// nothing else, and so is a craft and a repair; a *refused* placement is answered by
-	// ActionRefused, and an accepted one is not — there is still no acknowledgement
-	// payload anywhere in this contract, and the size of the union is the only place that
-	// claim can be checked. V7's four are the handshake's new phase and the appearance
+	// ActionRefused, and an accepted one is not. V12's LeaveStarted is the deliberately
+	// exceptional acknowledgement: it reports the server's timer, never a client-owned
+	// outcome. The size of the union is the only place that membership can be checked.
+	// V7's four are the handshake's new phase and the appearance
 	// that rides beside it, and none of them acknowledges anything either: a character is
 	// chosen and the answer is ServerWelcome. V8's one does not break the run: a drop is
 	// answered by the complete InventoryState that follows it and by the ItemDropState in
@@ -269,6 +273,30 @@ func TestProtocolV11AppendsNoTagAndStillMovesToEleven(t *testing.T) {
 	// every FlatBuffers union carries.
 	if got := len(vnet.EnumNamesPayload); got != len(want)+1 {
 		t.Errorf("Payload has %d members, want %d plus NONE — a new member needs a decision, not a test edit", got, len(want))
+	}
+}
+
+func TestTheLeavingExchangeCarriesOnlyTheServersDecision(t *testing.T) {
+	t.Parallel()
+
+	msg, err := Decode(EncodeLeaveRequest())
+	if err != nil {
+		t.Fatalf("Decode LeaveRequest: %v", err)
+	}
+	if msg.Kind != vnet.PayloadLeaveRequest || msg.LeaveRequest == nil {
+		t.Fatalf("decoded leave = %+v, want an empty LeaveRequest", msg)
+	}
+
+	frame := EncodeLeaveStarted(10 * time.Second)
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	if env.PayloadType() != vnet.PayloadLeaveStarted {
+		t.Fatalf("leave acknowledgement is %s, want %s", env.PayloadType(), vnet.PayloadLeaveStarted)
+	}
+	table := payloadTable(t, env)
+	started := new(vnet.LeaveStarted)
+	started.Init(table.Bytes, table.Pos)
+	if got := started.RemainingMs(); got != 10_000 {
+		t.Errorf("RemainingMs = %d, want 10000", got)
 	}
 }
 

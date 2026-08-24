@@ -524,7 +524,15 @@ func (p *Player) tryApplyDeathPenaltyLocked() bool {
 // A changed state is returned whole; every refusal returns an error so the session
 // can log it and send nothing.
 func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.InventoryState, error) {
-	p.inventory.mu.Lock()
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if err := p.cannotActLocked(); err != nil {
+		return protocol.InventoryState{}, err
+	}
+	if !p.inventory.mu.TryLock() {
+		return protocol.InventoryState{}, errors.New("the inventory is busy")
+	}
 	defer p.inventory.mu.Unlock()
 
 	if !p.inventory.moveLocked(req) {

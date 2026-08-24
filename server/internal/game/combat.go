@@ -50,8 +50,8 @@ func (p *Player) Attack(req protocol.AttackRequest) error {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
-		return errors.New("the player is dead")
+	if err := p.cannotActLocked(); err != nil {
+		return err
 	}
 
 	// Its own ordering guard, beside movement's and mining's rather than shared with

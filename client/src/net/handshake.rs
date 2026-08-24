@@ -29,7 +29,7 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, InventoryState, LifeState, Message, MineProgress,
+    ActionRefused, CharacterList, InventoryState, LeaveStarted, LifeState, Message, MineProgress,
     PlayerAppearance, Reject, SessionParams, Snapshot, WorldClock, WorldUpdate,
 };
 
@@ -93,6 +93,8 @@ pub enum Transition {
     /// Named apart from [`Self::Refused`] above, which is the *connection* being
     /// refused and ends it. This one is an answer inside a session that continues.
     ActionRefused(ActionRefused),
+    /// The authoritative leave timer for this session.
+    Leaving(LeaveStarted),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -376,6 +378,9 @@ impl Handshake {
             (Phase::Established, Message::PlayerAppearance(appearance)) => {
                 Ok(Transition::Appearance(appearance))
             }
+            (Phase::Established, Message::LeaveStarted(started)) => {
+                Ok(Transition::Leaving(started))
+            }
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -393,6 +398,7 @@ impl Handshake {
             (_, Message::MineProgress(_)) => Err(HandshakeError::Premature("MineProgress")),
             (_, Message::ActionRefused(_)) => Err(HandshakeError::Premature("ActionRefused")),
             (_, Message::PlayerAppearance(_)) => Err(HandshakeError::Premature("PlayerAppearance")),
+            (_, Message::LeaveStarted(_)) => Err(HandshakeError::Premature("LeaveStarted")),
         }
     }
 }
@@ -1217,6 +1223,28 @@ mod tests {
         assert_eq!(
             handshake.apply(Message::PlayerAppearance(described)),
             Ok(Transition::Appearance(described))
+        );
+    }
+
+    #[test]
+    fn a_leave_countdown_only_belongs_to_an_established_session() {
+        let started = LeaveStarted {
+            remaining_ms: 10_000,
+        };
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::LeaveStarted(started)),
+            Err(HandshakeError::Premature("LeaveStarted"))
+        );
+
+        let mut admitted = established();
+        assert_eq!(
+            admitted.apply(Message::LeaveStarted(started)),
+            Ok(Transition::Leaving(started))
+        );
+        assert!(
+            admitted.established(),
+            "leaving remains an established session until the server closes it"
         );
     }
 

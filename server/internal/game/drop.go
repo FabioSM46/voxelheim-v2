@@ -544,11 +544,11 @@ func (p *Player) releaseSlot(slot uint8) (protocol.InventoryState, droppedStack,
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
+	if err := p.cannotActLocked(); err != nil {
 		// Consistent with mining, editing, placing, attacking, crafting and repairing: a
 		// corpse does nothing. What a *death* puts on the ground is a different question,
 		// and it is not asked here.
-		return protocol.InventoryState{}, droppedStack{}, errors.New("the player is dead")
+		return protocol.InventoryState{}, droppedStack{}, err
 	}
 
 	// TryLock, never Lock, and the same argument Craft and Repair record: every other holder

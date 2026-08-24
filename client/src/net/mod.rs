@@ -50,7 +50,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
@@ -102,7 +102,7 @@ pub const DEFAULT_PLAYER_NAME: &str = "voxelheim";
 /// Where the connection has got to. The status text is a rendering of this and
 /// nothing else.
 ///
-/// Two of the six variants are terminal-with-a-reason and terminal-without-one,
+/// Two of the eight variants are terminal-with-a-reason and terminal-without-one,
 /// and the difference is worth stating: [`Self::Rejected`] means *there is no
 /// session and here is why* — a `ServerReject`, an unreachable address, or a peer
 /// that turned out not to speak this protocol. [`Self::Disconnected`] means a
@@ -132,6 +132,10 @@ pub enum ConnectionState {
     Choosing,
     /// A validated `ServerWelcome` arrived. [`Session`] exists.
     Connected,
+    /// An irrevocable leave was requested. `None` is the short interval before the
+    /// server acknowledges it; `Some` is the server-owned remaining whole seconds.
+    /// Socket closure is the authoritative completion in both cases.
+    Leaving { seconds_remaining: Option<u32> },
 
     /// There is no session. `reason` is written for a player to read.
     Rejected { reason: String },
@@ -151,7 +155,7 @@ impl ConnectionState {
     /// untested.
     ///
     /// **What pins it is `the_list_holds_every_state` below**, which sets a flag per
-    /// variant through a wildcard-free match. An eighth variant stops that match
+    /// variant through a wildcard-free match. A ninth variant stops that match
     /// compiling, the arm written for it indexes past the flags, and the only edit that
     /// makes the assertion pass again is adding the state here — so the list cannot fall
     /// behind the enum, and no number can be bumped to quieten it.
@@ -166,6 +170,9 @@ impl ConnectionState {
             Self::Handshaking,
             Self::Choosing,
             Self::Connected,
+            Self::Leaving {
+                seconds_remaining: None,
+            },
             Self::Rejected {
                 reason: "refused".to_owned(),
             },
@@ -845,6 +852,7 @@ impl Plugin for NetPlugin {
                     // After the drain, so a choice made this frame is sent against the
                     // exchange this frame's events describe rather than the last one's.
                     send_character_choice.after(DrainNetwork),
+                    update_leave_countdown.after(DrainNetwork),
                     disconnect_on_request.after(DrainNetwork),
                 )
                     .chain(),
@@ -935,6 +943,7 @@ fn start_session(
     // Bounded, unlike the other two: this is the only channel the ECS *produces* into,
     // and a producer that cannot block has to be able to drop. See OUTBOUND_QUEUE.
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(OUTBOUND_QUEUE);
+    let session_outbound = outbound_tx.clone();
 
     let addr = addr.to_owned();
     let player_name = settings.player_name.clone();
@@ -957,6 +966,7 @@ fn start_session(
                 },
                 event_tx,
                 command_rx,
+                session_outbound,
                 outbound_rx,
             )
         })
@@ -1008,6 +1018,15 @@ enum RejoinBy {
 /// return rather than a retry policy — `client/AGENTS.md` still says there is none.
 #[derive(Resource, Debug, Default)]
 struct Rejoining;
+
+/// The local presentation clock for a server-owned leave duration.
+///
+/// It never ends the session. It only updates the integer displayed in
+/// [`ConnectionState::Leaving`]; the net thread's `Ended` event is the sole completion.
+#[derive(Resource, Debug)]
+struct LeaveCountdown {
+    deadline: Instant,
+}
 
 /// Asks the world to be opened again, on the route the last session was opened by.
 ///
@@ -1427,6 +1446,18 @@ fn drain_session_events(
             // beside the sentence it writes for the other half.
             Ok(SessionEvent::ActionRefused(refused)) => inboxes.refusals.0.push(refused),
 
+            Ok(SessionEvent::Leaving(started)) => {
+                let duration = Duration::from_millis(u64::from(started.remaining_ms));
+                commands.insert_resource(LeaveCountdown {
+                    deadline: Instant::now() + duration,
+                });
+                *state = ConnectionState::Leaving {
+                    seconds_remaining: Some(
+                        u32::try_from(duration.as_millis().div_ceil(1_000)).unwrap_or(u32::MAX),
+                    ),
+                };
+            }
+
             Ok(SessionEvent::ServerRefused(reject)) => {
                 let reason = reject.describe();
                 let retryable_creation = reject.is_character_name_refusal()
@@ -1454,6 +1485,7 @@ fn drain_session_events(
                 commands.remove_resource::<Outbound>();
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
+                commands.remove_resource::<LeaveCountdown>();
             }
 
             Ok(SessionEvent::Refused(reason)) => {
@@ -1465,6 +1497,7 @@ fn drain_session_events(
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<CharacterChoice>();
+                commands.remove_resource::<LeaveCountdown>();
             }
 
             Ok(SessionEvent::Ended(detail)) => {
@@ -1479,6 +1512,7 @@ fn drain_session_events(
                 commands.remove_resource::<Outbound>();
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
+                commands.remove_resource::<LeaveCountdown>();
             }
 
             Err(TryRecvError::Empty) => break,
@@ -1524,6 +1558,7 @@ fn drain_session_events(
                     commands.remove_resource::<Session>();
                     commands.remove_resource::<Identity>();
                     commands.remove_resource::<CharacterChoice>();
+                    commands.remove_resource::<LeaveCountdown>();
                 }
                 // **And the link itself, which used to outlive the thread it represents.**
                 // Reaching this arm means the sender was dropped, and the sender lives in
@@ -1623,6 +1658,19 @@ fn disconnect_on_request(
     if requests.read().count() == 0 {
         return;
     }
+
+    // A leave is irrevocable, and a second press must not erase the countdown the
+    // server already supplied. The other two states are terminal too; consuming the
+    // message above is all there is to do for any of the three.
+    if matches!(
+        *state,
+        ConnectionState::Leaving { .. }
+            | ConnectionState::Rejected { .. }
+            | ConnectionState::Disconnected
+    ) {
+        return;
+    }
+
     // No link is no session, which is the state being asked for. The messages are
     // still consumed above, so nothing replays into a session opened later.
     let Some(mut link) = link else {
@@ -1633,7 +1681,18 @@ fn disconnect_on_request(
         Ok(channels) => channels,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let _ = channels.commands.send(NetCommand::Disconnect);
+    // Only a welcomed session has a character for the authoritative linger to keep in
+    // the world. Before that, `Leave` has no legal wire meaning and the net thread must
+    // be stopped directly instead of silently dropping the command.
+    let established = matches!(*state, ConnectionState::Connected);
+    let command = if established {
+        NetCommand::Leave
+    } else {
+        NetCommand::Disconnect
+    };
+    if channels.commands.send(command).is_err() {
+        return;
+    }
 
     // **The one place a return is asked for.** Reaching this system means a
     // `DisconnectRequest` was written, which is a player pressing something — so leaving a
@@ -1642,18 +1701,45 @@ fn disconnect_on_request(
     // sets no flag: a refusal and a dropped connection are reported and stay reported.
     commands.insert_resource(Rejoining);
 
-    if !matches!(
-        *state,
-        ConnectionState::Rejected { .. } | ConnectionState::Disconnected
-    ) {
-        *state = ConnectionState::Disconnected;
-    }
-    // Closing the writer tells its thread to release its socket handle. The read thread
-    // remains represented by NetLink long enough to report its orderly end.
+    // Dropping the ECS sender stops all later gameplay input. On an established session
+    // the net thread retains one sender solely to place the durable LeaveRequest behind
+    // frames already accepted, and keeps reading until the server acknowledges and
+    // closes. Before the welcome there is no character to linger, so the direct
+    // Disconnect restores the old immediate teardown instead.
     commands.remove_resource::<Outbound>();
-    commands.remove_resource::<Session>();
-    commands.remove_resource::<Identity>();
     commands.remove_resource::<CharacterChoice>();
+    if established {
+        *state = ConnectionState::Leaving {
+            seconds_remaining: None,
+        };
+    } else {
+        *state = ConnectionState::Disconnected;
+        commands.remove_resource::<Session>();
+        commands.remove_resource::<Identity>();
+        commands.remove_resource::<LeaveCountdown>();
+    }
+}
+
+/// Advances only the displayed whole-second value of an authoritative leave.
+fn update_leave_countdown(
+    countdown: Option<Res<LeaveCountdown>>,
+    mut state: ResMut<ConnectionState>,
+) {
+    let Some(countdown) = countdown else {
+        return;
+    };
+    let millis = countdown
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis();
+    let remaining = u32::try_from(millis.div_ceil(1_000)).unwrap_or(u32::MAX);
+    if let ConnectionState::Leaving {
+        seconds_remaining: Some(seconds_remaining),
+    } = &mut *state
+        && *seconds_remaining != remaining
+    {
+        *seconds_remaining = remaining;
+    }
 }
 
 /// Where a sign-in has got to, and the only thing about one that leaves this
@@ -2129,8 +2215,8 @@ mod tests {
     use super::codec::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire, WelcomeWire,
         encode_chunk_data, encode_chunk_unload, encode_entity_snapshot, encode_inventory_state,
-        encode_mine_progress, encode_server_character_list, encode_server_reject,
-        encode_server_welcome,
+        encode_leave_started, encode_mine_progress, encode_server_character_list,
+        encode_server_reject, encode_server_welcome,
     };
 
     use super::codec::{PLAYER_TOKEN_LEN, SESSION_TICKET_LEN, SessionTicket};
@@ -2141,18 +2227,18 @@ mod tests {
 
     /// The list [`ConnectionState::every`] hands the sweeps holds every variant.
     ///
-    /// **A flag per variant, not a count**, and the difference is the whole test: seven
-    /// values with `Rejected` missing and `Idle` written twice counts to seven and covers
-    /// six states. A `match` over the values proves every variant has an *arm*, never that
+    /// **A flag per variant, not a count**, and the difference is the whole test: eight
+    /// values with `Rejected` missing and `Idle` written twice counts to eight and covers
+    /// seven states. A `match` over the values proves every variant has an *arm*, never that
     /// every variant is *present*.
     ///
     /// What the two together buy is a chain of forced edits that ends in the right place.
-    /// An eighth variant stops the match compiling; the arm the author writes indexes past
+    /// A ninth variant stops the match compiling; the arm the author writes indexes past
     /// the array; growing the array makes `all` fail; and the only thing that satisfies it
     /// is adding the state to `every`. Nothing here can be quietened by editing a number.
     #[test]
     fn the_list_holds_every_state() {
-        let mut seen = [false; 7];
+        let mut seen = [false; 8];
         for state in ConnectionState::every() {
             match state {
                 ConnectionState::Idle => seen[0] = true,
@@ -2160,8 +2246,9 @@ mod tests {
                 ConnectionState::Handshaking => seen[2] = true,
                 ConnectionState::Choosing => seen[3] = true,
                 ConnectionState::Connected => seen[4] = true,
-                ConnectionState::Rejected { .. } => seen[5] = true,
-                ConnectionState::Disconnected => seen[6] = true,
+                ConnectionState::Leaving { .. } => seen[5] = true,
+                ConnectionState::Rejected { .. } => seen[6] = true,
+                ConnectionState::Disconnected => seen[7] = true,
             }
         }
         assert!(
@@ -2192,6 +2279,12 @@ mod tests {
         /// answers a *choice*, and a stub that sent one straight after the hello would be
         /// testing a server this client refuses.
         AfterAChoice(Vec<Vec<u8>>),
+        /// Establish a session, then wait for LeaveRequest, acknowledge it and close.
+        /// Only this authoritative reply turns a request into a completed leave.
+        AfterAChoiceThenLeave {
+            frames: Vec<Vec<u8>>,
+            remaining_ms: u32,
+        },
         /// Close without answering.
         Close,
         /// Hold the connection open and say nothing.
@@ -2335,6 +2428,32 @@ mod tests {
                         return false;
                     }
                 }
+            }
+            Reply::AfterAChoiceThenLeave {
+                frames,
+                remaining_ms,
+            } => {
+                if send(socket, &one_character()).is_err() {
+                    return false;
+                }
+                match read_one_frame(socket) {
+                    Some(choice) => received.push(choice),
+                    None => return false,
+                }
+                for payload in frames {
+                    if send(socket, payload).is_err() {
+                        return false;
+                    }
+                }
+                while let Some(frame) = read_one_frame(socket) {
+                    let is_leave = fb::root_as_envelope(&frame)
+                        .is_ok_and(|envelope| envelope.payload_type() == fb::Payload::LeaveRequest);
+                    received.push(frame);
+                    if is_leave {
+                        return send(socket, &encode_leave_started(*remaining_ms)).is_ok();
+                    }
+                }
+                return false;
             }
         }
 
@@ -3061,10 +3180,13 @@ mod tests {
     #[test]
     fn leaving_a_world_dials_it_again_and_stops_at_the_character_list() {
         let scratch = Scratch::new("net-rejoin");
-        let (addr, _stub) = spawn_stub_serving(
+        let (addr, _stub) = spawn_stub_sequence(vec![
+            Reply::AfterAChoiceThenLeave {
+                frames: vec![encode_server_welcome(&WelcomeWire::default())],
+                remaining_ms: 25,
+            },
             Reply::AfterAChoice(vec![encode_server_welcome(&WelcomeWire::default())]),
-            2,
-        );
+        ]);
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -3430,9 +3552,9 @@ mod tests {
     }
 
     #[test]
-    fn the_identity_goes_when_the_session_does() {
-        // Inserted and removed exactly where `Session` is: a status line reading a
-        // stale `Identity` after a disconnect would describe a session that ended.
+    fn identity_and_session_remain_until_the_server_finishes_leave() {
+        // A leave request is not completion. The server may still send snapshots while
+        // the body lingers, so only outbound gameplay is removed immediately.
         let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(
             &WelcomeWire::default(),
         )]));
@@ -3446,11 +3568,12 @@ mod tests {
         app.world_mut().write_message(DisconnectRequest);
         app.update();
 
-        assert!(!app.world().contains_resource::<Session>());
+        assert!(app.world().contains_resource::<Session>());
         assert!(
-            !app.world().contains_resource::<Identity>(),
-            "the identity belongs to the session that ended"
+            app.world().contains_resource::<Identity>(),
+            "the server has not yet ended this session"
         );
+        assert!(!app.world().contains_resource::<Outbound>());
     }
 
     #[test]
@@ -3928,6 +4051,41 @@ mod tests {
     }
 
     #[test]
+    fn the_server_s_leave_acknowledgement_owns_the_visible_countdown() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        app.world_mut().insert_resource(Session(params()));
+        app.world_mut().insert_resource(Identity::New);
+
+        events
+            .send(SessionEvent::Leaving(codec::LeaveStarted {
+                remaining_ms: 10_000,
+            }))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            state(&app),
+            ConnectionState::Leaving {
+                seconds_remaining: Some(10),
+            }
+        );
+        assert!(app.world().contains_resource::<LeaveCountdown>());
+        assert!(
+            app.world().contains_resource::<Session>(),
+            "the server has not completed leave while its socket is open"
+        );
+
+        events
+            .send(SessionEvent::Ended(None))
+            .expect("the app holds the receiver");
+        app.update();
+        assert_eq!(state(&app), ConnectionState::Disconnected);
+        assert!(!app.world().contains_resource::<LeaveCountdown>());
+        assert!(!app.world().contains_resource::<Session>());
+        assert!(!app.world().contains_resource::<Identity>());
+    }
+
+    #[test]
     fn a_vanished_thread_ends_a_session_that_never_got_past_connecting() {
         let (mut app, events) = app_with_manual_link(ConnectionState::Connecting);
         drop(events);
@@ -4005,7 +4163,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_request_ends_the_session_without_ending_the_app() {
+    fn a_disconnect_request_starts_an_authoritative_leave_without_ending_the_app() {
         let (_event_tx, event_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
         let (outbound, _sent) = Outbound::to_a_test(1);
@@ -4027,17 +4185,83 @@ mod tests {
         app.world_mut().write_message(DisconnectRequest);
         app.update();
 
-        assert!(matches!(command_rx.try_recv(), Ok(NetCommand::Disconnect)));
+        assert!(matches!(command_rx.try_recv(), Ok(NetCommand::Leave)));
         assert!(
             command_rx.try_recv().is_err(),
             "one frame emitted more than one disconnect command"
         );
-        assert_eq!(state(&app), ConnectionState::Disconnected);
-        assert!(!app.world().contains_resource::<Session>());
+        assert_eq!(
+            state(&app),
+            ConnectionState::Leaving {
+                seconds_remaining: None,
+            }
+        );
+        assert!(app.world().contains_resource::<Session>());
         assert!(!app.world().contains_resource::<Outbound>());
+        assert!(app.world().contains_resource::<Rejoining>());
         assert!(
             app.should_exit().is_none(),
             "disconnect must leave the client running"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_before_the_welcome_stops_the_thread_instead_of_requesting_a_leave() {
+        for initial in [ConnectionState::Handshaking, ConnectionState::Choosing] {
+            let (_event_tx, event_rx) = mpsc::channel();
+            let (command_tx, command_rx) = mpsc::channel();
+
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .add_message::<DisconnectRequest>()
+                .insert_resource(initial.clone())
+                .insert_resource(NetLink(Mutex::new(Channels {
+                    events: event_rx,
+                    commands: command_tx,
+                })))
+                .add_systems(Update, disconnect_on_request);
+
+            app.world_mut().write_message(DisconnectRequest);
+            app.update();
+
+            assert!(
+                matches!(command_rx.try_recv(), Ok(NetCommand::Disconnect)),
+                "{initial:?} did not stop its pre-world session"
+            );
+            assert_eq!(state(&app), ConnectionState::Disconnected);
+            assert!(app.world().contains_resource::<Rejoining>());
+        }
+    }
+
+    #[test]
+    fn a_second_disconnect_does_not_erase_the_server_s_leave_countdown() {
+        let (_event_tx, event_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<DisconnectRequest>()
+            .insert_resource(ConnectionState::Leaving {
+                seconds_remaining: Some(7),
+            })
+            .insert_resource(NetLink(Mutex::new(Channels {
+                events: event_rx,
+                commands: command_tx,
+            })))
+            .add_systems(Update, disconnect_on_request);
+
+        app.world_mut().write_message(DisconnectRequest);
+        app.update();
+
+        assert_eq!(
+            state(&app),
+            ConnectionState::Leaving {
+                seconds_remaining: Some(7),
+            }
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "an irrevocable leave emitted a second network command"
         );
     }
 

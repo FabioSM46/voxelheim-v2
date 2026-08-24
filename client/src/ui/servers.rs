@@ -530,7 +530,8 @@ mod tests {
                 ConnectionState::Connecting
                 | ConnectionState::Handshaking
                 | ConnectionState::Choosing
-                | ConnectionState::Connected => false,
+                | ConnectionState::Connected
+                | ConnectionState::Leaving { .. } => false,
             };
             assert_eq!(
                 server_list_is_up(Some(&list), Some(&state), Some(&signed_in)),

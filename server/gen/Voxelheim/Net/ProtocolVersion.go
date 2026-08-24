@@ -52,6 +52,13 @@ import "strconv"
 // / The rule that generalises, now that five shapes have been argued: **ask
 // / what the receiver does with the value it does not recognise, not which way
 // / it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
+// /
+// / **V12 adds the leaving exchange.** `LeaveRequest` travels client -> server, and an
+// / older server treats an unknown client payload as a protocol error rather than
+// / dropping it. A V12 client against a V11 server would therefore handshake cleanly
+// / and be disconnected the first time it asked to leave. `LeaveStarted` travels back
+// / with the server-owned duration; its direction alone could have avoided a bump, but
+// / it is the answer to the request that already owes one.
 type ProtocolVersion uint16
 
 const (
@@ -60,7 +67,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 11
+	ProtocolVersionCurrent ProtocolVersion = 12
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

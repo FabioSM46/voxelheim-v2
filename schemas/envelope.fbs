@@ -88,7 +88,16 @@ union Payload {
   //    union has gained arrived with a bump, and the one appended without one travels the
   //    other way. See `DropItemRequest` in `player.fbs`.
 
-  DropItemRequest         // 25
+  DropItemRequest,        // 25
+
+  // -- V12. Appended, so the tags of 1..25 are untouched.
+  //
+  //    The request carries the bump. An older server refuses a client payload it
+  //    cannot name, so a V12 client must not handshake with one and then discover the
+  //    mismatch only when leaving. The acknowledgement is the authoritative duration
+  //    that client presentation counts down; socket closure remains the completion.
+  LeaveRequest,           // 26
+  LeaveStarted            // 27
 }
 
 table Envelope {

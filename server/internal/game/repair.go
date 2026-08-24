@@ -114,10 +114,10 @@ func (p *Player) Repair(req protocol.RepairRequest) (protocol.InventoryState, er
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
+	if err := p.cannotActLocked(); err != nil {
 		// Consistent with mining, editing, placing, attacking and crafting: a corpse
 		// does nothing.
-		return protocol.InventoryState{}, errors.New("the player is dead")
+		return protocol.InventoryState{}, err
 	}
 
 	// TryLock, never Lock, and the same argument Craft records: every other holder of this

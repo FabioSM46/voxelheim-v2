@@ -360,6 +360,54 @@ func TestDeathHappensOnceAndStopsEverythingInFlight(t *testing.T) {
 	}
 }
 
+// A leaving body is still part of the world, so damage and the ordinary death path
+// continue. What stays irrevocable is agency: a respawn inside the linger keeps the
+// leaving bit, while Sim.Leave removing a corpse before its countdown ends is the end
+// of the only tick path that could ever respawn it.
+func TestDeathDuringLeaveLingerCannotRestoreAgencyOrResurrectARemovedPlayer(t *testing.T) {
+	t.Parallel()
+
+	t.Run("respawn inside the linger stays inert", func(t *testing.T) {
+		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		player.BeginLeaving()
+		h.hurt(player, PlayerMaxHealth)
+
+		h.advance(int(h.sim.deathTicks))
+		if got := h.vitals(player); got.LifeState != vnet.LifeStateAlive || got.Health != PlayerMaxHealth {
+			t.Fatalf("leaving player after the death countdown is %+v, want an ordinary full-health respawn", got)
+		}
+		if err := player.Submit(protocol.PlayerInput{ClientTick: 1, MoveZ: 1}); err == nil {
+			t.Fatal("respawning during leave restored player agency")
+		}
+		if got := h.sim.Count(); got != 1 {
+			t.Fatalf("respawn duplicated the leaving player: simulation holds %d, want 1", got)
+		}
+	})
+
+	t.Run("removal ends an unfinished countdown", func(t *testing.T) {
+		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		player.BeginLeaving()
+		h.hurt(player, PlayerMaxHealth)
+
+		h.advance(int(h.sim.deathTicks) - 1)
+		before := h.vitals(player)
+		if before.LifeState != vnet.LifeStateDead || before.RespawnTicks != 1 {
+			t.Fatalf("player just before removal is %+v, want a corpse with one tick left", before)
+		}
+
+		h.sim.Leave(player)
+		h.advance(int(h.sim.deathTicks) + 1)
+		if got := h.sim.Count(); got != 0 {
+			t.Fatalf("removed player reappeared after its countdown: simulation holds %d", got)
+		}
+		if after := h.vitals(player); after != before {
+			t.Errorf("removed player's detached state advanced from %+v to %+v", before, after)
+		}
+	})
+}
+
 // The three seconds are three seconds, whatever Step is being called at.
 func TestTheDeathCountdownIsThreeSecondsAtEveryTickRate(t *testing.T) {
 	t.Parallel()

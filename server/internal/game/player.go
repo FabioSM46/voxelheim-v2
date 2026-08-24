@@ -361,6 +361,12 @@ type Player struct {
 	haveTick  bool
 	lastTick  uint32
 
+	// leaving is the irrevocable server-owned linger state. The body remains a live
+	// simulation entity — gravity, damage, snapshots and interaction all continue —
+	// but no client intent may change it. It is guarded by sim.mu with the intents it
+	// disables and is cleared only by removing this Player from the simulation.
+	leaving bool
+
 	// The life the server owns. See vitals.go, which is where every transition between
 	// these values happens; nothing outside it writes them.
 	//
@@ -613,6 +619,43 @@ func (p *Player) PlayerID() identity.PlayerID { return p.playerID }
 // receives the live slots, so there is no route around the locked inventory operations.
 func (p *Player) InventoryState() protocol.InventoryState { return p.inventory.state() }
 
+// BeginLeaving makes this body inert without removing it from the simulation.
+//
+// Idempotent because every session ending converges here: a polite LeaveRequest, an
+// idle deadline, a dead socket and a writer failure can notice the same end from
+// different paths. The transition clears every queued or held action under the tick's
+// lock, so once it returns no later tick can apply intent accepted before the leave.
+func (p *Player) BeginLeaving() {
+	if p == nil {
+		return
+	}
+
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	if p.leaving {
+		return
+	}
+
+	p.leaving = true
+	p.current = intent{yaw: p.yaw}
+	p.setMiningLocked(nil)
+	p.mineReset = nil
+	p.mineCompleting = false
+	p.pendingSwing = nil
+}
+
+// cannotActLocked distinguishes a corpse from a lingering live body while giving every
+// request one gate. The caller holds sim.mu.
+func (p *Player) cannotActLocked() error {
+	if !p.alive() {
+		return errors.New("the player is dead")
+	}
+	if p.leaving {
+		return errors.New("the player is leaving")
+	}
+	return nil
+}
+
 // State is a copy of this player's authoritative state.
 func (p *Player) State() PlayerState {
 	p.sim.mu.Lock()
@@ -659,12 +702,12 @@ func (p *Player) Submit(in protocol.PlayerInput) error {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	if !p.alive() {
+	if err := p.cannotActLocked(); err != nil {
 		// A refusal, not a protocol error: the frame was well formed and the client is
 		// entitled to keep sending while it waits for the respawn it has been told about.
 		// The session logs it at debug and sends nothing, exactly as it does for a stale
 		// tick — see handlePostHandshake.
-		return errors.New("the player is dead")
+		return err
 	}
 
 	if p.haveTick && !newerTick(in.ClientTick, p.lastTick) {

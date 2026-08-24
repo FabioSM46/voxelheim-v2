@@ -188,6 +188,7 @@ func (o options) timeouts() session.Timeouts {
 		Handshake: o.handshakeTimeout,
 		Character: o.characterTimeout,
 		Idle:      o.idleTimeout,
+		Leave:     session.DefaultLeaveLinger,
 	}
 
 }

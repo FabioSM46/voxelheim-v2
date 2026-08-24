@@ -337,6 +337,29 @@ table DropItemRequest {
   client_tick: uint;
 }
 
+/// A player asking to leave the world. Client -> server, and intent only.
+///
+/// Empty deliberately. The server owns the ten-second linger, so the client cannot
+/// name a duration, an end time, or a cancellation. Once accepted, every later input
+/// from this session is inert and the character remains in the simulation until the
+/// server's countdown expires. Closing the socket instead reaches the same server-side
+/// transition without this message, which is the feature's security boundary.
+table LeaveRequest {
+}
+
+/// The server acknowledging that this session's irrevocable leave has begun.
+/// Server -> client.
+///
+/// `remaining_ms` is the server-owned window at the moment this frame is produced. The
+/// client may count it down for presentation, but it never removes the character or
+/// decides that the leave completed; the connection ending is the authoritative result.
+///
+/// Decoder invariant: `remaining_ms` is non-zero. Zero would announce a countdown that
+/// has already ended while the session still exists.
+table LeaveStarted {
+  remaining_ms: uint;
+}
+
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is

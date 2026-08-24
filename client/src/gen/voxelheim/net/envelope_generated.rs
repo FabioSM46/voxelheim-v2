@@ -443,6 +443,36 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_leave_request(&self) -> Option<LeaveRequest<'a>> {
+        if self.payload_type() == Payload::LeaveRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LeaveRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_leave_started(&self) -> Option<LeaveStarted<'a>> {
+        if self.payload_type() == Payload::LeaveStarted {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LeaveStarted::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -479,6 +509,8 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::CreateCharacterRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<CreateCharacterRequest>>("Payload::CreateCharacterRequest", pos),
           Payload::PlayerAppearance => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerAppearance>>("Payload::PlayerAppearance", pos),
           Payload::DropItemRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DropItemRequest>>("Payload::DropItemRequest", pos),
+          Payload::LeaveRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveRequest>>("Payload::LeaveRequest", pos),
+          Payload::LeaveStarted => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveStarted>>("Payload::LeaveStarted", pos),
           _ => Ok(()),
         }
      })?
@@ -782,6 +814,26 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::DropItemRequest => {
                 if let Some(x) = self.payload_as_drop_item_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LeaveRequest => {
+                if let Some(x) = self.payload_as_leave_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LeaveStarted => {
+                if let Some(x) = self.payload_as_leave_started() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

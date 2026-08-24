@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 11;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 12;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -68,6 +68,13 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// The rule that generalises, now that five shapes have been argued: **ask
 /// what the receiver does with the value it does not recognise, not which way
 /// it travelled.** Dropping it is a bump avoided; refusing it is a bump owed.
+///
+/// **V12 adds the leaving exchange.** `LeaveRequest` travels client -> server, and an
+/// older server treats an unknown client payload as a protocol error rather than
+/// dropping it. A V12 client against a V11 server would therefore handshake cleanly
+/// and be disconnected the first time it asked to leave. `LeaveStarted` travels back
+/// with the server-owned duration; its direction alone could have avoided a bump, but
+/// it is the answer to the request that already owes one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -78,10 +85,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(11);
+    pub const Current: Self = Self(12);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 11;
+    pub const ENUM_MAX: u16 = 12;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

@@ -1697,6 +1697,13 @@ Recorded here so the next reader does not mistake them for oversights:
   recovery: the server closes by contract, the client dials once, and the new list re-enables the
   form. Every other refusal and every unasked ending sets no flag.
 
+  A deliberate disconnect is also not locally complete. It sends the empty `LeaveRequest`, drops
+  the gameplay `Outbound` resource immediately, and retains the session socket until the server
+  answers `LeaveStarted` and closes it after the authoritative linger. `ConnectionState::Leaving`
+  is display state only: its local clock may render the server's remaining milliseconds, but may
+  neither cancel the leave nor close the session. Only the server close permits the one rejoin,
+  which means the client never attempts to take control of the inert body during its ten seconds.
+
   The flag is dropped *before* the dial that consumes it can fail, so a rejoin that is itself
   refused is a refusal a player can read rather than the first turn of a loop. The list is fetched
   again over a fresh connection rather than reused, because what the server holds may have changed,

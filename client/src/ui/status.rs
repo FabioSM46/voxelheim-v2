@@ -578,6 +578,16 @@ fn describe(
             // status line is the last thing that should panic.
             None => format!("Connected to {addr}"),
         },
+        ConnectionState::Leaving {
+            seconds_remaining: Some(seconds_remaining),
+        } => {
+            format!("Leaving {addr} in {seconds_remaining}s - your character is still in the world")
+        }
+        ConnectionState::Leaving {
+            seconds_remaining: None,
+        } => format!(
+            "Leaving {addr} - waiting for the server countdown; your character is still in the world"
+        ),
         ConnectionState::Rejected { reason } => format!("Cannot play: {}", refusal(reason, addr)),
         ConnectionState::Disconnected => format!("Disconnected from {addr}"),
     }
@@ -771,6 +781,7 @@ mod tests {
                 | ConnectionState::Handshaking
                 | ConnectionState::Choosing
                 | ConnectionState::Connected
+                | ConnectionState::Leaving { .. }
                 | ConnectionState::Disconnected => true,
             };
             assert_eq!(
@@ -1003,6 +1014,14 @@ mod tests {
                 Some(Identity::Returning),
             ),
             describe(&ConnectionState::Connected, address(), None, None),
+            describe(
+                &ConnectionState::Leaving {
+                    seconds_remaining: Some(10),
+                },
+                address(),
+                None,
+                None,
+            ),
             describe(
                 &ConnectionState::Rejected {
                     reason: "SERVER_FULL".to_owned(),

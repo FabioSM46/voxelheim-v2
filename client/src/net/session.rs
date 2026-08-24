@@ -48,7 +48,7 @@ use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -117,6 +117,10 @@ static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum NetCommand {
     Disconnect,
+    /// Ask the authoritative server to begin the irrevocable leave. Unlike
+    /// `Disconnect`, this writes a wire frame and keeps the reader alive for the
+    /// acknowledgement and final server close.
+    Leave,
     /// Which character this session plays, as the player chose it.
     ///
     /// **It travels as a command rather than as a frame, and that is what keeps one
@@ -218,6 +222,8 @@ pub(super) enum SessionEvent {
     /// Named apart from [`Self::Refused`] below, which means there is no session at all.
     /// This one is an answer inside a session that continues.
     ActionRefused(ActionRefused),
+    /// The server accepted a leave and owns this remaining duration.
+    Leaving(codec::LeaveStarted),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -382,6 +388,7 @@ pub(super) fn run(
     target: Target,
     events: Sender<SessionEvent>,
     commands: Receiver<NetCommand>,
+    outbound_sender: SyncSender<Vec<u8>>,
     outbound: Receiver<Vec<u8>>,
 ) {
     let Target {
@@ -518,6 +525,7 @@ pub(super) fn run(
         events: &events,
         commands: &commands,
         outbound,
+        outbound_sender: &outbound_sender,
         identity: &identity,
         chosen: &chosen,
     }) {
@@ -1134,6 +1142,10 @@ struct Connection<'a> {
     /// Handed to the writer thread when the welcome arrives, and owned here until then.
     /// See [`pump`] for why that is where it goes rather than at connect.
     outbound: Receiver<Vec<u8>>,
+    /// A clone of the writer's bounded queue, kept so the reader thread can place
+    /// the one durable LeaveRequest behind every frame already accepted. Blocking
+    /// here is safe — this is the network thread, never a Bevy system.
+    outbound_sender: &'a SyncSender<Vec<u8>>,
     identity: &'a IdentityFile,
     chosen: &'a ChosenCharacter,
 }
@@ -1155,6 +1167,7 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
         events,
         commands,
         outbound,
+        outbound_sender,
         identity,
         chosen,
     } = conn;
@@ -1169,6 +1182,7 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
     // names an entity and no character, so a client that has just made one cannot know
     // the id the server minted. See [`ChosenCharacter`].
     let mut playing: Option<u64> = None;
+    let mut leave_sent = false;
 
     loop {
         // Every command that has arrived rather than the first, because two can be
@@ -1194,6 +1208,17 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 // A dropped sender means the app is shutting down, which is the same
                 // instruction arriving less politely.
                 Ok(NetCommand::Disconnect) | Err(TryRecvError::Disconnected) => return None,
+                Ok(NetCommand::Leave) => {
+                    if leave_sent || !handshake.established() {
+                        continue;
+                    }
+                    if outbound_sender.send(codec::encode_leave_request()).is_err() {
+                        return Some(SessionEvent::Ended(Some(
+                            "the network writer ended before the leave request was sent".to_owned(),
+                        )));
+                    }
+                    leave_sent = true;
+                }
                 Ok(NetCommand::Choose(choice)) => {
                     // **The phase decides, and it decides before anything is written.**
                     // A choice arriving after `Established` would put this thread on a
@@ -1352,6 +1377,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::ActionRefused(refused)) => {
                     events.send(SessionEvent::ActionRefused(refused)).ok()?;
+                }
+                Ok(Transition::Leaving(started)) => {
+                    events.send(SessionEvent::Leaving(started)).ok()?;
                 }
                 Ok(Transition::MineProgress(progress)) => {
                     events.send(SessionEvent::MineProgress(progress)).ok()?;
