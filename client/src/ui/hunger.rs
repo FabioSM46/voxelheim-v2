@@ -212,17 +212,20 @@ fn show_hunger_bar(
 ///
 /// A low value arriving for the first time starts bright immediately and resets the
 /// ten-minute period. Returning to 25% or above cancels both timers; a later low value is
-/// therefore a fresh crossing rather than the tail of an older cycle. [`Time<Real>`]
-/// keeps those ten minutes on the wall clock instead of stretching them with a paused or
-/// scaled game clock.
+/// therefore a fresh crossing rather than the tail of an older cycle. Leaving playing
+/// mode cancels the cycle in the same way, because a burst behind the inventory or pause
+/// menu cannot remind anybody; returning while still low starts visibly from the beginning.
+/// While the bar is visible, [`Time<Real>`] keeps the period on the wall clock instead of
+/// stretching it with a scaled game clock.
 fn drive_low_hunger_blink(
     time: Res<Time<Real>>,
+    mode: Res<InputMode>,
     session: Option<Res<Session>>,
     vitals: Res<SelfVitals>,
     mut state: ResMut<LowHungerReminder>,
     mut fills: Query<&mut BackgroundColor, With<HungerFill>>,
 ) {
-    let low = session.is_some() && vitals.get().is_some_and(is_low);
+    let low = *mode == InputMode::Playing && session.is_some() && vitals.get().is_some_and(is_low);
     let colour = if !low {
         if state.was_low {
             state.leave_low();
@@ -503,5 +506,37 @@ mod tests {
 
         app.update();
         assert_eq!(fill_colour(&mut app), LOW_HUNGER_FLASH);
+    }
+
+    #[test]
+    fn hidden_modes_defer_the_reminder_and_resume_with_a_full_cycle() {
+        for hidden_mode in [InputMode::Inventory, InputMode::Menu] {
+            let mut app = hud(Some(vitals(24, 100)), Duration::from_secs(60));
+            assert_eq!(fill_colour(&mut app), LOW_HUNGER_FLASH);
+
+            // Half of the first period passes while the bar is visible.
+            advance(&mut app, 5);
+            *app.world_mut().resource_mut::<InputMode>() = hidden_mode;
+            app.update();
+            assert_eq!(visibility(&mut app), Visibility::Hidden);
+            assert_eq!(fill_colour(&mut app), BAR_FILL);
+
+            // Several old periods may pass behind the UI; none can produce an off-screen
+            // burst or consume time from the next visible cycle.
+            advance(&mut app, 20);
+            assert_eq!(fill_colour(&mut app), BAR_FILL);
+
+            *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+            app.update();
+            assert_eq!(visibility(&mut app), Visibility::Visible);
+            assert_eq!(fill_colour(&mut app), LOW_HUNGER_FLASH);
+
+            // The reminder is due ten visible minutes after resuming, not after the five
+            // minutes accumulated before the bar was hidden.
+            advance(&mut app, 9);
+            assert_eq!(fill_colour(&mut app), BAR_FILL);
+            app.update();
+            assert_eq!(fill_colour(&mut app), LOW_HUNGER_FLASH);
+        }
     }
 }
