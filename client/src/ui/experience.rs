@@ -254,11 +254,17 @@ fn detect_level_up(
     vitals: Res<SelfVitals>,
     mut flash: ResMut<LevelUpFlash>,
 ) {
-    if session.is_none() {
+    let Some(session) = session else {
         if flash.last_level.is_some() || flash.active_level.is_some() {
             flash.clear_session();
         }
         return;
+    };
+    // In production the network removes `Session` before another handshake can insert
+    // one. Treat replacement as the same boundary as well: it costs nothing and keeps a
+    // direct server transfer from comparing the new character with the old baseline.
+    if session.is_changed() {
+        flash.clear_session();
     }
     if !vitals.is_changed() {
         return;
@@ -546,6 +552,23 @@ mod tests {
         assert_eq!(flash_visibility(&mut app), Visibility::Hidden);
 
         app.world_mut().insert_resource(session());
+        deliver(&mut app, vitals(20, 0, 2_000));
+        assert_eq!(flash_visibility(&mut app), Visibility::Hidden);
+
+        deliver(&mut app, vitals(21, 0, 2_500));
+        assert_eq!(flash_visibility(&mut app), Visibility::Visible);
+        assert_eq!(flash_label(&mut app), "Level 21");
+    }
+
+    #[test]
+    fn replacing_a_session_also_makes_its_first_vitals_a_silent_baseline() {
+        let mut app = hud(Some(vitals(7, 349, 350)));
+        deliver(&mut app, vitals(8, 0, 500));
+        assert_eq!(flash_visibility(&mut app), Visibility::Visible);
+
+        let mut replacement = session();
+        replacement.0.entity_id = 2;
+        app.world_mut().insert_resource(replacement);
         deliver(&mut app, vitals(20, 0, 2_000));
         assert_eq!(flash_visibility(&mut app), Visibility::Hidden);
 
