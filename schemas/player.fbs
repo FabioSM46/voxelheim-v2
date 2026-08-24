@@ -1109,6 +1109,8 @@ table PlayerAppearance {
   /// what `entity_id` is for.
   name: string;
 
-  /// The sender's current level. Never zero, and resent whenever it changes.
+  /// The sender's current level. Never zero. V17 sends it when the entity enters view;
+  /// invalidating the cached appearance and resending it when the level changes is
+  /// planned separately.
   level: ushort;
 }

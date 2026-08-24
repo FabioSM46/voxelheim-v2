@@ -132,7 +132,9 @@ func (rcv *PlayerAppearance) Name() []byte {
 // / The character's stored name, from the server and from nothing this session said.
 // / Display text only: shown, never parsed, and never used as an identifier — that is
 // / what `entity_id` is for.
-// / The sender's current level. Never zero, and resent whenever it changes.
+// / The sender's current level. Never zero. V17 sends it when the entity enters view;
+// / invalidating the cached appearance and resending it when the level changes is
+// / planned separately.
 func (rcv *PlayerAppearance) Level() uint16 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
 	if o != 0 {
@@ -141,7 +143,9 @@ func (rcv *PlayerAppearance) Level() uint16 {
 	return 0
 }
 
-// / The sender's current level. Never zero, and resent whenever it changes.
+// / The sender's current level. Never zero. V17 sends it when the entity enters view;
+// / invalidating the cached appearance and resending it when the level changes is
+// / planned separately.
 func (rcv *PlayerAppearance) MutateLevel(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(10, n)
 }

@@ -134,7 +134,9 @@ impl<'a> PlayerAppearance<'a> {
                 .get::<::flatbuffers::ForwardsUOffset<&str>>(PlayerAppearance::VT_NAME, None)
         }
     }
-    /// The sender's current level. Never zero, and resent whenever it changes.
+    /// The sender's current level. Never zero. V17 sends it when the entity enters view;
+    /// invalidating the cached appearance and resending it when the level changes is
+    /// planned separately.
     #[inline]
     pub fn level(&self) -> u16 {
         // Safety:
