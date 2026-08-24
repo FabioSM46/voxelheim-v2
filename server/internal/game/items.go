@@ -297,6 +297,20 @@ var blockDrops = map[world.Block]ItemID{
 	world.IronOre: ItemRawIron,
 }
 
+// blockExperience is the lifetime progress a successful break earns. It mirrors every
+// breakable row in blockDrops, including the explicit zeroes: adding a block without
+// deciding its reward is a registry error rather than an implicit choice of none.
+var blockExperience = map[world.Block]uint16{
+	world.Stone:   0,
+	world.Dirt:    0,
+	world.Grass:   0,
+	world.Snow:    0,
+	world.Log:     2,
+	world.Leaves:  0,
+	world.CoalOre: 4,
+	world.IronOre: 6,
+}
+
 func itemByID(id ItemID) (itemDefinition, bool) {
 	item, ok := itemRegistry[id]
 	return item, ok

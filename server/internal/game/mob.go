@@ -573,7 +573,8 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 	return true
 }
 
-// damageMobLocked takes health from a mob and starts it dying if it runs out.
+// damageMobLocked takes health from a mob, starts it dying if it runs out, and reports
+// whether this blow caused that transition.
 //
 // The one path a mob loses health by, for the reason damageLocked is the one path a
 // player does: one place clamps, one place decides what death means, and there is one
@@ -607,9 +608,9 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 // standing beside it.
 //
 // The caller holds Sim.mu.
-func (s *Sim) damageMobLocked(m *mob, amount uint16) {
+func (s *Sim) damageMobLocked(m *mob, amount uint16) bool {
 	if amount == 0 || m.health == 0 {
-		return
+		return false
 	}
 
 	if amount >= m.health {
@@ -623,7 +624,7 @@ func (s *Sim) damageMobLocked(m *mob, amount uint16) {
 		m.vel[0], m.vel[2] = 0, 0
 		s.log.Debug("mob died", "entity_id", m.entityID, "kind", m.kind,
 			"death_ticks", m.actionTicks)
-		return
+		return true
 	}
 	m.health -= amount
 	if m.species().passive {
@@ -631,6 +632,7 @@ func (s *Sim) damageMobLocked(m *mob, amount uint16) {
 		m.actionTicks = 0
 		m.target = 0
 	}
+	return false
 }
 
 // mobStates is the wire form of every mob, in the order it was given.

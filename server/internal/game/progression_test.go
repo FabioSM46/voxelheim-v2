@@ -9,6 +9,12 @@ import (
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 )
 
+func experienceOf(p *Player) uint32 {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	return p.experience
+}
+
 func TestTheProgressionCurveAtEveryBoundaryShape(t *testing.T) {
 	t.Parallel()
 
@@ -68,7 +74,11 @@ func TestAwardExperienceCrossesLevelsAndSaturatesWithoutOverflow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			startLevel := levelFor(tc.start)
-			player := Player{experience: tc.start, health: maxHealthFor(startLevel)}
+			player := Player{
+				experience: tc.start,
+				health:     maxHealthFor(startLevel),
+				lifeState:  vnet.LifeStateAlive,
+			}
 			if got := player.awardExperienceLocked(tc.amount); got != tc.leveledUp {
 				t.Errorf("leveledUp = %t, want %t", got, tc.leveledUp)
 			}
@@ -106,7 +116,11 @@ func TestMaximumHealthScalesFivePointsPerLevel(t *testing.T) {
 func TestALevelUpRaisesCurrentHealthWithTheMaximum(t *testing.T) {
 	t.Parallel()
 
-	player := Player{experience: experienceBefore(2) - 1, health: 61}
+	player := Player{
+		experience: experienceBefore(2) - 1,
+		health:     61,
+		lifeState:  vnet.LifeStateAlive,
+	}
 	if !player.awardExperienceLocked(1) {
 		t.Fatal("the boundary did not report a level-up")
 	}
@@ -237,6 +251,38 @@ func equalLevels(got, want []uint16) bool {
 		}
 	}
 	return true
+}
+
+func TestADeadPlayerKeepsZeroHealthWhenLateExperienceLevelsThem(t *testing.T) {
+	t.Parallel()
+
+	player := Player{
+		experience: experienceBefore(2) - 1,
+		lifeState:  vnet.LifeStateDead,
+	}
+	if !player.awardExperienceLocked(1) {
+		t.Fatal("the late award did not preserve the level-up")
+	}
+	if player.health != 0 {
+		t.Errorf("late experience raised a dead player's health to %d", player.health)
+	}
+}
+
+func TestDeathAndRespawnPreserveLifetimeExperience(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.sim.mu.Lock()
+	player.awardExperienceLocked(37)
+	h.sim.mu.Unlock()
+
+	h.hurt(player, PlayerMaxHealth)
+	h.advance(int(h.sim.deathTicks))
+
+	if got := experienceOf(player); got != 37 {
+		t.Errorf("experience after death and respawn = %d, want the lifetime total 37", got)
+	}
 }
 
 // The wire carries progress within a level rather than the lifetime total. At the cap

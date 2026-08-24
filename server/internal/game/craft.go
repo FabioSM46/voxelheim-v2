@@ -64,6 +64,7 @@ type recipe struct {
 	product      ItemID
 	productCount uint16
 	station      vnet.StructureKind
+	experience   uint16
 }
 
 // recipeTable is the authoritative answer to every `CraftRequest`.
@@ -116,6 +117,7 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		product:      ItemIronSword,
 		productCount: 1,
 		station:      vnet.StructureKindForge,
+		experience:   10,
 	},
 
 	// What keeps the blade alive. The repair itself is a field action and needs no forge;
@@ -125,6 +127,7 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		product:      ItemSharpeningStone,
 		productCount: 1,
 		station:      vnet.StructureKindForge,
+		experience:   10,
 	},
 
 	// The other half of that job, and the fourth recipe that needs nowhere to stand —
@@ -156,18 +159,21 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		product:      ItemShovel,
 		productCount: 1,
 		station:      vnet.StructureKindForge,
+		experience:   10,
 	},
 	vnet.RecipeIDPickaxe: {
 		ingredients:  []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
 		product:      ItemPickaxe,
 		productCount: 1,
 		station:      vnet.StructureKindForge,
+		experience:   10,
 	},
 	vnet.RecipeIDAxe: {
 		ingredients:  []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
 		product:      ItemAxe,
 		productCount: 1,
 		station:      vnet.StructureKindForge,
+		experience:   10,
 	},
 
 	// Cooking is immediate crafting for now: one raw piece becomes one cooked piece at
@@ -177,6 +183,7 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		product:      ItemCookedMeat,
 		productCount: 1,
 		station:      vnet.StructureKindCampfire,
+		experience:   3,
 	},
 }
 
@@ -286,6 +293,12 @@ func (p *Player) Craft(req protocol.CraftRequest) (protocol.InventoryState, erro
 
 	if !p.inventory.slots.craft(r) {
 		return protocol.InventoryState{}, fmt.Errorf("the pack has no room or not enough for %s", req.Recipe)
+	}
+	if r.experience > 0 {
+		p.sim.awardExperienceLocked(p, uint32(r.experience))
+		p.sim.log.Debug("experience awarded",
+			"entity_id", p.entityID, "source", "craft", "amount", r.experience,
+			"recipe", req.Recipe.String())
 	}
 
 	p.sim.log.Debug("craft applied",

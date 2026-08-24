@@ -62,6 +62,9 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 		if def.maxHealth == 0 {
 			t.Errorf("%s has no health, so it arrives dead", kind)
 		}
+		if def.experience == 0 {
+			t.Errorf("%s awards no experience, so its reward was never decided", kind)
+		}
 		if def.speed <= 0 {
 			t.Errorf("%s has a speed of %v, so it can never close on anybody", kind, def.speed)
 		}
@@ -135,6 +138,7 @@ func TestTheDeerRowIsPassivePrey(t *testing.T) {
 
 	want := mobDefinition{
 		maxHealth:  20,
+		experience: 5,
 		speed:      4.0,
 		aggroRange: 12.0,
 		passive:    true,
@@ -186,6 +190,7 @@ func TestTheDraugrsNumbersSurvivedTheMoveIntoTheRegistry(t *testing.T) {
 
 	want := mobDefinition{
 		maxHealth:   60,
+		experience:  15,
 		speed:       3.2,
 		aggroRange:  16.0,
 		attackRange: 2.0,
@@ -214,6 +219,25 @@ func TestTheDraugrsNumbersSurvivedTheMoveIntoTheRegistry(t *testing.T) {
 	if draugrRow.body != (body{width: PlayerWidth, height: PlayerHeight}) {
 		t.Errorf("the draugr's body is %v, and it was the player's %v by %v",
 			draugrRow.body, PlayerWidth, PlayerHeight)
+	}
+}
+
+// The draugr is the baseline hunt against the first level boundary. Three kills leave
+// the player five experience short; the fourth crosses it. Both sides are intentional:
+// rounding 15 up to a divisor of 50 would make the balance look cleaner while changing
+// the number of fights the first level asks for.
+func TestDraugrExperienceStraddlesTheFirstLevelAfterThreeKills(t *testing.T) {
+	t.Parallel()
+
+	three := uint32(3) * uint32(draugrRow.experience)
+	four := uint32(4) * uint32(draugrRow.experience)
+	if three >= ExperiencePerLevelStep {
+		t.Errorf("three draugr award %d experience against a %d first level, want them still below it",
+			three, ExperiencePerLevelStep)
+	}
+	if four < ExperiencePerLevelStep {
+		t.Errorf("four draugr award %d experience against a %d first level, want the fourth to cross it",
+			four, ExperiencePerLevelStep)
 	}
 }
 

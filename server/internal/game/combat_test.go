@@ -99,6 +99,40 @@ func TestThreeSwingsKillADraugr(t *testing.T) {
 	}
 }
 
+func TestOnlyTheKillingBlowAwardsTheSwingingPlayer(t *testing.T) {
+	t.Parallel()
+
+	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
+	bystander, _ := h.join(2, [3]float32{10.5, 64, 10.5})
+	player.inventory.mu.Lock()
+	player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+	player.inventory.mu.Unlock()
+
+	if err := h.swing(player, 0, 1); err != nil {
+		t.Fatalf("first swing: %v", err)
+	}
+	h.step()
+	if got := experienceOf(player); got != 0 {
+		t.Fatalf("non-killing blow awarded %d experience, want 0", got)
+	}
+
+	h.advance(int(h.sim.attackCooldown))
+	if err := h.swing(player, 0, 2); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := h.mobHealth(id); got != 0 {
+		t.Fatalf("draugr has %d health after two iron swings, want 0", got)
+	}
+	if got := experienceOf(player); got != uint32(draugrRow.experience) {
+		t.Errorf("swinging player has %d experience, want %d", got, draugrRow.experience)
+	}
+	if got := experienceOf(bystander); got != 0 {
+		t.Errorf("bystander has %d experience, want 0", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Where a swing reaches
 // ---------------------------------------------------------------------------

@@ -304,6 +304,47 @@ func TestMiningBreaksOnItsHardnessTickAndSendsNoCompletionProgress(t *testing.T)
 	}
 }
 
+func TestOnlyRewardedBlocksAwardExperienceAfterACompletedBreak(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		block world.Block
+		want  uint32
+	}{
+		"a log": {block: world.Log, want: 2},
+		"dirt":  {block: world.Dirt, want: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			target := [3]int32{3, 200, 0}
+			sim, player, _, _ := newMiningPlayer(t, map[[3]int64]world.Block{mineTarget(target): tc.block})
+			if err := player.Mine(activeMine(target, 1), true); err != nil {
+				t.Fatalf("Mine: %v", err)
+			}
+			cost, breakable := sim.hardnessTicks(tc.block, ItemNone)
+			if !breakable {
+				t.Fatalf("block %d is not breakable", tc.block)
+			}
+			for tick := 1; tick <= cost; tick++ {
+				if tick > 1 {
+					if err := player.Mine(activeMine(target, uint32(tick)), true); err != nil {
+						t.Fatalf("mining refresh %d: %v", tick, err)
+					}
+				}
+				sim.Step(uint64(tick))
+			}
+			completion := awaitCompletion(t, player)
+			if _, err := player.CompleteMining(context.Background(), completion); err != nil {
+				t.Fatalf("CompleteMining: %v", err)
+			}
+			if got := experienceOf(player); got != tc.want {
+				t.Errorf("breaking %d awarded %d experience, want %d", tc.block, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAChangedBlockAfterHardnessPaymentSendsExactlyOneReset(t *testing.T) {
 	t.Parallel()
 
