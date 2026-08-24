@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	flatbuffers "github.com/google/flatbuffers/go"
+
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -57,13 +59,14 @@ func awaitSignal(t *testing.T, name string, signal <-chan struct{}) {
 	}
 }
 
-func TestInventoryStatePreservesAllThirtySixRealSlots(t *testing.T) {
+func TestInventoryStatePreservesAllThirtyNineRealSlots(t *testing.T) {
 	t.Parallel()
 
 	inventory := newInventory()
 	inventory.slots[0] = inventoryStack{item: ItemDirt, count: 7}
 	inventory.slots[9] = inventoryStack{item: ItemStone, count: 3}
 	inventory.slots[35] = inventoryStack{item: ItemRawIron, count: 1}
+	inventory.slots[38] = inventoryStack{item: ItemSnow, count: 2}
 
 	state := inventory.state()
 	if got := len(state.Stacks); got != int(protocol.InventorySlots) {
@@ -73,10 +76,43 @@ func TestInventoryStatePreservesAllThirtySixRealSlots(t *testing.T) {
 		0:  {ItemID: uint16(ItemDirt), Count: 7},
 		9:  {ItemID: uint16(ItemStone), Count: 3},
 		35: {ItemID: uint16(ItemRawIron), Count: 1},
+		38: {ItemID: uint16(ItemSnow), Count: 2},
 	}
 	for slot, stack := range state.Stacks {
 		if got := want[slot]; stack != got {
 			t.Errorf("slot %d = %+v, want %+v", slot, stack, got)
+		}
+	}
+}
+
+func TestAutomaticInsertionOverflowsInsteadOfFillingEquipment(t *testing.T) {
+	t.Parallel()
+
+	fullPack := func() slotTable {
+		var slots slotTable
+		for slot := range slots[:equipmentFirst] {
+			slots[slot] = inventoryStack{item: ItemDirt, count: 64}
+		}
+		return slots
+	}
+
+	slots := fullPack()
+	if remainder := slots.insert(ItemStone, 5); remainder != 5 {
+		t.Fatalf("insert returned remainder %d, want all 5 items", remainder)
+	}
+	for slot := equipmentFirst; slot < int(protocol.InventorySlots); slot++ {
+		if slots[slot] != (inventoryStack{}) {
+			t.Errorf("insert filled equipment slot %d with %+v", slot, slots[slot])
+		}
+	}
+
+	slots = fullPack()
+	if remainder := slots.insertStack(stackOf(ItemRustySword, 1)); remainder != 1 {
+		t.Fatalf("insertStack returned remainder %d, want the whole blade", remainder)
+	}
+	for slot := equipmentFirst; slot < int(protocol.InventorySlots); slot++ {
+		if slots[slot] != (inventoryStack{}) {
+			t.Errorf("insertStack filled equipment slot %d with %+v", slot, slots[slot])
 		}
 	}
 }
@@ -206,6 +242,166 @@ func TestRefusedInventoryMovesLeaveTheStateByteIdentical(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) {
+	const (
+		testHead ItemID = 65_000 + iota
+		testOtherHead
+		testChest
+		testLegs
+		testStackableHead
+	)
+	itemRegistry[testHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
+	itemRegistry[testOtherHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
+	itemRegistry[testChest] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornChest}
+	itemRegistry[testLegs] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornLegs}
+	itemRegistry[testStackableHead] = itemDefinition{places: world.Air, maxStack: 4, wornAt: wornHead}
+	t.Cleanup(func() {
+		delete(itemRegistry, testHead)
+		delete(itemRegistry, testOtherHead)
+		delete(itemRegistry, testChest)
+		delete(itemRegistry, testLegs)
+		delete(itemRegistry, testStackableHead)
+	})
+
+	refusedByteIdentical := func(t *testing.T, inventory *inventory, request protocol.InventoryMoveRequest) {
+		t.Helper()
+		before := protocol.EncodeInventoryState(inventory.stateLocked())
+		if inventory.moveLocked(request) {
+			t.Fatal("the wrong-location move was accepted")
+		}
+		after := protocol.EncodeInventoryState(inventory.stateLocked())
+		if !bytes.Equal(before, after) {
+			t.Fatalf("refusal changed the inventory bytes:\n before %v\n after  %v", before, after)
+		}
+	}
+
+	locations := []struct {
+		name       string
+		slot       int
+		matching   ItemID
+		mismatched ItemID
+	}{
+		{name: "head", slot: equipmentHead, matching: testHead, mismatched: testChest},
+		{name: "chest", slot: equipmentChest, matching: testChest, mismatched: testLegs},
+		{name: "legs", slot: equipmentLegs, matching: testLegs, mismatched: testHead},
+	}
+	for _, location := range locations {
+		t.Run(location.name, func(t *testing.T) {
+			t.Run("matching item enters", func(t *testing.T) {
+				inventory := newInventory()
+				inventory.slots[4] = stackOf(location.matching, 1)
+				if !inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1}) {
+					t.Fatalf("matching item %d was refused", location.matching)
+				}
+				if got := inventory.slots[location.slot].item; got != location.matching {
+					t.Errorf("equipment slot holds item %d, want %d", got, location.matching)
+				}
+			})
+
+			t.Run("mismatched item is refused", func(t *testing.T) {
+				inventory := newInventory()
+				inventory.slots[4] = stackOf(location.mismatched, 1)
+				refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1})
+			})
+
+			t.Run("empty source is refused", func(t *testing.T) {
+				inventory := newInventory()
+				refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1})
+			})
+		})
+	}
+
+	t.Run("a swap cannot return a pack item into equipment", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[equipmentHead] = stackOf(testHead, 1)
+		inventory.slots[4] = stackOf(ItemStone, 1)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1})
+	})
+
+	t.Run("a swap succeeds when both directions fit", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[equipmentHead] = stackOf(testHead, 1)
+		inventory.slots[4] = stackOf(testOtherHead, 1)
+		if !inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1}) {
+			t.Fatal("the two matching head items were refused")
+		}
+		if inventory.slots[equipmentHead].item != testOtherHead || inventory.slots[4].item != testHead {
+			t.Errorf("swap produced head=%d pack=%d", inventory.slots[equipmentHead].item, inventory.slots[4].item)
+		}
+	})
+
+	t.Run("equipment refuses a stack larger than one", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[4] = stackOf(testStackableHead, 2)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentHead), Count: 2})
+	})
+
+	t.Run("equipment refuses merging a second item", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[4] = stackOf(testStackableHead, 1)
+		inventory.slots[equipmentHead] = stackOf(testStackableHead, 1)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentHead), Count: 1})
+	})
+
+	t.Run("a swap cannot return a stack into equipment", func(t *testing.T) {
+		inventory := newInventory()
+		inventory.slots[equipmentHead] = stackOf(testHead, 1)
+		inventory.slots[4] = stackOf(testStackableHead, 2)
+		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1})
+	})
+}
+
+func TestAnEquipmentMoveResendsTheAppearanceWithTheWornItem(t *testing.T) {
+	const testHead ItemID = 64_980
+	itemRegistry[testHead] = itemDefinition{
+		places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead,
+	}
+	t.Cleanup(func() { delete(itemRegistry, testHead) })
+
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
+	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
+	subject.inventory.mu.Lock()
+	subject.inventory.slots[4] = stackOf(testHead, 1)
+	subject.inventory.mu.Unlock()
+	h.step()
+
+	initial := appearanceFrames(t, watcherOut, subject.entityID)
+	if len(initial) != 1 {
+		t.Fatalf("the watcher began with %d subject appearances, want one", len(initial))
+	}
+	if got := playerAppearanceWornHead(t, initial[0]); got != 0 {
+		t.Fatalf("the initial appearance wears item %d, want nothing", got)
+	}
+
+	if _, err := subject.MoveInventory(protocol.InventoryMoveRequest{
+		From: 4, To: uint8(equipmentHead), Count: 1,
+	}); err != nil {
+		t.Fatalf("moving the matching item onto the head: %v", err)
+	}
+	h.step()
+
+	resent := appearanceFrames(t, watcherOut, subject.entityID)
+	if len(resent) != 2 {
+		t.Fatalf("the equipment move produced %d subject appearances, want two total", len(resent))
+	}
+	if got := playerAppearanceWornHead(t, resent[1]); got != uint16(testHead) {
+		t.Errorf("resent appearance wears item %d, want %d", got, testHead)
+	}
+}
+
+func playerAppearanceWornHead(t *testing.T, frame []byte) uint16 {
+	t.Helper()
+	envelope := vnet.GetRootAsEnvelope(frame, 0)
+	var table flatbuffers.Table
+	if !envelope.Payload(&table) {
+		t.Fatal("the appearance payload is absent")
+	}
+	var appearance vnet.PlayerAppearance
+	appearance.Init(table.Bytes, table.Pos)
+	return appearance.WornHead()
 }
 
 // starterSword is the slot every player joins with, as InventoryState carries it. A

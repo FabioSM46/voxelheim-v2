@@ -35,6 +35,7 @@ fn session() -> Session {
         view_distance: 8,
         inventory_slots: 36,
         hotbar_slots: 9,
+        equipment_slots: 3,
         player_token: crate::net::ANY_TOKEN,
     })
 }
@@ -103,6 +104,9 @@ fn describe_as_level(
             entity_id,
             appearance,
             name: name.to_owned(),
+            worn_head: 0,
+            worn_chest: 0,
+            worn_legs: 0,
             level,
         });
 }

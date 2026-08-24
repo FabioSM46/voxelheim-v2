@@ -45,6 +45,8 @@ pub enum PlayerAppearanceOffset {}
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
 ///   - `level` is never zero
+///   - `worn_head`, `worn_chest` and `worn_legs` are item ids, with zero meaning that
+///     the corresponding equipment slot is empty
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 pub struct PlayerAppearance<'a> {
@@ -66,6 +68,9 @@ impl<'a> PlayerAppearance<'a> {
     pub const VT_APPEARANCE: ::flatbuffers::VOffsetT = 6;
     pub const VT_NAME: ::flatbuffers::VOffsetT = 8;
     pub const VT_LEVEL: ::flatbuffers::VOffsetT = 10;
+    pub const VT_WORN_HEAD: ::flatbuffers::VOffsetT = 12;
+    pub const VT_WORN_CHEST: ::flatbuffers::VOffsetT = 14;
+    pub const VT_WORN_LEGS: ::flatbuffers::VOffsetT = 16;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -89,6 +94,9 @@ impl<'a> PlayerAppearance<'a> {
         if let Some(x) = args.appearance {
             builder.add_appearance(x);
         }
+        builder.add_worn_legs(args.worn_legs);
+        builder.add_worn_chest(args.worn_chest);
+        builder.add_worn_head(args.worn_head);
         builder.add_level(args.level);
         builder.finish()
     }
@@ -148,6 +156,42 @@ impl<'a> PlayerAppearance<'a> {
                 .unwrap()
         }
     }
+    /// Item id in the trailing head equipment slot, or zero when nothing is worn.
+    #[inline]
+    pub fn worn_head(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerAppearance::VT_WORN_HEAD, Some(0))
+                .unwrap()
+        }
+    }
+    /// Item id in the trailing chest equipment slot, or zero when nothing is worn.
+    #[inline]
+    pub fn worn_chest(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerAppearance::VT_WORN_CHEST, Some(0))
+                .unwrap()
+        }
+    }
+    /// Item id in the trailing legs equipment slot, or zero when nothing is worn.
+    #[inline]
+    pub fn worn_legs(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerAppearance::VT_WORN_LEGS, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
@@ -165,6 +209,9 @@ impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
             )?
             .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
             .visit_field::<u16>("level", Self::VT_LEVEL, false)?
+            .visit_field::<u16>("worn_head", Self::VT_WORN_HEAD, false)?
+            .visit_field::<u16>("worn_chest", Self::VT_WORN_CHEST, false)?
+            .visit_field::<u16>("worn_legs", Self::VT_WORN_LEGS, false)?
             .finish();
         Ok(())
     }
@@ -174,6 +221,9 @@ pub struct PlayerAppearanceArgs<'a> {
     pub appearance: Option<::flatbuffers::WIPOffset<Appearance<'a>>>,
     pub name: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub level: u16,
+    pub worn_head: u16,
+    pub worn_chest: u16,
+    pub worn_legs: u16,
 }
 impl<'a> Default for PlayerAppearanceArgs<'a> {
     #[inline]
@@ -183,6 +233,9 @@ impl<'a> Default for PlayerAppearanceArgs<'a> {
             appearance: None,
             name: None,
             level: 0,
+            worn_head: 0,
+            worn_chest: 0,
+            worn_legs: 0,
         }
     }
 }
@@ -216,6 +269,21 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerAppearanceBuilder<'a, '
             .push_slot::<u16>(PlayerAppearance::VT_LEVEL, level, 0);
     }
     #[inline]
+    pub fn add_worn_head(&mut self, worn_head: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerAppearance::VT_WORN_HEAD, worn_head, 0);
+    }
+    #[inline]
+    pub fn add_worn_chest(&mut self, worn_chest: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerAppearance::VT_WORN_CHEST, worn_chest, 0);
+    }
+    #[inline]
+    pub fn add_worn_legs(&mut self, worn_legs: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerAppearance::VT_WORN_LEGS, worn_legs, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerAppearanceBuilder<'a, 'b, A> {
@@ -239,6 +307,9 @@ impl ::core::fmt::Debug for PlayerAppearance<'_> {
         ds.field("appearance", &self.appearance());
         ds.field("name", &self.name());
         ds.field("level", &self.level());
+        ds.field("worn_head", &self.worn_head());
+        ds.field("worn_chest", &self.worn_chest());
+        ds.field("worn_legs", &self.worn_legs());
         ds.finish()
     }
 }

@@ -433,8 +433,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: 32,
             view_distance: 8,
-            inventory_slots: 1,
+            inventory_slots: 2,
             hotbar_slots: 1,
+            equipment_slots: 1,
             player_token: crate::net::ANY_TOKEN,
         }
     }
@@ -570,12 +571,15 @@ mod tests {
     /// nothing here splits it back apart.
     fn inventory() -> InventoryState {
         InventoryState {
-            stacks: vec![InventoryStack {
-                item_id: 7,
-                count: 1,
-                durability: 35,
-                max_durability: 100,
-            }],
+            stacks: vec![
+                InventoryStack {
+                    item_id: 7,
+                    count: 1,
+                    durability: 35,
+                    max_durability: 100,
+                },
+                InventoryStack::default(),
+            ],
         }
     }
 
@@ -602,7 +606,7 @@ mod tests {
 
     #[test]
     fn inventory_slot_count_must_match_the_welcome() {
-        for got in [0, 2] {
+        for got in [0, 1, 3] {
             let mut handshake = established();
             let state = InventoryState {
                 stacks: vec![
@@ -617,7 +621,7 @@ mod tests {
 
             assert_eq!(
                 handshake.apply(Message::Inventory(state)),
-                Err(HandshakeError::InventorySlots { expected: 1, got })
+                Err(HandshakeError::InventorySlots { expected: 2, got })
             );
         }
     }
@@ -1095,6 +1099,9 @@ mod tests {
             entity_id: 1,
             appearance: PLACEHOLDER_APPEARANCE,
             name: "Test Character".to_owned(),
+            worn_head: 0,
+            worn_chest: 0,
+            worn_legs: 0,
             level: 1,
         }
     }

@@ -535,6 +535,9 @@ struct Described {
     appearance: Appearance,
     name: String,
     level: u16,
+    worn_head: u16,
+    worn_chest: u16,
+    worn_legs: u16,
     /// When this entry was written. Read only while `drawn` is false — once a body
     /// exists, that body's presence in the newest snapshot is what keeps the entry.
     at: Instant,
@@ -1177,6 +1180,9 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
                 described.appearance = message.appearance;
                 described.name = message.name;
                 described.level = message.level;
+                described.worn_head = message.worn_head;
+                described.worn_chest = message.worn_chest;
+                described.worn_legs = message.worn_legs;
             }
             None => {
                 appearances.0.insert(
@@ -1185,6 +1191,9 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
                         appearance: message.appearance,
                         name: message.name,
                         level: message.level,
+                        worn_head: message.worn_head,
+                        worn_chest: message.worn_chest,
+                        worn_legs: message.worn_legs,
                         at: now,
                         drawn: false,
                     },

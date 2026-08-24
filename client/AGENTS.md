@@ -437,7 +437,11 @@ The client samples the controls, sends what the player is *trying* to do at the 
   sent. A click never touches it. `SelectedSlot` is local input — number keys 1 through 9
   choose a slot index from the server-announced hotbar — and a place request carries only
   that index. The server resolves the item in its authoritative inventory, and its next
-  complete state is the only thing that changes the displayed contents.
+  complete state is the only thing that changes the displayed contents. The welcome also
+  announces a non-empty trailing equipment subset; the pack grid draws only the slots between
+  the hotbar and that subset. Equipment has no cells or body rendering yet, so the three worn ids
+  in a described appearance are state carried forward for a later renderer, not a client-side
+  equipment rule.
 - **Item drops are snapshot entities, not pickup candidates.** `player/drops.rs` uses the
   newest `drops` vector as the complete existence set and interpolates positions through the
   same two-snapshot buffer as player bodies. Proximity and clicks are not inputs. Spin and bob

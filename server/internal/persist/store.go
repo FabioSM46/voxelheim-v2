@@ -107,7 +107,12 @@ import (
 // store writes the total verbatim and session asks game whether it is legal when the
 // character resumes. There is no migration; a v5 record cannot say how much experience
 // the character earned, and inventing a value would make persistence decide progression.
-const StoreVersion uint32 = 6
+//
+// **7 widens the fixed slot table from 36 to 39 entries.** The three trailing entries
+// are the character's worn head, chest and legs equipment, so they must persist and pay
+// the same death penalty as the rest of the life. There is no migration: a v6 record
+// cannot say what was worn, and inventing those slots would make persistence decide it.
+const StoreVersion uint32 = 7
 
 // On-disk layout, little-endian throughout, one file per character.
 //
@@ -150,7 +155,7 @@ const (
 
 	// supersededSuffix marks a players directory written in a format this build does
 	// not speak, and it names the format this build *does* speak: a directory set aside
-	// by this version becomes players.pre-v6.<timestamp>.
+	// by this version becomes players.pre-v7.<timestamp>.
 	//
 	// It said `.pre-accounts` while there had been exactly one such move, which was
 	// true of the format that introduced characters and stopped being true the moment a
@@ -407,8 +412,8 @@ func (s *Store) Unreadable() []string {
 // records inside are unreadable to this build — a v2 record names a player by the hash
 // of their account and cannot say which character it was; a v3 record cannot say what
 // its character looks like; a v4 record says nothing about hunger; a v5 record says
-// nothing about experience — so there is no migration to run and deliberately none
-// written. What there is, is a directory an
+// nothing about experience; a v6 record has no worn-equipment slots — so there is no
+// migration to run and deliberately none written. What there is, is a directory an
 // operator can copy somewhere and open at their leisure.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:

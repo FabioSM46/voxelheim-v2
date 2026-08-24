@@ -94,6 +94,45 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	}
 }
 
+func TestARecordRestoresAWornChestItemAndRejectsItInTheWrongSlot(t *testing.T) {
+	const testChest ItemID = 64_990
+	itemRegistry[testChest] = itemDefinition{
+		maxStack: 1, maxDurability: 25, wornAt: wornChest,
+	}
+	t.Cleanup(func() { delete(itemRegistry, testChest) })
+
+	life := Life{Pos: [3]float64{0.5, 64, 0.5}, Health: PlayerMaxHealth, Hunger: PlayerMaxHunger}
+	life.Slots[equipmentChest] = protocol.InventoryStack{
+		ItemID: uint16(testChest), Count: 1, Durability: 17, MaxDurability: 25,
+	}
+	if err := life.Validate(); err != nil {
+		t.Fatalf("the chest item in slot %d was refused: %v", equipmentChest, err)
+	}
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	out := &dropSink{}
+	player, err := h.sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 64, 0.5}, testAppearance(), &life, out.deliver)
+	if err != nil {
+		t.Fatalf("Join with worn chest item: %v", err)
+	}
+	if got := player.Record().Slots[equipmentChest]; got != life.Slots[equipmentChest] {
+		t.Errorf("restored chest slot = %+v, want %+v", got, life.Slots[equipmentChest])
+	}
+
+	misplaced := life
+	misplaced.Slots[equipmentChest] = protocol.InventoryStack{}
+	misplaced.Slots[equipmentHead] = life.Slots[equipmentChest]
+	if err := misplaced.Validate(); err == nil {
+		t.Fatal("Validate accepted a chest item in the head slot")
+	}
+
+	stacked := life
+	stacked.Slots[equipmentChest].Count = 2
+	if err := stacked.Validate(); err == nil {
+		t.Fatal("Validate accepted more than one item in an equipment slot")
+	}
+}
+
 // A restored player settles the same way a new one does, and keeps facing where they
 // were facing until their client says otherwise.
 //

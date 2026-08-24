@@ -30,6 +30,15 @@ type inventory struct {
 // leave a pack therefore live on this type, and `inventory` is the lock around it.
 type slotTable [protocol.InventorySlots]inventoryStack
 
+const (
+	// equipmentFirst is the first slot automatic insertion must never reach. The
+	// inventory is laid out as hotbar, pack, then the three worn slots.
+	equipmentFirst = int(protocol.InventorySlots - protocol.EquipmentSlots)
+	equipmentHead  = equipmentFirst
+	equipmentChest = equipmentFirst + 1
+	equipmentLegs  = equipmentFirst + 2
+)
+
 // inventoryStack is one slot's authoritative contents. The zero value is an empty slot.
 //
 // durability and maxDurability are both zero for an empty slot and for every resource:
@@ -169,7 +178,7 @@ func (t *slotTable) insertStack(stack inventoryStack) uint16 {
 		return stack.count
 	}
 
-	for slot := range t {
+	for slot := range t[:equipmentFirst] {
 		if t[slot].count != 0 {
 			continue
 		}
@@ -200,7 +209,7 @@ func (t *slotTable) insert(itemID ItemID, count uint16) uint16 {
 	// to refuse every occupied slot because of it, but a later durable item that
 	// stacked two deep would start silently merging durabilities.
 	if definition.maxDurability == 0 {
-		for slot := range t {
+		for slot := range t[:equipmentFirst] {
 			stack := &t[slot]
 			if stack.item != itemID || stack.count >= definition.maxStack {
 				continue
@@ -214,7 +223,7 @@ func (t *slotTable) insert(itemID ItemID, count uint16) uint16 {
 		}
 	}
 
-	for slot := range t {
+	for slot := range t[:equipmentFirst] {
 		stack := &t[slot]
 		if stack.count != 0 {
 			continue
@@ -349,13 +358,40 @@ func (i *inventory) stateLocked() protocol.InventoryState {
 // arrives it joins every rule that asks this by widening this answer — not by a second
 // `slot < protocol.HotbarSlots` appearing somewhere that can disagree with this one.
 //
-// Today the answer is the hotbar, and the server needs nothing from the client to give
-// it: protocol.HotbarSlots is the *leading* subset of the inventory, so a slot's own
-// index is the whole of it. There is no selection in this package and none on the wire,
-// deliberately — a slot reaches this server only inside a request that names one — so
-// "what is on the player" could never have meant the one slot a client had highlighted.
+// The hotbar is the leading subset and equipment is the trailing subset, so a slot's
+// own index is the whole answer. There is no selection in this package and none on the
+// wire, deliberately — a slot reaches this server only inside a request that names one
+// — so "what is on the player" could never have meant the one slot a client highlighted.
 func carriedOnPerson(slot int) bool {
-	return slot < int(protocol.HotbarSlots)
+	return slot < int(protocol.HotbarSlots) || slot >= equipmentFirst
+}
+
+// wornAtForSlot names the registry value an equipment slot accepts. The bool is false
+// for every ordinary inventory slot, where any registered item may be placed.
+func wornAtForSlot(slot uint8) (wornAt, bool) {
+	switch int(slot) {
+	case equipmentHead:
+		return wornHead, true
+	case equipmentChest:
+		return wornChest, true
+	case equipmentLegs:
+		return wornLegs, true
+	default:
+		return wornNowhere, false
+	}
+}
+
+func equipmentSlot(slot uint8) bool {
+	_, equipment := wornAtForSlot(slot)
+	return equipment
+}
+
+// wornItemsLocked returns the item ids announced with this player's appearance.
+// The caller holds inventory.mu, so all three ids describe one authoritative instant.
+func (i *inventory) wornItemsLocked() (head, chest, legs uint16) {
+	return uint16(i.slots[equipmentHead].item),
+		uint16(i.slots[equipmentChest].item),
+		uint16(i.slots[equipmentLegs].item)
 }
 
 // applyDeathPenaltyLocked wears by the approved death penalty every durable slot the
@@ -419,8 +455,15 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 	if source.count == 0 || source.item == ItemNone || !registered {
 		return false
 	}
+	toPlace, toEquipment := wornAtForSlot(req.To)
+	if toEquipment && definition.wornAt != toPlace {
+		return false
+	}
 
 	moveCount := min(req.Count, source.count)
+	if toEquipment && moveCount != 1 {
+		return false
+	}
 	switch {
 	case target.count == 0:
 		// A durable item moves whole or not at all. Its wear belongs to the one object,
@@ -443,7 +486,7 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 	case target.item == source.item:
 		// Never for equipment, for the reason insertLocked does not merge it: two
 		// blades have two different amounts of wear left and one slot to record it in.
-		if source.durable() || target.durable() {
+		if toEquipment || source.durable() || target.durable() {
 			return false
 		}
 		if target.count >= definition.maxStack {
@@ -461,7 +504,11 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 		return true
 
 	case moveCount == source.count:
-		if _, ok := itemByID(target.item); !ok {
+		targetDefinition, ok := itemByID(target.item)
+		if !ok {
+			return false
+		}
+		if place, equipment := wornAtForSlot(req.From); equipment && (targetDefinition.wornAt != place || target.count != 1) {
 			return false
 		}
 		*source, *target = *target, *source
@@ -537,6 +584,9 @@ func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.Inve
 
 	if !p.inventory.moveLocked(req) {
 		return protocol.InventoryState{}, errors.New("the inventory move changes no authoritative slot")
+	}
+	if equipmentSlot(req.From) || equipmentSlot(req.To) {
+		p.sim.forgetDescribedLocked(p.entityID)
 	}
 	return p.inventory.stateLocked(), nil
 }

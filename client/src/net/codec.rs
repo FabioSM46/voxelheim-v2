@@ -185,6 +185,9 @@ pub struct SessionParams {
     /// Leading inventory slots selectable as the hotbar. Guaranteed non-zero
     /// and no greater than `inventory_slots`.
     pub hotbar_slots: u8,
+    /// Trailing inventory slots reserved for worn equipment. Guaranteed non-zero,
+    /// with hotbar and equipment together no larger than `inventory_slots`.
+    pub equipment_slots: u8,
     /// This session's identity token. Guaranteed to have been present and exactly
     /// [`PLAYER_TOKEN_LEN`] bytes on the wire.
     ///
@@ -763,6 +766,10 @@ pub struct PlayerAppearance {
     pub name: String,
     /// Server-derived current level. Guaranteed non-zero.
     pub level: u16,
+    /// Item ids in the trailing equipment slots. Zero means nothing is worn there.
+    pub worn_head: u16,
+    pub worn_chest: u16,
+    pub worn_legs: u16,
 }
 
 /// One character a client asks the server to create. **Intent only.**
@@ -1519,8 +1526,14 @@ pub enum DecodeError {
     InventorySlots(u8),
     /// `hotbar_slots` must be non-zero.
     HotbarSlots(u8),
-    /// Every hotbar slot must also be an inventory slot.
-    HotbarExceedsInventory { hotbar: u8, inventory: u8 },
+    /// `equipment_slots` must be non-zero.
+    EquipmentSlots(u8),
+    /// The leading hotbar and trailing equipment subsets must fit in the inventory.
+    ReservedSlotsExceedInventory {
+        hotbar: u8,
+        equipment: u8,
+        inventory: u8,
+    },
     /// `ServerWelcome.entity_id` is the reserved id 0.
     ///
     /// Zero is not an entity anywhere in this contract — a mob carrying it is
@@ -1773,9 +1786,16 @@ impl fmt::Display for DecodeError {
             Self::HotbarSlots(got) => {
                 write!(f, "hotbar slot count must be non-zero, got {got}")
             }
-            Self::HotbarExceedsInventory { hotbar, inventory } => write!(
+            Self::EquipmentSlots(got) => {
+                write!(f, "equipment slot count must be non-zero, got {got}")
+            }
+            Self::ReservedSlotsExceedInventory {
+                hotbar,
+                equipment,
+                inventory,
+            } => write!(
                 f,
-                "hotbar has {hotbar} slots, more than the inventory's {inventory}"
+                "hotbar has {hotbar} slots and equipment has {equipment}, more than the inventory's {inventory}"
             ),
             Self::WelcomeEntityId => {
                 write!(f, "server welcome carries the reserved entity id 0")
@@ -2136,6 +2156,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 appearance: appearance(payload.appearance(), "PlayerAppearance")?,
                 name,
                 level,
+                worn_head: payload.worn_head(),
+                worn_chest: payload.worn_chest(),
+                worn_legs: payload.worn_legs(),
             }))
         }
         fb::Payload::LeaveStarted => {
@@ -2846,9 +2869,14 @@ fn session_params(welcome: &fb::ServerWelcome) -> Result<SessionParams, DecodeEr
     if hotbar_slots == 0 {
         return Err(DecodeError::HotbarSlots(hotbar_slots));
     }
-    if hotbar_slots > inventory_slots {
-        return Err(DecodeError::HotbarExceedsInventory {
+    let equipment_slots = welcome.equipment_slots();
+    if equipment_slots == 0 {
+        return Err(DecodeError::EquipmentSlots(equipment_slots));
+    }
+    if u16::from(hotbar_slots) + u16::from(equipment_slots) > u16::from(inventory_slots) {
+        return Err(DecodeError::ReservedSlotsExceedInventory {
             hotbar: hotbar_slots,
+            equipment: equipment_slots,
             inventory: inventory_slots,
         });
     }
@@ -2901,6 +2929,7 @@ fn session_params(welcome: &fb::ServerWelcome) -> Result<SessionParams, DecodeEr
         view_distance,
         inventory_slots,
         hotbar_slots,
+        equipment_slots,
         player_token: PlayerToken::from_bytes(player_token),
         clock,
     })
@@ -3386,6 +3415,7 @@ pub(super) mod server_side {
         pub view_distance: u8,
         pub inventory_slots: u8,
         pub hotbar_slots: u8,
+        pub equipment_slots: u8,
         /// `None` omits the field; any other length than
         /// [`super::PLAYER_TOKEN_LEN`] is a token the decoder must refuse, the
         /// empty vector included.
@@ -3407,8 +3437,9 @@ pub(super) mod server_side {
                 tick_rate: 20,
                 chunk_size: 32,
                 view_distance: 8,
-                inventory_slots: 36,
+                inventory_slots: 39,
                 hotbar_slots: 9,
+                equipment_slots: 3,
                 player_token: Some(DEFAULT_TOKEN.to_vec()),
                 // No clock by default, which is what every server in this repository
                 // announces today and therefore the shape most fixtures should carry.
@@ -3458,6 +3489,7 @@ pub(super) mod server_side {
         table.add_day_length_ticks(welcome.clock.day_length_ticks);
         table.add_night_start_ticks(welcome.clock.night_start_ticks);
         table.add_night_end_ticks(welcome.clock.night_end_ticks);
+        table.add_equipment_slots(welcome.equipment_slots);
         let payload = table.finish();
 
         finish_envelope(
@@ -4276,6 +4308,18 @@ pub(super) mod server_side {
         name: Option<&str>,
         level: u16,
     ) -> Vec<u8> {
+        encode_player_appearance_with_worn(entity_id, appearance, name, level, [0; 3])
+    }
+
+    /// A `PlayerAppearance` with explicit worn item ids, including zero for an empty
+    /// location. Kept beside the ordinary helper so most tests keep the empty default.
+    pub fn encode_player_appearance_with_worn(
+        entity_id: u64,
+        appearance: Option<AppearanceWire>,
+        name: Option<&str>,
+        level: u16,
+        worn: [u16; 3],
+    ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
         let name = name.map(|name| builder.create_string(name));
@@ -4286,6 +4330,9 @@ pub(super) mod server_side {
                 appearance,
                 name,
                 level,
+                worn_head: worn[0],
+                worn_chest: worn[1],
+                worn_legs: worn[2],
             },
         );
         finish_envelope(
@@ -4342,8 +4389,9 @@ mod tests {
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
         encode_inventory_state_with_durability, encode_leave_started, encode_mine_progress,
-        encode_player_appearance, encode_player_appearance_without_level,
-        encode_server_character_list, encode_server_reject, encode_server_welcome,
+        encode_player_appearance, encode_player_appearance_with_worn,
+        encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
+        encode_server_welcome,
     };
     use super::*;
 
@@ -4446,14 +4494,18 @@ mod tests {
     /// sends; without the bump it would refuse the first snapshot after a clean
     /// handshake.
     ///
+    /// **V18 appends equipment layout metadata and worn item ids.** This decoder
+    /// requires a non-zero equipment count that a V17 server never sends, so the
+    /// mismatch must be caught at admission.
+    ///
     /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v17_names_authoritative_progression() {
+    fn protocol_v18_names_the_equipment_layout() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 17);
+        assert_eq!(fb::ProtocolVersion::Current.0, 18);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5481,12 +5533,13 @@ mod tests {
     }
 
     #[test]
-    fn a_player_appearance_decodes_into_its_entity_face_name_and_level() {
-        let decoded = decode(&encode_player_appearance(
+    fn a_player_appearance_decodes_into_its_entity_face_name_level_and_worn_items() {
+        let decoded = decode(&encode_player_appearance_with_worn(
             4242,
             Some(AppearanceWire::default()),
             Some("Brynhildr"),
             12,
+            [101, 102, 103],
         ));
 
         assert_eq!(
@@ -5496,6 +5549,9 @@ mod tests {
                 appearance: an_appearance(),
                 name: "Brynhildr".to_owned(),
                 level: 12,
+                worn_head: 101,
+                worn_chest: 102,
+                worn_legs: 103,
             }))
         );
     }
@@ -5719,6 +5775,9 @@ mod tests {
                 appearance: PLACEHOLDER_APPEARANCE,
                 name: "Placeholder".to_owned(),
                 level: 1,
+                worn_head: 0,
+                worn_chest: 0,
+                worn_legs: 0,
             }))
         );
     }
@@ -5829,6 +5888,7 @@ mod tests {
             view_distance: 8,
             inventory_slots: 36,
             hotbar_slots: 9,
+            equipment_slots: 3,
             player_token: Some(vec![7; PLAYER_TOKEN_LEN]),
             clock: WorldClock {
                 day_length_ticks: 24_000,
@@ -5848,6 +5908,7 @@ mod tests {
                 view_distance: 8,
                 inventory_slots: 36,
                 hotbar_slots: 9,
+                equipment_slots: 3,
                 player_token: PlayerToken::from_bytes([7; PLAYER_TOKEN_LEN]),
                 clock: WorldClock {
                     day_length_ticks: 24_000,
@@ -6001,7 +6062,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_inventory_and_hotbar_slot_counts_are_protocol_errors() {
+    fn zero_inventory_hotbar_and_equipment_slot_counts_are_protocol_errors() {
         assert_eq!(
             decode_welcome(&WelcomeWire {
                 inventory_slots: 0,
@@ -6016,19 +6077,28 @@ mod tests {
             }),
             Err(DecodeError::HotbarSlots(0))
         );
+        assert_eq!(
+            decode_welcome(&WelcomeWire {
+                equipment_slots: 0,
+                ..WelcomeWire::default()
+            }),
+            Err(DecodeError::EquipmentSlots(0))
+        );
     }
 
     #[test]
-    fn a_hotbar_larger_than_the_inventory_is_a_protocol_error() {
+    fn hotbar_and_equipment_larger_than_the_inventory_is_a_protocol_error() {
         assert_eq!(
             decode_welcome(&WelcomeWire {
-                inventory_slots: 8,
+                inventory_slots: 11,
                 hotbar_slots: 9,
+                equipment_slots: 3,
                 ..WelcomeWire::default()
             }),
-            Err(DecodeError::HotbarExceedsInventory {
+            Err(DecodeError::ReservedSlotsExceedInventory {
                 hotbar: 9,
-                inventory: 8,
+                equipment: 3,
+                inventory: 11,
             })
         );
     }

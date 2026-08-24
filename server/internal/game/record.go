@@ -106,6 +106,17 @@ func (l Life) Validate() error {
 		if err := validateStoredSlot(stack); err != nil {
 			return fmt.Errorf("game: stored inventory slot %d: %w", slot, err)
 		}
+		place, equipment := wornAtForSlot(uint8(slot))
+		if !equipment || stack.ItemID == 0 {
+			continue
+		}
+		if stack.Count != 1 {
+			return fmt.Errorf("game: stored inventory slot %d: equipment stack count %d, want exactly one", slot, stack.Count)
+		}
+		definition, _ := itemByID(ItemID(stack.ItemID))
+		if definition.wornAt != place {
+			return fmt.Errorf("game: stored inventory slot %d: item %d is worn at the wrong body location", slot, stack.ItemID)
+		}
 	}
 	return nil
 }

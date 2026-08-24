@@ -261,6 +261,7 @@ mod tests {
             view_distance: 8,
             inventory_slots: 36,
             hotbar_slots: 9,
+            equipment_slots: 3,
             player_token: crate::net::ANY_TOKEN,
         })
     }

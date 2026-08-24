@@ -52,7 +52,7 @@ That is why a stored life is declared twice: `game.Life` and the life fields of 
 carry the same five values, and `session` is the one place that maps between them. The duplication
 is five field names; what it buys is that the store never decides what a life may say and the
 simulation never decides how one is written down. Both use `protocol.InventoryStack` for the slots,
-so the 36-slot shape has exactly one declaration.
+so the 39-slot shape has exactly one declaration.
 
 `session` and `game` both name a few enums from `gen/` — `Payload`, `EditAction` — and that is
 deliberate rather than a leak. `protocol` owns *reading and writing* FlatBuffers; the wire's
@@ -435,17 +435,19 @@ package can avoid the import would create two truths to keep in step for no bene
 - **Items and blocks are different id spaces.** The server-only registry in `game/items.go`
   owns each item's placed block (or none) and its per-item stack limit, currently 64. The
   drop table independently decides what each mined block yields, and what it names is spawned
-  as an entity rather than inserted: a completion against 36 full slots removes the voxel and
+  as an entity rather than inserted: a completion against a full pack removes the voxel and
   leaves the yield lying where the block was.
 - **Inventory state is sent whole, once on join and after each real count change.** The
   session never sends a delta and never drops one on a full outbound queue: unlike a tick
   snapshot, no later frame is guaranteed to supersede it. A pickup is decided on the tick and
   therefore uses the tick's non-blocking seam, which is why it keeps a durable flag and retries
-  until one is accepted rather than dropping the frame. Protocol V2 always sends 36 real,
-  stable slot-indexed pairs; `(0, 0)` is empty and the first nine are the hotbar. Insertions
-  fill partial same-item stacks before the lowest empty slot; moves split, merge or swap
-  under the same per-player lock. `BlockEditRequest.slot` spends exactly the slot the client
-  named for a placement after the server revalidates it.
+  until one is accepted rather than dropping the frame. The current protocol sends 39 real,
+  stable slot-indexed pairs; `(0, 0)` is empty, the first nine are the hotbar, slots 9–35 are
+  the pack and slots 36–38 are head, chest and legs equipment. Automatic insertions fill partial
+  same-item stacks before the lowest empty pack slot and never enter equipment; moves split,
+  merge or swap under the same per-player lock, and only an explicit compatible move may enter an
+  equipment slot. `BlockEditRequest.slot` spends exactly the slot the client named for a placement
+  after the server revalidates it.
 - **"Every session holding this chunk" lives in `session.Registry`, not in the tick loop.**
   It is a different question from the snapshot fan-out: the tick knows where each player is
   and can derive the cube it is streaming, but only the streamer knows which chunks have
@@ -801,14 +803,14 @@ durability means.
 
 - **It reaches what the player has *on them*, and `carriedOnPerson` is the one answer to
   which slots those are.** The pack behind them is untouched, so a spare blade stowed away
-  outlives the death that spent the one in hand. Today the answer is the hotbar —
-  `protocol.HotbarSlots` is the *leading* subset of the inventory, so a slot's own index is
-  the whole of it and the server needs nothing from the client to compute it.
-- **A function rather than a `slot < protocol.HotbarSlots` inline in the loop**, for the
-  reason `meleeDamage` is a registry field rather than a list of item ids in the combat
-  path. Worn armour is the next thing that will be on a player, and it joins this rule by
-  widening that one answer — a second comparison elsewhere is a second answer that can
-  disagree, and the disagreement is a death that costs two different things.
+  outlives the death that spent the one in hand. The answer is the leading hotbar plus the
+  trailing equipment slots; a slot's own index is the whole of it and the server needs nothing
+  from the client to compute it.
+- **A function rather than the two range comparisons inline in the loop**, for the reason
+  `meleeDamage` is a registry field rather than a list of item ids in the combat path. Worn
+  equipment joined this rule by widening that one answer; a second comparison elsewhere would
+  be a second answer that can disagree, and the disagreement is a death that costs two different
+  things.
 - **"What is on the player" was never the selected slot, and an earlier draft of #199 read
   it that way.** There is no selection in `internal/game` and none on the wire: a slot
   reaches this server only inside a request that names one. That draft concluded
@@ -2052,7 +2054,7 @@ Recorded here so the next reader does not mistake them for oversights:
   Raising `JumpImpulse` to cover 5 Hz would change how every jump feels at 20; the honest fix is a
   sub-stepped integrator, and that is its own issue.
 - **A life survives a disconnect; the session around it deliberately does not.** What is written is
-  position, yaw, health and all 36 slots with their durability — `game.Life`, captured by
+  position, yaw, health and all 39 slots with their durability — `game.Life`, captured by
   `Player.Record` and stored by `persist`. What is **not** written is everything that only means
   something inside one connection: the death countdown, the respawn protection window, mining
   progress, a pending swing, the three client-tick ordering guards, and the drops and mobs in the

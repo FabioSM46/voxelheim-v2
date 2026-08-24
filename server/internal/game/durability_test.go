@@ -325,14 +325,14 @@ func TestTheDeathPenaltySparesThePack(t *testing.T) {
 
 	hotbar := int(protocol.HotbarSlots) - 1
 	stowed := int(protocol.HotbarSlots)
-	last := int(protocol.InventorySlots) - 1
+	last := equipmentFirst - 1
 
 	inventory := newStarterInventory()
 	// On them: the far end of the hotbar, so the rule is not passing by only reaching
 	// slot 0, and a resource beside it that has nothing to lose either way.
 	inventory.slots[hotbar] = stackOf(ItemPickaxe, 1)
 	inventory.slots[1] = stackOf(ItemStone, 64)
-	// Stowed: the first slot past the hotbar, and the last slot of the inventory.
+	// Stowed: the first slot past the hotbar, and the last slot of the pack.
 	inventory.slots[stowed] = stackOf(ItemIronSword, 1)
 	inventory.slots[last] = stackOf(ItemAxe, 1)
 
@@ -373,7 +373,7 @@ func TestTheDeathPenaltyReachesExactlyWhatIsOnThePlayer(t *testing.T) {
 
 	for slot, stack := range inventory.slots {
 		want := ToolMaxDurability
-		if slot < int(protocol.HotbarSlots) {
+		if slot < int(protocol.HotbarSlots) || slot >= equipmentFirst {
 			want = wornByDeath(ToolMaxDurability)
 		}
 		if stack.durability != want {
