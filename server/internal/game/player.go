@@ -1076,6 +1076,18 @@ func (s *Sim) sortedPlayersLocked() []*Player {
 	return players
 }
 
+// forgetDescribedLocked makes the next appearance pass describe entityID again to
+// exactly the viewers currently caching it. Viewers outside the subject's view never
+// held an entry and are left untouched; the once-per-tick faces cache keeps the retry
+// to one encoding however many viewers need it.
+//
+// The caller holds Sim.mu.
+func (s *Sim) forgetDescribedLocked(entityID uint64) {
+	for _, viewer := range s.players {
+		delete(viewer.described, entityID)
+	}
+}
+
 // compareEntityIDs orders two identities.
 //
 // cmp.Compare rather than a subtraction: the difference of two uint64 identities does

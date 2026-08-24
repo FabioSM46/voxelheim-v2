@@ -534,6 +534,7 @@ struct Appearances(HashMap<u64, Described>);
 struct Described {
     appearance: Appearance,
     name: String,
+    level: u16,
     /// When this entry was written. Read only while `drawn` is false — once a body
     /// exists, that body's presence in the newest snapshot is what keeps the entry.
     at: Instant,
@@ -1094,7 +1095,11 @@ fn apply_snapshots(
         let description = match described {
             Some(described) => {
                 described.drawn = true;
-                Some((described.appearance, described.name.as_str()))
+                Some((
+                    described.appearance,
+                    described.name.as_str(),
+                    described.level,
+                ))
             }
             None => None,
         };
@@ -1171,6 +1176,7 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
             Some(described) => {
                 described.appearance = message.appearance;
                 described.name = message.name;
+                described.level = message.level;
             }
             None => {
                 appearances.0.insert(
@@ -1178,6 +1184,7 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
                     Described {
                         appearance: message.appearance,
                         name: message.name,
+                        level: message.level,
                         at: now,
                         drawn: false,
                     },
@@ -1295,13 +1302,13 @@ fn spawn_body(
     wardrobe: &mut Wardrobe<'_>,
     entity_id: u64,
     local_entity_id: u64,
-    description: Option<(Appearance, &str)>,
+    description: Option<(Appearance, &str, u16)>,
     state: &interpolate::Interpolated,
     dead: bool,
 ) {
     let local = entity_id == local_entity_id;
-    let (worn, name) = match description {
-        Some((appearance, name)) => (appearance, Some(name)),
+    let (worn, name_plate) = match description {
+        Some((appearance, name, level)) => (appearance, Some((name, level))),
         None => (PLACEHOLDER_APPEARANCE, None),
     };
     let parts = wardrobe.outfit(worn);
@@ -1322,8 +1329,8 @@ fn spawn_body(
         commands
             .entity(owner)
             .insert((LocalPlayer, Visibility::Hidden));
-    } else if let Some(name) = name {
-        spawn_name_plate(commands, entity_id, name);
+    } else if let Some((name, level)) = name_plate {
+        spawn_name_plate(commands, entity_id, name, level);
     }
     commands.entity(owner).with_children(|parent| {
         for (piece, mesh, material) in parts {
@@ -1344,26 +1351,32 @@ fn spawn_body(
 /// leaving them intact would let one name create an unbounded stack of lines. Truncation
 /// walks Unicode scalars, so it can never split UTF-8. A combining sequence may end at the
 /// boundary and remains valid text — no grapheme dependency is introduced for cosmetics.
-fn name_plate_text(name: &str) -> String {
+fn name_plate_text(level: u16, name: &str) -> String {
+    let prefix = format!("Lv {level} · ");
+    let name_characters = NAME_PLATE_CHARACTERS
+        .checked_sub(prefix.chars().count())
+        .expect("a u16 level prefix fits inside the name-plate bound");
     let mut chars = name.chars();
-    let mut shown = String::with_capacity(name.len().min(NAME_PLATE_CHARACTERS * 4));
-    for _ in 0..NAME_PLATE_CHARACTERS {
+    let mut shown = String::with_capacity(NAME_PLATE_CHARACTERS * 4);
+    shown.push_str(&prefix);
+    for position in 0..name_characters {
         let Some(character) = chars.next() else {
             return shown;
         };
+        if position + 1 == name_characters && chars.next().is_some() {
+            shown.push('…');
+            return shown;
+        }
         shown.push(if character.is_control() {
             '\u{fffd}'
         } else {
             character
         });
     }
-    if chars.next().is_some() {
-        shown.push('…');
-    }
     shown
 }
 
-fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str) {
+fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, level: u16) {
     commands.spawn((
         NamePlate(entity_id),
         Node {
@@ -1376,7 +1389,7 @@ fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str) {
             ..default()
         },
         BackgroundColor(Color::srgba(0.025, 0.03, 0.04, 0.72)),
-        Text::new(name_plate_text(name)),
+        Text::new(name_plate_text(level, name)),
         TextFont {
             font_size: FontSize::Px(NAME_PLATE_FONT_SIZE),
             ..default()
@@ -1421,7 +1434,8 @@ fn sync_name_plates(
             continue;
         }
         existing.insert(plate.0);
-        let next = name_plate_text(&described.expect("checked above").name);
+        let described = described.expect("checked above");
+        let next = name_plate_text(described.level, &described.name);
         if text.0 != next {
             text.0 = next;
         }
@@ -1432,7 +1446,7 @@ fn sync_name_plates(
             continue;
         }
         if let Some(described) = appearances.0.get(&entity_id) {
-            spawn_name_plate(&mut commands, entity_id, &described.name);
+            spawn_name_plate(&mut commands, entity_id, &described.name, described.level);
         }
     }
 }

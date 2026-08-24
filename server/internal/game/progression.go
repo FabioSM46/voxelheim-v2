@@ -91,3 +91,20 @@ func (p *Player) awardExperienceLocked(amount uint32) (leveledUp bool) {
 	p.health += HealthPerLevel * (after - before)
 	return true
 }
+
+// awardExperienceLocked applies one authoritative award and makes a crossed level
+// visible through the existing appearance path. The next tick re-encodes the subject
+// once and offers that frame to every viewer who had already been told about it.
+//
+// Keeping the invalidation here gives every later experience source one route through
+// which to award. A source that called Player.awardExperienceLocked directly would
+// update the owner's vitals but leave nearby name plates stale.
+//
+// The caller holds sim.mu.
+func (s *Sim) awardExperienceLocked(p *Player, amount uint32) (leveledUp bool) {
+	leveledUp = p.awardExperienceLocked(amount)
+	if leveledUp {
+		s.forgetDescribedLocked(p.entityID)
+	}
+	return leveledUp
+}
