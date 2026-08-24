@@ -20,7 +20,7 @@
 
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, WindowResized};
 
 use super::icon::DrawnIcon;
 use super::{
@@ -37,9 +37,11 @@ pub(super) struct InventoryUiPlugin;
 
 impl Plugin for InventoryUiPlugin {
     fn build(&self, app: &mut App) {
-        // The player plugin registers this too; doing it here as well keeps this module
-        // headlessly testable on its own. `add_message` is idempotent.
+        // The player plugin registers `CraftClick` and the window plugin registers
+        // `WindowResized`; doing both here too keeps this module headlessly testable on
+        // its own. `add_message` is idempotent.
         app.add_message::<CraftClick>()
+            .add_message::<WindowResized>()
             .init_resource::<InventoryTab>()
             .init_resource::<InventoryWindowPosition>()
             .init_resource::<InventoryDrag>()
@@ -55,6 +57,7 @@ impl Plugin for InventoryUiPlugin {
                     // After `show_inventory`, which resets the tab when the screen opens,
                     // so the frame it appears on is already showing the pack.
                     place_inventory_window_on_open,
+                    reclamp_inventory_window_on_resize,
                     drag_inventory_window,
                     switch_tabs,
                     show_the_active_tab,
@@ -803,10 +806,19 @@ fn drag_inventory_window(
     }
 
     let Some(window) = windows.iter().next() else {
+        if drag.0.is_some() {
+            drag.0 = None;
+        }
         return;
     };
     let viewport = Vec2::new(window.width(), window.height());
     let Some(cursor) = window.cursor_position() else {
+        // A release outside the window is not delivered on every platform. Losing the
+        // cursor therefore ends the gesture here, so re-entering cannot resume an old
+        // cursor offset with a button state the window never got to clear.
+        if drag.0.is_some() {
+            drag.0 = None;
+        }
         return;
     };
     let current = position
@@ -882,6 +894,45 @@ fn place_inventory_window_on_open(
         return;
     };
     let viewport = Vec2::new(window.width(), window.height());
+    let wanted = position
+        .0
+        .unwrap_or_else(|| centred_window_position(viewport));
+    let placed = clamp_window_position(wanted, viewport);
+    if position.0 != Some(placed) {
+        position.0 = Some(placed);
+    }
+    for mut frame in &mut frames {
+        set_window_position(&mut frame, placed);
+    }
+}
+
+/// Keeps an already-open inventory recoverable when the viewport becomes smaller.
+///
+/// Opening and dragging already clamp through the current viewport. A resize is the third
+/// way that viewport can change around a stationary frame, so it must update both the
+/// remembered position and the node rather than waiting for a close and reopen.
+fn reclamp_inventory_window_on_resize(
+    mut resized: MessageReader<WindowResized>,
+    primary: Query<Entity, With<PrimaryWindow>>,
+    roots: Query<&Visibility, With<InventoryRoot>>,
+    mut position: ResMut<InventoryWindowPosition>,
+    mut frames: Query<&mut Node, With<InventoryWindow>>,
+) {
+    let Some(primary) = primary.iter().next() else {
+        return;
+    };
+    let viewport = resized
+        .read()
+        .filter(|event| event.window == primary)
+        .map(|event| Vec2::new(event.width, event.height))
+        .last();
+    let Some(viewport) = viewport else {
+        return;
+    };
+    if roots.iter().next() != Some(&Visibility::Visible) {
+        return;
+    }
+
     let wanted = position
         .0
         .unwrap_or_else(|| centred_window_position(viewport));
@@ -1366,6 +1417,49 @@ mod tests {
     }
 
     #[test]
+    fn losing_the_cursor_ends_a_drag_that_may_never_receive_its_release() {
+        let mut app = app();
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        let window = add_window(&mut app, UVec2::new(1280, 900), Vec2::new(640.0, 200.0));
+        app.update();
+
+        let grab = grab_area(&mut app);
+        *app.world_mut()
+            .entity_mut(grab)
+            .get_mut::<Interaction>()
+            .expect("the grab area is a button") = Interaction::Pressed;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        assert!(app.world().resource::<InventoryDrag>().0.is_some());
+
+        *app.world_mut()
+            .entity_mut(grab)
+            .get_mut::<Interaction>()
+            .expect("the grab area is a button") = Interaction::None;
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("the primary window exists")
+            .set_cursor_position(None);
+        app.update();
+        assert_eq!(app.world().resource::<InventoryDrag>().0, None);
+        let left_outside = position(&app);
+
+        // Model a platform that never delivered the release: the stale held state cannot
+        // make the old gesture resume when the pointer comes back.
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("the primary window exists")
+            .set_cursor_position(Some(Vec2::new(900.0, 400.0)));
+        app.update();
+        assert_eq!(position(&app), left_outside);
+        assert_eq!(app.world().resource::<InventoryDrag>().0, None);
+    }
+
+    #[test]
     fn the_drag_clamp_keeps_the_grab_area_recoverable_at_every_edge() {
         let viewport = Vec2::new(800.0, 600.0);
         assert_eq!(
@@ -1406,6 +1500,44 @@ mod tests {
         let expected = clamp_window_position(left_on_large_window, Vec2::new(800.0, 600.0));
         assert_eq!(position(&app), expected);
         let frame = inventory_window(&mut app);
+        let node = app.world().get::<Node>(frame).expect("the frame is a node");
+        assert_eq!(
+            (node.left, node.top),
+            (Val::Px(expected.x), Val::Px(expected.y))
+        );
+    }
+
+    #[test]
+    fn resizing_reclamps_an_inventory_that_is_already_open() {
+        let mut app = app();
+        let window = add_window(&mut app, UVec2::new(1920, 1080), Vec2::new(0.0, 0.0));
+        app.update();
+
+        let left_on_large_window = Vec2::new(1500.0, 900.0);
+        app.world_mut().resource_mut::<InventoryWindowPosition>().0 = Some(left_on_large_window);
+        let frame = inventory_window(&mut app);
+        set_window_position(
+            &mut app
+                .world_mut()
+                .entity_mut(frame)
+                .get_mut::<Node>()
+                .expect("the frame is a node"),
+            left_on_large_window,
+        );
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("the primary window exists")
+            .resolution = bevy::window::WindowResolution::new(800, 600);
+        app.world_mut().write_message(WindowResized {
+            window,
+            width: 800.0,
+            height: 600.0,
+        });
+        app.update();
+
+        let expected = clamp_window_position(left_on_large_window, Vec2::new(800.0, 600.0));
+        assert_eq!(position(&app), expected);
         let node = app.world().get::<Node>(frame).expect("the frame is a node");
         assert_eq!(
             (node.left, node.top),
