@@ -725,7 +725,10 @@ func (i *Identities) recall(character persist.Character) (*game.Life, bool, erro
 	// means and how much health is a full bar are game's answers, so they are asked
 	// here — once, before anything is built from them, and about the whole record
 	// rather than slot by slot.
-	life := game.Life{Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger, Slots: rec.Slots}
+	life := game.Life{
+		Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger,
+		Experience: rec.Experience, Slots: rec.Slots,
+	}
 	if vErr := life.Validate(); vErr != nil {
 		return nil, false, i.refuseRecord(character, vErr)
 	}
@@ -848,12 +851,13 @@ func (i *Identities) write(character persist.CharacterID, life game.Life) error 
 		// When this record was written, which is the end of the session on the teardown
 		// path and the moment of the pass on the autosave's. Both are "the last time
 		// this server knew anything about this character", which is what the field means.
-		LastSeen: time.Now().UTC(),
-		Pos:      life.Pos,
-		Yaw:      life.Yaw,
-		Health:   life.Health,
-		Hunger:   life.Hunger,
-		Slots:    life.Slots,
+		LastSeen:   time.Now().UTC(),
+		Pos:        life.Pos,
+		Yaw:        life.Yaw,
+		Health:     life.Health,
+		Hunger:     life.Hunger,
+		Experience: life.Experience,
+		Slots:      life.Slots,
 	})
 }
 

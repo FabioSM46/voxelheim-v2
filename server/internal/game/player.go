@@ -374,8 +374,8 @@ type Player struct {
 	// disables and is cleared only by removing this Player from the simulation.
 	leaving bool
 
-	// The life the server owns. See vitals.go, which is where every transition between
-	// these values happens; nothing outside it writes them.
+	// The life the server owns. See vitals.go and progression.go, which are where every
+	// transition between these values happens; nothing outside them writes them.
 	//
 	// spawn is the position Join was given, kept as the provisional respawn point. Kept
 	// rather than recomputed because the world helper that produced it can generate
@@ -400,6 +400,7 @@ type Player struct {
 	hungerTicks      uint32
 	regenPoints      uint16
 	hunger           uint16
+	experience       uint32
 	protectionTicks  uint32
 	penaltyApplied   bool
 	spawn            [3]float64
@@ -462,8 +463,9 @@ type Player struct {
 // rather than a second constructor, the same shape a nil *world.Store is the ephemeral
 // world: there is one admission path, and "this player is new" is a value it takes
 // rather than a branch every caller repeats. A resumed player is placed at their stored
-// position, facing where they faced, with the health, hunger and pack they had; a new
-// one gets full health and hunger, [newStarterInventory] and spawn.
+// position, facing where they faced, with the health, hunger, experience and pack they
+// had; a new one gets full health and hunger, zero experience,
+// [newStarterInventory] and spawn.
 //
 // **spawn is the join spawn either way**, because it is also the provisional respawn
 // point — where a player with no tent comes back to. Restoring a position is not moving
@@ -511,9 +513,9 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 	}
 
 	joinSpawn := [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
-	pos, yaw, health, hunger, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), starterSlots()
+	pos, yaw, health, hunger, experience, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), uint32(0), starterSlots()
 	if resume != nil {
-		pos, yaw, health, hunger, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, restoredSlots(resume.Slots)
+		pos, yaw, health, hunger, experience, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, restoredSlots(resume.Slots)
 	}
 
 	p := &Player{
@@ -540,10 +542,11 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 		// The intent carries the yaw too, because step reads p.current.yaw and writes it
 		// back over p.yaw on the first tick. Without this a restored player would snap to
 		// facing north before their client's first input arrived.
-		current:   intent{yaw: yaw},
-		health:    health,
-		hunger:    hunger,
-		lifeState: vnet.LifeStateAlive,
+		current:    intent{yaw: yaw},
+		health:     health,
+		hunger:     hunger,
+		experience: experience,
+		lifeState:  vnet.LifeStateAlive,
 		// Not on the ground until a tick says so — for a restored player exactly as for a
 		// new one. The spawn sits a couple of blocks above the surface
 		// (world.SpawnClearance) and a stored position was written wherever the player
@@ -946,6 +949,7 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 					EntityID:      p.entityID,
 					Appearance:    p.appearance,
 					Name:          p.name,
+					Level:         levelFor(p.experience),
 					HasAppearance: true,
 					HasName:       true,
 				})

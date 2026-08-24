@@ -458,16 +458,19 @@ type StructureState struct {
 //
 // Server to client, and per recipient: a snapshot carries the vitals of the player it
 // is addressed to, never anyone else's. The zero value is deliberately **not** a valid
-// wire value — MaxHealth is the denominator of every health display, and zero is the
-// absent-field case rather than a player with no maximum.
+// wire value — MaxHealth and ExperienceToNext are display denominators, and zero is
+// the absent-field case rather than a valid authoritative state.
 type PlayerVitals struct {
-	Health       uint16
-	MaxHealth    uint16
-	LifeState    vnet.LifeState
-	RespawnTicks uint32
-	Invulnerable bool
-	Hunger       uint16
-	MaxHunger    uint16
+	Health           uint16
+	MaxHealth        uint16
+	LifeState        vnet.LifeState
+	RespawnTicks     uint32
+	Invulnerable     bool
+	Hunger           uint16
+	MaxHunger        uint16
+	Level            uint16
+	Experience       uint32
+	ExperienceToNext uint32
 }
 
 // MobState is one mob's authoritative state, as a snapshot carries it.
@@ -753,14 +756,16 @@ type CreateCharacterRequest struct {
 	HasAppearance bool
 }
 
-// PlayerAppearance is what one player entity looks like and is called. **Server to
-// client, and static per character.**
+// PlayerAppearance is what one player entity looks like, is called and has reached.
+// **Server to client.**
 //
 // Sent once, when a player enters a session's view, and cached by the client against
 // the entity id. It is deliberately not a field of EntityState: that is a struct
 // inlined into every snapshot, and five colours and a hair model never change for the
-// life of a character, so carrying them there would pay for them at the tick rate for
-// ever. schemas/player.fbs holds the full argument, beside the message.
+// life of a character, and level changes far less often than a snapshot, so carrying
+// them there would pay for them at the tick rate for ever. The contract requires the
+// current level to be resent whenever it changes; the later name-plate issue owns that
+// delivery path. schemas/player.fbs holds the full argument beside the message.
 //
 // The server never decodes one — receiving it is a client sending a payload only a
 // server sends, which the session refuses as a protocol error — so there is no field
@@ -770,6 +775,7 @@ type PlayerAppearance struct {
 
 	Appearance Appearance
 	Name       string
+	Level      uint16
 
 	// HasAppearance is honoured by the encoder so a test can build the frame a client
 	// must refuse, exactly as ActionRefused.HasAnchor is. The server always sets it.
@@ -1349,6 +1355,7 @@ func EncodePlayerAppearance(p PlayerAppearance) []byte {
 	if p.HasName {
 		vnet.PlayerAppearanceAddName(b, nameOffset)
 	}
+	vnet.PlayerAppearanceAddLevel(b, p.Level)
 	built := vnet.PlayerAppearanceEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadPlayerAppearance, built)
@@ -1539,6 +1546,9 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.PlayerVitalsAddInvulnerable(b, s.Vitals.Invulnerable)
 	vnet.PlayerVitalsAddHunger(b, s.Vitals.Hunger)
 	vnet.PlayerVitalsAddMaxHunger(b, s.Vitals.MaxHunger)
+	vnet.PlayerVitalsAddLevel(b, s.Vitals.Level)
+	vnet.PlayerVitalsAddExperience(b, s.Vitals.Experience)
+	vnet.PlayerVitalsAddExperienceToNext(b, s.Vitals.ExperienceToNext)
 	vitalsOffset := vnet.PlayerVitalsEnd(b)
 
 	// A vector of structs must be complete before the table that references it

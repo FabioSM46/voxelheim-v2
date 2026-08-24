@@ -101,7 +101,13 @@ import (
 // store writes it verbatim and session asks game whether it is legal when the character
 // resumes. There is no migration; a v4 record carries no hunger reserve, and inventing
 // one would turn the storage layer into the owner of a gameplay rule.
-const StoreVersion uint32 = 5
+//
+// **6 adds experience immediately after hunger.** Experience is the authoritative
+// lifetime total from which game derives level and progress within that level. The
+// store writes the total verbatim and session asks game whether it is legal when the
+// character resumes. There is no migration; a v5 record cannot say how much experience
+// the character earned, and inventing a value would make persistence decide progression.
+const StoreVersion uint32 = 6
 
 // On-disk layout, little-endian throughout, one file per character.
 //
@@ -109,7 +115,7 @@ const StoreVersion uint32 = 5
 //	    magic[4] version:u32 last_seen:i64
 //	    character_id:u64 owner:32
 //	    skin:u32 shirt:u32 trousers:u32 shoes:u32 hair:u32 hair_model:u8
-//	    pos:3×f64 yaw:f64 health:u16 hunger:u16
+//	    pos:3×f64 yaw:f64 health:u16 hunger:u16 experience:u32
 //	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
 //	    name_len:u16 name[name_len] crc32:u32
 //
@@ -144,7 +150,7 @@ const (
 
 	// supersededSuffix marks a players directory written in a format this build does
 	// not speak, and it names the format this build *does* speak: a directory set aside
-	// by this version becomes players.pre-v5.<timestamp>.
+	// by this version becomes players.pre-v6.<timestamp>.
 	//
 	// It said `.pre-accounts` while there had been exactly one such move, which was
 	// true of the format that introduced characters and stopped being true the moment a
@@ -169,7 +175,8 @@ const (
 	offYaw        = offPos + 3*8
 	offHealth     = offYaw + 8
 	offHunger     = offHealth + 2
-	offSlots      = offHunger + 2
+	offExperience = offHunger + 2
+	offSlots      = offExperience + 4
 	offNameLen    = offSlots + slotsSize
 
 	recordHeaderSize = offNameLen + 2
@@ -180,8 +187,8 @@ var playerMagic = [4]byte{'V', 'X', 'H', 'P'}
 
 // Record is what the server remembers about one character between connections.
 //
-// The life — position, yaw, health, hunger, slots — is written verbatim and read back
-// verbatim. **This package judges none of it**, and that is deliberate rather than an
+// The life — position, yaw, health, hunger, experience, slots — is written verbatim and
+// read back verbatim. **This package judges none of it**, and that is deliberate rather than an
 // omission: whether an item id exists and how much health is a full bar are the item
 // registry's answers, and it lives in internal/game. Everything here checks is what a
 // *file* can be wrong about — magic, version, checksum, size — and the caller puts the
@@ -237,6 +244,10 @@ type Record struct {
 	// does not participate in [Record.Unplayed]; Health remains the sentinel that
 	// distinguishes a newly created character from a stored life.
 	Hunger uint16
+
+	// Experience is the character's authoritative lifetime total. Level and progress
+	// within the current level are derived by game and are never stored beside it.
+	Experience uint32
 
 	// Slots is the whole pack, in the shape the wire announces, so a stored pack and a
 	// sent InventoryState are the same value rather than two that have to agree.
@@ -395,8 +406,9 @@ func (s *Store) Unreadable() []string {
 // every player on this world had, and a format change is not a reason to lose it. The
 // records inside are unreadable to this build — a v2 record names a player by the hash
 // of their account and cannot say which character it was; a v3 record cannot say what
-// its character looks like; a v4 record says nothing about hunger — so there is no
-// migration to run and deliberately none written. What there is, is a directory an
+// its character looks like; a v4 record says nothing about hunger; a v5 record says
+// nothing about experience — so there is no migration to run and deliberately none
+// written. What there is, is a directory an
 // operator can copy somewhere and open at their leisure.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
@@ -749,6 +761,7 @@ func encodeRecord(rec Record) []byte {
 	binary.LittleEndian.PutUint64(buf[offYaw:offYaw+8], math.Float64bits(rec.Yaw))
 	binary.LittleEndian.PutUint16(buf[offHealth:offHealth+2], rec.Health)
 	binary.LittleEndian.PutUint16(buf[offHunger:offHunger+2], rec.Hunger)
+	binary.LittleEndian.PutUint32(buf[offExperience:offExperience+4], rec.Experience)
 
 	for slot, stack := range rec.Slots {
 		at := offSlots + slot*slotSize
@@ -801,6 +814,7 @@ func decodeRecord(data []byte) (Record, error) {
 		Yaw:        math.Float64frombits(binary.LittleEndian.Uint64(data[offYaw : offYaw+8])),
 		Health:     binary.LittleEndian.Uint16(data[offHealth : offHealth+2]),
 		Hunger:     binary.LittleEndian.Uint16(data[offHunger : offHunger+2]),
+		Experience: binary.LittleEndian.Uint32(data[offExperience : offExperience+4]),
 	}
 
 	rec.Owner = identity.PlayerID(data[offOwner : offOwner+identity.IDSize])

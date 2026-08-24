@@ -86,6 +86,17 @@ func checkVitals(t *testing.T, vitals *vnet.PlayerVitals) {
 	if hunger > maxHunger {
 		t.Errorf("hunger %d exceeds max_hunger %d", hunger, maxHunger)
 	}
+
+	level, experience, experienceToNext := vitals.Level(), vitals.Experience(), vitals.ExperienceToNext()
+	if level == 0 {
+		t.Error("level is zero, which is the absent value rather than a progression level")
+	}
+	if experienceToNext == 0 {
+		t.Error("experience_to_next is zero, which is the division every experience display performs")
+	}
+	if experience > experienceToNext {
+		t.Errorf("experience %d exceeds experience_to_next %d", experience, experienceToNext)
+	}
 }
 
 // The vitals every snapshot carries are a value the client refuses to decode when it is

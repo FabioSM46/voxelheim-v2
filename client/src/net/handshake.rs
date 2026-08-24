@@ -710,6 +710,9 @@ mod tests {
             max_health: 100,
             hunger: 50,
             max_hunger: 100,
+            level: 1,
+            experience: 0,
+            experience_to_next: 50,
             life_state: LifeState::Dead,
             respawn_ticks: 40,
             invulnerable: false,
@@ -805,6 +808,9 @@ mod tests {
             max_health: 100,
             hunger: 50,
             max_hunger: 100,
+            level: 1,
+            experience: 0,
+            experience_to_next: 50,
             life_state: LifeState::Dead,
             respawn_ticks: 40,
             invulnerable: false,
@@ -1089,6 +1095,7 @@ mod tests {
             entity_id: 1,
             appearance: PLACEHOLDER_APPEARANCE,
             name: "Test Character".to_owned(),
+            level: 1,
         }
     }
 

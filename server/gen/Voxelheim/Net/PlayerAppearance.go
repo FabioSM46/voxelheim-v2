@@ -45,6 +45,7 @@ import (
 // /   - `name` is present. It may be empty or arbitrarily long: this message carries the
 // /     stored display text verbatim, and a renderer must bound its layout rather than
 // /     changing what names the server accepts. It is never parsed or used as identity
+// /   - `level` is never zero
 // /   - nothing here is required to name an entity in any snapshot, in either
 // /     direction; see above
 type PlayerAppearance struct {
@@ -131,8 +132,26 @@ func (rcv *PlayerAppearance) Name() []byte {
 // / The character's stored name, from the server and from nothing this session said.
 // / Display text only: shown, never parsed, and never used as an identifier — that is
 // / what `entity_id` is for.
+// / The sender's current level. Never zero. V17 sends it when the entity enters view;
+// / invalidating the cached appearance and resending it when the level changes is
+// / planned separately.
+func (rcv *PlayerAppearance) Level() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / The sender's current level. Never zero. V17 sends it when the entity enters view;
+// / invalidating the cached appearance and resending it when the level changes is
+// / planned separately.
+func (rcv *PlayerAppearance) MutateLevel(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(10, n)
+}
+
 func PlayerAppearanceStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func PlayerAppearanceAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -142,6 +161,9 @@ func PlayerAppearanceAddAppearance(builder *flatbuffers.Builder, appearance flat
 }
 func PlayerAppearanceAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(name), 0)
+}
+func PlayerAppearanceAddLevel(builder *flatbuffers.Builder, level uint16) {
+	builder.PrependUint16Slot(3, level, 0)
 }
 func PlayerAppearanceEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

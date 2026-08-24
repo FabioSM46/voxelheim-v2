@@ -48,6 +48,9 @@ impl<'a> PlayerVitals<'a> {
     pub const VT_INVULNERABLE: ::flatbuffers::VOffsetT = 12;
     pub const VT_HUNGER: ::flatbuffers::VOffsetT = 14;
     pub const VT_MAX_HUNGER: ::flatbuffers::VOffsetT = 16;
+    pub const VT_LEVEL: ::flatbuffers::VOffsetT = 18;
+    pub const VT_EXPERIENCE: ::flatbuffers::VOffsetT = 20;
+    pub const VT_EXPERIENCE_TO_NEXT: ::flatbuffers::VOffsetT = 22;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -64,7 +67,10 @@ impl<'a> PlayerVitals<'a> {
         args: &'args PlayerVitalsArgs,
     ) -> ::flatbuffers::WIPOffset<PlayerVitals<'bldr>> {
         let mut builder = PlayerVitalsBuilder::new(_fbb);
+        builder.add_experience_to_next(args.experience_to_next);
+        builder.add_experience(args.experience);
         builder.add_respawn_ticks(args.respawn_ticks);
+        builder.add_level(args.level);
         builder.add_max_hunger(args.max_hunger);
         builder.add_hunger(args.hunger);
         builder.add_max_health(args.max_health);
@@ -165,6 +171,44 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
+    /// The recipient's current level. Never zero: the first level is level 1.
+    #[inline]
+    pub fn level(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerVitals::VT_LEVEL, Some(0))
+                .unwrap()
+        }
+    }
+    /// Experience earned into the current level. Never exceeds `experience_to_next`.
+    /// At the level cap the two values are equal.
+    #[inline]
+    pub fn experience(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u32>(PlayerVitals::VT_EXPERIENCE, Some(0))
+                .unwrap()
+        }
+    }
+    /// Experience required to complete the current level. Never zero: it is the
+    /// denominator of every experience display.
+    #[inline]
+    pub fn experience_to_next(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u32>(PlayerVitals::VT_EXPERIENCE_TO_NEXT, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
@@ -181,6 +225,9 @@ impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
             .visit_field::<bool>("invulnerable", Self::VT_INVULNERABLE, false)?
             .visit_field::<u16>("hunger", Self::VT_HUNGER, false)?
             .visit_field::<u16>("max_hunger", Self::VT_MAX_HUNGER, false)?
+            .visit_field::<u16>("level", Self::VT_LEVEL, false)?
+            .visit_field::<u32>("experience", Self::VT_EXPERIENCE, false)?
+            .visit_field::<u32>("experience_to_next", Self::VT_EXPERIENCE_TO_NEXT, false)?
             .finish();
         Ok(())
     }
@@ -193,6 +240,9 @@ pub struct PlayerVitalsArgs {
     pub invulnerable: bool,
     pub hunger: u16,
     pub max_hunger: u16,
+    pub level: u16,
+    pub experience: u32,
+    pub experience_to_next: u32,
 }
 impl<'a> Default for PlayerVitalsArgs {
     #[inline]
@@ -205,6 +255,9 @@ impl<'a> Default for PlayerVitalsArgs {
             invulnerable: false,
             hunger: 0,
             max_hunger: 0,
+            level: 0,
+            experience: 0,
+            experience_to_next: 0,
         }
     }
 }
@@ -253,6 +306,20 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerVitalsBuilder<'a, 'b, A
             .push_slot::<u16>(PlayerVitals::VT_MAX_HUNGER, max_hunger, 0);
     }
     #[inline]
+    pub fn add_level(&mut self, level: u16) {
+        self.fbb_.push_slot::<u16>(PlayerVitals::VT_LEVEL, level, 0);
+    }
+    #[inline]
+    pub fn add_experience(&mut self, experience: u32) {
+        self.fbb_
+            .push_slot::<u32>(PlayerVitals::VT_EXPERIENCE, experience, 0);
+    }
+    #[inline]
+    pub fn add_experience_to_next(&mut self, experience_to_next: u32) {
+        self.fbb_
+            .push_slot::<u32>(PlayerVitals::VT_EXPERIENCE_TO_NEXT, experience_to_next, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerVitalsBuilder<'a, 'b, A> {
@@ -279,6 +346,9 @@ impl ::core::fmt::Debug for PlayerVitals<'_> {
         ds.field("invulnerable", &self.invulnerable());
         ds.field("hunger", &self.hunger());
         ds.field("max_hunger", &self.max_hunger());
+        ds.field("level", &self.level());
+        ds.field("experience", &self.experience());
+        ds.field("experience_to_next", &self.experience_to_next());
         ds.finish()
     }
 }

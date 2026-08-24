@@ -174,8 +174,54 @@ func (rcv *PlayerVitals) MutateMaxHunger(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(16, n)
 }
 
+// / The recipient's current level. Never zero: the first level is level 1.
+func (rcv *PlayerVitals) Level() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / The recipient's current level. Never zero: the first level is level 1.
+func (rcv *PlayerVitals) MutateLevel(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(18, n)
+}
+
+// / Experience earned into the current level. Never exceeds `experience_to_next`.
+// / At the level cap the two values are equal.
+func (rcv *PlayerVitals) Experience() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Experience earned into the current level. Never exceeds `experience_to_next`.
+// / At the level cap the two values are equal.
+func (rcv *PlayerVitals) MutateExperience(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(20, n)
+}
+
+// / Experience required to complete the current level. Never zero: it is the
+// / denominator of every experience display.
+func (rcv *PlayerVitals) ExperienceToNext() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Experience required to complete the current level. Never zero: it is the
+// / denominator of every experience display.
+func (rcv *PlayerVitals) MutateExperienceToNext(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(22, n)
+}
+
 func PlayerVitalsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(10)
 }
 func PlayerVitalsAddHealth(builder *flatbuffers.Builder, health uint16) {
 	builder.PrependUint16Slot(0, health, 0)
@@ -197,6 +243,15 @@ func PlayerVitalsAddHunger(builder *flatbuffers.Builder, hunger uint16) {
 }
 func PlayerVitalsAddMaxHunger(builder *flatbuffers.Builder, maxHunger uint16) {
 	builder.PrependUint16Slot(6, maxHunger, 0)
+}
+func PlayerVitalsAddLevel(builder *flatbuffers.Builder, level uint16) {
+	builder.PrependUint16Slot(7, level, 0)
+}
+func PlayerVitalsAddExperience(builder *flatbuffers.Builder, experience uint32) {
+	builder.PrependUint32Slot(8, experience, 0)
+}
+func PlayerVitalsAddExperienceToNext(builder *flatbuffers.Builder, experienceToNext uint32) {
+	builder.PrependUint32Slot(9, experienceToNext, 0)
 }
 func PlayerVitalsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

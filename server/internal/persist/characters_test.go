@@ -304,11 +304,11 @@ func TestALookupIsAMapHitAndNotADirectoryScan(t *testing.T) {
 	}
 }
 
-// **The set-aside, and what proves it did not migrate or delete.** A v4 players
-// directory has no hunger field, so it is moved whole and a fresh v5 one is opened.
+// **The set-aside, and what proves it did not migrate or delete.** A v5 players
+// directory has no experience field, so it is moved whole and a fresh v6 one is opened.
 // Every byte that was in it is still there, under a name nothing will write to; the
-// world starts with no characters at all rather than inventing reserves for old lives.
-func TestAV4DirectoryIsSetAsideAndNotMigrated(t *testing.T) {
+// world starts with no characters at all rather than inventing progression for old lives.
+func TestAV5DirectoryIsSetAsideAndNotMigrated(t *testing.T) {
 	t.Parallel()
 
 	worldDir := t.TempDir()
@@ -318,12 +318,12 @@ func TestAV4DirectoryIsSetAsideAndNotMigrated(t *testing.T) {
 	}
 
 	// Representative records from the immediately previous format. Their bodies do not
-	// need to parse as v4 lives: startup reads only this store's magic and version before
+	// need to parse as v5 lives: startup reads only this store's magic and version before
 	// deciding the whole directory belongs aside.
 	was := map[string][]byte{}
 	for seed := byte(1); seed <= 3; seed++ {
 		name := CharacterID(seed).String() + recordFileExt
-		body := v4Record(seed)
+		body := v5Record(seed)
 		if err := os.WriteFile(filepath.Join(players, name), body, 0o600); err != nil {
 			t.Fatalf("writing %s: %v", name, err)
 		}
@@ -413,7 +413,7 @@ func TestASecondSetAsideDoesNotOverwriteTheFirst(t *testing.T) {
 			t.Fatalf("creating the old players directory: %v", err)
 		}
 		name := CharacterID(round).String() + recordFileExt
-		if err := os.WriteFile(filepath.Join(players, name), v4Record(round), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(players, name), v5Record(round), 0o600); err != nil {
 			t.Fatalf("writing %s: %v", name, err)
 		}
 		store, err := OpenStore(worldDir)
@@ -633,12 +633,12 @@ func TestACharacterIDNamesAFile(t *testing.T) {
 	}
 }
 
-// v4Record is what the immediately previous build wrote as far as startup needs to
-// know: this store's magic, format version 4, and a body v5 deliberately never parses.
-func v4Record(seed byte) []byte {
+// v5Record is what the immediately previous build wrote as far as startup needs to
+// know: this store's magic, format version 5, and a body v6 deliberately never parses.
+func v5Record(seed byte) []byte {
 	body := make([]byte, world.HeaderSize+32)
 	copy(body[0:4], playerMagic[:])
-	binary.LittleEndian.PutUint32(body[4:8], 4)
+	binary.LittleEndian.PutUint32(body[4:8], 5)
 	for i := world.HeaderSize; i < len(body); i++ {
 		body[i] = seed
 	}

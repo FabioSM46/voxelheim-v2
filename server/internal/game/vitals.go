@@ -17,10 +17,10 @@ import (
 // on a stalled server must not respawn early because wall time kept moving, and a test
 // must be able to cover three seconds instantly.
 //
-// **Health and hunger are persisted; the clocks around them are not.** A life is written
-// to the player store on leave, on the autosave and at shutdown, so both reserves and the
-// pack come back with the player — see [Life] and [Player.Record]. What is deliberately
-// left behind is
+// **Health, hunger and experience are persisted; the clocks around them are not.** A
+// life is written to the player store on leave, on the autosave and at shutdown, so both
+// reserves, the lifetime progression total and the pack come back with the player — see
+// [Life] and [Player.Record]. What is deliberately left behind is
 // everything that only means something inside one session: the respawn countdown, the
 // protection window, the mining and swing guards. A record always describes a *living*
 // player, which is why none of those has anything to say across a disconnect.
@@ -50,14 +50,26 @@ func (p *Player) alive() bool { return p.lifeState == vnet.LifeStateAlive }
 
 // vitalsLocked is the wire form of this player's own vitals. The caller holds sim.mu.
 func (p *Player) vitalsLocked() protocol.PlayerVitals {
+	level := levelFor(p.experience)
+	experience := experienceIntoLevel(p.experience)
+	experienceToNext := experienceToNext(level)
+	if level == MaxLevel {
+		// A full final bar preserves the wire invariants without asking every client for
+		// a special case for a level that has no successor.
+		experience = experienceToNext
+	}
+
 	return protocol.PlayerVitals{
-		Health:       p.health,
-		MaxHealth:    PlayerMaxHealth,
-		LifeState:    p.lifeState,
-		RespawnTicks: p.respawnTicks,
-		Invulnerable: p.protectionTicks > 0,
-		Hunger:       p.hunger,
-		MaxHunger:    PlayerMaxHunger,
+		Health:           p.health,
+		MaxHealth:        PlayerMaxHealth,
+		LifeState:        p.lifeState,
+		RespawnTicks:     p.respawnTicks,
+		Invulnerable:     p.protectionTicks > 0,
+		Hunger:           p.hunger,
+		MaxHunger:        PlayerMaxHunger,
+		Level:            level,
+		Experience:       experience,
+		ExperienceToNext: experienceToNext,
 	}
 }
 

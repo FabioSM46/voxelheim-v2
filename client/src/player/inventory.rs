@@ -860,6 +860,9 @@ mod tests {
             max_health: 100,
             hunger: 100,
             max_hunger: 100,
+            level: 1,
+            experience: 0,
+            experience_to_next: 50,
             life_state: if dead {
                 crate::net::LifeState::Dead
             } else {

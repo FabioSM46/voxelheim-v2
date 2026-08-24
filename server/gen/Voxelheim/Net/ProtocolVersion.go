@@ -75,6 +75,11 @@ import "strconv"
 // /
 // / **V16 appends `RecipeID.CookedMeat`.** A V16 client may send that new enum value in a
 // / `CraftRequest`; a V15 server cannot name it and would fail only after a clean handshake.
+// /
+// / **V17 appends progression to `PlayerVitals` and `PlayerAppearance`.** A V17 client
+// / requires a non-zero `experience_to_next` in every snapshot, while a V16 server never
+// / sends that field. Without the bump the peers would handshake cleanly and the client
+// / would refuse the first snapshot it received.
 type ProtocolVersion uint16
 
 const (
@@ -83,7 +88,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 16
+	ProtocolVersionCurrent ProtocolVersion = 17
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

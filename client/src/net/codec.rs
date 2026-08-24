@@ -746,12 +746,12 @@ pub struct CharacterList {
     pub max_characters: u8,
 }
 
-/// What one player entity looks like, sent once as that player comes into view.
+/// What one player entity looks like, sent as that player comes into view.
 ///
-/// Cached against the entity id and not resent. **Not part of a snapshot, and that is
-/// the whole point**: `EntityState` is a struct inlined once per visible entity per
-/// tick, and five colours that never change would be paid for at the tick rate for
-/// ever. See `schemas/player.fbs`.
+/// Cached against the entity id and resent only when the level changes. **Not part of a
+/// snapshot, and that is the whole point**: `EntityState` is a struct inlined once per
+/// visible entity per tick, and five colours plus one progression label would otherwise
+/// be paid for at the tick rate for ever. See `schemas/player.fbs`.
 ///
 /// An appearance for an entity this client has never seen is **not** an error: the two
 /// streams are not ordered against each other, so either can arrive first and a
@@ -761,6 +761,8 @@ pub struct PlayerAppearance {
     pub entity_id: u64,
     pub appearance: Appearance,
     pub name: String,
+    /// Server-derived current level. Guaranteed non-zero.
+    pub level: u16,
 }
 
 /// One character a client asks the server to create. **Intent only.**
@@ -825,15 +827,16 @@ impl RecipeId {
     }
 }
 
-/// The recipient's own health, hunger and life state, from the newest snapshot.
+/// The recipient's own health, hunger, progression and life state, from the newest snapshot.
 ///
 /// Replaces the previous value wholesale, exactly as an [`InventoryState`] does. There
 /// is nothing to merge and nothing to advance locally: a dropped snapshot is harmless
 /// because the next one carries the complete answer.
 ///
 /// Every invariant `schemas/player.fbs` documents has already been checked by the time
-/// one of these exists — both maxima are non-zero and neither current value exceeds
-/// its maximum, so a presentation may divide by either without trusting the peer.
+/// one of these exists — health, hunger and experience denominators are non-zero and
+/// no current value exceeds its maximum, so a presentation may divide without trusting
+/// the peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayerVitals {
     /// Current health. Zero is legal and means dead — but it is `life_state` that says
@@ -845,6 +848,13 @@ pub struct PlayerVitals {
     pub hunger: u16,
     /// Maximum hunger. Guaranteed non-zero.
     pub max_hunger: u16,
+    /// Current level. Guaranteed non-zero.
+    pub level: u16,
+    /// Experience earned into the current level. Never exceeds
+    /// `experience_to_next`; equal to it at the level cap.
+    pub experience: u32,
+    /// Experience required to complete the current level. Guaranteed non-zero.
+    pub experience_to_next: u32,
     pub life_state: LifeState,
     /// Server ticks until the server respawns this player, at
     /// [`SessionParams::tick_rate`]. Zero unless `life_state` is [`LifeState::Dead`].
@@ -870,6 +880,9 @@ impl PlayerVitals {
             max_health: 100,
             hunger: 100,
             max_hunger: 100,
+            level: 1,
+            experience: 0,
+            experience_to_next: 50,
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
@@ -1626,6 +1639,13 @@ pub enum DecodeError {
     /// `max_hunger` is zero, or `hunger` exceeds it. A zero reserve is legal; a zero
     /// denominator is not.
     VitalsHunger { hunger: u16, max_hunger: u16 },
+    /// Progression carries no level, no denominator, or more experience than that
+    /// denominator. At the level cap equality remains legal.
+    VitalsExperience {
+        level: u16,
+        experience: u32,
+        experience_to_next: u32,
+    },
     /// An `Alive` player with no health left. Zero health is what the server's own
     /// transition to `Dead` means, so this is a server that has lost track of one of its
     /// own players.
@@ -1717,6 +1737,9 @@ pub enum DecodeError {
     /// A V13 description omitted its server-owned display text. Empty is legal;
     /// absence is a pre-V13 message shape and is not.
     AppearanceWithoutName(u64),
+    /// A V17 description omitted its current level. The absent scalar reads as zero,
+    /// which is not a level any character can have.
+    AppearanceWithoutLevel(u64),
     /// `LeaveStarted.remaining_ms` is zero, which describes a countdown already over.
     LeaveWithoutTime,
 }
@@ -1852,6 +1875,14 @@ impl fmt::Display for DecodeError {
                 f,
                 "hunger is {hunger}/{max_hunger}, want a non-zero maximum and no more hunger than it"
             ),
+            Self::VitalsExperience {
+                level,
+                experience,
+                experience_to_next,
+            } => write!(
+                f,
+                "progression is level {level} at {experience}/{experience_to_next}, want a non-zero level and denominator and no more experience than it"
+            ),
             Self::AliveWithoutHealth => write!(f, "vitals say alive with no health left"),
             Self::RespawnWhileAlive { respawn_ticks } => write!(
                 f,
@@ -1934,6 +1965,12 @@ impl fmt::Display for DecodeError {
             }
             Self::AppearanceWithoutName(entity_id) => {
                 write!(f, "PlayerAppearance for entity {entity_id} carries no name")
+            }
+            Self::AppearanceWithoutLevel(entity_id) => {
+                write!(
+                    f,
+                    "PlayerAppearance for entity {entity_id} carries no level"
+                )
             }
             Self::LeaveWithoutTime => write!(f, "LeaveStarted carries no time remaining"),
         }
@@ -2086,6 +2123,10 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .name()
                 .ok_or(DecodeError::AppearanceWithoutName(entity_id))?
                 .to_owned();
+            let level = payload.level();
+            if level == 0 {
+                return Err(DecodeError::AppearanceWithoutLevel(entity_id));
+            }
             // Nothing here asks whether the client knows this entity, and nothing may:
             // `schemas/player.fbs` is explicit that the appearance stream and the
             // snapshot stream are not ordered against each other, so an appearance for
@@ -2094,6 +2135,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 entity_id,
                 appearance: appearance(payload.appearance(), "PlayerAppearance")?,
                 name,
+                level,
             }))
         }
         fb::Payload::LeaveStarted => {
@@ -2622,8 +2664,8 @@ fn mob_state(state: &fb::MobState) -> Result<MobState, DecodeError> {
 ///
 /// The field is `(required)` on the wire, so an absent one never reaches here: the
 /// verifier [`decode`] runs has already refused the buffer. What is left are the value
-/// invariants, and they are the ones any vitals presentation depends on: both maxima are
-/// denominators and neither peer-owned current value may exceed its maximum.
+/// invariants, and they are the ones any vitals presentation depends on: all three
+/// denominators are non-zero and no peer-owned current value may exceed its maximum.
 fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError> {
     let life_state =
         LifeState::from_wire(vitals.life_state()).ok_or(DecodeError::UnknownLifeState)?;
@@ -2635,6 +2677,18 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
     let (hunger, max_hunger) = (vitals.hunger(), vitals.max_hunger());
     if max_hunger == 0 || hunger > max_hunger {
         return Err(DecodeError::VitalsHunger { hunger, max_hunger });
+    }
+    let (level, experience, experience_to_next) = (
+        vitals.level(),
+        vitals.experience(),
+        vitals.experience_to_next(),
+    );
+    if level == 0 || experience_to_next == 0 || experience > experience_to_next {
+        return Err(DecodeError::VitalsExperience {
+            level,
+            experience,
+            experience_to_next,
+        });
     }
     if life_state == LifeState::Alive && health == 0 {
         return Err(DecodeError::AliveWithoutHealth);
@@ -2650,6 +2704,9 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
         max_health,
         hunger,
         max_hunger,
+        level,
+        experience,
+        experience_to_next,
         life_state,
         respawn_ticks,
         invulnerable: vitals.invulnerable(),
@@ -3689,6 +3746,9 @@ pub(super) mod server_side {
         pub max_health: u16,
         pub hunger: u16,
         pub max_hunger: u16,
+        pub level: u16,
+        pub experience: u32,
+        pub experience_to_next: u32,
         pub life_state: fb::LifeState,
         pub respawn_ticks: u32,
         pub invulnerable: bool,
@@ -3702,6 +3762,9 @@ pub(super) mod server_side {
                 max_health: 100,
                 hunger: 100,
                 max_hunger: 100,
+                level: 1,
+                experience: 0,
+                experience_to_next: 50,
                 life_state: fb::LifeState::Alive,
                 respawn_ticks: 0,
                 invulnerable: false,
@@ -3784,6 +3847,9 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -3935,6 +4001,9 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -3974,6 +4043,9 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -4018,6 +4090,9 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
@@ -4199,6 +4274,7 @@ pub(super) mod server_side {
         entity_id: u64,
         appearance: Option<AppearanceWire>,
         name: Option<&str>,
+        level: u16,
     ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
@@ -4209,6 +4285,32 @@ pub(super) mod server_side {
                 entity_id,
                 appearance,
                 name,
+                level,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::PlayerAppearance,
+            payload.as_union_value(),
+        )
+    }
+
+    /// A pre-V17 `PlayerAppearance`, whose builder never names `level` at all.
+    pub fn encode_player_appearance_without_level(
+        entity_id: u64,
+        appearance: Option<AppearanceWire>,
+        name: Option<&str>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
+        let name = name.map(|name| builder.create_string(name));
+        let payload = fb::PlayerAppearance::create(
+            &mut builder,
+            &fb::PlayerAppearanceArgs {
+                entity_id,
+                appearance,
+                name,
+                ..Default::default()
             },
         );
         finish_envelope(
@@ -4240,8 +4342,8 @@ mod tests {
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
         encode_inventory_state_with_durability, encode_leave_started, encode_mine_progress,
-        encode_player_appearance, encode_server_character_list, encode_server_reject,
-        encode_server_welcome,
+        encode_player_appearance, encode_player_appearance_without_level,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
     };
     use super::*;
 
@@ -4339,14 +4441,19 @@ mod tests {
     /// **V16 appends `RecipeID::CookedMeat`.** It travels client to server in a
     /// `CraftRequest`, so a V15 server would reject it only after a clean handshake.
     ///
+    /// **V17 appends progression to `PlayerVitals` and `PlayerAppearance`.** This
+    /// decoder requires a non-zero experience denominator, which a V16 server never
+    /// sends; without the bump it would refuse the first snapshot after a clean
+    /// handshake.
+    ///
     /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v16_names_campfire_cooking() {
+    fn protocol_v17_names_authoritative_progression() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 16);
+        assert_eq!(fb::ProtocolVersion::Current.0, 17);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5374,11 +5481,12 @@ mod tests {
     }
 
     #[test]
-    fn a_player_appearance_decodes_into_its_entity_face_and_name() {
+    fn a_player_appearance_decodes_into_its_entity_face_name_and_level() {
         let decoded = decode(&encode_player_appearance(
             4242,
             Some(AppearanceWire::default()),
             Some("Brynhildr"),
+            12,
         ));
 
         assert_eq!(
@@ -5387,6 +5495,7 @@ mod tests {
                 entity_id: 4242,
                 appearance: an_appearance(),
                 name: "Brynhildr".to_owned(),
+                level: 12,
             }))
         );
     }
@@ -5399,6 +5508,7 @@ mod tests {
                 7,
                 Some(AppearanceWire::default()),
                 Some(name),
+                1,
             ));
             let Ok(Message::PlayerAppearance(described)) = decoded else {
                 panic!("the display text was refused: {decoded:?}");
@@ -5420,6 +5530,7 @@ mod tests {
             u64::MAX,
             Some(AppearanceWire::default()),
             Some("Unseen"),
+            1,
         ));
 
         assert!(
@@ -5435,11 +5546,12 @@ mod tests {
                 0,
                 Some(AppearanceWire::default()),
                 Some("Nobody"),
+                1,
             )),
             Err(DecodeError::AppearanceWithoutEntity)
         );
         assert_eq!(
-            decode(&encode_player_appearance(1, None, Some("No face"))),
+            decode(&encode_player_appearance(1, None, Some("No face"), 1)),
             Err(DecodeError::MissingAppearance {
                 at: "PlayerAppearance"
             })
@@ -5449,9 +5561,22 @@ mod tests {
                 1,
                 Some(AppearanceWire::default()),
                 None,
+                1,
             )),
             Err(DecodeError::AppearanceWithoutName(1))
         );
+        // FlatBuffers reads an absent scalar as its default zero, so a V16 frame and a
+        // V17 builder handed zero are the same invalid value at this boundary.
+        for frame in [
+            encode_player_appearance_without_level(
+                1,
+                Some(AppearanceWire::default()),
+                Some("No level"),
+            ),
+            encode_player_appearance(1, Some(AppearanceWire::default()), Some("Zero level"), 0),
+        ] {
+            assert_eq!(decode(&frame), Err(DecodeError::AppearanceWithoutLevel(1)));
+        }
     }
 
     /// Every colour's reserved top eight bits are checked, and each one is named.
@@ -5479,7 +5604,7 @@ mod tests {
                 "shoes_color" => wire.shoes_color |= 0xAB00_0000,
                 _ => wire.hair_color |= 0x7F00_0000,
             }
-            match decode(&encode_player_appearance(1, Some(wire), Some("Colour"))) {
+            match decode(&encode_player_appearance(1, Some(wire), Some("Colour"), 1)) {
                 Err(DecodeError::AppearanceColorReserved { field: got, .. }) => {
                     assert_eq!(got, field)
                 }
@@ -5546,7 +5671,7 @@ mod tests {
                 ..AppearanceWire::default()
             };
             assert_eq!(
-                decode(&encode_player_appearance(1, Some(wire), Some("Hair"))),
+                decode(&encode_player_appearance(1, Some(wire), Some("Hair"), 1)),
                 Err(DecodeError::UnknownHairModel(value.0))
             );
         }
@@ -5586,12 +5711,14 @@ mod tests {
             decode(&encode_player_appearance(
                 1,
                 Some(wire),
-                Some("Placeholder")
+                Some("Placeholder"),
+                1,
             )),
             Ok(Message::PlayerAppearance(PlayerAppearance {
                 entity_id: 1,
                 appearance: PLACEHOLDER_APPEARANCE,
                 name: "Placeholder".to_owned(),
+                level: 1,
             }))
         );
     }
@@ -5649,7 +5776,7 @@ mod tests {
     fn every_truncation_and_corruption_of_a_v7_payload_survives_decoding() {
         let frames = [
             encode_server_character_list(Some(&[CharacterSummaryWire::default()]), 3),
-            encode_player_appearance(1, Some(AppearanceWire::default()), Some("Corruption")),
+            encode_player_appearance(1, Some(AppearanceWire::default()), Some("Corruption"), 1),
         ];
 
         for frame in frames {
@@ -7380,6 +7507,9 @@ mod tests {
                 max_health: 100,
                 hunger: 40,
                 max_hunger: 100,
+                level: 7,
+                experience: 20,
+                experience_to_next: 350,
                 life_state: fb::LifeState::Dead,
                 respawn_ticks: 60,
                 invulnerable: false,
@@ -7395,6 +7525,9 @@ mod tests {
                 max_health: 100,
                 hunger: 40,
                 max_hunger: 100,
+                level: 7,
+                experience: 20,
+                experience_to_next: 350,
                 life_state: LifeState::Dead,
                 respawn_ticks: 60,
                 invulnerable: false,
@@ -7417,6 +7550,27 @@ mod tests {
         };
         assert!(snapshot.self_vitals.invulnerable);
         assert_eq!(snapshot.self_vitals.respawn_ticks, 0);
+    }
+
+    /// Equality is the level-cap representation the contract promises. The client
+    /// knows no curve and needs no cap special case: it only checks the wire invariant.
+    #[test]
+    fn capped_experience_may_equal_its_denominator() {
+        let Ok(Message::Snapshot(snapshot)) = snapshot_of(
+            &[],
+            PlayerVitalsWire {
+                level: 30,
+                experience: 1_500,
+                experience_to_next: 1_500,
+                ..PlayerVitalsWire::default()
+            },
+        ) else {
+            panic!("the contract's capped progression shape did not decode");
+        };
+
+        assert_eq!(snapshot.self_vitals.level, 30);
+        assert_eq!(snapshot.self_vitals.experience, 1_500);
+        assert_eq!(snapshot.self_vitals.experience_to_next, 1_500);
     }
 
     #[test]
@@ -7484,6 +7638,43 @@ mod tests {
                 DecodeError::VitalsHunger {
                     hunger: 101,
                     max_hunger: 100,
+                },
+            ),
+            (
+                "level zero, which no character can have",
+                PlayerVitalsWire {
+                    level: 0,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsExperience {
+                    level: 0,
+                    experience: 0,
+                    experience_to_next: 50,
+                },
+            ),
+            (
+                "a zero experience denominator, which no presentation may divide by",
+                PlayerVitalsWire {
+                    experience_to_next: 0,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsExperience {
+                    level: 1,
+                    experience: 0,
+                    experience_to_next: 0,
+                },
+            ),
+            (
+                "more experience than the level requires",
+                PlayerVitalsWire {
+                    experience: 51,
+                    experience_to_next: 50,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsExperience {
+                    level: 1,
+                    experience: 51,
+                    experience_to_next: 50,
                 },
             ),
             (
