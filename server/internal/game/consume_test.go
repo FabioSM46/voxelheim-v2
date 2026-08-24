@@ -89,24 +89,37 @@ func TestEveryRefusedMealLeavesTheLifeAndPackUntouched(t *testing.T) {
 	}
 }
 
-func TestEatingAtZeroRestoresExactlyTheRegistryAmount(t *testing.T) {
+func TestEachFoodAtZeroRestoresExactlyItsRegistryAmount(t *testing.T) {
 	t.Parallel()
 
-	h := newStructureHarness(t)
-	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.give(player, 0, ItemRawMeat, 1)
-	h.sim.mu.Lock()
-	player.hunger = 0
-	h.sim.mu.Unlock()
+	for _, tc := range []struct {
+		name string
+		item ItemID
+		want uint16
+	}{
+		{"raw meat", ItemRawMeat, RawMeatHungerRestore},
+		{"cooked meat", ItemCookedMeat, CookedMeatHungerRestore},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	state, err := player.Consume(consumeRequest(0))
-	if err != nil {
-		t.Fatalf("Consume: %v", err)
-	}
-	if got := hungerOf(h.sim, player); got != RawMeatHungerRestore {
-		t.Errorf("hunger after raw meat = %d, want %d", got, RawMeatHungerRestore)
-	}
-	if got := state.Stacks[0]; got != (protocol.InventoryStack{}) {
-		t.Errorf("the last raw meat left slot 0 as %+v, want empty", got)
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.give(player, 0, tc.item, 1)
+			h.sim.mu.Lock()
+			player.hunger = 0
+			h.sim.mu.Unlock()
+
+			state, err := player.Consume(consumeRequest(0))
+			if err != nil {
+				t.Fatalf("Consume: %v", err)
+			}
+			if got := hungerOf(h.sim, player); got != tc.want {
+				t.Errorf("hunger after %s = %d, want %d", tc.name, got, tc.want)
+			}
+			if got := state.Stacks[0]; got != (protocol.InventoryStack{}) {
+				t.Errorf("the last %s left slot 0 as %+v, want empty", tc.name, got)
+			}
+		})
 	}
 }

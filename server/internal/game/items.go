@@ -61,9 +61,11 @@ const (
 	ItemAxe
 
 	// The first food ingredient, and the first item the hunger system can consume.
-	// Cooking remains separate: this id is the raw hunted resource and nothing here
-	// turns it into a recipe product.
 	ItemRawMeat
+
+	// The cooked form is appended rather than inserted because item ids cross the wire.
+	// It is a distinct food and the product of the campfire recipe.
+	ItemCookedMeat
 )
 
 // What each blade is worth, and the only copy of it.
@@ -132,6 +134,11 @@ const (
 	// back. It describes the item, so it lives beside the other item-owned values
 	// and is read through itemRegistry rather than by an item-id check in Consume.
 	RawMeatHungerRestore uint16 = 25
+
+	// CookedMeatHungerRestore is the full reserve one cooked piece gives back. Cooking
+	// changes the item rather than multiplying Consume's result, so the value remains a
+	// registry fact like raw meat's.
+	CookedMeatHungerRestore uint16 = 100
 )
 
 // itemDefinition is the server-only rule for one item. places is world.Air when
@@ -270,6 +277,10 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// to a stack keeps it carryable without making a carcass indistinguishable from a
 	// block resource. Its one non-zero capability is the registry answer Consume reads.
 	ItemRawMeat: {places: world.Air, maxStack: 16, restoresHunger: RawMeatHungerRestore},
+
+	// Cooking keeps the hunted resource's stack shape and changes only what eating it is
+	// worth. It is wearless, harmless and not placeable by the registry's zero values.
+	ItemCookedMeat: {places: world.Air, maxStack: 16, restoresHunger: CookedMeatHungerRestore},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

@@ -481,9 +481,9 @@ The client samples the controls, sends what the player is *trying* to do at the 
   predicate is read by the panel that draws the row and by the sender that declines to ask.
 
   **Proximity is deliberately not mirrored, and the asymmetry is the whole of the rule.**
-  Whether a forge stands within `ForgeCraftRadius` is something the server can see and this
+  Whether a forge or campfire stands within its crafting radius is something the server can see and this
   client can only guess at — the structures a snapshot names are the ones in *view*, not the
-  ones that exist — so a forge recipe stays clickable from anywhere and says what it needs
+  ones that exist — so a station recipe stays clickable from anywhere and says what it needs
   instead of pretending to know. A courtesy that guessed here would produce the one failure
   a courtesy must never produce: a row refusing a craft the server would have granted. The
   craft itself changes nothing locally; the complete `InventoryState` that follows is what
@@ -795,10 +795,9 @@ the two lists are the same length, so neither can drift without the other failin
 that module — the blade in `combat.rs`, the three bundles in `structures.rs`, the forge's two
 products in `crafting.rs`, and `inventory.rs` reads the kit's from `crafting` rather than
 copying the number. Ids nothing acts on, which is every plain block and material, are declared
-in `items.rs` because drawing them is all anyone does — and that now includes the three a
-hunt puts in the pack: bones, a vargr pelt and a leather patch are drawn and named on this
-side and routed nowhere, because what a patch mends is the server's registry. The registry
-names all fifteen from wherever they live: one declaration read from several places cannot
+in `items.rs` because drawing them is all anyone does — including bones, a vargr pelt and
+raw meat. Products this side routes live with their recipes: a leather patch is a repair
+kit and cooked meat is food. The registry names all twenty from wherever they live: one declaration read from several places cannot
 drift the way two declarations of the same number can.
 
 **Nothing in a row is ever a gameplay fact, and a fourth field must not make one.** What an item

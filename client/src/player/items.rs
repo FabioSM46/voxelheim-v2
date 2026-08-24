@@ -21,7 +21,8 @@
 
 use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::{
-    ITEM_AXE, ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
+    ITEM_AXE, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_PICKAXE,
+    ITEM_SHARPENING_STONE, ITEM_SHOVEL,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use crate::world::{BlockId, palette};
@@ -156,6 +157,8 @@ enum ItemColour {
     ForgedSteel,
     /// Fresh raw meat. A muted red that belongs to no terrain block. sRGB `#9C4F4F`.
     RawMeat,
+    /// Cooked meat. A browned swatch distinct from the raw ingredient. sRGB `#8B5A3C`.
+    CookedMeat,
 }
 
 /// `#59636D`, converted from sRGB to the linear space vertex colours use.
@@ -164,6 +167,8 @@ const WORN_STEEL_LINEAR: [f32; 3] = [0.099_899, 0.124_772, 0.152_926];
 const FORGED_STEEL_LINEAR: [f32; 3] = [0.250_158, 0.309_469, 0.366_253];
 /// `#9C4F4F`, converted from sRGB to the linear space vertex colours use.
 const RAW_MEAT_LINEAR: [f32; 3] = [0.332_452, 0.078_187, 0.078_187];
+/// `#8B5A3C`, converted from sRGB to the linear space vertex colours use.
+const COOKED_MEAT_LINEAR: [f32; 3] = [0.258_183, 0.102_242, 0.045_186];
 
 impl ItemColour {
     fn linear_rgba(self) -> [f32; 4] {
@@ -179,6 +184,10 @@ impl ItemColour {
             }
             Self::RawMeat => {
                 let [r, g, b] = RAW_MEAT_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::CookedMeat => {
+                let [r, g, b] = COOKED_MEAT_LINEAR;
                 [r, g, b, 1.0]
             }
         }
@@ -219,7 +228,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 19] = [
+pub(super) const ITEMS: [ItemDisplay; 20] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -354,13 +363,19 @@ pub(super) const ITEMS: [ItemDisplay; 19] = [
         shape: ItemShape::Tool,
         colour: ItemColour::Block(palette::LOG),
     },
-    // A hunted ingredient, not yet edible or cookable. `Material` is the carried shape
-    // for a consumable resource, and the item-only red keeps it distinct from hide.
+    // The hunted ingredient and its cooked product. Both are `Material`, while distinct
+    // item-only swatches keep the raw and cooked forms legible in the same pack.
     ItemDisplay {
         item_id: ITEM_RAW_MEAT,
         name: "raw meat",
         shape: ItemShape::Material,
         colour: ItemColour::RawMeat,
+    },
+    ItemDisplay {
+        item_id: ITEM_COOKED_MEAT,
+        name: "cooked meat",
+        shape: ItemShape::Material,
+        colour: ItemColour::CookedMeat,
     },
 ];
 
@@ -498,6 +513,7 @@ mod tests {
             ITEM_PICKAXE,
             ITEM_AXE,
             ITEM_RAW_MEAT,
+            ITEM_COOKED_MEAT,
         ];
         for item_id in declared {
             assert!(
@@ -612,13 +628,24 @@ mod tests {
     }
 
     #[test]
-    fn raw_meat_has_the_appended_id_and_its_own_display() {
+    fn both_meats_have_their_appended_ids_and_distinct_displays() {
         assert_eq!(ITEM_RAW_MEAT, 19);
         assert_eq!(item_label(ITEM_RAW_MEAT), "raw meat");
         assert_eq!(item_shape(ITEM_RAW_MEAT), ItemShape::Material);
         assert_eq!(
             display(ITEM_RAW_MEAT).map(|row| row.colour),
             Some(ItemColour::RawMeat)
+        );
+        assert_eq!(ITEM_COOKED_MEAT, 20);
+        assert_eq!(item_label(ITEM_COOKED_MEAT), "cooked meat");
+        assert_eq!(item_shape(ITEM_COOKED_MEAT), ItemShape::Material);
+        assert_eq!(
+            display(ITEM_COOKED_MEAT).map(|row| row.colour),
+            Some(ItemColour::CookedMeat)
+        );
+        assert_ne!(
+            item_linear_rgba(ITEM_RAW_MEAT),
+            item_linear_rgba(ITEM_COOKED_MEAT)
         );
     }
 

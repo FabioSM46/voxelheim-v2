@@ -72,6 +72,9 @@ import "strconv"
 // / **V15 adds `ConsumeRequest` and appends hunger to `PlayerVitals`.** An older server
 // / refuses the new client payload, while a V15 client requires a non-zero `max_hunger`
 // / that a V14 server never sends. Either skew would fail only after a clean handshake.
+// /
+// / **V16 appends `RecipeID.CookedMeat`.** A V16 client may send that new enum value in a
+// / `CraftRequest`; a V15 server cannot name it and would fail only after a clean handshake.
 type ProtocolVersion uint16
 
 const (
@@ -80,7 +83,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 15
+	ProtocolVersionCurrent ProtocolVersion = 16
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

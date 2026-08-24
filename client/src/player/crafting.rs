@@ -13,17 +13,19 @@
 //! something it can already see will be declined. The server re-reads its own slots either
 //! way, and a refusal is silence.
 //!
-//! **Proximity is not mirrored, and that asymmetry is the point.** Whether a forge stands
-//! within `ForgeCraftRadius` is something the server can see and this client can only
+//! **Proximity is not mirrored, and that asymmetry is the point.** Whether a forge or
+//! campfire stands within its crafting radius is something the server can see and this client can only
 //! guess at — the structures a snapshot names are the ones in view, not the ones that
-//! exist — so a forge recipe stays clickable from anywhere and says what it needs instead
+//! exist — so a station recipe stays clickable from anywhere and says what it needs instead
 //! of pretending to know. Guessing here would produce the one failure a courtesy must
 //! never produce: a row that refuses a craft the server would have granted.
 
 use bevy::prelude::*;
 
 use super::inventory::{ApplyInventory, Inventory};
-use super::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE, ITEM_VARGR_PELT};
+use super::items::{
+    ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_RAW_MEAT, ITEM_STONE, ITEM_VARGR_PELT,
+};
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
@@ -59,6 +61,10 @@ pub(super) const ITEM_LEATHER_PATCH: u16 = 15;
 pub(super) const ITEM_SHOVEL: u16 = 16;
 pub(super) const ITEM_PICKAXE: u16 = 17;
 pub(super) const ITEM_AXE: u16 = 18;
+
+/// Item id 20, the cooked form of raw meat. Declared with its recipe because this
+/// module produces it; inventory imports the same declaration to route consumption.
+pub(super) const ITEM_COOKED_MEAT: u16 = 20;
 
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,8 +107,8 @@ impl Recipe {
 ///
 /// In the order a player meets them: the forge is the thing you build before you have one,
 /// the blade and the stone are what it is for, the tent is the camp you come back to, the
-/// fire is the one patch of ground nothing will spawn on, and the patch is what a hunt is
-/// worked into.
+/// fire is the one patch of ground nothing will spawn on and where meat is cooked, and the
+/// patch is what a hunt is worked into.
 ///
 /// **No count of this table is written down anywhere**, and that is deliberate. A count is
 /// a claim about the mirror made by the same hand that writes the mirror, so it agrees
@@ -112,7 +118,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 9] = [
+pub const RECIPES: [Recipe; 10] = [
     Recipe {
         id: RecipeId::Forge,
         ingredients: &[
@@ -249,6 +255,18 @@ pub const RECIPES: [Recipe; 9] = [
             count: 1,
         },
         station: Some(StructureKind::Forge),
+    },
+    Recipe {
+        id: RecipeId::CookedMeat,
+        ingredients: &[Ingredient {
+            item_id: ITEM_RAW_MEAT,
+            count: 1,
+        }],
+        product: Ingredient {
+            item_id: ITEM_COOKED_MEAT,
+            count: 1,
+        },
+        station: Some(StructureKind::Campfire),
     },
 ];
 
@@ -475,6 +493,7 @@ mod tests {
             vec![(ITEM_LOG, 4), (ITEM_RAW_COAL, 1)]
         );
         assert_eq!(cost(RecipeId::LeatherPatch), vec![(ITEM_VARGR_PELT, 2)]);
+        assert_eq!(cost(RecipeId::CookedMeat), vec![(ITEM_RAW_MEAT, 1)]);
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -491,6 +510,11 @@ mod tests {
             (RecipeId::Tent, ITEM_TENT, None),
             (RecipeId::Campfire, ITEM_CAMPFIRE, None),
             (RecipeId::LeatherPatch, ITEM_LEATHER_PATCH, None),
+            (
+                RecipeId::CookedMeat,
+                ITEM_COOKED_MEAT,
+                Some(StructureKind::Campfire),
+            ),
         ] {
             let row = recipe(id).expect("every member has a row");
             assert_eq!(

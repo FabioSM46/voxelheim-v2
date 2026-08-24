@@ -449,7 +449,7 @@ fn recipe_heading(recipe: &Recipe) -> String {
 ///
 /// The row remains clickable: the structures a snapshot names are the ones in view, so a
 /// client that refused to ask without one would refuse crafts the server would have
-/// granted. A craft made too far from a forge is refused there, in silence.
+/// granted. A craft made too far from its station is refused there, in silence.
 fn station_note(station: StructureKind) -> String {
     let name = match station {
         StructureKind::Forge => "forge",
@@ -1970,10 +1970,10 @@ mod tests {
         assert_eq!(row_colour(&mut app, RecipeId::Tent), BUTTON);
     }
 
-    /// Proximity is the server's call, so a forge recipe is never grayed out for want of a
-    /// forge — only for want of materials, and it says what else it needs in its own note.
+    /// Proximity is the server's call, so a station recipe is never grayed out for want of
+    /// its station — only for want of materials, and it says what else it needs in its note.
     #[test]
-    fn a_forge_recipe_with_the_materials_is_enabled_and_labelled() {
+    fn a_station_recipe_with_the_materials_is_enabled_and_labelled() {
         let mut app = app();
         deliver(&mut app, &[(STONE, 2), (COAL, 1)]);
 
@@ -1985,7 +1985,7 @@ mod tests {
 
         let world = app.world_mut();
         let mut query = world.query::<(&Text, &TextColor)>();
-        let notes: Vec<String> = query
+        let mut notes: Vec<String> = query
             .iter(world)
             .filter(|(_, colour)| colour.0 == RECIPE_STATION)
             .map(|(text, _)| text.0.clone())
@@ -1994,18 +1994,15 @@ mod tests {
         // strings, and #185 made it five — a number this test had no opinion about and was
         // asserting anyway. What it is actually for is that a station note appears exactly
         // where a station is required, and that survives a sixth recipe.
-        let with_station = RECIPES
+        let mut expected: Vec<String> = RECIPES
             .iter()
-            .filter(|recipe| recipe.station.is_some())
-            .count();
+            .filter_map(|recipe| recipe.station.map(station_note))
+            .collect();
+        notes.sort();
+        expected.sort();
         assert_eq!(
-            notes.len(),
-            with_station,
-            "every recipe needing a station carries the note, and nothing else does"
-        );
-        assert!(
-            notes.iter().all(|note| note == "requires a forge nearby"),
-            "a station note says something this test did not expect: {notes:?}"
+            notes, expected,
+            "station notes do not mirror the recipe table"
         );
     }
 

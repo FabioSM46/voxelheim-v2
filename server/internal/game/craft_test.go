@@ -52,6 +52,22 @@ func (h *structureHarness) plantForge(p *Player, anchor [3]int32) {
 	}
 }
 
+// plantCraftingStation stands up the exact station a recipe names. Keeping the switch
+// exhaustive and fail-closed prevents a generic recipe sweep from silently planting a
+// forge for every future station.
+func (h *structureHarness) plantCraftingStation(p *Player, kind vnet.StructureKind, anchor [3]int32) {
+	h.t.Helper()
+
+	switch kind {
+	case vnet.StructureKindForge:
+		h.plantForge(p, anchor)
+	case vnet.StructureKindCampfire:
+		h.plantCampfire(p, 0, anchor)
+	default:
+		h.t.Fatalf("no test fixture for crafting station %s", kind)
+	}
+}
+
 // standAt moves a player to an exact position, the way a test needs rather than the way
 // the integrator would.
 func (h *structureHarness) standAt(p *Player, pos [3]float64) {
@@ -137,7 +153,7 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 			h := newStructureHarness(t)
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 			if r.station != vnet.StructureKindUnknown {
-				h.plantForge(player, [3]int32{0, 63, 0})
+				h.plantCraftingStation(player, r.station, [3]int32{0, 63, 0})
 			}
 			h.stockPack(player, r.ingredients...)
 
@@ -165,7 +181,7 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 				h := newStructureHarness(t)
 				player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 				if r.station != vnet.StructureKindUnknown {
-					h.plantForge(player, [3]int32{0, 63, 0})
+					h.plantCraftingStation(player, r.station, [3]int32{0, 63, 0})
 				}
 				h.stockPack(player, shortened...)
 				before := h.pack(player)
@@ -182,9 +198,9 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 	}
 }
 
-// The recipe table is the six the iterations agreed on, with the costs they agreed on. A
+// The recipe table is the ten the iterations agreed on, with the costs they agreed on. A
 // balance pass edits this test and the table together; a typo edits only one of them.
-func TestTheRecipeTableIsTheSixAgreedRecipes(t *testing.T) {
+func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
 	t.Parallel()
 
 	want := map[vnet.RecipeID]recipe{
@@ -228,6 +244,10 @@ func TestTheRecipeTableIsTheSixAgreedRecipes(t *testing.T) {
 		vnet.RecipeIDAxe: {
 			ingredients: []ingredient{{ItemRawIron, 1}, {ItemLog, 2}},
 			product:     ItemAxe, productCount: 1, station: vnet.StructureKindForge,
+		},
+		vnet.RecipeIDCookedMeat: {
+			ingredients: []ingredient{{ItemRawMeat, 1}},
+			product:     ItemCookedMeat, productCount: 1, station: vnet.StructureKindCampfire,
 		},
 	}
 
@@ -329,6 +349,92 @@ func TestAForgeSomebodyElseBuiltStillWorks(t *testing.T) {
 	}
 	if got := heldCount(state, ItemSharpeningStone); got != 1 {
 		t.Errorf("the visitor holds %d stones, want 1", got)
+	}
+}
+
+// Cooking uses the campfire's own five-block radius and no other station. The pack is
+// compared on every refusal so being out of range cannot consume the raw piece.
+func TestCookingRequiresACampfireInsideItsOwnRadius(t *testing.T) {
+	t.Parallel()
+
+	if CampfireCookRadius != 5.0 {
+		t.Fatalf("CampfireCookRadius = %.1f, want the pinned 5.0", CampfireCookRadius)
+	}
+	if CampfireCookRadius == CampfireSafeRadius {
+		t.Fatal("the cooking radius reuses the spawn-safe radius")
+	}
+	for _, tc := range []struct {
+		name     string
+		station  vnet.StructureKind
+		distance float64
+		accepted bool
+	}{
+		{"no station", vnet.StructureKindUnknown, 0, false},
+		{"wrong station", vnet.StructureKindForge, 4.9, false},
+		{"just inside", vnet.StructureKindCampfire, 4.9, true},
+		{"just outside", vnet.StructureKindCampfire, 5.1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			if tc.station != vnet.StructureKindUnknown {
+				h.plantCraftingStation(player, tc.station, [3]int32{0, 63, 0})
+			}
+			h.stockPack(player, ingredient{ItemRawMeat, 1})
+			before := h.pack(player)
+			h.standAt(player, [3]float64{0.5, 63.5 + tc.distance - PlayerHeight/2, 0.5})
+
+			state, err := h.craft(player, vnet.RecipeIDCookedMeat)
+			if tc.accepted {
+				if err != nil {
+					t.Fatalf("cooking %.1f blocks from %s: %v", tc.distance, tc.station, err)
+				}
+				if got := heldCount(state, ItemCookedMeat); got != 1 {
+					t.Errorf("the pack holds %d cooked meat, want 1", got)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("cooking %.1f blocks from %s was accepted", tc.distance, tc.station)
+			}
+			if after := h.pack(player); after != before {
+				t.Error("the refused cook changed the pack")
+			}
+		})
+	}
+}
+
+func TestACampfireSomebodyElseBuiltStillCooks(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	builder, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	visitor, _ := h.join(2, [3]float32{0.5, 64, 0.5})
+	h.plantCampfire(builder, 0, [3]int32{0, 63, 0})
+	h.stockPack(visitor, ingredient{ItemRawMeat, 1})
+
+	state, err := h.craft(visitor, vnet.RecipeIDCookedMeat)
+	if err != nil {
+		t.Fatalf("cooking at another player's campfire: %v", err)
+	}
+	if got := heldCount(state, ItemCookedMeat); got != 1 {
+		t.Errorf("the visitor holds %d cooked meat, want 1", got)
+	}
+}
+
+func TestCraftingStationRadiiFailClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []vnet.StructureKind{
+		vnet.StructureKindUnknown,
+		vnet.StructureKindTent,
+		vnet.StructureKind(200),
+	} {
+		if radius, configured := craftRadius(kind); configured || radius != 0 {
+			t.Errorf("station %s resolved to radius %.1f (configured %v), want fail-closed", kind, radius, configured)
+		}
 	}
 }
 

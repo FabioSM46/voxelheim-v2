@@ -797,6 +797,7 @@ pub enum RecipeId {
     Shovel,
     Pickaxe,
     Axe,
+    CookedMeat,
 }
 
 impl RecipeId {
@@ -819,6 +820,7 @@ impl RecipeId {
             Self::Shovel => fb::RecipeID::Shovel,
             Self::Pickaxe => fb::RecipeID::Pickaxe,
             Self::Axe => fb::RecipeID::Axe,
+            Self::CookedMeat => fb::RecipeID::CookedMeat,
         }
     }
 }
@@ -4334,14 +4336,17 @@ mod tests {
     /// union member an older server refuses, and the new maximum is a decoder invariant:
     /// its absent-field zero is not a usable V15 snapshot.
     ///
-    /// The rule that generalises, now that six shapes have been argued: **ask what the
+    /// **V16 appends `RecipeID::CookedMeat`.** It travels client to server in a
+    /// `CraftRequest`, so a V15 server would reject it only after a clean handshake.
+    ///
+    /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v15_names_consumption_and_hunger() {
+    fn protocol_v16_names_campfire_cooking() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 15);
+        assert_eq!(fb::ProtocolVersion::Current.0, 16);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4786,6 +4791,7 @@ mod tests {
         assert_eq!(fb::RecipeID::Tent.0, 4);
         assert_eq!(fb::RecipeID::Campfire.0, 5);
         assert_eq!(fb::RecipeID::LeatherPatch.0, 6);
+        assert_eq!(fb::RecipeID::CookedMeat.0, 10);
     }
 
     /// V7's members sit where they were appended, and the enums they were appended to
@@ -7038,6 +7044,7 @@ mod tests {
             (RecipeId::Shovel, fb::RecipeID::Shovel),
             (RecipeId::Pickaxe, fb::RecipeID::Pickaxe),
             (RecipeId::Axe, fb::RecipeID::Axe),
+            (RecipeId::CookedMeat, fb::RecipeID::CookedMeat),
         ];
 
         for (recipe, wire) in named {

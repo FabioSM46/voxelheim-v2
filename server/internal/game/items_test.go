@@ -40,7 +40,7 @@ func TestEveryItemIsRegisteredWithItsOwnStackLimitAndPlacement(t *testing.T) {
 	}
 }
 
-func TestRawMeatCarriesItsPinnedIDAndResourceStats(t *testing.T) {
+func TestBothMeatsCarryTheirPinnedIDsAndResourceStats(t *testing.T) {
 	t.Parallel()
 
 	if ItemRawMeat != 19 {
@@ -57,18 +57,39 @@ func TestRawMeatCarriesItsPinnedIDAndResourceStats(t *testing.T) {
 	if block, placeable := blockPlacedBy(ItemRawMeat); placeable || block != world.Air {
 		t.Errorf("raw meat places block %d (placeable %v)", block, placeable)
 	}
+
+	if ItemCookedMeat != 20 {
+		t.Errorf("cooked meat id = %d, want the appended wire id 20", ItemCookedMeat)
+	}
+	got, registered = itemByID(ItemCookedMeat)
+	if !registered {
+		t.Fatal("cooked meat is not registered")
+	}
+	want = itemDefinition{places: world.Air, maxStack: 16, restoresHunger: CookedMeatHungerRestore}
+	if got != want {
+		t.Errorf("cooked meat row = %+v, want %+v", got, want)
+	}
+	if block, placeable := blockPlacedBy(ItemCookedMeat); placeable || block != world.Air {
+		t.Errorf("cooked meat places block %d (placeable %v)", block, placeable)
+	}
 }
 
-func TestRawMeatIsTheOnlyFood(t *testing.T) {
+func TestRawAndCookedMeatAreTheOnlyFoods(t *testing.T) {
 	t.Parallel()
 
 	if RawMeatHungerRestore != 25 {
 		t.Errorf("RawMeatHungerRestore = %d, want the pinned 25", RawMeatHungerRestore)
 	}
+	if CookedMeatHungerRestore != 100 {
+		t.Errorf("CookedMeatHungerRestore = %d, want the pinned 100", CookedMeatHungerRestore)
+	}
 	for id, definition := range itemRegistry {
 		want := uint16(0)
-		if id == ItemRawMeat {
+		switch id {
+		case ItemRawMeat:
 			want = RawMeatHungerRestore
+		case ItemCookedMeat:
+			want = CookedMeatHungerRestore
 		}
 		if definition.restoresHunger != want {
 			t.Errorf("item %d restores %d hunger, want %d", id, definition.restoresHunger, want)
