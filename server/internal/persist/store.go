@@ -96,7 +96,12 @@ import (
 // its character looks like, and the only value this build could invent is the
 // placeholder the contract reserves for an appearance that has not *arrived* — which is
 // a different claim entirely.
-const StoreVersion uint32 = 4
+//
+// **5 adds hunger immediately after health.** Hunger is a life value like health: the
+// store writes it verbatim and session asks game whether it is legal when the character
+// resumes. There is no migration; a v4 record carries no hunger reserve, and inventing
+// one would turn the storage layer into the owner of a gameplay rule.
+const StoreVersion uint32 = 5
 
 // On-disk layout, little-endian throughout, one file per character.
 //
@@ -104,7 +109,7 @@ const StoreVersion uint32 = 4
 //	    magic[4] version:u32 last_seen:i64
 //	    character_id:u64 owner:32
 //	    skin:u32 shirt:u32 trousers:u32 shoes:u32 hair:u32 hair_model:u8
-//	    pos:3×f64 yaw:f64 health:u16
+//	    pos:3×f64 yaw:f64 health:u16 hunger:u16
 //	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
 //	    name_len:u16 name[name_len] crc32:u32
 //
@@ -139,7 +144,7 @@ const (
 
 	// supersededSuffix marks a players directory written in a format this build does
 	// not speak, and it names the format this build *does* speak: a directory set aside
-	// by this version becomes players.pre-v4.<timestamp>.
+	// by this version becomes players.pre-v5.<timestamp>.
 	//
 	// It said `.pre-accounts` while there had been exactly one such move, which was
 	// true of the format that introduced characters and stopped being true the moment a
@@ -163,7 +168,8 @@ const (
 	offPos        = offAppearance + appearanceSize
 	offYaw        = offPos + 3*8
 	offHealth     = offYaw + 8
-	offSlots      = offHealth + 2
+	offHunger     = offHealth + 2
+	offSlots      = offHunger + 2
 	offNameLen    = offSlots + slotsSize
 
 	recordHeaderSize = offNameLen + 2
@@ -174,7 +180,7 @@ var playerMagic = [4]byte{'V', 'X', 'H', 'P'}
 
 // Record is what the server remembers about one character between connections.
 //
-// The life — position, yaw, health, slots — is written verbatim and read back
+// The life — position, yaw, health, hunger, slots — is written verbatim and read back
 // verbatim. **This package judges none of it**, and that is deliberate rather than an
 // omission: whether an item id exists and how much health is a full bar are the item
 // registry's answers, and it lives in internal/game. Everything here checks is what a
@@ -226,6 +232,11 @@ type Record struct {
 	// Zero in the one record no session wrote: the first, laid down by [Store.Create].
 	// See [Record.Unplayed].
 	Health uint16
+
+	// Hunger is the player's remaining food reserve. Zero is a legal played value and
+	// does not participate in [Record.Unplayed]; Health remains the sentinel that
+	// distinguishes a newly created character from a stored life.
+	Hunger uint16
 
 	// Slots is the whole pack, in the shape the wire announces, so a stored pack and a
 	// sent InventoryState are the same value rather than two that have to agree.
@@ -384,9 +395,9 @@ func (s *Store) Unreadable() []string {
 // every player on this world had, and a format change is not a reason to lose it. The
 // records inside are unreadable to this build — a v2 record names a player by the hash
 // of their account and cannot say which character it was; a v3 record cannot say what
-// its character looks like — so there is no migration to run and deliberately none
-// written. What there is, is a directory an operator can copy somewhere and open at
-// their leisure.
+// its character looks like; a v4 record says nothing about hunger — so there is no
+// migration to run and deliberately none written. What there is, is a directory an
+// operator can copy somewhere and open at their leisure.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
 // a fixed name would be destroyed by the second run that found something to move, which
@@ -737,6 +748,7 @@ func encodeRecord(rec Record) []byte {
 	}
 	binary.LittleEndian.PutUint64(buf[offYaw:offYaw+8], math.Float64bits(rec.Yaw))
 	binary.LittleEndian.PutUint16(buf[offHealth:offHealth+2], rec.Health)
+	binary.LittleEndian.PutUint16(buf[offHunger:offHunger+2], rec.Hunger)
 
 	for slot, stack := range rec.Slots {
 		at := offSlots + slot*slotSize
@@ -788,6 +800,7 @@ func decodeRecord(data []byte) (Record, error) {
 		Appearance: appearanceAt(data),
 		Yaw:        math.Float64frombits(binary.LittleEndian.Uint64(data[offYaw : offYaw+8])),
 		Health:     binary.LittleEndian.Uint16(data[offHealth : offHealth+2]),
+		Hunger:     binary.LittleEndian.Uint16(data[offHunger : offHunger+2]),
 	}
 
 	rec.Owner = identity.PlayerID(data[offOwner : offOwner+identity.IDSize])

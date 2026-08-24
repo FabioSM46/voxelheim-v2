@@ -142,6 +142,7 @@ func livingRecord() persist.Record {
 		LastSeen: time.Unix(1, 0),
 		Pos:      [3]float64{0.5, 64, 0.5},
 		Health:   game.PlayerMaxHealth,
+		Hunger:   41,
 	}
 }
 
@@ -248,6 +249,9 @@ func TestResolveAPlayer(t *testing.T) {
 		}
 		if resolved.Life == nil {
 			t.Fatal("a returning player arrived with no life")
+		}
+		if resolved.Life.Hunger != 41 {
+			t.Errorf("the resumed life has hunger %d, want the stored 41", resolved.Life.Hunger)
 		}
 		if resolved.ID != testPlayerID(account) {
 			t.Error("a resumed player has a different player id")

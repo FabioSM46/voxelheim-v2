@@ -4,6 +4,7 @@
 package persist
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -79,7 +80,7 @@ func TestStoreRoundTripsARecord(t *testing.T) {
 	// Seconds, because that is the resolution the format keeps. A test that wrote
 	// time.Now() and compared it whole would fail on the nanoseconds the format
 	// deliberately does not store.
-	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100}
+	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100, Hunger: 73}
 	if err := store.Save(character.ID, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -115,12 +116,12 @@ func TestStoreRoundTripsARecord(t *testing.T) {
 	}
 
 	// A second save replaces the first rather than appending to it.
-	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61}
+	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61, Hunger: 12}
 	if err := store.Save(character.ID, later); err != nil {
 		t.Fatalf("the second Save: %v", err)
 	}
 	got, _, _ = store.Load(character.ID)
-	if got.Health != later.Health || !got.LastSeen.Equal(later.LastSeen) {
+	if got.Health != later.Health || got.Hunger != later.Hunger || !got.LastSeen.Equal(later.LastSeen) {
 		t.Errorf("the second save did not replace the first: %+v", got)
 	}
 }
@@ -401,6 +402,7 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 		Pos:    [3]float64{-1234.5678901234567, 70.100000000000001, 4096.3333333333333},
 		Yaw:    -2.7182818284590452,
 		Health: 61,
+		Hunger: 37,
 	}
 	// Every shape a slot can take: a worn durable item, a partial stack, the last slot
 	// occupied, and empties everywhere else.
@@ -427,6 +429,9 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 	}
 	if got.Health != want.Health {
 		t.Errorf("Health = %d, want %d", got.Health, want.Health)
+	}
+	if got.Hunger != want.Hunger {
+		t.Errorf("Hunger = %d, want %d", got.Hunger, want.Hunger)
 	}
 	if got.Slots != want.Slots {
 		for slot := range want.Slots {
@@ -458,6 +463,47 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	oneItem.Slots[3] = protocol.InventoryStack{ItemID: 1, Count: 1}
 	if len(encodeRecord(oneItem)) != len(empty) {
 		t.Error("a record with an item is a different size from an empty one; the slot table is not fixed")
+	}
+}
+
+// V5 puts hunger immediately after health and before the fixed slot table. Pin both
+// the relationship between the offsets and the bytes themselves: changing only the
+// struct field would otherwise round trip through an equally wrong encoder and decoder.
+func TestV5StoresHungerImmediatelyAfterHealth(t *testing.T) {
+	t.Parallel()
+
+	if offHunger != offHealth+2 {
+		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
+	}
+	if offSlots != offHunger+2 {
+		t.Fatalf("offSlots = %d, want offHunger+2 = %d", offSlots, offHunger+2)
+	}
+
+	rec := Record{Health: 0x1234, Hunger: 0x5678}
+	rec.Slots[0] = protocol.InventoryStack{ItemID: 0x9abc, Count: 1}
+	encoded := encodeRecord(rec)
+	if got := binary.LittleEndian.Uint16(encoded[offHealth : offHealth+2]); got != rec.Health {
+		t.Errorf("health bytes = %#x, want %#x", got, rec.Health)
+	}
+	if got := binary.LittleEndian.Uint16(encoded[offHunger : offHunger+2]); got != rec.Hunger {
+		t.Errorf("hunger bytes = %#x, want %#x", got, rec.Hunger)
+	}
+	if got := binary.LittleEndian.Uint16(encoded[offSlots : offSlots+2]); got != rec.Slots[0].ItemID {
+		t.Errorf("first slot item bytes = %#x, want %#x", got, rec.Slots[0].ItemID)
+	}
+}
+
+// There is deliberately no v4 migration. Even bytes that otherwise have the current
+// layout are refused when the header says v4, rather than being parsed as a prefix and
+// assigned a hunger value the old record never stored.
+func TestV5RefusesAV4RecordRatherThanMigratingIt(t *testing.T) {
+	t.Parallel()
+
+	old := encodeRecord(Record{Health: 100, Hunger: 100})
+	binary.LittleEndian.PutUint32(old[4:8], 4)
+	world.PutChecksum(old)
+	if _, err := decodeRecord(old); !errors.Is(err, world.ErrCorruptStore) {
+		t.Fatalf("decodeRecord(v4) = %v, want ErrCorruptStore", err)
 	}
 }
 

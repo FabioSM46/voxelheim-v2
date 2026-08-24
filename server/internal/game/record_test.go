@@ -35,6 +35,7 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	player.pos = [3]float64{12.5, 70, -8.25}
 	player.yaw = 1.25
 	player.health = 61
+	player.hunger = 37
 	h.sim.mu.Unlock()
 
 	player.inventory.mu.Lock()
@@ -65,6 +66,9 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	}
 	if got.Health != saved.Health {
 		t.Errorf("restored health %d, want %d", got.Health, saved.Health)
+	}
+	if got.Hunger != saved.Hunger {
+		t.Errorf("restored hunger %d, want %d", got.Hunger, saved.Hunger)
 	}
 	for slot := range saved.Slots {
 		if got.Slots[slot] != saved.Slots[slot] {
@@ -144,6 +148,9 @@ func TestAPlayerWithNoRecordJoinsWithTheStarterPack(t *testing.T) {
 	if life.Health != PlayerMaxHealth {
 		t.Errorf("a new player's health is %d, want %d", life.Health, PlayerMaxHealth)
 	}
+	if life.Hunger != PlayerMaxHunger {
+		t.Errorf("a new player's hunger is %d, want %d", life.Hunger, PlayerMaxHunger)
+	}
 	if life.Pos != ([3]float64{0.5, 64, 0.5}) {
 		t.Errorf("a new player's position is %v, want the join spawn", life.Pos)
 	}
@@ -177,6 +184,7 @@ func TestTheRecordOfADeadPlayerIsTheirRespawn(t *testing.T) {
 	// something to fail against.
 	h.sim.mu.Lock()
 	player.pos = [3]float64{40, 80, -40}
+	player.hunger = 10
 	h.sim.mu.Unlock()
 
 	h.hurt(player, PlayerMaxHealth)
@@ -194,6 +202,9 @@ func TestTheRecordOfADeadPlayerIsTheirRespawn(t *testing.T) {
 
 	if life.Health != PlayerMaxHealth {
 		t.Errorf("a dead player's record holds %d health, want a full %d", life.Health, PlayerMaxHealth)
+	}
+	if life.Hunger != RespawnHungerFloor {
+		t.Errorf("a dead player's record holds %d hunger, want the respawn floor %d", life.Hunger, RespawnHungerFloor)
 	}
 	if life.Pos != ([3]float64{0.5, 64, 0.5}) {
 		t.Errorf("a dead player's record holds position %v, want the respawn position", life.Pos)
@@ -296,7 +307,7 @@ func TestValidateRefusesARecordThisBuildCannotHaveWritten(t *testing.T) {
 	t.Parallel()
 
 	sound := func() Life {
-		life := Life{Pos: [3]float64{1, 64, 2}, Yaw: 0.5, Health: 42}
+		life := Life{Pos: [3]float64{1, 64, 2}, Yaw: 0.5, Health: 42, Hunger: 42}
 		life.Slots[0] = protocol.InventoryStack{
 			ItemID: uint16(ItemRustySword), Count: 1,
 			Durability: 40, MaxDurability: RustySwordMaxDurability,
@@ -329,6 +340,7 @@ func TestValidateRefusesARecordThisBuildCannotHaveWritten(t *testing.T) {
 		// so a zero here is a record this server did not write.
 		"no health":                     func(l *Life) { l.Health = 0 },
 		"more health than a player has": func(l *Life) { l.Health = PlayerMaxHealth + 1 },
+		"more hunger than a player has": func(l *Life) { l.Hunger = PlayerMaxHunger + 1 },
 		"an unknown item id": func(l *Life) {
 			l.Slots[2] = protocol.InventoryStack{ItemID: 60000, Count: 1}
 		},
@@ -357,6 +369,12 @@ func TestValidateRefusesARecordThisBuildCannotHaveWritten(t *testing.T) {
 				t.Fatal("Validate accepted a record this build cannot have written")
 			}
 		})
+	}
+
+	emptyReserve := sound()
+	emptyReserve.Hunger = 0
+	if err := emptyReserve.Validate(); err != nil {
+		t.Errorf("a living record at zero hunger was refused: %v", err)
 	}
 }
 

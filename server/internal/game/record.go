@@ -9,7 +9,7 @@ import (
 )
 
 // Life is everything about one player that outlives their connection: where they
-// stood, which way they faced, how much health they had, and every slot of their
+// stood, which way they faced, how much health and hunger they had, and every slot of their
 // pack.
 //
 // # Why the type lives here and not in the store
@@ -17,7 +17,7 @@ import (
 // The store owns bytes; this package owns what those bytes are allowed to mean. Only
 // this package holds the item registry and [PlayerMaxHealth], so a record's values
 // can only be judged here — see [Life.Validate], which is the one place that judges
-// them. internal/persist declares the same four fields because it has to write them
+// them. internal/persist declares the same five values because it has to write them
 // down; it deliberately does not re-derive the rules, because a second copy of a rule
 // is a second rule the moment one of them is edited.
 //
@@ -32,6 +32,7 @@ type Life struct {
 	Pos    [3]float64
 	Yaw    float64
 	Health uint16
+	Hunger uint16
 	Slots  [protocol.InventorySlots]protocol.InventoryStack
 }
 
@@ -90,6 +91,9 @@ func (l Life) Validate() error {
 	// server rather than a corpse to be restored.
 	if l.Health == 0 || l.Health > PlayerMaxHealth {
 		return fmt.Errorf("game: a stored health must be in 1..%d, got %d", PlayerMaxHealth, l.Health)
+	}
+	if l.Hunger > PlayerMaxHunger {
+		return fmt.Errorf("game: a stored hunger must be in 0..%d, got %d", PlayerMaxHunger, l.Hunger)
 	}
 
 	for slot, stack := range l.Slots {
@@ -176,7 +180,7 @@ func (p *Player) Record() Life {
 
 // recordLocked is [Player.Record] with both locks already held.
 func (p *Player) recordLocked() Life {
-	pos, health := p.pos, p.health
+	pos, health, hunger := p.pos, p.health, p.hunger
 	if !p.alive() {
 		// The transition a respawn would have performed, minus the parts that only mean
 		// something to a live session: no protection window, no cleared ordering guards,
@@ -184,13 +188,14 @@ func (p *Player) recordLocked() Life {
 		p.chargeDeathPenaltyLocked()
 		pos = p.respawnPositionLocked()
 		health = PlayerMaxHealth
+		hunger = max(hunger, RespawnHungerFloor)
 	}
 
 	// Through the same builder the wire uses, so a stored pack and a sent one cannot
 	// describe the same slots differently.
 	state := p.inventory.stateLocked()
 
-	life := Life{Pos: pos, Yaw: p.yaw, Health: health}
+	life := Life{Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger}
 	copy(life.Slots[:], state.Stacks)
 	return life
 }
