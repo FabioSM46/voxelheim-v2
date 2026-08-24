@@ -64,17 +64,17 @@ const (
 	// PlayerHeight is how tall the player's box is, in blocks.
 	PlayerHeight = 1.8
 
-	// PlayerMaxHealth is the health a player has, and the denominator of every health
-	// display the client draws.
-	//
-	// **Nothing in this package can change a player's health yet**, and that is the
-	// whole of what this constant means today. Protocol V3 makes per-recipient vitals a
-	// required field of every snapshot, so the tick has to report *something*; what it
-	// reports is the only true statement available, which is that every player is alive
-	// and unharmed. Damage, death, the respawn countdown and invulnerability arrive
-	// with the issue that owns them and read this same number — a second constant
-	// appearing then would be two answers to "how much health is full".
+	// PlayerMaxHealth is the level-one health maximum. Higher levels add
+	// HealthPerLevel through maxHealthFor, and the resulting per-player value is the
+	// denominator of every health display the client draws.
 	PlayerMaxHealth = 100
+
+	// HealthPerLevel is how much maximum health each level after the first adds.
+	//
+	// Five makes a level-30 player reach 245 health, 2.45 times the level-one base.
+	// Ten would reach 390 and make today's non-scaling mobs irrelevant long before the
+	// cap; five makes progression tangible while their existing damage remains useful.
+	HealthPerLevel uint16 = 5
 
 	// PlayerMaxHunger is a full food reserve and the denominator of every hunger
 	// display. Zero remains a living state: it stops regeneration and does nothing

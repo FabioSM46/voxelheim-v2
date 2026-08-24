@@ -21,6 +21,17 @@ const ExperiencePerLevelStep uint32 = 50
 // level-cap change move the persisted bound and every saturation point with it.
 const ExperienceCap uint32 = ExperiencePerLevelStep * uint32(MaxLevel-1) * uint32(MaxLevel) / 2
 
+// maxHealthFor derives the health ceiling for a level. Every caller obtains its level
+// from levelFor, so level is always in 1..MaxLevel.
+func maxHealthFor(level uint16) uint16 {
+	return PlayerMaxHealth + HealthPerLevel*(level-1)
+}
+
+// maxHealthLocked is this player's current health ceiling. The caller holds sim.mu.
+func (p *Player) maxHealthLocked() uint16 {
+	return maxHealthFor(levelFor(p.experience))
+}
+
 // levelFor derives the current level from a lifetime total. Totals beyond the cap are
 // treated as capped so a defensive caller cannot derive a level this build does not
 // have; [Life.Validate] prevents such a total from entering a Player in the first place.
@@ -70,5 +81,13 @@ func (p *Player) awardExperienceLocked(amount uint32) (leveledUp bool) {
 	} else {
 		p.experience += amount
 	}
-	return levelFor(p.experience) > before
+	after := levelFor(p.experience)
+	if after <= before {
+		return false
+	}
+
+	// Every crossed level grows the current bar with its maximum, so a full player
+	// stays full even when one award crosses several boundaries.
+	p.health += HealthPerLevel * (after - before)
+	return true
 }

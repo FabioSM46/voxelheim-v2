@@ -15,7 +15,7 @@ import (
 // # Why the type lives here and not in the store
 //
 // The store owns bytes; this package owns what those bytes are allowed to mean. Only
-// this package holds the item registry and [PlayerMaxHealth], so a record's values
+// this package holds the item registry and the per-level health rule, so a record's values
 // can only be judged here — see [Life.Validate], which is the one place that judges
 // them. internal/persist declares the same six values because it has to write them
 // down; it deliberately does not re-derive the rules, because a second copy of a rule
@@ -90,8 +90,10 @@ func (l Life) Validate() error {
 	// Zero is refused, not clamped: a record always describes a *living* player — see
 	// Player.Record — so a health of zero is a record that was never written by this
 	// server rather than a corpse to be restored.
-	if l.Health == 0 || l.Health > PlayerMaxHealth {
-		return fmt.Errorf("game: a stored health must be in 1..%d, got %d", PlayerMaxHealth, l.Health)
+	maxHealth := maxHealthFor(levelFor(l.Experience))
+	if l.Health == 0 || l.Health > maxHealth {
+		return fmt.Errorf("game: stored health at level %d must be in 1..%d, got %d",
+			levelFor(l.Experience), maxHealth, l.Health)
 	}
 	if l.Hunger > PlayerMaxHunger {
 		return fmt.Errorf("game: a stored hunger must be in 0..%d, got %d", PlayerMaxHunger, l.Hunger)
@@ -149,7 +151,7 @@ func validateStoredSlot(stack protocol.InventoryStack) error {
 // **It always describes a living player, and that is the whole of what makes quitting
 // neither a way out of a death nor a way to pay for one twice.** A player who is dead
 // when this runs is captured as their respawn would have left them: alive, at
-// [PlayerMaxHealth], at [Player.respawnPositionLocked] — their tent if one stands, the
+// their per-level maximum, at [Player.respawnPositionLocked] — their tent if one stands, the
 // join spawn otherwise — with the death penalty charged if the tick had not managed it
 // yet. Charged through the same one-shot the tick uses, so a death already paid for is
 // not paid for again.
@@ -191,7 +193,7 @@ func (p *Player) recordLocked() Life {
 		// no chunk publish. What survives is where they come back and what it cost them.
 		p.chargeDeathPenaltyLocked()
 		pos = p.respawnPositionLocked()
-		health = PlayerMaxHealth
+		health = p.maxHealthLocked()
 		hunger = max(hunger, RespawnHungerFloor)
 	}
 
