@@ -432,6 +432,24 @@ func TestBreakingSpawnsOneDropAtTheCentreOfTheVoxel(t *testing.T) {
 	}
 }
 
+// A throw belongs only to Player.DropItem. A yield produced by the world keeps the
+// exact x/z chosen by that world event while gravity settles it vertically.
+func TestAWorldProducedDropHasNoHorizontalMotion(t *testing.T) {
+	t.Parallel()
+
+	h := newDropHarness(t, dropTerrain{groundTop: 63})
+	drop := h.spawn(ItemStone, 1, [3]int64{4, 70, -3})
+	startX, startZ := drop.pos[0], drop.pos[2]
+	h.advance(100)
+
+	if drop.pos[0] != startX || drop.pos[2] != startZ {
+		t.Errorf("the world drop moved horizontally from (%v, %v) to (%v, %v)", startX, startZ, drop.pos[0], drop.pos[2])
+	}
+	if drop.horizontalVelocity != [2]float64{} {
+		t.Errorf("the world drop carries horizontal velocity %v", drop.horizontalVelocity)
+	}
+}
+
 // Leaves are the drop table's explicit "nothing", and an unlisted block is its
 // implicit one. Neither may cost an entity or an identity.
 func TestABlockThatYieldsNothingSpawnsNoDrop(t *testing.T) {

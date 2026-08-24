@@ -494,9 +494,9 @@ than as a special case of the inventory.
   `client/src/player/drops.rs`. Spawning centres the box in the broken voxel, so the position
   a client receives is the centre of the block it just watched disappear.
 - **A drop over a chunk that is not resident holds where it is**, with no accumulated fall
-  speed, by the same rule that keeps a player from dropping out of a world that is merely
-  still loading: an absent chunk is solid, `moveAndCollide` refuses a move that starts inside
-  one, and a blocked axis zeroes the velocity.
+  speed or retained throw, by the same rule that keeps a player from dropping out of a world
+  that is merely still loading: an absent chunk is solid, `moveAndCollide` refuses a move that
+  starts inside one, and every blocked axis zeroes its velocity.
 - **Pickup is proximity and nothing else.** No key, no aim, no request: the client sends
   nothing and learns the outcome by the id leaving the `drops` vector. The radius is measured
   between the two boxes and is Euclidean for the reason `EditReach` is. A drop cannot be
@@ -532,35 +532,36 @@ than as a special case of the inventory.
 ### A player can ask for one, and that is the fourth reason a drop exists
 
 `Player.DropItem` in `drop.go` answers a `DropItemRequest`: one slot index on the wire, and
-the whole of it decided here. It is the only caller of `spawnStackDrop` that answers a
+the whole of it decided here. It is the only caller of `spawnMovingStackDrop` that answers a
 *request* rather than something that happened to the world; the wearless world callers use
 `spawnDrop`, and both forms reach the same core entity path.
 
 - **The wire carries a slot and nothing else, and both absences are the safety.** No count,
   because a client that could name one would be stating what leaves its own pack; no
-  position, because one would let it put an item down anywhere in the world. The stack is
-  whatever the slot holds, and it lands at `voxelAt(p.pos)` — the cell the server says the
-  player's feet are in, the two steps a kill's loot already takes from the creature.
+  position or direction, because either would let it decide where an item lands. The stack
+  is whatever the slot holds, starts at `voxelAt(p.pos)` and leaves along the movement
+  basis's forward vector computed from `p.yaw`. The speed and deceleration are server
+  constants, so both direction and distance are authoritative.
 - **Two phases split by the lock, which is `RemoveStructure`'s shape.** `releaseSlot` takes
   `Sim.mu`, checks liveness, takes the inventory with `TryLock`, reads the slot, empties it
-  and returns the state; `DropItem` then spawns outside that lock, because `spawnStackDrop`
-  takes it. Nothing is lost in the gap: the spawn core refuses an empty, unregistered or
+  and returns the state; `DropItem` then spawns outside that lock, because
+  `spawnMovingStackDrop` takes it. Nothing is lost in the gap: the spawn core refuses an empty, unregistered or
   invalid stack, and `releaseSlot` has already read a validated inventory slot before it
   emptied anything.
 - **A worn slot reaches the ground as the exact authoritative object.** The fixed
   `ItemDropState` remains unchanged; V11 appends sparse `drop_durabilities` entries keyed by
   entity id, so block yields, loot rolls and structure bundles stay wearless and pay no
-  per-drop wire cost. `spawnStackDrop` carries the inventory stack through the entity, and
+  per-drop wire cost. The shared spawn core carries the inventory stack through the entity, and
   pickup inserts that exact durable stack into one empty slot instead of rebuilding it with
   `stackOf`. A blade let go of at 12 durability therefore comes back at 12, never at the
   registry maximum. Durable drops never merge because one wear pair describes one object.
-- **A player standing on what they put down picks it straight back up**, half a second later,
-  and that is the ordinary pickup rule rather than an oversight. The issue asked for a drop
-  indistinguishable from one the world produced, and `dropPickupDelayTicks` belongs to the
-  drop rather than to who spawned it — the same thing already happens to a block broken at
-  your own feet. So dropping is "put it down and step away", and
-  `TestADroppedStackIsCollectedBackByAPlayerWhoStaysOnIt` is what says that was chosen rather
-  than missed. Making it otherwise needs a per-drop delay or some velocity.
+- **A player-authored drop is the one drop with a horizontal start.** Its velocity decays by
+  magnitude, so diagonals travel the same distance as cardinal throws, and every component
+  goes through the existing axis-by-axis `moveAndCollide`: a wall stops it on this side and
+  may slide it along the unblocked axis. In open terrain it clears the player's pickup radius
+  before the unchanged `dropPickupDelayTicks` expires, so standing still does not immediately
+  undo the gesture. World-produced drops enter the same creation core with zero horizontal
+  velocity and stay exactly where the world put them.
 - **`RefusedAction.DropItem` exists on the wire and nothing sends it**, exactly like
   `MineBlock`, `EditBlock`, `Craft` and `Repair`. It has a member where a removal deliberately
   does not, and the contrast is the rule: every question a refused drop could answer is about
