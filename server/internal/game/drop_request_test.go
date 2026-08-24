@@ -16,6 +16,7 @@ func TestADroppedStackLeavesThePackAndLandsInFront(t *testing.T) {
 
 	h := newDropHarness(t, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{4.5, 64, -2.5})
+	origin := player.pos
 
 	player.inventory.mu.Lock()
 	player.inventory.slots[3] = inventoryStack{item: ItemStone, count: 17}
@@ -46,15 +47,14 @@ func TestADroppedStackLeavesThePackAndLandsInFront(t *testing.T) {
 	if only.item != ItemStone || only.count != 17 {
 		t.Errorf("the drop holds %d of item %d, want 17 Stone", only.count, uint16(only.item))
 	}
-	start := dropSpawnPos(voxelAt(player.pos))
 	h.advance(100)
 	if got := h.drop(only.entityID); got == nil {
 		t.Fatal("the player collected the stack without moving")
 	}
-	if math.Abs(only.pos[0]-start[0]) > dropTolerance {
-		t.Errorf("the north-facing drop moved sideways from x=%v to x=%v", start[0], only.pos[0])
+	if math.Abs(only.pos[0]-origin[0]) > dropTolerance {
+		t.Errorf("the north-facing drop moved sideways from x=%v to x=%v", origin[0], only.pos[0])
 	}
-	if travelled := start[2] - only.pos[2]; travelled < 1.5 || travelled > 2.0 {
+	if travelled := origin[2] - only.pos[2]; travelled < 1.5 || travelled > 2.0 {
 		t.Errorf("the north-facing drop travelled %v blocks, want roughly one block ahead", travelled)
 	}
 	if overlaps(h.sim.terrain, only.box()) {
@@ -93,34 +93,40 @@ func TestADroppedStackExpiresWithEveryOtherDrop(t *testing.T) {
 
 // The unchanged pickup delay is long enough for the authoritative throw to carry a
 // stack out of reach. A stationary player therefore does not immediately undo the drop.
-func TestADroppedStackIsNotCollectedBackByAPlayerWhoStaysStill(t *testing.T) {
+func TestADroppedStackIsNotCollectedBackByAPlayerWhoStaysStillAtAnyTickRate(t *testing.T) {
 	t.Parallel()
 
-	h := newDropHarness(t, dropTerrain{groundTop: 63})
-	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	for _, tickRate := range []uint8{DefaultTickRate, 40, 255} {
+		t.Run(fmt.Sprintf("%d Hz", tickRate), func(t *testing.T) {
+			t.Parallel()
 
-	player.inventory.mu.Lock()
-	player.inventory.slots[0] = inventoryStack{item: ItemStone, count: 4}
-	player.inventory.mu.Unlock()
+			h := newDropHarnessAtTickRate(t, dropTerrain{groundTop: 63}, 8, tickRate)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	if _, err := player.DropItem(protocol.DropItemRequest{Slot: 0}); err != nil {
-		t.Fatalf("DropItem: %v", err)
-	}
-	if got := heldCount(player.InventoryState(), ItemStone); got != 0 {
-		t.Fatalf("the pack still holds %d Stone the moment after the drop", got)
-	}
+			player.inventory.mu.Lock()
+			player.inventory.slots[0] = inventoryStack{item: ItemStone, count: 4}
+			player.inventory.mu.Unlock()
 
-	h.advance(dropPickupDelayTicks)
-	if got := h.dropCount(); got != 1 {
-		t.Fatalf("%d drops on the tenth tick, want the delay to still be running", got)
-	}
+			if _, err := player.DropItem(protocol.DropItemRequest{Slot: 0}); err != nil {
+				t.Fatalf("DropItem: %v", err)
+			}
+			if got := heldCount(player.InventoryState(), ItemStone); got != 0 {
+				t.Fatalf("the pack still holds %d Stone the moment after the drop", got)
+			}
 
-	h.step()
-	if got := h.dropCount(); got != 1 {
-		t.Errorf("%d drops after the pickup delay, want the thrown stack to remain", got)
-	}
-	if got := heldCount(player.InventoryState(), ItemStone); got != 0 {
-		t.Errorf("the stationary player holds %d Stone, want the dropped stack to stay away", got)
+			h.advance(dropPickupDelayTicks)
+			if got := h.dropCount(); got != 1 {
+				t.Fatalf("%d drops on the tenth tick, want the delay to still be running", got)
+			}
+
+			h.step()
+			if got := h.dropCount(); got != 1 {
+				t.Errorf("%d drops after the pickup delay at %d Hz, want the placed stack to remain", got, tickRate)
+			}
+			if got := heldCount(player.InventoryState(), ItemStone); got != 0 {
+				t.Errorf("the stationary player holds %d Stone at %d Hz, want the dropped stack to stay away", got, tickRate)
+			}
+		})
 	}
 }
 
@@ -143,6 +149,7 @@ func TestAPlayerDropUsesEveryAuthoritativeFacingIncludingDiagonals(t *testing.T)
 
 			h := newDropHarness(t, dropTerrain{groundTop: 63})
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			origin := player.pos
 			h.sim.mu.Lock()
 			player.yaw = tc.yaw
 			h.sim.mu.Unlock()
@@ -159,13 +166,12 @@ func TestAPlayerDropUsesEveryAuthoritativeFacingIncludingDiagonals(t *testing.T)
 			for _, drop = range h.sim.drops {
 			}
 			h.sim.mu.Unlock()
-			start := drop.pos
 			h.advance(100)
 			if h.drop(drop.entityID) == nil {
 				t.Fatal("the stationary player collected the drop")
 			}
 
-			delta := [2]float64{drop.pos[0] - start[0], drop.pos[2] - start[2]}
+			delta := [2]float64{drop.pos[0] - origin[0], drop.pos[2] - origin[2]}
 			distance := math.Hypot(delta[0], delta[1])
 			if distance < 1.5 || distance > 2.0 {
 				t.Fatalf("the drop travelled %v blocks, want roughly one block ahead", distance)
@@ -179,26 +185,12 @@ func TestAPlayerDropUsesEveryAuthoritativeFacingIncludingDiagonals(t *testing.T)
 	}
 }
 
-func TestAPlayerDropTravelsTheSameDistanceAtDifferentTickRates(t *testing.T) {
+func TestAPlayerDropPlacementDistanceDoesNotDependOnTicks(t *testing.T) {
 	t.Parallel()
 
-	want := dropThrowSpeed * dropThrowSpeed / (2 * dropThrowDeceleration)
-	for _, tickRate := range []int{20, 40} {
-		t.Run(fmt.Sprintf("%d Hz", tickRate), func(t *testing.T) {
-			t.Parallel()
-
-			drop := itemDrop{
-				pos:                dropSpawnPos([3]int64{0, 64, 0}),
-				horizontalVelocity: dropThrowVelocity(0),
-			}
-			start := drop.pos
-			for range tickRate {
-				drop.step(1/float64(tickRate), dropTerrain{groundTop: 63})
-			}
-			if got := math.Hypot(drop.pos[0]-start[0], drop.pos[2]-start[2]); math.Abs(got-want) > dropTolerance {
-				t.Errorf("the drop travelled %v blocks at %d Hz, want %v", got, tickRate, want)
-			}
-		})
+	delta := dropPlacementDelta(math.Pi / 4)
+	if got := math.Hypot(delta[0], delta[1]); math.Abs(got-dropPlacementDistance) > dropTolerance {
+		t.Errorf("the placement delta is %v blocks, want %v", got, dropPlacementDistance)
 	}
 }
 
@@ -233,8 +225,8 @@ func TestAPlayerDropCannotPassThroughAWall(t *testing.T) {
 	if overlaps(terrain, drop.box()) || drop.box().max[0] >= float64(terrain.wallX) {
 		t.Errorf("the drop crossed or entered the wall: box=%+v wall x=%d", drop.box(), terrain.wallX)
 	}
-	if drop.pos[0] <= 0.5 || drop.horizontalVelocity[0] != 0 {
-		t.Errorf("the wall left the drop at %v with velocity %v", drop.pos, drop.horizontalVelocity)
+	if drop.pos[0] <= 0.5 {
+		t.Errorf("the wall left the drop at %v instead of ahead of the player", drop.pos)
 	}
 }
 
@@ -446,6 +438,37 @@ func TestTwoPlayerDropsInSuccessionStillMerge(t *testing.T) {
 	}
 	if drop := groundDrop(h); drop == nil || drop.count != 7 {
 		t.Errorf("the merged player drop is %+v, want 7 Stone", drop)
+	}
+}
+
+// A world drop at the landing point may absorb a player's stack, but it never gains
+// movement or gets dragged from the position the world chose. The player placement is
+// resolved before the entity appears, so merging remains the ordinary stationary rule.
+func TestAPlayerDropMergingIntoAWorldDropLeavesTheWorldDropWhereItWas(t *testing.T) {
+	t.Parallel()
+
+	h := newDropHarness(t, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	worldDrop := h.spawn(ItemStone, 3, [3]int64{0, 64, -2})
+	worldPos := worldDrop.pos
+
+	player.inventory.mu.Lock()
+	player.inventory.slots[0] = inventoryStack{item: ItemStone, count: 4}
+	player.inventory.mu.Unlock()
+	if _, err := player.DropItem(protocol.DropItemRequest{Slot: 0}); err != nil {
+		t.Fatalf("DropItem: %v", err)
+	}
+
+	h.step()
+	if got := h.dropCount(); got != 1 {
+		t.Fatalf("the mixed merge left %d drops, want one", got)
+	}
+	merged := h.drop(worldDrop.entityID)
+	if merged == nil || merged.count != 7 {
+		t.Fatalf("the older world drop is %+v, want the surviving stack of 7", merged)
+	}
+	if merged.pos[0] != worldPos[0] || merged.pos[2] != worldPos[2] {
+		t.Errorf("the player drop dragged the world drop from %v to %v", worldPos, merged.pos)
 	}
 }
 

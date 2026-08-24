@@ -110,8 +110,13 @@ func newDropHarness(t *testing.T, terrain Terrain) *dropHarness {
 
 func newDropHarnessAt(t *testing.T, terrain Terrain, viewDistance uint8) *dropHarness {
 	t.Helper()
+	return newDropHarnessAtTickRate(t, terrain, viewDistance, DefaultTickRate)
+}
 
-	sim, err := NewSim(DefaultTickRate, viewDistance, testWorldSeed, terrain, refusedEdits{}, testEntityIDs(),
+func newDropHarnessAtTickRate(t *testing.T, terrain Terrain, viewDistance, tickRate uint8) *dropHarness {
+	t.Helper()
+
+	sim, err := NewSim(tickRate, viewDistance, testWorldSeed, terrain, refusedEdits{}, testEntityIDs(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
@@ -444,9 +449,6 @@ func TestAWorldProducedDropHasNoHorizontalMotion(t *testing.T) {
 
 	if drop.pos[0] != startX || drop.pos[2] != startZ {
 		t.Errorf("the world drop moved horizontally from (%v, %v) to (%v, %v)", startX, startZ, drop.pos[0], drop.pos[2])
-	}
-	if drop.horizontalVelocity != [2]float64{} {
-		t.Errorf("the world drop carries horizontal velocity %v", drop.horizontalVelocity)
 	}
 }
 

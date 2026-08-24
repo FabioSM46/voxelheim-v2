@@ -53,15 +53,15 @@ const dropMergeRadius = 1.0
 // is still too early; the eleventh is the first that may collect.
 const dropPickupDelayTicks = 10
 
-// dropThrowSpeed is the horizontal speed a player-authored drop starts with, in
-// blocks per second. Together with dropThrowDeceleration it carries the drop far
-// enough beyond the player's pickup radius before that unchanged delay expires.
-const dropThrowSpeed = 5.5
-
-// dropThrowDeceleration brings a player-authored drop to rest after roughly two
-// blocks in open terrain. A constant deceleration keeps the travelled distance a
-// server-side rule independent of the tick rate.
-const dropThrowDeceleration = 8.0
+// dropPlacementDistance is how far in front of the authoritative player position a
+// player-authored drop tries to land. The displacement goes through moveAndCollide,
+// so terrain may shorten it but can never be crossed by it.
+//
+// Long enough that the two boxes are more than DropPickupRadius apart in open
+// terrain. It is a distance rather than a velocity because dropPickupDelayTicks is
+// deliberately tick-based: placement must not become re-collectable merely because
+// an operator raises the tick rate.
+const dropPlacementDistance = 1.875
 
 // dropBody is the box a drop collides with, and the only reason moveAndCollide takes
 // a body at all.
@@ -88,11 +88,9 @@ type itemDrop struct {
 	// is told instead.
 	pos [3]float64
 
-	// horizontalVelocity is blocks per second in x and z. World-produced drops start
-	// at zero; only Player.DropItem supplies one, from the player's authoritative yaw.
-	horizontalVelocity [2]float64
-
-	// fallSpeed is blocks per second, negative downwards.
+	// fallSpeed is the drop's only velocity: blocks per second, negative downwards.
+	// Player-authored horizontal placement is resolved once at spawn so the existing
+	// tick-based pickup delay has the same meaning at every configured tick rate.
 	fallSpeed float64
 
 	// chunk is the chunk pos falls in, kept beside the position for the same reason a
@@ -115,8 +113,8 @@ func dropLifetimeTicks(tickRate uint8) int {
 //
 // The wearless form used by every world-produced drop: a mined block's yield, a structure
 // taken back or brought down, and what a kill left behind. Player.DropItem reaches the same
-// creation core with its authoritative wear and horizontal velocity, so both forms keep one
-// entity, lifetime, physics and pickup path.
+// creation core with its authoritative wear and server-resolved landing position, so both forms
+// keep one entity, lifetime, physics and pickup path.
 //
 // **The third of those is now late, and it is late in its caller rather than here.** A kill
 // puts the creature into [vnet.MobActionDying] and its loot reaches this function
@@ -134,17 +132,24 @@ func (s *Sim) spawnDrop(item ItemID, count uint16, voxel [3]int64) (uint64, bool
 	return s.spawnStackDrop(inventoryStack{item: item, count: count}, voxel)
 }
 
-// spawnStackDrop is the stationary stack form. spawnDrop above is its wearless
-// world-produced wrapper; tests also use it to put an authoritative worn stack down
-// without a player gesture.
+// spawnStackDrop is the world-positioned stack form. spawnDrop above is its wearless
+// wrapper; tests also use it to put an authoritative worn stack down without a player
+// gesture.
 func (s *Sim) spawnStackDrop(stack inventoryStack, voxel [3]int64) (uint64, bool) {
-	return s.spawnMovingStackDrop(stack, voxel, [2]float64{})
+	return s.spawnStackDropAt(stack, dropSpawnPos(voxel), voxel, [2]float64{})
 }
 
-// spawnMovingStackDrop is the creation core for every drop. Player.DropItem supplies
-// a horizontal velocity; world-produced callers reach it through spawnStackDrop with
-// zero velocity and therefore keep their exact spawn behaviour.
-func (s *Sim) spawnMovingStackDrop(stack inventoryStack, voxel [3]int64, velocity [2]float64) (uint64, bool) {
+// spawnPlayerStackDrop places a stack forward from the player's authoritative position
+// and facing. The one-shot displacement goes through the same collision a falling drop
+// uses; it is therefore shortened by a wall instead of crossing or entering one.
+func (s *Sim) spawnPlayerStackDrop(stack inventoryStack, pos [3]float64, yaw float64) (uint64, bool) {
+	return s.spawnStackDropAt(stack, pos, voxelAt(pos), dropPlacementDelta(yaw))
+}
+
+// spawnStackDropAt is the creation core for every drop. World-produced callers give it
+// no horizontal displacement and retain their exact spawn position; Player.DropItem
+// gives it a server-derived one that is collision-resolved before the entity appears.
+func (s *Sim) spawnStackDropAt(stack inventoryStack, pos [3]float64, voxel [3]int64, displacement [2]float64) (uint64, bool) {
 	if stack.item == ItemNone || stack.count == 0 {
 		return 0, false
 	}
@@ -168,18 +173,22 @@ func (s *Sim) spawnMovingStackDrop(stack inventoryStack, voxel [3]int64, velocit
 	// and a drop. Minted before the lock because it is an atomic add and the identity
 	// space does not belong to the simulation.
 	drop := &itemDrop{
-		entityID:           s.mintEntityID(),
-		item:               stack.item,
-		count:              stack.count,
-		durability:         stack.durability,
-		maxDurability:      stack.maxDurability,
-		pos:                dropSpawnPos(voxel),
-		horizontalVelocity: velocity,
+		entityID:      s.mintEntityID(),
+		item:          stack.item,
+		count:         stack.count,
+		durability:    stack.durability,
+		maxDurability: stack.maxDurability,
+		pos:           pos,
 	}
-	drop.chunk = chunkAt(drop.pos)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if displacement != [2]float64{} {
+		drop.pos, _ = moveAndCollide(s.terrain, dropBody, drop.pos, [3]float64{
+			displacement[0], 0, displacement[1],
+		})
+	}
+	drop.chunk = chunkAt(drop.pos)
 	s.drops[drop.entityID] = drop
 	return drop.entityID, true
 }
@@ -263,7 +272,7 @@ func (s *Sim) advanceDropsLocked(drops []*itemDrop) []*itemDrop {
 	return kept
 }
 
-// step moves one drop by one tick. Called with sim.mu held.
+// step falls one drop by one tick. Called with sim.mu held.
 //
 // The player's integrator and the player's collision, with a smaller box and no
 // intent to read. A drop over a chunk that is not resident therefore holds where it
@@ -272,47 +281,14 @@ func (s *Sim) advanceDropsLocked(drops []*itemDrop) []*itemDrop {
 // moveAndCollide refuses a move that starts inside a solid, and a blocked axis zeroes
 // the velocity.
 func (d *itemDrop) step(dt float64, terrain Terrain) {
-	horizontalDelta := d.horizontalDelta(dt)
 	d.fallSpeed = max(d.fallSpeed-Gravity*dt, -TerminalFallSpeed)
 
-	pos, blocked := moveAndCollide(terrain, dropBody, d.pos, [3]float64{
-		horizontalDelta[0],
-		d.fallSpeed * dt,
-		horizontalDelta[1],
-	})
+	pos, blocked := moveAndCollide(terrain, dropBody, d.pos, [3]float64{0, d.fallSpeed * dt, 0})
 	d.pos = pos
-	if blocked[0] {
-		d.horizontalVelocity[0] = 0
-	}
 	if blocked[1] {
 		d.fallSpeed = 0
 	}
-	if blocked[2] {
-		d.horizontalVelocity[1] = 0
-	}
 	d.chunk = chunkAt(d.pos)
-}
-
-// horizontalDelta applies friction without changing direction and returns this tick's
-// displacement. Integrating the constant deceleration over the exact moving part of
-// the tick makes the stopping distance independent of the server's tick rate; reducing
-// the vector's magnitude keeps diagonals equal to cardinal throws too.
-func (d *itemDrop) horizontalDelta(dt float64) [2]float64 {
-	speed := math.Hypot(d.horizontalVelocity[0], d.horizontalVelocity[1])
-	if speed == 0 {
-		return [2]float64{}
-	}
-	movingFor := min(dt, speed/dropThrowDeceleration)
-	distance := speed*movingFor - dropThrowDeceleration*movingFor*movingFor/2
-	direction := [2]float64{d.horizontalVelocity[0] / speed, d.horizontalVelocity[1] / speed}
-	remaining := max(speed-dropThrowDeceleration*dt, 0)
-	if remaining == 0 {
-		d.horizontalVelocity = [2]float64{}
-	} else {
-		d.horizontalVelocity[0] = direction[0] * remaining
-		d.horizontalVelocity[1] = direction[1] * remaining
-	}
-	return [2]float64{direction[0] * distance, direction[1] * distance}
 }
 
 // mergeDropsLocked folds nearby drops of the same item into one, up to that item's
@@ -510,12 +486,13 @@ func dropStates(drops []*itemDrop) []protocol.ItemDropState {
 // that has to decide whether it may happen. The wire carries one slot index and nothing
 // else, the shape AttackRequest and RepairRequest have, and every refusal is silence.
 
-// droppedStack is what a player let go of, where it starts and how it leaves: everything
-// spawnMovingStackDrop needs, decided under the lock and carried out of it.
+// droppedStack is what a player let go of, and the authoritative position and facing
+// that decide where it lands: everything spawnPlayerStackDrop needs, decided under the
+// lock and carried out of it.
 type droppedStack struct {
-	stack              inventoryStack
-	voxel              [3]int64
-	horizontalVelocity [2]float64
+	stack inventoryStack
+	pos   [3]float64
+	yaw   float64
 }
 
 // DropItem resolves one DropItemRequest against the authoritative pack, empties the slot
@@ -523,10 +500,10 @@ type droppedStack struct {
 //
 // **Two phases, and the split is the lock**, exactly as [Player.RemoveStructure]'s is:
 // releaseSlot below decides the whole thing under Sim.mu, and the drop is spawned after
-// that lock is gone because [Sim.spawnMovingStackDrop] takes it.
+// that lock is gone because [Sim.spawnPlayerStackDrop] takes it.
 //
 // **The item cannot be lost between the two halves**, and that is a property rather than a
-// hope: spawnMovingStackDrop refuses an empty, unregistered or invalid stack, and
+// hope: spawnPlayerStackDrop refuses an empty, unregistered or invalid stack, and
 // releaseSlot has already read one of the inventory's validated stacks before it emptied
 // anything.
 //
@@ -537,8 +514,8 @@ func (p *Player) DropItem(req protocol.DropItemRequest) (protocol.InventoryState
 		return protocol.InventoryState{}, err
 	}
 
-	// Outside the lock, because spawnMovingStackDrop takes it.
-	if _, spawned := p.sim.spawnMovingStackDrop(dropped.stack, dropped.voxel, dropped.horizontalVelocity); !spawned {
+	// Outside the lock, because spawnPlayerStackDrop takes it.
+	if _, spawned := p.sim.spawnPlayerStackDrop(dropped.stack, dropped.pos, dropped.yaw); !spawned {
 		// Unreachable, and logged as the server bug it would be rather than reported to a
 		// client that can do nothing about it. The pack has already changed, so the state
 		// captured above is still the truth and is still what the session sends.
@@ -549,7 +526,7 @@ func (p *Player) DropItem(req protocol.DropItemRequest) (protocol.InventoryState
 
 	p.sim.log.Debug("stack dropped",
 		"entity_id", p.entityID, "slot", req.Slot, "item_id", uint16(dropped.stack.item),
-		"count", dropped.stack.count, "voxel", dropped.voxel, "client_tick", req.ClientTick)
+		"count", dropped.stack.count, "voxel", voxelAt(dropped.pos), "client_tick", req.ClientTick)
 
 	return state, nil
 }
@@ -591,7 +568,7 @@ func (p *Player) releaseSlot(slot uint8) (protocol.InventoryState, droppedStack,
 	}
 	definition, registered := itemByID(stack.item)
 	if !registered {
-		// Checked before the slot is emptied because spawnMovingStackDrop runs outside this
+		// Checked before the slot is emptied because spawnPlayerStackDrop runs outside this
 		// critical section. An impossible internal stack must not become an item that
 		// stopped existing merely because the later spawn path refused it.
 		return protocol.InventoryState{}, droppedStack{}, fmt.Errorf("item %d is not registered", uint16(stack.item))
@@ -613,21 +590,17 @@ func (p *Player) releaseSlot(slot uint8) (protocol.InventoryState, droppedStack,
 		// on the request: a client that could state either would be stating what leaves
 		// its own pack.
 		stack: dropped,
-		// The player's own position rather than anything they sent, and voxelAt rather than
-		// a truncation: p.pos is the bottom of their box, so this is the cell their feet are
-		// in, and dropSpawnPos centres the drop inside it — the two steps a kill's loot
-		// already takes from the creature's position.
-		voxel: voxelAt(p.pos),
-		// The movement basis's forward vector, derived from the yaw the simulation
-		// already owns. The request has no direction or distance to trust.
-		horizontalVelocity: dropThrowVelocity(p.yaw),
+		// The player's standing position and yaw rather than anything they sent. The
+		// request has no position, direction or distance to trust.
+		pos: p.pos,
+		yaw: p.yaw,
 	}, nil
 }
 
-// dropThrowVelocity turns the simulation's authoritative facing into the horizontal
-// velocity of a player-authored drop. It is the movement integrator's basis: yaw zero
-// faces north (-Z), and negative pi/2 faces east (+X).
-func dropThrowVelocity(yaw float64) [2]float64 {
+// dropPlacementDelta turns the simulation's authoritative facing into the horizontal
+// displacement of a player-authored drop. It is the movement integrator's basis: yaw
+// zero faces north (-Z), and negative pi/2 faces east (+X).
+func dropPlacementDelta(yaw float64) [2]float64 {
 	sinYaw, cosYaw := math.Sincos(yaw)
-	return [2]float64{-sinYaw * dropThrowSpeed, -cosYaw * dropThrowSpeed}
+	return [2]float64{-sinYaw * dropPlacementDistance, -cosYaw * dropPlacementDistance}
 }
