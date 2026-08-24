@@ -735,8 +735,8 @@ type CreateCharacterRequest struct {
 	HasAppearance bool
 }
 
-// PlayerAppearance is what one player entity looks like. **Server to client, and
-// static per character.**
+// PlayerAppearance is what one player entity looks like and is called. **Server to
+// client, and static per character.**
 //
 // Sent once, when a player enters a session's view, and cached by the client against
 // the entity id. It is deliberately not a field of EntityState: that is a struct
@@ -751,10 +751,16 @@ type PlayerAppearance struct {
 	EntityID uint64
 
 	Appearance Appearance
+	Name       string
 
 	// HasAppearance is honoured by the encoder so a test can build the frame a client
 	// must refuse, exactly as ActionRefused.HasAnchor is. The server always sets it.
 	HasAppearance bool
+
+	// HasName distinguishes an omitted string from a present empty one. Empty is legal
+	// display text; absence is the malformed V12-shaped description a V13 client must
+	// refuse. The server always sets it for a joined character.
+	HasName bool
 }
 
 // Welcome is the authoritative answer to an accepted handshake.
@@ -1296,11 +1302,18 @@ func EncodePlayerAppearance(p PlayerAppearance) []byte {
 	if p.HasAppearance {
 		appearanceOffset = encodeAppearance(b, p.Appearance)
 	}
+	var nameOffset flatbuffers.UOffsetT
+	if p.HasName {
+		nameOffset = b.CreateString(p.Name)
+	}
 
 	vnet.PlayerAppearanceStart(b)
 	vnet.PlayerAppearanceAddEntityId(b, p.EntityID)
 	if p.HasAppearance {
 		vnet.PlayerAppearanceAddAppearance(b, appearanceOffset)
+	}
+	if p.HasName {
+		vnet.PlayerAppearanceAddName(b, nameOffset)
 	}
 	built := vnet.PlayerAppearanceEnd(b)
 

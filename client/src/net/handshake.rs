@@ -1084,6 +1084,7 @@ mod tests {
         PlayerAppearance {
             entity_id: 1,
             appearance: PLACEHOLDER_APPEARANCE,
+            name: "Test Character".to_owned(),
         }
     }
 
@@ -1221,7 +1222,7 @@ mod tests {
         let described = player_appearance();
 
         assert_eq!(
-            handshake.apply(Message::PlayerAppearance(described)),
+            handshake.apply(Message::PlayerAppearance(described.clone())),
             Ok(Transition::Appearance(described))
         );
     }

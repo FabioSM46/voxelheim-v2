@@ -63,6 +63,11 @@ namespace Voxelheim.Net;
 /// and be disconnected the first time it asked to leave. `LeaveStarted` travels back
 /// with the server-owned duration; its direction alone could have avoided a bump, but
 /// it is the answer to the request that already owes one.
+///
+/// **V13 appends `PlayerAppearance.name`.** A V13 client treats that string as the
+/// server-owned label for one visible entity and refuses a description that omits it.
+/// A V12 server would omit the field, so the newer client would otherwise handshake
+/// cleanly and end the session as soon as the first player entered view.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -70,7 +75,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 12
+  Current = 13
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

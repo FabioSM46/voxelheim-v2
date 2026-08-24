@@ -19,6 +19,8 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
+const testCharacterName = "Test Character"
+
 // testWorldSeed is the world these external tests build their simulations over. The
 // value is arbitrary; sharing one is what keeps the spawn director's draws the same
 // from test to test.
@@ -191,6 +193,10 @@ func (s *sink) appearances(t *testing.T) []protocol.PlayerAppearance {
 		payload.Init(table.Bytes, table.Pos)
 
 		sent := protocol.PlayerAppearance{EntityID: payload.EntityId()}
+		if name := payload.Name(); name != nil {
+			sent.HasName = true
+			sent.Name = string(name)
+		}
 		if worn := payload.Appearance(nil); worn != nil {
 			sent.HasAppearance = true
 			sent.Appearance = protocol.Appearance{
@@ -299,7 +305,7 @@ func (h *harness) join(entityID uint64, pos [3]float32) (*game.Player, *sink) {
 	h.t.Helper()
 
 	out := &sink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, testAppearance(), nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), testCharacterName, pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}
@@ -1190,20 +1196,20 @@ func TestJoinRefusesWhatItCannotSimulate(t *testing.T) {
 
 	h := newHarness(t, flatWorld{groundTop: 63})
 
-	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, 64, 0}, testAppearance(), nil, nil); err == nil {
+	if _, err := h.sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0, 64, 0}, testAppearance(), nil, nil); err == nil {
 		t.Error("a nil deliver was accepted; there would be nowhere to put a snapshot")
 	}
-	if _, err := h.sim.Join(1, testPlayerID(1), [3]float32{0, float32(math.NaN()), 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0, float32(math.NaN()), 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
 		t.Error("a NaN spawn was accepted")
 	}
 	// The zero player id is the digest of nothing and names nobody, so a simulation
 	// that accepted it would hold two players who are the same person the moment
 	// anything keys a record on them.
-	if _, err := h.sim.Join(1, identity.PlayerID{}, [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(1, identity.PlayerID{}, testCharacterName, [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
 		t.Error("a player joined under no identity at all")
 	}
 
-	joined, err := h.sim.Join(7, testPlayerID(7), [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true })
+	joined, err := h.sim.Join(7, testPlayerID(7), testCharacterName, [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true })
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
@@ -1215,7 +1221,7 @@ func TestJoinRefusesWhatItCannotSimulate(t *testing.T) {
 	if got := joined.EntityID(); got != 7 {
 		t.Errorf("EntityID = %d, want 7", got)
 	}
-	if _, err := h.sim.Join(7, testPlayerID(7), [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
+	if _, err := h.sim.Join(7, testPlayerID(7), testCharacterName, [3]float32{0, 64, 0}, testAppearance(), nil, func([]byte) bool { return true }); err == nil {
 		t.Error("the same entity id joined twice; the first session's handle would be orphaned")
 	}
 }

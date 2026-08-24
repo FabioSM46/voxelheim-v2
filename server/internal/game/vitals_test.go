@@ -55,7 +55,7 @@ func (h *vitalsHarness) join(entityID uint64, pos [3]float32) (*Player, *dropSin
 	h.t.Helper()
 
 	out := &dropSink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), pos, testAppearance(), nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), testCharacterName, pos, testAppearance(), nil, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestAPlacementIsRefusedWhenThePlayerDiesWhileItsChunkLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}
-	player, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
+	player, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}

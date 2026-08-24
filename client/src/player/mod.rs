@@ -64,6 +64,7 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
+use bevy::ui::FocusPolicy;
 
 pub(crate) use appearance::{
     BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
@@ -125,6 +126,14 @@ const ANY_HAIR: HairModel = HairModel::Shaved;
 /// Two seconds is forty ticks at the default rate, which is two orders of magnitude more
 /// than the gap it exists to cover and still a bound.
 const APPEARANCE_GRACE: Duration = Duration::from_secs(2);
+
+/// A fixed screen-space size keeps labels legible at every streamed distance.
+const NAME_PLATE_WIDTH: f32 = 240.0;
+const NAME_PLATE_HEIGHT: f32 = 28.0;
+const NAME_PLATE_FONT_SIZE: f32 = 16.0;
+const NAME_PLATE_GAP: f32 = 0.14;
+/// Bound text layout on Unicode scalar boundaries without adding a grapheme crate.
+const NAME_PLATE_CHARACTERS: usize = 48;
 
 /// The furthest a walking limb swings from rest.
 ///
@@ -272,6 +281,12 @@ impl Plugin for PlayerPlugin {
                     .after(crate::net::DrainNetwork),
             )
             .add_plugins(camera::PlayerCameraPlugin)
+            .add_systems(
+                Update,
+                (sync_name_plates, position_name_plates)
+                    .chain()
+                    .after(camera::AimCamera),
+            )
             .add_plugins(inventory::InventoryPlugin)
             // After the inventory plugin, because the craft gate is read against the
             // newest complete state and the ordering inside `CraftingPlugin` is written
@@ -515,9 +530,10 @@ struct Appearances(HashMap<u64, Described>);
 
 /// One cached appearance: what the server said, when it said it, and whether anything
 /// has been drawn wearing it yet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Described {
     appearance: Appearance,
+    name: String,
     /// When this entry was written. Read only while `drawn` is false — once a body
     /// exists, that body's presence in the newest snapshot is what keeps the entry.
     at: Instant,
@@ -678,6 +694,10 @@ impl Plugin for BodyVisualsPlugin {
 /// Marks an entity the snapshots drive, and carries the identity it is drawn for.
 #[derive(Component, Debug, Clone, Copy)]
 struct Body(u64);
+
+/// One screen-space label tied to the authoritative entity id, never to its text.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct NamePlate(u64);
 
 /// Marks the body belonging to this session. Exactly one entity ever has it.
 #[derive(Component)]
@@ -1071,19 +1091,20 @@ fn apply_snapshots(
         // grey `schemas/player.fbs` documents and `dress_bodies` replaces that in place
         // the moment the appearance arrives. Nothing pops out and respawns.
         let described = appearances.0.get_mut(entity_id);
-        let worn = described
-            .as_ref()
-            .map_or(PLACEHOLDER_APPEARANCE, |described| described.appearance);
-        if let Some(described) = described {
-            described.drawn = true;
-        }
+        let description = match described {
+            Some(described) => {
+                described.drawn = true;
+                Some((described.appearance, described.name.as_str()))
+            }
+            None => None,
+        };
 
         spawn_body(
             &mut commands,
             &mut wardrobe,
             *entity_id,
             session.0.entity_id,
-            worn,
+            description,
             state,
             buffer.player_is_dead(*entity_id),
         );
@@ -1147,12 +1168,16 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
             // hand the sender the bound: an entity that never appears in a snapshot, named
             // again inside every window, would live for as long as the connection did, and
             // a map of them would grow with it.
-            Some(described) => described.appearance = message.appearance,
+            Some(described) => {
+                described.appearance = message.appearance;
+                described.name = message.name;
+            }
             None => {
                 appearances.0.insert(
                     message.entity_id,
                     Described {
                         appearance: message.appearance,
+                        name: message.name,
                         at: now,
                         drawn: false,
                     },
@@ -1270,11 +1295,15 @@ fn spawn_body(
     wardrobe: &mut Wardrobe<'_>,
     entity_id: u64,
     local_entity_id: u64,
-    worn: Appearance,
+    description: Option<(Appearance, &str)>,
     state: &interpolate::Interpolated,
     dead: bool,
 ) {
     let local = entity_id == local_entity_id;
+    let (worn, name) = match description {
+        Some((appearance, name)) => (appearance, Some(name)),
+        None => (PLACEHOLDER_APPEARANCE, None),
+    };
     let parts = wardrobe.outfit(worn);
     let placed = placement(state);
     let walk = WalkPose::from(state);
@@ -1293,6 +1322,8 @@ fn spawn_body(
         commands
             .entity(owner)
             .insert((LocalPlayer, Visibility::Hidden));
+    } else if let Some(name) = name {
+        spawn_name_plate(commands, entity_id, name);
     }
     commands.entity(owner).with_children(|parent| {
         for (piece, mesh, material) in parts {
@@ -1304,6 +1335,148 @@ fn spawn_body(
             ));
         }
     });
+}
+
+/// Bounds hostile display text before it reaches Bevy's layout engine.
+///
+/// The value remains display-only: it is never matched, parsed or used as identity.
+/// Controls become the replacement glyph because even `no_wrap` honours hard newlines;
+/// leaving them intact would let one name create an unbounded stack of lines. Truncation
+/// walks Unicode scalars, so it can never split UTF-8. A combining sequence may end at the
+/// boundary and remains valid text — no grapheme dependency is introduced for cosmetics.
+fn name_plate_text(name: &str) -> String {
+    let mut chars = name.chars();
+    let mut shown = String::with_capacity(name.len().min(NAME_PLATE_CHARACTERS * 4));
+    for _ in 0..NAME_PLATE_CHARACTERS {
+        let Some(character) = chars.next() else {
+            return shown;
+        };
+        shown.push(if character.is_control() {
+            '\u{fffd}'
+        } else {
+            character
+        });
+    }
+    if chars.next().is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
+fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str) {
+    commands.spawn((
+        NamePlate(entity_id),
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Px(NAME_PLATE_WIDTH),
+            height: Val::Px(NAME_PLATE_HEIGHT),
+            padding: UiRect::horizontal(Val::Px(6.0)),
+            overflow: Overflow::clip(),
+            border_radius: BorderRadius::all(Val::Px(5.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.025, 0.03, 0.04, 0.72)),
+        Text::new(name_plate_text(name)),
+        TextFont {
+            font_size: FontSize::Px(NAME_PLATE_FONT_SIZE),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        TextLayout::no_wrap().with_justify(Justify::Center),
+        TextShadow::default(),
+        FocusPolicy::Pass,
+        GlobalZIndex(8),
+        // A plate is shown only after a camera successfully projects its head anchor.
+        Visibility::Hidden,
+    ));
+}
+
+/// Reconciles the UI labels with the bodies and the server descriptions already cached.
+///
+/// A body can precede its `PlayerAppearance`, so spawning only in [`spawn_body`] would
+/// permanently miss that ordinary ordering. Conversely, a plate is a UI root rather than
+/// a body child and must be removed explicitly when the complete snapshot drops its body.
+/// The local entity is deliberately omitted in both views: first person has no visible
+/// head to label, and third person does not need to tell the player their own name.
+fn sync_name_plates(
+    session: Option<Res<Session>>,
+    appearances: Res<Appearances>,
+    bodies: Query<&Body>,
+    mut plates: Query<(Entity, &NamePlate, &mut Text)>,
+    mut commands: Commands,
+) {
+    let Some(local_entity_id) = session.map(|session| session.0.entity_id) else {
+        for (entity, _, _) in &mut plates {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+
+    let body_ids: HashSet<u64> = bodies.iter().map(|body| body.0).collect();
+    let mut existing = HashSet::with_capacity(body_ids.len());
+    for (entity, plate, mut text) in &mut plates {
+        let described = appearances.0.get(&plate.0);
+        if plate.0 == local_entity_id || !body_ids.contains(&plate.0) || described.is_none() {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        existing.insert(plate.0);
+        let next = name_plate_text(&described.expect("checked above").name);
+        if text.0 != next {
+            text.0 = next;
+        }
+    }
+
+    for entity_id in body_ids {
+        if entity_id == local_entity_id || existing.contains(&entity_id) {
+            continue;
+        }
+        if let Some(described) = appearances.0.get(&entity_id) {
+            spawn_name_plate(&mut commands, entity_id, &described.name);
+        }
+    }
+}
+
+/// The feet-relative point whose projection the plate sits above.
+fn name_plate_anchor(body: &Transform) -> Vec3 {
+    let envelope = body_envelope();
+    let top = envelope.centre.y + envelope.size.y / 2.0 + NAME_PLATE_GAP;
+    body.transform_point(Vec3::Y * top)
+}
+
+/// Projects each head anchor into the UI viewport.
+///
+/// Screen-space text is the deliberate choice over world text: its pixel size remains
+/// legible across the entire streamed view and the existing Bevy feature set already owns
+/// the font and UI renderer. A failed projection means behind the camera, off-screen, or
+/// not ready yet, and hides rather than clamps the plate to an unrelated screen edge.
+fn position_name_plates(
+    cameras: Query<(&Camera, &Transform), With<WorldCamera>>,
+    bodies: Query<(&Body, &Transform)>,
+    mut plates: Query<(&NamePlate, &mut Node, &mut Visibility)>,
+) {
+    let Ok((camera, camera_transform)) = cameras.single() else {
+        for (_, _, mut visibility) in &mut plates {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    };
+    let camera_transform = GlobalTransform::from(*camera_transform);
+
+    for (plate, mut node, mut visibility) in &mut plates {
+        let Some((_, body)) = bodies.iter().find(|(body, _)| body.0 == plate.0) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        match camera.world_to_viewport(&camera_transform, name_plate_anchor(body)) {
+            Ok(screen) => {
+                node.left = Val::Px(screen.x - NAME_PLATE_WIDTH / 2.0);
+                node.top = Val::Px(screen.y - NAME_PLATE_HEIGHT);
+                *visibility = Visibility::Inherited;
+            }
+            Err(_) => *visibility = Visibility::Hidden,
+        }
+    }
 }
 
 pub(crate) fn resting_piece_transform(piece: BodyPiece) -> Transform {

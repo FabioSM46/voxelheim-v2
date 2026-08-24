@@ -131,7 +131,7 @@ func newMiningPlayer(t *testing.T, blocks map[[3]int64]world.Block) (*Sim, *Play
 		t.Fatalf("NewSim: %v", err)
 	}
 	out := &miningSink{}
-	player, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, out.deliver)
+	player, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, out.deliver)
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
@@ -613,15 +613,15 @@ func TestMiningIndexInvalidatesOnlyPlayersWhoTargetedTheEditedVoxel(t *testing.T
 		t.Fatalf("NewSim: %v", err)
 	}
 	firstOut, secondOut, lateOut := &miningSink{}, &miningSink{}, &miningSink{}
-	first, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, firstOut.deliver)
+	first, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, firstOut.deliver)
 	if err != nil {
 		t.Fatalf("Join first: %v", err)
 	}
-	second, err := sim.Join(2, testPlayerID(2), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, secondOut.deliver)
+	second, err := sim.Join(2, testPlayerID(2), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, secondOut.deliver)
 	if err != nil {
 		t.Fatalf("Join second: %v", err)
 	}
-	late, err := sim.Join(3, testPlayerID(3), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, lateOut.deliver)
+	late, err := sim.Join(3, testPlayerID(3), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, lateOut.deliver)
 	if err != nil {
 		t.Fatalf("Join late: %v", err)
 	}
@@ -757,11 +757,11 @@ func TestTwoPlayersHoldIndependentProgressAndTheFirstCompletionWins(t *testing.T
 		t.Fatalf("NewSim: %v", err)
 	}
 	firstOut, secondOut := &miningSink{}, &miningSink{}
-	first, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, firstOut.deliver)
+	first, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, firstOut.deliver)
 	if err != nil {
 		t.Fatalf("Join first: %v", err)
 	}
-	second, err := sim.Join(2, testPlayerID(2), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, secondOut.deliver)
+	second, err := sim.Join(2, testPlayerID(2), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, secondOut.deliver)
 	if err != nil {
 		t.Fatalf("Join second: %v", err)
 	}

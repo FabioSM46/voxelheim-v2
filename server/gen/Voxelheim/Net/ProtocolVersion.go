@@ -59,6 +59,11 @@ import "strconv"
 // / and be disconnected the first time it asked to leave. `LeaveStarted` travels back
 // / with the server-owned duration; its direction alone could have avoided a bump, but
 // / it is the answer to the request that already owes one.
+// /
+// / **V13 appends `PlayerAppearance.name`.** A V13 client treats that string as the
+// / server-owned label for one visible entity and refuses a description that omits it.
+// / A V12 server would omit the field, so the newer client would otherwise handshake
+// / cleanly and end the session as soon as the first player entered view.
 type ProtocolVersion uint16
 
 const (
@@ -67,7 +72,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 12
+	ProtocolVersionCurrent ProtocolVersion = 13
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

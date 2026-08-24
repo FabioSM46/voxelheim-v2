@@ -5,7 +5,8 @@ use super::*;
 pub enum PlayerAppearanceOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// What one player entity looks like. **Server -> client, and static per character.**
+/// What one player entity looks like and is called. **Server -> client, and static per
+/// character.**
 ///
 /// Sent once, when a player enters this session's view, and cached by the client
 /// against the entity id for as long as the entity is known. It is not resent every
@@ -17,7 +18,8 @@ pub enum PlayerAppearanceOffset {}
 /// hair model are *static per character*: they are chosen once, at creation, and then
 /// never change for the life of that character. Putting them in the hot struct would
 /// pay for them at the tick rate, for every visible player, for ever, to carry a
-/// value that is identical in every frame. It would also make `EntityState` a
+/// value that is identical in every frame. The character's name follows the same
+/// lifetime and would be still more expensive there. It would also make `EntityState` a
 /// different size, and a struct's field list can never be taken back.
 ///
 /// **An appearance for an entity the client has never seen is not an error.** The two
@@ -39,6 +41,9 @@ pub enum PlayerAppearanceOffset {}
 /// Decoder invariants:
 ///   - `entity_id` is never 0, which names no entity anywhere in this contract
 ///   - `appearance` is present and satisfies every invariant `Appearance` documents
+///   - `name` is present. It may be empty or arbitrarily long: this message carries the
+///     stored display text verbatim, and a renderer must bound its layout rather than
+///     changing what names the server accepts. It is never parsed or used as identity
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 pub struct PlayerAppearance<'a> {
@@ -58,6 +63,7 @@ impl<'a> ::flatbuffers::Follow<'a> for PlayerAppearance<'a> {
 impl<'a> PlayerAppearance<'a> {
     pub const VT_ENTITY_ID: ::flatbuffers::VOffsetT = 4;
     pub const VT_APPEARANCE: ::flatbuffers::VOffsetT = 6;
+    pub const VT_NAME: ::flatbuffers::VOffsetT = 8;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -75,6 +81,9 @@ impl<'a> PlayerAppearance<'a> {
     ) -> ::flatbuffers::WIPOffset<PlayerAppearance<'bldr>> {
         let mut builder = PlayerAppearanceBuilder::new(_fbb);
         builder.add_entity_id(args.entity_id);
+        if let Some(x) = args.name {
+            builder.add_name(x);
+        }
         if let Some(x) = args.appearance {
             builder.add_appearance(x);
         }
@@ -109,6 +118,19 @@ impl<'a> PlayerAppearance<'a> {
             )
         }
     }
+    /// The character's stored name, from the server and from nothing this session said.
+    /// Display text only: shown, never parsed, and never used as an identifier — that is
+    /// what `entity_id` is for.
+    #[inline]
+    pub fn name(&self) -> Option<&'a str> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<&str>>(PlayerAppearance::VT_NAME, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
@@ -124,6 +146,7 @@ impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
                 Self::VT_APPEARANCE,
                 false,
             )?
+            .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
             .finish();
         Ok(())
     }
@@ -131,6 +154,7 @@ impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
 pub struct PlayerAppearanceArgs<'a> {
     pub entity_id: u64,
     pub appearance: Option<::flatbuffers::WIPOffset<Appearance<'a>>>,
+    pub name: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for PlayerAppearanceArgs<'a> {
     #[inline]
@@ -138,6 +162,7 @@ impl<'a> Default for PlayerAppearanceArgs<'a> {
         PlayerAppearanceArgs {
             entity_id: 0,
             appearance: None,
+            name: None,
         }
     }
 }
@@ -161,6 +186,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerAppearanceBuilder<'a, '
             );
     }
     #[inline]
+    pub fn add_name(&mut self, name: ::flatbuffers::WIPOffset<&'b str>) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerAppearance::VT_NAME, name);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerAppearanceBuilder<'a, 'b, A> {
@@ -182,6 +212,7 @@ impl ::core::fmt::Debug for PlayerAppearance<'_> {
         let mut ds = f.debug_struct("PlayerAppearance");
         ds.field("entity_id", &self.entity_id());
         ds.field("appearance", &self.appearance());
+        ds.field("name", &self.name());
         ds.finish()
     }
 }

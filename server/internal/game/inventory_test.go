@@ -242,7 +242,7 @@ func TestPlacingLocksTheInventoryOnlyAfterGenerationAndThroughTheWrite(t *testin
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}
-	player, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
+	player, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestAMiningCompletionHoldsNoInventoryLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}
-	player, err := sim.Join(1, testPlayerID(1), [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
+	player, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
 	if err != nil {
 		t.Fatalf("Join: %v", err)
 	}
