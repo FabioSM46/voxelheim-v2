@@ -155,6 +155,9 @@ package can avoid the import would create two truths to keep in step for no bene
   so the idle timeout cannot remove the body early. During the linger the player stays in
   `Sim`: snapshots, gravity, damage and world interaction continue, while movement, mining and
   every other player action are cleared or refused. There is no cancel and no resumption. The
+  ordinary damage and death path still runs: a respawn reached inside the linger remains inert
+  because `leaving` survives it, while `Sim.Leave` removes the player from the only tick loop that
+  can advance an unfinished respawn countdown — there is no timer that can resurrect it later. The
   account claim remains held, so a reconnect receives `ALREADY_CONNECTED` until `sim.Leave`, the
   final post-linger record write and claim release complete. Server shutdown may skip the wait
   because the world itself is ending, but it still performs that persistence ordering.

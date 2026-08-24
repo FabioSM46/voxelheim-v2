@@ -133,6 +133,10 @@ func (p *Player) dieLocked() {
 //
 // The caller holds sim.mu.
 func (p *Player) advanceVitalsLocked() {
+	// There is no per-player timer or respawn goroutine. Step calls this only for
+	// players still present in Sim.players, under the same lock Sim.Leave takes; once
+	// Leave returns an unfinished countdown cannot fire later and cannot reinsert the
+	// player. This is especially load-bearing for a body killed during leave linger.
 	if p.protectionTicks > 0 {
 		p.protectionTicks--
 	}

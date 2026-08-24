@@ -1658,6 +1658,19 @@ fn disconnect_on_request(
     if requests.read().count() == 0 {
         return;
     }
+
+    // A leave is irrevocable, and a second press must not erase the countdown the
+    // server already supplied. The other two states are terminal too; consuming the
+    // message above is all there is to do for any of the three.
+    if matches!(
+        *state,
+        ConnectionState::Leaving { .. }
+            | ConnectionState::Rejected { .. }
+            | ConnectionState::Disconnected
+    ) {
+        return;
+    }
+
     // No link is no session, which is the state being asked for. The messages are
     // still consumed above, so nothing replays into a session opened later.
     let Some(mut link) = link else {
@@ -1668,12 +1681,18 @@ fn disconnect_on_request(
         Ok(channels) => channels,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if channels.commands.send(NetCommand::Leave).is_err() {
+    // Only a welcomed session has a character for the authoritative linger to keep in
+    // the world. Before that, `Leave` has no legal wire meaning and the net thread must
+    // be stopped directly instead of silently dropping the command.
+    let established = matches!(*state, ConnectionState::Connected);
+    let command = if established {
+        NetCommand::Leave
+    } else {
+        NetCommand::Disconnect
+    };
+    if channels.commands.send(command).is_err() {
         return;
     }
-    *state = ConnectionState::Leaving {
-        seconds_remaining: None,
-    };
 
     // **The one place a return is asked for.** Reaching this system means a
     // `DisconnectRequest` was written, which is a player pressing something — so leaving a
@@ -1682,11 +1701,23 @@ fn disconnect_on_request(
     // sets no flag: a refusal and a dropped connection are reported and stay reported.
     commands.insert_resource(Rejoining);
 
-    // Dropping the ECS sender stops all later gameplay input. The net thread retains one
-    // sender solely to place the durable LeaveRequest behind frames already accepted,
-    // and keeps reading until the server acknowledges and closes.
+    // Dropping the ECS sender stops all later gameplay input. On an established session
+    // the net thread retains one sender solely to place the durable LeaveRequest behind
+    // frames already accepted, and keeps reading until the server acknowledges and
+    // closes. Before the welcome there is no character to linger, so the direct
+    // Disconnect restores the old immediate teardown instead.
     commands.remove_resource::<Outbound>();
     commands.remove_resource::<CharacterChoice>();
+    if established {
+        *state = ConnectionState::Leaving {
+            seconds_remaining: None,
+        };
+    } else {
+        *state = ConnectionState::Disconnected;
+        commands.remove_resource::<Session>();
+        commands.remove_resource::<Identity>();
+        commands.remove_resource::<LeaveCountdown>();
+    }
 }
 
 /// Advances only the displayed whole-second value of an authoritative leave.
@@ -4171,6 +4202,66 @@ mod tests {
         assert!(
             app.should_exit().is_none(),
             "disconnect must leave the client running"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_before_the_welcome_stops_the_thread_instead_of_requesting_a_leave() {
+        for initial in [ConnectionState::Handshaking, ConnectionState::Choosing] {
+            let (_event_tx, event_rx) = mpsc::channel();
+            let (command_tx, command_rx) = mpsc::channel();
+
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .add_message::<DisconnectRequest>()
+                .insert_resource(initial.clone())
+                .insert_resource(NetLink(Mutex::new(Channels {
+                    events: event_rx,
+                    commands: command_tx,
+                })))
+                .add_systems(Update, disconnect_on_request);
+
+            app.world_mut().write_message(DisconnectRequest);
+            app.update();
+
+            assert!(
+                matches!(command_rx.try_recv(), Ok(NetCommand::Disconnect)),
+                "{initial:?} did not stop its pre-world session"
+            );
+            assert_eq!(state(&app), ConnectionState::Disconnected);
+            assert!(app.world().contains_resource::<Rejoining>());
+        }
+    }
+
+    #[test]
+    fn a_second_disconnect_does_not_erase_the_server_s_leave_countdown() {
+        let (_event_tx, event_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<DisconnectRequest>()
+            .insert_resource(ConnectionState::Leaving {
+                seconds_remaining: Some(7),
+            })
+            .insert_resource(NetLink(Mutex::new(Channels {
+                events: event_rx,
+                commands: command_tx,
+            })))
+            .add_systems(Update, disconnect_on_request);
+
+        app.world_mut().write_message(DisconnectRequest);
+        app.update();
+
+        assert_eq!(
+            state(&app),
+            ConnectionState::Leaving {
+                seconds_remaining: Some(7),
+            }
+        );
+        assert!(
+            command_rx.try_recv().is_err(),
+            "an irrevocable leave emitted a second network command"
         );
     }
 
