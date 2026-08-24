@@ -71,6 +71,34 @@ func TestTheDescriptionSentIsTheOneTheCharacterJoinedWith(t *testing.T) {
 	if got := sent[0].Name; got != testCharacterName {
 		t.Errorf("the name sent is %q, want the stored character name %q", got, testCharacterName)
 	}
+	if got := sent[0].Level; got != 1 {
+		t.Errorf("a new character's displayed level is %d, want 1", got)
+	}
+}
+
+// Level is derived from the stored lifetime total when the appearance is built; there
+// is no second persisted level that can disagree with it.
+func TestTheDescriptionDerivesLevelFromLifetimeExperience(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, flatWorld{groundTop: 63})
+	out := &sink{}
+	life := game.Life{
+		Pos: [3]float64{0.5, 67, 0.5}, Health: game.PlayerMaxHealth,
+		Hunger: game.PlayerMaxHunger, Experience: 50,
+	}
+	if _, err := h.sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 67, 0.5}, testAppearance(), &life, out.deliver); err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	h.step()
+
+	sent := out.appearances(t)
+	if len(sent) != 1 {
+		t.Fatalf("the session was sent %d appearances, want 1", len(sent))
+	}
+	if got := sent[0].Level; got != 2 {
+		t.Errorf("appearance level = %d, want 2 from 50 lifetime experience", got)
+	}
 }
 
 // A queue with no room loses the frame, and nothing else replaces it: an appearance is

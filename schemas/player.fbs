@@ -748,6 +748,17 @@ table PlayerVitals {
 
   /// Maximum hunger. Non-zero, always: it is the denominator of every hunger display.
   max_hunger: ushort;
+
+  /// The recipient's current level. Never zero: the first level is level 1.
+  level: ushort;
+
+  /// Experience earned into the current level. Never exceeds `experience_to_next`.
+  /// At the level cap the two values are equal.
+  experience: uint;
+
+  /// Experience required to complete the current level. Never zero: it is the
+  /// denominator of every experience display.
+  experience_to_next: uint;
 }
 
 /// One mob's authoritative state in a snapshot.
@@ -1080,6 +1091,7 @@ table InventoryState {
 ///   - `name` is present. It may be empty or arbitrarily long: this message carries the
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
+///   - `level` is never zero
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 table PlayerAppearance {
@@ -1096,4 +1108,7 @@ table PlayerAppearance {
   /// Display text only: shown, never parsed, and never used as an identifier — that is
   /// what `entity_id` is for.
   name: string;
+
+  /// The sender's current level. Never zero, and resent whenever it changes.
+  level: ushort;
 }

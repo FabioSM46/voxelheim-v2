@@ -44,6 +44,7 @@ pub enum PlayerAppearanceOffset {}
 ///   - `name` is present. It may be empty or arbitrarily long: this message carries the
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
+///   - `level` is never zero
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 pub struct PlayerAppearance<'a> {
@@ -64,6 +65,7 @@ impl<'a> PlayerAppearance<'a> {
     pub const VT_ENTITY_ID: ::flatbuffers::VOffsetT = 4;
     pub const VT_APPEARANCE: ::flatbuffers::VOffsetT = 6;
     pub const VT_NAME: ::flatbuffers::VOffsetT = 8;
+    pub const VT_LEVEL: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -87,6 +89,7 @@ impl<'a> PlayerAppearance<'a> {
         if let Some(x) = args.appearance {
             builder.add_appearance(x);
         }
+        builder.add_level(args.level);
         builder.finish()
     }
 
@@ -131,6 +134,18 @@ impl<'a> PlayerAppearance<'a> {
                 .get::<::flatbuffers::ForwardsUOffset<&str>>(PlayerAppearance::VT_NAME, None)
         }
     }
+    /// The sender's current level. Never zero, and resent whenever it changes.
+    #[inline]
+    pub fn level(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerAppearance::VT_LEVEL, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
@@ -147,6 +162,7 @@ impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
                 false,
             )?
             .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("name", Self::VT_NAME, false)?
+            .visit_field::<u16>("level", Self::VT_LEVEL, false)?
             .finish();
         Ok(())
     }
@@ -155,6 +171,7 @@ pub struct PlayerAppearanceArgs<'a> {
     pub entity_id: u64,
     pub appearance: Option<::flatbuffers::WIPOffset<Appearance<'a>>>,
     pub name: Option<::flatbuffers::WIPOffset<&'a str>>,
+    pub level: u16,
 }
 impl<'a> Default for PlayerAppearanceArgs<'a> {
     #[inline]
@@ -163,6 +180,7 @@ impl<'a> Default for PlayerAppearanceArgs<'a> {
             entity_id: 0,
             appearance: None,
             name: None,
+            level: 0,
         }
     }
 }
@@ -191,6 +209,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerAppearanceBuilder<'a, '
             .push_slot_always::<::flatbuffers::WIPOffset<_>>(PlayerAppearance::VT_NAME, name);
     }
     #[inline]
+    pub fn add_level(&mut self, level: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerAppearance::VT_LEVEL, level, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerAppearanceBuilder<'a, 'b, A> {
@@ -213,6 +236,7 @@ impl ::core::fmt::Debug for PlayerAppearance<'_> {
         ds.field("entity_id", &self.entity_id());
         ds.field("appearance", &self.appearance());
         ds.field("name", &self.name());
+        ds.field("level", &self.level());
         ds.finish()
     }
 }

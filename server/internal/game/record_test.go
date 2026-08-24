@@ -36,6 +36,7 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	player.yaw = 1.25
 	player.health = 61
 	player.hunger = 37
+	player.experience = 1337
 	h.sim.mu.Unlock()
 
 	player.inventory.mu.Lock()
@@ -69,6 +70,9 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	}
 	if got.Hunger != saved.Hunger {
 		t.Errorf("restored hunger %d, want %d", got.Hunger, saved.Hunger)
+	}
+	if got.Experience != saved.Experience {
+		t.Errorf("restored experience %d, want %d", got.Experience, saved.Experience)
 	}
 	for slot := range saved.Slots {
 		if got.Slots[slot] != saved.Slots[slot] {
@@ -151,6 +155,9 @@ func TestAPlayerWithNoRecordJoinsWithTheStarterPack(t *testing.T) {
 	if life.Hunger != PlayerMaxHunger {
 		t.Errorf("a new player's hunger is %d, want %d", life.Hunger, PlayerMaxHunger)
 	}
+	if life.Experience != 0 {
+		t.Errorf("a new player's experience is %d, want 0", life.Experience)
+	}
 	if life.Pos != ([3]float64{0.5, 64, 0.5}) {
 		t.Errorf("a new player's position is %v, want the join spawn", life.Pos)
 	}
@@ -185,6 +192,7 @@ func TestTheRecordOfADeadPlayerIsTheirRespawn(t *testing.T) {
 	h.sim.mu.Lock()
 	player.pos = [3]float64{40, 80, -40}
 	player.hunger = 10
+	player.experience = 1337
 	h.sim.mu.Unlock()
 
 	h.hurt(player, PlayerMaxHealth)
@@ -205,6 +213,9 @@ func TestTheRecordOfADeadPlayerIsTheirRespawn(t *testing.T) {
 	}
 	if life.Hunger != RespawnHungerFloor {
 		t.Errorf("a dead player's record holds %d hunger, want the respawn floor %d", life.Hunger, RespawnHungerFloor)
+	}
+	if life.Experience != 1337 {
+		t.Errorf("a dead player's record holds %d experience, want the lifetime total 1337", life.Experience)
 	}
 	if life.Pos != ([3]float64{0.5, 64, 0.5}) {
 		t.Errorf("a dead player's record holds position %v, want the respawn position", life.Pos)
@@ -341,6 +352,7 @@ func TestValidateRefusesARecordThisBuildCannotHaveWritten(t *testing.T) {
 		"no health":                     func(l *Life) { l.Health = 0 },
 		"more health than a player has": func(l *Life) { l.Health = PlayerMaxHealth + 1 },
 		"more hunger than a player has": func(l *Life) { l.Hunger = PlayerMaxHunger + 1 },
+		"more experience than the cap":  func(l *Life) { l.Experience = ExperienceCap + 1 },
 		"an unknown item id": func(l *Life) {
 			l.Slots[2] = protocol.InventoryStack{ItemID: 60000, Count: 1}
 		},

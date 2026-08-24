@@ -2142,6 +2142,7 @@ mod tests {
                 entity_id: session().0.entity_id,
                 appearance: look,
                 name: "Test Character".to_owned(),
+                level: 1,
             });
         app.update();
 

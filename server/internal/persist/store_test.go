@@ -80,7 +80,7 @@ func TestStoreRoundTripsARecord(t *testing.T) {
 	// Seconds, because that is the resolution the format keeps. A test that wrote
 	// time.Now() and compared it whole would fail on the nanoseconds the format
 	// deliberately does not store.
-	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100, Hunger: 73}
+	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100, Hunger: 73, Experience: 4321}
 	if err := store.Save(character.ID, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -116,12 +116,12 @@ func TestStoreRoundTripsARecord(t *testing.T) {
 	}
 
 	// A second save replaces the first rather than appending to it.
-	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61, Hunger: 12}
+	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61, Hunger: 12, Experience: 9876}
 	if err := store.Save(character.ID, later); err != nil {
 		t.Fatalf("the second Save: %v", err)
 	}
 	got, _, _ = store.Load(character.ID)
-	if got.Health != later.Health || got.Hunger != later.Hunger || !got.LastSeen.Equal(later.LastSeen) {
+	if got.Health != later.Health || got.Hunger != later.Hunger || got.Experience != later.Experience || !got.LastSeen.Equal(later.LastSeen) {
 		t.Errorf("the second save did not replace the first: %+v", got)
 	}
 }
@@ -399,10 +399,11 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 		LastSeen: time.Unix(1_700_000_000, 0).UTC(),
 		// Values a float32 could not hold exactly, so a narrowing anywhere in the
 		// format shows up as a failure rather than as a rounding nobody notices.
-		Pos:    [3]float64{-1234.5678901234567, 70.100000000000001, 4096.3333333333333},
-		Yaw:    -2.7182818284590452,
-		Health: 61,
-		Hunger: 37,
+		Pos:        [3]float64{-1234.5678901234567, 70.100000000000001, 4096.3333333333333},
+		Yaw:        -2.7182818284590452,
+		Health:     61,
+		Hunger:     37,
+		Experience: 1234,
 	}
 	// Every shape a slot can take: a worn durable item, a partial stack, the last slot
 	// occupied, and empties everywhere else.
@@ -432,6 +433,9 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 	}
 	if got.Hunger != want.Hunger {
 		t.Errorf("Hunger = %d, want %d", got.Hunger, want.Hunger)
+	}
+	if got.Experience != want.Experience {
+		t.Errorf("Experience = %d, want %d", got.Experience, want.Experience)
 	}
 	if got.Slots != want.Slots {
 		for slot := range want.Slots {
@@ -466,20 +470,26 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	}
 }
 
-// V5 puts hunger immediately after health and before the fixed slot table. Pin both
-// the relationship between the offsets and the bytes themselves: changing only the
-// struct field would otherwise round trip through an equally wrong encoder and decoder.
-func TestV5StoresHungerImmediatelyAfterHealth(t *testing.T) {
+// V6 puts experience immediately after hunger and before the fixed slot table. Pin
+// every relationship and the bytes themselves: changing only the struct field would
+// otherwise round trip through an equally wrong encoder and decoder.
+func TestV6StoresExperienceImmediatelyAfterHunger(t *testing.T) {
 	t.Parallel()
 
+	if StoreVersion != 6 {
+		t.Fatalf("StoreVersion = %d, want 6", StoreVersion)
+	}
 	if offHunger != offHealth+2 {
 		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
 	}
-	if offSlots != offHunger+2 {
-		t.Fatalf("offSlots = %d, want offHunger+2 = %d", offSlots, offHunger+2)
+	if offExperience != offHunger+2 {
+		t.Fatalf("offExperience = %d, want offHunger+2 = %d", offExperience, offHunger+2)
+	}
+	if offSlots != offExperience+4 {
+		t.Fatalf("offSlots = %d, want offExperience+4 = %d", offSlots, offExperience+4)
 	}
 
-	rec := Record{Health: 0x1234, Hunger: 0x5678}
+	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0}
 	rec.Slots[0] = protocol.InventoryStack{ItemID: 0x9abc, Count: 1}
 	encoded := encodeRecord(rec)
 	if got := binary.LittleEndian.Uint16(encoded[offHealth : offHealth+2]); got != rec.Health {
@@ -488,22 +498,25 @@ func TestV5StoresHungerImmediatelyAfterHealth(t *testing.T) {
 	if got := binary.LittleEndian.Uint16(encoded[offHunger : offHunger+2]); got != rec.Hunger {
 		t.Errorf("hunger bytes = %#x, want %#x", got, rec.Hunger)
 	}
+	if got := binary.LittleEndian.Uint32(encoded[offExperience : offExperience+4]); got != rec.Experience {
+		t.Errorf("experience bytes = %#x, want %#x", got, rec.Experience)
+	}
 	if got := binary.LittleEndian.Uint16(encoded[offSlots : offSlots+2]); got != rec.Slots[0].ItemID {
 		t.Errorf("first slot item bytes = %#x, want %#x", got, rec.Slots[0].ItemID)
 	}
 }
 
-// There is deliberately no v4 migration. Even bytes that otherwise have the current
-// layout are refused when the header says v4, rather than being parsed as a prefix and
-// assigned a hunger value the old record never stored.
-func TestV5RefusesAV4RecordRatherThanMigratingIt(t *testing.T) {
+// There is deliberately no v5 migration. Even bytes that otherwise have the current
+// layout are refused when the header says v5, rather than being parsed as a prefix and
+// assigned an experience value the old record never stored.
+func TestV6RefusesAV5RecordRatherThanMigratingIt(t *testing.T) {
 	t.Parallel()
 
-	old := encodeRecord(Record{Health: 100, Hunger: 100})
-	binary.LittleEndian.PutUint32(old[4:8], 4)
+	old := encodeRecord(Record{Health: 100, Hunger: 100, Experience: 200})
+	binary.LittleEndian.PutUint32(old[4:8], 5)
 	world.PutChecksum(old)
 	if _, err := decodeRecord(old); !errors.Is(err, world.ErrCorruptStore) {
-		t.Fatalf("decodeRecord(v4) = %v, want ErrCorruptStore", err)
+		t.Fatalf("decodeRecord(v5) = %v, want ErrCorruptStore", err)
 	}
 }
 

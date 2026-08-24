@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 16;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 17;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -91,6 +91,11 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 ///
 /// **V16 appends `RecipeID.CookedMeat`.** A V16 client may send that new enum value in a
 /// `CraftRequest`; a V15 server cannot name it and would fail only after a clean handshake.
+///
+/// **V17 appends progression to `PlayerVitals` and `PlayerAppearance`.** A V17 client
+/// requires a non-zero `experience_to_next` in every snapshot, while a V16 server never
+/// sends that field. Without the bump the peers would handshake cleanly and the client
+/// would refuse the first snapshot it received.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -101,10 +106,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(16);
+    pub const Current: Self = Self(17);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 16;
+    pub const ENUM_MAX: u16 = 17;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

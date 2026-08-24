@@ -228,17 +228,21 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // **V16 appends RecipeID.CookedMeat.** It travels client to server in CraftRequest, so a
 // V15 server would reject it only after a clean handshake.
 //
-// The rule that generalises, now that seven shapes have been argued: **ask what the receiver
+// **V17 appends experience progress to PlayerVitals.** A V17 client requires the new
+// experience-to-next denominator to be non-zero, while a V16 server omits it and sends
+// the scalar default. Without the bump the peers would fail only after admission.
+//
+// The rule that generalises, now that eight shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV16NamesCampfireCooking(t *testing.T) {
+func TestProtocolV17NamesExperienceProgress(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 16 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 16", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 17 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 17", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -690,6 +694,7 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 	wantVitals := PlayerVitals{
 		Health: 35, MaxHealth: 100, LifeState: vnet.LifeStateAlive,
 		RespawnTicks: 0, Invulnerable: true, Hunger: 47, MaxHunger: 100,
+		Level: 4, Experience: 23, ExperienceToNext: 200,
 	}
 
 	frame := EncodeEntitySnapshot(EntitySnapshot{
@@ -825,13 +830,16 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		t.Fatal("the snapshot carries no self_vitals")
 	}
 	gotVitals := PlayerVitals{
-		Health:       vitals.Health(),
-		MaxHealth:    vitals.MaxHealth(),
-		LifeState:    vitals.LifeState(),
-		RespawnTicks: vitals.RespawnTicks(),
-		Invulnerable: vitals.Invulnerable(),
-		Hunger:       vitals.Hunger(),
-		MaxHunger:    vitals.MaxHunger(),
+		Health:           vitals.Health(),
+		MaxHealth:        vitals.MaxHealth(),
+		LifeState:        vitals.LifeState(),
+		RespawnTicks:     vitals.RespawnTicks(),
+		Invulnerable:     vitals.Invulnerable(),
+		Hunger:           vitals.Hunger(),
+		MaxHunger:        vitals.MaxHunger(),
+		Level:            vitals.Level(),
+		Experience:       vitals.Experience(),
+		ExperienceToNext: vitals.ExperienceToNext(),
 	}
 	if gotVitals != wantVitals {
 		t.Errorf("self_vitals decoded as %+v, want %+v", gotVitals, wantVitals)
@@ -1546,6 +1554,7 @@ func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 	want := PlayerVitals{
 		Health: 0, MaxHealth: 100, LifeState: vnet.LifeStateDead, RespawnTicks: 60,
 		Hunger: 17, MaxHunger: 100,
+		Level: 6, Experience: 17, ExperienceToNext: 300,
 	}
 
 	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{Tick: 9, Vitals: want}), 0)
@@ -1558,13 +1567,16 @@ func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 		t.Fatal("the snapshot carries no self_vitals")
 	}
 	got := PlayerVitals{
-		Health:       vitals.Health(),
-		MaxHealth:    vitals.MaxHealth(),
-		LifeState:    vitals.LifeState(),
-		RespawnTicks: vitals.RespawnTicks(),
-		Invulnerable: vitals.Invulnerable(),
-		Hunger:       vitals.Hunger(),
-		MaxHunger:    vitals.MaxHunger(),
+		Health:           vitals.Health(),
+		MaxHealth:        vitals.MaxHealth(),
+		LifeState:        vitals.LifeState(),
+		RespawnTicks:     vitals.RespawnTicks(),
+		Invulnerable:     vitals.Invulnerable(),
+		Hunger:           vitals.Hunger(),
+		MaxHunger:        vitals.MaxHunger(),
+		Level:            vitals.Level(),
+		Experience:       vitals.Experience(),
+		ExperienceToNext: vitals.ExperienceToNext(),
 	}
 	if got != want {
 		t.Errorf("self_vitals decoded as %+v, want %+v", got, want)
@@ -2673,13 +2685,14 @@ func TestAnEmptyCharacterListIsStillACharacterList(t *testing.T) {
 	}
 }
 
-func TestPlayerAppearanceCarriesTheEntityTheFaceAndTheName(t *testing.T) {
+func TestPlayerAppearanceCarriesTheEntityFaceNameAndLevel(t *testing.T) {
 	t.Parallel()
 
 	want := PlayerAppearance{
 		EntityID:      4242,
 		Appearance:    anAppearance(),
 		Name:          "Brynhildr",
+		Level:         7,
 		HasAppearance: true,
 		HasName:       true,
 	}
@@ -2705,6 +2718,9 @@ func TestPlayerAppearanceCarriesTheEntityTheFaceAndTheName(t *testing.T) {
 	}
 	if got := string(payload.Name()); got != want.Name {
 		t.Errorf("Name = %q, want %q", got, want.Name)
+	}
+	if got := payload.Level(); got != want.Level {
+		t.Errorf("Level = %d, want %d", got, want.Level)
 	}
 }
 
