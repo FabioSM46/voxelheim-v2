@@ -108,6 +108,111 @@ pub enum BodyPart {
     Eyes,
 }
 
+/// One independently placeable piece of the world-space rig.
+///
+/// [`BodyPart`] answers which colour a box wears. This answers which boxes have to move
+/// together: each leg and each arm needs its own transform, while the torso and head stay
+/// on the body's root. Keeping the split beside the model sheet makes the pivots below
+/// properties of the rig rather than coordinates copied into the animation system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BodyPiece {
+    LeftShoe,
+    RightShoe,
+    LeftTrouser,
+    RightTrouser,
+    Torso,
+    LeftSleeve,
+    RightSleeve,
+    HeadAndNeck,
+    LeftFist,
+    RightFist,
+    Hair,
+    Eyes,
+}
+
+impl BodyPiece {
+    /// Every independently drawn piece, back to front by colour family.
+    pub const ALL: [Self; 12] = [
+        Self::LeftShoe,
+        Self::RightShoe,
+        Self::LeftTrouser,
+        Self::RightTrouser,
+        Self::Torso,
+        Self::LeftSleeve,
+        Self::RightSleeve,
+        Self::HeadAndNeck,
+        Self::LeftFist,
+        Self::RightFist,
+        Self::Hair,
+        Self::Eyes,
+    ];
+
+    /// Every fixed-shape piece. Hair is the one shape an appearance chooses.
+    pub const FIXED: [Self; 11] = [
+        Self::LeftShoe,
+        Self::RightShoe,
+        Self::LeftTrouser,
+        Self::RightTrouser,
+        Self::Torso,
+        Self::LeftSleeve,
+        Self::RightSleeve,
+        Self::HeadAndNeck,
+        Self::LeftFist,
+        Self::RightFist,
+        Self::Eyes,
+    ];
+
+    /// The appearance colour this piece wears.
+    pub const fn part(self) -> BodyPart {
+        match self {
+            Self::LeftShoe | Self::RightShoe => BodyPart::Shoes,
+            Self::LeftTrouser | Self::RightTrouser => BodyPart::Trousers,
+            Self::Torso | Self::LeftSleeve | Self::RightSleeve => BodyPart::Shirt,
+            Self::HeadAndNeck | Self::LeftFist | Self::RightFist => BodyPart::Skin,
+            Self::Hair => BodyPart::Hair,
+            Self::Eyes => BodyPart::Eyes,
+        }
+    }
+
+    /// The limb whose pivot carries this piece, if it moves while walking.
+    pub const fn limb(self) -> Option<Limb> {
+        match self {
+            Self::LeftShoe | Self::LeftTrouser => Some(Limb::LeftLeg),
+            Self::RightShoe | Self::RightTrouser => Some(Limb::RightLeg),
+            Self::LeftSleeve | Self::LeftFist => Some(Limb::LeftArm),
+            Self::RightSleeve | Self::RightFist => Some(Limb::RightArm),
+            Self::Torso | Self::HeadAndNeck | Self::Hair | Self::Eyes => None,
+        }
+    }
+
+    /// The joint this piece rotates around, in the same feet-relative space as its mesh.
+    ///
+    /// Hips sit one notch inside the tunic hem, so a stride cannot open the seam the
+    /// static pose hides. Shoulders sit at the centre of the sleeve's top overlap rather
+    /// than at the sleeve's centre; rotating a limb about its own centre makes both ends
+    /// orbit and is immediately legible as a loose block rather than an arm.
+    pub fn pivot(self) -> Vec3 {
+        let Some(limb) = self.limb() else {
+            return Vec3::ZERO;
+        };
+        match limb {
+            Limb::LeftLeg => Vec3::new(-2.5 * NOTCH_XZ, 14.0 * NOTCH_Y, 0.0),
+            Limb::RightLeg => Vec3::new(2.5 * NOTCH_XZ, 14.0 * NOTCH_Y, 0.0),
+            Limb::LeftArm => Vec3::new(-6.0 * NOTCH_XZ, 24.0 * NOTCH_Y, 0.0),
+            Limb::RightArm => Vec3::new(6.0 * NOTCH_XZ, 24.0 * NOTCH_Y, 0.0),
+        }
+    }
+}
+
+/// The four independently animated limbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limb {
+    LeftLeg,
+    RightLeg,
+    LeftArm,
+    RightArm,
+}
+
 impl BodyPart {
     /// Every part, in the order they are drawn back to front for a viewer standing in
     /// front of the character.
@@ -250,6 +355,27 @@ pub const fn boxes(part: BodyPart, hair: HairModel) -> &'static [PartBox] {
         BodyPart::Skin => &SKIN,
         BodyPart::Eyes => &EYES,
         BodyPart::Hair => hair_boxes(hair),
+    }
+}
+
+/// The boxes merged into one independently placeable world-space piece.
+///
+/// The slices deliberately name the model sheet's existing rows. Splitting them here
+/// changes no proportion and creates no second table for the preview to disagree with.
+pub fn piece_boxes(piece: BodyPiece, hair: HairModel) -> &'static [PartBox] {
+    match piece {
+        BodyPiece::LeftShoe => &SHOES[0..1],
+        BodyPiece::RightShoe => &SHOES[1..2],
+        BodyPiece::LeftTrouser => &TROUSERS[0..1],
+        BodyPiece::RightTrouser => &TROUSERS[1..2],
+        BodyPiece::Torso => &SHIRT[0..1],
+        BodyPiece::LeftSleeve => &SHIRT[1..2],
+        BodyPiece::RightSleeve => &SHIRT[2..3],
+        BodyPiece::HeadAndNeck => &SKIN[0..2],
+        BodyPiece::LeftFist => &SKIN[2..3],
+        BodyPiece::RightFist => &SKIN[3..4],
+        BodyPiece::Hair => hair_boxes(hair),
+        BodyPiece::Eyes => &EYES,
     }
 }
 
@@ -532,6 +658,45 @@ mod tests {
                     .map(move |cell| (part, placed(part, *cell)))
             })
             .collect()
+    }
+
+    #[test]
+    fn the_moving_pieces_partition_the_existing_model_sheet() {
+        for model in HairModel::ALL {
+            for part in BodyPart::IN_DRAWING_ORDER {
+                let from_part = boxes(part, model);
+                let from_pieces: Vec<PartBox> = BodyPiece::ALL
+                    .into_iter()
+                    .filter(|piece| piece.part() == part)
+                    .flat_map(|piece| piece_boxes(piece, model).iter().copied())
+                    .collect();
+                assert_eq!(
+                    from_pieces, from_part,
+                    "splitting {part:?} for {model:?} changed or duplicated its boxes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_limb_rotates_about_its_joint_rather_than_its_centre() {
+        for (upper, lower) in [
+            (BodyPiece::LeftTrouser, BodyPiece::LeftShoe),
+            (BodyPiece::RightTrouser, BodyPiece::RightShoe),
+            (BodyPiece::LeftSleeve, BodyPiece::LeftFist),
+            (BodyPiece::RightSleeve, BodyPiece::RightFist),
+        ] {
+            assert_eq!(upper.pivot(), lower.pivot(), "one limb has two joints");
+            let centre = piece_boxes(upper, HairModel::Shaved)
+                .iter()
+                .map(|cell| placed(upper.part(), *cell).centre.y)
+                .sum::<f32>()
+                / piece_boxes(upper, HairModel::Shaved).len() as f32;
+            assert!(
+                upper.pivot().y > centre,
+                "{upper:?} rotates around its centre or below it"
+            );
+        }
     }
 
     /// Whether two spans overlap over a positive length.

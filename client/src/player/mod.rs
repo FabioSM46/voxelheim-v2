@@ -66,8 +66,8 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 
 pub(crate) use appearance::{
-    BodyPart, PlacedBox, boxes as body_boxes, envelope as body_envelope,
-    held_item_anchor as body_held_item_anchor, placed as placed_box,
+    BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
+    held_item_anchor as body_held_item_anchor, piece_boxes, placed as placed_box,
 };
 
 pub use camera::{Orbit, ViewMode, WorldCamera};
@@ -105,11 +105,11 @@ pub use constants::MAX_PITCH;
 /// player standing still is silent.
 const MOVEMENT_LOG_DISTANCE: f32 = 8.0;
 
-/// The hair model handed to [`body_boxes`] for a part that is not the hair, where it is
+/// The hair model handed to [`piece_boxes`] for a piece that is not the hair, where it is
 /// ignored.
 ///
 /// Named rather than spelled at the call site, so nobody reads it as a default haircut:
-/// `body_boxes` is total over the part, and every part but [`BodyPart::Hair`] has one
+/// `piece_boxes` is total over the piece, and every piece but [`BodyPiece::Hair`] has one
 /// shape whatever is on the head above it.
 const ANY_HAIR: HairModel = HairModel::Shaved;
 
@@ -125,6 +125,12 @@ const ANY_HAIR: HairModel = HairModel::Shaved;
 /// Two seconds is forty ticks at the default rate, which is two orders of magnitude more
 /// than the gap it exists to cover and still a bound.
 const APPEARANCE_GRACE: Duration = Duration::from_secs(2);
+
+/// The furthest a walking limb swings from rest.
+///
+/// A presentation angle only. Distance advances the phase in [`interpolate`], so this
+/// number changes the silhouette and never how quickly anybody moves.
+const WALK_SWING: f32 = 0.55;
 
 /// Orders anything that reads the transforms a snapshot wrote after the systems that write
 /// them.
@@ -231,6 +237,10 @@ impl Plugin for PlayerPlugin {
                         // at it. Inside the set rather than after it, so the visibility a
                         // frame draws is the one this frame's view asked for.
                         show_the_local_body,
+                        // The phase came from the same interpolated snapshot positions
+                        // `apply_snapshots` just wrote. Limbs compose below the body's
+                        // root, before the death fall composes onto that root.
+                        animate_walking_bodies,
                         // **After `apply_snapshots`, which is a declared order and not an
                         // assumption.** That system writes the body's transform wholesale
                         // from the snapshot, and this composes a rotation onto it; the
@@ -342,40 +352,45 @@ impl InputCadence {
 
 /// The meshes every body is drawn from, built once at startup and shared by everybody.
 ///
-/// **Ten meshes for a whole settlement.** Every player is the same geometry and only the
-/// colours differ, so a part is merged into one mesh the way a mob's body and a
-/// structure's are — five for the parts whose shape is fixed, and one per hair model,
-/// which is the one part whose shape a player chooses. Nothing here is ever rebuilt: a
-/// body that changes its hair swaps a handle.
+/// **Sixteen meshes for a whole settlement.** Every player is the same geometry and only
+/// the colours differ, so each independently moving piece is merged once at startup —
+/// eleven fixed pieces and one per hair model. Nothing here is ever rebuilt: a body that
+/// changes its hair swaps a handle, and every body shares the same limb geometry.
 #[derive(Resource, Debug)]
 pub(crate) struct PlayerVisuals {
-    shoes: Handle<Mesh>,
-    trousers: Handle<Mesh>,
-    shirt: Handle<Mesh>,
-    skin: Handle<Mesh>,
-    eyes: Handle<Mesh>,
+    fixed: [(BodyPiece, Handle<Mesh>); BodyPiece::FIXED.len()],
     /// One per model, paired with the model it draws. An array rather than a map because
     /// there are five of them and `HairModel` is deliberately not a number.
     hair: [(HairModel, Handle<Mesh>); HairModel::ALL.len()],
 }
 
 impl PlayerVisuals {
-    /// The mesh one part of a body wearing one hair model is drawn from.
+    /// The mesh one independently moving piece wearing one hair model is drawn from.
     ///
-    /// Total over [`BodyPart`] with no wildcard arm, so a sixth part does not compile
-    /// until it has been given geometry.
-    fn mesh(&self, part: BodyPart, model: HairModel) -> Handle<Mesh> {
-        match part {
-            BodyPart::Shoes => self.shoes.clone(),
-            BodyPart::Trousers => self.trousers.clone(),
-            BodyPart::Shirt => self.shirt.clone(),
-            BodyPart::Skin => self.skin.clone(),
-            BodyPart::Eyes => self.eyes.clone(),
-            BodyPart::Hair => self
+    /// Total over [`BodyPiece`] with no wildcard arm, so a new piece does not compile
+    /// until it has been routed to fixed geometry or the chosen hair model.
+    fn mesh(&self, piece: BodyPiece, model: HairModel) -> Handle<Mesh> {
+        match piece {
+            BodyPiece::Hair => self
                 .hair
                 .iter()
                 .find(|(drawn, _)| *drawn == model)
-                .map_or_else(|| self.skin.clone(), |(_, mesh)| mesh.clone()),
+                .map_or_else(|| self.fixed[0].1.clone(), |(_, mesh)| mesh.clone()),
+            BodyPiece::LeftShoe
+            | BodyPiece::RightShoe
+            | BodyPiece::LeftTrouser
+            | BodyPiece::RightTrouser
+            | BodyPiece::Torso
+            | BodyPiece::LeftSleeve
+            | BodyPiece::RightSleeve
+            | BodyPiece::HeadAndNeck
+            | BodyPiece::LeftFist
+            | BodyPiece::RightFist
+            | BodyPiece::Eyes => self
+                .fixed
+                .iter()
+                .find(|(drawn, _)| *drawn == piece)
+                .map_or_else(|| self.fixed[0].1.clone(), |(_, mesh)| mesh.clone()),
         }
     }
 }
@@ -443,13 +458,13 @@ impl Wardrobe<'_> {
     pub(crate) fn outfit(
         &mut self,
         worn: Appearance,
-    ) -> [(BodyPart, Handle<Mesh>, Handle<StandardMaterial>); BodyPart::IN_DRAWING_ORDER.len()]
-    {
+    ) -> [(BodyPiece, Handle<Mesh>, Handle<StandardMaterial>); BodyPiece::ALL.len()] {
         let model = worn.hair_model();
-        BodyPart::IN_DRAWING_ORDER.map(|part| {
+        BodyPiece::ALL.map(|piece| {
+            let part = piece.part();
             (
-                part,
-                self.visuals.mesh(part, model),
+                piece,
+                self.visuals.mesh(piece, model),
                 self.palette.of(part.colour(worn), self.materials),
             )
         })
@@ -679,9 +694,28 @@ pub struct LocalPlayer;
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 struct Worn(Appearance);
 
-/// One drawn part of one body — the six children a body has.
+/// One independently placeable mesh of one body.
 #[derive(Component, Debug, Clone, Copy)]
-struct BodyVisual(BodyPart);
+struct BodyVisual(BodyPiece);
+
+/// The stride sample the interpolator produced for this frame.
+///
+/// Stored beside the root transform so the child-animation system consumes the exact
+/// sample that placed the body. It is presentation state only and never leaves the ECS.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+struct WalkPose {
+    phase: f32,
+    moving: bool,
+}
+
+impl From<&interpolate::Interpolated> for WalkPose {
+    fn from(state: &interpolate::Interpolated) -> Self {
+        Self {
+            phase: state.walk_phase,
+            moving: state.walking,
+        }
+    }
+}
 
 /// The item drawn in this session's body hand.
 ///
@@ -732,16 +766,12 @@ fn stack_item_id(stack: Option<crate::net::InventoryStack>) -> Option<u16> {
 
 fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     commands.insert_resource(PlayerVisuals {
-        shoes: meshes.add(part_mesh(BodyPart::Shoes, ANY_HAIR)),
-        trousers: meshes.add(part_mesh(BodyPart::Trousers, ANY_HAIR)),
-        shirt: meshes.add(part_mesh(BodyPart::Shirt, ANY_HAIR)),
-        skin: meshes.add(part_mesh(BodyPart::Skin, ANY_HAIR)),
-        eyes: meshes.add(part_mesh(BodyPart::Eyes, ANY_HAIR)),
-        hair: HairModel::ALL.map(|model| (model, meshes.add(part_mesh(BodyPart::Hair, model)))),
+        fixed: BodyPiece::FIXED.map(|piece| (piece, meshes.add(piece_mesh(piece, ANY_HAIR)))),
+        hair: HairModel::ALL.map(|model| (model, meshes.add(piece_mesh(BodyPiece::Hair, model)))),
     });
 }
 
-/// One part of the rig, merged into a single mesh.
+/// One independently placeable piece of the rig, merged into a single mesh.
 ///
 /// **Authored with its origin at the feet**, which is where the server puts the position
 /// it sends, exactly as a mob's parts are. So a body entity's `Transform` is the *feet*
@@ -751,19 +781,21 @@ fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>
 /// itself up half a body; `player::appearance` measures from the ground instead, so
 /// nothing here has to.
 ///
-/// Merged per part rather than per box, because a material is what a part *is*: five
-/// parts and a haircut is six draws for a body, where a box apiece would be sixteen.
-fn part_mesh(part: BodyPart, model: HairModel) -> Mesh {
-    let mut boxes = body_boxes(part, model).iter().map(|cell| {
+/// Merged per piece rather than per box. An arm needs a sleeve and fist because they wear
+/// different colours, while the head and neck share a transform and stay one mesh.
+fn piece_mesh(piece: BodyPiece, model: HairModel) -> Mesh {
+    let part = piece.part();
+    let pivot = piece.pivot();
+    let mut boxes = piece_boxes(piece, model).iter().map(|cell| {
         let placed = placed_box(part, *cell);
-        Mesh::from(Cuboid::from_size(placed.size)).translated_by(placed.centre)
+        Mesh::from(Cuboid::from_size(placed.size)).translated_by(placed.centre - pivot)
     });
 
     // Unreachable: every part in the table is drawn from at least one box, and
     // `every_hair_model_is_a_silhouette_of_its_own` is what says so. An empty mesh is the
     // cosmetic failure the rest of this module already prefers to a panic in a renderer.
     let Some(mut merged) = boxes.next() else {
-        error!("{part:?} is drawn from no boxes at all");
+        error!("{piece:?} is drawn from no boxes at all");
         return Mesh::from(Cuboid::from_size(Vec3::ZERO));
     };
     merge_all(&mut merged, boxes, "player body");
@@ -998,7 +1030,7 @@ fn apply_snapshots(
     session: Option<Res<Session>>,
     mut dressing: Dressing<'_>,
     mut appearances: ResMut<Appearances>,
-    mut existing: Query<(Entity, &Body, &mut Transform)>,
+    mut existing: Query<(Entity, &Body, &mut Transform, &mut WalkPose)>,
     mut commands: Commands,
 ) {
     // Both exist from the first frame after startup. A frame without them is a frame before
@@ -1015,10 +1047,14 @@ fn apply_snapshots(
     // entity still recorded, or a recorded entity that was never spawned. Scanning a handful
     // of bodies per frame is cheaper than that class of bug.
     let mut placed = HashSet::with_capacity(drawn.len());
-    for (entity, body, mut transform) in &mut existing {
+    for (entity, body, mut transform, mut walk) in &mut existing {
         match drawn.iter().find(|(entity_id, _)| *entity_id == body.0) {
             Some((_, state)) => {
                 *transform = placement(state);
+                let next = WalkPose::from(state);
+                if *walk != next {
+                    *walk = next;
+                }
                 placed.insert(body.0);
             }
             None => commands.entity(entity).despawn(),
@@ -1048,7 +1084,7 @@ fn apply_snapshots(
             *entity_id,
             session.0.entity_id,
             worn,
-            placement(state),
+            state,
             buffer.player_is_dead(*entity_id),
         );
     }
@@ -1129,8 +1165,9 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
 /// Dresses every body whose appearance has changed since it was drawn.
 ///
 /// **In place, and that is the acceptance criterion**: an entity whose appearance arrives
-/// after it does keeps its identity, its transform and its interpolation, and swaps six
-/// handles. Despawning and respawning it would restart both and blink the body.
+/// after it does keeps its identity, its transform and its interpolation, and swaps the
+/// existing piece handles. Despawning and respawning it would restart both and blink the
+/// body.
 ///
 /// It is also what makes a *changed* appearance free: the comparison against [`Worn`] is
 /// one equality per body per frame, and the loop below runs only for the bodies where it
@@ -1164,12 +1201,12 @@ fn dress_bodies(
             let Ok((visual, mut mesh, mut material)) = parts.get_mut(*child) else {
                 continue;
             };
-            let Some((_, shape, colour)) = outfit.iter().find(|(part, _, _)| *part == visual.0)
+            let Some((_, shape, colour)) = outfit.iter().find(|(piece, _, _)| *piece == visual.0)
             else {
                 continue;
             };
             // The hair is the one part whose *shape* a player chooses, so it is the one
-            // part where a mesh handle can change. The other five swap a colour.
+            // piece where a mesh handle can change. Every fixed piece swaps only colour.
             if mesh.0 != *shape {
                 mesh.0 = shape.clone();
             }
@@ -1216,9 +1253,10 @@ fn placement(state: &interpolate::Interpolated) -> Transform {
 
 /// Spawns the entity that draws one of the server's entities.
 ///
-/// Everybody gets one child per part, all six under the one transform, and none of them
-/// carries an offset: the meshes are authored with their origin at the feet, which is the
-/// point the parent already stands on.
+/// Everybody gets one child per independently moving piece under the one body transform.
+/// Static pieces keep the feet as their origin; limb meshes are authored relative to the
+/// shoulder or hip carried by their child transform, so rotating one cannot orbit a leg
+/// around its centre.
 ///
 /// **This session's own player is drawn the same way and simply hidden in first person.**
 /// It used to get no mesh, no children and no [`Worn`] at all — the camera sits at its
@@ -1233,15 +1271,18 @@ fn spawn_body(
     entity_id: u64,
     local_entity_id: u64,
     worn: Appearance,
-    placed: Transform,
+    state: &interpolate::Interpolated,
     dead: bool,
 ) {
     let local = entity_id == local_entity_id;
     let parts = wardrobe.outfit(worn);
+    let placed = placement(state);
+    let walk = WalkPose::from(state);
     let owner = commands
         .spawn((
             Body(entity_id),
             Worn(worn),
+            walk,
             camera::DeathFall::newly_seen(dead),
             placed,
         ))
@@ -1254,15 +1295,58 @@ fn spawn_body(
             .insert((LocalPlayer, Visibility::Hidden));
     }
     commands.entity(owner).with_children(|parent| {
-        for (part, mesh, material) in parts {
+        for (piece, mesh, material) in parts {
             parent.spawn((
-                BodyVisual(part),
+                BodyVisual(piece),
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
-                Transform::default(),
+                resting_piece_transform(piece),
             ));
         }
     });
+}
+
+pub(crate) fn resting_piece_transform(piece: BodyPiece) -> Transform {
+    Transform::from_translation(piece.pivot())
+}
+
+/// Swings every body's limbs from the distance its interpolated snapshots covered.
+///
+/// Local and remote bodies share this system and no input resource appears in its
+/// signature. Arms counter-swing the opposite legs. A dead body is put in its neutral
+/// child pose before [`collapse_bodies`] tips the root, so the two animations never
+/// compose competing limb rotations.
+fn animate_walking_bodies(
+    buffer: Res<SnapshotBuffer>,
+    bodies: Query<(&Body, &WalkPose, &Children)>,
+    mut parts: Query<(&BodyVisual, &mut Transform)>,
+) {
+    for (body, walk, children) in &bodies {
+        let stride = if walk.moving && !buffer.player_is_dead(body.0) {
+            walk.phase.sin() * WALK_SWING
+        } else {
+            0.0
+        };
+
+        for child in children {
+            let Ok((visual, mut transform)) = parts.get_mut(*child) else {
+                continue;
+            };
+            let angle = match visual.0.limb() {
+                Some(Limb::LeftLeg | Limb::RightArm) => stride,
+                Some(Limb::RightLeg | Limb::LeftArm) => -stride,
+                None => 0.0,
+            };
+            let next = Transform {
+                translation: visual.0.pivot(),
+                rotation: Quat::from_rotation_x(angle),
+                ..default()
+            };
+            if *transform != next {
+                *transform = next;
+            }
+        }
+    }
 }
 
 /// Tips every body the newest snapshot says is dead.
@@ -1367,19 +1451,27 @@ impl BodyHeldAssets<'_> {
 
 /// Mirrors the authoritative selected item into the local body's right hand.
 ///
-/// The item is a seventh child beside the six coloured rig parts. Its mesh is the same
-/// world-scale asset a drop of that shape uses, its colour comes through
-/// `player/items.rs`, and its parent is the snapshot-driven body transform. Nothing here
+/// The item is parented to the local body's right fist. Its mesh is the same world-scale
+/// asset a drop of that shape uses, its colour comes through `player/items.rs`, and the
+/// fist's shoulder pivot makes it inherit the distance-driven arm swing. Nothing here
 /// states an item to the server or changes what it can do.
 fn refresh_body_held_item(
     subject: BodyHeldSubject<'_>,
     mut assets: BodyHeldAssets<'_>,
-    local_body: Query<Entity, With<LocalPlayer>>,
+    local_body: Query<&Children, With<LocalPlayer>>,
+    body_parts: Query<&BodyVisual>,
     held: Query<(Entity, &BodyHeldItem, &ChildOf)>,
     held_visibility: Query<&Visibility, With<BodyHeldItem>>,
     mut commands: Commands,
 ) {
-    let Some(body) = local_body.iter().next() else {
+    let Some(children) = local_body.iter().next() else {
+        return;
+    };
+    let Some(right_fist) = children.iter().find(|child| {
+        body_parts
+            .get(*child)
+            .is_ok_and(|visual| visual.0 == BodyPiece::RightFist)
+    }) else {
         return;
     };
     let selected_item = subject.item_id();
@@ -1387,7 +1479,7 @@ fn refresh_body_held_item(
 
     let mut current = None;
     for (entity, item, parent) in &held {
-        if parent.parent() == body {
+        if parent.parent() == right_fist {
             current = Some((entity, *item));
             break;
         }
@@ -1430,11 +1522,11 @@ fn refresh_body_held_item(
         return;
     }
 
-    commands.entity(body).with_child((
+    commands.entity(right_fist).with_child((
         BodyHeldItem { item_id, shape },
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(body_held_item_anchor()),
+        Transform::from_translation(body_held_item_anchor() - BodyPiece::RightFist.pivot()),
         visibility,
     ));
 }

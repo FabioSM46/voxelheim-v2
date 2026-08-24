@@ -21,6 +21,7 @@
 //! deliberately. **Nothing here predicts.** The client does not correct, rewind, or run
 //! its own physics; it draws the answers it was given, slightly late, in between.
 
+use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,17 @@ use crate::net::{
 pub struct Interpolated {
     pub pos: Vec3,
     pub yaw: f32,
+    /// A distance-driven presentation phase. It never enters a request or a rule.
+    pub walk_phase: f32,
+    /// Whether the newest segment covers horizontal ground.
+    pub walking: bool,
 }
+
+/// One complete stride per 1.2 blocks of horizontal travel.
+///
+/// This is a drawn stride length, not a speed. The server still owns how quickly the
+/// distance is covered; a faster answer merely advances this phase faster.
+const WALK_RADIANS_PER_BLOCK: f32 = TAU / 1.2;
 
 /// Where one authoritative item drop should be drawn now.
 ///
@@ -69,6 +80,8 @@ pub struct InterpolatedMob {
 struct Received {
     snapshot: Snapshot,
     at: Instant,
+    /// The accumulated phase at each entity's position in this snapshot.
+    walk_phases: HashMap<u64, f32>,
 }
 
 /// The two most recent snapshots a session has received.
@@ -95,8 +108,40 @@ impl SnapshotBuffer {
             return false;
         }
 
+        let walk_phases = snapshot
+            .entities
+            .iter()
+            .map(|state| {
+                let phase = self
+                    .latest
+                    .as_ref()
+                    .and_then(|latest| {
+                        let earlier = latest
+                            .snapshot
+                            .entities
+                            .iter()
+                            .find(|earlier| earlier.entity_id == state.entity_id)?;
+                        let phase = latest.walk_phases.get(&state.entity_id).copied()?;
+                        let distance = horizontal_distance(earlier, state);
+                        Some(if distance > f32::EPSILON {
+                            advance_walk_phase(phase, distance)
+                        } else {
+                            // Rest is a neutral pose. Starting again begins there while
+                            // consecutive moving segments keep accumulating unchanged.
+                            0.0
+                        })
+                    })
+                    .unwrap_or(0.0);
+                (state.entity_id, phase)
+            })
+            .collect();
+
         self.previous = self.latest.take();
-        self.latest = Some(Received { snapshot, at });
+        self.latest = Some(Received {
+            snapshot,
+            at,
+            walk_phases,
+        });
         true
     }
 
@@ -172,7 +217,14 @@ impl SnapshotBuffer {
                 .snapshot
                 .entities
                 .iter()
-                .map(|state| (state.entity_id, at_rest(state)))
+                .map(|state| {
+                    let phase = latest
+                        .walk_phases
+                        .get(&state.entity_id)
+                        .copied()
+                        .unwrap_or(0.0);
+                    (state.entity_id, at_rest(state, phase))
+                })
                 .collect();
         };
 
@@ -196,11 +248,28 @@ impl SnapshotBuffer {
                     .find(|earlier| earlier.entity_id == state.entity_id);
 
                 let drawn = match from {
-                    Some(from) => Interpolated {
-                        pos: position(from).lerp(position(state), weight),
-                        yaw: lerp_angle(from.yaw, state.yaw, weight),
-                    },
-                    None => at_rest(state),
+                    Some(from) => {
+                        let distance = horizontal_distance(from, state);
+                        let phase = previous
+                            .walk_phases
+                            .get(&state.entity_id)
+                            .copied()
+                            .unwrap_or(0.0);
+                        Interpolated {
+                            pos: position(from).lerp(position(state), weight),
+                            yaw: lerp_angle(from.yaw, state.yaw, weight),
+                            walk_phase: advance_walk_phase(phase, distance * weight),
+                            walking: distance > f32::EPSILON,
+                        }
+                    }
+                    None => {
+                        let phase = latest
+                            .walk_phases
+                            .get(&state.entity_id)
+                            .copied()
+                            .unwrap_or(0.0);
+                        at_rest(state, phase)
+                    }
                 };
                 (state.entity_id, drawn)
             })
@@ -311,15 +380,26 @@ impl SnapshotBuffer {
 }
 
 /// An entity drawn exactly where the snapshot puts it.
-fn at_rest(state: &EntityState) -> Interpolated {
+fn at_rest(state: &EntityState, walk_phase: f32) -> Interpolated {
     Interpolated {
         pos: position(state),
         yaw: state.yaw,
+        walk_phase,
+        walking: false,
     }
 }
 
 fn position(state: &EntityState) -> Vec3 {
     Vec3::from_array(state.pos)
+}
+
+/// Horizontal displacement only: jumping and falling in place are not walking.
+fn horizontal_distance(from: &EntityState, to: &EntityState) -> f32 {
+    Vec2::new(to.pos[0] - from.pos[0], to.pos[2] - from.pos[2]).length()
+}
+
+fn advance_walk_phase(phase: f32, distance: f32) -> f32 {
+    (phase + distance * WALK_RADIANS_PER_BLOCK).rem_euclid(TAU)
 }
 
 /// A mob drawn exactly where the snapshot puts it.
@@ -567,6 +647,85 @@ mod tests {
             );
             assert_eq!(drawn.pos.y, 64.0, "the other axes are interpolated too");
         }
+    }
+
+    #[test]
+    fn horizontal_distance_advances_the_walk_phase_for_every_entity() {
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        buffer.accept(
+            snapshot(1, vec![state(1, 0.0, 0.0), state(99, 10.0, 0.0)]),
+            start,
+        );
+        let arrived = start + INTERVAL;
+        buffer.accept(
+            snapshot(2, vec![state(1, 0.3, 0.0), state(99, 10.3, 0.0)]),
+            arrived,
+        );
+
+        let drawn = buffer.sample(arrived + INTERVAL / 2, INTERVAL);
+        let local = drawn.iter().find(|(id, _)| *id == 1).expect("local body").1;
+        let remote = drawn
+            .iter()
+            .find(|(id, _)| *id == 99)
+            .expect("remote body")
+            .1;
+        assert!(local.walking && remote.walking);
+        assert!(local.walk_phase > 0.0);
+        assert!(
+            (local.walk_phase - remote.walk_phase).abs() < 1e-5,
+            "the same server movement produced local phase {} and remote phase {}",
+            local.walk_phase,
+            remote.walk_phase
+        );
+    }
+
+    #[test]
+    fn standing_and_vertical_motion_do_not_advance_a_stride() {
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        let grounded = EntityState {
+            entity_id: 1,
+            pos: [3.0, 64.0, -2.0],
+            vel: [0.0; 3],
+            yaw: 0.0,
+        };
+        let airborne = EntityState {
+            pos: [3.0, 70.0, -2.0],
+            ..grounded
+        };
+        buffer.accept(snapshot(1, vec![grounded]), start);
+        buffer.accept(snapshot(2, vec![airborne]), start + INTERVAL);
+
+        let drawn = only(buffer.sample(start + INTERVAL + INTERVAL / 2, INTERVAL));
+        assert!(!drawn.walking, "vertical travel was classified as walking");
+        assert_eq!(drawn.walk_phase, 0.0);
+
+        buffer.accept(snapshot(3, vec![airborne]), start + INTERVAL * 2);
+        let still = only(buffer.sample(start + INTERVAL * 2 + INTERVAL / 2, INTERVAL));
+        assert!(!still.walking);
+        assert_eq!(still.walk_phase, 0.0);
+    }
+
+    #[test]
+    fn a_new_snapshot_does_not_restart_the_walk_phase() {
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        buffer.accept(snapshot(1, vec![state(1, 0.0, 0.0)]), start);
+        buffer.accept(snapshot(2, vec![state(1, 0.4, 0.0)]), start + INTERVAL);
+
+        let boundary = start + INTERVAL * 2;
+        let before = only(buffer.sample(boundary, INTERVAL));
+        buffer.accept(snapshot(3, vec![state(1, 0.8, 0.0)]), boundary);
+        let after = only(buffer.sample(boundary, INTERVAL));
+
+        assert!(before.walking && after.walking);
+        assert!(
+            (before.walk_phase - after.walk_phase).abs() < 1e-5,
+            "snapshot boundary restarted phase {} at {}",
+            before.walk_phase,
+            after.walk_phase
+        );
     }
 
     #[test]

@@ -633,9 +633,11 @@ belongs to the server and a character with more hair is not a taller character.
 into meshes for the bodies the snapshots drive. Two tables would be two answers to "what does a shirt
 colour cover", and the first thing two answers do is disagree.
 
-**Ten meshes for a whole settlement.** Every player is the same geometry and only the colours differ,
-so a part is merged into one mesh at startup — five for the parts whose shape is fixed and one per
-hair model — and nothing is ever rebuilt. Materials are keyed on the wire's colour itself, so two
+**Sixteen meshes for a whole settlement.** Every player is the same geometry and only the colours
+differ, so each independently moving piece is merged into one mesh at startup — eleven for the
+pieces whose shape is fixed and one per hair model — and nothing is ever rebuilt. Splitting the arms
+and legs creates pivots, not per-player geometry: every body still shares those handles. Materials
+are keyed on the wire's colour itself, so two
 players in the same walnut tunic share one `StandardMaterial` and the palettes bound how many there
 can be; the map is swept whenever a body leaves, because a server is free to describe a colour nobody
 can choose and sixteen million of those is a map rather than a palette.
@@ -904,12 +906,12 @@ does — `combat.rs` routes on the ids it knows, and what an item can do is the 
 wrong icon draws the wrong picture and has no other effect available to it.
 
 **A body is the same shape of answer, and `player/appearance.rs` is where it is decided once.**
-Five colours cross the wire and six parts wear them — see "The rig" below for the sixth — and the
-table says which part takes which field and where each of its boxes sits, in notches of the
-collision box rather than in metres. `ui/character.rs` draws those boxes flat as `bevy_ui` nodes for
-the preview, exactly as `ui/icon.rs` draws an `ItemShape`; `player/mod.rs` merges the same boxes into
-meshes for the bodies in the world. Two tables would be two answers to "what does a shirt colour
-cover", and the first thing two answers do is disagree.
+Five colours cross the wire and six colour parts wear them — see "The rig" below for the sixth —
+while twelve independently placeable pieces let each arm and leg rotate around its joint. The table
+says which part takes which field and where each of its boxes sits, in notches of the collision box
+rather than in metres. `ui/character.rs` and `player/mod.rs` consume those same pieces and shared
+meshes. Two tables would be two answers to "what does a shirt colour cover", and the first thing two
+answers do is disagree.
 
 ## Conventions that are not obvious from the code
 
@@ -1772,15 +1774,16 @@ Recorded here so the next reader does not mistake them for oversights:
   why the camera sits behind a turning character with nothing chasing anything, and why releasing
   the key is an animation back to zero rather than back to a remembered angle. Nothing about the
   view crosses the wire and the server cannot tell which one a client is in.
-- **Other players are the rig and one server-driven death pose.** The local body mirrors the
-  selected authoritative pack item into its hand in third person; other players still carry no
-  held-item fact on the wire, so drawing one for them would be a guess. There is no movement or
+- **Other players are the rig, a distance-driven walk and one server-driven death pose.** The local
+  body mirrors the selected authoritative pack item into its hand in third person; other players
+  still carry no held-item fact on the wire, so drawing one for them would be a guess. There is no
   combat animation, no name plate, no other equipment on the body, no faces beyond the two eye
   boxes, and no texture anywhere — it is coloured geometry. Each of those is its own issue.
 - **An entity can be drawn before it has been described, and is never re-spawned when it is.** The
   appearance stream and the snapshot stream are not ordered against each other, so a body whose
   `PlayerAppearance` has not landed wears `codec::PLACEHOLDER_APPEARANCE` — the neutral grey
-  `schemas/player.fbs` documents — and `dress_bodies` swaps six handles in place the moment it does.
+  `schemas/player.fbs` documents — and `dress_bodies` swaps the existing piece handles in place the
+  moment it does.
   Despawning and re-spawning would restart the interpolation and blink the body. The server sends
   the appearance *ahead* of the snapshot that first carries the entity where it can, which makes the
   placeholder rare rather than impossible.
