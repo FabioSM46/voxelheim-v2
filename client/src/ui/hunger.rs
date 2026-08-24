@@ -288,7 +288,7 @@ mod tests {
 
     use super::*;
     use crate::net::{LifeState, SessionParams};
-    use crate::ui::health::{HEALTH_BAR_BOTTOM, VITAL_BAR_GAP};
+    use crate::ui::health::{EXPERIENCE_BAR_BOTTOM, HEALTH_BAR_BOTTOM, VITAL_BAR_GAP};
 
     fn session() -> Session {
         Session(SessionParams {
@@ -386,7 +386,11 @@ mod tests {
     }
 
     #[test]
-    fn both_vital_bars_have_explicit_non_overlapping_positions() {
+    fn all_three_vital_bars_have_explicit_non_overlapping_positions() {
+        assert_eq!(
+            HUNGER_BAR_BOTTOM,
+            EXPERIENCE_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
+        );
         assert_eq!(
             HEALTH_BAR_BOTTOM,
             HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
