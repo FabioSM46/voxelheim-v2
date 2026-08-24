@@ -1,4 +1,4 @@
-//! Authoritative item drops, drawn as small local-time-animated cubes.
+//! Authoritative item drops, drawn as small local-time-animated geometry.
 //!
 //! A drop exists exactly while the newest snapshot names its id. There is no
 //! pickup request, proximity check, click, fade, or prediction here: collection,
@@ -6,7 +6,7 @@
 //! module — the id disappears from the next snapshot.
 
 use std::collections::HashSet;
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
@@ -38,6 +38,23 @@ const BOB_RADIANS_PER_SECOND: f32 = TAU / 2.0;
 /// ground reaches or how it tumbles moves — [`sword_mesh`] fills the same length with a
 /// weapon.
 const BLADE_DROP_LENGTH: f32 = 1.25;
+
+/// The volume the packed-gear silhouette is allowed to occupy.
+///
+/// These are the old bundle box's exact dimensions. The roll and its two collars fill
+/// the same bounds, so changing the silhouette cannot change how far a structure drop
+/// reaches while [`animate`] tumbles it.
+const BUNDLE_DROP_SIZE: Vec3 = Vec3::new(DROP_EDGE * 1.15, DROP_EDGE * 0.62, DROP_EDGE * 0.72);
+
+/// The canvas roll inside [`BUNDLE_DROP_SIZE`].
+const BUNDLE_ROLL_SIZE: Vec3 = Vec3::new(BUNDLE_DROP_SIZE.x, DROP_EDGE * 0.52, DROP_EDGE * 0.62);
+
+/// One raised collar around the roll.
+const BUNDLE_COLLAR_SIZE: Vec3 =
+    Vec3::new(DROP_EDGE * 0.12, BUNDLE_DROP_SIZE.y, BUNDLE_DROP_SIZE.z);
+
+/// How far each collar sits from the centre of the packed roll.
+const BUNDLE_COLLAR_OFFSET: f32 = DROP_EDGE * 0.31;
 
 /// One full turn every eight seconds: visible, but not a propeller.
 const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
@@ -158,7 +175,7 @@ pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<M
 /// than which colour it is. So the arm calls [`sword_mesh`] with a drop-scale length
 /// and gets the same weapon at a different size. Nothing is shared but the shape: this
 /// module still mints its own asset, at its own scale, with its own materials, and the four
-/// other arms below still author their own boxes.
+/// other arms below still author their own geometry.
 ///
 /// Wildcard-free, so a fifth [`ItemShape`] does not compile until it can be dropped — the
 /// same guarantee `ui::icon::parts` and `hands::item_mesh` already give.
@@ -172,12 +189,10 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
         // The length is what it was when this was one box, so nothing about how far a
         // dropped sword reaches or how it tumbles moves.
         ItemShape::Blade => sword_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
-        // A carried structure: wider than it is tall, so a tent never reads as a cube.
-        ItemShape::Bundle => Mesh::from(Cuboid::from_size(Vec3::new(
-            DROP_EDGE * 1.15,
-            DROP_EDGE * 0.62,
-            DROP_EDGE * 0.72,
-        ))),
+        // A carried structure is packed gear: one horizontal canvas roll with two raised
+        // collars. The three structures share this silhouette and their item-table colour
+        // tells them apart. `bundle_mesh` fills the old box's exact bounds.
+        ItemShape::Bundle => bundle_mesh(),
         // A haft with a head across the top of it, merged into one mesh for the reason the
         // held one is: a drop is one entity with one transform, and the spin is on it.
         ItemShape::Tool => {
@@ -196,6 +211,27 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
             merged
         }
     }
+}
+
+/// One rolled, strapped load for every carried structure.
+///
+/// The three primitive parts are merged before they become an asset. A drop — and the
+/// local body-held mirror that shares this world-space asset — therefore remains one mesh,
+/// one material, one entity and one transform under the existing spin and bob.
+fn bundle_mesh() -> Mesh {
+    let roll = |size: Vec3| {
+        // Bevy authors a cylinder along Y. Turn it onto X and scale its unit diameter and
+        // height independently so a round load can still honour the old rectangular bound.
+        Mesh::from(Cylinder::new(0.5, 1.0))
+            .rotated_by(Quat::from_rotation_z(FRAC_PI_2))
+            .scaled_by(size)
+    };
+
+    let mut bundle = roll(BUNDLE_ROLL_SIZE);
+    let collars = [-BUNDLE_COLLAR_OFFSET, BUNDLE_COLLAR_OFFSET]
+        .map(|x| roll(BUNDLE_COLLAR_SIZE).translated_by(Vec3::X * x));
+    merge_all(&mut bundle, collars, "dropped packed-gear bundle");
+    bundle
 }
 
 /// Spawns, places, and despawns drops from the latest authoritative snapshot.
@@ -327,6 +363,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::super::items::{ITEM_DIRT, ITEM_STONE, ITEM_VARGR_PELT};
+    use super::super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
     use super::*;
     use crate::net::{EntityState, ItemDropState, SessionParams, Snapshot, SnapshotInbox};
     use crate::player::PlayerPlugin;
@@ -543,6 +580,107 @@ mod tests {
                 extent.iter().all(|axis| *axis > 0.0),
                 "{shape:?} is drawn from nothing"
             );
+        }
+    }
+
+    /// A bundle is a rolled load with collars, not the unequal-sided box it replaces.
+    ///
+    /// The vertex count and cross-section are properties of that silhouette; the bounds
+    /// are the compatibility promise. Pinning the old volume here protects the reach of a
+    /// spinning drop and of the body-held world asset without pinning a generated vertex
+    /// list.
+    #[test]
+    fn a_bundle_is_a_strapped_roll_inside_the_old_bounds() {
+        let mesh = drop_mesh(ItemShape::Bundle);
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the bundle must carry Float32x3 positions");
+        };
+
+        assert!(
+            positions.len() > Mesh::from(Cuboid::from_size(BUNDLE_DROP_SIZE)).count_vertices(),
+            "the packed bundle is {} vertices, which is still one box",
+            positions.len()
+        );
+
+        let mut extents = [0.0; 3];
+        for (axis, extent) in extents.iter_mut().enumerate() {
+            let (low, high) = positions
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), point| {
+                    (low.min(point[axis]), high.max(point[axis]))
+                });
+            *extent = high - low;
+        }
+        for (actual, expected) in extents.into_iter().zip(BUNDLE_DROP_SIZE.to_array()) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "the bundle span {actual} moved outside its old {expected} bound"
+            );
+        }
+
+        // A box has only two coordinate planes on either cross-section. The roll and its
+        // raised collars have many, independent of the cylinder's tessellation count.
+        for axis in [1, 2] {
+            let mut coordinates: Vec<f32> = positions.iter().map(|point| point[axis]).collect();
+            coordinates.sort_by(f32::total_cmp);
+            coordinates.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+            assert!(
+                coordinates.len() > 2,
+                "bundle axis {axis} has only box faces at {coordinates:?}"
+            );
+        }
+    }
+
+    /// Tent, forge and campfire remain one visual kind, distinguished by palette colour.
+    ///
+    /// Three authoritative drops produce three visual children, each with exactly the one
+    /// shared mesh and one material component that the existing spin turns as a unit. The
+    /// material handles differ because `player/items.rs` names three distinct colours.
+    #[test]
+    fn bundled_structures_share_one_mesh_and_are_told_apart_by_colour() {
+        let mut app = headless_player();
+        deliver(
+            &mut app,
+            snapshot(
+                1,
+                vec![],
+                vec![
+                    drop(10, [0.0, 64.0, 0.0], ITEM_TENT),
+                    drop(11, [1.0, 64.0, 0.0], ITEM_FORGE),
+                    drop(12, [2.0, 64.0, 0.0], ITEM_CAMPFIRE),
+                ],
+            ),
+            Instant::now(),
+        );
+        app.update();
+
+        for item_id in [ITEM_TENT, ITEM_FORGE, ITEM_CAMPFIRE] {
+            assert_eq!(item_shape(item_id), ItemShape::Bundle, "item {item_id}");
+        }
+
+        let world = app.world_mut();
+        let mut every_visual = world.query_filtered::<Entity, With<DropVisual>>();
+        assert_eq!(every_visual.iter(world).count(), 3);
+
+        let mut drawn = world
+            .query_filtered::<(&Mesh3d, &MeshMaterial3d<StandardMaterial>), With<DropVisual>>();
+        let presentations: Vec<_> = drawn
+            .iter(world)
+            .map(|(mesh, material)| (mesh.0.clone(), material.0.clone()))
+            .collect();
+        assert_eq!(presentations.len(), 3);
+        assert!(
+            presentations
+                .iter()
+                .all(|(mesh, _)| *mesh == presentations[0].0),
+            "the three Bundle items did not share one world-space mesh"
+        );
+        for (index, (_, material)) in presentations.iter().enumerate() {
+            for (_, other) in &presentations[index + 1..] {
+                assert_ne!(material, other, "two Bundle colours became one material");
+            }
         }
     }
 
