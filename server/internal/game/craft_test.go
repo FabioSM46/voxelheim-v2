@@ -543,7 +543,7 @@ func TestACraftWithNoRoomForItsOutputChangesNothing(t *testing.T) {
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
 	full := []ingredient{{ItemStone, 64}, {ItemRawCoal, 64}}
-	for range int(protocol.InventorySlots) - len(full) {
+	for range equipmentFirst - len(full) {
 		full = append(full, ingredient{ItemDirt, 64})
 	}
 	h.stockPack(player, full...)
@@ -570,7 +570,7 @@ func TestACraftThatEmptiesASlotHasRoomForItsOwnOutput(t *testing.T) {
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
 	contents := []ingredient{{ItemLog, 8}}
-	for range int(protocol.InventorySlots) - 1 {
+	for range equipmentFirst - 1 {
 		contents = append(contents, ingredient{ItemDirt, 64})
 	}
 	h.stockPack(player, contents...)

@@ -46,6 +46,8 @@ import (
 // /     stored display text verbatim, and a renderer must bound its layout rather than
 // /     changing what names the server accepts. It is never parsed or used as identity
 // /   - `level` is never zero
+// /   - `worn_head`, `worn_chest` and `worn_legs` are item ids, with zero meaning that
+// /     the corresponding equipment slot is empty
 // /   - nothing here is required to name an entity in any snapshot, in either
 // /     direction; see above
 type PlayerAppearance struct {
@@ -150,8 +152,50 @@ func (rcv *PlayerAppearance) MutateLevel(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(10, n)
 }
 
+// / Item id in the trailing head equipment slot, or zero when nothing is worn.
+func (rcv *PlayerAppearance) WornHead() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Item id in the trailing head equipment slot, or zero when nothing is worn.
+func (rcv *PlayerAppearance) MutateWornHead(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(12, n)
+}
+
+// / Item id in the trailing chest equipment slot, or zero when nothing is worn.
+func (rcv *PlayerAppearance) WornChest() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Item id in the trailing chest equipment slot, or zero when nothing is worn.
+func (rcv *PlayerAppearance) MutateWornChest(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(14, n)
+}
+
+// / Item id in the trailing legs equipment slot, or zero when nothing is worn.
+func (rcv *PlayerAppearance) WornLegs() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Item id in the trailing legs equipment slot, or zero when nothing is worn.
+func (rcv *PlayerAppearance) MutateWornLegs(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(16, n)
+}
+
 func PlayerAppearanceStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(7)
 }
 func PlayerAppearanceAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -164,6 +208,15 @@ func PlayerAppearanceAddName(builder *flatbuffers.Builder, name flatbuffers.UOff
 }
 func PlayerAppearanceAddLevel(builder *flatbuffers.Builder, level uint16) {
 	builder.PrependUint16Slot(3, level, 0)
+}
+func PlayerAppearanceAddWornHead(builder *flatbuffers.Builder, wornHead uint16) {
+	builder.PrependUint16Slot(4, wornHead, 0)
+}
+func PlayerAppearanceAddWornChest(builder *flatbuffers.Builder, wornChest uint16) {
+	builder.PrependUint16Slot(5, wornChest, 0)
+}
+func PlayerAppearanceAddWornLegs(builder *flatbuffers.Builder, wornLegs uint16) {
+	builder.PrependUint16Slot(6, wornLegs, 0)
 }
 func PlayerAppearanceEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

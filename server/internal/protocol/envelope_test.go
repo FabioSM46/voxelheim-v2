@@ -232,17 +232,21 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // experience-to-next denominator to be non-zero, while a V16 server omits it and sends
 // the scalar default. Without the bump the peers would fail only after admission.
 //
+// **V18 appends equipment_slots to ServerWelcome and worn item ids to
+// PlayerAppearance.** A V18 client requires the non-zero equipment count a V17 server
+// omits, so the mismatch must be refused at the handshake.
+//
 // The rule that generalises, now that eight shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV17NamesExperienceProgress(t *testing.T) {
+func TestProtocolV18NamesTheEquipmentLayout(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 17 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 17", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 18 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 18", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -336,6 +340,7 @@ func TestServerWelcomeEncodesEveryField(t *testing.T) {
 		ViewDistance:   3,
 		InventorySlots: InventorySlots,
 		HotbarSlots:    HotbarSlots,
+		EquipmentSlots: EquipmentSlots,
 		PlayerToken:    token,
 		// A clock this encoder has no opinion about: the numbers are the simulation's,
 		// and what is being checked here is that all three survive the wire in the order
@@ -388,6 +393,9 @@ func TestServerWelcomeEncodesEveryField(t *testing.T) {
 	}
 	if got := table.HotbarSlots(); got != want.HotbarSlots {
 		t.Errorf("HotbarSlots = %d, want %d", got, want.HotbarSlots)
+	}
+	if got := table.EquipmentSlots(); got != want.EquipmentSlots {
+		t.Errorf("EquipmentSlots = %d, want %d", got, want.EquipmentSlots)
 	}
 	// Present and exactly 32 bytes on every accepted handshake — a decoder invariant
 	// the client enforces the way it enforces a non-zero tick rate.
@@ -2685,7 +2693,7 @@ func TestAnEmptyCharacterListIsStillACharacterList(t *testing.T) {
 	}
 }
 
-func TestPlayerAppearanceCarriesTheEntityFaceNameAndLevel(t *testing.T) {
+func TestPlayerAppearanceCarriesTheEntityFaceNameLevelAndWornItems(t *testing.T) {
 	t.Parallel()
 
 	want := PlayerAppearance{
@@ -2693,6 +2701,9 @@ func TestPlayerAppearanceCarriesTheEntityFaceNameAndLevel(t *testing.T) {
 		Appearance:    anAppearance(),
 		Name:          "Brynhildr",
 		Level:         7,
+		WornHead:      101,
+		WornChest:     102,
+		WornLegs:      103,
 		HasAppearance: true,
 		HasName:       true,
 	}
@@ -2721,6 +2732,15 @@ func TestPlayerAppearanceCarriesTheEntityFaceNameAndLevel(t *testing.T) {
 	}
 	if got := payload.Level(); got != want.Level {
 		t.Errorf("Level = %d, want %d", got, want.Level)
+	}
+	if got := payload.WornHead(); got != want.WornHead {
+		t.Errorf("WornHead = %d, want %d", got, want.WornHead)
+	}
+	if got := payload.WornChest(); got != want.WornChest {
+		t.Errorf("WornChest = %d, want %d", got, want.WornChest)
+	}
+	if got := payload.WornLegs(); got != want.WornLegs {
+		t.Errorf("WornLegs = %d, want %d", got, want.WornLegs)
 	}
 }
 

@@ -2795,6 +2795,7 @@ mod tests {
             view_distance: 8,
             inventory_slots: 36,
             hotbar_slots: 9,
+            equipment_slots: 3,
             ..WelcomeWire::default()
         };
         let (addr, stub) = spawn_stub(Reply::AfterAChoice(vec![encode_server_welcome(&welcome)]));
@@ -3705,7 +3706,8 @@ mod tests {
     fn an_inventory_after_the_welcome_reaches_the_inventory_inbox() {
         let welcome = WelcomeWire {
             inventory_slots: 2,
-            hotbar_slots: 2,
+            hotbar_slots: 1,
+            equipment_slots: 1,
             ..WelcomeWire::default()
         };
         let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
@@ -3988,6 +3990,7 @@ mod tests {
             view_distance: 8,
             inventory_slots: 36,
             hotbar_slots: 9,
+            equipment_slots: 3,
             player_token: ANY_TOKEN,
             clock: Default::default(),
         }

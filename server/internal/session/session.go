@@ -252,6 +252,7 @@ func Welcome(cfg Config, entityID uint64, self Resolved) []byte {
 		ViewDistance:   cfg.ViewDistance,
 		InventorySlots: protocol.InventorySlots,
 		HotbarSlots:    protocol.HotbarSlots,
+		EquipmentSlots: protocol.EquipmentSlots,
 		// **The retired field, filled rather than dropped.** V7 settles identity from
 		// `session_ticket`, so this server mints no tokens and has nothing of its own to
 		// say here — but schemas/handshake.fbs still requires the field to be present and

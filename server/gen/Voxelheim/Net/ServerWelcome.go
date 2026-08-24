@@ -23,9 +23,10 @@ import (
 // /   - `view_distance` must be in 0..=16: the streamed volume grows as
 // /     `(2 * view_distance + 1)^3` chunks, so the bound is what keeps a single
 // /     number from asking the client for gigabytes
-// /   - `inventory_slots` and `hotbar_slots` must both be non-zero
-// /   - `hotbar_slots` must be <= `inventory_slots`, because every hotbar slot is
-// /     an inventory slot and indexing beyond the inventory is a protocol error
+// /   - `inventory_slots`, `hotbar_slots` and `equipment_slots` must all be non-zero
+// /   - `hotbar_slots + equipment_slots` must be <= `inventory_slots`, because the
+// /     hotbar is the leading subset, equipment is the trailing subset, and the pack
+// /     occupies the slots between them
 // /   - `player_token` must be present and exactly 32 bytes; an absent, empty or
 // /     differently sized vector is a protocol error, rejected the way a zero
 // /     `tick_rate` is
@@ -179,7 +180,8 @@ func (rcv *ServerWelcome) MutateViewDistance(n byte) bool {
 }
 
 // / Number of slot pairs in every `InventoryState.stacks` vector this session
-// / receives. The server currently announces 36.
+// / receives. The layout is the hotbar first, the pack in the middle, and equipment
+// / last. The server currently announces 39.
 func (rcv *ServerWelcome) InventorySlots() byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
@@ -189,7 +191,8 @@ func (rcv *ServerWelcome) InventorySlots() byte {
 }
 
 // / Number of slot pairs in every `InventoryState.stacks` vector this session
-// / receives. The server currently announces 36.
+// / receives. The layout is the hotbar first, the pack in the middle, and equipment
+// / last. The server currently announces 39.
 func (rcv *ServerWelcome) MutateInventorySlots(n byte) bool {
 	return rcv._tab.MutateByteSlot(16, n)
 }
@@ -388,8 +391,28 @@ func (rcv *ServerWelcome) MutateNightEndTicks(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(26, n)
 }
 
+// / Trailing inventory slots reserved for worn equipment. These slots are part of
+// / `inventory_slots`, and the server currently announces three: head, chest and legs,
+// / in that order. The client uses this count to find where the pack ends; it never
+// / decides which item is legal in a worn slot.
+func (rcv *ServerWelcome) EquipmentSlots() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Trailing inventory slots reserved for worn equipment. These slots are part of
+// / `inventory_slots`, and the server currently announces three: head, chest and legs,
+// / in that order. The client uses this count to find where the pack ends; it never
+// / decides which item is legal in a worn slot.
+func (rcv *ServerWelcome) MutateEquipmentSlots(n byte) bool {
+	return rcv._tab.MutateByteSlot(28, n)
+}
+
 func ServerWelcomeStart(builder *flatbuffers.Builder) {
-	builder.StartObject(12)
+	builder.StartObject(13)
 }
 func ServerWelcomeAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -429,6 +452,9 @@ func ServerWelcomeAddNightStartTicks(builder *flatbuffers.Builder, nightStartTic
 }
 func ServerWelcomeAddNightEndTicks(builder *flatbuffers.Builder, nightEndTicks uint32) {
 	builder.PrependUint32Slot(11, nightEndTicks, 0)
+}
+func ServerWelcomeAddEquipmentSlots(builder *flatbuffers.Builder, equipmentSlots byte) {
+	builder.PrependByteSlot(12, equipmentSlots, 0)
 }
 func ServerWelcomeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

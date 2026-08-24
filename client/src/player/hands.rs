@@ -1410,8 +1410,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: 32,
             view_distance: 3,
-            inventory_slots: 4,
+            inventory_slots: 5,
             hotbar_slots: 4,
+            equipment_slots: 1,
             player_token: crate::net::ANY_TOKEN,
         })
     }
@@ -2142,6 +2143,9 @@ mod tests {
                 entity_id: session().0.entity_id,
                 appearance: look,
                 name: "Test Character".to_owned(),
+                worn_head: 0,
+                worn_chest: 0,
+                worn_legs: 0,
                 level: 1,
             });
         app.update();

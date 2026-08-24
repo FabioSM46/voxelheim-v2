@@ -576,12 +576,13 @@ func TestAFullPackLeavesTheRemainderOnTheGround(t *testing.T) {
 	h := newDropHarness(t, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	// Thirty-five full stacks and one with a single space in it: room for exactly one.
+	// Thirty-five full pack stacks and one with a single space in it: room for exactly
+	// one. The trailing equipment slots stay empty and automatic pickup must ignore them.
 	player.inventory.mu.Lock()
-	for slot := range player.inventory.slots {
+	for slot := range player.inventory.slots[:equipmentFirst] {
 		player.inventory.slots[slot] = inventoryStack{item: ItemStone, count: 64}
 	}
-	player.inventory.slots[protocol.InventorySlots-1].count = 63
+	player.inventory.slots[equipmentFirst-1].count = 63
 	player.inventory.mu.Unlock()
 
 	drop := h.spawn(ItemStone, 10, [3]int64{1, 64, 0})

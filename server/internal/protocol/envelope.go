@@ -29,13 +29,18 @@ const (
 	MaxViewDistance = 16
 
 	// InventorySlots is the fixed number of authoritative inventory slots this
-	// server announces and emits. The handshake carries it so the client never
-	// has to hardcode the value.
-	InventorySlots uint8 = 36
+	// server announces and emits. The layout is the hotbar first, the pack in the
+	// middle, and equipment last. The handshake carries the counts so the client
+	// never has to hardcode the layout.
+	InventorySlots uint8 = 39
 
 	// HotbarSlots is the leading subset of InventorySlots the client may select
 	// with its hotbar.
 	HotbarSlots uint8 = 9
+
+	// EquipmentSlots is the trailing subset of InventorySlots reserved for worn
+	// equipment: head, chest and legs, in that order.
+	EquipmentSlots uint8 = 3
 
 	// SessionTicketLen is the exact length of a ClientHello.session_ticket, from V7:
 	// a 32-byte body and a 64-byte detached signature over it. schemas/handshake.fbs
@@ -776,6 +781,9 @@ type PlayerAppearance struct {
 	Appearance Appearance
 	Name       string
 	Level      uint16
+	WornHead   uint16
+	WornChest  uint16
+	WornLegs   uint16
 
 	// HasAppearance is honoured by the encoder so a test can build the frame a client
 	// must refuse, exactly as ActionRefused.HasAnchor is. The server always sets it.
@@ -797,6 +805,7 @@ type Welcome struct {
 	ViewDistance   uint8
 	InventorySlots uint8
 	HotbarSlots    uint8
+	EquipmentSlots uint8
 
 	// PlayerToken is the retired identity field, which a welcome must still carry:
 	// present and exactly [PlayerTokenLen] bytes on every accepted handshake, because
@@ -1210,6 +1219,7 @@ func EncodeServerWelcome(w Welcome) []byte {
 	vnet.ServerWelcomeAddDayLengthTicks(b, w.DayLengthTicks)
 	vnet.ServerWelcomeAddNightStartTicks(b, w.NightStartTicks)
 	vnet.ServerWelcomeAddNightEndTicks(b, w.NightEndTicks)
+	vnet.ServerWelcomeAddEquipmentSlots(b, w.EquipmentSlots)
 	welcome := vnet.ServerWelcomeEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadServerWelcome, welcome)
@@ -1356,6 +1366,9 @@ func EncodePlayerAppearance(p PlayerAppearance) []byte {
 		vnet.PlayerAppearanceAddName(b, nameOffset)
 	}
 	vnet.PlayerAppearanceAddLevel(b, p.Level)
+	vnet.PlayerAppearanceAddWornHead(b, p.WornHead)
+	vnet.PlayerAppearanceAddWornChest(b, p.WornChest)
+	vnet.PlayerAppearanceAddWornLegs(b, p.WornLegs)
 	built := vnet.PlayerAppearanceEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadPlayerAppearance, built)

@@ -541,6 +541,9 @@ func TestWelcome(t *testing.T) {
 		if got := welcome.HotbarSlots(); got != protocol.HotbarSlots {
 			t.Errorf("HotbarSlots = %d, want %d", got, protocol.HotbarSlots)
 		}
+		if got := welcome.EquipmentSlots(); got != protocol.EquipmentSlots {
+			t.Errorf("EquipmentSlots = %d, want %d", got, protocol.EquipmentSlots)
+		}
 		if got := welcome.WorldSeed(); got != cfg.WorldSeed {
 			t.Errorf("WorldSeed = %d, want %d", got, cfg.WorldSeed)
 		}

@@ -945,11 +945,22 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 				continue
 			}
 			if faces[i] == nil {
+				// The tick never waits for a session operation holding the inventory.
+				// Leaving the description uncached retries it next tick, exactly as a
+				// dropped delivery below does.
+				if !p.inventory.mu.TryLock() {
+					continue
+				}
+				wornHead, wornChest, wornLegs := p.inventory.wornItemsLocked()
+				p.inventory.mu.Unlock()
 				faces[i] = protocol.EncodePlayerAppearance(protocol.PlayerAppearance{
 					EntityID:      p.entityID,
 					Appearance:    p.appearance,
 					Name:          p.name,
 					Level:         levelFor(p.experience),
+					WornHead:      wornHead,
+					WornChest:     wornChest,
+					WornLegs:      wornLegs,
 					HasAppearance: true,
 					HasName:       true,
 				})

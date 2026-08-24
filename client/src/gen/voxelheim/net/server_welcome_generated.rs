@@ -22,9 +22,10 @@ pub enum ServerWelcomeOffset {}
 ///   - `view_distance` must be in 0..=16: the streamed volume grows as
 ///     `(2 * view_distance + 1)^3` chunks, so the bound is what keeps a single
 ///     number from asking the client for gigabytes
-///   - `inventory_slots` and `hotbar_slots` must both be non-zero
-///   - `hotbar_slots` must be <= `inventory_slots`, because every hotbar slot is
-///     an inventory slot and indexing beyond the inventory is a protocol error
+///   - `inventory_slots`, `hotbar_slots` and `equipment_slots` must all be non-zero
+///   - `hotbar_slots + equipment_slots` must be <= `inventory_slots`, because the
+///     hotbar is the leading subset, equipment is the trailing subset, and the pack
+///     occupies the slots between them
 ///   - `player_token` must be present and exactly 32 bytes; an absent, empty or
 ///     differently sized vector is a protocol error, rejected the way a zero
 ///     `tick_rate` is
@@ -60,6 +61,7 @@ impl<'a> ServerWelcome<'a> {
     pub const VT_DAY_LENGTH_TICKS: ::flatbuffers::VOffsetT = 22;
     pub const VT_NIGHT_START_TICKS: ::flatbuffers::VOffsetT = 24;
     pub const VT_NIGHT_END_TICKS: ::flatbuffers::VOffsetT = 26;
+    pub const VT_EQUIPMENT_SLOTS: ::flatbuffers::VOffsetT = 28;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -88,6 +90,7 @@ impl<'a> ServerWelcome<'a> {
             builder.add_spawn(x);
         }
         builder.add_chunk_size(args.chunk_size);
+        builder.add_equipment_slots(args.equipment_slots);
         builder.add_hotbar_slots(args.hotbar_slots);
         builder.add_inventory_slots(args.inventory_slots);
         builder.add_view_distance(args.view_distance);
@@ -176,7 +179,8 @@ impl<'a> ServerWelcome<'a> {
         }
     }
     /// Number of slot pairs in every `InventoryState.stacks` vector this session
-    /// receives. The server currently announces 36.
+    /// receives. The layout is the hotbar first, the pack in the middle, and equipment
+    /// last. The server currently announces 39.
     #[inline]
     pub fn inventory_slots(&self) -> u8 {
         // Safety:
@@ -301,6 +305,21 @@ impl<'a> ServerWelcome<'a> {
                 .unwrap()
         }
     }
+    /// Trailing inventory slots reserved for worn equipment. These slots are part of
+    /// `inventory_slots`, and the server currently announces three: head, chest and legs,
+    /// in that order. The client uses this count to find where the pack ends; it never
+    /// decides which item is legal in a worn slot.
+    #[inline]
+    pub fn equipment_slots(&self) -> u8 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u8>(ServerWelcome::VT_EQUIPMENT_SLOTS, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for ServerWelcome<'_> {
@@ -326,6 +345,7 @@ impl ::flatbuffers::Verifiable for ServerWelcome<'_> {
             .visit_field::<u32>("day_length_ticks", Self::VT_DAY_LENGTH_TICKS, false)?
             .visit_field::<u32>("night_start_ticks", Self::VT_NIGHT_START_TICKS, false)?
             .visit_field::<u32>("night_end_ticks", Self::VT_NIGHT_END_TICKS, false)?
+            .visit_field::<u8>("equipment_slots", Self::VT_EQUIPMENT_SLOTS, false)?
             .finish();
         Ok(())
     }
@@ -343,6 +363,7 @@ pub struct ServerWelcomeArgs<'a> {
     pub day_length_ticks: u32,
     pub night_start_ticks: u32,
     pub night_end_ticks: u32,
+    pub equipment_slots: u8,
 }
 impl<'a> Default for ServerWelcomeArgs<'a> {
     #[inline]
@@ -360,6 +381,7 @@ impl<'a> Default for ServerWelcomeArgs<'a> {
             day_length_ticks: 0,
             night_start_ticks: 0,
             night_end_ticks: 0,
+            equipment_slots: 0,
         }
     }
 }
@@ -435,6 +457,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ServerWelcomeBuilder<'a, 'b, 
             .push_slot::<u32>(ServerWelcome::VT_NIGHT_END_TICKS, night_end_ticks, 0);
     }
     #[inline]
+    pub fn add_equipment_slots(&mut self, equipment_slots: u8) {
+        self.fbb_
+            .push_slot::<u8>(ServerWelcome::VT_EQUIPMENT_SLOTS, equipment_slots, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> ServerWelcomeBuilder<'a, 'b, A> {
@@ -466,6 +493,7 @@ impl ::core::fmt::Debug for ServerWelcome<'_> {
         ds.field("day_length_ticks", &self.day_length_ticks());
         ds.field("night_start_ticks", &self.night_start_ticks());
         ds.field("night_end_ticks", &self.night_end_ticks());
+        ds.field("equipment_slots", &self.equipment_slots());
         ds.finish()
     }
 }

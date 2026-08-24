@@ -84,6 +84,11 @@ namespace Voxelheim.Net;
 /// requires a non-zero `experience_to_next` in every snapshot, while a V16 server never
 /// sends that field. Without the bump the peers would handshake cleanly and the client
 /// would refuse the first snapshot it received.
+///
+/// **V18 appends equipment slot metadata to `ServerWelcome` and worn item ids to
+/// `PlayerAppearance`.** A V18 client requires a non-zero `equipment_slots` count that
+/// a V17 server never sends. Without the bump the peers would handshake cleanly and the
+/// client would refuse a welcome whose inventory layout it cannot interpret.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -91,7 +96,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 17
+  Current = 18
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

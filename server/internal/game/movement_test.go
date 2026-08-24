@@ -192,7 +192,10 @@ func (s *sink) appearances(t *testing.T) []protocol.PlayerAppearance {
 		var payload vnet.PlayerAppearance
 		payload.Init(table.Bytes, table.Pos)
 
-		sent := protocol.PlayerAppearance{EntityID: payload.EntityId(), Level: payload.Level()}
+		sent := protocol.PlayerAppearance{
+			EntityID: payload.EntityId(), Level: payload.Level(),
+			WornHead: payload.WornHead(), WornChest: payload.WornChest(), WornLegs: payload.WornLegs(),
+		}
 		if name := payload.Name(); name != nil {
 			sent.HasName = true
 			sent.Name = string(name)

@@ -148,6 +148,11 @@ type itemDefinition struct {
 	places   world.Block
 	maxStack uint16
 
+	// wornAt names the one equipment slot this item may enter: head, chest or legs.
+	// Zero means it cannot be worn, which is every existing registry row. The move
+	// rule reads this column in both directions before changing either slot.
+	wornAt wornAt
+
 	// maxDurability is zero for an item that does not wear out, which is every
 	// resource and therefore every stack in the game until this one. A non-zero value
 	// is what makes an item *equipment*: one whole item to a slot, never merged and
@@ -189,6 +194,18 @@ type itemDefinition struct {
 	// cannot be consumed until its registry row deliberately says it is edible.
 	restoresHunger uint16
 }
+
+// wornAt is the server-only placement class for worn equipment. Its zero value refuses
+// equipment slots, so adding an item without deliberately naming a body location cannot
+// make it wearable.
+type wornAt uint8
+
+const (
+	wornNowhere wornAt = iota
+	wornHead
+	wornChest
+	wornLegs
+)
 
 // itemRegistry is intentionally not sent to clients. They receive authoritative
 // slot contents and may render an opinion about them, but only this table decides

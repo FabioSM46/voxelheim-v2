@@ -546,7 +546,7 @@ fn build_inventory_cells(
     let Some(session) = session else {
         return;
     };
-    let expected = usize::from(session.0.inventory_slots);
+    let expected = usize::from(session.0.inventory_slots - session.0.equipment_slots);
     // The same total can have a different hotbar/pack split in a later session.
     // A newly inserted Session therefore invalidates the layout even when the
     // number of existing cells still matches.
@@ -562,7 +562,9 @@ fn build_inventory_cells(
         node.grid_template_columns =
             RepeatedGridTrack::flex(u16::from(session.0.hotbar_slots), 1.0);
         let range = match grid {
-            InventoryGrid::Pack => session.0.hotbar_slots..session.0.inventory_slots,
+            InventoryGrid::Pack => {
+                session.0.hotbar_slots..session.0.inventory_slots - session.0.equipment_slots
+            }
             InventoryGrid::Hotbar => 0..session.0.hotbar_slots,
         };
         for slot in range {
@@ -1166,6 +1168,7 @@ mod tests {
             view_distance: 3,
             inventory_slots: 6,
             hotbar_slots: 2,
+            equipment_slots: 1,
             player_token: crate::net::ANY_TOKEN,
         })
     }
@@ -1660,14 +1663,14 @@ mod tests {
     }
 
     #[test]
-    fn every_inventory_slot_is_drawn_with_the_hotbar_as_its_own_row() {
+    fn equipment_slots_are_not_drawn_as_pack_cells() {
         let mut app = app();
         app.update();
 
         let world = app.world_mut();
         let mut query = world.query::<&InventoryCell>();
         let cells: Vec<InventoryCell> = query.iter(world).copied().collect();
-        assert_eq!(cells.len(), 6);
+        assert_eq!(cells.len(), 5);
         assert_eq!(
             cells
                 .iter()
@@ -1680,7 +1683,7 @@ mod tests {
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Pack)
                 .count(),
-            4
+            3
         );
     }
 
@@ -1697,7 +1700,7 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query::<&InventoryCell>();
         let cells: Vec<InventoryCell> = query.iter(world).copied().collect();
-        assert_eq!(cells.len(), 6);
+        assert_eq!(cells.len(), 5);
         assert_eq!(
             cells
                 .iter()
@@ -1710,7 +1713,7 @@ mod tests {
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Pack)
                 .count(),
-            2
+            1
         );
     }
 

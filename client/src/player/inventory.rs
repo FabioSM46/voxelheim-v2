@@ -622,8 +622,9 @@ mod tests {
                 tick_rate: 20,
                 chunk_size: 32,
                 view_distance: 3,
-                inventory_slots: 4,
+                inventory_slots: 5,
                 hotbar_slots: 4,
+                equipment_slots: 1,
                 player_token: crate::net::ANY_TOKEN,
             }));
         if with_input {
@@ -824,7 +825,7 @@ mod tests {
         let (mut app, sent) = move_app();
 
         inventory_click(&mut app, 0, InventoryClickKind::Full);
-        inventory_click(&mut app, 4, InventoryClickKind::Full);
+        inventory_click(&mut app, 5, InventoryClickKind::Full);
 
         assert!(sent.try_recv().is_err());
         assert_eq!(
@@ -832,7 +833,7 @@ mod tests {
             Some(0),
             "an invalid destination consumed the valid source"
         );
-        assert!(move_request(0, 4, 1, 4).is_none());
+        assert!(move_request(0, 5, 1, 5).is_none());
     }
 
     #[test]

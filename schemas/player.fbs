@@ -1092,6 +1092,8 @@ table InventoryState {
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
 ///   - `level` is never zero
+///   - `worn_head`, `worn_chest` and `worn_legs` are item ids, with zero meaning that
+///     the corresponding equipment slot is empty
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 table PlayerAppearance {
@@ -1113,4 +1115,13 @@ table PlayerAppearance {
   /// invalidating the cached appearance and resending it when the level changes is
   /// planned separately.
   level: ushort;
+
+  /// Item id in the trailing head equipment slot, or zero when nothing is worn.
+  worn_head: ushort;
+
+  /// Item id in the trailing chest equipment slot, or zero when nothing is worn.
+  worn_chest: ushort;
+
+  /// Item id in the trailing legs equipment slot, or zero when nothing is worn.
+  worn_legs: ushort;
 }

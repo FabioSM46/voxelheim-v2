@@ -80,6 +80,11 @@ import "strconv"
 // / requires a non-zero `experience_to_next` in every snapshot, while a V16 server never
 // / sends that field. Without the bump the peers would handshake cleanly and the client
 // / would refuse the first snapshot it received.
+// /
+// / **V18 appends equipment slot metadata to `ServerWelcome` and worn item ids to
+// / `PlayerAppearance`.** A V18 client requires a non-zero `equipment_slots` count that
+// / a V17 server never sends. Without the bump the peers would handshake cleanly and the
+// / client would refuse a welcome whose inventory layout it cannot interpret.
 type ProtocolVersion uint16
 
 const (
@@ -88,7 +93,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 17
+	ProtocolVersionCurrent ProtocolVersion = 18
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{
