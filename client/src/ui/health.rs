@@ -39,15 +39,19 @@ pub(super) const BAR_HEIGHT: f32 = 18.0;
 /// than a grid, and the same weight would read as a frame around it.
 pub(super) const BAR_BORDER: f32 = 2.0;
 
-/// Distance from the bottom of the window to the hunger bar, in logical pixels. It clears
-/// the hotbar, which is [`CELL_SIZE`] tall and sits 18 px up.
-pub(super) const HUNGER_BAR_BOTTOM: f32 = 18.0 + CELL_SIZE + 14.0;
+/// Distance from the bottom of the window to the experience bar, in logical pixels. It
+/// clears the hotbar, which is [`CELL_SIZE`] tall and sits 18 px up.
+pub(super) const EXPERIENCE_BAR_BOTTOM: f32 = 18.0 + CELL_SIZE + 14.0;
 
-/// Vertical space between the two vital bars.
+/// Vertical space between the three vital bars.
 pub(super) const VITAL_BAR_GAP: f32 = 8.0;
 
-/// Distance from the bottom of the window to this health bar. Hunger takes the lower
-/// position nearest the hotbar; health moves up by exactly one bar and the documented gap.
+/// Distance from the bottom of the window to the hunger bar. Experience takes the lower
+/// position nearest the hotbar; hunger moves up by one bar and the documented gap.
+pub(super) const HUNGER_BAR_BOTTOM: f32 = EXPERIENCE_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
+
+/// Distance from the bottom of the window to this health bar. Health sits one bar and
+/// the documented gap above hunger.
 pub(super) const HEALTH_BAR_BOTTOM: f32 = HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
 
 /// The empty part of the bar. The same near-black the empty inventory cells use, so the

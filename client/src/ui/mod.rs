@@ -2,6 +2,7 @@
 
 mod character;
 mod crosshair;
+mod experience;
 mod health;
 mod hunger;
 
@@ -152,6 +153,7 @@ impl Plugin for UiPlugin {
                 crosshair::CrosshairPlugin,
                 health::HealthUiPlugin,
                 hunger::HungerUiPlugin,
+                experience::ExperienceUiPlugin,
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
                 login::LoginPlugin,
