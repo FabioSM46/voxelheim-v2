@@ -46,6 +46,8 @@ impl<'a> PlayerVitals<'a> {
     pub const VT_LIFE_STATE: ::flatbuffers::VOffsetT = 8;
     pub const VT_RESPAWN_TICKS: ::flatbuffers::VOffsetT = 10;
     pub const VT_INVULNERABLE: ::flatbuffers::VOffsetT = 12;
+    pub const VT_HUNGER: ::flatbuffers::VOffsetT = 14;
+    pub const VT_MAX_HUNGER: ::flatbuffers::VOffsetT = 16;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -63,6 +65,8 @@ impl<'a> PlayerVitals<'a> {
     ) -> ::flatbuffers::WIPOffset<PlayerVitals<'bldr>> {
         let mut builder = PlayerVitalsBuilder::new(_fbb);
         builder.add_respawn_ticks(args.respawn_ticks);
+        builder.add_max_hunger(args.max_hunger);
+        builder.add_hunger(args.hunger);
         builder.add_max_health(args.max_health);
         builder.add_health(args.health);
         builder.add_invulnerable(args.invulnerable);
@@ -136,6 +140,31 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
+    /// Current hunger reserve, in the same units as `max_hunger`. Zero is legal: it
+    /// prevents health regeneration but does not itself damage the player.
+    #[inline]
+    pub fn hunger(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerVitals::VT_HUNGER, Some(0))
+                .unwrap()
+        }
+    }
+    /// Maximum hunger. Non-zero, always: it is the denominator of every hunger display.
+    #[inline]
+    pub fn max_hunger(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerVitals::VT_MAX_HUNGER, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
@@ -150,6 +179,8 @@ impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
             .visit_field::<LifeState>("life_state", Self::VT_LIFE_STATE, false)?
             .visit_field::<u32>("respawn_ticks", Self::VT_RESPAWN_TICKS, false)?
             .visit_field::<bool>("invulnerable", Self::VT_INVULNERABLE, false)?
+            .visit_field::<u16>("hunger", Self::VT_HUNGER, false)?
+            .visit_field::<u16>("max_hunger", Self::VT_MAX_HUNGER, false)?
             .finish();
         Ok(())
     }
@@ -160,6 +191,8 @@ pub struct PlayerVitalsArgs {
     pub life_state: LifeState,
     pub respawn_ticks: u32,
     pub invulnerable: bool,
+    pub hunger: u16,
+    pub max_hunger: u16,
 }
 impl<'a> Default for PlayerVitalsArgs {
     #[inline]
@@ -170,6 +203,8 @@ impl<'a> Default for PlayerVitalsArgs {
             life_state: LifeState::Unknown,
             respawn_ticks: 0,
             invulnerable: false,
+            hunger: 0,
+            max_hunger: 0,
         }
     }
 }
@@ -208,6 +243,16 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerVitalsBuilder<'a, 'b, A
             .push_slot::<bool>(PlayerVitals::VT_INVULNERABLE, invulnerable, false);
     }
     #[inline]
+    pub fn add_hunger(&mut self, hunger: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerVitals::VT_HUNGER, hunger, 0);
+    }
+    #[inline]
+    pub fn add_max_hunger(&mut self, max_hunger: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerVitals::VT_MAX_HUNGER, max_hunger, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerVitalsBuilder<'a, 'b, A> {
@@ -232,6 +277,8 @@ impl ::core::fmt::Debug for PlayerVitals<'_> {
         ds.field("life_state", &self.life_state());
         ds.field("respawn_ticks", &self.respawn_ticks());
         ds.field("invulnerable", &self.invulnerable());
+        ds.field("hunger", &self.hunger());
+        ds.field("max_hunger", &self.max_hunger());
         ds.finish()
     }
 }

@@ -50,12 +50,29 @@ func TestRawMeatCarriesItsPinnedIDAndResourceStats(t *testing.T) {
 	if !registered {
 		t.Fatal("raw meat is not registered")
 	}
-	want := itemDefinition{places: world.Air, maxStack: 16}
+	want := itemDefinition{places: world.Air, maxStack: 16, restoresHunger: RawMeatHungerRestore}
 	if got != want {
 		t.Errorf("raw meat row = %+v, want %+v", got, want)
 	}
 	if block, placeable := blockPlacedBy(ItemRawMeat); placeable || block != world.Air {
 		t.Errorf("raw meat places block %d (placeable %v)", block, placeable)
+	}
+}
+
+func TestRawMeatIsTheOnlyFood(t *testing.T) {
+	t.Parallel()
+
+	if RawMeatHungerRestore != 25 {
+		t.Errorf("RawMeatHungerRestore = %d, want the pinned 25", RawMeatHungerRestore)
+	}
+	for id, definition := range itemRegistry {
+		want := uint16(0)
+		if id == ItemRawMeat {
+			want = RawMeatHungerRestore
+		}
+		if definition.restoresHunger != want {
+			t.Errorf("item %d restores %d hunger, want %d", id, definition.restoresHunger, want)
+		}
 	}
 }
 

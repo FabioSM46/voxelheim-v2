@@ -66,7 +66,7 @@ keeps meaning "everything the client is".
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
 | `player/items.rs` | one row per item id: its display name, its held shape, and the block-derived or item-only colour it draws as | hold a capability, a stat, or anything a rule is read from |
-| `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the three intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down |
+| `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the four intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down or consumed |
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
 | `player/interpolate.rs` | the two-snapshot buffer and the interpolation | mention a Bevy world, or extrapolate |
 | `player/camera.rs` | the one camera, and what it follows | decide a gameplay outcome |
@@ -488,16 +488,25 @@ The client samples the controls, sends what the player is *trying* to do at the 
   a courtesy must never produce: a row refusing a craft the server would have granted. The
   craft itself changes nothing locally; the complete `InventoryState` that follows is what
   moves a count, and a refusal is silence.
-- **One cell press, three possible intents, and choosing between them is routing rather
-  than authority.** A picked sharpening stone dropped on a slot that wears out sends a
-  `RepairRequest` naming the two slots; a shift-click sends a `DropItemRequest` naming one;
-  every other pair sends the `InventoryMoveRequest`
-  it always sent. The judgement is read from the durability already beside every stack —
+- **One cell press, four possible intents, and choosing between them is routing rather
+  than authority.** A middle-click on known food sends a `ConsumeRequest` naming one slot;
+  a picked sharpening stone dropped on a slot that wears out sends a `RepairRequest` naming
+  the two slots; a shift-click sends a `DropItemRequest` naming one; every other pair sends
+  the `InventoryMoveRequest`
+  it always sent.
+
+  **Food routing follows the kit pattern without copying the server's capability table.**
+  `FOODS` names the ids whose middle-click is worth sending, and `consume_request` is the
+  only place a `ConsumeRequest` is built. It deliberately does not ask how much hunger an
+  item restores, whether the reserve is full or whether the server will still consider the
+  stack edible: all three are authoritative answers. A mistaken extra id grants nothing;
+  an omitted id makes supported food unreachable, so the list fails open toward asking.
+
+  Repair's separate judgement is read from the durability already beside every stack —
   `max_durability > 0` answers *does this wear out* with no registry and no second copy of
-  the server's table — so the only item id in it is the kit's, and that one is presentation
-  and routing exactly as `combat::ITEM_RUSTY_SWORD` is. `player/inventory.rs` holds the
-  whole decision in one function, `repair_request`, which is the only place a
-  `RepairRequest` is built.
+  the server's table — so the only item ids in that branch are the kits', and those are
+  presentation and routing exactly as `combat::ITEM_RUSTY_SWORD` is. `repair_request` is
+  the only place a `RepairRequest` is built.
 
   **What it deliberately does not ask is whether the mend would achieve anything.**
   Clicking a stone onto a blade at full durability sends the request and silence answers
@@ -513,7 +522,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   which the server's `moveLocked` used to answer with a swap. It is still reachable from
   the other side — pick the blade, click the stones — because a picked non-kit never mends.
 
-  **The drop is the third, and it is the one that pairs with nothing.** `drop_request` in
+  **Drop and consume are the two actions that pair with nothing.** `drop_request` in
   `player/inventory.rs` asks two things and no third: is the index one the contract permits,
   and does the last complete state show something in that cell. It deliberately does *not*
   predict whether the server will accept a slot — that is a gameplay outcome read from a
@@ -522,7 +531,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   therefore asked about like anything else; acceptance arrives only through the complete
   inventory and the snapshot's sparse authoritative durability entry. The branch also runs
   ahead of the cursor and leaves it untouched: a picked slot is a source waiting for a
-  destination, and a shift-click elsewhere is not that destination.
+  destination, and neither a shift-click nor a middle-click elsewhere is that destination.
 
   **Shift is read against the full-stack button and not the split one** (`ui/inventory.rs`),
   because what the modifier changes is *where the stack goes* rather than *how much of it

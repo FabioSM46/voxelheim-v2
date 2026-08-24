@@ -410,6 +410,8 @@ mod tests {
         PlayerVitals {
             health,
             max_health,
+            hunger: 100,
+            max_hunger: 100,
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
@@ -420,6 +422,8 @@ mod tests {
         PlayerVitals {
             health: 0,
             max_health: 100,
+            hunger: 50,
+            max_hunger: 100,
             life_state: LifeState::Dead,
             respawn_ticks,
             invulnerable: false,

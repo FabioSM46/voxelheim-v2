@@ -1680,6 +1680,8 @@ fn vitals(health: u16, life_state: LifeState, respawn_ticks: u32) -> PlayerVital
     PlayerVitals {
         health,
         max_health: 100,
+        hunger: 100,
+        max_hunger: 100,
         life_state,
         respawn_ticks,
         invulnerable: false,
@@ -1930,6 +1932,30 @@ fn every_accepted_snapshot_replaces_the_vitals_whole() {
     );
     app.update();
     assert_eq!(held(&app), Some(vitals(0, LifeState::Dead, 20)));
+}
+
+#[test]
+fn hunger_is_carried_by_self_vitals_without_local_change() {
+    let mut app = headless_player();
+    let mut carried = vitals(73, LifeState::Alive, 0);
+    carried.hunger = 24;
+
+    deliver_vitals(&mut app, 1, carried, Instant::now());
+    app.update();
+    assert_eq!(held(&app), Some(carried));
+
+    // Local frames neither drain nor restore it. Only another accepted snapshot may
+    // replace the complete value.
+    for _ in 0..4 {
+        app.update();
+        assert_eq!(held(&app).map(|vitals| vitals.hunger), Some(24));
+    }
+
+    let mut newer = carried;
+    newer.hunger = 81;
+    deliver_vitals(&mut app, 2, newer, Instant::now() + INTERVAL);
+    app.update();
+    assert_eq!(held(&app), Some(newer));
 }
 
 #[test]

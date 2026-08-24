@@ -2117,6 +2117,8 @@ mod tests {
         app.insert_resource(SelfVitals::from_server(crate::net::PlayerVitals {
             health: if dead { 0 } else { 100 },
             max_health: 100,
+            hunger: 100,
+            max_hunger: 100,
             life_state,
             respawn_ticks: if dead { 60 } else { 0 },
             invulnerable: false,

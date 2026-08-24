@@ -144,8 +144,38 @@ func (rcv *PlayerVitals) MutateInvulnerable(n bool) bool {
 	return rcv._tab.MutateBoolSlot(12, n)
 }
 
+// / Current hunger reserve, in the same units as `max_hunger`. Zero is legal: it
+// / prevents health regeneration but does not itself damage the player.
+func (rcv *PlayerVitals) Hunger() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Current hunger reserve, in the same units as `max_hunger`. Zero is legal: it
+// / prevents health regeneration but does not itself damage the player.
+func (rcv *PlayerVitals) MutateHunger(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(14, n)
+}
+
+// / Maximum hunger. Non-zero, always: it is the denominator of every hunger display.
+func (rcv *PlayerVitals) MaxHunger() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Maximum hunger. Non-zero, always: it is the denominator of every hunger display.
+func (rcv *PlayerVitals) MutateMaxHunger(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(16, n)
+}
+
 func PlayerVitalsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(7)
 }
 func PlayerVitalsAddHealth(builder *flatbuffers.Builder, health uint16) {
 	builder.PrependUint16Slot(0, health, 0)
@@ -161,6 +191,12 @@ func PlayerVitalsAddRespawnTicks(builder *flatbuffers.Builder, respawnTicks uint
 }
 func PlayerVitalsAddInvulnerable(builder *flatbuffers.Builder, invulnerable bool) {
 	builder.PrependBoolSlot(4, invulnerable, false)
+}
+func PlayerVitalsAddHunger(builder *flatbuffers.Builder, hunger uint16) {
+	builder.PrependUint16Slot(5, hunger, 0)
+}
+func PlayerVitalsAddMaxHunger(builder *flatbuffers.Builder, maxHunger uint16) {
+	builder.PrependUint16Slot(6, maxHunger, 0)
 }
 func PlayerVitalsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -224,6 +224,22 @@ table RepairRequest {
   client_tick: uint;
 }
 
+/// A player trying to consume one carried item. Client -> server, and intent only.
+///
+/// The slot names the authoritative stack to inspect. Whether its item is edible, how
+/// much hunger it restores, whether the player is alive and whether the reserve has room
+/// are all server decisions. A refusal is silence; success consumes exactly one item and
+/// is visible through the complete `InventoryState` and subsequent `PlayerVitals`.
+///
+/// Decoder invariants the server enforces on this untrusted input:
+///   - `slot` is copied verbatim, including values outside the announced inventory;
+///     gameplay refuses an unusable slot without treating valid framing as a protocol error
+///   - `client_tick` is ordering and staleness only, never a trusted clock
+table ConsumeRequest {
+  slot: ushort;
+  client_tick: uint;
+}
+
 /// Which way a placed structure faces.
 ///
 /// Four compass members rather than a yaw in radians: a structure's footprint is a set
@@ -720,6 +736,13 @@ table PlayerVitals {
   /// Whether the server is currently refusing damage to this player. The server owns
   /// the timer; this is the answer, not a duration to run down locally.
   invulnerable: bool;
+
+  /// Current hunger reserve, in the same units as `max_hunger`. Zero is legal: it
+  /// prevents health regeneration but does not itself damage the player.
+  hunger: ushort;
+
+  /// Maximum hunger. Non-zero, always: it is the denominator of every hunger display.
+  max_hunger: ushort;
 }
 
 /// One mob's authoritative state in a snapshot.

@@ -60,9 +60,9 @@ const (
 	ItemPickaxe
 	ItemAxe
 
-	// The first food ingredient. It is still only a resource in this iteration: hunger,
-	// eating and cooking are separate systems, so appending the id and registering its
-	// carrying rules does not give it a capability the server has not implemented.
+	// The first food ingredient, and the first item the hunger system can consume.
+	// Cooking remains separate: this id is the raw hunted resource and nothing here
+	// turns it into a recipe product.
 	ItemRawMeat
 )
 
@@ -127,6 +127,11 @@ const (
 	// the other a mistake. Forty and fifty make them two answers to the same question,
 	// chosen by what the player has on them rather than by which is better.
 	LeatherPatchRestore uint16 = 40
+
+	// RawMeatHungerRestore is the reserve one piece of uncooked deer meat gives
+	// back. It describes the item, so it lives beside the other item-owned values
+	// and is read through itemRegistry rather than by an item-id check in Consume.
+	RawMeatHungerRestore uint16 = 25
 )
 
 // itemDefinition is the server-only rule for one item. places is world.Air when
@@ -171,6 +176,11 @@ type itemDefinition struct {
 	// cannot be spent as a kit, and there is deliberately no second list of kit ids
 	// anywhere that could disagree with this field.
 	repairRestore uint16
+
+	// restoresHunger is how much reserve one of this item gives back when eaten,
+	// and zero for everything that is not food. The zero is fail-closed: a new item
+	// cannot be consumed until its registry row deliberately says it is edible.
+	restoresHunger uint16
 }
 
 // itemRegistry is intentionally not sent to clients. They receive authoritative
@@ -256,10 +266,10 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemPickaxe: {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
 	ItemAxe:     {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
 
-	// A plain hunted resource until cooking exists. It places nothing, wears out nothing
-	// and does no damage; sixteen to a stack keeps it carryable without making a carcass
-	// indistinguishable from a block resource.
-	ItemRawMeat: {places: world.Air, maxStack: 16},
+	// The first food. It places nothing, wears out nothing and does no damage; sixteen
+	// to a stack keeps it carryable without making a carcass indistinguishable from a
+	// block resource. Its one non-zero capability is the registry answer Consume reads.
+	ItemRawMeat: {places: world.Air, maxStack: 16, restoresHunger: RawMeatHungerRestore},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

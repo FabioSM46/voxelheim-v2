@@ -97,7 +97,11 @@ union Payload {
   //    mismatch only when leaving. The acknowledgement is the authoritative duration
   //    that client presentation counts down; socket closure remains the completion.
   LeaveRequest,           // 26
-  LeaveStarted            // 27
+  LeaveStarted,           // 27
+
+  // -- V15. A client request, and therefore a bump owed: a V14 server cannot name
+  //    this tag and closes the session rather than dropping it.
+  ConsumeRequest          // 28
 }
 
 table Envelope {
