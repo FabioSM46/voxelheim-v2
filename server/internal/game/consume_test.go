@@ -54,6 +54,7 @@ func TestEveryRefusedMealLeavesTheLifeAndPackUntouched(t *testing.T) {
 		{"empty slot", 4, 50, func(*structureHarness, *Player) {}},
 		{"non-food", 4, 50, func(h *structureHarness, p *Player) { h.give(p, 4, ItemStone, 2) }},
 		{"slot beyond the pack", uint16(protocol.InventorySlots), 50, func(h *structureHarness, p *Player) { h.give(p, 4, ItemRawMeat, 2) }},
+		{"slot one past uint8", uint16(^uint8(0)) + 1, 50, func(h *structureHarness, p *Player) { h.give(p, 0, ItemRawMeat, 2) }},
 		{"slot that would wrap if narrowed", ^uint16(0), 50, func(h *structureHarness, p *Player) { h.give(p, 4, ItemRawMeat, 2) }},
 		{"dead player", 4, 50, func(h *structureHarness, p *Player) {
 			h.give(p, 4, ItemRawMeat, 2)

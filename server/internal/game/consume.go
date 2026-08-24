@@ -8,10 +8,11 @@ import (
 )
 
 // consumeFoodLocked spends exactly one edible item from slot and returns what it
-// restores. The caller holds the inventory lock. Slot stays uint16 until after the
-// bound check because narrowing an untrusted value would wrap it onto a real slot.
+// restores. The caller holds the inventory lock. Slot stays uint16 until both the
+// uint8 representation and pack bounds are checked, so narrowing an untrusted value
+// can never wrap it onto a real slot even if the pack grows beyond 256 entries.
 func (i *inventory) consumeFoodLocked(slot uint16) (uint16, bool) {
-	if slot >= uint16(len(i.slots)) {
+	if slot > uint16(^uint8(0)) || int(slot) >= len(i.slots) {
 		return 0, false
 	}
 
