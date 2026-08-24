@@ -59,6 +59,11 @@ const (
 	ItemShovel
 	ItemPickaxe
 	ItemAxe
+
+	// The first food ingredient. It is still only a resource in this iteration: hunger,
+	// eating and cooking are separate systems, so appending the id and registering its
+	// carrying rules does not give it a capability the server has not implemented.
+	ItemRawMeat
 )
 
 // What each blade is worth, and the only copy of it.
@@ -250,6 +255,11 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemShovel:  {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
 	ItemPickaxe: {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
 	ItemAxe:     {places: world.Air, maxStack: 1, maxDurability: ToolMaxDurability},
+
+	// A plain hunted resource until cooking exists. It places nothing, wears out nothing
+	// and does no damage; sixteen to a stack keeps it carryable without making a carcass
+	// indistinguishable from a block resource.
+	ItemRawMeat: {places: world.Air, maxStack: 16},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

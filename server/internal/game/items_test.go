@@ -40,6 +40,25 @@ func TestEveryItemIsRegisteredWithItsOwnStackLimitAndPlacement(t *testing.T) {
 	}
 }
 
+func TestRawMeatCarriesItsPinnedIDAndResourceStats(t *testing.T) {
+	t.Parallel()
+
+	if ItemRawMeat != 19 {
+		t.Errorf("raw meat id = %d, want the appended wire id 19", ItemRawMeat)
+	}
+	got, registered := itemByID(ItemRawMeat)
+	if !registered {
+		t.Fatal("raw meat is not registered")
+	}
+	want := itemDefinition{places: world.Air, maxStack: 16}
+	if got != want {
+		t.Errorf("raw meat row = %+v, want %+v", got, want)
+	}
+	if block, placeable := blockPlacedBy(ItemRawMeat); placeable || block != world.Air {
+		t.Errorf("raw meat places block %d (placeable %v)", block, placeable)
+	}
+}
+
 func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 	t.Parallel()
 

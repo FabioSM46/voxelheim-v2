@@ -68,6 +68,10 @@ namespace Voxelheim.Net;
 /// server-owned label for one visible entity and refuses a description that omits it.
 /// A V12 server would omit the field, so the newer client would otherwise handshake
 /// cleanly and end the session as soon as the first player entered view.
+///
+/// **V14 appends `MobKind.Deer` and `MobAction.Flee`.** Both values travel inside a
+/// `MobState`, whose client decoder refuses unknown enum members. A V13 client would
+/// therefore handshake cleanly and end the session as soon as a deer entered view.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -75,7 +79,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 13
+  Current = 14
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

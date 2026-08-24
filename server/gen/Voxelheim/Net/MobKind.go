@@ -18,18 +18,22 @@ const (
 	MobKindUnknown MobKind = 0
 	MobKindDraugr  MobKind = 1
 	MobKindVargr   MobKind = 2
+	/// A passive animal that runs from nearby live players rather than attacking them.
+	MobKindDeer MobKind = 3
 )
 
 var EnumNamesMobKind = map[MobKind]string{
 	MobKindUnknown: "Unknown",
 	MobKindDraugr:  "Draugr",
 	MobKindVargr:   "Vargr",
+	MobKindDeer:    "Deer",
 }
 
 var EnumValuesMobKind = map[string]MobKind{
 	"Unknown": MobKindUnknown,
 	"Draugr":  MobKindDraugr,
 	"Vargr":   MobKindVargr,
+	"Deer":    MobKindDeer,
 }
 
 func (v MobKind) String() string {

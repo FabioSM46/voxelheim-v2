@@ -29,8 +29,8 @@ use crate::world::{BlockId, palette};
 // Presentation-only item ids. The server registry remains the sole authority on whether
 // any of these can be placed and which block an action actually creates.
 //
-// These eight live here because no module *acts* on them — they are ids this client only
-// ever draws. The seven that a module does act on stay where that module declares them:
+// These nine live here because no module *acts* on them — they are ids this client only
+// ever draws. Items that a module does act on stay where that module declares them:
 // the blade in `super::combat`, the three bundles in `super::structures`, the forge's two
 // products and the patch beside them in `super::crafting`. The table below names them from
 // there, because one declaration read from several places cannot drift the way two
@@ -45,9 +45,9 @@ pub(super) const ITEM_RAW_IRON: u16 = 6;
 /// What the dead leave behind.
 ///
 /// Presentation only, exactly as the six above are. The server's registry decides that a
-/// vargr leaves a pelt and a draugr leaves bone; nothing on this side routes a click or a
-/// key on either of these two, which is why they are declared here rather than in the
-/// module that would act on them.
+/// vargr leaves a pelt, a draugr leaves bone and a deer leaves meat; nothing on this side
+/// routes a click or a key on any of them, which is why they are declared here rather than
+/// in the module that would act on them.
 ///
 /// **What two pelts are worked into is no longer one of them.** `ITEM_LEATHER_PATCH` sat
 /// in this group until #113, on the strength of a sentence that had stopped being true:
@@ -55,6 +55,7 @@ pub(super) const ITEM_RAW_IRON: u16 = 6;
 /// beside its recipe in `super::crafting` with the other two products this client acts on.
 pub(super) const ITEM_BONE: u16 = 13;
 pub(super) const ITEM_VARGR_PELT: u16 = 14;
+pub(super) const ITEM_RAW_MEAT: u16 = 19;
 
 /// The shapes an item is drawn in.
 ///
@@ -153,12 +154,16 @@ enum ItemColour {
     WornSteel,
     /// Cleaner, brighter forged steel. sRGB `#8997A3`.
     ForgedSteel,
+    /// Fresh raw meat. A muted red that belongs to no terrain block. sRGB `#9C4F4F`.
+    RawMeat,
 }
 
 /// `#59636D`, converted from sRGB to the linear space vertex colours use.
 const WORN_STEEL_LINEAR: [f32; 3] = [0.099_899, 0.124_772, 0.152_926];
 /// `#8997A3`, converted from sRGB to the linear space vertex colours use.
 const FORGED_STEEL_LINEAR: [f32; 3] = [0.250_158, 0.309_469, 0.366_253];
+/// `#9C4F4F`, converted from sRGB to the linear space vertex colours use.
+const RAW_MEAT_LINEAR: [f32; 3] = [0.332_452, 0.078_187, 0.078_187];
 
 impl ItemColour {
     fn linear_rgba(self) -> [f32; 4] {
@@ -170,6 +175,10 @@ impl ItemColour {
             }
             Self::ForgedSteel => {
                 let [r, g, b] = FORGED_STEEL_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::RawMeat => {
+                let [r, g, b] = RAW_MEAT_LINEAR;
                 [r, g, b, 1.0]
             }
         }
@@ -210,7 +219,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 18] = [
+pub(super) const ITEMS: [ItemDisplay; 19] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -344,6 +353,14 @@ pub(super) const ITEMS: [ItemDisplay; 18] = [
         name: "axe",
         shape: ItemShape::Tool,
         colour: ItemColour::Block(palette::LOG),
+    },
+    // A hunted ingredient, not yet edible or cookable. `Material` is the carried shape
+    // for a consumable resource, and the item-only red keeps it distinct from hide.
+    ItemDisplay {
+        item_id: ITEM_RAW_MEAT,
+        name: "raw meat",
+        shape: ItemShape::Material,
+        colour: ItemColour::RawMeat,
     },
 ];
 
@@ -480,6 +497,7 @@ mod tests {
             ITEM_SHOVEL,
             ITEM_PICKAXE,
             ITEM_AXE,
+            ITEM_RAW_MEAT,
         ];
         for item_id in declared {
             assert!(
@@ -591,6 +609,17 @@ mod tests {
         assert_ne!(swatch(ITEM_BONE), swatch(ITEM_VARGR_PELT));
         assert_ne!(swatch(ITEM_BONE), swatch(ITEM_LEATHER_PATCH));
         assert_ne!(swatch(ITEM_VARGR_PELT), swatch(ITEM_LEATHER_PATCH));
+    }
+
+    #[test]
+    fn raw_meat_has_the_appended_id_and_its_own_display() {
+        assert_eq!(ITEM_RAW_MEAT, 19);
+        assert_eq!(item_label(ITEM_RAW_MEAT), "raw meat");
+        assert_eq!(item_shape(ITEM_RAW_MEAT), ItemShape::Material);
+        assert_eq!(
+            display(ITEM_RAW_MEAT).map(|row| row.colour),
+            Some(ItemColour::RawMeat)
+        );
     }
 
     /// What an id with no row does in every reader, asserted rather than assumed.

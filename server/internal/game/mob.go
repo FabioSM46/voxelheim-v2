@@ -44,6 +44,11 @@ const (
 	// The collision rests a body a hair above the face it landed on, so a sample taken at
 	// exactly the feet reads the air the skin sits in rather than the block below it.
 	stepProbeLift = 0.1
+
+	// A passive creature keeps running after the player leaves its awareness radius,
+	// until this wider boundary is crossed. Twelve blocks starts a deer's flight and
+	// twenty-four ends it, so small movements at the edge cannot flap the state.
+	passiveFleeReleaseRange = 24.0
 )
 
 // mob is one live creature.
@@ -194,21 +199,72 @@ func (s *Sim) advanceMobsLocked(players []*Player) ([]*mob, []lootDrop) {
 
 // step advances one mob by one tick, whatever species it is. The caller holds Sim.mu.
 func (m *mob) step(s *Sim, players []*Player) {
-	switch m.action {
-	case vnet.MobActionDying:
+	if m.action == vnet.MobActionDying {
 		m.stepDying()
-	case vnet.MobActionWindup:
-		// The *committed* target, not a fresh choice. A telegraph is aimed at somebody,
-		// and one that landed on whoever happened to walk nearer while it played out
-		// would be unreadable — the player who reacted to it is not the one it hit.
-		m.stepWindup(s, huntable(players, m.target))
-	case vnet.MobActionRecovery:
-		m.stepRecovery(m.chooseTargetLocked(players))
-	default:
-		m.stepPursuit(s, m.chooseTargetLocked(players))
+	} else if m.species().passive {
+		m.stepPassive(players)
+	} else {
+		switch m.action {
+		case vnet.MobActionWindup:
+			// The *committed* target, not a fresh choice. A telegraph is aimed at somebody,
+			// and one that landed on whoever happened to walk nearer while it played out
+			// would be unreadable — the player who reacted to it is not the one it hit.
+			m.stepWindup(s, huntable(players, m.target))
+		case vnet.MobActionRecovery:
+			m.stepRecovery(m.chooseTargetLocked(players))
+		default:
+			m.stepPursuit(s, m.chooseTargetLocked(players))
+		}
 	}
 
 	m.physics(s)
+}
+
+// stepPassive runs the non-attacking half of the shared state machine.
+//
+// A live player inside the registry's awareness radius starts flight. Once fleeing, the
+// wider release radius keeps it moving until it has actually escaped. Protection is not
+// invisibility here: it prevents a hostile attack, but a living player is still something
+// prey notices. `target` remains zero because it means prey selected for an attack in the
+// hostile branch and the spawn director reads that meaning.
+func (m *mob) stepPassive(players []*Player) {
+	threat, distance := m.nearestLivePlayer(players)
+	m.target = 0
+
+	if threat == nil || (m.action == vnet.MobActionFlee && distance > passiveFleeReleaseRange) {
+		m.action = vnet.MobActionIdle
+		m.actionTicks = 0
+		m.vel[0], m.vel[2] = 0, 0
+		return
+	}
+	if m.action != vnet.MobActionFlee && distance > m.species().aggroRange {
+		m.action = vnet.MobActionIdle
+		m.actionTicks = 0
+		m.vel[0], m.vel[2] = 0, 0
+		return
+	}
+
+	m.action = vnet.MobActionFlee
+	m.actionTicks = 0
+	m.steerAway(threat)
+}
+
+// nearestLivePlayer is the nearest living threat and its body-to-body distance.
+// Equal distances resolve by entity id, independently of caller order.
+func (m *mob) nearestLivePlayer(players []*Player) (*Player, float64) {
+	def := m.species()
+	var best *Player
+	bestDistance := math.Inf(1)
+	for _, p := range players {
+		if !p.alive() {
+			continue
+		}
+		distance := boxDistance(def.body.boxAt(m.pos), playerBox(p.pos))
+		if distance < bestDistance || (distance == bestDistance && (best == nil || p.entityID < best.entityID)) {
+			best, bestDistance = p, distance
+		}
+	}
+	return best, bestDistance
 }
 
 // huntable is the player with this identity, if there is one worth attacking.
@@ -398,6 +454,21 @@ func (m *mob) steerToward(target *Player) {
 	m.faceToward(target)
 }
 
+// steerAway walks directly opposite a live player's position and faces that heading.
+func (m *mob) steerAway(threat *Player) {
+	dx, dz := m.pos[0]-threat.pos[0], m.pos[2]-threat.pos[2]
+	length := math.Hypot(dx, dz)
+	if length == 0 {
+		m.vel[0], m.vel[2] = 0, 0
+		return
+	}
+
+	speed := m.species().speed
+	m.vel[0] = dx / length * speed
+	m.vel[2] = dz / length * speed
+	m.yaw = wrapAngle(math.Atan2(-dx, -dz))
+}
+
 // faceToward points the mob at a target.
 //
 // The same basis the player integrator uses — yaw 0 looks along -Z and +X is to its
@@ -555,6 +626,11 @@ func (s *Sim) damageMobLocked(m *mob, amount uint16) {
 		return
 	}
 	m.health -= amount
+	if m.species().passive {
+		m.action = vnet.MobActionFlee
+		m.actionTicks = 0
+		m.target = 0
+	}
 }
 
 // mobStates is the wire form of every mob, in the order it was given.

@@ -21,11 +21,10 @@ import (
 // draugrBody.boxAt(m.pos) for every mob it considered, which would have given a vargr
 // the reach of a draugr the moment a second species existed.
 //
-// **Two species share one state machine, and that is the design rather than an economy.**
-// A vargr differs from a draugr in its numbers and in nothing else: it chooses a target
-// the same way, telegraphs the same way, hops the same single block and dies the same
-// way. Two state machines would be two things to reason about and two places for the
-// same bug to live; one state machine parameterised by this table is one of each.
+// **Every species shares one state machine, and disposition is a column in this table.**
+// Hostile rows choose a target and attack it; passive rows choose a threat and flee. The
+// movement, collision, death and loot paths remain one of each rather than one copy per
+// creature.
 
 // mobDefinition is the server-only rule for one species.
 //
@@ -33,12 +32,10 @@ import (
 // health and the action; how fast the thing walks and how far it can reach are the
 // server's answers, and a client that disagreed about either would gain nothing.
 //
-// **Every field below is a real number, and a zero in any of them is a row somebody
-// forgot to finish.** That is the opposite of itemRegistry, where a zero maxDurability
-// is the documented way to say "this does not wear out" — nothing in a creature reads
-// that way, because one with no health is already dead, one with no speed cannot chase
-// and one with no body occupies nothing at all. The single exception is nocturnal, whose
-// false is a positive statement: this species hunts by day as well.
+// **Every common field below is a real number, while attack fields are conditional.**
+// A hostile row needs a complete attack; a passive row must set every attack field to
+// zero because it never enters those states. Health, speed, awareness, body and loot are
+// required for both. `passive` and `nocturnal` are positive boolean statements.
 // TestEverySpeciesIsFullyDescribed is what holds that line rather than this paragraph.
 //
 // **loot is held to the same rule, which is why an empty table is not allowed either.**
@@ -62,6 +59,11 @@ type mobDefinition struct {
 	// already hunting — which reads as the server cheating rather than as the dark being
 	// dangerous. TestTheSpawnGeometryHangsTogether asks the whole registry, not one row.
 	aggroRange float64
+
+	// passive selects the non-attacking branch of the shared state machine. Its zero is
+	// deliberately hostile, so an old row does not silently stop fighting when this
+	// column is added.
+	passive bool
 
 	// attackRange is how close it has to be to swing, in blocks between bodies. Under
 	// [SwordReach], so a player who holds the edge of their own reach is not trading
@@ -191,6 +193,19 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		// put that between them and the arithmetic.
 		loot: []lootRoll{{item: ItemVargrPelt, min: 1, max: 1}},
 	},
+
+	// The deer is prey rather than an enemy. Its aggro range is awareness: inside it a
+	// live player makes the deer flee, and the wider release radius in mob.go prevents a
+	// body standing on the boundary from switching state every tick.
+	vnet.MobKindDeer: {
+		maxHealth:  20,
+		speed:      4.0,
+		aggroRange: 12.0,
+		passive:    true,
+		body:       body{width: 0.9, height: 1.4},
+		nocturnal:  false,
+		loot:       []lootRoll{{item: ItemRawMeat, min: 1, max: 2}},
+	},
 }
 
 // mobByKind is one species' row, and whether the kind is one this server knows.
@@ -254,6 +269,10 @@ type mobTicks struct {
 func mobTimingsFor(tickRate uint8) map[vnet.MobKind]mobTicks {
 	timings := make(map[vnet.MobKind]mobTicks, len(mobRegistry))
 	for kind, def := range mobRegistry {
+		if def.passive {
+			timings[kind] = mobTicks{}
+			continue
+		}
 		timings[kind] = mobTicks{
 			windup:   ticksFor(def.windup, tickRate),
 			recovery: ticksFor(def.recovery, tickRate),
