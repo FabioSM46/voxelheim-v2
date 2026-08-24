@@ -208,8 +208,9 @@ func TestTheRecordOfADeadPlayerIsTheirRespawn(t *testing.T) {
 
 	life := player.Record()
 
-	if life.Health != PlayerMaxHealth {
-		t.Errorf("a dead player's record holds %d health, want a full %d", life.Health, PlayerMaxHealth)
+	wantHealth := maxHealthFor(levelFor(life.Experience))
+	if life.Health != wantHealth {
+		t.Errorf("a dead player's record holds %d health, want a full %d", life.Health, wantHealth)
 	}
 	if life.Hunger != RespawnHungerFloor {
 		t.Errorf("a dead player's record holds %d hunger, want the respawn floor %d", life.Hunger, RespawnHungerFloor)
@@ -274,8 +275,8 @@ func TestARecordAfterThePenaltyDoesNotChargeItTwice(t *testing.T) {
 	if got, want := life.Slots[0].Durability, wornByDeath(RustySwordMaxDurability); got != want {
 		t.Errorf("the recorded blade has %d durability, want %d charged exactly once", got, want)
 	}
-	if life.Health != PlayerMaxHealth {
-		t.Errorf("a dead player's record holds %d health, want a full %d", life.Health, PlayerMaxHealth)
+	if want := maxHealthFor(levelFor(life.Experience)); life.Health != want {
+		t.Errorf("a dead player's record holds %d health, want a full %d", life.Health, want)
 	}
 }
 
@@ -387,6 +388,27 @@ func TestValidateRefusesARecordThisBuildCannotHaveWritten(t *testing.T) {
 	emptyReserve.Hunger = 0
 	if err := emptyReserve.Validate(); err != nil {
 		t.Errorf("a living record at zero hunger was refused: %v", err)
+	}
+}
+
+func TestValidateUsesTheMaximumForTheStoredLevel(t *testing.T) {
+	t.Parallel()
+
+	levelFive := experienceBefore(5)
+	accepted := Life{Health: maxHealthFor(5), Experience: levelFive}
+	if err := accepted.Validate(); err != nil {
+		t.Fatalf("level-five maximum was refused: %v", err)
+	}
+
+	tooHealthy := accepted
+	tooHealthy.Health++
+	if err := tooHealthy.Validate(); err == nil {
+		t.Fatal("health above the level-five maximum was accepted")
+	}
+
+	capped := Life{Health: maxHealthFor(MaxLevel), Experience: ExperienceCap}
+	if err := capped.Validate(); err != nil {
+		t.Fatalf("level-30 maximum was refused: %v", err)
 	}
 }
 

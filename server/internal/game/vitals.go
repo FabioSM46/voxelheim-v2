@@ -61,7 +61,7 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 
 	return protocol.PlayerVitals{
 		Health:           p.health,
-		MaxHealth:        PlayerMaxHealth,
+		MaxHealth:        p.maxHealthLocked(),
 		LifeState:        p.lifeState,
 		RespawnTicks:     p.respawnTicks,
 		Invulnerable:     p.protectionTicks > 0,
@@ -236,7 +236,7 @@ func (p *Player) regenerateLocked() {
 		p.sinceDamageTicks++
 		return
 	}
-	if p.health >= PlayerMaxHealth {
+	if p.health >= p.maxHealthLocked() {
 		return
 	}
 	if p.hunger == 0 {
@@ -270,7 +270,7 @@ func (p *Player) regenerateLocked() {
 // The caller holds sim.mu.
 func (p *Player) respawnLocked() {
 	p.lifeState = vnet.LifeStateAlive
-	p.health = PlayerMaxHealth
+	p.health = p.maxHealthLocked()
 	p.hunger = max(p.hunger, RespawnHungerFloor)
 	p.respawnTicks = 0
 	p.protectionTicks = p.sim.protectionTicks
@@ -366,8 +366,8 @@ func fallDamage(impact float64) uint16 {
 	excess := math.Floor(impact - SafeFallSpeed)
 	damage := excess * FallDamagePerSpeed
 	if damage >= PlayerMaxHealth {
-		// Clamped rather than converted: anything at or past a full bar is lethal, and
-		// the conversion below is only safe once the value is known to be small.
+		// Clamped against the level-one base deliberately: a fall that kills a novice is
+		// survivable at high level, while this conversion stays bounded and deterministic.
 		return PlayerMaxHealth
 	}
 	return uint16(damage)

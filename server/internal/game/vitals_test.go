@@ -115,6 +115,62 @@ func (h *vitalsHarness) hurt(p *Player, amount uint16) {
 	p.damageLocked(amount)
 }
 
+func TestLevelFiveRegeneratesAndRespawnsToItsOwnMaximum(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	player.experience = experienceBefore(5)
+	player.health = PlayerMaxHealth
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+	for player.health < maxHealthFor(5) {
+		player.regenTicks = h.sim.regenIntervalTicks - 1
+		player.regenerateLocked()
+	}
+	player.regenTicks = h.sim.regenIntervalTicks - 1
+	player.regenerateLocked()
+	regenerated := player.health
+	player.damageLocked(regenerated)
+	h.sim.mu.Unlock()
+
+	if regenerated != maxHealthFor(5) {
+		t.Fatalf("level-five regeneration stopped at %d, want %d", regenerated, maxHealthFor(5))
+	}
+	h.advance(int(h.sim.deathTicks))
+	if got := h.vitals(player); got.Health != maxHealthFor(5) || got.MaxHealth != maxHealthFor(5) {
+		t.Errorf("level-five respawn vitals are %d/%d, want %d/%d",
+			got.Health, got.MaxHealth, maxHealthFor(5), maxHealthFor(5))
+	}
+}
+
+func TestTheSameTerminalFallKillsANoviceButNotALevelThirtyPlayer(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	novice, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	veteran, _ := h.join(2, [3]float32{4.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	veteran.experience = ExperienceCap
+	veteran.health = veteran.maxHealthLocked()
+	damage := fallDamage(TerminalFallSpeed)
+	novice.damageLocked(damage)
+	veteran.damageLocked(damage)
+	noviceAlive := novice.alive()
+	veteranAlive, veteranHealth := veteran.alive(), veteran.health
+	h.sim.mu.Unlock()
+
+	if noviceAlive {
+		t.Error("the level-one player survived the terminal-speed fall")
+	}
+	if !veteranAlive || veteranHealth != maxHealthFor(MaxLevel)-PlayerMaxHealth {
+		t.Errorf("the level-30 player ended alive=%t health=%d, want alive with %d",
+			veteranAlive, veteranHealth, maxHealthFor(MaxLevel)-PlayerMaxHealth)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // The formula
 // ---------------------------------------------------------------------------

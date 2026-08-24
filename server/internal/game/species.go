@@ -70,7 +70,8 @@ type mobDefinition struct {
 	// blows evenly.
 	attackRange float64
 
-	// damage is what one landed blow costs a player, out of [PlayerMaxHealth].
+	// damage is what one landed blow costs a player, measured against the
+	// [PlayerMaxHealth] level-one maximum.
 	damage uint16
 
 	// windup is the telegraph: the swing is committed and has not landed yet. It is what

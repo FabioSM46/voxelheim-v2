@@ -125,7 +125,7 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 				kind, def.attackRange, SwordReach)
 		}
 		if !def.passive && def.damage >= PlayerMaxHealth {
-			t.Errorf("%s takes %d of a player's %d health in one blow", kind, def.damage, PlayerMaxHealth)
+			t.Errorf("%s takes %d of a level-one player's %d health in one blow", kind, def.damage, PlayerMaxHealth)
 		}
 	}
 }

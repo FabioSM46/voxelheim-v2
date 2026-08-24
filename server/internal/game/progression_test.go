@@ -63,14 +63,51 @@ func TestAwardExperienceCrossesLevelsAndSaturatesWithoutOverflow(t *testing.T) {
 		{name: "repairs an impossible over-cap total", start: ExperienceCap + 1, amount: 0, want: ExperienceCap},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			player := Player{experience: tc.start}
+			startLevel := levelFor(tc.start)
+			player := Player{experience: tc.start, health: maxHealthFor(startLevel)}
 			if got := player.awardExperienceLocked(tc.amount); got != tc.leveledUp {
 				t.Errorf("leveledUp = %t, want %t", got, tc.leveledUp)
 			}
 			if player.experience != tc.want {
 				t.Errorf("experience = %d, want %d", player.experience, tc.want)
 			}
+			wantHealth := maxHealthFor(startLevel)
+			if endLevel := levelFor(tc.want); endLevel > startLevel {
+				wantHealth += HealthPerLevel * (endLevel - startLevel)
+			}
+			if player.health != wantHealth {
+				t.Errorf("health = %d, want %d after the crossed levels", player.health, wantHealth)
+			}
 		})
+	}
+}
+
+func TestMaximumHealthScalesFivePointsPerLevel(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		level uint16
+		want  uint16
+	}{
+		{level: 1, want: 100},
+		{level: 2, want: 105},
+		{level: 30, want: 245},
+	} {
+		if got := maxHealthFor(tc.level); got != tc.want {
+			t.Errorf("maxHealthFor(%d) = %d, want %d", tc.level, got, tc.want)
+		}
+	}
+}
+
+func TestALevelUpRaisesCurrentHealthWithTheMaximum(t *testing.T) {
+	t.Parallel()
+
+	player := Player{experience: experienceBefore(2) - 1, health: 61}
+	if !player.awardExperienceLocked(1) {
+		t.Fatal("the boundary did not report a level-up")
+	}
+	if player.health != 61+HealthPerLevel {
+		t.Errorf("health after the level-up = %d, want %d", player.health, 61+HealthPerLevel)
 	}
 }
 
