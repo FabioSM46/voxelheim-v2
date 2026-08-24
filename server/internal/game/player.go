@@ -73,6 +73,7 @@ type Sim struct {
 	// duration here is: the tick rate is an operator's flag.
 	regenDelayTicks    uint32
 	regenIntervalTicks uint32
+	hungerDrainTicks   uint32
 
 	// mobTimings is every registered species' windup and recovery in the ticks Step
 	// counts, derived from the configured rate for the reason every other duration here
@@ -256,6 +257,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		regenDelayTicks: ticksFor(HealthRegenDelay, tickRate),
 
 		regenIntervalTicks: ticksFor(HealthRegenInterval, tickRate),
+		hungerDrainTicks:   ticksFor(HungerDrainInterval, tickRate),
 		mobTimings:         mobTimingsFor(tickRate),
 		spawnEvery:         ticksFor(SpawnDirectorInterval, tickRate),
 		mobDespawnTicks:    ticksFor(MobDespawnGrace, tickRate),
@@ -382,17 +384,22 @@ type Player struct {
 	lifeState    vnet.LifeState
 	respawnTicks uint32
 
-	// sinceDamageTicks is how long since the last landed hit, and regenTicks how far
-	// through the current point of regeneration. Both stop counting once they have done
-	// their job, so neither grows without bound over a long session.
+	// sinceDamageTicks is how long since the last landed hit, regenTicks how far
+	// through the current point of regeneration, and hungerTicks how far through the
+	// next point of ordinary hunger drain. regenPoints counts the health already bought
+	// by the current hunger point. All stop at small thresholds rather than growing
+	// without bound over a long session.
 	//
-	// **Neither is persisted, and that is the same rule as the respawn countdown.** A
+	// **None is persisted, and that is the same rule as the respawn countdown.** A
 	// record describes a living player and carries nothing that only means something
 	// inside one session — see the note at the top of vitals.go. A player who leaves
 	// hurt comes back hurt and waits the full delay again, which is the honest answer:
 	// this server did not watch them for the time they were away.
 	sinceDamageTicks uint32
 	regenTicks       uint32
+	hungerTicks      uint32
+	regenPoints      uint16
+	hunger           uint16
 	protectionTicks  uint32
 	penaltyApplied   bool
 	spawn            [3]float64
@@ -455,8 +462,8 @@ type Player struct {
 // rather than a second constructor, the same shape a nil *world.Store is the ephemeral
 // world: there is one admission path, and "this player is new" is a value it takes
 // rather than a branch every caller repeats. A resumed player is placed at their stored
-// position, facing where they faced, with the health and the pack they had; a new one
-// gets full health, [newStarterInventory] and spawn.
+// position, facing where they faced, with the health, hunger and pack they had; a new
+// one gets full health and hunger, [newStarterInventory] and spawn.
 //
 // **spawn is the join spawn either way**, because it is also the provisional respawn
 // point — where a player with no tent comes back to. Restoring a position is not moving
@@ -504,9 +511,9 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 	}
 
 	joinSpawn := [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
-	pos, yaw, health, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), starterSlots()
+	pos, yaw, health, hunger, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), starterSlots()
 	if resume != nil {
-		pos, yaw, health, slots = resume.Pos, resume.Yaw, resume.Health, restoredSlots(resume.Slots)
+		pos, yaw, health, hunger, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, restoredSlots(resume.Slots)
 	}
 
 	p := &Player{
@@ -535,6 +542,7 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 		// facing north before their client's first input arrived.
 		current:   intent{yaw: yaw},
 		health:    health,
+		hunger:    hunger,
 		lifeState: vnet.LifeStateAlive,
 		// Not on the ground until a tick says so — for a restored player exactly as for a
 		// new one. The spawn sits a couple of blocks above the surface

@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -952,6 +953,166 @@ func TestRegenerationIsBoundedAndNeverResurrects(t *testing.T) {
 	}
 	if got := h.vitals(dead); got.Health != 0 {
 		t.Errorf("a dead player regenerated to %d, want none at all", got.Health)
+	}
+}
+
+// Hunger is paid only by connected, living ticks. The full budget is asserted rather
+// than extrapolated from one point: one hundred intervals are exactly twelve hours.
+func TestHungerDrainsFromFullToEmptyInTwelveHoursOfLivingPlay(t *testing.T) {
+	t.Parallel()
+
+	const rate = uint8(1)
+	h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	if got, want := h.sim.hungerDrainTicks, ticksFor(HungerDrainInterval, rate); got != want {
+		t.Fatalf("hunger interval = %d ticks, want %d", got, want)
+	}
+	total := int(PlayerMaxHunger) * int(h.sim.hungerDrainTicks)
+
+	h.sim.mu.Lock()
+	for range total - 1 {
+		player.advanceVitalsLocked()
+	}
+	if player.hunger != 1 {
+		t.Fatalf("one tick before the twelve-hour budget hunger = %d, want 1", player.hunger)
+	}
+	player.advanceVitalsLocked()
+	if player.hunger != 0 {
+		t.Errorf("after the twelve-hour budget hunger = %d, want 0", player.hunger)
+	}
+	if elapsed := time.Duration(total) * time.Second / time.Duration(rate); elapsed != 12*time.Hour {
+		t.Errorf("full-to-empty budget = %v, want 12h", elapsed)
+	}
+
+	// A corpse pauses rather than resets the connected-play clock. One dead tick at
+	// the edge of an interval must neither drain nor advance it.
+	player.hunger = 1
+	player.hungerTicks = h.sim.hungerDrainTicks - 1
+	player.damageLocked(PlayerMaxHealth)
+	before := player.hungerTicks
+	player.advanceVitalsLocked()
+	if player.hunger != 1 || player.hungerTicks != before {
+		t.Errorf("a dead tick changed hunger to %d or its clock to %d; want 1 and %d",
+			player.hunger, player.hungerTicks, before)
+	}
+	h.sim.mu.Unlock()
+}
+
+// A leaving body stays alive in Sim for the server-owned linger, including after EOF.
+// Those ticks are no longer connected play, so neither ordinary drain nor regeneration
+// may change the stored life even when both are one tick from spending hunger.
+func TestLeavingDoesNotAdvanceHungerOrRegeneration(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	player.health = 90
+	player.hunger = 2
+	player.hungerTicks = h.sim.hungerDrainTicks - 1
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+	player.regenTicks = h.sim.regenIntervalTicks - 1
+	player.regenPoints = HealthRegenPointsPerHunger - 1
+	h.sim.mu.Unlock()
+	player.BeginLeaving()
+
+	h.sim.mu.Lock()
+	beforeDrain, beforeRegen := player.hungerTicks, player.regenTicks
+	player.advanceVitalsLocked()
+	if player.health != 90 || player.hunger != 2 {
+		t.Errorf("a leaving tick changed health/hunger to %d/%d, want 90/2",
+			player.health, player.hunger)
+	}
+	if player.hungerTicks != beforeDrain || player.regenTicks != beforeRegen {
+		t.Errorf("a leaving tick advanced drain/regen clocks to %d/%d, want %d/%d",
+			player.hungerTicks, player.regenTicks, beforeDrain, beforeRegen)
+	}
+	h.sim.mu.Unlock()
+}
+
+func TestRegenerationSpendsOneHungerForEveryTwoHealth(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	player.health = 90
+	player.hunger = 2
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+
+	regeneratePoint := func() {
+		player.regenTicks = h.sim.regenIntervalTicks - 1
+		player.regenerateLocked()
+	}
+	regeneratePoint()
+	if player.health != 91 || player.hunger != 2 {
+		t.Fatalf("the first regenerated point left health/hunger %d/%d, want 91/2", player.health, player.hunger)
+	}
+	regeneratePoint()
+	if player.health != 92 || player.hunger != 1 {
+		t.Fatalf("the second regenerated point left health/hunger %d/%d, want 92/1", player.health, player.hunger)
+	}
+	regeneratePoint()
+	regeneratePoint()
+	if player.health != 94 || player.hunger != 0 {
+		t.Fatalf("four regenerated points left health/hunger %d/%d, want 94/0", player.health, player.hunger)
+	}
+	regeneratePoint()
+	if player.health != 94 {
+		t.Errorf("zero hunger still regenerated health to %d", player.health)
+	}
+	h.sim.mu.Unlock()
+}
+
+// Damage resets the timing of regeneration, not what food has already paid for. If it
+// reset the point counter too, repeatedly taking a hit after one healed point would make
+// every recovery free.
+func TestDamageCannotResetTheRegenerationHungerCost(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	player.health = 90
+	player.hunger = 2
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+	player.regenTicks = h.sim.regenIntervalTicks - 1
+	player.regenerateLocked()
+	player.damageLocked(1)
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+	player.regenTicks = h.sim.regenIntervalTicks - 1
+	player.regenerateLocked()
+	if player.hunger != 1 {
+		t.Errorf("two regenerated points separated by damage left hunger %d, want 1", player.hunger)
+	}
+	h.sim.mu.Unlock()
+}
+
+func TestRespawnRaisesHungerToItsFloorAndNeverLowersIt(t *testing.T) {
+	t.Parallel()
+
+	for _, start := range []uint16{10, 75} {
+		t.Run(fmt.Sprintf("from %d", start), func(t *testing.T) {
+			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.sim.mu.Lock()
+			player.hunger = start
+			player.damageLocked(PlayerMaxHealth)
+			h.sim.mu.Unlock()
+			h.advance(int(h.sim.deathTicks))
+
+			want := max(start, RespawnHungerFloor)
+			h.sim.mu.Lock()
+			got := player.hunger
+			h.sim.mu.Unlock()
+			if got != want {
+				t.Errorf("respawn hunger = %d, want %d", got, want)
+			}
+		})
 	}
 }
 

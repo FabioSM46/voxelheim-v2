@@ -360,9 +360,9 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	self := identities.playing(Admitted{ID: id}, character, false, nil)
 
 	// What the autosave captured, a moment before the player left.
-	stale := game.Life{Pos: [3]float64{1, 64, 1}, Health: 40}
+	stale := game.Life{Pos: [3]float64{1, 64, 1}, Health: 40, Hunger: 12}
 	// What the teardown captured after them: the last word.
-	final := game.Life{Pos: [3]float64{9, 70, 9}, Health: 100}
+	final := game.Life{Pos: [3]float64{9, 70, 9}, Health: 100, Hunger: 83}
 
 	if err := identities.Remember(self, final); err != nil {
 		t.Fatalf("Remember: %v", err)
@@ -378,9 +378,9 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	if !found {
 		t.Fatal("no record was written at all")
 	}
-	if saved.Pos != final.Pos || saved.Health != final.Health {
-		t.Errorf("the stored record is %v/%d, want the teardown's %v/%d",
-			saved.Pos, saved.Health, final.Pos, final.Health)
+	if saved.Pos != final.Pos || saved.Health != final.Health || saved.Hunger != final.Hunger {
+		t.Errorf("the stored record is %v/%d/%d, want the teardown's %v/%d/%d",
+			saved.Pos, saved.Health, saved.Hunger, final.Pos, final.Health, final.Hunger)
 	}
 
 	// And once the claim is gone there is nothing for an autosave to write at all: a
@@ -419,7 +419,7 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	}
 	identities.playing(Admitted{ID: id}, character, false, nil)
 
-	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73}
+	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73, Hunger: 29}
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: life}); err != nil {
 		t.Fatalf("RememberAll: %v", err)
 	}
@@ -431,8 +431,9 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	if !found {
 		t.Fatal("the autosave wrote nothing for a live session")
 	}
-	if saved.Pos != life.Pos || saved.Health != life.Health {
-		t.Errorf("the autosaved record is %v/%d, want %v/%d", saved.Pos, saved.Health, life.Pos, life.Health)
+	if saved.Pos != life.Pos || saved.Health != life.Health || saved.Hunger != life.Hunger {
+		t.Errorf("the autosaved record is %v/%d/%d, want %v/%d/%d",
+			saved.Pos, saved.Health, saved.Hunger, life.Pos, life.Health, life.Hunger)
 	}
 	// The character it was written under comes from the claim, because the simulation
 	// keys a life by account and an account has several characters.

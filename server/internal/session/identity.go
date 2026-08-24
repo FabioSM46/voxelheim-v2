@@ -725,7 +725,7 @@ func (i *Identities) recall(character persist.Character) (*game.Life, bool, erro
 	// means and how much health is a full bar are game's answers, so they are asked
 	// here — once, before anything is built from them, and about the whole record
 	// rather than slot by slot.
-	life := game.Life{Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Slots: rec.Slots}
+	life := game.Life{Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger, Slots: rec.Slots}
 	if vErr := life.Validate(); vErr != nil {
 		return nil, false, i.refuseRecord(character, vErr)
 	}
@@ -852,6 +852,7 @@ func (i *Identities) write(character persist.CharacterID, life game.Life) error 
 		Pos:      life.Pos,
 		Yaw:      life.Yaw,
 		Health:   life.Health,
+		Hunger:   life.Hunger,
 		Slots:    life.Slots,
 	})
 }

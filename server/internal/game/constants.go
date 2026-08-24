@@ -70,6 +70,11 @@ const (
 	// appearing then would be two answers to "how much health is full".
 	PlayerMaxHealth = 100
 
+	// PlayerMaxHunger is a full food reserve and the denominator of every hunger
+	// display. Zero remains a living state: it stops regeneration and does nothing
+	// else by itself.
+	PlayerMaxHunger = 100
+
 	// deathDurabilityKept over deathDurabilityScale is the approved death penalty on
 	// equipment: a player who dies keeps four fifths of the remaining condition of every
 	// durable item they had on them, losing the GDD's 20%. Which items those are is
@@ -146,6 +151,21 @@ const (
 	// them once somebody has actually been hurt.
 	HealthRegenDelay    = 5 * time.Second
 	HealthRegenInterval = 1 * time.Second
+
+	// HungerDrainInterval is how much connected, living play costs one point of
+	// hunger. At PlayerMaxHunger, 432 seconds per point is twelve hours from full to
+	// empty and six hours from half to empty. It is converted to ticks once by NewSim;
+	// wall time never advances it.
+	HungerDrainInterval = 432 * time.Second
+
+	// HealthRegenPointsPerHunger is how many health points one point of food pays
+	// for. Two makes a recovery from near death cost roughly half a full reserve,
+	// while hunger zero remains a hard stop rather than a debt.
+	HealthRegenPointsPerHunger uint16 = 2
+
+	// RespawnHungerFloor is the minimum reserve a new life receives. A death never
+	// lowers a better-fed player, and it never leaves an empty one unable to recover.
+	RespawnHungerFloor uint16 = 50
 
 	// --- The creatures ----------------------------------------------------------
 	//

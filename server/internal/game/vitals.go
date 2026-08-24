@@ -17,9 +17,10 @@ import (
 // on a stalled server must not respawn early because wall time kept moving, and a test
 // must be able to cover three seconds instantly.
 //
-// **Health is persisted; the clocks around it are not.** A life is written to the player
-// store on leave, on the autosave and at shutdown, so health and the pack come back with
-// the player — see [Life] and [Player.Record]. What is deliberately left behind is
+// **Health and hunger are persisted; the clocks around them are not.** A life is written
+// to the player store on leave, on the autosave and at shutdown, so both reserves and the
+// pack come back with the player — see [Life] and [Player.Record]. What is deliberately
+// left behind is
 // everything that only means something inside one session: the respawn countdown, the
 // protection window, the mining and swing guards. A record always describes a *living*
 // player, which is why none of those has anything to say across a disconnect.
@@ -142,7 +143,14 @@ func (p *Player) advanceVitalsLocked() {
 	}
 
 	if p.alive() {
-		p.regenerateLocked()
+		// A leaving body remains in the simulation for the server-owned linger, but its
+		// player can no longer act and may already be disconnected. That is not connected
+		// play, so both the ordinary hunger clock and the regeneration it pays for pause
+		// with the controls they were charging for.
+		if !p.leaving {
+			p.drainHungerLocked()
+			p.regenerateLocked()
+		}
 		return
 	}
 
@@ -169,6 +177,24 @@ func (p *Player) advanceVitalsLocked() {
 	if p.respawnTicks == 0 {
 		p.respawnLocked()
 	}
+}
+
+// drainHungerLocked spends one point after a full interval of connected, living play.
+// advanceVitalsLocked is the only caller, on its alive branch, so a corpse's countdown
+// never consumes the reserve. At zero the clock is cleared and stopped: eating from
+// empty buys a complete interval rather than inheriting a drain that could not land.
+func (p *Player) drainHungerLocked() {
+	if p.hunger == 0 {
+		p.hungerTicks = 0
+		return
+	}
+
+	p.hungerTicks++
+	if p.hungerTicks < p.sim.hungerDrainTicks {
+		return
+	}
+	p.hungerTicks = 0
+	p.hunger--
 }
 
 // regenerateLocked gives back one point of health when enough quiet has passed.
@@ -199,6 +225,9 @@ func (p *Player) regenerateLocked() {
 	if p.health >= PlayerMaxHealth {
 		return
 	}
+	if p.hunger == 0 {
+		return
+	}
 
 	p.regenTicks++
 	if p.regenTicks < p.sim.regenIntervalTicks {
@@ -206,6 +235,11 @@ func (p *Player) regenerateLocked() {
 	}
 	p.regenTicks = 0
 	p.health++
+	p.regenPoints++
+	if p.regenPoints == HealthRegenPointsPerHunger {
+		p.regenPoints = 0
+		p.hunger--
+	}
 }
 
 // respawnLocked puts a dead player back in the world at full health.
@@ -223,6 +257,7 @@ func (p *Player) regenerateLocked() {
 func (p *Player) respawnLocked() {
 	p.lifeState = vnet.LifeStateAlive
 	p.health = PlayerMaxHealth
+	p.hunger = max(p.hunger, RespawnHungerFloor)
 	p.respawnTicks = 0
 	p.protectionTicks = p.sim.protectionTicks
 
@@ -231,6 +266,8 @@ func (p *Player) respawnLocked() {
 	// arrive with a partial point owed to a life that has ended.
 	p.sinceDamageTicks = 0
 	p.regenTicks = 0
+	p.hungerTicks = 0
+	p.regenPoints = 0
 
 	p.pos = p.respawnPositionLocked()
 	p.vel = [3]float64{}

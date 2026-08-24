@@ -49,8 +49,8 @@ and never learns that a session exists beyond "there is somewhere to put a snaps
 between `session` and `world` — it imports both `identity` and `world`, reusing the delta store's
 record framing rather than copying it — and **neither of `game` and `persist` imports the other**.
 That is why a stored life is declared twice: `game.Life` and the life fields of `persist.Record`
-carry the same four values, and `session` is the one place that maps between them. The duplication
-is four field names; what it buys is that the store never decides what a life may say and the
+carry the same five values, and `session` is the one place that maps between them. The duplication
+is five field names; what it buys is that the store never decides what a life may say and the
 simulation never decides how one is written down. Both use `protocol.InventoryStack` for the slots,
 so the 36-slot shape has exactly one declaration.
 

@@ -304,11 +304,11 @@ func TestALookupIsAMapHitAndNotADirectoryScan(t *testing.T) {
 	}
 }
 
-// **The set-aside, and what proves it did not delete.** A players directory written
-// before characters is moved whole and a fresh one is opened. Every byte that was in it
-// is still there, under a name nothing will write to; the world starts with no
-// characters at all.
-func TestAPreCharacterDirectoryIsSetAsideAndNotDeleted(t *testing.T) {
+// **The set-aside, and what proves it did not migrate or delete.** A v4 players
+// directory has no hunger field, so it is moved whole and a fresh v5 one is opened.
+// Every byte that was in it is still there, under a name nothing will write to; the
+// world starts with no characters at all rather than inventing reserves for old lives.
+func TestAV4DirectoryIsSetAsideAndNotMigrated(t *testing.T) {
 	t.Parallel()
 
 	worldDir := t.TempDir()
@@ -317,12 +317,13 @@ func TestAPreCharacterDirectoryIsSetAsideAndNotDeleted(t *testing.T) {
 		t.Fatalf("creating the old players directory: %v", err)
 	}
 
-	// What a build before characters left: one file per identity, named for a
-	// 64-character player id, carrying this magic and format version 2.
+	// Representative records from the immediately previous format. Their bodies do not
+	// need to parse as v4 lives: startup reads only this store's magic and version before
+	// deciding the whole directory belongs aside.
 	was := map[string][]byte{}
 	for seed := byte(1); seed <= 3; seed++ {
-		name := testID(seed).String() + recordFileExt
-		body := preCharacterRecord(seed)
+		name := CharacterID(seed).String() + recordFileExt
+		body := v4Record(seed)
 		if err := os.WriteFile(filepath.Join(players, name), body, 0o600); err != nil {
 			t.Fatalf("writing %s: %v", name, err)
 		}
@@ -411,8 +412,8 @@ func TestASecondSetAsideDoesNotOverwriteTheFirst(t *testing.T) {
 		if err := os.MkdirAll(players, 0o755); err != nil {
 			t.Fatalf("creating the old players directory: %v", err)
 		}
-		name := testID(round).String() + recordFileExt
-		if err := os.WriteFile(filepath.Join(players, name), preCharacterRecord(round), 0o600); err != nil {
+		name := CharacterID(round).String() + recordFileExt
+		if err := os.WriteFile(filepath.Join(players, name), v4Record(round), 0o600); err != nil {
 			t.Fatalf("writing %s: %v", name, err)
 		}
 		store, err := OpenStore(worldDir)
@@ -632,12 +633,12 @@ func TestACharacterIDNamesAFile(t *testing.T) {
 	}
 }
 
-// preCharacterRecord is what a build before characters wrote: this magic, format
-// version 2, and a body this build has no way to read.
-func preCharacterRecord(seed byte) []byte {
+// v4Record is what the immediately previous build wrote as far as startup needs to
+// know: this store's magic, format version 4, and a body v5 deliberately never parses.
+func v4Record(seed byte) []byte {
 	body := make([]byte, world.HeaderSize+32)
 	copy(body[0:4], playerMagic[:])
-	binary.LittleEndian.PutUint32(body[4:8], StoreVersion-1)
+	binary.LittleEndian.PutUint32(body[4:8], 4)
 	for i := world.HeaderSize; i < len(body); i++ {
 		body[i] = seed
 	}
