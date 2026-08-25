@@ -672,6 +672,11 @@ impl PartyLogInbox {
     pub(crate) fn take(&mut self) -> Vec<String> {
         std::mem::take(&mut self.0)
     }
+
+    #[cfg(test)]
+    pub(crate) fn push(&mut self, line: String) {
+        self.0.push(line);
+    }
 }
 
 /// One cached appearance: what the server said, when it said it, and whether anything

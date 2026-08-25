@@ -14,7 +14,7 @@ use bevy::time::Real;
 
 use crate::net::{
     ChatEntry, ChatInbox, ChatRequest, DrainNetwork, Outbound, PartyAction, PartyRequest, Sent,
-    encode_chat_request, encode_party_request,
+    Session, encode_chat_request, encode_party_request,
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
@@ -171,9 +171,14 @@ fn ingest_server_lines(
 
 fn ingest_party_lines(
     time: Res<Time<Real>>,
+    session: Option<Res<Session>>,
     mut inbox: ResMut<PartyLogInbox>,
     mut log: ResMut<ChatLog>,
 ) {
+    if session.is_none() {
+        drop(inbox.take());
+        return;
+    }
     for line in inbox.take() {
         log.push(line, time.elapsed());
     }
@@ -353,7 +358,23 @@ fn line_alpha(mode: InputMode, visible: bool, age: Duration) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::{ChatMessage, PartyInvite};
+    use crate::net::{ANY_TOKEN, ChatMessage, PartyInvite, SessionParams};
+
+    fn session() -> Session {
+        Session(SessionParams {
+            clock: Default::default(),
+            entity_id: 7,
+            spawn: [0.5, 64.0, 0.5],
+            world_seed: 1,
+            tick_rate: 20,
+            chunk_size: 32,
+            view_distance: 8,
+            inventory_slots: 36,
+            hotbar_slots: 9,
+            equipment_slots: 3,
+            player_token: ANY_TOKEN,
+        })
+    }
 
     fn capture_app(outbound: Option<Outbound>) -> App {
         let mut app = App::new();
@@ -497,6 +518,36 @@ mod tests {
             "Eivor invites you to a party — /accept or /decline"
         );
         assert!(line.highlighted);
+    }
+
+    #[test]
+    fn party_lines_are_dropped_once_the_session_is_gone() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<PartyLogInbox>()
+            .init_resource::<ChatLog>()
+            .add_systems(Update, ingest_party_lines);
+        app.world_mut()
+            .resource_mut::<PartyLogInbox>()
+            .push("Eivor joined the party".to_owned());
+        app.update();
+        assert!(app.world().resource::<ChatLog>().0.is_empty());
+        assert!(
+            app.world_mut()
+                .resource_mut::<PartyLogInbox>()
+                .take()
+                .is_empty()
+        );
+
+        app.insert_resource(session());
+        app.world_mut()
+            .resource_mut::<PartyLogInbox>()
+            .push("Eivor joined the party".to_owned());
+        app.update();
+        assert_eq!(
+            app.world().resource::<ChatLog>().0.back().unwrap().text,
+            "Eivor joined the party"
+        );
     }
 
     #[test]

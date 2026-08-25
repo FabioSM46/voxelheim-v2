@@ -71,12 +71,18 @@ fn spawn_party(mut commands: Commands) {
                 .with_children(|row| {
                     row.spawn((
                         PartyLabel(index),
+                        Node {
+                            width: Val::Percent(100.0),
+                            overflow: Overflow::clip(),
+                            ..default()
+                        },
                         Text::new(String::new()),
                         TextFont {
                             font_size: FontSize::Px(16.0),
                             ..default()
                         },
                         TextColor(ALIVE),
+                        TextLayout::no_wrap(),
                         TextShadow::default(),
                     ));
                     row.spawn((
@@ -206,6 +212,13 @@ mod tests {
         let (_, dead, dead_colour) = labels.iter(world).find(|(slot, _, _)| slot.0 == 1).unwrap();
         assert_eq!(dead.0, "Unknown · Lv 0");
         assert_eq!(dead_colour.0, DEAD);
+
+        let mut label_bounds = world.query::<(&PartyLabel, &Node, &TextLayout)>();
+        for (_, node, layout) in label_bounds.iter(world) {
+            assert_eq!(node.width, Val::Percent(100.0));
+            assert_eq!(node.overflow, Overflow::clip());
+            assert_eq!(layout.linebreak, LineBreak::NoWrap);
+        }
 
         let mut fills = world.query::<(&PartyFill, &Node, &BackgroundColor)>();
         let (_, fill, _) = fills.iter(world).find(|(slot, _, _)| slot.0 == 0).unwrap();
