@@ -36,6 +36,11 @@ const (
 	// duration and never decides expiry.
 	PartyInviteTTL = 60 * time.Second
 
+	// PartyOfflineGrace is how long a disconnected character keeps its ordered
+	// roster slot. NewSim turns it into ticks so expiry is authoritative,
+	// deterministic and independent of scheduler timing.
+	PartyOfflineGrace = 10 * time.Minute
+
 	// PartyShareRadius is how near a living party member must stand to share a kill.
 	// Thirty-two blocks is twice the draugr's sixteen-block aggro range, so everybody
 	// spread across one fight counts, and well inside the default streamed view.

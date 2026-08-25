@@ -9,15 +9,57 @@ import (
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 )
 
-// checkPartySnapshot executes the recipient-aware V20 invariants the frame-only
-// decoder cannot: the member vector excludes the recipient, while its leader may be
-// either that recipient or one of the vector entries.
+// checkPartySnapshot executes the recipient-aware V21 invariants the frame-only
+// decoder cannot: the stable roster includes the recipient and offline members,
+// while the spatial member vector contains only other online members.
 func checkPartySnapshot(t *testing.T, recipient uint64, snapshot *vnet.EntitySnapshot) {
 	t.Helper()
 
 	leader := snapshot.PartyLeaderEntityId()
+	if snapshot.PartyRosterLength() == 0 {
+		if leader != 0 || snapshot.PartyMembersLength() != 0 {
+			t.Error("empty party roster carries a leader or live members")
+		}
+		return
+	}
+
+	characters := make(map[uint64]struct{}, snapshot.PartyRosterLength())
+	online := make(map[uint64]struct{}, snapshot.PartyRosterLength())
+	recipientCount := 0
+	for index := range snapshot.PartyRosterLength() {
+		member := new(vnet.PartyRosterMember)
+		if !snapshot.PartyRoster(member, index) {
+			t.Fatalf("party roster member %d is absent", index)
+		}
+		characterID, entityID := member.CharacterId(), member.EntityId()
+		if characterID == 0 {
+			t.Errorf("party roster member %d carries reserved character id 0", index)
+		}
+		if _, duplicate := characters[characterID]; duplicate {
+			t.Errorf("party character id %d appears more than once", characterID)
+		}
+		characters[characterID] = struct{}{}
+		if member.Online() != (entityID != 0) {
+			t.Errorf("party roster member %d online=%v with entity id %d", index, member.Online(), entityID)
+		}
+		if entityID != 0 {
+			if _, duplicate := online[entityID]; duplicate {
+				t.Errorf("online party entity id %d appears more than once", entityID)
+			}
+			online[entityID] = struct{}{}
+		}
+		if entityID == recipient {
+			recipientCount++
+		}
+		if index == 0 && leader != entityID {
+			t.Errorf("leader entity id = %d, first roster entity id = %d", leader, entityID)
+		}
+	}
+	if recipientCount != 1 {
+		t.Errorf("recipient entity id %d occurs %d times in roster, want once", recipient, recipientCount)
+	}
+
 	seen := make(map[uint64]struct{}, snapshot.PartyMembersLength())
-	leaderAmongMembers := false
 	for index := range snapshot.PartyMembersLength() {
 		var member vnet.PartyMemberState
 		if !snapshot.PartyMembers(&member, index) {
@@ -34,7 +76,9 @@ func checkPartySnapshot(t *testing.T, recipient uint64, snapshot *vnet.EntitySna
 			t.Errorf("party entity id %d appears more than once", entityID)
 		}
 		seen[entityID] = struct{}{}
-		leaderAmongMembers = leaderAmongMembers || entityID == leader
+		if _, rostered := online[entityID]; !rostered {
+			t.Errorf("live party entity id %d is not online in the roster", entityID)
+		}
 
 		pos := member.Pos(nil)
 		if pos == nil || math.IsNaN(float64(pos.X())) || math.IsInf(float64(pos.X()), 0) ||
@@ -47,11 +91,8 @@ func checkPartySnapshot(t *testing.T, recipient uint64, snapshot *vnet.EntitySna
 				index, member.Health(), member.MaxHealth())
 		}
 	}
-	if leader == 0 && snapshot.PartyMembersLength() != 0 {
-		t.Error("party members are present with no leader")
-	}
-	if leader != 0 && leader != recipient && !leaderAmongMembers {
-		t.Errorf("leader %d is neither recipient %d nor one of the party members", leader, recipient)
+	if len(seen) != len(online)-1 {
+		t.Errorf("party members contain %d entities, want %d other online roster entries", len(seen), len(online)-1)
 	}
 }
 

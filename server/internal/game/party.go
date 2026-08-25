@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
@@ -17,8 +18,24 @@ import (
 const maxPartyTargetBytes = 64
 
 type party struct {
-	leader  uint64
-	members []uint64
+	leader  partyMemberKey
+	members []partyMember
+}
+
+// partyMemberKey names one character rather than one connection. The account keeps
+// two owners from ever colliding, the persisted character id survives reconnects,
+// and the folded name pins the same character boundary mob-tap progression uses.
+type partyMemberKey struct {
+	playerID    identity.PlayerID
+	characterID uint64
+	foldedName  string
+}
+
+type partyMember struct {
+	key              partyMemberKey
+	name             string
+	player           *Player
+	offlineUntilTick uint64
 }
 
 type partyInvite struct {
@@ -32,6 +49,9 @@ type partyInvite struct {
 func (p *Player) Party(action vnet.PartyAction, targetName string) (vnet.RefusalReason, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
+	if !p.sim.onlineLocked(p) {
+		return vnet.RefusalReasonNoSuchPlayer, errors.New("the requesting player is no longer online")
+	}
 
 	switch action {
 	case vnet.PartyActionInvite:
@@ -41,7 +61,7 @@ func (p *Player) Party(action vnet.PartyAction, targetName string) (vnet.Refusal
 	case vnet.PartyActionDecline:
 		return p.declinePartyInviteLocked()
 	case vnet.PartyActionLeave:
-		if !p.sim.removeFromPartyLocked(p) {
+		if !p.sim.removePartyMemberLocked(p.partyID, p.partyMemberKey()) {
 			return vnet.RefusalReasonNoInvite, errors.New("the player is not in a party")
 		}
 		return vnet.RefusalReasonUnknown, nil
@@ -98,7 +118,7 @@ func (p *Player) canInviteLocked() (vnet.RefusalReason, error) {
 	if held == nil {
 		return vnet.RefusalReasonNoInvite, errors.New("the player's party no longer exists")
 	}
-	if held.leader != p.entityID {
+	if held.leader != p.partyMemberKey() {
 		return vnet.RefusalReasonNotLeader, errors.New("only the party leader may invite")
 	}
 	if len(held.members) >= MaxPartySize {
@@ -127,8 +147,12 @@ func (p *Player) acceptPartyInviteLocked() (vnet.RefusalReason, error) {
 
 	if inviter.partyID == 0 {
 		partyID := p.sim.mintEntityID()
-		held := &party{leader: inviter.entityID, members: []uint64{inviter.entityID, p.entityID}}
+		inviterMember := inviter.partyMember()
+		invitedMember := p.partyMember()
+		held := &party{leader: inviterMember.key, members: []partyMember{inviterMember, invitedMember}}
 		p.sim.parties[partyID] = held
+		p.sim.partyMemberships[inviterMember.key] = partyID
+		p.sim.partyMemberships[invitedMember.key] = partyID
 		inviter.partyID = partyID
 		p.partyID = partyID
 		p.invite = nil
@@ -136,14 +160,16 @@ func (p *Player) acceptPartyInviteLocked() (vnet.RefusalReason, error) {
 	}
 
 	held := p.sim.parties[inviter.partyID]
-	if held == nil || held.leader != inviter.entityID {
+	if held == nil || held.leader != inviter.partyMemberKey() {
 		p.invite = nil
 		return vnet.RefusalReasonNoInvite, errors.New("the inviter may no longer add party members")
 	}
 	if len(held.members) >= MaxPartySize {
 		return vnet.RefusalReasonPartyFull, errors.New("the party is full")
 	}
-	held.members = append(held.members, p.entityID)
+	member := p.partyMember()
+	held.members = append(held.members, member)
+	p.sim.partyMemberships[member.key] = inviter.partyID
 	p.partyID = inviter.partyID
 	p.invite = nil
 	return vnet.RefusalReasonUnknown, nil
@@ -174,65 +200,125 @@ func (p *Player) kickPartyMemberLocked(targetName string) (vnet.RefusalReason, e
 		return vnet.RefusalReasonUnknown, err
 	}
 	held := p.sim.parties[p.partyID]
-	if p.partyID == 0 || held == nil || held.leader != p.entityID {
+	if p.partyID == 0 || held == nil || held.leader != p.partyMemberKey() {
 		return vnet.RefusalReasonNotLeader, errors.New("only the party leader may kick")
 	}
-	target, online := p.sim.byName[folded]
-	if !online || target == p || target.partyID != p.partyID {
+	var target *partyMember
+	for index := range held.members {
+		candidate := &held.members[index]
+		if candidate.key.foldedName == folded && candidate.key != p.partyMemberKey() {
+			target = candidate
+			break
+		}
+	}
+	if target == nil {
 		return vnet.RefusalReasonNoSuchPlayer, errors.New("that name is not another member of the party")
 	}
-	p.sim.removeFromPartyLocked(target)
+	p.sim.removePartyMemberLocked(p.partyID, target.key)
 	return vnet.RefusalReasonUnknown, nil
 }
 
-func (s *Sim) removeFromPartyLocked(p *Player) bool {
-	if p == nil || p.partyID == 0 {
+func (s *Sim) removePartyMemberLocked(partyID uint64, key partyMemberKey) bool {
+	if partyID == 0 {
 		return false
 	}
-	partyID := p.partyID
 	held := s.parties[partyID]
 	if held == nil {
-		p.partyID = 0
+		delete(s.partyMemberships, key)
 		return false
-	}
-
-	for _, memberID := range held.members {
-		if memberID == p.entityID {
-			continue
-		}
-		if member := s.players[memberID]; member != nil {
-			delete(p.described, memberID)
-			delete(member.described, p.entityID)
-		}
 	}
 
 	index := -1
-	for i, memberID := range held.members {
-		if memberID == p.entityID {
+	for i, member := range held.members {
+		if member.key == key {
 			index = i
 			break
 		}
 	}
 	if index < 0 {
-		p.partyID = 0
+		delete(s.partyMemberships, key)
 		return false
 	}
+	removed := held.members[index]
+	if removed.player != nil && s.onlineLocked(removed.player) {
+		for memberIndex := range held.members {
+			member := held.members[memberIndex].player
+			if member == nil || member == removed.player || !s.onlineLocked(member) {
+				continue
+			}
+			delete(removed.player.described, member.entityID)
+			delete(member.described, removed.player.entityID)
+		}
+		removed.player.partyID = 0
+	}
 	held.members = append(held.members[:index], held.members[index+1:]...)
-	p.partyID = 0
+	delete(s.partyMemberships, key)
 
 	if len(held.members) <= 1 {
 		if len(held.members) == 1 {
-			if remaining := s.players[held.members[0]]; remaining != nil {
-				remaining.partyID = 0
+			remaining := held.members[0]
+			delete(s.partyMemberships, remaining.key)
+			if remaining.player != nil && s.onlineLocked(remaining.player) {
+				remaining.player.partyID = 0
 			}
 		}
 		delete(s.parties, partyID)
 		return true
 	}
-	if held.leader == p.entityID {
-		held.leader = held.members[0]
+	if held.leader == key {
+		held.leader = held.members[0].key
 	}
 	return true
+}
+
+// markPartyMemberOfflineLocked detaches exactly this session object while retaining
+// its stable roster slot. A late teardown from an older entity cannot detach a newer
+// reconnect because the live pointer has to match.
+func (s *Sim) markPartyMemberOfflineLocked(p *Player) {
+	if p == nil || p.partyID == 0 {
+		return
+	}
+	held := s.parties[p.partyID]
+	if held == nil {
+		p.partyID = 0
+		return
+	}
+	key := p.partyMemberKey()
+	for index := range held.members {
+		member := &held.members[index]
+		if member.key == key && member.player == p {
+			member.player = nil
+			member.offlineUntilTick = s.currentTick + s.partyOfflineTicks
+			p.partyID = 0
+			return
+		}
+	}
+}
+
+func (s *Sim) rebindPartyMemberLocked(p *Player) {
+	key := p.partyMemberKey()
+	partyID := s.partyMemberships[key]
+	held := s.parties[partyID]
+	if partyID == 0 || held == nil {
+		return
+	}
+	for index := range held.members {
+		member := &held.members[index]
+		if member.key == key {
+			member.player = p
+			member.offlineUntilTick = 0
+			p.partyID = partyID
+			return
+		}
+	}
+}
+
+func (p *Player) partyMemberKey() partyMemberKey {
+	return partyMemberKey{playerID: p.playerID, characterID: p.characterID, foldedName: foldPlayerName(p.name)}
+}
+
+func (p *Player) partyMember() partyMember {
+	return partyMember{key: p.partyMemberKey(), name: p.name, player: p}
 }
 
 func (s *Sim) clearInvitesFromLocked(entityID uint64) {
@@ -248,6 +334,25 @@ func (s *Sim) advancePartyInvitesLocked(tick uint64) {
 		if player.invite != nil && tick >= player.invite.expiresTick {
 			player.invite = nil
 		}
+	}
+
+	// Collect first because removal may compact a roster or dissolve its party.
+	// Every deadline is compared at the same authoritative tick, so members that
+	// disconnected together expire together regardless of map iteration order.
+	type expiredMember struct {
+		partyID uint64
+		key     partyMemberKey
+	}
+	var expired []expiredMember
+	for partyID, held := range s.parties {
+		for _, member := range held.members {
+			if member.player == nil && member.offlineUntilTick != 0 && tick >= member.offlineUntilTick {
+				expired = append(expired, expiredMember{partyID: partyID, key: member.key})
+			}
+		}
+	}
+	for _, member := range expired {
+		s.removePartyMemberLocked(member.partyID, member.key)
 	}
 }
 
@@ -274,9 +379,9 @@ func (p *Player) membersNearLocked(pos [3]float64, radius float64) []*Player {
 	}
 
 	radiusSquared := radius * radius
-	for _, entityID := range held.members {
-		member := p.sim.players[entityID]
-		if member == nil || member == p || !member.alive() {
+	for index := range held.members {
+		member := held.members[index].player
+		if member == nil || !p.sim.onlineLocked(member) || member == p || !member.alive() {
 			continue
 		}
 		var distanceSquared float64
@@ -291,32 +396,46 @@ func (p *Player) membersNearLocked(pos [3]float64, radius float64) []*Player {
 	return members
 }
 
-func (s *Sim) partySnapshotLocked(viewer *Player) (uint64, []protocol.PartyMemberState) {
+func (s *Sim) partySnapshotLocked(viewer *Player) (uint64, []protocol.PartyMemberState, []protocol.PartyRosterMember) {
 	if viewer.partyID == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 	held := s.parties[viewer.partyID]
 	if held == nil {
-		return 0, nil
+		return 0, nil, nil
 	}
 	members := make([]protocol.PartyMemberState, 0, len(held.members)-1)
-	for _, entityID := range held.members {
-		if entityID == viewer.entityID {
-			continue
+	roster := make([]protocol.PartyRosterMember, 0, len(held.members))
+	leaderEntityID := uint64(0)
+	for index := range held.members {
+		member := &held.members[index]
+		live := member.player
+		online := live != nil && s.onlineLocked(live)
+		entityID := uint64(0)
+		if online {
+			entityID = live.entityID
 		}
-		member := s.players[entityID]
-		if member == nil {
+		roster = append(roster, protocol.PartyRosterMember{
+			CharacterID: member.key.characterID,
+			EntityID:    entityID,
+			Name:        member.name,
+			Online:      online,
+		})
+		if member.key == held.leader {
+			leaderEntityID = entityID
+		}
+		if !online || live == viewer {
 			continue
 		}
 		members = append(members, protocol.PartyMemberState{
-			EntityID:  member.entityID,
-			Pos:       toWire(member.pos),
-			Health:    member.health,
-			MaxHealth: member.maxHealthLocked(),
-			Alive:     member.alive(),
+			EntityID:  live.entityID,
+			Pos:       toWire(live.pos),
+			Health:    live.health,
+			MaxHealth: live.maxHealthLocked(),
+			Alive:     live.alive(),
 		})
 	}
-	return held.leader, members
+	return leaderEntityID, members, roster
 }
 
 func acceptPartyTarget(name string) (accepted, folded string, err error) {

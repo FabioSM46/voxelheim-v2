@@ -163,7 +163,7 @@ func TestAcceptBuildsAnOrderedBoundedParty(t *testing.T) {
 		inviteAndAccept(t, players[0], players[index], names[index])
 	}
 	held := h.sim.parties[partyID]
-	if held == nil || held.leader != players[0].entityID || !slices.Equal(held.members, []uint64{1, 2, 3, 4, 5}) {
+	if held == nil || held.leader != players[0].partyMemberKey() || !slices.Equal(partyCharacterIDs(held), []uint64{1, 2, 3, 4, 5}) {
 		t.Fatalf("party = %+v, want leader 1 and join order [1 2 3 4 5]", held)
 	}
 	wantPartyRefusal(t, players[1], vnet.PartyActionInvite, names[5], vnet.RefusalReasonNotLeader)
@@ -241,7 +241,7 @@ func TestDeclineLeaderSuccessionKickAndDissolution(t *testing.T) {
 	partyID := astrid.partyID
 	mustParty(t, astrid, vnet.PartyActionLeave, "")
 	held := h.sim.parties[partyID]
-	if held == nil || held.leader != bjorn.entityID || !slices.Equal(held.members, []uint64{2, 3}) {
+	if held == nil || held.leader != bjorn.partyMemberKey() || !slices.Equal(partyCharacterIDs(held), []uint64{2, 3}) {
 		t.Fatalf("after leader leave party = %+v, want leader 2 and members [2 3]", held)
 	}
 	wantPartyRefusal(t, cora, vnet.PartyActionKick, "Bjorn", vnet.RefusalReasonNotLeader)
@@ -251,7 +251,7 @@ func TestDeclineLeaderSuccessionKickAndDissolution(t *testing.T) {
 	}
 }
 
-func TestSimLeaveMaintainsPartyAndNameIndexes(t *testing.T) {
+func TestSimLeaveKeepsTheStableRosterAndLeaderOffline(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
@@ -266,8 +266,11 @@ func TestSimLeaveMaintainsPartyAndNameIndexes(t *testing.T) {
 
 	h.sim.Leave(astrid)
 	held := h.sim.parties[partyID]
-	if held == nil || held.leader != bjorn.entityID || !slices.Equal(held.members, []uint64{2, 3}) {
-		t.Fatalf("party after disconnect = %+v, want leader 2 and members [2 3]", held)
+	if held == nil || held.leader != astrid.partyMemberKey() || !slices.Equal(partyCharacterIDs(held), []uint64{1, 2, 3}) {
+		t.Fatalf("party after disconnect = %+v, want offline leader and stable order [1 2 3]", held)
+	}
+	if held.members[0].player != nil {
+		t.Fatal("disconnected leader retained a live player binding")
 	}
 	if _, found := h.sim.byName["astrid"]; found {
 		t.Error("departed player remains in the name index")
@@ -275,6 +278,276 @@ func TestSimLeaveMaintainsPartyAndNameIndexes(t *testing.T) {
 	if dag.invite != nil {
 		t.Error("departed inviter left an actionable invitation behind")
 	}
+}
+
+func TestReconnectRebindsExactlyTheSameCharacterAndRestartsItsGrace(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 1, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, member, member.name)
+	inviteAndAccept(t, leader, third, third.name)
+	partyID := leader.partyID
+	grace := uint64(ticksFor(PartyOfflineGrace, 1))
+
+	h.sim.Leave(member)
+	held := h.sim.parties[partyID]
+	if held.members[1].player != nil || held.members[1].offlineUntilTick != grace {
+		t.Fatalf("offline member = %+v, want no player and deadline %d", held.members[1], grace)
+	}
+	h.sim.Step(grace - 1)
+	out := &dropSink{}
+	rebound, err := h.sim.JoinCharacter(22, member.playerID, member.characterID, member.name,
+		[3]float32{0.5, 64, 0.5}, testAppearance(), nil, out.deliver)
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	if rebound.partyID != partyID || held.members[1].player != rebound || held.members[1].offlineUntilTick != 0 {
+		t.Fatalf("rebound member = %+v with party %d, want same slot in party %d", held.members[1], rebound.partyID, partyID)
+	}
+
+	// The old teardown is harmless after the new binding has landed, and the old
+	// deadline cannot evict the reconnect on its boundary.
+	h.sim.Leave(member)
+	h.sim.Step(grace)
+	if held.members[1].player != rebound || rebound.partyID != partyID {
+		t.Fatal("an old teardown or deadline detached the new session")
+	}
+
+	// A later disconnect receives a whole new grace window from this tick.
+	h.sim.Leave(rebound)
+	secondDeadline := grace + grace
+	if held.members[1].offlineUntilTick != secondDeadline {
+		t.Fatalf("second deadline = %d, want %d", held.members[1].offlineUntilTick, secondDeadline)
+	}
+	h.sim.Step(secondDeadline - 1)
+	if len(held.members) != 3 {
+		t.Fatal("member expired one tick before the restarted deadline")
+	}
+	h.sim.Step(secondDeadline)
+	if !slices.Equal(partyCharacterIDs(held), []uint64{1, 3}) {
+		t.Fatalf("party after expiry = %v, want [1 3]", partyCharacterIDs(held))
+	}
+}
+
+func TestAnotherCharacterOnTheSameAccountDoesNotInheritPartyMembership(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, member, member.name)
+	partyID := leader.partyID
+	h.sim.Leave(member)
+
+	other, err := h.sim.JoinCharacter(20, member.playerID, 200, "Ivar", [3]float32{0.5, 64, 0.5},
+		testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("joining another character: %v", err)
+	}
+	if other.partyID != 0 || h.sim.parties[partyID].members[1].player != nil {
+		t.Fatal("another character inherited the offline character's party slot")
+	}
+}
+
+func TestReconnectAtTheExpiryTickDoesNotRestoreAnExpiredMembership(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 1, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, member, member.name)
+	inviteAndAccept(t, leader, third, third.name)
+	h.sim.Leave(member)
+	h.sim.Step(uint64(ticksFor(PartyOfflineGrace, 1)))
+
+	rejoined, err := h.sim.JoinCharacter(20, member.playerID, member.characterID, member.name,
+		[3]float32{0.5, 64, 0.5}, testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("reconnect at deadline: %v", err)
+	}
+	if rejoined.partyID != 0 {
+		t.Fatalf("reconnect at deadline restored expired party %d", rejoined.partyID)
+	}
+}
+
+func TestExplicitLeaveAfterReconnectRemovesOnlyTheStableMember(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, member, member.name)
+	inviteAndAccept(t, leader, third, third.name)
+	partyID := leader.partyID
+	h.sim.Leave(member)
+	rebound, err := h.sim.JoinCharacter(20, member.playerID, member.characterID, member.name,
+		[3]float32{0.5, 64, 0.5}, testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+
+	wantPartyRefusal(t, member, vnet.PartyActionLeave, "", vnet.RefusalReasonNoSuchPlayer)
+	if !slices.Equal(partyCharacterIDs(h.sim.parties[partyID]), []uint64{1, 2, 3}) {
+		t.Fatal("a stale session mutated the rebound roster")
+	}
+	mustParty(t, rebound, vnet.PartyActionLeave, "")
+	if rebound.partyID != 0 || !slices.Equal(partyCharacterIDs(h.sim.parties[partyID]), []uint64{1, 3}) {
+		t.Fatalf("explicit leave produced party %d and roster %v, want solo member and [1 3]", rebound.partyID, partyCharacterIDs(h.sim.parties[partyID]))
+	}
+	if _, retained := h.sim.partyMemberships[member.partyMemberKey()]; retained {
+		t.Fatal("explicit leave retained the stable membership index")
+	}
+}
+
+func TestLeaderReconnectKeepsTheFirstRosterSlotAndLeadership(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, member, member.name)
+	inviteAndAccept(t, leader, third, third.name)
+	partyID := leader.partyID
+	h.sim.Leave(leader)
+	if h.sim.parties[partyID].leader != leader.partyMemberKey() {
+		t.Fatal("disconnect promoted a successor")
+	}
+	rebound, err := h.sim.JoinCharacter(10, leader.playerID, leader.characterID, leader.name,
+		[3]float32{0.5, 64, 0.5}, testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("leader reconnect: %v", err)
+	}
+	leaderEntityID, _, roster := h.sim.partySnapshotLocked(member)
+	if rebound.partyID != partyID || leaderEntityID != 10 || len(roster) != 3 || roster[0].EntityID != 10 || !roster[0].Online {
+		t.Fatalf("leader reconnect produced party %d, leader %d, roster %+v", rebound.partyID, leaderEntityID, roster)
+	}
+}
+
+func TestOfflineExpiryPromotesInOrderAndCleansAnAllOfflineParty(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 1, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	second, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, second, second.name)
+	inviteAndAccept(t, leader, third, third.name)
+	partyID := leader.partyID
+	grace := uint64(ticksFor(PartyOfflineGrace, 1))
+
+	h.sim.Leave(leader)
+	h.sim.Step(1)
+	h.sim.Leave(second)
+	h.sim.Step(grace - 1)
+	held := h.sim.parties[partyID]
+	if held.leader != leader.partyMemberKey() || len(held.members) != 3 {
+		t.Fatal("offline leader was promoted or removed before its deadline")
+	}
+	h.sim.Step(grace)
+	if held.leader != second.partyMemberKey() || !slices.Equal(partyCharacterIDs(held), []uint64{2, 3}) || held.members[0].player != nil {
+		t.Fatalf("leader expiry produced %+v, want offline second member leading [2 3]", held)
+	}
+
+	// Once the promoted member reaches its own later deadline, the legacy two-member
+	// dissolution rule removes the final solo membership too.
+	h.sim.Leave(third)
+	h.sim.Step(grace + 1)
+	if h.sim.parties[partyID] != nil || len(h.sim.partyMemberships) != 0 || third.partyID != 0 {
+		t.Fatal("all-offline expiry left a party, membership index, or solo binding behind")
+	}
+}
+
+func TestAnAllOfflinePartyWithOneDeadlineIsCompletelyRemovedAtThatTick(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 1, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	second, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, second, second.name)
+	inviteAndAccept(t, leader, third, third.name)
+	partyID := leader.partyID
+	h.sim.Leave(leader)
+	h.sim.Leave(second)
+	h.sim.Leave(third)
+	deadline := uint64(ticksFor(PartyOfflineGrace, 1))
+	h.sim.Step(deadline - 1)
+	if held := h.sim.parties[partyID]; held == nil || len(held.members) != 3 {
+		t.Fatal("all-offline party disappeared before the shared deadline")
+	}
+	rebound, err := h.sim.JoinCharacter(20, second.playerID, second.characterID, second.name,
+		[3]float32{0.5, 64, 0.5}, testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("reconstructing all-offline party: %v", err)
+	}
+	held := h.sim.parties[partyID]
+	if rebound.partyID != partyID || held.members[1].player != rebound || held.members[1].offlineUntilTick != 0 ||
+		!slices.Equal(partyCharacterIDs(held), []uint64{1, 2, 3}) {
+		t.Fatalf("reconstructed party = %+v with rebound party %d", held, rebound.partyID)
+	}
+	h.sim.Step(deadline)
+	if h.sim.parties[partyID] != nil || len(h.sim.partyMemberships) != 0 || rebound.partyID != 0 {
+		t.Fatal("all-offline party or membership index survived the shared deadline")
+	}
+}
+
+func TestOfflineMembersStillCountAndCanBeKicked(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	names := []string{"Astrid", "Bjorn", "Cora", "Dag", "Eira", "Finn"}
+	players := make([]*Player, 0, len(names))
+	for index, name := range names {
+		player, _ := joinPartyPlayer(t, h, uint64(index+1), name, [3]float32{0.5, 64, 0.5})
+		players = append(players, player)
+	}
+	for index := 1; index < MaxPartySize; index++ {
+		inviteAndAccept(t, players[0], players[index], names[index])
+	}
+	h.sim.Leave(players[4])
+	wantPartyRefusal(t, players[0], vnet.PartyActionInvite, names[5], vnet.RefusalReasonPartyFull)
+	wantPartyRefusal(t, players[1], vnet.PartyActionKick, names[4], vnet.RefusalReasonNotLeader)
+	mustParty(t, players[0], vnet.PartyActionKick, names[4])
+	if _, retained := h.sim.partyMemberships[players[4].partyMemberKey()]; retained {
+		t.Fatal("leader kick retained the offline member index")
+	}
+}
+
+func TestExplicitLeaderLeavePromotesTheOfflineSecondMember(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	second, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, second, second.name)
+	inviteAndAccept(t, leader, third, third.name)
+	partyID := leader.partyID
+	h.sim.Leave(second)
+	mustParty(t, leader, vnet.PartyActionLeave, "")
+
+	held := h.sim.parties[partyID]
+	if held == nil || held.leader != second.partyMemberKey() || !slices.Equal(partyCharacterIDs(held), []uint64{2, 3}) {
+		t.Fatalf("party after explicit leader leave = %+v, want offline second member leading [2 3]", held)
+	}
+	leaderID, _, roster := h.sim.partySnapshotLocked(third)
+	if leaderID != 0 || len(roster) != 2 || roster[0].Online {
+		t.Fatalf("snapshot leader/roster = %d/%+v, want offline promoted leader first", leaderID, roster)
+	}
+}
+
+func partyCharacterIDs(held *party) []uint64 {
+	ids := make([]uint64, 0, len(held.members))
+	for _, member := range held.members {
+		ids = append(ids, member.key.characterID)
+	}
+	return ids
 }
 
 func TestPartySnapshotCarriesEveryOtherMemberRegardlessOfView(t *testing.T) {
@@ -305,10 +578,26 @@ func TestPartySnapshotCarriesEveryOtherMemberRegardlessOfView(t *testing.T) {
 		if got := snapshotPartyIDs(t, snapshot); !slices.Equal(got, tc.want) {
 			t.Errorf("viewer %d members = %v, want %v", tc.viewer.entityID, got, tc.want)
 		}
+		if got := snapshotRosterIDs(t, snapshot); !slices.Equal(got, []uint64{1, 2, 3}) {
+			t.Errorf("viewer %d roster = %v, want stable order [1 2 3]", tc.viewer.entityID, got)
+		}
 	}
 	if snapshot := newestSnapshot(t, soloOut); snapshot.PartyLeaderEntityId() != 0 || snapshot.PartyMembersLength() != 0 {
 		t.Errorf("solo viewer %d received party state", solo.entityID)
 	}
+}
+
+func snapshotRosterIDs(t *testing.T, snapshot *vnet.EntitySnapshot) []uint64 {
+	t.Helper()
+	ids := make([]uint64, 0, snapshot.PartyRosterLength())
+	for index := range snapshot.PartyRosterLength() {
+		member := new(vnet.PartyRosterMember)
+		if !snapshot.PartyRoster(member, index) {
+			t.Fatalf("party roster member %d is absent", index)
+		}
+		ids = append(ids, member.CharacterId())
+	}
+	return ids
 }
 
 func snapshotPartyIDs(t *testing.T, snapshot *vnet.EntitySnapshot) []uint64 {
