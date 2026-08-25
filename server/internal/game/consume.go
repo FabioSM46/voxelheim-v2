@@ -54,6 +54,7 @@ func (p *Player) Consume(req protocol.ConsumeRequest) (protocol.InventoryState, 
 	if !consumed {
 		return protocol.InventoryState{}, fmt.Errorf("slot %d holds no edible item", req.Slot)
 	}
+	p.refreshWornLocked()
 
 	p.hunger = uint16(min(uint32(PlayerMaxHunger), uint32(p.hunger)+uint32(restore)))
 	p.sim.log.Debug("item consumed", "entity_id", p.entityID, "slot", req.Slot,

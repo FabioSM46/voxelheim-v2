@@ -394,6 +394,32 @@ func (i *inventory) wornItemsLocked() (head, chest, legs uint16) {
 		uint16(i.slots[equipmentLegs].item)
 }
 
+// refreshWornLocked rebuilds the combat summary from the three authoritative
+// equipment slots. The caller holds sim.mu and inventory.mu; assigning the complete
+// local value at the end means the tick can never observe half of one refresh.
+//
+// A piece at zero durability stays equipped and visible but contributes nothing: worn
+// through is unusable under GDD section 4. Unknown rows fail closed in the same way,
+// though a validated inventory cannot contain one.
+func (p *Player) refreshWornLocked() {
+	var worn struct {
+		armour uint16
+		threat uint16
+	}
+	for _, stack := range p.inventory.slots[equipmentFirst:] {
+		if stack.durability == 0 {
+			continue
+		}
+		definition, registered := itemByID(stack.item)
+		if !registered {
+			continue
+		}
+		worn.armour += definition.armour
+		worn.threat += definition.threat
+	}
+	p.worn = worn
+}
+
 // applyDeathPenaltyLocked wears by the approved death penalty every durable slot the
 // player has on them, and reports whether any of them changed.
 //
@@ -547,6 +573,7 @@ func (p *Player) chargeDeathPenaltyLocked() {
 		// showing durability the server has already spent. See offerInventoryLocked.
 		p.inventoryDirty = true
 	}
+	p.refreshWornLocked()
 	p.penaltyApplied = true
 }
 
@@ -585,6 +612,7 @@ func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.Inve
 	if !p.inventory.moveLocked(req) {
 		return protocol.InventoryState{}, errors.New("the inventory move changes no authoritative slot")
 	}
+	p.refreshWornLocked()
 	if equipmentSlot(req.From) || equipmentSlot(req.To) {
 		p.sim.forgetDescribedLocked(p.entityID)
 	}

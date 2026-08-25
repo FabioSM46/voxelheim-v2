@@ -584,6 +584,7 @@ func (p *Player) releaseSlot(slot uint8) (protocol.InventoryState, droppedStack,
 	if !emptied {
 		return protocol.InventoryState{}, droppedStack{}, fmt.Errorf("inventory slot %d could not be emptied", slot)
 	}
+	p.refreshWornLocked()
 
 	return p.inventory.stateLocked(), droppedStack{
 		// The whole authoritative stack, wear included. There is no count or durability

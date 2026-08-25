@@ -373,7 +373,17 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		return
 	}
 
-	target.damageLocked(m.species().damage)
+	// Armour applies here rather than in damageLocked: a mob's blow is softened, while
+	// fall damage remains absolute and continues through the unchanged common funnel.
+	// Widen before multiplying so a future larger damage value cannot overflow uint16.
+	rawDamage := m.species().damage
+	damage := uint16(uint32(rawDamage) * uint32(ArmourScale-target.worn.armour) / uint32(ArmourScale))
+	if rawDamage != 0 && damage == 0 {
+		// A blow that connects always lands for something, even at the exact 100% test
+		// boundary. Production combinations stay below it by the registry sweep.
+		damage = 1
+	}
+	target.damageLocked(damage)
 	// Every attack pays recovery, landed or not, which is what stops a low tick rate or
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery

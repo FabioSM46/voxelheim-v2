@@ -321,6 +321,7 @@ func (p *Player) Craft(req protocol.CraftRequest) (protocol.InventoryState, erro
 	if !p.inventory.slots.craft(r) {
 		return protocol.InventoryState{}, fmt.Errorf("the pack has no room or not enough for %s", req.Recipe)
 	}
+	p.refreshWornLocked()
 	if r.experience > 0 {
 		p.sim.awardExperienceLocked(p, uint32(r.experience))
 		p.sim.log.Debug("experience awarded",

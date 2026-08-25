@@ -430,6 +430,103 @@ func TestADraugrTelegraphsBeforeItHits(t *testing.T) {
 	}
 }
 
+func draugrBlowAgainst(t *testing.T, pieces ...testArmourPiece) uint16 {
+	t.Helper()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
+	pos := [3]float32{1.5, 64, 0.5}
+	life := lifeWearing(t, pos, pieces...)
+	player, _ := h.joinLife(1, pos, &life)
+
+	h.step()
+	h.advance(int(h.sim.mobTimings[vnet.MobKindDraugr].windup))
+	return PlayerMaxHealth - h.vitals(player).Health
+}
+
+func TestWornArmourSoftensADraugrBlow(t *testing.T) {
+	leather := []testArmourPiece{
+		fullTestArmour(ItemLeatherCap),
+		fullTestArmour(ItemLeatherJerkin),
+		fullTestArmour(ItemLeatherLeggings),
+	}
+	iron := []testArmourPiece{
+		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemIronCuirass),
+		fullTestArmour(ItemIronGreaves),
+	}
+	mixed := []testArmourPiece{
+		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemLeatherJerkin),
+		fullTestArmour(ItemIronGreaves),
+	}
+	wornThrough := []testArmourPiece{
+		{item: ItemIronHelm, durability: 0},
+		fullTestArmour(ItemIronCuirass),
+		fullTestArmour(ItemIronGreaves),
+	}
+	mixedArmour := itemRegistry[ItemIronHelm].armour +
+		itemRegistry[ItemLeatherJerkin].armour +
+		itemRegistry[ItemIronGreaves].armour
+
+	for _, tc := range []struct {
+		name   string
+		pieces []testArmourPiece
+		want   uint16
+	}{
+		{name: "full leather", pieces: leather, want: 8},
+		{name: "full iron", pieces: iron, want: 7},
+		{name: "mixed", pieces: mixed, want: uint16(uint32(draugrRow.damage) * uint32(ArmourScale-mixedArmour) / uint32(ArmourScale))},
+		{name: "one iron piece worn through", pieces: wornThrough, want: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := draugrBlowAgainst(t, tc.pieces...); got != tc.want {
+				t.Errorf("the blow cost %d health, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvenCompleteArmourCannotEraseABlow(t *testing.T) {
+	const completeArmour ItemID = 64_970
+	itemRegistry[completeArmour] = itemDefinition{
+		places: world.Air, maxStack: 1, wornAt: wornHead, armour: ArmourScale, maxDurability: 1,
+	}
+	t.Cleanup(func() { delete(itemRegistry, completeArmour) })
+
+	if got := draugrBlowAgainst(t, fullTestArmour(completeArmour)); got != 1 {
+		t.Errorf("a blow against 100%% test armour cost %d health, want the floor of 1", got)
+	}
+}
+
+func TestAnArmourReducedBlowStillRestartsRegeneration(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
+	pos := [3]float32{1.5, 64, 0.5}
+	life := lifeWearing(t, pos,
+		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemIronCuirass),
+		fullTestArmour(ItemIronGreaves),
+	)
+	player, _ := h.joinLife(1, pos, &life)
+	h.step()
+
+	h.sim.mu.Lock()
+	player.sinceDamageTicks = h.sim.regenDelayTicks
+	player.regenTicks = h.sim.regenIntervalTicks - 1
+	h.sim.mu.Unlock()
+	h.advance(int(h.sim.mobTimings[vnet.MobKindDraugr].windup))
+
+	h.sim.mu.Lock()
+	sinceDamage, regen := player.sinceDamageTicks, player.regenTicks
+	h.sim.mu.Unlock()
+	if sinceDamage != 0 || regen != 0 {
+		t.Errorf("the reduced blow left regeneration clocks at since=%d regen=%d, want both zero", sinceDamage, regen)
+	}
+}
+
 // Leaving reach mid-telegraph costs the draugr its swing — and costs it no recovery,
 // because recovery is what an attack pays and this was not one.
 func TestASwingAbandonedMidTelegraphLandsNothing(t *testing.T) {
