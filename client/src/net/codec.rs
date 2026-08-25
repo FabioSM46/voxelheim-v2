@@ -1421,7 +1421,6 @@ pub struct LeaveStarted {
 
 /// One world-chat line this client asks the authoritative server to accept.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Wire foundation; the chat input system lands in a later issue.
 pub struct ChatRequest {
     /// Display text copied verbatim. Acceptance belongs to the server.
     pub text: String,
@@ -1439,7 +1438,6 @@ pub struct ChatMessage {
 
 /// Which party operation a client asks the authoritative server to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Wire foundation; party controls land in a later issue.
 pub enum PartyAction {
     Invite,
     Accept,
@@ -1449,7 +1447,6 @@ pub enum PartyAction {
 }
 
 impl PartyAction {
-    #[allow(dead_code)] // Used by the V20 encoder before an ECS caller exists.
     fn wire(self) -> fb::PartyAction {
         match self {
             Self::Invite => fb::PartyAction::Invite,
@@ -1463,7 +1460,6 @@ impl PartyAction {
 
 /// One client intent to change party membership.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Wire foundation; party controls land in a later issue.
 pub struct PartyRequest {
     pub action: PartyAction,
     /// Display text copied verbatim. Read by the server only for Invite and Kick.
@@ -3314,7 +3310,6 @@ pub fn encode_create_character_request(request: &CreateCharacterRequest) -> Vec<
 
 /// Builds one chat intent. The text is copied verbatim, empty and whitespace included;
 /// the authoritative server owns length and rate decisions.
-#[allow(dead_code)] // Wire foundation; the chat input system lands in a later issue.
 pub fn encode_chat_request(request: &ChatRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let text = builder.create_string(&request.text);
@@ -3324,7 +3319,6 @@ pub fn encode_chat_request(request: &ChatRequest) -> Vec<u8> {
 
 /// Builds one party intent. Target display text is copied verbatim and is meaningful
 /// only to the server for Invite and Kick.
-#[allow(dead_code)] // Wire foundation; party controls land in a later issue.
 pub fn encode_party_request(request: &PartyRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let target_name = builder.create_string(&request.target_name);

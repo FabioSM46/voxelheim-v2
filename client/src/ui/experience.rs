@@ -236,7 +236,10 @@ fn show_experience_bar(
     vitals: Res<SelfVitals>,
     mut roots: Query<&mut Visibility, With<ExperienceRoot>>,
 ) {
-    let next = if *mode == InputMode::Playing && session.is_some() && vitals.get().is_some() {
+    let next = if matches!(*mode, InputMode::Playing | InputMode::Chat)
+        && session.is_some()
+        && vitals.get().is_some()
+    {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -495,6 +498,10 @@ mod tests {
         assert_eq!(bar_visibility(&mut app), Visibility::Hidden);
 
         deliver(&mut app, vitals(1, 0, 50));
+        assert_eq!(bar_visibility(&mut app), Visibility::Visible);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
         assert_eq!(bar_visibility(&mut app), Visibility::Visible);
 
         for mode in [InputMode::Inventory, InputMode::Menu] {

@@ -903,6 +903,10 @@ mod tests {
         app.update();
         assert_eq!(only_anchor_visibility(&mut app), Visibility::Visible);
 
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        assert_eq!(only_anchor_visibility(&mut app), Visibility::Visible);
+
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
         app.update();
         assert_eq!(only_anchor_visibility(&mut app), Visibility::Hidden);

@@ -181,17 +181,19 @@ pub enum Control {
     Left,
     Right,
     Jump,
+    Chat,
     Inventory,
     Menu,
 }
 
 /// Every control, in the order the settings screen lists them.
-pub const CONTROLS: [Control; 7] = [
+pub const CONTROLS: [Control; 8] = [
     Control::Forward,
     Control::Back,
     Control::Left,
     Control::Right,
     Control::Jump,
+    Control::Chat,
     Control::Inventory,
     Control::Menu,
 ];
@@ -205,6 +207,7 @@ impl Control {
             Self::Left => "left",
             Self::Right => "right",
             Self::Jump => "jump",
+            Self::Chat => "chat",
             Self::Inventory => "inventory",
             Self::Menu => "menu",
         }
@@ -218,6 +221,7 @@ impl Control {
             Self::Left => "Strafe left",
             Self::Right => "Strafe right",
             Self::Jump => "Jump",
+            Self::Chat => "Chat",
             Self::Inventory => "Inventory",
             Self::Menu => "Pause menu",
         }
@@ -236,6 +240,7 @@ impl Control {
             Self::Left => KeyCode::KeyA,
             Self::Right => KeyCode::KeyD,
             Self::Jump => KeyCode::Space,
+            Self::Chat => KeyCode::KeyT,
             Self::Inventory => KeyCode::KeyE,
             Self::Menu => KeyCode::Escape,
         }
@@ -1022,8 +1027,8 @@ mod tests {
             let mut settings = Settings::default();
             settings.adjust(Knob::LookSensitivity, 4);
             settings
-                .rebind(Control::Forward, KeyCode::KeyT)
-                .expect("t is free");
+                .rebind(Control::Forward, KeyCode::F6)
+                .expect("f6 is free");
             settings.adjust(Knob::RenderDistance, -3);
             settings.adjust(Knob::FieldOfView, 2);
             settings.adjust(Knob::Brightness, -2);
@@ -1136,8 +1141,8 @@ mod tests {
     #[test]
     fn a_free_key_is_accepted_and_the_key_it_replaces_becomes_free() {
         let mut settings = Settings::default();
-        assert_eq!(settings.rebind(Control::Forward, KeyCode::KeyT), Ok(()));
-        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::KeyT);
+        assert_eq!(settings.rebind(Control::Forward, KeyCode::F6), Ok(()));
+        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::F6);
 
         // `W` is nobody's now, so the pause menu may have it — and Escape is then free.
         assert_eq!(settings.rebind(Control::Menu, KeyCode::KeyW), Ok(()));

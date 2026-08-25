@@ -196,7 +196,10 @@ fn show_hunger_bar(
     vitals: Res<SelfVitals>,
     mut roots: Query<&mut Visibility, With<HungerRoot>>,
 ) {
-    let next = if *mode == InputMode::Playing && session.is_some() && vitals.get().is_some() {
+    let next = if matches!(*mode, InputMode::Playing | InputMode::Chat)
+        && session.is_some()
+        && vitals.get().is_some()
+    {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -225,7 +228,9 @@ fn drive_low_hunger_blink(
     mut state: ResMut<LowHungerReminder>,
     mut fills: Query<&mut BackgroundColor, With<HungerFill>>,
 ) {
-    let low = *mode == InputMode::Playing && session.is_some() && vitals.get().is_some_and(is_low);
+    let low = matches!(*mode, InputMode::Playing | InputMode::Chat)
+        && session.is_some()
+        && vitals.get().is_some_and(is_low);
     let colour = if !low {
         if state.was_low {
             state.leave_low();
@@ -412,6 +417,10 @@ mod tests {
         assert_eq!(visibility(&mut app), Visibility::Hidden);
 
         deliver(&mut app, vitals(80, 100));
+        assert_eq!(visibility(&mut app), Visibility::Visible);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
         assert_eq!(visibility(&mut app), Visibility::Visible);
 
         for mode in [InputMode::Inventory, InputMode::Menu] {

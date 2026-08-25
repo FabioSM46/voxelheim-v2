@@ -2351,6 +2351,14 @@ mod tests {
         let mut app = app();
         assert_eq!(held(&mut app).1, Visibility::Visible);
 
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        assert_eq!(
+            held(&mut app).1,
+            Visibility::Visible,
+            "chat keeps the held item in the live world"
+        );
+
         for mode in [InputMode::Inventory, InputMode::Menu] {
             *app.world_mut().resource_mut::<InputMode>() = mode;
             app.update();
@@ -2834,7 +2842,7 @@ mod tests {
     fn a_mode_that_is_not_playing_stops_the_hand_the_server_is_still_feeding() {
         const STEP: Duration = Duration::from_millis(16);
 
-        for mode in [InputMode::Inventory, InputMode::Menu] {
+        for mode in [InputMode::Chat, InputMode::Inventory, InputMode::Menu] {
             let mut app = hand_only_app();
             app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
 

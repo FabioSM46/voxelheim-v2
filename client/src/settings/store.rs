@@ -407,7 +407,7 @@ mod tests {
         settings.toggle_readout();
         settings.cycle_readout_corner();
         for (control, key) in [
-            (Control::Forward, KeyCode::KeyT),
+            (Control::Forward, KeyCode::F6),
             (Control::Menu, KeyCode::KeyG),
             (Control::Jump, KeyCode::Escape),
         ] {
@@ -466,12 +466,12 @@ mod tests {
         let path = scratch.join("settings");
         fs::write(
             &path,
-            "bind forward t\nlook-sensitivity banana\nbind jump g\n",
+            "bind forward f6\nlook-sensitivity banana\nbind jump g\n",
         )
         .expect("a scratch file");
 
         let (settings, complaints) = load(&path);
-        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::KeyT);
+        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::F6);
         assert_eq!(settings.bindings().key(Control::Jump), KeyCode::KeyG);
         assert!(
             (settings.look_sensitivity() - Settings::default().look_sensitivity()).abs()
@@ -541,7 +541,7 @@ mod tests {
     fn a_file_that_binds_two_controls_to_one_key_is_refused_whole() {
         let scratch = Scratch::new("settings-collision");
         let path = scratch.join("settings");
-        fs::write(&path, "bind forward t\nbind back t\n").expect("a scratch file");
+        fs::write(&path, "bind forward f6\nbind back f6\n").expect("a scratch file");
 
         let (settings, complaints) = load(&path);
         assert_eq!(*settings.bindings(), Settings::default().bindings().clone());
@@ -550,10 +550,10 @@ mod tests {
         // And nothing reachable from the screen can produce that state either.
         let mut settings = settings;
         settings
-            .rebind(Control::Forward, KeyCode::KeyT)
-            .expect("t is free");
+            .rebind(Control::Forward, KeyCode::F6)
+            .expect("f6 is free");
         assert_eq!(
-            settings.rebind(Control::Back, KeyCode::KeyT),
+            settings.rebind(Control::Back, KeyCode::F6),
             Err(RebindRefusal::WouldUnbind(Control::Forward))
         );
     }

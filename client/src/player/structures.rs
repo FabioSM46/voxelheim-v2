@@ -2203,6 +2203,17 @@ mod tests {
         deliver(&mut app, 1, vec![tent_at(900, [3, 80, 0], LOCAL_ID)]);
         app.update();
 
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Visibility, With<Structure>>();
+            assert_eq!(
+                *query.single(world).expect("one structure"),
+                Visibility::Visible
+            );
+        }
+
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
         app.update();
 
