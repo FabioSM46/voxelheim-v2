@@ -548,6 +548,66 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_loot_open_request(&self) -> Option<LootOpenRequest<'a>> {
+        if self.payload_type() == Payload::LootOpenRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LootOpenRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_loot_take_request(&self) -> Option<LootTakeRequest<'a>> {
+        if self.payload_type() == Payload::LootTakeRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LootTakeRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_loot_state(&self) -> Option<LootState<'a>> {
+        if self.payload_type() == Payload::LootState {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LootState::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_loot_closed(&self) -> Option<LootClosed<'a>> {
+        if self.payload_type() == Payload::LootClosed {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LootClosed::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -591,6 +651,10 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::ChatMessage => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChatMessage>>("Payload::ChatMessage", pos),
           Payload::PartyRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PartyRequest>>("Payload::PartyRequest", pos),
           Payload::PartyInvite => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PartyInvite>>("Payload::PartyInvite", pos),
+          Payload::LootOpenRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootOpenRequest>>("Payload::LootOpenRequest", pos),
+          Payload::LootTakeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootTakeRequest>>("Payload::LootTakeRequest", pos),
+          Payload::LootState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootState>>("Payload::LootState", pos),
+          Payload::LootClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootClosed>>("Payload::LootClosed", pos),
           _ => Ok(()),
         }
      })?
@@ -964,6 +1028,46 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::PartyInvite => {
                 if let Some(x) = self.payload_as_party_invite() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LootOpenRequest => {
+                if let Some(x) = self.payload_as_loot_open_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LootTakeRequest => {
+                if let Some(x) = self.payload_as_loot_take_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LootState => {
+                if let Some(x) = self.payload_as_loot_state() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LootClosed => {
+                if let Some(x) = self.payload_as_loot_closed() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

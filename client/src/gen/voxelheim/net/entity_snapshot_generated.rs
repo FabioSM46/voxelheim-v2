@@ -36,6 +36,8 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_DROP_DURABILITIES: ::flatbuffers::VOffsetT = 20;
     pub const VT_PARTY_LEADER_ENTITY_ID: ::flatbuffers::VOffsetT = 22;
     pub const VT_PARTY_MEMBERS: ::flatbuffers::VOffsetT = 24;
+    pub const VT_PARTY_ROSTER: ::flatbuffers::VOffsetT = 26;
+    pub const VT_ACCESSIBLE_LOOT_CORPSES: ::flatbuffers::VOffsetT = 28;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -53,6 +55,12 @@ impl<'a> EntitySnapshot<'a> {
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
         builder.add_party_leader_entity_id(args.party_leader_entity_id);
+        if let Some(x) = args.accessible_loot_corpses {
+            builder.add_accessible_loot_corpses(x);
+        }
+        if let Some(x) = args.party_roster {
+            builder.add_party_roster(x);
+        }
         if let Some(x) = args.party_members {
             builder.add_party_members(x);
         }
@@ -285,14 +293,14 @@ impl<'a> EntitySnapshot<'a> {
             self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ItemDropDurability>>>(EntitySnapshot::VT_DROP_DURABILITIES, None)
         }
     }
-    /// The current party leader's entity id, or `0` when the recipient is in no party.
+    /// The current party leader's live entity id, or `0` when there is no party **or the
+    /// stable leader at `party_roster[0]` is offline**.
     ///
     /// A non-zero leader may be the recipient itself or one of `party_members`. The
-    /// decoder that sees only this frame can compare it with the member vector but cannot
-    /// reject an absent match: it does not know the recipient id from the earlier welcome,
-    /// so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
-    /// empty member vector. The converse is not
-    /// frame-verifiable: a non-zero leader with no other members may be the recipient.
+    /// decoder that sees only this frame compares it with the roster's first entry: an
+    /// online leader must carry that same non-zero entity id, and an offline leader must
+    /// carry zero. When the roster is empty this field and `party_members` are both empty.
+    /// A non-zero leader may be the recipient and therefore absent from `party_members`.
     #[inline]
     pub fn party_leader_entity_id(&self) -> u64 {
         // Safety:
@@ -320,9 +328,10 @@ impl<'a> EntitySnapshot<'a> {
     ///     `health <= max_health`
     ///   - the recipient's own entity id never appears; this must be checked by a layer that
     ///     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
-    ///   - a zero `party_leader_entity_id` requires this vector to be empty
+    ///   - every member maps to an online non-zero entity in `party_roster`
+    ///   - when the roster is empty this vector is empty
     ///   - a non-zero leader is either the recipient or one of the members; the
-    ///     recipient-aware consumer must check which when it has the welcome and snapshot together
+    ///     recipient-aware consumer checks which when it has the welcome and snapshot together
     #[inline]
     pub fn party_members(&self) -> Option<::flatbuffers::Vector<'a, PartyMemberState>> {
         // Safety:
@@ -332,6 +341,46 @@ impl<'a> EntitySnapshot<'a> {
             self._tab
                 .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, PartyMemberState>>>(
                     EntitySnapshot::VT_PARTY_MEMBERS,
+                    None,
+                )
+        }
+    }
+    /// The complete ordered party roster, including the recipient. Empty means no party;
+    /// otherwise the first entry is the leader. Unlike `party_members`, this remains complete
+    /// when a member disconnects and uses stable character identity for every position.
+    ///
+    /// `party_leader_entity_id` is the first entry's live entity id while the leader is
+    /// online and zero while that leader is offline. Zero therefore no longer implies that
+    /// `party_members` or this roster is empty; it never names an online entity.
+    #[inline]
+    pub fn party_roster(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PartyRosterMember<'a>>>>
+    {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PartyRosterMember>>,
+            >>(EntitySnapshot::VT_PARTY_ROSTER, None)
+        }
+    }
+    /// Corpse ids that still hold loot this recipient may access. Each id is exactly the
+    /// `entity_id` of one `mobs` entry whose action is `Corpse`; a receiver rejects an id
+    /// that names no such body. Complete per snapshot:
+    /// a later vector replaces the former one, absence and empty both mean none, and ids
+    /// are non-zero and unique. It carries access, never contents; opening one asks the
+    /// server for a per-recipient `LootState`.
+    #[inline]
+    pub fn accessible_loot_corpses(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(
+                    EntitySnapshot::VT_ACCESSIBLE_LOOT_CORPSES,
                     None,
                 )
         }
@@ -356,6 +405,8 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ItemDropDurability>>>("drop_durabilities", Self::VT_DROP_DURABILITIES, false)?
      .visit_field::<u64>("party_leader_entity_id", Self::VT_PARTY_LEADER_ENTITY_ID, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, PartyMemberState>>>("party_members", Self::VT_PARTY_MEMBERS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PartyRosterMember>>>>("party_roster", Self::VT_PARTY_ROSTER, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("accessible_loot_corpses", Self::VT_ACCESSIBLE_LOOT_CORPSES, false)?
      .finish();
         Ok(())
     }
@@ -382,6 +433,12 @@ pub struct EntitySnapshotArgs<'a> {
     pub party_leader_entity_id: u64,
     pub party_members:
         Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, PartyMemberState>>>,
+    pub party_roster: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<PartyRosterMember<'a>>>,
+        >,
+    >,
+    pub accessible_loot_corpses: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -398,6 +455,8 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             drop_durabilities: None,
             party_leader_entity_id: 0,
             party_members: None,
+            party_roster: None,
+            accessible_loot_corpses: None,
         }
     }
 }
@@ -502,6 +561,28 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
         );
     }
     #[inline]
+    pub fn add_party_roster(
+        &mut self,
+        party_roster: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<PartyRosterMember<'b>>>,
+        >,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_PARTY_ROSTER,
+            party_roster,
+        );
+    }
+    #[inline]
+    pub fn add_accessible_loot_corpses(
+        &mut self,
+        accessible_loot_corpses: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u64>>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_ACCESSIBLE_LOOT_CORPSES,
+            accessible_loot_corpses,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -534,6 +615,8 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("drop_durabilities", &self.drop_durabilities());
         ds.field("party_leader_entity_id", &self.party_leader_entity_id());
         ds.field("party_members", &self.party_members());
+        ds.field("party_roster", &self.party_roster());
+        ds.field("accessible_loot_corpses", &self.accessible_loot_corpses());
         ds.finish()
     }
 }

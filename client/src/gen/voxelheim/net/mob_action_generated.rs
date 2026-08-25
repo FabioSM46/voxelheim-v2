@@ -11,13 +11,13 @@ pub const ENUM_MIN_MOB_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_ACTION: u8 = 6;
+pub const ENUM_MAX_MOB_ACTION: u8 = 7;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_ACTION: [MobAction; 7] = [
+pub const ENUM_VALUES_MOB_ACTION: [MobAction; 8] = [
     MobAction::Unknown,
     MobAction::Idle,
     MobAction::Chase,
@@ -25,6 +25,7 @@ pub const ENUM_VALUES_MOB_ACTION: [MobAction; 7] = [
     MobAction::Recovery,
     MobAction::Dying,
     MobAction::Flee,
+    MobAction::Corpse,
 ];
 
 /// What a mob is doing this tick, as the server's finite-state machine holds it.
@@ -47,8 +48,8 @@ impl MobAction {
     /// Cannot attack again until this expires. The server's answer to attack cadence.
     pub const Recovery: Self = Self(4);
     /// Killed, and going down. The creature has no health left and is not coming back;
-    /// the server holds the body here for a fixed span and then stops sending it, and
-    /// what the kill left behind reaches the ground at that moment and not before.
+    /// the server holds the fall here for its presentation span and then advances the
+    /// same entity to `Corpse`. Ordinary mob loot never becomes a ground drop.
     ///
     /// **It is the only statement of death this contract makes about a mob, and it is
     /// what a receiver must animate on.** There is no `LifeState` beside a `MobState` and
@@ -60,14 +61,17 @@ impl MobAction {
     /// gameplay fact the server is already stating.
     ///
     /// Nothing about the pose is here. How long a body takes to go down, and which way it
-    /// falls, are presentation; how long the server keeps sending this action, and when
-    /// the drop exists, are not.
+    /// falls, are presentation; when the server advances it to `Corpse` is not.
     pub const Dying: Self = Self(5);
     /// Moving directly away from the nearest live player the server chose as a threat.
     pub const Flee: Self = Self(6);
+    /// Dead and available as a server-owned loot container. The body neither moves nor
+    /// acts, and remains until its authoritative expiry rather than becoming a ground drop.
+    /// Which recipients may open it is carried separately and per recipient.
+    pub const Corpse: Self = Self(7);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 6;
+    pub const ENUM_MAX: u8 = 7;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Idle,
@@ -76,6 +80,7 @@ impl MobAction {
         Self::Recovery,
         Self::Dying,
         Self::Flee,
+        Self::Corpse,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -87,6 +92,7 @@ impl MobAction {
             Self::Recovery => Some("Recovery"),
             Self::Dying => Some("Dying"),
             Self::Flee => Some("Flee"),
+            Self::Corpse => Some("Corpse"),
             _ => None,
         }
     }

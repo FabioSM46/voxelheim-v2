@@ -59,6 +59,10 @@ const (
 	PayloadChatMessage            Payload = 30
 	PayloadPartyRequest           Payload = 31
 	PayloadPartyInvite            Payload = 32
+	PayloadLootOpenRequest        Payload = 33
+	PayloadLootTakeRequest        Payload = 34
+	PayloadLootState              Payload = 35
+	PayloadLootClosed             Payload = 36
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -95,6 +99,10 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadChatMessage:            "ChatMessage",
 	PayloadPartyRequest:           "PartyRequest",
 	PayloadPartyInvite:            "PartyInvite",
+	PayloadLootOpenRequest:        "LootOpenRequest",
+	PayloadLootTakeRequest:        "LootTakeRequest",
+	PayloadLootState:              "LootState",
+	PayloadLootClosed:             "LootClosed",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -131,6 +139,10 @@ var EnumValuesPayload = map[string]Payload{
 	"ChatMessage":            PayloadChatMessage,
 	"PartyRequest":           PayloadPartyRequest,
 	"PartyInvite":            PayloadPartyInvite,
+	"LootOpenRequest":        PayloadLootOpenRequest,
+	"LootTakeRequest":        PayloadLootTakeRequest,
+	"LootState":              PayloadLootState,
+	"LootClosed":             PayloadLootClosed,
 }
 
 func (v Payload) String() string {

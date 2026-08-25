@@ -468,6 +468,87 @@ table PartyInvite {
   expires_ms: uint;
 }
 
+/// Ask to open the authoritative loot container attached to one corpse. Client -> server.
+///
+/// This is intent only. It names neither contents, ownership, eligibility nor the player's
+/// position; the server resolves every one of those from its own state. `client_tick` is
+/// ordering and staleness only and is never read as a clock.
+///
+/// Decoder invariant: `corpse_id` is non-zero and names the `entity_id` of the
+/// `MobState` whose action is `Corpse`.
+table LootOpenRequest {
+  corpse_id: ulong;
+  client_tick: uint;
+}
+
+/// Ask to move one stable entry from a corpse container into the player's inventory.
+/// Client -> server.
+///
+/// The entry id is meaningful only inside the named corpse. The request deliberately
+/// carries no item id, count, durability, ownership, position or inventory result; the
+/// server resolves those from the container revision it owns. A stale revision is refused
+/// rather than applied to a different complete state.
+///
+/// Decoder invariants:
+///   - `corpse_id` is non-zero and names the `entity_id` of the `MobState` in `Corpse`
+///   - `entry_id` is non-zero
+///   - `revision` is non-zero
+table LootTakeRequest {
+  corpse_id: ulong;
+  entry_id: ulong;
+  revision: uint;
+  client_tick: uint;
+}
+
+/// One authoritative stack in a corpse container.
+///
+/// A fixed struct because the complete list is replaced as one value and every entry has
+/// the same settled shape. `entry_id` is stable for the lifetime of its corpse and is what
+/// a later `LootTakeRequest` names; item id is never used as identity.
+///
+/// Decoder invariants:
+///   - `entry_id`, `item_id` and `count` are non-zero
+///   - no `entry_id` appears twice in one `LootState`
+///   - `(durability, max_durability) == (0, 0)` means the stack does not wear out
+///   - otherwise `max_durability` is non-zero, `durability <= max_durability`, and
+///     `count == 1`; zero durability under a non-zero maximum is a legal worn-out item
+struct LootEntry {
+  entry_id: ulong;
+  item_id: ushort;
+  count: ushort;
+  durability: ushort;
+  max_durability: ushort;
+}
+
+/// The complete loot container state visible to one recipient. Server -> client.
+///
+/// A later state for the same corpse supersedes the earlier revision wholesale. The list
+/// is per-recipient: two boss participants may receive different entries for the same corpse
+/// without either learning the other's roll. Empty containers are ended with `LootClosed`
+/// rather than represented by an empty state.
+///
+/// Decoder invariants:
+///   - `corpse_id` is the non-zero `entity_id` of the `MobState` in `Corpse`
+///   - `revision` is non-zero
+///   - `entries` is present and non-empty
+///   - every entry satisfies `LootEntry` and entry ids are unique
+table LootState {
+  corpse_id: ulong;
+  revision: uint;
+  entries: [LootEntry];
+}
+
+/// Explicitly ends an open loot container. Server -> client.
+///
+/// Sent when the corpse is empty, expired, reset or otherwise no longer available. The
+/// client closes presentation and infers no reason from the message.
+///
+/// Decoder invariant: `corpse_id` is the non-zero entity id formerly carried by the
+/// `MobState` whose container this message ends.
+table LootClosed {
+  corpse_id: ulong;
+}
+
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is
@@ -501,7 +582,9 @@ enum RefusedAction : ubyte {
   Repair = 5,
   DropItem = 6,
   Chat = 7,
-  Party = 8
+  Party = 8,
+  OpenLoot = 9,
+  TakeLoot = 10
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -599,6 +682,18 @@ enum RefusalReason : ubyte {
 
   /// This party operation is reserved for the current leader.
   NotLeader = 17,
+
+  /// The named corpse has expired, reset, been emptied or never existed for this player.
+  CorpseUnavailable = 18,
+
+  /// The player is not the solo tap owner or the normal-party round-robin owner.
+  LootNotOwned = 19,
+
+  /// The request names a loot revision older or newer than the complete state now held.
+  StaleRevision = 20,
+
+  /// The inventory has no slot able to receive the authoritative loot entry.
+  InventoryFull = 21,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -785,8 +880,8 @@ enum MobAction : ubyte {
   Recovery = 4,
 
   /// Killed, and going down. The creature has no health left and is not coming back;
-  /// the server holds the body here for a fixed span and then stops sending it, and
-  /// what the kill left behind reaches the ground at that moment and not before.
+  /// the server holds the fall here for its presentation span and then advances the
+  /// same entity to `Corpse`. Ordinary mob loot never becomes a ground drop.
   ///
   /// **It is the only statement of death this contract makes about a mob, and it is
   /// what a receiver must animate on.** There is no `LifeState` beside a `MobState` and
@@ -798,12 +893,16 @@ enum MobAction : ubyte {
   /// gameplay fact the server is already stating.
   ///
   /// Nothing about the pose is here. How long a body takes to go down, and which way it
-  /// falls, are presentation; how long the server keeps sending this action, and when
-  /// the drop exists, are not.
+  /// falls, are presentation; when the server advances it to `Corpse` is not.
   Dying = 5,
 
   /// Moving directly away from the nearest live player the server chose as a threat.
-  Flee = 6
+  Flee = 6,
+
+  /// Dead and available as a server-owned loot container. The body neither moves nor
+  /// acts, and remains until its authoritative expiry rather than becoming a ground drop.
+  /// Which recipients may open it is carried separately and per recipient.
+  Corpse = 7
 }
 
 /// The recipient's own health and life state, as the server holds them.
@@ -1006,6 +1105,26 @@ struct PartyMemberState {
   alive: bool;
 }
 
+/// One character in the complete stable party roster.
+///
+/// A table rather than the fixed `PartyMemberState` combat struct because names and
+/// connection state are not hot spatial data and this shape may grow. `character_id`
+/// survives every session; `entity_id` is only the current online handle. The roster is
+/// authoritative order, includes the recipient, and its first entry is the leader — so
+/// an offline leader remains representable without inventing entity id zero as a body.
+///
+/// Decoder invariants, together with the owning `EntitySnapshot`:
+///   - `character_id` is non-zero and unique
+///   - `name` is present; the empty string remains legal display text
+///   - `online` is true exactly when `entity_id` is non-zero
+///   - non-zero `entity_id` values are unique
+table PartyRosterMember {
+  character_id: ulong;
+  entity_id: ulong;
+  name: string;
+  online: bool;
+}
+
 /// The authoritative state of every entity a session can see, for one tick.
 ///
 /// The client renders from these, interpolating between the two most recent. It
@@ -1123,14 +1242,14 @@ table EntitySnapshot {
   /// different state to the same drop after a clean handshake.
   drop_durabilities: [ItemDropDurability];
 
-  /// The current party leader's entity id, or `0` when the recipient is in no party.
+  /// The current party leader's live entity id, or `0` when there is no party **or the
+  /// stable leader at `party_roster[0]` is offline**.
   ///
   /// A non-zero leader may be the recipient itself or one of `party_members`. The
-  /// decoder that sees only this frame can compare it with the member vector but cannot
-  /// reject an absent match: it does not know the recipient id from the earlier welcome,
-  /// so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
-  /// empty member vector. The converse is not
-  /// frame-verifiable: a non-zero leader with no other members may be the recipient.
+  /// decoder that sees only this frame compares it with the roster's first entry: an
+  /// online leader must carry that same non-zero entity id, and an offline leader must
+  /// carry zero. When the roster is empty this field and `party_members` are both empty.
+  /// A non-zero leader may be the recipient and therefore absent from `party_members`.
   party_leader_entity_id: ulong;
 
   /// Every **other** member of the recipient's party, in authoritative party order.
@@ -1149,10 +1268,28 @@ table EntitySnapshot {
   ///     `health <= max_health`
   ///   - the recipient's own entity id never appears; this must be checked by a layer that
   ///     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
-  ///   - a zero `party_leader_entity_id` requires this vector to be empty
+  ///   - every member maps to an online non-zero entity in `party_roster`
+  ///   - when the roster is empty this vector is empty
   ///   - a non-zero leader is either the recipient or one of the members; the
-  ///     recipient-aware consumer must check which when it has the welcome and snapshot together
+  ///     recipient-aware consumer checks which when it has the welcome and snapshot together
   party_members: [PartyMemberState];
+
+  /// The complete ordered party roster, including the recipient. Empty means no party;
+  /// otherwise the first entry is the leader. Unlike `party_members`, this remains complete
+  /// when a member disconnects and uses stable character identity for every position.
+  ///
+  /// `party_leader_entity_id` is the first entry's live entity id while the leader is
+  /// online and zero while that leader is offline. Zero therefore no longer implies that
+  /// `party_members` or this roster is empty; it never names an online entity.
+  party_roster: [PartyRosterMember];
+
+  /// Corpse ids that still hold loot this recipient may access. Each id is exactly the
+  /// `entity_id` of one `mobs` entry whose action is `Corpse`; a receiver rejects an id
+  /// that names no such body. Complete per snapshot:
+  /// a later vector replaces the former one, absence and empty both mean none, and ids
+  /// are non-zero and unique. It carries access, never contents; opening one asks the
+  /// server for a per-recipient `LootState`.
+  accessible_loot_corpses: [ulong];
 }
 
 /// Everything the player is carrying, as the server holds it.

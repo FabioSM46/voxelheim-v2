@@ -98,6 +98,8 @@ type Message struct {
 	CreateCharacter    *CreateCharacterRequest
 	Chat               *ChatRequest
 	Party              *PartyRequest
+	LootOpen           *LootOpenRequest
+	LootTake           *LootTakeRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -115,6 +117,42 @@ type ChatRequest struct {
 type PartyRequest struct {
 	Action     vnet.PartyAction
 	TargetName string
+}
+
+// LootOpenRequest asks for the authoritative container attached to one corpse.
+type LootOpenRequest struct {
+	CorpseID   uint64
+	ClientTick uint32
+}
+
+// LootTakeRequest asks to move one stable entry from one known container revision.
+// It carries no stack contents or inventory outcome.
+type LootTakeRequest struct {
+	CorpseID   uint64
+	EntryID    uint64
+	Revision   uint32
+	ClientTick uint32
+}
+
+// LootEntry is one authoritative stack in a per-recipient corpse container.
+type LootEntry struct {
+	EntryID       uint64
+	ItemID        uint16
+	Count         uint16
+	Durability    uint16
+	MaxDurability uint16
+}
+
+// LootState replaces the recipient's previous view of one corpse wholesale.
+type LootState struct {
+	CorpseID uint64
+	Revision uint32
+	Entries  []LootEntry
+}
+
+// LootClosed explicitly ends presentation for one corpse container.
+type LootClosed struct {
+	CorpseID uint64
 }
 
 // ChatMessage is one chat line the authoritative server accepted.
@@ -497,6 +535,15 @@ type PartyMemberState struct {
 	Alive     bool
 }
 
+// PartyRosterMember is one stable character in authoritative party order. EntityID is
+// zero exactly while that character is offline; CharacterID remains stable.
+type PartyRosterMember struct {
+	CharacterID uint64
+	EntityID    uint64
+	Name        string
+	Online      bool
+}
+
 // PlayerVitals is one recipient's authoritative health and life state.
 //
 // Server to client, and per recipient: a snapshot carries the vitals of the player it
@@ -587,6 +634,12 @@ type EntitySnapshot struct {
 	// PartyMembers excludes the recipient. The caller that knows that recipient's id
 	// owns that invariant; this encoder only lays out the authoritative projection.
 	PartyMembers []PartyMemberState
+
+	// PartyRoster is complete, includes the recipient, and begins with the leader.
+	PartyRoster []PartyRosterMember
+
+	// AccessibleLootCorpses is the complete set this recipient may currently open.
+	AccessibleLootCorpses []uint64
 }
 
 // ChunkResendRequest is one decoded ask for a chunk the client has lost. **A request
@@ -1231,6 +1284,38 @@ func Decode(frame []byte) (msg Message, err error) {
 			Action:     action,
 			TargetName: string(request.TargetName()),
 		}
+
+	case vnet.PayloadLootOpenRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.LootOpenRequest
+		request.Init(table.Bytes, table.Pos)
+		if request.CorpseId() == 0 {
+			return Message{}, fmt.Errorf("%w: LootOpenRequest corpse id is absent", ErrMalformed)
+		}
+		msg.LootOpen = &LootOpenRequest{CorpseID: request.CorpseId(), ClientTick: request.ClientTick()}
+
+	case vnet.PayloadLootTakeRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.LootTakeRequest
+		request.Init(table.Bytes, table.Pos)
+		switch {
+		case request.CorpseId() == 0:
+			return Message{}, fmt.Errorf("%w: LootTakeRequest corpse id is absent", ErrMalformed)
+		case request.EntryId() == 0:
+			return Message{}, fmt.Errorf("%w: LootTakeRequest entry id is absent", ErrMalformed)
+		case request.Revision() == 0:
+			return Message{}, fmt.Errorf("%w: LootTakeRequest revision is absent", ErrMalformed)
+		}
+		msg.LootTake = &LootTakeRequest{
+			CorpseID: request.CorpseId(), EntryID: request.EntryId(),
+			Revision: request.Revision(), ClientTick: request.ClientTick(),
+		}
 	}
 
 	return msg, nil
@@ -1580,7 +1665,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 			durableDrops++
 		}
 	}
-	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + 128)
+	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + len(s.PartyRoster)*64 + len(s.AccessibleLootCorpses)*8 + 128)
 
 	// Every table a vector points at must be finished before that vector opens, so the
 	// mob tables are built first and the vector below only carries their offsets. The
@@ -1711,6 +1796,36 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		partyMembersOffset = b.EndVector(len(s.PartyMembers))
 	}
 
+	// Roster members are tables because each owns a string. Build every string, then
+	// every table, before opening the vector that carries their offsets.
+	partyRosterOffsets := make([]flatbuffers.UOffsetT, len(s.PartyRoster))
+	for i, member := range s.PartyRoster {
+		nameOffset := b.CreateString(member.Name)
+		vnet.PartyRosterMemberStart(b)
+		vnet.PartyRosterMemberAddCharacterId(b, member.CharacterID)
+		vnet.PartyRosterMemberAddEntityId(b, member.EntityID)
+		vnet.PartyRosterMemberAddName(b, nameOffset)
+		vnet.PartyRosterMemberAddOnline(b, member.Online)
+		partyRosterOffsets[i] = vnet.PartyRosterMemberEnd(b)
+	}
+	var partyRosterOffset flatbuffers.UOffsetT
+	if len(partyRosterOffsets) > 0 {
+		vnet.EntitySnapshotStartPartyRosterVector(b, len(partyRosterOffsets))
+		for i := len(partyRosterOffsets) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(partyRosterOffsets[i])
+		}
+		partyRosterOffset = b.EndVector(len(partyRosterOffsets))
+	}
+
+	var accessibleLootOffset flatbuffers.UOffsetT
+	if len(s.AccessibleLootCorpses) > 0 {
+		vnet.EntitySnapshotStartAccessibleLootCorpsesVector(b, len(s.AccessibleLootCorpses))
+		for i := len(s.AccessibleLootCorpses) - 1; i >= 0; i-- {
+			b.PrependUint64(s.AccessibleLootCorpses[i])
+		}
+		accessibleLootOffset = b.EndVector(len(s.AccessibleLootCorpses))
+	}
+
 	vnet.EntitySnapshotStart(b)
 	vnet.EntitySnapshotAddServerTick(b, s.Tick)
 	vnet.EntitySnapshotAddEntities(b, entitiesOffset)
@@ -1732,6 +1847,12 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.EntitySnapshotAddPartyLeaderEntityId(b, s.PartyLeaderEntityID)
 	if partyMembersOffset != 0 {
 		vnet.EntitySnapshotAddPartyMembers(b, partyMembersOffset)
+	}
+	if partyRosterOffset != 0 {
+		vnet.EntitySnapshotAddPartyRoster(b, partyRosterOffset)
+	}
+	if accessibleLootOffset != 0 {
+		vnet.EntitySnapshotAddAccessibleLootCorpses(b, accessibleLootOffset)
 	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 
@@ -1976,6 +2097,54 @@ func EncodePartyRequest(r PartyRequest) []byte {
 	request := vnet.PartyRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadPartyRequest, request)
+}
+
+// EncodeLootOpenRequest builds one corpse-open intent for protocol round-trip tests.
+func EncodeLootOpenRequest(r LootOpenRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.LootOpenRequestStart(b)
+	vnet.LootOpenRequestAddCorpseId(b, r.CorpseID)
+	vnet.LootOpenRequestAddClientTick(b, r.ClientTick)
+	request := vnet.LootOpenRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadLootOpenRequest, request)
+}
+
+// EncodeLootTakeRequest builds one stable-entry intent and carries no stack contents.
+func EncodeLootTakeRequest(r LootTakeRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.LootTakeRequestStart(b)
+	vnet.LootTakeRequestAddCorpseId(b, r.CorpseID)
+	vnet.LootTakeRequestAddEntryId(b, r.EntryID)
+	vnet.LootTakeRequestAddRevision(b, r.Revision)
+	vnet.LootTakeRequestAddClientTick(b, r.ClientTick)
+	request := vnet.LootTakeRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadLootTakeRequest, request)
+}
+
+// EncodeLootState builds one complete, per-recipient authoritative container state.
+func EncodeLootState(state LootState) []byte {
+	b := flatbuffers.NewBuilder(len(state.Entries)*16 + 128)
+	vnet.LootStateStartEntriesVector(b, len(state.Entries))
+	for i := len(state.Entries) - 1; i >= 0; i-- {
+		entry := state.Entries[i]
+		vnet.CreateLootEntry(b, entry.EntryID, entry.ItemID, entry.Count, entry.Durability, entry.MaxDurability)
+	}
+	entries := b.EndVector(len(state.Entries))
+	vnet.LootStateStart(b)
+	vnet.LootStateAddCorpseId(b, state.CorpseID)
+	vnet.LootStateAddRevision(b, state.Revision)
+	vnet.LootStateAddEntries(b, entries)
+	loot := vnet.LootStateEnd(b)
+	return finishEnvelope(b, vnet.PayloadLootState, loot)
+}
+
+// EncodeLootClosed explicitly ends one open corpse container.
+func EncodeLootClosed(closed LootClosed) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.LootClosedStart(b)
+	vnet.LootClosedAddCorpseId(b, closed.CorpseID)
+	payload := vnet.LootClosedEnd(b)
+	return finishEnvelope(b, vnet.PayloadLootClosed, payload)
 }
 
 // EncodeChatMessage builds one authoritative, accepted chat line. Strings are created

@@ -40,6 +40,8 @@ const (
 	RefusedActionDropItem       RefusedAction = 6
 	RefusedActionChat           RefusedAction = 7
 	RefusedActionParty          RefusedAction = 8
+	RefusedActionOpenLoot       RefusedAction = 9
+	RefusedActionTakeLoot       RefusedAction = 10
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -52,6 +54,8 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionDropItem:       "DropItem",
 	RefusedActionChat:           "Chat",
 	RefusedActionParty:          "Party",
+	RefusedActionOpenLoot:       "OpenLoot",
+	RefusedActionTakeLoot:       "TakeLoot",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -64,6 +68,8 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"DropItem":       RefusedActionDropItem,
 	"Chat":           RefusedActionChat,
 	"Party":          RefusedActionParty,
+	"OpenLoot":       RefusedActionOpenLoot,
+	"TakeLoot":       RefusedActionTakeLoot,
 }
 
 func (v RefusedAction) String() string {

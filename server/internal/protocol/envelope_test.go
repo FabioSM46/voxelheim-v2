@@ -242,17 +242,20 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // **V20 appends chat and party requests plus party state in the snapshot.** The two
 // client payloads are unknown to a V19 server and would otherwise fail only on first use.
 //
+// **V21 appends two corpse-loot requests and their two server answers.** A V20 server
+// cannot name either request, and the snapshot gains stable roster and accessibility state.
+//
 // The rule that generalises, now that eight shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV20NamesChatAndParty(t *testing.T) {
+func TestProtocolV21NamesCorpseLoot(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 20 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 20", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 21 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 21", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -287,6 +290,10 @@ func TestProtocolV20NamesChatAndParty(t *testing.T) {
 		vnet.PayloadChatMessage,
 		vnet.PayloadPartyRequest,
 		vnet.PayloadPartyInvite,
+		vnet.PayloadLootOpenRequest,
+		vnet.PayloadLootTakeRequest,
+		vnet.PayloadLootState,
+		vnet.PayloadLootClosed,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -307,6 +314,73 @@ func TestProtocolV20NamesChatAndParty(t *testing.T) {
 	// every FlatBuffers union carries.
 	if got := len(vnet.EnumNamesPayload); got != len(want)+1 {
 		t.Errorf("Payload has %d members, want %d plus NONE — a new member needs a decision, not a test edit", got, len(want))
+	}
+}
+
+func TestLootRequestsCarryOnlyIntentAndRejectAbsentIdentities(t *testing.T) {
+	t.Parallel()
+
+	openWant := LootOpenRequest{CorpseID: 91, ClientTick: 44}
+	open, err := Decode(EncodeLootOpenRequest(openWant))
+	if err != nil || open.Kind != vnet.PayloadLootOpenRequest || open.LootOpen == nil || *open.LootOpen != openWant {
+		t.Fatalf("loot open round trip = %+v, %v; want %+v", open, err, openWant)
+	}
+	takeWant := LootTakeRequest{CorpseID: 91, EntryID: 7, Revision: 3, ClientTick: 45}
+	take, err := Decode(EncodeLootTakeRequest(takeWant))
+	if err != nil || take.Kind != vnet.PayloadLootTakeRequest || take.LootTake == nil || *take.LootTake != takeWant {
+		t.Fatalf("loot take round trip = %+v, %v; want %+v", take, err, takeWant)
+	}
+
+	for name, frame := range map[string][]byte{
+		"open without corpse":   EncodeLootOpenRequest(LootOpenRequest{}),
+		"take without corpse":   EncodeLootTakeRequest(LootTakeRequest{EntryID: 1, Revision: 1}),
+		"take without entry":    EncodeLootTakeRequest(LootTakeRequest{CorpseID: 1, Revision: 1}),
+		"take without revision": EncodeLootTakeRequest(LootTakeRequest{CorpseID: 1, EntryID: 1}),
+	} {
+		if _, decodeErr := Decode(frame); !errors.Is(decodeErr, ErrMalformed) {
+			t.Errorf("%s decoded with %v, want ErrMalformed", name, decodeErr)
+		}
+	}
+
+}
+
+func TestLootServerMessagesCarryCompleteEntriesAndExplicitClosure(t *testing.T) {
+	t.Parallel()
+
+	want := LootState{CorpseID: 400, Revision: 2, Entries: []LootEntry{
+		{EntryID: 9, ItemID: 31, Count: 4},
+		{EntryID: 10, ItemID: 8, Count: 1, Durability: 3, MaxDurability: 10},
+	}}
+	env := vnet.GetRootAsEnvelope(EncodeLootState(want), 0)
+	if env.PayloadType() != vnet.PayloadLootState {
+		t.Fatalf("payload = %s, want LootState", env.PayloadType())
+	}
+	table := payloadTable(t, env)
+	state := new(vnet.LootState)
+	state.Init(table.Bytes, table.Pos)
+	if state.CorpseId() != want.CorpseID || state.Revision() != want.Revision || state.EntriesLength() != len(want.Entries) {
+		t.Fatalf("loot state header = corpse %d revision %d entries %d", state.CorpseId(), state.Revision(), state.EntriesLength())
+	}
+	for index, expected := range want.Entries {
+		entry := new(vnet.LootEntry)
+		if !state.Entries(entry, index) {
+			t.Fatalf("entry %d absent", index)
+		}
+		got := LootEntry{EntryID: entry.EntryId(), ItemID: entry.ItemId(), Count: entry.Count(), Durability: entry.Durability(), MaxDurability: entry.MaxDurability()}
+		if got != expected {
+			t.Errorf("entry %d = %+v, want %+v", index, got, expected)
+		}
+	}
+
+	closedEnv := vnet.GetRootAsEnvelope(EncodeLootClosed(LootClosed{CorpseID: 400}), 0)
+	if closedEnv.PayloadType() != vnet.PayloadLootClosed {
+		t.Fatalf("payload = %s, want LootClosed", closedEnv.PayloadType())
+	}
+	closedTable := payloadTable(t, closedEnv)
+	closed := new(vnet.LootClosed)
+	closed.Init(closedTable.Bytes, closedTable.Pos)
+	if closed.CorpseId() != 400 {
+		t.Errorf("closed corpse = %d, want 400", closed.CorpseId())
 	}
 }
 
@@ -1010,6 +1084,46 @@ func TestEntitySnapshotCarriesPartyInAuthoritativeOrder(t *testing.T) {
 	}
 }
 
+func TestEntitySnapshotCarriesStableRosterAndAccessibleCorpses(t *testing.T) {
+	t.Parallel()
+
+	roster := []PartyRosterMember{
+		{CharacterID: 101, Name: "Offline leader"},
+		{CharacterID: 202, EntityID: 72, Name: "Online member", Online: true},
+	}
+	accessible := []uint64{800, 801}
+	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+		Tick:                  9,
+		Vitals:                PlayerVitals{Health: 10, MaxHealth: 10, LifeState: vnet.LifeStateAlive},
+		PartyRoster:           roster,
+		AccessibleLootCorpses: accessible,
+	}), 0)
+	table := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(table.Bytes, table.Pos)
+	if snapshot.PartyLeaderEntityId() != 0 {
+		t.Errorf("offline leader entity id = %d, want 0", snapshot.PartyLeaderEntityId())
+	}
+	if snapshot.PartyRosterLength() != len(roster) || snapshot.AccessibleLootCorpsesLength() != len(accessible) {
+		t.Fatalf("roster/corpse lengths = %d/%d", snapshot.PartyRosterLength(), snapshot.AccessibleLootCorpsesLength())
+	}
+	for index, expected := range roster {
+		member := new(vnet.PartyRosterMember)
+		if !snapshot.PartyRoster(member, index) {
+			t.Fatalf("roster member %d absent", index)
+		}
+		got := PartyRosterMember{CharacterID: member.CharacterId(), EntityID: member.EntityId(), Name: string(member.Name()), Online: member.Online()}
+		if got != expected {
+			t.Errorf("roster member %d = %+v, want %+v", index, got, expected)
+		}
+	}
+	for index, expected := range accessible {
+		if got := snapshot.AccessibleLootCorpses(index); got != expected {
+			t.Errorf("accessible corpse %d = %d, want %d", index, got, expected)
+		}
+	}
+}
+
 func TestEntitySnapshotOmitsThePartyVectorWhenEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -1406,6 +1520,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.DropItem":  {byte(vnet.RefusedActionDropItem), 6},
 		"RefusedAction.Chat":      {byte(vnet.RefusedActionChat), 7},
 		"RefusedAction.Party":     {byte(vnet.RefusedActionParty), 8},
+		"RefusedAction.OpenLoot":  {byte(vnet.RefusedActionOpenLoot), 9},
+		"RefusedAction.TakeLoot":  {byte(vnet.RefusedActionTakeLoot), 10},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1420,8 +1536,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// nine is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 9 {
-		t.Errorf("RefusedAction has %d members, want 9 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 11 {
+		t.Errorf("RefusedAction has %d members, want 11 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -1445,6 +1561,10 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"AlreadyInParty":     {byte(vnet.RefusalReasonAlreadyInParty), 15},
 		"NoInvite":           {byte(vnet.RefusalReasonNoInvite), 16},
 		"NotLeader":          {byte(vnet.RefusalReasonNotLeader), 17},
+		"CorpseUnavailable":  {byte(vnet.RefusalReasonCorpseUnavailable), 18},
+		"LootNotOwned":       {byte(vnet.RefusalReasonLootNotOwned), 19},
+		"StaleRevision":      {byte(vnet.RefusalReasonStaleRevision), 20},
+		"InventoryFull":      {byte(vnet.RefusalReasonInventoryFull), 21},
 		"MalformedNoAnchor":  {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":    {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":      {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -1454,8 +1574,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 22 {
-		t.Errorf("RefusalReason has %d members, want 22 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 26 {
+		t.Errorf("RefusalReason has %d members, want 26 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -1780,7 +1900,8 @@ func TestV3EnumsFailClosedOnZero(t *testing.T) {
 		// Appended by V9, and pinned here with the four that came before it for the reason
 		// they are: the value is an integer on the wire, so a renumbering would draw one
 		// action where the server said another and no compiler would object.
-		"Dying": {byte(vnet.MobActionDying), 5},
+		"Dying":  {byte(vnet.MobActionDying), 5},
+		"Corpse": {byte(vnet.MobActionCorpse), 7},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("MobAction.%s = %d, want %d", name, pair[0], pair[1])

@@ -526,6 +526,10 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::AlreadyInParty
         | RefusalReason::NoInvite
         | RefusalReason::NotLeader
+        | RefusalReason::CorpseUnavailable
+        | RefusalReason::LootNotOwned
+        | RefusalReason::StaleRevision
+        | RefusalReason::InventoryFull
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing

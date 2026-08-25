@@ -589,7 +589,11 @@ fn lean_for(action: MobAction) -> f32 {
     match action {
         MobAction::Windup => WINDUP_LEAN,
         MobAction::Recovery => RECOVERY_LEAN,
-        MobAction::Idle | MobAction::Chase | MobAction::Flee | MobAction::Dying => 0.0,
+        MobAction::Idle
+        | MobAction::Chase
+        | MobAction::Flee
+        | MobAction::Dying
+        | MobAction::Corpse => 0.0,
     }
 }
 
