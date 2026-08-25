@@ -34,6 +34,8 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_TICK_OF_DAY: ::flatbuffers::VOffsetT = 16;
     pub const VT_DEAD_PLAYERS: ::flatbuffers::VOffsetT = 18;
     pub const VT_DROP_DURABILITIES: ::flatbuffers::VOffsetT = 20;
+    pub const VT_PARTY_LEADER_ENTITY_ID: ::flatbuffers::VOffsetT = 22;
+    pub const VT_PARTY_MEMBERS: ::flatbuffers::VOffsetT = 24;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -50,6 +52,10 @@ impl<'a> EntitySnapshot<'a> {
         args: &'args EntitySnapshotArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
+        builder.add_party_leader_entity_id(args.party_leader_entity_id);
+        if let Some(x) = args.party_members {
+            builder.add_party_members(x);
+        }
         if let Some(x) = args.drop_durabilities {
             builder.add_drop_durabilities(x);
         }
@@ -279,6 +285,57 @@ impl<'a> EntitySnapshot<'a> {
             self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ItemDropDurability>>>(EntitySnapshot::VT_DROP_DURABILITIES, None)
         }
     }
+    /// The current party leader's entity id, or `0` when the recipient is in no party.
+    ///
+    /// A non-zero leader may be the recipient itself or one of `party_members`. The
+    /// decoder that sees only this frame can compare it with the member vector but cannot
+    /// reject an absent match: it does not know the recipient id from the earlier welcome,
+    /// so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
+    /// empty member vector. The converse is not
+    /// frame-verifiable: a non-zero leader with no other members may be the recipient.
+    #[inline]
+    pub fn party_leader_entity_id(&self) -> u64 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u64>(EntitySnapshot::VT_PARTY_LEADER_ENTITY_ID, Some(0))
+                .unwrap()
+        }
+    }
+    /// Every **other** member of the recipient's party, in authoritative party order.
+    /// Empty when the recipient is in no party.
+    ///
+    /// **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
+    /// state only for bodies already present in `entities`, and `PlayerVitals` exposes one
+    /// player's health only to that player. Party membership is explicit consent to share
+    /// position and health with the other members, including outside the streamed view, so
+    /// this vector is the narrow exception rather than a field on `EntityState` paid by every
+    /// visible player. For everyone outside a party it is absent and costs zero bytes.
+    ///
+    /// Decoder invariants:
+    ///   - no `entity_id` appears twice
+    ///   - every member has finite `pos`, non-zero `max_health`, and
+    ///     `health <= max_health`
+    ///   - the recipient's own entity id never appears; this must be checked by a layer that
+    ///     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
+    ///   - a zero `party_leader_entity_id` requires this vector to be empty
+    ///   - a non-zero leader is either the recipient or one of the members; the
+    ///     recipient-aware consumer must check which when it has the welcome and snapshot together
+    #[inline]
+    pub fn party_members(&self) -> Option<::flatbuffers::Vector<'a, PartyMemberState>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, PartyMemberState>>>(
+                    EntitySnapshot::VT_PARTY_MEMBERS,
+                    None,
+                )
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -297,6 +354,8 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<u32>("tick_of_day", Self::VT_TICK_OF_DAY, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("dead_players", Self::VT_DEAD_PLAYERS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ItemDropDurability>>>("drop_durabilities", Self::VT_DROP_DURABILITIES, false)?
+     .visit_field::<u64>("party_leader_entity_id", Self::VT_PARTY_LEADER_ENTITY_ID, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, PartyMemberState>>>("party_members", Self::VT_PARTY_MEMBERS, false)?
      .finish();
         Ok(())
     }
@@ -320,6 +379,9 @@ pub struct EntitySnapshotArgs<'a> {
     pub dead_players: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
     pub drop_durabilities:
         Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ItemDropDurability>>>,
+    pub party_leader_entity_id: u64,
+    pub party_members:
+        Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, PartyMemberState>>>,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -334,6 +396,8 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             tick_of_day: 0,
             dead_players: None,
             drop_durabilities: None,
+            party_leader_entity_id: 0,
+            party_members: None,
         }
     }
 }
@@ -420,6 +484,24 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
         );
     }
     #[inline]
+    pub fn add_party_leader_entity_id(&mut self, party_leader_entity_id: u64) {
+        self.fbb_.push_slot::<u64>(
+            EntitySnapshot::VT_PARTY_LEADER_ENTITY_ID,
+            party_leader_entity_id,
+            0,
+        );
+    }
+    #[inline]
+    pub fn add_party_members(
+        &mut self,
+        party_members: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, PartyMemberState>>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_PARTY_MEMBERS,
+            party_members,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -450,6 +532,8 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("tick_of_day", &self.tick_of_day());
         ds.field("dead_players", &self.dead_players());
         ds.field("drop_durabilities", &self.drop_durabilities());
+        ds.field("party_leader_entity_id", &self.party_leader_entity_id());
+        ds.field("party_members", &self.party_members());
         ds.finish()
     }
 }

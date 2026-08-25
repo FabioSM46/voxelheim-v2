@@ -381,6 +381,10 @@ impl Handshake {
             (Phase::Established, Message::LeaveStarted(started)) => {
                 Ok(Transition::Leaving(started))
             }
+            // Protocol mirrors only in V20: the ECS inbox and chat log land in their
+            // own issues, so an established session safely drops these typed payloads.
+            (Phase::Established, Message::Chat(_)) => Ok(Transition::Ignored("ChatMessage")),
+            (Phase::Established, Message::PartyInvite(_)) => Ok(Transition::Ignored("PartyInvite")),
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -399,6 +403,8 @@ impl Handshake {
             (_, Message::ActionRefused(_)) => Err(HandshakeError::Premature("ActionRefused")),
             (_, Message::PlayerAppearance(_)) => Err(HandshakeError::Premature("PlayerAppearance")),
             (_, Message::LeaveStarted(_)) => Err(HandshakeError::Premature("LeaveStarted")),
+            (_, Message::Chat(_)) => Err(HandshakeError::Premature("ChatMessage")),
+            (_, Message::PartyInvite(_)) => Err(HandshakeError::Premature("PartyInvite")),
         }
     }
 }

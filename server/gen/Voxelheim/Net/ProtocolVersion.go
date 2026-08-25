@@ -89,6 +89,11 @@ import "strconv"
 // / **V19 appends six wearable members to `RecipeID`.** A V19 client may send any of
 // / those enum values in a `CraftRequest`; a V18 server cannot name them and would fail
 // / only after a clean handshake, on the first attempt to craft armour.
+// /
+// / **V20 adds chat and party requests and appends party state to `EntitySnapshot`.**
+// / An older server cannot name either new client payload and would close the session
+// / after a clean handshake. The snapshot vector also carries health and position outside
+// / ordinary view for consenting party members; a pre-V20 server never sends that state.
 type ProtocolVersion uint16
 
 const (
@@ -97,7 +102,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 19
+	ProtocolVersionCurrent ProtocolVersion = 20
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

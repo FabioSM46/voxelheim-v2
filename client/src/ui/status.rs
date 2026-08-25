@@ -506,37 +506,57 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     if refused.reason.is_client_defect() {
         return None;
     }
-    // Placement is the only action a server fills this in for today; the rest of the
-    // enum is reserved by the contract and becomes real in its own issue. An action
-    // without a sentence is not shown, rather than shown with the wrong verb.
-    if refused.action != RefusedAction::PlaceStructure {
-        return None;
-    }
-
-    let reason = match refused.reason {
+    let placement_reason = match refused.reason {
         RefusalReason::GroundNotGenerated | RefusalReason::SpaceNotGenerated => {
-            "the world here has not loaded yet"
+            Some("the world here has not loaded yet")
         }
-        RefusalReason::GroundIsAir => "there is nothing solid to build on",
-        RefusalReason::SpaceBlocked => "something is in the way",
-        RefusalReason::OutOfReach => "that is too far away",
-        RefusalReason::PlayerIsDead => "you cannot build while dead",
+        RefusalReason::GroundIsAir => Some("there is nothing solid to build on"),
+        RefusalReason::SpaceBlocked => Some("something is in the way"),
+        RefusalReason::OutOfReach => Some("that is too far away"),
+        RefusalReason::PlayerIsDead => Some("you cannot build while dead"),
         RefusalReason::SlotEmpty | RefusalReason::SlotChanged => {
-            "you are not holding that any more"
+            Some("you are not holding that any more")
         }
-        RefusalReason::SlotUnusable => "what you are holding does not build anything",
-        RefusalReason::InventoryBusy => "your pack was busy; try again",
-        RefusalReason::TentAlreadyPlaced => "you already have a tent standing",
-        // Unreachable: the four malformed reasons left above, and Unknown is neither
-        // group. Stated rather than reached by a catch-all that would silently absorb a
-        // reason appended later without a sentence.
-        RefusalReason::Unknown
+        RefusalReason::SlotUnusable => Some("what you are holding does not build anything"),
+        RefusalReason::InventoryBusy => Some("your pack was busy; try again"),
+        RefusalReason::TentAlreadyPlaced => Some("you already have a tent standing"),
+        RefusalReason::TooFast
+        | RefusalReason::PartyFull
+        | RefusalReason::NoSuchPlayer
+        | RefusalReason::AlreadyInParty
+        | RefusalReason::NoInvite
+        | RefusalReason::NotLeader
+        | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
         | RefusalReason::MalformedSlot
-        | RefusalReason::MalformedKind => return None,
+        | RefusalReason::MalformedKind => None,
     };
-    Some(format!("Cannot build here: {reason}"))
+
+    match (refused.action, refused.reason) {
+        (RefusedAction::PlaceStructure, _) => {
+            placement_reason.map(|reason| format!("Cannot build here: {reason}"))
+        }
+        (RefusedAction::Chat, RefusalReason::TooFast) => {
+            Some("Cannot chat: you are sending messages too quickly".to_owned())
+        }
+        (RefusedAction::Party, RefusalReason::PartyFull) => {
+            Some("Cannot change party: the party is full".to_owned())
+        }
+        (RefusedAction::Party, RefusalReason::NoSuchPlayer) => {
+            Some("Cannot change party: no online player has that name".to_owned())
+        }
+        (RefusedAction::Party, RefusalReason::AlreadyInParty) => {
+            Some("Cannot change party: that player is already in a party".to_owned())
+        }
+        (RefusedAction::Party, RefusalReason::NoInvite) => {
+            Some("Cannot change party: there is no invitation to answer".to_owned())
+        }
+        (RefusedAction::Party, RefusalReason::NotLeader) => {
+            Some("Cannot change party: only the party leader can do that".to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// Renders the connection state as the line a player reads.
@@ -1070,7 +1090,7 @@ mod tests {
     /// that `match`. A reason appended later without a sentence fails
     /// [`every_reason_is_either_a_sentence_or_a_deliberate_silence`] only because this list
     /// has to be extended by hand to compile past it.
-    const EVERY_REASON: [RefusalReason; 16] = [
+    const EVERY_REASON: [RefusalReason; 22] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1083,6 +1103,12 @@ mod tests {
         RefusalReason::SlotChanged,
         RefusalReason::InventoryBusy,
         RefusalReason::TentAlreadyPlaced,
+        RefusalReason::TooFast,
+        RefusalReason::PartyFull,
+        RefusalReason::NoSuchPlayer,
+        RefusalReason::AlreadyInParty,
+        RefusalReason::NoInvite,
+        RefusalReason::NotLeader,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1090,8 +1116,17 @@ mod tests {
     ];
 
     fn refusal(reason: RefusalReason) -> ActionRefused {
+        let action = match reason {
+            RefusalReason::TooFast => RefusedAction::Chat,
+            RefusalReason::PartyFull
+            | RefusalReason::NoSuchPlayer
+            | RefusalReason::AlreadyInParty
+            | RefusalReason::NoInvite
+            | RefusalReason::NotLeader => RefusedAction::Party,
+            _ => RefusedAction::PlaceStructure,
+        };
         ActionRefused {
-            action: RefusedAction::PlaceStructure,
+            action,
             reason,
             anchor: Some(crate::net::BlockCoord { x: 0, y: 63, z: 0 }),
         }
@@ -1120,11 +1155,40 @@ mod tests {
                  codes it cannot read, and for nothing else"
             );
             if let Some(line) = shown {
-                assert!(
-                    line.starts_with("Cannot build here: "),
-                    "{reason:?} -> {line}"
-                );
+                assert!(line.starts_with("Cannot "), "{reason:?} -> {line}");
             }
+        }
+    }
+
+    #[test]
+    fn chat_and_party_refusals_have_specific_sentences() {
+        for (reason, want) in [
+            (
+                RefusalReason::TooFast,
+                "Cannot chat: you are sending messages too quickly",
+            ),
+            (
+                RefusalReason::PartyFull,
+                "Cannot change party: the party is full",
+            ),
+            (
+                RefusalReason::NoSuchPlayer,
+                "Cannot change party: no online player has that name",
+            ),
+            (
+                RefusalReason::AlreadyInParty,
+                "Cannot change party: that player is already in a party",
+            ),
+            (
+                RefusalReason::NoInvite,
+                "Cannot change party: there is no invitation to answer",
+            ),
+            (
+                RefusalReason::NotLeader,
+                "Cannot change party: only the party leader can do that",
+            ),
+        ] {
+            assert_eq!(describe_refusal(&refusal(reason)).as_deref(), Some(want));
         }
     }
 

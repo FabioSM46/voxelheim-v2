@@ -980,6 +980,16 @@ pub struct StructureState {
     pub owner_entity_id: u64,
 }
 
+/// One other member of the snapshot recipient's party.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartyMemberState {
+    pub entity_id: u64,
+    pub pos: [f32; 3],
+    pub health: u16,
+    pub max_health: u16,
+    pub alive: bool,
+}
+
 /// One tick of authoritative state for everything a session can see.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
@@ -1026,6 +1036,13 @@ pub struct Snapshot {
     /// oversight: this half lands the contract, the server that fills it and the decoder that
     /// refuses a frame breaking it. The half that tips a body on it follows.
     pub dead_players: Vec<u64>,
+    /// Zero only when this session has no party. A non-zero value may name this
+    /// session itself, so a frame-only decoder cannot require it to occur below.
+    pub party_leader_entity_id: u64,
+    /// Every other member of this session's party. The session layer that also owns
+    /// `ServerWelcome.entity_id` must verify that the recipient itself is absent and
+    /// that a leader not listed here is the recipient.
+    pub party_members: Vec<PartyMemberState>,
 }
 
 #[cfg(test)]
@@ -1047,6 +1064,8 @@ impl Default for Snapshot {
             structures: Vec::new(),
             tick_of_day: 0,
             dead_players: Vec::new(),
+            party_leader_entity_id: 0,
+            party_members: Vec::new(),
         }
     }
 }
@@ -1140,6 +1159,8 @@ pub enum RefusedAction {
     EditBlock,
     Craft,
     Repair,
+    Chat,
+    Party,
 }
 
 impl RefusedAction {
@@ -1152,6 +1173,8 @@ impl RefusedAction {
             fb::RefusedAction::EditBlock => Self::EditBlock,
             fb::RefusedAction::Craft => Self::Craft,
             fb::RefusedAction::Repair => Self::Repair,
+            fb::RefusedAction::Chat => Self::Chat,
+            fb::RefusedAction::Party => Self::Party,
             _ => Self::Unknown,
         }
     }
@@ -1185,6 +1208,12 @@ pub enum RefusalReason {
     SlotChanged,
     InventoryBusy,
     TentAlreadyPlaced,
+    TooFast,
+    PartyFull,
+    NoSuchPlayer,
+    AlreadyInParty,
+    NoInvite,
+    NotLeader,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1209,6 +1238,12 @@ impl RefusalReason {
             fb::RefusalReason::SlotChanged => Self::SlotChanged,
             fb::RefusalReason::InventoryBusy => Self::InventoryBusy,
             fb::RefusalReason::TentAlreadyPlaced => Self::TentAlreadyPlaced,
+            fb::RefusalReason::TooFast => Self::TooFast,
+            fb::RefusalReason::PartyFull => Self::PartyFull,
+            fb::RefusalReason::NoSuchPlayer => Self::NoSuchPlayer,
+            fb::RefusalReason::AlreadyInParty => Self::AlreadyInParty,
+            fb::RefusalReason::NoInvite => Self::NoInvite,
+            fb::RefusalReason::NotLeader => Self::NotLeader,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1384,6 +1419,66 @@ pub struct LeaveStarted {
     pub remaining_ms: u32,
 }
 
+/// One world-chat line this client asks the authoritative server to accept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Wire foundation; the chat input system lands in a later issue.
+pub struct ChatRequest {
+    /// Display text copied verbatim. Acceptance belongs to the server.
+    pub text: String,
+}
+
+/// One accepted world-chat line from the authoritative server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub sender_entity_id: u64,
+    /// Display text. Shown, never parsed or used as identity.
+    pub sender_name: String,
+    /// Display text copied verbatim, including the empty string.
+    pub text: String,
+}
+
+/// Which party operation a client asks the authoritative server to perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Wire foundation; party controls land in a later issue.
+pub enum PartyAction {
+    Invite,
+    Accept,
+    Decline,
+    Leave,
+    Kick,
+}
+
+impl PartyAction {
+    #[allow(dead_code)] // Used by the V20 encoder before an ECS caller exists.
+    fn wire(self) -> fb::PartyAction {
+        match self {
+            Self::Invite => fb::PartyAction::Invite,
+            Self::Accept => fb::PartyAction::Accept,
+            Self::Decline => fb::PartyAction::Decline,
+            Self::Leave => fb::PartyAction::Leave,
+            Self::Kick => fb::PartyAction::Kick,
+        }
+    }
+}
+
+/// One client intent to change party membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Wire foundation; party controls land in a later issue.
+pub struct PartyRequest {
+    pub action: PartyAction,
+    /// Display text copied verbatim. Read by the server only for Invite and Kick.
+    pub target_name: String,
+}
+
+/// One still-live party invitation from the authoritative server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartyInvite {
+    pub from_entity_id: u64,
+    /// Display text. Shown, never parsed or used as identity.
+    pub from_name: String,
+    pub expires_ms: u32,
+}
+
 /// A decoded `ServerReject`.
 ///
 /// [`Self::describe`] is the one place the code and the detail become a single
@@ -1493,6 +1588,10 @@ pub enum Message {
     PlayerAppearance(PlayerAppearance),
     /// The server has made this session inert and begun its removal countdown.
     LeaveStarted(LeaveStarted),
+    /// One accepted chat line. ECS delivery is intentionally a later issue.
+    Chat(ChatMessage),
+    /// One live party invitation. ECS delivery is intentionally a later issue.
+    PartyInvite(PartyInvite),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -1726,6 +1825,34 @@ pub enum DecodeError {
         field: &'static str,
         value: u8,
     },
+    /// A chat line carries the reserved sender id 0.
+    ChatWithoutEntity,
+    /// A chat line omitted its sender display name. Empty remains legal.
+    ChatWithoutName(u64),
+    /// A party invitation carries the reserved sender id 0.
+    PartyInviteWithoutEntity,
+    /// A party invitation omitted its sender display name. Empty remains legal.
+    PartyInviteWithoutName(u64),
+    /// A party invitation carries no remaining lifetime.
+    PartyInviteWithoutTime,
+    /// A party member carries the reserved entity id 0.
+    PartyMemberWithoutIdentity,
+    /// One entity id appears twice in the party projection.
+    DuplicatePartyMember(u64),
+    /// A party member position contains NaN or infinity.
+    NonFinitePartyMember {
+        entity_id: u64,
+        field: &'static str,
+        value: f32,
+    },
+    /// A party member has no health denominator or exceeds it.
+    PartyMemberHealth {
+        entity_id: u64,
+        health: u16,
+        max_health: u16,
+    },
+    /// Members exist while the leader id says there is no party.
+    PartyMembersWithoutLeader,
     /// A message that must describe a face carries no `appearance` table at all.
     ///
     /// Refused rather than filled in with [`PLACEHOLDER_APPEARANCE`]: the placeholder
@@ -1971,6 +2098,50 @@ impl fmt::Display for DecodeError {
                 f,
                 "structure {structure_id} has an unknown {field}: {value}"
             ),
+            Self::ChatWithoutEntity => write!(f, "a ChatMessage carries reserved entity id 0"),
+            Self::ChatWithoutName(entity_id) => {
+                write!(
+                    f,
+                    "ChatMessage for entity {entity_id} carries no sender name"
+                )
+            }
+            Self::PartyInviteWithoutEntity => {
+                write!(f, "a PartyInvite carries reserved entity id 0")
+            }
+            Self::PartyInviteWithoutName(entity_id) => {
+                write!(
+                    f,
+                    "PartyInvite from entity {entity_id} carries no sender name"
+                )
+            }
+            Self::PartyInviteWithoutTime => {
+                write!(f, "PartyInvite carries no time remaining")
+            }
+            Self::PartyMemberWithoutIdentity => {
+                write!(f, "a party member carries reserved entity id 0")
+            }
+            Self::DuplicatePartyMember(entity_id) => {
+                write!(f, "party_members names {entity_id} twice")
+            }
+            Self::NonFinitePartyMember {
+                entity_id,
+                field,
+                value,
+            } => write!(
+                f,
+                "party member {entity_id} has a non-finite {field}: {value}"
+            ),
+            Self::PartyMemberHealth {
+                entity_id,
+                health,
+                max_health,
+            } => write!(
+                f,
+                "party member {entity_id} is {health}/{max_health}, want a non-zero maximum and no more health than it"
+            ),
+            Self::PartyMembersWithoutLeader => {
+                write!(f, "party_members is non-empty while party leader id is 0")
+            }
             Self::MissingAppearance { at } => write!(f, "{at} carries no appearance"),
             Self::AppearanceColorReserved { field, value } => write!(
                 f,
@@ -2183,6 +2354,47 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             }
             Ok(Message::LeaveStarted(LeaveStarted { remaining_ms }))
         }
+        fb::Payload::ChatMessage => {
+            let payload = envelope
+                .payload_as_chat_message()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let sender_entity_id = payload.sender_entity_id();
+            if sender_entity_id == 0 {
+                return Err(DecodeError::ChatWithoutEntity);
+            }
+            let sender_name = payload
+                .sender_name()
+                .ok_or(DecodeError::ChatWithoutName(sender_entity_id))?
+                .to_owned();
+            Ok(Message::Chat(ChatMessage {
+                sender_entity_id,
+                sender_name,
+                // Display text copied verbatim. Absent and empty carry the same line.
+                text: payload.text().unwrap_or_default().to_owned(),
+            }))
+        }
+        fb::Payload::PartyInvite => {
+            let payload = envelope
+                .payload_as_party_invite()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let from_entity_id = payload.from_entity_id();
+            if from_entity_id == 0 {
+                return Err(DecodeError::PartyInviteWithoutEntity);
+            }
+            let from_name = payload
+                .from_name()
+                .ok_or(DecodeError::PartyInviteWithoutName(from_entity_id))?
+                .to_owned();
+            let expires_ms = payload.expires_ms();
+            if expires_ms == 0 {
+                return Err(DecodeError::PartyInviteWithoutTime);
+            }
+            Ok(Message::PartyInvite(PartyInvite {
+                from_entity_id,
+                from_name,
+                expires_ms,
+            }))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -2204,7 +2416,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::CreateCharacterRequest
         | fb::Payload::DropItemRequest
         | fb::Payload::LeaveRequest
-        | fb::Payload::ConsumeRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::ConsumeRequest
+        | fb::Payload::ChatRequest
+        | fb::Payload::PartyRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -2551,6 +2765,61 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         }
     }
 
+    let party_leader_entity_id = snapshot.party_leader_entity_id();
+    let mut party_members = Vec::new();
+    let mut party_member_ids = HashSet::new();
+    if let Some(list) = snapshot.party_members() {
+        party_members.reserve(list.len());
+        for member in &list {
+            let entity_id = member.entity_id();
+            if entity_id == 0 {
+                return Err(DecodeError::PartyMemberWithoutIdentity);
+            }
+            if !party_member_ids.insert(entity_id) {
+                return Err(DecodeError::DuplicatePartyMember(entity_id));
+            }
+            let pos = member.pos();
+            let checked = |field: &'static str, value: f32| {
+                if value.is_finite() {
+                    Ok(value)
+                } else {
+                    Err(DecodeError::NonFinitePartyMember {
+                        entity_id,
+                        field,
+                        value,
+                    })
+                }
+            };
+            let health = member.health();
+            let max_health = member.max_health();
+            if max_health == 0 || health > max_health {
+                return Err(DecodeError::PartyMemberHealth {
+                    entity_id,
+                    health,
+                    max_health,
+                });
+            }
+            party_members.push(PartyMemberState {
+                entity_id,
+                pos: [
+                    checked("pos.x", pos.x())?,
+                    checked("pos.y", pos.y())?,
+                    checked("pos.z", pos.z())?,
+                ],
+                health,
+                max_health,
+                alive: member.alive(),
+            });
+        }
+    }
+    // This is the complete frame-only implication. The converse is deliberately not
+    // enforced: a non-zero leader with no listed members can be the recipient itself.
+    // Whether an unlisted leader is that recipient needs ServerWelcome.entity_id, which
+    // this single-frame decoder does not have.
+    if party_leader_entity_id == 0 && !party_members.is_empty() {
+        return Err(DecodeError::PartyMembersWithoutLeader);
+    }
+
     Ok(Snapshot {
         server_tick: snapshot.server_tick(),
         entities,
@@ -2562,6 +2831,8 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         // number this function has never seen.
         tick_of_day: snapshot.tick_of_day(),
         dead_players,
+        party_leader_entity_id,
+        party_members,
     })
 }
 
@@ -3039,6 +3310,32 @@ pub fn encode_create_character_request(request: &CreateCharacterRequest) -> Vec<
         fb::Payload::CreateCharacterRequest,
         payload.as_union_value(),
     )
+}
+
+/// Builds one chat intent. The text is copied verbatim, empty and whitespace included;
+/// the authoritative server owns length and rate decisions.
+#[allow(dead_code)] // Wire foundation; the chat input system lands in a later issue.
+pub fn encode_chat_request(request: &ChatRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let text = builder.create_string(&request.text);
+    let payload = fb::ChatRequest::create(&mut builder, &fb::ChatRequestArgs { text: Some(text) });
+    finish_envelope(builder, fb::Payload::ChatRequest, payload.as_union_value())
+}
+
+/// Builds one party intent. Target display text is copied verbatim and is meaningful
+/// only to the server for Invite and Kick.
+#[allow(dead_code)] // Wire foundation; party controls land in a later issue.
+pub fn encode_party_request(request: &PartyRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let target_name = builder.create_string(&request.target_name);
+    let payload = fb::PartyRequest::create(
+        &mut builder,
+        &fb::PartyRequestArgs {
+            action: request.action.wire(),
+            target_name: Some(target_name),
+        },
+    );
+    finish_envelope(builder, fb::Payload::PartyRequest, payload.as_union_value())
 }
 
 /// Writes one appearance table and returns its offset.
@@ -3770,6 +4067,15 @@ pub(super) mod server_side {
         pub owner_entity_id: u64,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    pub struct PartyMemberStateWire {
+        pub entity_id: u64,
+        pub pos: [f32; 3],
+        pub health: u16,
+        pub max_health: u16,
+        pub alive: bool,
+    }
+
     impl StructureStateWire {
         /// A valid tent, for a test to break one field of.
         pub fn tent(structure_id: u64, owner_entity_id: u64) -> Self {
@@ -3854,6 +4160,8 @@ pub(super) mod server_side {
             PlayerVitalsWire::default(),
             &[],
             durabilities,
+            0,
+            &[],
         )
     }
 
@@ -3943,6 +4251,27 @@ pub(super) mod server_side {
             vitals,
             structures,
             &durabilities,
+            0,
+            &[],
+        )
+    }
+
+    /// Encodes the V20 party projection independently so malformed decoder boundaries
+    /// do not require a simulation capable of producing them.
+    pub fn encode_entity_snapshot_with_party(
+        party_leader_entity_id: u64,
+        party_members: &[PartyMemberStateWire],
+    ) -> Vec<u8> {
+        encode_entity_snapshot_with_explicit_durabilities(
+            1,
+            &[],
+            &[],
+            &[],
+            PlayerVitalsWire::default(),
+            &[],
+            &[],
+            party_leader_entity_id,
+            party_members,
         )
     }
 
@@ -3955,6 +4284,8 @@ pub(super) mod server_side {
         vitals: PlayerVitalsWire,
         structures: &[StructureStateWire],
         durabilities: &[ItemDropDurabilityWire],
+        party_leader_entity_id: u64,
+        party_members: &[PartyMemberStateWire],
     ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(
             entities.len() * 40
@@ -3962,6 +4293,7 @@ pub(super) mod server_side {
                 + durabilities.len() * 16
                 + mobs.len() * 64
                 + structures.len() * 48
+                + party_members.len() * 32
                 + 128,
         );
 
@@ -4038,6 +4370,20 @@ pub(super) mod server_side {
             .collect();
         let structures = builder.create_vector(&laid_out);
 
+        let laid_out: Vec<fb::PartyMemberState> = party_members
+            .iter()
+            .map(|member| {
+                fb::PartyMemberState::new(
+                    member.entity_id,
+                    &fb::Vec3::new(member.pos[0], member.pos[1], member.pos[2]),
+                    member.health,
+                    member.max_health,
+                    member.alive,
+                )
+            })
+            .collect();
+        let party_members = builder.create_vector(&laid_out);
+
         let self_vitals = fb::PlayerVitals::create(
             &mut builder,
             &fb::PlayerVitalsArgs {
@@ -4061,6 +4407,10 @@ pub(super) mod server_side {
         table.add_mobs(mobs);
         table.add_self_vitals(self_vitals);
         table.add_structures(structures);
+        table.add_party_leader_entity_id(party_leader_entity_id);
+        if !laid_out.is_empty() {
+            table.add_party_members(party_members);
+        }
         if !durabilities.is_empty() {
             table.add_drop_durabilities(drop_durabilities);
         }
@@ -4108,6 +4458,8 @@ pub(super) mod server_side {
                 structures: None,
                 dead_players: None,
                 drop_durabilities: None,
+                party_leader_entity_id: 0,
+                party_members: None,
             },
         );
 
@@ -4155,6 +4507,8 @@ pub(super) mod server_side {
                 tick_of_day,
                 dead_players: None,
                 drop_durabilities: None,
+                party_leader_entity_id: 0,
+                party_members: None,
             },
         );
 
@@ -4387,21 +4741,59 @@ pub(super) mod server_side {
             fb::LeaveStarted::create(&mut builder, &fb::LeaveStartedArgs { remaining_ms });
         finish_envelope(builder, fb::Payload::LeaveStarted, payload.as_union_value())
     }
+
+    pub fn encode_chat_message(
+        sender_entity_id: u64,
+        sender_name: Option<&str>,
+        text: Option<&str>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let sender_name = sender_name.map(|value| builder.create_string(value));
+        let text = text.map(|value| builder.create_string(value));
+        let payload = fb::ChatMessage::create(
+            &mut builder,
+            &fb::ChatMessageArgs {
+                sender_entity_id,
+                sender_name,
+                text,
+            },
+        );
+        finish_envelope(builder, fb::Payload::ChatMessage, payload.as_union_value())
+    }
+
+    pub fn encode_party_invite(
+        from_entity_id: u64,
+        from_name: Option<&str>,
+        expires_ms: u32,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let from_name = from_name.map(|value| builder.create_string(value));
+        let payload = fb::PartyInvite::create(
+            &mut builder,
+            &fb::PartyInviteArgs {
+                from_entity_id,
+                from_name,
+                expires_ms,
+            },
+        );
+        finish_envelope(builder, fb::Payload::PartyInvite, payload.as_union_value())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
-        ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PlayerVitalsWire,
-        StructureStateWire, WelcomeWire, encode_action_refused, encode_bare_block_update,
-        encode_bare_chunk_data, encode_bare_chunk_unload, encode_bare_entity_snapshot,
-        encode_block_update, encode_chunk_data, encode_chunk_unload, encode_entity_snapshot,
-        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
-        encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
+        ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PartyMemberStateWire,
+        PlayerVitalsWire, StructureStateWire, WelcomeWire, encode_action_refused,
+        encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
+        encode_bare_entity_snapshot, encode_block_update, encode_chat_message, encode_chunk_data,
+        encode_chunk_unload, encode_entity_snapshot, encode_entity_snapshot_with,
+        encode_entity_snapshot_with_dead, encode_entity_snapshot_with_drop_durabilities,
+        encode_entity_snapshot_with_drops, encode_entity_snapshot_with_party,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
         encode_inventory_state_with_durability, encode_leave_started, encode_mine_progress,
-        encode_player_appearance, encode_player_appearance_with_worn,
+        encode_party_invite, encode_player_appearance, encode_player_appearance_with_worn,
         encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
         encode_server_welcome,
     };
@@ -4513,14 +4905,17 @@ mod tests {
     /// **V19 appends six wearable `RecipeID` members.** They travel client to server in
     /// a `CraftRequest`, so a V18 server would reject them only after a clean handshake.
     ///
+    /// **V20 appends chat and party requests plus party state in snapshots.** A V19
+    /// server cannot name either request and would otherwise fail only on first use.
+    ///
     /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v19_names_the_armour_recipes() {
+    fn protocol_v20_names_chat_and_party() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 19);
+        assert_eq!(fb::ProtocolVersion::Current.0, 20);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4550,6 +4945,10 @@ mod tests {
             (fb::Payload::LeaveRequest, 26),
             (fb::Payload::LeaveStarted, 27),
             (fb::Payload::ConsumeRequest, 28),
+            (fb::Payload::ChatRequest, 29),
+            (fb::Payload::ChatMessage, 30),
+            (fb::Payload::PartyRequest, 31),
+            (fb::Payload::PartyInvite, 32),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -4565,7 +4964,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            29,
+            33,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -4595,7 +4994,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 29] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 33] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -4625,6 +5024,10 @@ mod tests {
         (fb::Payload::LeaveRequest, Handling::ClientOnly),
         (fb::Payload::LeaveStarted, Handling::Consumed),
         (fb::Payload::ConsumeRequest, Handling::ClientOnly),
+        (fb::Payload::ChatRequest, Handling::ClientOnly),
+        (fb::Payload::ChatMessage, Handling::Consumed),
+        (fb::Payload::PartyRequest, Handling::ClientOnly),
+        (fb::Payload::PartyInvite, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -4817,6 +5220,8 @@ mod tests {
         assert_eq!(fb::RefusedAction::Craft.0, 4);
         assert_eq!(fb::RefusedAction::Repair.0, 5);
         assert_eq!(fb::RefusedAction::DropItem.0, 6);
+        assert_eq!(fb::RefusedAction::Chat.0, 7);
+        assert_eq!(fb::RefusedAction::Party.0, 8);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -4827,7 +5232,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            7,
+            9,
             "a removal is refused in silence by design"
         );
 
@@ -4844,6 +5249,12 @@ mod tests {
             (fb::RefusalReason::SlotChanged, 9),
             (fb::RefusalReason::InventoryBusy, 10),
             (fb::RefusalReason::TentAlreadyPlaced, 11),
+            (fb::RefusalReason::TooFast, 12),
+            (fb::RefusalReason::PartyFull, 13),
+            (fb::RefusalReason::NoSuchPlayer, 14),
+            (fb::RefusalReason::AlreadyInParty, 15),
+            (fb::RefusalReason::NoInvite, 16),
+            (fb::RefusalReason::NotLeader, 17),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -4853,7 +5264,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            16,
+            22,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -4870,6 +5281,12 @@ mod tests {
             RefusalReason::SlotChanged,
             RefusalReason::InventoryBusy,
             RefusalReason::TentAlreadyPlaced,
+            RefusalReason::TooFast,
+            RefusalReason::PartyFull,
+            RefusalReason::NoSuchPlayer,
+            RefusalReason::AlreadyInParty,
+            RefusalReason::NoInvite,
+            RefusalReason::NotLeader,
         ] {
             assert!(
                 !reason.is_client_defect(),
@@ -6338,6 +6755,8 @@ mod tests {
                     self_vitals: PlayerVitals::unharmed(),
                     structures: vec![],
                     dead_players: vec![],
+                    party_leader_entity_id: 0,
+                    party_members: vec![],
                 })),
                 "{name}"
             );
@@ -7432,6 +7851,168 @@ mod tests {
         assert_eq!(
             decode(&encode_leave_started(0)),
             Err(DecodeError::LeaveWithoutTime)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V20 — chat and party wire foundation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chat_and_party_requests_copy_display_text_verbatim() {
+        let chat = ChatRequest {
+            text: "  skål\n".to_owned(),
+        };
+        let frame = encode_chat_request(&chat);
+        assert_eq!(decode(&frame), Ok(Message::ClientOnly("ChatRequest")));
+        let envelope = fb::root_as_envelope(&frame).expect("valid chat request");
+        assert_eq!(
+            envelope
+                .payload_as_chat_request()
+                .and_then(|request| request.text()),
+            Some(chat.text.as_str())
+        );
+
+        for action in [
+            PartyAction::Invite,
+            PartyAction::Accept,
+            PartyAction::Decline,
+            PartyAction::Leave,
+            PartyAction::Kick,
+        ] {
+            let request = PartyRequest {
+                action,
+                target_name: "  Freya  ".to_owned(),
+            };
+            let frame = encode_party_request(&request);
+            assert_eq!(decode(&frame), Ok(Message::ClientOnly("PartyRequest")));
+            let envelope = fb::root_as_envelope(&frame).expect("valid party request");
+            let wire = envelope
+                .payload_as_party_request()
+                .expect("PartyRequest payload");
+            assert_eq!(wire.action(), action.wire());
+            assert_eq!(wire.target_name(), Some(request.target_name.as_str()));
+        }
+    }
+
+    #[test]
+    fn chat_message_requires_identity_and_a_present_name() {
+        assert_eq!(
+            decode(&encode_chat_message(41, Some(""), None)),
+            Ok(Message::Chat(ChatMessage {
+                sender_entity_id: 41,
+                sender_name: String::new(),
+                text: String::new(),
+            }))
+        );
+        assert_eq!(
+            decode(&encode_chat_message(0, Some("Eir"), Some("hail"))),
+            Err(DecodeError::ChatWithoutEntity)
+        );
+        assert_eq!(
+            decode(&encode_chat_message(41, None, Some("hail"))),
+            Err(DecodeError::ChatWithoutName(41))
+        );
+    }
+
+    #[test]
+    fn party_invite_requires_identity_name_and_time() {
+        assert_eq!(
+            decode(&encode_party_invite(72, Some(""), 15_000)),
+            Ok(Message::PartyInvite(PartyInvite {
+                from_entity_id: 72,
+                from_name: String::new(),
+                expires_ms: 15_000,
+            }))
+        );
+        assert_eq!(
+            decode(&encode_party_invite(0, Some("Sif"), 1)),
+            Err(DecodeError::PartyInviteWithoutEntity)
+        );
+        assert_eq!(
+            decode(&encode_party_invite(72, None, 1)),
+            Err(DecodeError::PartyInviteWithoutName(72))
+        );
+        assert_eq!(
+            decode(&encode_party_invite(72, Some("Sif"), 0)),
+            Err(DecodeError::PartyInviteWithoutTime)
+        );
+    }
+
+    #[test]
+    fn snapshot_party_projection_enforces_frame_only_invariants() {
+        let member = PartyMemberStateWire {
+            entity_id: 17,
+            pos: [1.5, 62.0, -8.0],
+            health: 44,
+            max_health: 50,
+            alive: true,
+        };
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_party(91, &[member])),
+            Ok(Message::Snapshot(Snapshot {
+                server_tick: 1,
+                party_leader_entity_id: 91,
+                party_members: vec![PartyMemberState {
+                    entity_id: 17,
+                    pos: member.pos,
+                    health: 44,
+                    max_health: 50,
+                    alive: true,
+                }],
+                ..Default::default()
+            }))
+        );
+        // The frame decoder has no recipient id: a leader absent from members may be
+        // the recipient, including a party with no other members.
+        assert!(decode(&encode_entity_snapshot_with_party(91, &[])).is_ok());
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_party(0, &[member])),
+            Err(DecodeError::PartyMembersWithoutLeader)
+        );
+
+        for (broken, want) in [
+            (
+                PartyMemberStateWire {
+                    entity_id: 0,
+                    ..member
+                },
+                DecodeError::PartyMemberWithoutIdentity,
+            ),
+            (
+                PartyMemberStateWire {
+                    health: 51,
+                    ..member
+                },
+                DecodeError::PartyMemberHealth {
+                    entity_id: 17,
+                    health: 51,
+                    max_health: 50,
+                },
+            ),
+        ] {
+            assert_eq!(
+                decode(&encode_entity_snapshot_with_party(91, &[broken])),
+                Err(want)
+            );
+        }
+        assert!(matches!(
+            decode(&encode_entity_snapshot_with_party(
+                91,
+                &[PartyMemberStateWire {
+                    pos: [f32::NAN, 0.0, 0.0],
+                    ..member
+                }]
+            )),
+            Err(DecodeError::NonFinitePartyMember {
+                entity_id: 17,
+                field: "pos.x",
+                value,
+            }) if value.is_nan()
+        ));
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_party(17, &[member, member])),
+            Err(DecodeError::DuplicatePartyMember(17))
         );
     }
 

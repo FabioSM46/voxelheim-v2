@@ -16,6 +16,8 @@ pub mod voxelheim {
         pub use self::recipe_id_generated::*;
         mod facing_generated;
         pub use self::facing_generated::*;
+        mod party_action_generated;
+        pub use self::party_action_generated::*;
         mod refused_action_generated;
         pub use self::refused_action_generated::*;
         mod refusal_reason_generated;
@@ -88,6 +90,14 @@ pub mod voxelheim {
         pub use self::leave_request_generated::*;
         mod leave_started_generated;
         pub use self::leave_started_generated::*;
+        mod chat_request_generated;
+        pub use self::chat_request_generated::*;
+        mod chat_message_generated;
+        pub use self::chat_message_generated::*;
+        mod party_request_generated;
+        pub use self::party_request_generated::*;
+        mod party_invite_generated;
+        pub use self::party_invite_generated::*;
         mod action_refused_generated;
         pub use self::action_refused_generated::*;
         mod entity_state_generated;
@@ -102,6 +112,8 @@ pub mod voxelheim {
         pub use self::mob_state_generated::*;
         mod structure_state_generated;
         pub use self::structure_state_generated::*;
+        mod party_member_state_generated;
+        pub use self::party_member_state_generated::*;
         mod entity_snapshot_generated;
         pub use self::entity_snapshot_generated::*;
         mod inventory_state_generated;
