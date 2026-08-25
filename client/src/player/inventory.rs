@@ -514,10 +514,6 @@ const KITS: &[u16] = &[ITEM_SHARPENING_STONE, ITEM_LEATHER_PATCH];
 /// This is deliberately only a routing table for the cells that draw or grey a drop
 /// target. The server re-reads `itemRegistry.wornAt` before every move, so an entry here
 /// can grant nothing and an omitted entry can only make the client less helpful.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the equipment cells consume this in issue 297")
-)]
 pub(crate) const ARMOUR_SLOTS: &[(u16, u8)] = &[
     (ITEM_LEATHER_CAP, 0),
     (ITEM_LEATHER_JERKIN, 1),

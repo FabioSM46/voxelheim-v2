@@ -27,9 +27,9 @@ use super::{
     BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, TAB_SELECTED, button_colour, cell_node,
     refresh_cell_contents, spawn_cell_contents, stack_style,
 };
-use crate::net::{Session, StructureKind};
+use crate::net::{InventoryStack, Session, StructureKind};
 use crate::player::{
-    ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
+    ARMOUR_SLOTS, ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
     InventoryClickKind, PickedStack, RECIPES, Recipe, item_label,
 };
 
@@ -102,12 +102,32 @@ struct InventoryDrag(Option<Vec2>);
 enum InventoryGrid {
     Pack,
     Hotbar,
+    Equipment,
 }
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct InventoryCell {
     slot: u8,
     grid: InventoryGrid,
+}
+
+/// The body location an empty equipment cell names.
+///
+/// Kept on the caption child rather than inferred from its text, so refreshing the cell
+/// never has to parse presentation back into state. The child is hidden while the slot is
+/// full; the same icon and count as every other inventory cell take its place.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct EquipmentCaption(&'static str);
+
+/// The authoritative state needed to redraw a cell, grouped as one system parameter.
+///
+/// A refresh reads all three as one snapshot: the welcome defines the slot ranges, the
+/// inventory supplies their contents, and the picked source decides the selected/refused edge.
+#[derive(bevy::ecs::system::SystemParam)]
+struct InventoryCellState<'w> {
+    session: Option<Res<'w, Session>>,
+    inventory: Option<Res<'w, Inventory>>,
+    picked: Option<Res<'w, PickedStack>>,
 }
 
 /// The one tooltip node, spawned once and moved rather than respawned.
@@ -143,10 +163,11 @@ const RECIPE_ROW_SHORT: Color = Color::srgb(0.085, 0.095, 0.115);
 const RECIPE_TITLE: Color = Color::WHITE;
 const RECIPE_TITLE_SHORT: Color = Color::srgb(0.50, 0.53, 0.58);
 
-/// An ingredient the pack already holds enough of, and one it does not. The second is what
-/// answers "what am I missing" at a glance, per ingredient rather than per row.
+/// An ingredient the pack already holds enough of, and one it does not. The second colour
+/// also marks an equipment destination this client's routing table says the picked item does
+/// not fit. Both are refusal courtesies, and neither can stop a request leaving the client.
 const RECIPE_COST: Color = Color::srgb(0.72, 0.75, 0.80);
-const RECIPE_COST_SHORT: Color = Color::srgb(0.88, 0.44, 0.38);
+const REFUSED_TINT: Color = Color::srgb(0.88, 0.44, 0.38);
 
 /// The station note. Amber, and never a disabled state: proximity is the server's call.
 const RECIPE_STATION: Color = Color::srgb(0.95, 0.76, 0.35);
@@ -163,7 +184,17 @@ const TOOLTIP_GAP: f32 = 14.0;
 
 /// A fixed frame is the layout decision that keeps the tab strip stable: tab contents may
 /// differ, but neither participates in sizing this node.
-const INVENTORY_WINDOW_SIZE: Vec2 = Vec2::new(700.0, 720.0);
+const INVENTORY_WINDOW_SIZE: Vec2 = Vec2::new(760.0, 720.0);
+
+/// The space between the ordinary inventory and its one equipment column.
+const PACK_EQUIPMENT_GAP: f32 = 18.0;
+
+/// Enough room for the column heading while the cells themselves remain the shared size.
+const EQUIPMENT_COLUMN_WIDTH: f32 = 126.0;
+
+/// The current wire order, as `schemas/handshake.fbs` states it. A newer server may announce
+/// more equipment cells; those still get drawn and use the neutral fallback below.
+const EQUIPMENT_CAPTIONS: [&str; 3] = ["HEAD", "CHEST", "LEGS"];
 
 /// Space between the frame edge and the grab bar. The clamp accounts for it rather than
 /// mistaking visible frame padding for visible grab area.
@@ -299,10 +330,21 @@ fn spawn_inventory_screen(mut commands: Commands) {
                                     tab_panel_node(Display::Flex),
                                 ))
                                 .with_children(|pack| {
-                                    pack.spawn(section_title("PACK"));
-                                    pack.spawn((InventoryGrid::Pack, grid_node()));
-                                    pack.spawn(section_title("HOTBAR"));
-                                    pack.spawn((InventoryGrid::Hotbar, grid_node()));
+                                    pack.spawn(pack_and_equipment_node()).with_children(|body| {
+                                        body.spawn(pack_column_node()).with_children(|ordinary| {
+                                            ordinary.spawn(section_title("PACK"));
+                                            ordinary.spawn((InventoryGrid::Pack, grid_node()));
+                                            ordinary.spawn(section_title("HOTBAR"));
+                                            ordinary.spawn((InventoryGrid::Hotbar, grid_node()));
+                                        });
+                                        body.spawn(equipment_column_node()).with_children(
+                                            |equipment| {
+                                                equipment.spawn(section_title("EQUIPMENT"));
+                                                equipment
+                                                    .spawn((InventoryGrid::Equipment, grid_node()));
+                                            },
+                                        );
+                                    });
                                     pack.spawn(hint(
                                         "Left click: move stack    Right click: split    E: close",
                                     ));
@@ -536,6 +578,66 @@ fn grid_node() -> Node {
     }
 }
 
+/// The pack and equipment are two columns inside the existing Pack tab.
+fn pack_and_equipment_node() -> Node {
+    Node {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::FlexStart,
+        width: Val::Percent(100.0),
+        column_gap: Val::Px(PACK_EQUIPMENT_GAP),
+        ..default()
+    }
+}
+
+/// The ordinary slots consume the width left beside the fixed equipment column.
+fn pack_column_node() -> Node {
+    Node {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        flex_grow: 1.0,
+        min_width: Val::Px(0.0),
+        row_gap: Val::Px(10.0),
+        ..default()
+    }
+}
+
+fn equipment_column_node() -> Node {
+    Node {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        width: Val::Px(EQUIPMENT_COLUMN_WIDTH),
+        flex_shrink: 0.0,
+        align_items: AlignItems::Center,
+        row_gap: Val::Px(10.0),
+        ..default()
+    }
+}
+
+fn equipment_caption(offset: u8) -> &'static str {
+    EQUIPMENT_CAPTIONS
+        .get(usize::from(offset))
+        .copied()
+        .unwrap_or("WORN")
+}
+
+/// A small body-location label under no icon and no count.
+///
+/// `FocusPolicy::Pass` is load-bearing: without it only an empty equipment cell would stop
+/// answering the pointer, because a full cell hides this child.
+fn equipment_caption_bundle(label: &'static str) -> impl Bundle {
+    (
+        EquipmentCaption(label),
+        Text::new(label),
+        TextFont {
+            font_size: FontSize::Px(10.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.62, 0.66, 0.74)),
+        FocusPolicy::Pass,
+    )
+}
+
 fn build_inventory_cells(
     mut commands: Commands,
     session: Option<Res<Session>>,
@@ -546,7 +648,7 @@ fn build_inventory_cells(
     let Some(session) = session else {
         return;
     };
-    let expected = usize::from(session.0.inventory_slots - session.0.equipment_slots);
+    let expected = usize::from(session.0.inventory_slots);
     // The same total can have a different hotbar/pack split in a later session.
     // A newly inserted Session therefore invalidates the layout even when the
     // number of existing cells still matches.
@@ -558,14 +660,17 @@ fn build_inventory_cells(
         commands.entity(entity).despawn();
     }
 
+    let equipment_first = session.0.inventory_slots - session.0.equipment_slots;
     for (grid_entity, grid, mut node) in &mut grids {
-        node.grid_template_columns =
-            RepeatedGridTrack::flex(u16::from(session.0.hotbar_slots), 1.0);
+        let columns = match grid {
+            InventoryGrid::Equipment => 1,
+            InventoryGrid::Pack | InventoryGrid::Hotbar => u16::from(session.0.hotbar_slots),
+        };
+        node.grid_template_columns = RepeatedGridTrack::flex(columns, 1.0);
         let range = match grid {
-            InventoryGrid::Pack => {
-                session.0.hotbar_slots..session.0.inventory_slots - session.0.equipment_slots
-            }
+            InventoryGrid::Pack => session.0.hotbar_slots..equipment_first,
             InventoryGrid::Hotbar => 0..session.0.hotbar_slots,
+            InventoryGrid::Equipment => equipment_first..session.0.inventory_slots,
         };
         for slot in range {
             commands
@@ -577,14 +682,62 @@ fn build_inventory_cells(
                     BackgroundColor(super::EMPTY_CELL),
                     BorderColor::all(CELL_EDGE),
                 ))
-                // The picture and the count are the same two children the hotbar's cells
-                // get, spawned by the same function: one cell, drawn in two places.
-                .with_children(spawn_cell_contents);
+                .with_children(|cell| {
+                    // The picture and the count are the same two children every other
+                    // inventory cell gets. Equipment adds only the empty-state caption.
+                    spawn_cell_contents(cell);
+                    if *grid == InventoryGrid::Equipment {
+                        cell.spawn(equipment_caption_bundle(equipment_caption(
+                            slot - equipment_first,
+                        )));
+                    }
+                });
         }
     }
 }
 
-/// Redraws every pack and hotbar cell against the newest authoritative slot.
+/// Whether the routing mirror says one picked item does not belong in this equipment cell.
+///
+/// This answer colours a target and nothing else. The click path never reads it, so a wrong
+/// table entry cannot suppress a request or grant a move; the server re-decides both cases.
+fn equipment_target_is_refused(
+    cell: &InventoryCell,
+    interaction: Interaction,
+    equipment_first: u8,
+    picked: Option<InventoryStack>,
+) -> bool {
+    if cell.grid != InventoryGrid::Equipment || interaction == Interaction::None {
+        return false;
+    }
+    let Some(stack) = picked.filter(|stack| stack.item_id != 0 && stack.count != 0) else {
+        return false;
+    };
+    let Some(offset) = cell.slot.checked_sub(equipment_first) else {
+        return false;
+    };
+
+    !ARMOUR_SLOTS
+        .iter()
+        .any(|&(item_id, slot)| item_id == stack.item_id && slot == offset)
+}
+
+fn inventory_cell_edge(
+    cell: &InventoryCell,
+    interaction: Interaction,
+    equipment_first: u8,
+    picked_slot: Option<u8>,
+    picked_stack: Option<InventoryStack>,
+) -> Color {
+    if picked_slot == Some(cell.slot) {
+        SELECTED_EDGE
+    } else if equipment_target_is_refused(cell, interaction, equipment_first, picked_stack) {
+        REFUSED_TINT
+    } else {
+        CELL_EDGE
+    }
+}
+
+/// Redraws every pack, hotbar and equipment cell against the newest authoritative slot.
 ///
 /// The plate and the picked-up edge belong to this screen; what goes *inside* the cell is
 /// [`refresh_cell_contents`], shared with the always-visible hotbar so one stack cannot be
@@ -593,11 +746,11 @@ fn build_inventory_cells(
 /// component on two entities.
 fn refresh_inventory_cells(
     mut commands: Commands,
-    inventory: Option<Res<Inventory>>,
-    picked: Option<Res<PickedStack>>,
+    state: InventoryCellState<'_>,
     mut cells: Query<
         (
             &InventoryCell,
+            &Interaction,
             &Children,
             &mut BackgroundColor,
             &mut BorderColor,
@@ -606,26 +759,46 @@ fn refresh_inventory_cells(
     >,
     mut counts: Query<(&mut Text, &mut BackgroundColor), With<SlotCount>>,
     mut icons: Query<&mut DrawnIcon>,
+    mut captions: Query<(&EquipmentCaption, &mut Visibility)>,
 ) {
-    let (Some(inventory), Some(picked)) = (inventory, picked) else {
+    let (Some(session), Some(inventory), Some(picked)) =
+        (state.session, state.inventory, state.picked)
+    else {
         return;
     };
+    let equipment_first = session.0.inventory_slots - session.0.equipment_slots;
+    let picked_stack = picked.slot().and_then(|slot| inventory.slot(slot));
 
-    for (cell, children, mut background, mut border) in &mut cells {
+    for (cell, interaction, children, mut background, mut border) in &mut cells {
         let style = stack_style(inventory.slot(cell.slot));
         if background.0 != style.background {
             background.0 = style.background;
         }
-        let edge = if picked.slot() == Some(cell.slot) {
-            SELECTED_EDGE
-        } else {
-            CELL_EDGE
-        };
+        let edge = inventory_cell_edge(
+            cell,
+            *interaction,
+            equipment_first,
+            picked.slot(),
+            picked_stack,
+        );
         let next = BorderColor::all(edge);
         if *border != next {
             *border = next;
         }
         refresh_cell_contents(&mut commands, children, &style, &mut counts, &mut icons);
+        for child in children {
+            if let Ok((caption, mut visibility)) = captions.get_mut(*child) {
+                debug_assert!(!caption.0.is_empty());
+                let next = if style.icon.is_none() {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+                if *visibility != next {
+                    *visibility = next;
+                }
+            }
+        }
     }
 }
 
@@ -688,7 +861,7 @@ fn refresh_recipe_rows(
         let next = TextColor(if held >= needed {
             RECIPE_COST
         } else {
-            RECIPE_COST_SHORT
+            REFUSED_TINT
         });
         if *colour != next {
             *colour = next;
@@ -1168,7 +1341,7 @@ mod tests {
             view_distance: 3,
             inventory_slots: 6,
             hotbar_slots: 2,
-            equipment_slots: 1,
+            equipment_slots: 3,
             player_token: crate::net::ANY_TOKEN,
         })
     }
@@ -1663,28 +1836,108 @@ mod tests {
     }
 
     #[test]
-    fn equipment_slots_are_not_drawn_as_pack_cells() {
+    fn every_inventory_slot_is_drawn_with_equipment_in_its_own_column() {
         let mut app = app();
         app.update();
 
         let world = app.world_mut();
         let mut query = world.query::<&InventoryCell>();
-        let cells: Vec<InventoryCell> = query.iter(world).copied().collect();
-        assert_eq!(cells.len(), 5);
+        let mut cells: Vec<InventoryCell> = query.iter(world).copied().collect();
+        cells.sort_by_key(|cell| cell.slot);
+        assert_eq!(cells.len(), 6);
         assert_eq!(
             cells
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Hotbar)
-                .count(),
-            2
+                .map(|cell| cell.slot)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
         );
         assert_eq!(
             cells
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Pack)
-                .count(),
-            3
+                .map(|cell| cell.slot)
+                .collect::<Vec<_>>(),
+            vec![2]
         );
+        assert_eq!(
+            cells
+                .iter()
+                .filter(|cell| cell.grid == InventoryGrid::Equipment)
+                .map(|cell| cell.slot)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn empty_equipment_cells_name_the_body_location_and_a_full_one_draws_the_stack() {
+        let mut app = app();
+        app.update();
+
+        let captions = |app: &mut App| {
+            let world = app.world_mut();
+            let mut cells = world.query::<(&InventoryCell, &Children)>();
+            let mut result = Vec::new();
+            for (cell, children) in cells.iter(world) {
+                if cell.grid != InventoryGrid::Equipment {
+                    continue;
+                }
+                let child = children
+                    .iter()
+                    .find(|child| world.get::<EquipmentCaption>(*child).is_some())
+                    .expect("an equipment cell has one caption");
+                result.push((
+                    cell.slot,
+                    world
+                        .get::<Text>(child)
+                        .expect("the caption has text")
+                        .0
+                        .clone(),
+                    *world
+                        .get::<Visibility>(child)
+                        .expect("the caption has visibility"),
+                    world.get::<FocusPolicy>(child).copied(),
+                ));
+            }
+            result.sort_by_key(|row| row.0);
+            result
+        };
+
+        assert_eq!(
+            captions(&mut app),
+            vec![
+                (
+                    3,
+                    "HEAD".to_owned(),
+                    Visibility::Inherited,
+                    Some(FocusPolicy::Pass)
+                ),
+                (
+                    4,
+                    "CHEST".to_owned(),
+                    Visibility::Inherited,
+                    Some(FocusPolicy::Pass)
+                ),
+                (
+                    5,
+                    "LEGS".to_owned(),
+                    Visibility::Inherited,
+                    Some(FocusPolicy::Pass)
+                ),
+            ]
+        );
+
+        let head = ARMOUR_SLOTS
+            .iter()
+            .find(|(_, offset)| *offset == 0)
+            .map(|(item_id, _)| *item_id)
+            .expect("the routing table names head armour");
+        deliver(&mut app, &[(STONE, 5), (0, 0), (0, 0), (head, 1)]);
+        assert_eq!(captions(&mut app)[0].2, Visibility::Hidden);
+        assert_eq!(drawn(&mut app, 3).count, "1");
+        assert!(!drawn(&mut app, 3).rectangles.is_empty());
     }
 
     #[test]
@@ -1693,27 +1946,34 @@ mod tests {
         app.update();
 
         let mut params = session().0;
-        params.hotbar_slots = 4;
+        params.hotbar_slots = 3;
         app.insert_resource(Session(params));
         app.update();
 
         let world = app.world_mut();
         let mut query = world.query::<&InventoryCell>();
         let cells: Vec<InventoryCell> = query.iter(world).copied().collect();
-        assert_eq!(cells.len(), 5);
+        assert_eq!(cells.len(), 6);
         assert_eq!(
             cells
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Hotbar)
                 .count(),
-            4
+            3
         );
         assert_eq!(
             cells
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Pack)
                 .count(),
-            1
+            0
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .filter(|cell| cell.grid == InventoryGrid::Equipment)
+                .count(),
+            3
         );
     }
 
@@ -1755,6 +2015,123 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_refused_equipment_tint_never_changes_the_full_move_intent() {
+        let equipment_first = session().0.inventory_slots - session().0.equipment_slots;
+        let head = ARMOUR_SLOTS
+            .iter()
+            .find(|(_, offset)| *offset == 0)
+            .map(|(item_id, _)| *item_id)
+            .expect("the routing table names head armour");
+        let chest = ARMOUR_SLOTS
+            .iter()
+            .find(|(_, offset)| *offset == 1)
+            .map(|(item_id, _)| *item_id)
+            .expect("the routing table names chest armour");
+        let picked_head = Some(InventoryStack {
+            item_id: head,
+            count: 1,
+            ..Default::default()
+        });
+        let head_cell = InventoryCell {
+            slot: equipment_first,
+            grid: InventoryGrid::Equipment,
+        };
+        let chest_cell = InventoryCell {
+            slot: equipment_first + 1,
+            grid: InventoryGrid::Equipment,
+        };
+        let pack_cell = InventoryCell {
+            slot: 2,
+            grid: InventoryGrid::Pack,
+        };
+
+        assert_eq!(
+            inventory_cell_edge(
+                &head_cell,
+                Interaction::Hovered,
+                equipment_first,
+                Some(0),
+                picked_head,
+            ),
+            CELL_EDGE,
+            "matching head armour was tinted as refused"
+        );
+        assert_eq!(
+            inventory_cell_edge(
+                &chest_cell,
+                Interaction::Hovered,
+                equipment_first,
+                Some(0),
+                picked_head,
+            ),
+            REFUSED_TINT,
+            "head armour over the chest cell was not tinted"
+        );
+        assert_eq!(
+            inventory_cell_edge(
+                &pack_cell,
+                Interaction::Hovered,
+                equipment_first,
+                Some(0),
+                picked_head,
+            ),
+            CELL_EDGE,
+            "an ordinary pack cell inherited the equipment courtesy"
+        );
+        assert_eq!(
+            inventory_cell_edge(
+                &chest_cell,
+                Interaction::Hovered,
+                equipment_first,
+                Some(0),
+                Some(InventoryStack {
+                    item_id: chest,
+                    count: 1,
+                    ..Default::default()
+                }),
+            ),
+            CELL_EDGE,
+            "matching chest armour was tinted as refused"
+        );
+        assert_eq!(
+            inventory_cell_edge(
+                &chest_cell,
+                Interaction::Hovered,
+                equipment_first,
+                Some(chest_cell.slot),
+                picked_head,
+            ),
+            SELECTED_EDGE,
+            "the picked source lost its selected edge to the courtesy"
+        );
+
+        let mut app = app();
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.update();
+        let target = cell_at(&mut app, chest_cell.slot);
+        *app.world_mut()
+            .entity_mut(target)
+            .get_mut::<Interaction>()
+            .expect("an equipment cell is a button") = Interaction::Hovered;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<InventoryClick>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![InventoryClick {
+                slot: chest_cell.slot,
+                kind: InventoryClickKind::Full,
+            }],
+            "the tint changed or suppressed the existing click"
+        );
+    }
+
     /// Shift held over a left press reports a drop; split and consume remain independent.
     ///
     /// One table because the claim is the *pair*: what shift changes is where the stack
@@ -1767,71 +2144,74 @@ mod tests {
     /// the frame and the server answers it.
     #[test]
     fn every_mouse_gesture_has_one_meaning_with_or_without_shift() {
-        for (shift, button, want) in [
-            (
-                Some(KeyCode::ShiftLeft),
-                MouseButton::Left,
-                InventoryClickKind::Drop,
-            ),
-            (
-                Some(KeyCode::ShiftRight),
-                MouseButton::Left,
-                InventoryClickKind::Drop,
-            ),
-            (
-                Some(KeyCode::ShiftLeft),
-                MouseButton::Right,
-                InventoryClickKind::Split,
-            ),
-            (
-                Some(KeyCode::ShiftLeft),
-                MouseButton::Middle,
-                InventoryClickKind::Consume,
-            ),
-            (None, MouseButton::Left, InventoryClickKind::Full),
-            (None, MouseButton::Middle, InventoryClickKind::Consume),
+        for (grid, slot) in [
+            (InventoryGrid::Hotbar, 1),
+            (InventoryGrid::Pack, 2),
+            (InventoryGrid::Equipment, 3),
         ] {
-            let mut app = app();
-            app.insert_resource(ButtonInput::<MouseButton>::default());
-            app.insert_resource(ButtonInput::<KeyCode>::default());
-            app.update();
+            for (shift, button, want) in [
+                (
+                    Some(KeyCode::ShiftLeft),
+                    MouseButton::Left,
+                    InventoryClickKind::Drop,
+                ),
+                (
+                    Some(KeyCode::ShiftRight),
+                    MouseButton::Left,
+                    InventoryClickKind::Drop,
+                ),
+                (
+                    Some(KeyCode::ShiftLeft),
+                    MouseButton::Right,
+                    InventoryClickKind::Split,
+                ),
+                (
+                    Some(KeyCode::ShiftLeft),
+                    MouseButton::Middle,
+                    InventoryClickKind::Consume,
+                ),
+                (None, MouseButton::Left, InventoryClickKind::Full),
+                (None, MouseButton::Middle, InventoryClickKind::Consume),
+            ] {
+                let mut app = app();
+                app.insert_resource(ButtonInput::<MouseButton>::default());
+                app.insert_resource(ButtonInput::<KeyCode>::default());
+                app.update();
 
-            let cell = {
-                let world = app.world_mut();
-                let mut query = world.query::<(Entity, &InventoryCell)>();
-                query
-                    .iter(world)
-                    .find(|(_, cell)| cell.slot == 1)
-                    .map(|(entity, _)| entity)
-                    .expect("slot 1 exists")
-            };
-            *app.world_mut()
-                .entity_mut(cell)
-                .get_mut::<Interaction>()
-                .expect("buttons carry Interaction") = Interaction::Hovered;
-            if let Some(shift) = shift {
+                let cell = {
+                    let world = app.world_mut();
+                    let mut query = world.query::<(Entity, &InventoryCell)>();
+                    query
+                        .iter(world)
+                        .find(|(_, cell)| cell.slot == slot && cell.grid == grid)
+                        .map(|(entity, _)| entity)
+                        .unwrap_or_else(|| panic!("{grid:?} slot {slot} exists"))
+                };
+                *app.world_mut()
+                    .entity_mut(cell)
+                    .get_mut::<Interaction>()
+                    .expect("buttons carry Interaction") = Interaction::Hovered;
+                if let Some(shift) = shift {
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<KeyCode>>()
+                        .press(shift);
+                }
                 app.world_mut()
-                    .resource_mut::<ButtonInput<KeyCode>>()
-                    .press(shift);
-            }
-            app.world_mut()
-                .resource_mut::<ButtonInput<MouseButton>>()
-                .press(button);
-            app.update();
+                    .resource_mut::<ButtonInput<MouseButton>>()
+                    .press(button);
+                app.update();
 
-            let clicks: Vec<InventoryClick> = app
-                .world_mut()
-                .resource_mut::<Messages<InventoryClick>>()
-                .drain()
-                .collect();
-            assert_eq!(
-                clicks,
-                vec![InventoryClick {
-                    slot: 1,
-                    kind: want,
-                }],
-                "{shift:?} with {button:?}"
-            );
+                let clicks: Vec<InventoryClick> = app
+                    .world_mut()
+                    .resource_mut::<Messages<InventoryClick>>()
+                    .drain()
+                    .collect();
+                assert_eq!(
+                    clicks,
+                    vec![InventoryClick { slot, kind: want }],
+                    "{grid:?}: {shift:?} with {button:?}"
+                );
+            }
         }
     }
 
