@@ -650,12 +650,13 @@ belongs to the server and a character with more hair is not a taller character.
 into meshes for the bodies the snapshots drive. Two tables would be two answers to "what does a shirt
 colour cover", and the first thing two answers do is disagree.
 
-**Nineteen meshes for a whole settlement.** Every player is the same geometry and only the colours
+**Twenty-two meshes for a whole settlement.** Every player is the same geometry and only the colours
 and server-described equipment differ, so each independently moving piece is merged into one mesh
-at startup — eleven fixed body pieces, one per hair model and one per equipment slot — and nothing
-is ever rebuilt. Splitting the arms and legs creates pivots, not per-player geometry: every body
-still shares those handles. Armour is three optional overlay children; changing the worn ids adds,
-removes or re-materialises them without replacing the body. The helmet and cuirass occupy a second
+at startup — eleven fixed body pieces, one per hair model and six armour segments grouped under the
+three equipment slots — and nothing is ever rebuilt. Splitting the arms and legs creates pivots, not
+per-player geometry: every body still shares those handles. Armour is up to six optional overlay
+children; sleeves and greaves reuse the matching limb pivots, and changing worn ids adds, removes or
+re-materialises them without replacing the body. The helmet and cuirass occupy a second
 half-notch wrapping tier where hair can cross them, while greaves occupy the first tier over the
 trousers, so different materials never share a plane. Materials are keyed on colour plus finish:
 the ordinary rig and leather stay rough, while iron is smoother and slightly metallic. The map is

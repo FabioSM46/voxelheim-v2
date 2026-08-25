@@ -174,7 +174,7 @@ fn parts_of(
 fn armour_of(
     app: &mut App,
     entity_id: u64,
-) -> Vec<(ArmourPiece, Handle<Mesh>, Handle<StandardMaterial>)> {
+) -> Vec<(ArmourSegment, Handle<Mesh>, Handle<StandardMaterial>)> {
     let world = app.world_mut();
     let mut owners = world.query::<(&Body, &Children)>();
     let children: Vec<Entity> = owners
@@ -236,6 +236,32 @@ fn piece_transform(app: &mut App, entity_id: u64, piece: BodyPiece) -> Transform
         .find(|(visual, _)| visual.0 == piece)
         .map(|(_, transform)| *transform)
         .unwrap_or_else(|| panic!("entity {entity_id} has no {piece:?}"))
+}
+
+fn armour_transform(app: &mut App, entity_id: u64, segment: ArmourSegment) -> Transform {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_else(|| panic!("entity {entity_id} has no body"));
+    let mut segments = world.query::<(&ArmourVisual, &Transform)>();
+    children
+        .into_iter()
+        .filter_map(|child| segments.get(world, child).ok())
+        .find(|(visual, _)| visual.0 == segment)
+        .map(|(_, transform)| *transform)
+        .unwrap_or_else(|| panic!("entity {entity_id} has no {segment:?} armour segment"))
+}
+
+fn child_count(app: &mut App, entity_id: u64) -> usize {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map_or(0, |(_, children)| children.len())
 }
 
 /// Advances past the complete death curve without hitting virtual time's delta clamp.
@@ -916,7 +942,7 @@ fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
 }
 
 #[test]
-fn full_iron_is_three_metallic_overlays_that_strip_in_place() {
+fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
     let mut app = headless_player();
     let appearance = an_appearance(HairModel::Braided);
     let full_iron = [
@@ -939,11 +965,11 @@ fn full_iron_is_three_metallic_overlays_that_strip_in_place() {
 
     let body = body_of(&mut app, 99).expect("the described body is drawn");
     let remote = armour_of(&mut app, 99);
-    assert_eq!(remote.len(), ArmourPiece::ALL.len());
+    assert_eq!(remote.len(), ArmourSegment::ALL.len());
     assert_eq!(
         remote
             .iter()
-            .map(|(piece, _, _)| *piece)
+            .map(|(segment, _, _)| segment.piece())
             .collect::<HashSet<_>>(),
         ArmourPiece::ALL.into_iter().collect(),
     );
@@ -961,6 +987,10 @@ fn full_iron_is_three_metallic_overlays_that_strip_in_place() {
         assert_eq!(material.perceptual_roughness, BodyFinish::Iron.roughness());
         assert_eq!(material.metallic, BodyFinish::Iron.metallic());
     }
+    assert_eq!(
+        child_count(&mut app, 99),
+        BodyPiece::ALL.len() + ArmourSegment::ALL.len(),
+    );
 
     describe_wearing(&mut app, 99, appearance, [0, 0, 0]);
     app.update();
@@ -968,6 +998,20 @@ fn full_iron_is_three_metallic_overlays_that_strip_in_place() {
     assert_eq!(body_of(&mut app, 99), Some(body), "the body was respawned");
     assert!(armour_of(&mut app, 99).is_empty());
     assert_eq!(parts_of(&mut app, 99).len(), BodyPiece::ALL.len());
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
+
+    describe_wearing(&mut app, 99, appearance, full_iron);
+    app.update();
+    assert_eq!(armour_of(&mut app, 99).len(), ArmourSegment::ALL.len());
+    assert_eq!(
+        child_count(&mut app, 99),
+        BodyPiece::ALL.len() + ArmourSegment::ALL.len(),
+        "re-dressing appended stale overlays to Children",
+    );
+
+    describe_wearing(&mut app, 99, appearance, [0, 0, 0]);
+    app.update();
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
 }
 
 #[test]
@@ -1009,6 +1053,14 @@ fn leather_keeps_the_existing_rough_non_metallic_finish() {
 fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
     let mut app = headless_player();
     let start = Instant::now() - INTERVAL;
+    let appearance = an_appearance(HairModel::Braided);
+    let full_iron = [
+        crafting::ITEM_IRON_HELM,
+        crafting::ITEM_IRON_CUIRASS,
+        crafting::ITEM_IRON_GREAVES,
+    ];
+    describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
+    describe_wearing(&mut app, 99, appearance, full_iron);
     deliver(
         &mut app,
         1,
@@ -1058,6 +1110,24 @@ fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
         local.rotation, right_leg.rotation,
         "both legs swung together"
     );
+
+    for segment in [
+        ArmourSegment::LeftSleeve,
+        ArmourSegment::RightSleeve,
+        ArmourSegment::LeftGreave,
+        ArmourSegment::RightGreave,
+    ] {
+        assert_eq!(
+            armour_transform(&mut app, LOCAL_ID, segment),
+            piece_transform(&mut app, LOCAL_ID, segment.body_piece()),
+            "local {segment:?} did not follow its animated body pivot",
+        );
+        assert_eq!(
+            armour_transform(&mut app, 99, segment),
+            piece_transform(&mut app, 99, segment.body_piece()),
+            "remote {segment:?} did not follow its animated body pivot",
+        );
+    }
 }
 
 #[test]
@@ -1740,7 +1810,7 @@ fn an_entity_that_leaves_the_snapshot_loses_its_body() {
         let mut query = world.query_filtered::<Entity, With<ArmourVisual>>();
         query.iter(world).collect()
     };
-    assert_eq!(overlay_entities.len(), ArmourPiece::ALL.len());
+    assert_eq!(overlay_entities.len(), ArmourSegment::ALL.len());
 
     deliver(
         &mut app,

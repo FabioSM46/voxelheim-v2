@@ -142,6 +142,63 @@ pub enum ArmourPiece {
     Legs,
 }
 
+/// One independently moving part of a logical armour piece.
+///
+/// Chest and leg equipment each cover more than one animated limb. Keeping those
+/// segments explicit lets the renderer put every mesh at the same pivot as the body
+/// piece underneath it while the server still describes only three equipment slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArmourSegment {
+    Helmet,
+    Torso,
+    LeftSleeve,
+    RightSleeve,
+    LeftGreave,
+    RightGreave,
+}
+
+impl ArmourSegment {
+    pub const ALL: [Self; 6] = [
+        Self::Helmet,
+        Self::Torso,
+        Self::LeftSleeve,
+        Self::RightSleeve,
+        Self::LeftGreave,
+        Self::RightGreave,
+    ];
+
+    pub const fn piece(self) -> ArmourPiece {
+        match self {
+            Self::Helmet => ArmourPiece::Head,
+            Self::Torso | Self::LeftSleeve | Self::RightSleeve => ArmourPiece::Chest,
+            Self::LeftGreave | Self::RightGreave => ArmourPiece::Legs,
+        }
+    }
+
+    /// The rig piece whose pivot this segment shares.
+    pub const fn body_piece(self) -> BodyPiece {
+        match self {
+            Self::Helmet => BodyPiece::HeadAndNeck,
+            Self::Torso => BodyPiece::Torso,
+            Self::LeftSleeve => BodyPiece::LeftSleeve,
+            Self::RightSleeve => BodyPiece::RightSleeve,
+            Self::LeftGreave => BodyPiece::LeftTrouser,
+            Self::RightGreave => BodyPiece::RightTrouser,
+        }
+    }
+
+    pub const fn cell(self) -> PartBox {
+        match self {
+            Self::Helmet => SKIN[1],
+            Self::Torso => CUIRASS[0],
+            Self::LeftSleeve => CUIRASS[1],
+            Self::RightSleeve => CUIRASS[2],
+            Self::LeftGreave => TROUSERS[0],
+            Self::RightGreave => TROUSERS[1],
+        }
+    }
+}
+
 impl ArmourPiece {
     pub const ALL: [Self; 3] = [Self::Head, Self::Chest, Self::Legs];
 
@@ -371,19 +428,6 @@ fn placed_in_layer(layer: Layer, cell: PartBox) -> PlacedBox {
             // in one place, so every number below reads against the sheet it came from.
             -(z.0 + z.1) / 2.0 * NOTCH_XZ,
         ),
-    }
-}
-
-/// The model-sheet boxes one equipment overlay wraps.
-pub fn armour_boxes(piece: ArmourPiece) -> &'static [PartBox] {
-    match piece {
-        // The helmet wraps the head and leaves the neck visible.
-        ArmourPiece::Head => &SKIN[1..2],
-        // One item covers the torso and both sleeves, as the server describes one chest
-        // slot rather than three independently wearable pieces.
-        ArmourPiece::Chest => &CUIRASS,
-        // Greaves are one worn item wrapped around both trouser boxes.
-        ArmourPiece::Legs => &TROUSERS,
     }
 }
 
@@ -915,24 +959,23 @@ mod tests {
         for model in HairModel::ALL {
             let worn = Appearance::new(0, 1, 2, 3, model, 4).expect("all are colours");
             let body = drawn(worn);
-            for piece in ArmourPiece::ALL {
-                for cell in armour_boxes(piece) {
-                    let overlay = spans(placed_armour(piece, *cell));
-                    for (part, box_) in &body {
-                        let under = spans(*box_);
-                        for axis in 0..3 {
-                            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-                            if !overlaps(overlay[u], under[u]) || !overlaps(overlay[v], under[v]) {
-                                continue;
-                            }
-                            for side in [overlay[axis].0, overlay[axis].1] {
-                                for face in [under[axis].0, under[axis].1] {
-                                    assert!(
-                                        (side - face).abs() > f32::EPSILON,
-                                        "{piece:?} armour and {part:?} share plane {side} on \
-                                         axis {axis} while wearing {model:?}"
-                                    );
-                                }
+            for segment in ArmourSegment::ALL {
+                let piece = segment.piece();
+                let overlay = spans(placed_armour(piece, segment.cell()));
+                for (part, box_) in &body {
+                    let under = spans(*box_);
+                    for axis in 0..3 {
+                        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                        if !overlaps(overlay[u], under[u]) || !overlaps(overlay[v], under[v]) {
+                            continue;
+                        }
+                        for side in [overlay[axis].0, overlay[axis].1] {
+                            for face in [under[axis].0, under[axis].1] {
+                                assert!(
+                                    (side - face).abs() > f32::EPSILON,
+                                    "{piece:?} armour and {part:?} share plane {side} on \
+                                     axis {axis} while wearing {model:?}"
+                                );
                             }
                         }
                     }

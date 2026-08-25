@@ -67,7 +67,7 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 pub(crate) use appearance::{
-    ArmourPiece, BodyPart, BodyPiece, Limb, PlacedBox, armour_boxes, envelope as body_envelope,
+    ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
     held_item_anchor as body_held_item_anchor, piece_boxes, placed as placed_box, placed_armour,
 };
 
@@ -368,17 +368,17 @@ impl InputCadence {
 
 /// The meshes every body is drawn from, built once at startup and shared by everybody.
 ///
-/// **Nineteen meshes for a whole settlement.** Every player shares eleven fixed body
-/// pieces, five hair meshes and three equipment overlays. Nothing here is ever rebuilt:
-/// a description change swaps handles or optional children in place.
+/// **Twenty-two meshes for a whole settlement.** Every player shares eleven fixed body
+/// pieces, five hair meshes and six independently moving armour segments. Nothing here
+/// is ever rebuilt: a description change swaps handles or optional children in place.
 #[derive(Resource, Debug)]
 pub(crate) struct PlayerVisuals {
     fixed: [(BodyPiece, Handle<Mesh>); BodyPiece::FIXED.len()],
     /// One per model, paired with the model it draws. An array rather than a map because
     /// there are five of them and `HairModel` is deliberately not a number.
     hair: [(HairModel, Handle<Mesh>); HairModel::ALL.len()],
-    /// One shared overlay mesh per authoritative equipment slot.
-    armour: [(ArmourPiece, Handle<Mesh>); ArmourPiece::ALL.len()],
+    /// One shared overlay mesh per independently moving armour segment.
+    armour: [(ArmourSegment, Handle<Mesh>); ArmourSegment::ALL.len()],
 }
 
 impl PlayerVisuals {
@@ -411,10 +411,10 @@ impl PlayerVisuals {
         }
     }
 
-    fn armour_mesh(&self, piece: ArmourPiece) -> Handle<Mesh> {
+    fn armour_mesh(&self, segment: ArmourSegment) -> Handle<Mesh> {
         self.armour
             .iter()
-            .find(|(drawn, _)| *drawn == piece)
+            .find(|(drawn, _)| *drawn == segment)
             .map_or_else(|| self.armour[0].1.clone(), |(_, mesh)| mesh.clone())
     }
 }
@@ -576,15 +576,19 @@ impl Wardrobe<'_> {
     }
 
     /// The optional overlays named by the server's latest description.
-    fn armour(&mut self, worn: Worn) -> Vec<(ArmourPiece, Handle<Mesh>, Handle<StandardMaterial>)> {
-        ArmourPiece::ALL
+    fn armour(
+        &mut self,
+        worn: Worn,
+    ) -> Vec<(ArmourSegment, Handle<Mesh>, Handle<StandardMaterial>)> {
+        ArmourSegment::ALL
             .into_iter()
-            .filter_map(|piece| {
+            .filter_map(|segment| {
+                let piece = segment.piece();
                 let item_id = worn.armour(piece);
                 (item_id != 0).then(|| {
                     (
-                        piece,
-                        self.visuals.armour_mesh(piece),
+                        segment,
+                        self.visuals.armour_mesh(segment),
                         self.palette
                             .of(BodyMaterialKey::armour(item_id), self.materials),
                     )
@@ -872,10 +876,10 @@ impl Worn {
 #[derive(Component, Debug, Clone, Copy)]
 struct BodyVisual(BodyPiece);
 
-/// One optional equipment overlay, kept separate from the base rig so the character
+/// One optional equipment segment, kept separate from the base rig so the character
 /// preview remains bare and a server update can add or remove it in place.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct ArmourVisual(ArmourPiece);
+struct ArmourVisual(ArmourSegment);
 
 /// The stride sample the interpolator produced for this frame.
 ///
@@ -947,7 +951,8 @@ fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>
     commands.insert_resource(PlayerVisuals {
         fixed: BodyPiece::FIXED.map(|piece| (piece, meshes.add(piece_mesh(piece, ANY_HAIR)))),
         hair: HairModel::ALL.map(|model| (model, meshes.add(piece_mesh(BodyPiece::Hair, model)))),
-        armour: ArmourPiece::ALL.map(|piece| (piece, meshes.add(armour_piece_mesh(piece)))),
+        armour: ArmourSegment::ALL
+            .map(|segment| (segment, meshes.add(armour_segment_mesh(segment)))),
     });
 }
 
@@ -982,19 +987,15 @@ fn piece_mesh(piece: BodyPiece, model: HairModel) -> Mesh {
     merged
 }
 
-/// One worn item, merged into one shared overlay mesh at the body's feet origin.
-fn armour_piece_mesh(piece: ArmourPiece) -> Mesh {
-    let mut boxes = armour_boxes(piece).iter().map(|cell| {
-        let placed = placed_armour(piece, *cell);
-        Mesh::from(Cuboid::from_size(placed.size)).translated_by(placed.centre)
-    });
-
-    let Some(mut merged) = boxes.next() else {
-        error!("{piece:?} armour is drawn from no boxes at all");
-        return Mesh::from(Cuboid::from_size(Vec3::ZERO));
-    };
-    merge_all(&mut merged, boxes, "player armour");
-    merged
+/// One worn segment authored around the pivot of the body piece underneath it.
+///
+/// A cuirass is one logical server slot but its sleeves move with the arms, just as the
+/// two greaves move with their respective legs. The six shared meshes preserve those
+/// pivots without changing the three-slot wire contract.
+fn armour_segment_mesh(segment: ArmourSegment) -> Mesh {
+    let placed = placed_armour(segment.piece(), segment.cell());
+    Mesh::from(Cuboid::from_size(placed.size))
+        .translated_by(placed.centre - segment.body_piece().pivot())
 }
 
 /// Reads the controls into [`MoveIntent`] and [`LookState`].
@@ -1451,7 +1452,8 @@ fn dress_bodies(
             let Ok((entity, visual, mut mesh, mut material)) = overlays.get_mut(*child) else {
                 continue;
             };
-            let Some((_, shape, colour)) = armour.iter().find(|(piece, _, _)| *piece == visual.0)
+            let Some((_, shape, colour)) =
+                armour.iter().find(|(segment, _, _)| *segment == visual.0)
             else {
                 commands.entity(entity).despawn();
                 continue;
@@ -1466,15 +1468,15 @@ fn dress_bodies(
         }
 
         commands.entity(owner).with_children(|parent| {
-            for (piece, mesh, material) in armour {
-                if present.contains(&piece) {
+            for (segment, mesh, material) in armour {
+                if present.contains(&segment) {
                     continue;
                 }
                 parent.spawn((
-                    ArmourVisual(piece),
+                    ArmourVisual(segment),
                     Mesh3d(mesh),
                     MeshMaterial3d(material),
-                    Transform::default(),
+                    resting_piece_transform(segment.body_piece()),
                 ));
             }
         });
@@ -1577,12 +1579,12 @@ fn spawn_body(
                 resting_piece_transform(piece),
             ));
         }
-        for (piece, mesh, material) in armour {
+        for (segment, mesh, material) in armour {
             parent.spawn((
-                ArmourVisual(piece),
+                ArmourVisual(segment),
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
-                Transform::default(),
+                resting_piece_transform(segment.body_piece()),
             ));
         }
     });
@@ -1750,7 +1752,8 @@ pub(crate) fn resting_piece_transform(piece: BodyPiece) -> Transform {
 fn animate_walking_bodies(
     buffer: Res<SnapshotBuffer>,
     bodies: Query<(&Body, &WalkPose, &Children)>,
-    mut parts: Query<(&BodyVisual, &mut Transform)>,
+    mut parts: Query<(&BodyVisual, &mut Transform), Without<ArmourVisual>>,
+    mut armour: Query<(&ArmourVisual, &mut Transform), Without<BodyVisual>>,
 ) {
     for (body, walk, children) in &bodies {
         let stride = if walk.moving && !buffer.player_is_dead(body.0) {
@@ -1760,23 +1763,28 @@ fn animate_walking_bodies(
         };
 
         for child in children {
-            let Ok((visual, mut transform)) = parts.get_mut(*child) else {
-                continue;
+            if let Ok((visual, mut transform)) = parts.get_mut(*child) {
+                apply_walk_transform(visual.0, stride, &mut transform);
+            } else if let Ok((visual, mut transform)) = armour.get_mut(*child) {
+                apply_walk_transform(visual.0.body_piece(), stride, &mut transform);
             };
-            let angle = match visual.0.limb() {
-                Some(Limb::LeftLeg | Limb::RightArm) => stride,
-                Some(Limb::RightLeg | Limb::LeftArm) => -stride,
-                None => 0.0,
-            };
-            let next = Transform {
-                translation: visual.0.pivot(),
-                rotation: Quat::from_rotation_x(angle),
-                ..default()
-            };
-            if *transform != next {
-                *transform = next;
-            }
         }
+    }
+}
+
+fn apply_walk_transform(piece: BodyPiece, stride: f32, transform: &mut Transform) {
+    let angle = match piece.limb() {
+        Some(Limb::LeftLeg | Limb::RightArm) => stride,
+        Some(Limb::RightLeg | Limb::LeftArm) => -stride,
+        None => 0.0,
+    };
+    let next = Transform {
+        translation: piece.pivot(),
+        rotation: Quat::from_rotation_x(angle),
+        ..default()
+    };
+    if *transform != next {
+        *transform = next;
     }
 }
 
