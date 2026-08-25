@@ -16,7 +16,10 @@
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
-use super::crafting::{ITEM_COOKED_MEAT, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE};
+use super::crafting::{
+    ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES, ITEM_IRON_HELM, ITEM_LEATHER_CAP,
+    ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE,
+};
 use super::items::ITEM_RAW_MEAT;
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
@@ -504,6 +507,25 @@ fn consume_request(
 /// that actually costs something is the other direction — an item the server would have
 /// honoured and this list omitted, which is what the leather patch silently was.
 const KITS: &[u16] = &[ITEM_SHARPENING_STONE, ITEM_LEATHER_PATCH];
+
+/// Display-side routing from an armour item id to its equipment-slot offset:
+/// head `0`, chest `1`, legs `2`.
+///
+/// This is deliberately only a routing table for the cells that draw or grey a drop
+/// target. The server re-reads `itemRegistry.wornAt` before every move, so an entry here
+/// can grant nothing and an omitted entry can only make the client less helpful.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the equipment cells consume this in issue 297")
+)]
+pub(crate) const ARMOUR_SLOTS: &[(u16, u8)] = &[
+    (ITEM_LEATHER_CAP, 0),
+    (ITEM_LEATHER_JERKIN, 1),
+    (ITEM_LEATHER_LEGGINGS, 2),
+    (ITEM_IRON_HELM, 0),
+    (ITEM_IRON_CUIRASS, 1),
+    (ITEM_IRON_GREAVES, 2),
+];
 
 /// Whether this client routes a click with one item id onto a worn item to a mend.
 ///
@@ -1115,6 +1137,36 @@ mod tests {
             KITS.len(),
             "an id appears twice in the kit list"
         );
+    }
+
+    #[test]
+    fn every_armour_route_names_one_registry_item_once() {
+        assert_eq!(
+            crate::player::ARMOUR_SLOTS,
+            &[
+                (ITEM_LEATHER_CAP, 0),
+                (ITEM_LEATHER_JERKIN, 1),
+                (ITEM_LEATHER_LEGGINGS, 2),
+                (ITEM_IRON_HELM, 0),
+                (ITEM_IRON_CUIRASS, 1),
+                (ITEM_IRON_GREAVES, 2),
+            ]
+        );
+        for &(item_id, slot) in ARMOUR_SLOTS {
+            assert_ne!(item_label(item_id), "unknown item", "armour item {item_id}");
+            assert!(
+                slot < 3,
+                "armour item {item_id} names equipment offset {slot}"
+            );
+            assert_eq!(
+                ARMOUR_SLOTS
+                    .iter()
+                    .filter(|(other, _)| *other == item_id)
+                    .count(),
+                1,
+                "armour item {item_id} appears more than once"
+            );
+        }
     }
 
     /// The mend the leather patch could not complete, and the move it used to be instead.

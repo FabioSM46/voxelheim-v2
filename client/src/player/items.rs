@@ -21,8 +21,9 @@
 
 use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::{
-    ITEM_AXE, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_PATCH, ITEM_PICKAXE,
-    ITEM_SHARPENING_STONE, ITEM_SHOVEL,
+    ITEM_AXE, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES, ITEM_IRON_HELM,
+    ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
+    ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use crate::world::{BlockId, palette};
@@ -100,6 +101,9 @@ pub(crate) enum ItemShape {
     /// registry says with a zero. A shape is not a capability, and drawing them alike
     /// would be inviting the reader to think it was.
     Tool,
+    /// A compact plate with shoulders: every wearable piece uses one silhouette and the
+    /// registry colour distinguishes worked leather from forged iron.
+    Armour,
 }
 
 impl ItemShape {
@@ -131,12 +135,13 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Block,
         Self::Material,
         Self::Blade,
         Self::Bundle,
         Self::Tool,
+        Self::Armour,
     ];
 }
 
@@ -155,6 +160,8 @@ enum ItemColour {
     WornSteel,
     /// Cleaner, brighter forged steel. sRGB `#8997A3`.
     ForgedSteel,
+    /// Worked hide, warm and dark enough to stay distinct from forged steel. sRGB `#7A4E2D`.
+    Leather,
     /// Fresh raw meat. A muted red that belongs to no terrain block. sRGB `#9C4F4F`.
     RawMeat,
     /// Cooked meat. A browned swatch distinct from the raw ingredient. sRGB `#8B5A3C`.
@@ -165,6 +172,8 @@ enum ItemColour {
 const WORN_STEEL_LINEAR: [f32; 3] = [0.099_899, 0.124_772, 0.152_926];
 /// `#8997A3`, converted from sRGB to the linear space vertex colours use.
 const FORGED_STEEL_LINEAR: [f32; 3] = [0.250_158, 0.309_469, 0.366_253];
+/// `#7A4E2D`, converted from sRGB to the linear space vertex colours use.
+const LEATHER_LINEAR: [f32; 3] = [0.194_618, 0.076_185, 0.026_241];
 /// `#9C4F4F`, converted from sRGB to the linear space vertex colours use.
 const RAW_MEAT_LINEAR: [f32; 3] = [0.332_452, 0.078_187, 0.078_187];
 /// `#8B5A3C`, converted from sRGB to the linear space vertex colours use.
@@ -180,6 +189,10 @@ impl ItemColour {
             }
             Self::ForgedSteel => {
                 let [r, g, b] = FORGED_STEEL_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::Leather => {
+                let [r, g, b] = LEATHER_LINEAR;
                 [r, g, b, 1.0]
             }
             Self::RawMeat => {
@@ -228,7 +241,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 20] = [
+pub(super) const ITEMS: [ItemDisplay; 26] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -377,6 +390,42 @@ pub(super) const ITEMS: [ItemDisplay; 20] = [
         shape: ItemShape::Material,
         colour: ItemColour::CookedMeat,
     },
+    ItemDisplay {
+        item_id: ITEM_LEATHER_CAP,
+        name: "leather cap",
+        shape: ItemShape::Armour,
+        colour: ItemColour::Leather,
+    },
+    ItemDisplay {
+        item_id: ITEM_LEATHER_JERKIN,
+        name: "leather jerkin",
+        shape: ItemShape::Armour,
+        colour: ItemColour::Leather,
+    },
+    ItemDisplay {
+        item_id: ITEM_LEATHER_LEGGINGS,
+        name: "leather leggings",
+        shape: ItemShape::Armour,
+        colour: ItemColour::Leather,
+    },
+    ItemDisplay {
+        item_id: ITEM_IRON_HELM,
+        name: "iron helm",
+        shape: ItemShape::Armour,
+        colour: ItemColour::ForgedSteel,
+    },
+    ItemDisplay {
+        item_id: ITEM_IRON_CUIRASS,
+        name: "iron cuirass",
+        shape: ItemShape::Armour,
+        colour: ItemColour::ForgedSteel,
+    },
+    ItemDisplay {
+        item_id: ITEM_IRON_GREAVES,
+        name: "iron greaves",
+        shape: ItemShape::Armour,
+        colour: ItemColour::ForgedSteel,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -514,6 +563,12 @@ mod tests {
             ITEM_AXE,
             ITEM_RAW_MEAT,
             ITEM_COOKED_MEAT,
+            ITEM_LEATHER_CAP,
+            ITEM_LEATHER_JERKIN,
+            ITEM_LEATHER_LEGGINGS,
+            ITEM_IRON_HELM,
+            ITEM_IRON_CUIRASS,
+            ITEM_IRON_GREAVES,
         ];
         for item_id in declared {
             assert!(
@@ -567,7 +622,7 @@ mod tests {
 
     /// The readable sRGB declarations and the linear constants the renderers consume agree.
     #[test]
-    fn steel_linear_values_match_their_srgb() {
+    fn item_linear_values_match_their_srgb() {
         fn srgb_to_linear(byte: u8) -> f32 {
             let value = f32::from(byte) / 255.0;
             if value <= 0.040_45 {
@@ -580,6 +635,7 @@ mod tests {
         for (name, srgb, linear) in [
             ("worn steel", [0x59, 0x63, 0x6D], WORN_STEEL_LINEAR),
             ("forged steel", [0x89, 0x97, 0xA3], FORGED_STEEL_LINEAR),
+            ("leather", [0x7A, 0x4E, 0x2D], LEATHER_LINEAR),
         ] {
             for (channel, (got, byte)) in linear.iter().zip(srgb).enumerate() {
                 let want = srgb_to_linear(byte);
@@ -646,6 +702,49 @@ mod tests {
         assert_ne!(
             item_linear_rgba(ITEM_RAW_MEAT),
             item_linear_rgba(ITEM_COOKED_MEAT)
+        );
+    }
+
+    #[test]
+    fn both_armour_sets_have_their_appended_ids_and_materials() {
+        for (item_id, name) in [
+            (ITEM_LEATHER_CAP, "leather cap"),
+            (ITEM_LEATHER_JERKIN, "leather jerkin"),
+            (ITEM_LEATHER_LEGGINGS, "leather leggings"),
+        ] {
+            assert_eq!(item_label(item_id), name);
+            assert_eq!(item_shape(item_id), ItemShape::Armour);
+            assert_eq!(
+                display(item_id).map(|row| row.colour),
+                Some(ItemColour::Leather)
+            );
+        }
+        for (item_id, name) in [
+            (ITEM_IRON_HELM, "iron helm"),
+            (ITEM_IRON_CUIRASS, "iron cuirass"),
+            (ITEM_IRON_GREAVES, "iron greaves"),
+        ] {
+            assert_eq!(item_label(item_id), name);
+            assert_eq!(item_shape(item_id), ItemShape::Armour);
+            assert_eq!(
+                display(item_id).map(|row| row.colour),
+                Some(ItemColour::ForgedSteel)
+            );
+        }
+        assert_eq!(
+            [
+                ITEM_LEATHER_CAP,
+                ITEM_LEATHER_JERKIN,
+                ITEM_LEATHER_LEGGINGS,
+                ITEM_IRON_HELM,
+                ITEM_IRON_CUIRASS,
+                ITEM_IRON_GREAVES,
+            ],
+            [21, 22, 23, 24, 25, 26]
+        );
+        assert_ne!(
+            item_linear_rgba(ITEM_LEATHER_CAP),
+            item_linear_rgba(ITEM_IRON_HELM)
         );
     }
 

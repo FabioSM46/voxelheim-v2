@@ -11,13 +11,13 @@ pub const ENUM_MIN_RECIPE_ID: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_RECIPE_ID: u8 = 10;
+pub const ENUM_MAX_RECIPE_ID: u8 = 16;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 11] = [
+pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 17] = [
     RecipeID::Unknown,
     RecipeID::Forge,
     RecipeID::IronSword,
@@ -29,6 +29,12 @@ pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 11] = [
     RecipeID::Pickaxe,
     RecipeID::Axe,
     RecipeID::CookedMeat,
+    RecipeID::LeatherCap,
+    RecipeID::LeatherJerkin,
+    RecipeID::LeatherLeggings,
+    RecipeID::IronHelm,
+    RecipeID::IronCuirass,
+    RecipeID::IronGreaves,
 ];
 
 /// Which recipe a `CraftRequest` names.
@@ -62,9 +68,15 @@ impl RecipeID {
     pub const Pickaxe: Self = Self(8);
     pub const Axe: Self = Self(9);
     pub const CookedMeat: Self = Self(10);
+    pub const LeatherCap: Self = Self(11);
+    pub const LeatherJerkin: Self = Self(12);
+    pub const LeatherLeggings: Self = Self(13);
+    pub const IronHelm: Self = Self(14);
+    pub const IronCuirass: Self = Self(15);
+    pub const IronGreaves: Self = Self(16);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 10;
+    pub const ENUM_MAX: u8 = 16;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Forge,
@@ -77,6 +89,12 @@ impl RecipeID {
         Self::Pickaxe,
         Self::Axe,
         Self::CookedMeat,
+        Self::LeatherCap,
+        Self::LeatherJerkin,
+        Self::LeatherLeggings,
+        Self::IronHelm,
+        Self::IronCuirass,
+        Self::IronGreaves,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -92,6 +110,12 @@ impl RecipeID {
             Self::Pickaxe => Some("Pickaxe"),
             Self::Axe => Some("Axe"),
             Self::CookedMeat => Some("CookedMeat"),
+            Self::LeatherCap => Some("LeatherCap"),
+            Self::LeatherJerkin => Some("LeatherJerkin"),
+            Self::LeatherLeggings => Some("LeatherLeggings"),
+            Self::IronHelm => Some("IronHelm"),
+            Self::IronCuirass => Some("IronCuirass"),
+            Self::IronGreaves => Some("IronGreaves"),
             _ => None,
         }
     }

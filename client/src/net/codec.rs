@@ -807,6 +807,12 @@ pub enum RecipeId {
     Pickaxe,
     Axe,
     CookedMeat,
+    LeatherCap,
+    LeatherJerkin,
+    LeatherLeggings,
+    IronHelm,
+    IronCuirass,
+    IronGreaves,
 }
 
 impl RecipeId {
@@ -830,6 +836,12 @@ impl RecipeId {
             Self::Pickaxe => fb::RecipeID::Pickaxe,
             Self::Axe => fb::RecipeID::Axe,
             Self::CookedMeat => fb::RecipeID::CookedMeat,
+            Self::LeatherCap => fb::RecipeID::LeatherCap,
+            Self::LeatherJerkin => fb::RecipeID::LeatherJerkin,
+            Self::LeatherLeggings => fb::RecipeID::LeatherLeggings,
+            Self::IronHelm => fb::RecipeID::IronHelm,
+            Self::IronCuirass => fb::RecipeID::IronCuirass,
+            Self::IronGreaves => fb::RecipeID::IronGreaves,
         }
     }
 }
@@ -4498,14 +4510,17 @@ mod tests {
     /// requires a non-zero equipment count that a V17 server never sends, so the
     /// mismatch must be caught at admission.
     ///
+    /// **V19 appends six wearable `RecipeID` members.** They travel client to server in
+    /// a `CraftRequest`, so a V18 server would reject them only after a clean handshake.
+    ///
     /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v18_names_the_equipment_layout() {
+    fn protocol_v19_names_the_armour_recipes() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 18);
+        assert_eq!(fb::ProtocolVersion::Current.0, 19);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4951,6 +4966,12 @@ mod tests {
         assert_eq!(fb::RecipeID::Campfire.0, 5);
         assert_eq!(fb::RecipeID::LeatherPatch.0, 6);
         assert_eq!(fb::RecipeID::CookedMeat.0, 10);
+        assert_eq!(fb::RecipeID::LeatherCap.0, 11);
+        assert_eq!(fb::RecipeID::LeatherJerkin.0, 12);
+        assert_eq!(fb::RecipeID::LeatherLeggings.0, 13);
+        assert_eq!(fb::RecipeID::IronHelm.0, 14);
+        assert_eq!(fb::RecipeID::IronCuirass.0, 15);
+        assert_eq!(fb::RecipeID::IronGreaves.0, 16);
     }
 
     /// V7's members sit where they were appended, and the enums they were appended to
@@ -7242,6 +7263,12 @@ mod tests {
             (RecipeId::Pickaxe, fb::RecipeID::Pickaxe),
             (RecipeId::Axe, fb::RecipeID::Axe),
             (RecipeId::CookedMeat, fb::RecipeID::CookedMeat),
+            (RecipeId::LeatherCap, fb::RecipeID::LeatherCap),
+            (RecipeId::LeatherJerkin, fb::RecipeID::LeatherJerkin),
+            (RecipeId::LeatherLeggings, fb::RecipeID::LeatherLeggings),
+            (RecipeId::IronHelm, fb::RecipeID::IronHelm),
+            (RecipeId::IronCuirass, fb::RecipeID::IronCuirass),
+            (RecipeId::IronGreaves, fb::RecipeID::IronGreaves),
         ];
 
         for (recipe, wire) in named {

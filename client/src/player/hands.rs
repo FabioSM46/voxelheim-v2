@@ -255,6 +255,11 @@ const TOOL_HAFT_SIZE: Vec3 = Vec3::new(0.014, 0.130, 0.014);
 /// distinguishes the silhouette from [`sword_mesh`]'s guard, grip and tapering blade.
 const TOOL_HEAD_SIZE: Vec3 = Vec3::new(0.052, 0.020, 0.026);
 
+/// A carried armour plate: broad enough to read as clothing and shallow enough not to
+/// become another block in the hand.
+const ARMOUR_BODY_SIZE: Vec3 = Vec3::new(0.060, 0.070, 0.016);
+const ARMOUR_SHOULDER_SIZE: Vec3 = Vec3::new(0.026, 0.018, 0.022);
+
 /// A haft with a head across the top of it: one mesh, two boxes.
 ///
 /// Merged rather than parented, for the reason the body's parts are merged in
@@ -272,6 +277,20 @@ fn tool_mesh() -> Mesh {
     ));
     merge_all(&mut merged, [head], "held tool");
     merged
+}
+
+/// One body plate and two shoulders, merged into the single view-model entity.
+fn armour_mesh() -> Mesh {
+    let mut armour = Mesh::from(Cuboid::from_size(ARMOUR_BODY_SIZE));
+    let shoulders = [-1.0, 1.0].map(|side| {
+        Mesh::from(Cuboid::from_size(ARMOUR_SHOULDER_SIZE)).translated_by(Vec3::new(
+            side * ARMOUR_BODY_SIZE.x * 0.48,
+            ARMOUR_BODY_SIZE.y * 0.34,
+            0.0,
+        ))
+    });
+    merge_all(&mut armour, shoulders, "held armour");
+    armour
 }
 
 /// A closed fist: a palm with four knuckles standing proud of it.
@@ -735,6 +754,7 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Blade => sword_mesh(SWORD_LENGTH),
         ItemShape::Bundle => Mesh::from(Cuboid::from_size(BUNDLE_SIZE)),
         ItemShape::Tool => tool_mesh(),
+        ItemShape::Armour => armour_mesh(),
     }
 }
 
@@ -755,6 +775,7 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Bundle => hand_top + BUNDLE_SIZE.y / 2.0 - HOLD_OVERLAP,
         // The head stays above the hand and most of the haft remains visible below it.
         ItemShape::Tool => HAND_SIZE.y * 0.35,
+        ItemShape::Armour => hand_top + ARMOUR_BODY_SIZE.y / 2.0 - HOLD_OVERLAP,
     };
     Vec3::Y * y
 }
@@ -1398,6 +1419,7 @@ mod tests {
             (ItemShape::Blade, ITEM_IRON_SWORD),
             (ItemShape::Bundle, structures::ITEM_TENT),
             (ItemShape::Tool, crafting::ITEM_SHOVEL),
+            (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
         ]
     }
 

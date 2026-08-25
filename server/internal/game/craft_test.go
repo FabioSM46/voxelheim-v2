@@ -198,9 +198,9 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 	}
 }
 
-// The recipe table is the ten the iterations agreed on, with the costs they agreed on. A
+// The recipe table is the sixteen the iterations agreed on, with the costs they agreed on. A
 // balance pass edits this test and the table together; a typo edits only one of them.
-func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
+func TestTheRecipeTableIsTheSixteenAgreedRecipes(t *testing.T) {
 	t.Parallel()
 
 	want := map[vnet.RecipeID]recipe{
@@ -248,6 +248,27 @@ func TestTheRecipeTableIsTheTenAgreedRecipes(t *testing.T) {
 		vnet.RecipeIDCookedMeat: {
 			ingredients: []ingredient{{ItemRawMeat, 1}},
 			product:     ItemCookedMeat, productCount: 1, station: vnet.StructureKindCampfire, experience: 3,
+		},
+		vnet.RecipeIDLeatherCap: {
+			ingredients: []ingredient{{ItemVargrPelt, 3}}, product: ItemLeatherCap, productCount: 1,
+		},
+		vnet.RecipeIDLeatherJerkin: {
+			ingredients: []ingredient{{ItemVargrPelt, 5}}, product: ItemLeatherJerkin, productCount: 1,
+		},
+		vnet.RecipeIDLeatherLeggings: {
+			ingredients: []ingredient{{ItemVargrPelt, 4}}, product: ItemLeatherLeggings, productCount: 1,
+		},
+		vnet.RecipeIDIronHelm: {
+			ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemIronHelm, productCount: 1,
+			station: vnet.StructureKindForge, experience: 10,
+		},
+		vnet.RecipeIDIronCuirass: {
+			ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemIronCuirass, productCount: 1,
+			station: vnet.StructureKindForge, experience: 10,
+		},
+		vnet.RecipeIDIronGreaves: {
+			ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
+			station: vnet.StructureKindForge, experience: 10,
 		},
 	}
 
@@ -504,6 +525,9 @@ func TestTheStationlessRecipesNeedNothingBuilt(t *testing.T) {
 		// bootstrapping one: a patch is mended-in-the-field kit, so a forge requirement
 		// would mean walking home to make the thing that saves the walk.
 		{vnet.RecipeIDLeatherPatch, ItemLeatherPatch},
+		{vnet.RecipeIDLeatherCap, ItemLeatherCap},
+		{vnet.RecipeIDLeatherJerkin, ItemLeatherJerkin},
+		{vnet.RecipeIDLeatherLeggings, ItemLeatherLeggings},
 	} {
 		h := newStructureHarness(t)
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -668,6 +692,66 @@ func TestACraftedIronSwordArrivesAtFullDurability(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the craft produced no iron sword")
+	}
+}
+
+func TestCraftedArmourArrivesWholeInThePackAndMovesToItsMatchingSlot(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		recipe  vnet.RecipeID
+		item    ItemID
+		maximum uint16
+		slot    int
+	}{
+		{"leather cap", vnet.RecipeIDLeatherCap, ItemLeatherCap, LeatherArmourMaxDurability, equipmentHead},
+		{"leather jerkin", vnet.RecipeIDLeatherJerkin, ItemLeatherJerkin, LeatherArmourMaxDurability, equipmentChest},
+		{"leather leggings", vnet.RecipeIDLeatherLeggings, ItemLeatherLeggings, LeatherArmourMaxDurability, equipmentLegs},
+		{"iron helm", vnet.RecipeIDIronHelm, ItemIronHelm, IronArmourMaxDurability, equipmentHead},
+		{"iron cuirass", vnet.RecipeIDIronCuirass, ItemIronCuirass, IronArmourMaxDurability, equipmentChest},
+		{"iron greaves", vnet.RecipeIDIronGreaves, ItemIronGreaves, IronArmourMaxDurability, equipmentLegs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			r := recipeTable[tc.recipe]
+			if r.station != vnet.StructureKindUnknown {
+				h.plantCraftingStation(player, r.station, [3]int32{0, 63, 0})
+			}
+			h.stockPack(player, r.ingredients...)
+
+			state, err := h.craft(player, tc.recipe)
+			if err != nil {
+				t.Fatalf("crafting %s: %v", tc.recipe, err)
+			}
+			from := -1
+			for slot, stack := range state.Stacks {
+				if stack.ItemID != uint16(tc.item) {
+					continue
+				}
+				if slot >= equipmentFirst {
+					t.Errorf("crafted armour landed directly in equipment slot %d", slot)
+				}
+				if stack.Count != 1 || stack.Durability != tc.maximum || stack.MaxDurability != tc.maximum {
+					t.Errorf("crafted armour in slot %d is %+v, want one whole item at %d/%d", slot, stack, tc.maximum, tc.maximum)
+				}
+				from = slot
+			}
+			if from < 0 {
+				t.Fatal("the craft produced no armour in the pack")
+			}
+
+			moved, err := player.MoveInventory(protocol.InventoryMoveRequest{From: uint8(from), To: uint8(tc.slot), Count: 1})
+			if err != nil {
+				t.Fatalf("moving the crafted armour to its matching slot: %v", err)
+			}
+			if got := moved.Stacks[tc.slot]; got.ItemID != uint16(tc.item) || got.Count != 1 || got.Durability != tc.maximum || got.MaxDurability != tc.maximum {
+				t.Errorf("matching equipment slot holds %+v", got)
+			}
+		})
 	}
 }
 

@@ -253,6 +253,37 @@ const TOOL: [IconPart; 3] = [
     },
 ];
 
+/// Armour laid flat: a broad chest plate with two shoulders and a narrowed waist.
+/// Leather and iron share the outline and are told apart by the item registry's colour.
+const ARMOUR: [IconPart; 3] = [
+    IconPart {
+        left: 27.0,
+        top: 24.0,
+        width: 46.0,
+        height: 58.0,
+        radius: 12.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 14.0,
+        top: 20.0,
+        width: 72.0,
+        height: 20.0,
+        radius: 28.0,
+        shade: 0.28,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 34.0,
+        top: 64.0,
+        width: 32.0,
+        height: 18.0,
+        radius: 10.0,
+        shade: -0.34,
+        ..IconPart::PLAIN
+    },
+];
+
 /// The rectangles one shape is drawn from, in the order they are stacked.
 ///
 /// **Exhaustive, with no wildcard arm.** A fifth [`ItemShape`] does not compile until it
@@ -267,6 +298,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Blade => &BLADE,
         ItemShape::Bundle => &BUNDLE,
         ItemShape::Tool => &TOOL,
+        ItemShape::Armour => &ARMOUR,
     }
 }
 

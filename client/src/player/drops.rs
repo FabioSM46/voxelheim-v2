@@ -210,7 +210,24 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
             merge_all(&mut merged, [head], "dropped tool");
             merged
         }
+        ItemShape::Armour => armour_mesh(),
     }
+}
+
+/// A compact cuirass silhouette: one body plate and two raised shoulders.
+fn armour_mesh() -> Mesh {
+    let body_size = Vec3::new(DROP_EDGE * 0.64, DROP_EDGE * 0.72, DROP_EDGE * 0.22);
+    let shoulder_size = Vec3::new(DROP_EDGE * 0.28, DROP_EDGE * 0.18, DROP_EDGE * 0.28);
+    let mut armour = Mesh::from(Cuboid::from_size(body_size));
+    let shoulders = [-1.0, 1.0].map(|side| {
+        Mesh::from(Cuboid::from_size(shoulder_size)).translated_by(Vec3::new(
+            side * DROP_EDGE * 0.34,
+            DROP_EDGE * 0.27,
+            0.0,
+        ))
+    });
+    merge_all(&mut armour, shoulders, "dropped armour");
+    armour
 }
 
 /// One rolled, strapped load for every carried structure.

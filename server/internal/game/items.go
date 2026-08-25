@@ -66,6 +66,15 @@ const (
 	// The cooked form is appended rather than inserted because item ids cross the wire.
 	// It is a distinct food and the product of the campfire recipe.
 	ItemCookedMeat
+
+	// Two complete armour sets, appended rather than inserted because item ids cross the
+	// wire. Each piece names one of the three equipment slots introduced in V18.
+	ItemLeatherCap
+	ItemLeatherJerkin
+	ItemLeatherLeggings
+	ItemIronHelm
+	ItemIronCuirass
+	ItemIronGreaves
 )
 
 // What each blade is worth, and the only copy of it.
@@ -104,6 +113,11 @@ const (
 	// survives rather than how many blocks it breaks. See #199, which is where that
 	// penalty is being narrowed to what a player has on them.
 	ToolMaxDurability uint16 = 200
+
+	// Leather survives on the rusty blade's scale; iron survives twice as long. A set is
+	// three separate objects, so every piece carries the same maximum and its own wear.
+	LeatherArmourMaxDurability uint16 = 100
+	IronArmourMaxDurability    uint16 = 200
 
 	// SharpeningStoneRestore is how much wear one stone gives back, and it sits here for
 	// the reason the numbers above do: it describes the *stone*, not the act of repairing.
@@ -152,6 +166,18 @@ type itemDefinition struct {
 	// Zero means it cannot be worn, which is every existing registry row. The move
 	// rule reads this column in both directions before changing either slot.
 	wornAt wornAt
+
+	// armour is the percentage points of incoming damage this worn piece will remove.
+	// This issue only records the value: three leather pieces sum to 15%, turning a
+	// draugr's 10 into 8 and a vargr's 7 into 5; three iron pieces sum to 30%, turning
+	// those same hits into 7 and 4. Damage application belongs to the combat issue.
+	armour uint16
+
+	// threat is tenths added to the mob aggro weight while this piece is worn. Leather
+	// adds none; three iron pieces add fifteen tenths to the base weight of one, so a
+	// fully iron-clad player weighs 2.5 times as much in a mob's choice. Aggro applies it
+	// later; the registry merely owns the item stat here.
+	threat uint16
 
 	// maxDurability is zero for an item that does not wear out, which is every
 	// resource and therefore every stack in the game until this one. A non-zero value
@@ -298,6 +324,18 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// Cooking keeps the hunted resource's stack shape and changes only what eating it is
 	// worth. It is wearless, harmless and not placeable by the registry's zero values.
 	ItemCookedMeat: {places: world.Air, maxStack: 16, restoresHunger: CookedMeatHungerRestore},
+
+	// Field-worked leather: one whole durable piece for each body slot. Five points each
+	// make the complete set fifteen percent armour, and no threat keeps it neutral.
+	ItemLeatherCap:      {places: world.Air, maxStack: 1, wornAt: wornHead, armour: 5, maxDurability: LeatherArmourMaxDurability},
+	ItemLeatherJerkin:   {places: world.Air, maxStack: 1, wornAt: wornChest, armour: 5, maxDurability: LeatherArmourMaxDurability},
+	ItemLeatherLeggings: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 5, maxDurability: LeatherArmourMaxDurability},
+
+	// Forged iron: twice the durability and armour of leather. Five threat tenths per
+	// piece make the complete set add 1.5 to the base aggro weight, hence 2.5 times.
+	ItemIronHelm:    {places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
+	ItemIronCuirass: {places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
+	ItemIronGreaves: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

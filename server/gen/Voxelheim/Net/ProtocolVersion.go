@@ -85,6 +85,10 @@ import "strconv"
 // / `PlayerAppearance`.** A V18 client requires a non-zero `equipment_slots` count that
 // / a V17 server never sends. Without the bump the peers would handshake cleanly and the
 // / client would refuse a welcome whose inventory layout it cannot interpret.
+// /
+// / **V19 appends six wearable members to `RecipeID`.** A V19 client may send any of
+// / those enum values in a `CraftRequest`; a V18 server cannot name them and would fail
+// / only after a clean handshake, on the first attempt to craft armour.
 type ProtocolVersion uint16
 
 const (
@@ -93,7 +97,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 18
+	ProtocolVersionCurrent ProtocolVersion = 19
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

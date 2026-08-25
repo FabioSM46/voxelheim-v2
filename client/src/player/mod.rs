@@ -76,6 +76,14 @@ pub use camera::{Orbit, ViewMode, WorldCamera};
 // is dressed out of the same wardrobe rather than from a second copy of the tables.
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
 pub use interpolate::SnapshotBuffer;
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "the equipment cells consume this in issue 297"
+    )
+)]
+pub(crate) use inventory::ARMOUR_SLOTS;
 pub use inventory::{
     ApplyInventory, Inventory, InventoryClick, InventoryClickKind, PickedStack, SelectedSlot,
 };
