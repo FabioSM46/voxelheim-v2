@@ -111,6 +111,20 @@ fn describe_as_level(
         });
 }
 
+fn describe_wearing(app: &mut App, entity_id: u64, appearance: Appearance, worn: [u16; 3]) {
+    app.world_mut()
+        .resource_mut::<AppearanceInbox>()
+        .push(PlayerAppearance {
+            entity_id,
+            appearance,
+            name: "Test Character".to_owned(),
+            worn_head: worn[0],
+            worn_chest: worn[1],
+            worn_legs: worn[2],
+            level: 1,
+        });
+}
+
 fn describe(app: &mut App, entity_id: u64, appearance: Appearance) {
     describe_as(app, entity_id, "Test Character", appearance);
 }
@@ -157,6 +171,28 @@ fn parts_of(
     found
 }
 
+fn armour_of(
+    app: &mut App,
+    entity_id: u64,
+) -> Vec<(ArmourSegment, Handle<Mesh>, Handle<StandardMaterial>)> {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_default();
+
+    let mut overlays = world.query::<(&ArmourVisual, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
+    let mut found: Vec<_> = children
+        .into_iter()
+        .filter_map(|child| overlays.get(world, child).ok())
+        .map(|(visual, mesh, material)| (visual.0, mesh.0.clone(), material.0.clone()))
+        .collect();
+    found.sort_by_key(|(piece, _, _)| format!("{piece:?}"));
+    found
+}
+
 fn stats(app: &App) -> PlayerStats {
     *app.world().resource::<PlayerStats>()
 }
@@ -200,6 +236,32 @@ fn piece_transform(app: &mut App, entity_id: u64, piece: BodyPiece) -> Transform
         .find(|(visual, _)| visual.0 == piece)
         .map(|(_, transform)| *transform)
         .unwrap_or_else(|| panic!("entity {entity_id} has no {piece:?}"))
+}
+
+fn armour_transform(app: &mut App, entity_id: u64, segment: ArmourSegment) -> Transform {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_else(|| panic!("entity {entity_id} has no body"));
+    let mut segments = world.query::<(&ArmourVisual, &Transform)>();
+    children
+        .into_iter()
+        .filter_map(|child| segments.get(world, child).ok())
+        .find(|(visual, _)| visual.0 == segment)
+        .map(|(_, transform)| *transform)
+        .unwrap_or_else(|| panic!("entity {entity_id} has no {segment:?} armour segment"))
+}
+
+fn child_count(app: &mut App, entity_id: u64) -> usize {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map_or(0, |(_, children)| children.len())
 }
 
 /// Advances past the complete death curve without hitting virtual time's delta clamp.
@@ -842,7 +904,7 @@ fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
     // The acceptance criterion, part by part: head and hands the skin, torso the shirt,
     // legs the trousers, feet the shoes, hair its own — and the eyes a colour nobody
     // picked. Twelve independently moving pieces, six materials, and no piece wearing
-    // another part's field.
+    // another part's field. A bare body has no optional server-described overlays.
     let mut app = headless_player();
     let worn = an_appearance(HairModel::Braided);
     describe(&mut app, 99, worn);
@@ -858,6 +920,7 @@ fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
     app.update();
 
     let drawn = parts_of(&mut app, 99);
+    assert!(armour_of(&mut app, 99).is_empty());
     let mut pieces: Vec<BodyPiece> = drawn.iter().map(|(piece, _, _)| *piece).collect();
     pieces.sort_by_key(|piece| format!("{piece:?}"));
     let mut expected = BodyPiece::ALL.to_vec();
@@ -879,9 +942,125 @@ fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
 }
 
 #[test]
+fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
+    let mut app = headless_player();
+    let appearance = an_appearance(HairModel::Braided);
+    let full_iron = [
+        crafting::ITEM_IRON_HELM,
+        crafting::ITEM_IRON_CUIRASS,
+        crafting::ITEM_IRON_GREAVES,
+    ];
+    describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
+    describe_wearing(&mut app, 99, appearance, full_iron);
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let body = body_of(&mut app, 99).expect("the described body is drawn");
+    let remote = armour_of(&mut app, 99);
+    assert_eq!(remote.len(), ArmourSegment::ALL.len());
+    assert_eq!(
+        remote
+            .iter()
+            .map(|(segment, _, _)| segment.piece())
+            .collect::<HashSet<_>>(),
+        ArmourPiece::ALL.into_iter().collect(),
+    );
+    assert_eq!(
+        armour_of(&mut app, LOCAL_ID),
+        remote,
+        "the hidden local body and a remote body use the same overlays"
+    );
+    for (_, _, handle) in &remote {
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(handle)
+            .expect("the overlay material exists");
+        assert_eq!(material.perceptual_roughness, BodyFinish::Iron.roughness());
+        assert_eq!(material.metallic, BodyFinish::Iron.metallic());
+    }
+    assert_eq!(
+        child_count(&mut app, 99),
+        BodyPiece::ALL.len() + ArmourSegment::ALL.len(),
+    );
+
+    describe_wearing(&mut app, 99, appearance, [0, 0, 0]);
+    app.update();
+
+    assert_eq!(body_of(&mut app, 99), Some(body), "the body was respawned");
+    assert!(armour_of(&mut app, 99).is_empty());
+    assert_eq!(parts_of(&mut app, 99).len(), BodyPiece::ALL.len());
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
+
+    describe_wearing(&mut app, 99, appearance, full_iron);
+    app.update();
+    assert_eq!(armour_of(&mut app, 99).len(), ArmourSegment::ALL.len());
+    assert_eq!(
+        child_count(&mut app, 99),
+        BodyPiece::ALL.len() + ArmourSegment::ALL.len(),
+        "re-dressing appended stale overlays to Children",
+    );
+
+    describe_wearing(&mut app, 99, appearance, [0, 0, 0]);
+    app.update();
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
+}
+
+#[test]
+fn leather_keeps_the_existing_rough_non_metallic_finish() {
+    let mut app = headless_player();
+    describe_wearing(
+        &mut app,
+        99,
+        an_appearance(HairModel::Cropped),
+        [
+            crafting::ITEM_LEATHER_CAP,
+            crafting::ITEM_LEATHER_JERKIN,
+            crafting::ITEM_LEATHER_LEGGINGS,
+        ],
+    );
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    for (_, _, handle) in armour_of(&mut app, 99) {
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handle)
+            .expect("the overlay material exists");
+        assert_eq!(material.perceptual_roughness, 0.9);
+        assert_eq!(material.metallic, 0.0);
+    }
+}
+
+#[test]
 fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
     let mut app = headless_player();
     let start = Instant::now() - INTERVAL;
+    let appearance = an_appearance(HairModel::Braided);
+    let full_iron = [
+        crafting::ITEM_IRON_HELM,
+        crafting::ITEM_IRON_CUIRASS,
+        crafting::ITEM_IRON_GREAVES,
+    ];
+    describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
+    describe_wearing(&mut app, 99, appearance, full_iron);
     deliver(
         &mut app,
         1,
@@ -931,6 +1110,24 @@ fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
         local.rotation, right_leg.rotation,
         "both legs swung together"
     );
+
+    for segment in [
+        ArmourSegment::LeftSleeve,
+        ArmourSegment::RightSleeve,
+        ArmourSegment::LeftGreave,
+        ArmourSegment::RightGreave,
+    ] {
+        assert_eq!(
+            armour_transform(&mut app, LOCAL_ID, segment),
+            piece_transform(&mut app, LOCAL_ID, segment.body_piece()),
+            "local {segment:?} did not follow its animated body pivot",
+        );
+        assert_eq!(
+            armour_transform(&mut app, 99, segment),
+            piece_transform(&mut app, 99, segment.body_piece()),
+            "remote {segment:?} did not follow its animated body pivot",
+        );
+    }
 }
 
 #[test]
@@ -1481,8 +1678,7 @@ fn a_body_changing_its_clothes_does_not_grow_the_palette_for_ever() {
     // frame of slack on purpose. The sweep is a trigger, and triggers have hysteresis: it
     // runs inside `apply_snapshots`, and `dress_bodies` adds the colours for the change it
     // has just been told about *after* that — so the map is over its bound for exactly the
-    // frame between the two, by at most one body's worth of parts. Measured here it peaks
-    // at 13 where the cache justifies 12, and comes straight back down. What would fail is
+    // frame between the two, by at most one body's worth of base parts. What would fail is
     // growth: unswept, forty changes of shirt leave forty-odd colours behind, and the
     // ceiling below does not move with the number of changes.
     let mut app = headless_player();
@@ -1523,8 +1719,9 @@ fn a_body_changing_its_clothes_does_not_grow_the_palette_for_ever() {
 
         let cached = app.world().resource::<Appearances>().0.len();
         let palette = app.world().resource::<BodyMaterials>().0.len();
-        let justified = (cached + 1) * BodyPart::IN_DRAWING_ORDER.len();
-        // One body is re-dressed per frame here, so one part-set is the whole slack.
+        let per_description = BodyPart::IN_DRAWING_ORDER.len() + ArmourPiece::ALL.len();
+        let justified = (cached + 1) * per_description;
+        // One body is re-dressed per frame here, and only its base appearance changes.
         let ceiling = justified + BodyPart::IN_DRAWING_ORDER.len();
         assert!(
             palette <= ceiling,
@@ -1550,7 +1747,7 @@ fn a_body_changing_its_clothes_does_not_grow_the_palette_for_ever() {
     let cached = app.world().resource::<Appearances>().0.len();
     let palette = app.world().resource::<BodyMaterials>().0.len();
     assert!(
-        palette <= (cached + 1) * BodyPart::IN_DRAWING_ORDER.len(),
+        palette <= (cached + 1) * (BodyPart::IN_DRAWING_ORDER.len() + ArmourPiece::ALL.len()),
         "the palette settled at {palette} colours for {cached} cached appearances"
     );
 }
@@ -1587,6 +1784,16 @@ fn an_entity_that_leaves_the_snapshot_loses_its_body() {
     // because an older snapshot mentioned it would be a ghost standing where it last was.
     let mut app = headless_player();
     let start = Instant::now();
+    describe_wearing(
+        &mut app,
+        99,
+        an_appearance(HairModel::Braided),
+        [
+            crafting::ITEM_LEATHER_CAP,
+            crafting::ITEM_LEATHER_JERKIN,
+            crafting::ITEM_LEATHER_LEGGINGS,
+        ],
+    );
     deliver(
         &mut app,
         1,
@@ -1598,6 +1805,12 @@ fn an_entity_that_leaves_the_snapshot_loses_its_body() {
     );
     app.update();
     assert_eq!(bodies(&mut app).len(), 2);
+    let overlay_entities: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<ArmourVisual>>();
+        query.iter(world).collect()
+    };
+    assert_eq!(overlay_entities.len(), ArmourSegment::ALL.len());
 
     deliver(
         &mut app,
@@ -1611,6 +1824,12 @@ fn an_entity_that_leaves_the_snapshot_loses_its_body() {
     assert_eq!(remaining.len(), 1, "the entity that left is still drawn");
     assert_eq!(remaining[0].0, LOCAL_ID);
     assert_eq!(stats(&app).entities, 1);
+    for overlay in overlay_entities {
+        assert!(
+            app.world().get::<ArmourVisual>(overlay).is_none(),
+            "an overlay outlived the body it dressed"
+        );
+    }
 }
 
 #[test]
