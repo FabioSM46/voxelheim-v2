@@ -53,8 +53,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::codec::{
-    self, ActionRefused, CharacterList, InventoryState, MineProgress, PLAYER_TOKEN_LEN,
-    PlayerAppearance, PlayerToken, Reject, SessionParams, SessionTicket, Snapshot, WorldUpdate,
+    self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress,
+    PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject, SessionParams,
+    SessionTicket, Snapshot, WorldUpdate,
 };
 
 use super::frame::{self, FrameDecoder};
@@ -224,6 +225,10 @@ pub(super) enum SessionEvent {
     ActionRefused(ActionRefused),
     /// The server accepted a leave and owns this remaining duration.
     Leaving(codec::LeaveStarted),
+    /// One accepted world-chat line, preserved in wire order for the ECS log.
+    Chat(ChatMessage),
+    /// One still-live party invitation, preserved in wire order for the ECS log.
+    PartyInvite(PartyInvite),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1386,6 +1391,12 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::Appearance(appearance)) => {
                     events.send(SessionEvent::Appearance(appearance)).ok()?;
+                }
+                Ok(Transition::Chat(message)) => {
+                    events.send(SessionEvent::Chat(message)).ok()?;
+                }
+                Ok(Transition::PartyInvite(invite)) => {
+                    events.send(SessionEvent::PartyInvite(invite)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;

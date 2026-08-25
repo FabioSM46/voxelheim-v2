@@ -29,8 +29,9 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, InventoryState, LeaveStarted, LifeState, Message, MineProgress,
-    PlayerAppearance, Reject, SessionParams, Snapshot, WorldClock, WorldUpdate,
+    ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, Message,
+    MineProgress, PartyInvite, PlayerAppearance, Reject, SessionParams, Snapshot, WorldClock,
+    WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -95,6 +96,10 @@ pub enum Transition {
     ActionRefused(ActionRefused),
     /// The authoritative leave timer for this session.
     Leaving(LeaveStarted),
+    /// One world-chat line accepted and attributed by the authoritative server.
+    Chat(ChatMessage),
+    /// One still-live invitation issued by the authoritative server.
+    PartyInvite(PartyInvite),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -381,10 +386,10 @@ impl Handshake {
             (Phase::Established, Message::LeaveStarted(started)) => {
                 Ok(Transition::Leaving(started))
             }
-            // Protocol mirrors only in V20: the ECS inbox and chat log land in their
-            // own issues, so an established session safely drops these typed payloads.
-            (Phase::Established, Message::Chat(_)) => Ok(Transition::Ignored("ChatMessage")),
-            (Phase::Established, Message::PartyInvite(_)) => Ok(Transition::Ignored("PartyInvite")),
+            (Phase::Established, Message::Chat(message)) => Ok(Transition::Chat(message)),
+            (Phase::Established, Message::PartyInvite(invite)) => {
+                Ok(Transition::PartyInvite(invite))
+            }
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -1270,6 +1275,41 @@ mod tests {
         assert!(
             admitted.established(),
             "leaving remains an established session until the server closes it"
+        );
+    }
+
+    #[test]
+    fn chat_and_party_invites_only_belong_to_an_established_session() {
+        let chat = ChatMessage {
+            sender_entity_id: 8,
+            sender_name: "Eivor".to_owned(),
+            text: "hello".to_owned(),
+        };
+        let invite = PartyInvite {
+            from_entity_id: 8,
+            from_name: "Eivor".to_owned(),
+            expires_ms: 5_000,
+        };
+
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::Chat(chat.clone())),
+            Err(HandshakeError::Premature("ChatMessage"))
+        );
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::PartyInvite(invite.clone())),
+            Err(HandshakeError::Premature("PartyInvite"))
+        );
+
+        let mut live = established();
+        assert_eq!(
+            live.apply(Message::Chat(chat.clone())),
+            Ok(Transition::Chat(chat))
+        );
+        assert_eq!(
+            live.apply(Message::PartyInvite(invite.clone())),
+            Ok(Transition::PartyInvite(invite))
         );
     }
 

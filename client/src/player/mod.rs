@@ -160,6 +160,8 @@ pub enum InputMode {
     /// Pointer captured, movement sampled, camera and block targeting live.
     #[default]
     Playing,
+    /// Pointer captured and text entry owns the keyboard; gameplay input is closed.
+    Chat,
     /// Pointer released and the authoritative inventory visible.
     Inventory,
     /// Pointer released and the pause menu visible.
@@ -924,7 +926,7 @@ enum HeldItemSurface {
 }
 
 fn held_item_surface(mode: InputMode, view: ViewMode, session_exists: bool) -> HeldItemSurface {
-    if mode != InputMode::Playing || !session_exists {
+    if !matches!(mode, InputMode::Playing | InputMode::Chat) || !session_exists {
         HeldItemSurface::Hidden
     } else if view.first_person() {
         HeldItemSurface::ViewModel

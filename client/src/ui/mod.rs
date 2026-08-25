@@ -1,6 +1,7 @@
 //! The client's on-screen surface and the input mode that owns the pointer.
 
 mod character;
+mod chat;
 mod crosshair;
 mod experience;
 mod health;
@@ -150,6 +151,7 @@ impl Plugin for UiPlugin {
             .add_message::<ChooseCharacter>()
             .add_plugins((
                 character::CharacterUiPlugin,
+                chat::ChatUiPlugin,
                 crosshair::CrosshairPlugin,
                 health::HealthUiPlugin,
                 hunger::HungerUiPlugin,
@@ -294,6 +296,13 @@ fn choose_input_mode(
         return;
     }
 
+    // Text entry owns Enter, Escape and every printable key until it closes itself.
+    // Returning here is what prevents the Escape used to discard a line from opening
+    // the menu in the same frame.
+    if *mode == InputMode::Chat {
+        return;
+    }
+
     // The bindings, or the defaults for an app built without them — which are `Escape` and
     // `E`, the two literals that stood here until this screen existed.
     let bindings = settings
@@ -310,6 +319,11 @@ fn choose_input_mode(
         return;
     }
 
+    if keys.just_pressed(bindings.key(Control::Chat)) && *mode == InputMode::Playing {
+        set_mode(&mut mode, InputMode::Chat);
+        return;
+    }
+
     if keys.just_pressed(bindings.key(Control::Inventory)) {
         if vitals.dead() {
             return;
@@ -317,6 +331,7 @@ fn choose_input_mode(
         let next = match *mode {
             InputMode::Playing => InputMode::Inventory,
             InputMode::Inventory => InputMode::Playing,
+            InputMode::Chat => return,
             InputMode::Menu => return,
         };
         set_mode(&mut mode, next);
@@ -335,7 +350,9 @@ fn sync_cursor(
     // beside it — none of the three is up on a live session — and it is asked anyway,
     // because "the pointer is released for every overlay" should be readable here rather
     // than inferred from a state machine somewhere else.
-    let playing = *mode == InputMode::Playing && !overlays.any_is_up() && overlays.connected();
+    let playing = matches!(*mode, InputMode::Playing | InputMode::Chat)
+        && !overlays.any_is_up()
+        && overlays.connected();
     let (grab_mode, visible) = if playing {
         // Bevy falls back to Confined on X11, where Locked is unsupported.
         (CursorGrabMode::Locked, false)
@@ -758,7 +775,16 @@ mod tests {
     }
 
     #[test]
-    fn e_and_escape_own_the_three_mode_transitions() {
+    fn chat_inventory_and_menu_keys_own_the_mode_transitions() {
+        assert_eq!(
+            mode_after_key(InputMode::Playing, KeyCode::KeyT),
+            InputMode::Chat
+        );
+        assert_eq!(
+            mode_after_key(InputMode::Chat, KeyCode::Escape),
+            InputMode::Chat,
+            "chat owns its own close keys"
+        );
         assert_eq!(
             mode_after_key(InputMode::Playing, KeyCode::KeyE),
             InputMode::Inventory
@@ -811,11 +837,11 @@ mod tests {
         *app.world().resource::<InputMode>()
     }
 
-    /// `Escape` and `E` are bindings now rather than literals, and this is what says so:
+    /// `Escape`, `E` and `T` are bindings now rather than literals, and this is what says so:
     /// move them, and the mode follows the keys the settings name rather than the keys
     /// this file used to spell.
     #[test]
-    fn the_two_mode_keys_are_the_ones_the_settings_name() {
+    fn the_three_mode_keys_are_the_ones_the_settings_name() {
         let mut settings = Settings::default();
         settings
             .rebind(Control::Menu, KeyCode::KeyG)
@@ -823,6 +849,9 @@ mod tests {
         settings
             .rebind(Control::Inventory, KeyCode::KeyH)
             .expect("h is bindable and free");
+        settings
+            .rebind(Control::Chat, KeyCode::KeyJ)
+            .expect("j is bindable and free");
         let screen = SettingsScreen::default();
 
         assert_eq!(
@@ -843,6 +872,15 @@ mod tests {
             ),
             InputMode::Inventory
         );
+        assert_eq!(
+            mode_after_key_with(
+                InputMode::Playing,
+                KeyCode::KeyJ,
+                settings.clone(),
+                screen.clone()
+            ),
+            InputMode::Chat
+        );
         // And the keys they used to be belong to nobody.
         assert_eq!(
             mode_after_key_with(
@@ -854,7 +892,16 @@ mod tests {
             InputMode::Playing
         );
         assert_eq!(
-            mode_after_key_with(InputMode::Playing, KeyCode::KeyE, settings, screen),
+            mode_after_key_with(
+                InputMode::Playing,
+                KeyCode::KeyE,
+                settings.clone(),
+                screen.clone()
+            ),
+            InputMode::Playing
+        );
+        assert_eq!(
+            mode_after_key_with(InputMode::Playing, KeyCode::KeyT, settings, screen),
             InputMode::Playing
         );
     }
@@ -867,7 +914,7 @@ mod tests {
     fn the_settings_screen_keeps_the_keyboard_while_it_is_up() {
         let mut screen = SettingsScreen::default();
         screen.open();
-        for key in [KeyCode::Escape, KeyCode::KeyE] {
+        for key in [KeyCode::Escape, KeyCode::KeyE, KeyCode::KeyT] {
             assert_eq!(
                 mode_after_key_with(InputMode::Menu, key, Settings::default(), screen.clone()),
                 InputMode::Menu,
@@ -918,6 +965,16 @@ mod tests {
             .world_mut()
             .spawn((PrimaryWindow, CursorOptions::default()));
 
+        app.update();
+        let cursor = app
+            .world_mut()
+            .query_filtered::<&CursorOptions, With<PrimaryWindow>>()
+            .single(app.world())
+            .expect("one primary cursor");
+        assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
+        assert!(!cursor.visible);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
         app.update();
         let cursor = app
             .world_mut()

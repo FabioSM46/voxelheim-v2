@@ -181,17 +181,19 @@ pub enum Control {
     Left,
     Right,
     Jump,
+    Chat,
     Inventory,
     Menu,
 }
 
 /// Every control, in the order the settings screen lists them.
-pub const CONTROLS: [Control; 7] = [
+pub const CONTROLS: [Control; 8] = [
     Control::Forward,
     Control::Back,
     Control::Left,
     Control::Right,
     Control::Jump,
+    Control::Chat,
     Control::Inventory,
     Control::Menu,
 ];
@@ -205,6 +207,7 @@ impl Control {
             Self::Left => "left",
             Self::Right => "right",
             Self::Jump => "jump",
+            Self::Chat => "chat",
             Self::Inventory => "inventory",
             Self::Menu => "menu",
         }
@@ -218,6 +221,7 @@ impl Control {
             Self::Left => "Strafe left",
             Self::Right => "Strafe right",
             Self::Jump => "Jump",
+            Self::Chat => "Chat",
             Self::Inventory => "Inventory",
             Self::Menu => "Pause menu",
         }
@@ -236,6 +240,7 @@ impl Control {
             Self::Left => KeyCode::KeyA,
             Self::Right => KeyCode::KeyD,
             Self::Jump => KeyCode::Space,
+            Self::Chat => KeyCode::KeyT,
             Self::Inventory => KeyCode::KeyE,
             Self::Menu => KeyCode::Escape,
         }
@@ -373,8 +378,11 @@ impl Bindings {
 
     /// The complete assignment `named` describes, or `None` when it is not one.
     ///
-    /// Controls it leaves out keep their defaults; the answer is `None` — and the caller
-    /// then keeps *all* the defaults — when the result would break the invariant above.
+    /// Controls it leaves out keep their defaults when those keys are free. If a named
+    /// binding already uses a newly added control's default, the named binding wins and
+    /// the omitted control takes the first free default before falling back to another
+    /// offered key. That is how an older complete settings file survives a new control.
+    /// The answer is `None` when two controls named by the file share a key.
     ///
     /// **A set, and deliberately not a sequence of [`Self::rebind`] calls.** The file names
     /// every control at once, so two bindings that trade keys cross over halfway through —
@@ -382,16 +390,32 @@ impl Bindings {
     /// a time against the defaults refuses the second of the pair. That is a configuration a
     /// player saved and could not load again; `store`'s round trip is what found it.
     fn from_pairs(named: &[(Control, KeyCode)]) -> Option<Self> {
-        let mut bindings = Self::default();
+        let mut keys = [None; CONTROLS.len()];
         for (control, key) in named {
-            bindings.keys[*control as usize] = *key;
+            key_name(*key)?;
+            keys[*control as usize] = Some(*key);
         }
-        for (index, key) in bindings.keys.iter().enumerate() {
-            if key_name(*key).is_none() || bindings.keys[..index].contains(key) {
+        for (index, key) in keys.iter().enumerate() {
+            if key.is_some() && keys[..index].contains(key) {
                 return None;
             }
         }
-        Some(bindings)
+
+        for control in CONTROLS {
+            let index = control as usize;
+            if keys[index].is_some() {
+                continue;
+            }
+            let free = std::iter::once(control.default_key())
+                .chain(CONTROLS.map(Control::default_key))
+                .chain(REBINDABLE_KEYS.iter().map(|(key, _)| *key))
+                .find(|candidate| !keys.iter().flatten().any(|key| key == candidate))?;
+            keys[index] = Some(free);
+        }
+
+        Some(Self {
+            keys: keys.map(|key| key.expect("every omitted control was assigned a free key")),
+        })
     }
 
     /// Makes `control` answer to `key`, or refuses and changes nothing.
@@ -1022,8 +1046,8 @@ mod tests {
             let mut settings = Settings::default();
             settings.adjust(Knob::LookSensitivity, 4);
             settings
-                .rebind(Control::Forward, KeyCode::KeyT)
-                .expect("t is free");
+                .rebind(Control::Forward, KeyCode::F6)
+                .expect("f6 is free");
             settings.adjust(Knob::RenderDistance, -3);
             settings.adjust(Knob::FieldOfView, 2);
             settings.adjust(Knob::Brightness, -2);
@@ -1136,8 +1160,8 @@ mod tests {
     #[test]
     fn a_free_key_is_accepted_and_the_key_it_replaces_becomes_free() {
         let mut settings = Settings::default();
-        assert_eq!(settings.rebind(Control::Forward, KeyCode::KeyT), Ok(()));
-        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::KeyT);
+        assert_eq!(settings.rebind(Control::Forward, KeyCode::F6), Ok(()));
+        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::F6);
 
         // `W` is nobody's now, so the pause menu may have it — and Escape is then free.
         assert_eq!(settings.rebind(Control::Menu, KeyCode::KeyW), Ok(()));

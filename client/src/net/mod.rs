@@ -552,6 +552,38 @@ impl RefusalInbox {
     }
 }
 
+/// One entry in the ordered conversation stream shown by the chat log.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatEntry {
+    Message(ChatMessage),
+    PartyInvite(PartyInvite),
+}
+
+/// Every accepted world-chat line and party invitation not yet consumed by the log.
+///
+/// Both payloads share one inbox so their relative wire order survives an ECS frame.
+/// Chat is a conversation, not a latest-state snapshot: collapsing or regrouping two
+/// entries would silently rewrite it.
+#[derive(Resource, Debug, Default)]
+pub struct ChatInbox(Vec<ChatEntry>);
+
+impl ChatInbox {
+    /// Takes every queued entry in wire order, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<ChatEntry> {
+        std::mem::take(&mut self.0)
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, entry: ChatEntry) {
+        self.0.push(entry);
+    }
+
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// The ECS end of the frames this client sends.
 ///
 /// Present exactly while there is a net thread to send to: [`drain_session_events`]
@@ -834,6 +866,7 @@ impl Plugin for NetPlugin {
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
+            .init_resource::<ChatInbox>()
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
             .add_message::<ConnectRequest>()
@@ -1310,6 +1343,9 @@ struct Inboxes<'w> {
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
     refusals: ResMut<'w, RefusalInbox>,
+    // Optional only for focused net-boundary tests that install the drain directly.
+    // NetPlugin always initialises it, so a live client never drops this queue.
+    chat: Option<ResMut<'w, ChatInbox>>,
 }
 
 /// Applies everything the net thread has said since the last frame.
@@ -1449,6 +1485,19 @@ fn drain_session_events(
             // server could not read, and the status line is where that decision is made,
             // beside the sentence it writes for the other half.
             Ok(SessionEvent::ActionRefused(refused)) => inboxes.refusals.0.push(refused),
+
+            // Presentation-only queues. The UI keeps every line and never reinterprets
+            // received text as a command or as identity.
+            Ok(SessionEvent::Chat(message)) => {
+                if let Some(chat) = inboxes.chat.as_deref_mut() {
+                    chat.0.push(ChatEntry::Message(message));
+                }
+            }
+            Ok(SessionEvent::PartyInvite(invite)) => {
+                if let Some(chat) = inboxes.chat.as_deref_mut() {
+                    chat.0.push(ChatEntry::PartyInvite(invite));
+                }
+            }
 
             Ok(SessionEvent::Leaving(started)) => {
                 let duration = Duration::from_millis(u64::from(started.remaining_ms));
