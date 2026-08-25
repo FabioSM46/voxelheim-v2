@@ -93,6 +93,11 @@ namespace Voxelheim.Net;
 /// **V19 appends six wearable members to `RecipeID`.** A V19 client may send any of
 /// those enum values in a `CraftRequest`; a V18 server cannot name them and would fail
 /// only after a clean handshake, on the first attempt to craft armour.
+///
+/// **V20 adds chat and party requests and appends party state to `EntitySnapshot`.**
+/// An older server cannot name either new client payload and would close the session
+/// after a clean handshake. The snapshot vector also carries health and position outside
+/// ordinary view for consenting party members; a pre-V20 server never sends that state.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -100,7 +105,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 19
+  Current = 20
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

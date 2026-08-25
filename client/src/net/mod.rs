@@ -54,14 +54,16 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
+#[allow(unused_imports)] // V20 protocol surface; ECS consumers land in later issues.
 pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
-    ChunkCoord, ConsumeRequest, CraftRequest, DropItemRequest, EditAction, EntityState, Facing,
-    HairModel, InventoryMoveRequest, InventoryStack, InventoryState, ItemDropState, LifeState,
-    MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction, MobKind, MobState,
-    PLACEHOLDER_APPEARANCE, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
-    RecipeId, RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest,
-    SessionParams, Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate,
+    ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest, DropItemRequest,
+    EditAction, EntityState, Facing, HairModel, InventoryMoveRequest, InventoryStack,
+    InventoryState, ItemDropState, LifeState, MAX_VIEW_DISTANCE, MineProgress, MineRequest,
+    MobAction, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite,
+    PartyMemberState, PartyRequest, PlaceStructureRequest, PlayerAppearance, PlayerInput,
+    PlayerVitals, RecipeId, RefusalReason, RefusedAction, Reject, RemoveStructureRequest,
+    RepairRequest, SessionParams, Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
@@ -69,11 +71,13 @@ pub use codec::{
 // name nothing outside `net` can start deciding from.
 #[cfg(test)]
 pub use codec::ANY_TOKEN;
+#[allow(unused_imports)] // V20 outbound encoders precede their UI controls.
 pub use codec::{
-    encode_attack_request, encode_block_edit_request, encode_chunk_resend_request,
-    encode_consume_request, encode_craft_request, encode_drop_item_request,
-    encode_inventory_move_request, encode_mine_request, encode_place_structure_request,
-    encode_player_input, encode_remove_structure_request, encode_repair_request,
+    encode_attack_request, encode_block_edit_request, encode_chat_request,
+    encode_chunk_resend_request, encode_consume_request, encode_craft_request,
+    encode_drop_item_request, encode_inventory_move_request, encode_mine_request,
+    encode_party_request, encode_place_structure_request, encode_player_input,
+    encode_remove_structure_request, encode_repair_request,
 };
 pub use servers::ListedServer;
 use servers::ServerListEvent;

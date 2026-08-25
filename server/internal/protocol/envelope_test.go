@@ -238,6 +238,9 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 //
 // **V19 appends six RecipeID members that a client sends to the server.** A V18 server
 // cannot name them and would reject the first armour craft after a clean handshake.
+
+// **V20 appends chat and party requests plus party state in the snapshot.** The two
+// client payloads are unknown to a V19 server and would otherwise fail only on first use.
 //
 // The rule that generalises, now that eight shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
@@ -245,11 +248,11 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV19NamesTheArmourRecipes(t *testing.T) {
+func TestProtocolV20NamesChatAndParty(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 19 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 19", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 20 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 20", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -280,6 +283,10 @@ func TestProtocolV19NamesTheArmourRecipes(t *testing.T) {
 		vnet.PayloadLeaveRequest,
 		vnet.PayloadLeaveStarted,
 		vnet.PayloadConsumeRequest,
+		vnet.PayloadChatRequest,
+		vnet.PayloadChatMessage,
+		vnet.PayloadPartyRequest,
+		vnet.PayloadPartyInvite,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -300,6 +307,76 @@ func TestProtocolV19NamesTheArmourRecipes(t *testing.T) {
 	// every FlatBuffers union carries.
 	if got := len(vnet.EnumNamesPayload); got != len(want)+1 {
 		t.Errorf("Payload has %d members, want %d plus NONE — a new member needs a decision, not a test edit", got, len(want))
+	}
+}
+
+func TestChatAndPartyRequestsRoundTripVerbatim(t *testing.T) {
+	t.Parallel()
+
+	chat := ChatRequest{Text: "  skål, wanderer\n"}
+	message, err := Decode(EncodeChatRequest(chat))
+	if err != nil {
+		t.Fatalf("Decode chat: %v", err)
+	}
+	if message.Kind != vnet.PayloadChatRequest || message.Chat == nil || *message.Chat != chat {
+		t.Fatalf("chat round trip = %+v, want %+v", message, chat)
+	}
+	if empty, err := Decode(EncodeChatRequest(ChatRequest{})); err != nil || empty.Chat == nil || empty.Chat.Text != "" {
+		t.Fatalf("empty chat round trip = %+v, %v", empty, err)
+	}
+
+	for _, want := range []PartyRequest{
+		{Action: vnet.PartyActionInvite, TargetName: "  Freya  "},
+		{Action: vnet.PartyActionAccept},
+		{Action: vnet.PartyActionDecline, TargetName: "ignored verbatim"},
+		{Action: vnet.PartyActionLeave},
+		{Action: vnet.PartyActionKick, TargetName: "Skadi"},
+	} {
+		got, decodeErr := Decode(EncodePartyRequest(want))
+		if decodeErr != nil {
+			t.Fatalf("Decode party %s: %v", want.Action, decodeErr)
+		}
+		if got.Kind != vnet.PayloadPartyRequest || got.Party == nil || *got.Party != want {
+			t.Errorf("party round trip = %+v, want %+v", got, want)
+		}
+	}
+}
+
+func TestPartyRequestUnknownActionFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	for _, action := range []vnet.PartyAction{vnet.PartyActionUnknown, vnet.PartyAction(99)} {
+		if _, err := Decode(EncodePartyRequest(PartyRequest{Action: action})); !errors.Is(err, ErrMalformed) {
+			t.Errorf("Decode action %d = %v, want ErrMalformed", action, err)
+		}
+	}
+}
+
+func TestChatMessageAndPartyInviteEncodeEveryField(t *testing.T) {
+	t.Parallel()
+
+	chatWant := ChatMessage{SenderEntityID: 41, SenderName: "Eir", Text: "  hold fast  "}
+	chatEnvelope := vnet.GetRootAsEnvelope(EncodeChatMessage(chatWant), 0)
+	if chatEnvelope.PayloadType() != vnet.PayloadChatMessage {
+		t.Fatalf("chat payload = %s", chatEnvelope.PayloadType())
+	}
+	chatTable := payloadTable(t, chatEnvelope)
+	chat := new(vnet.ChatMessage)
+	chat.Init(chatTable.Bytes, chatTable.Pos)
+	if got := (ChatMessage{SenderEntityID: chat.SenderEntityId(), SenderName: string(chat.SenderName()), Text: string(chat.Text())}); got != chatWant {
+		t.Errorf("chat message = %+v, want %+v", got, chatWant)
+	}
+
+	inviteWant := PartyInvite{FromEntityID: 72, FromName: "Sif", ExpiresMS: 15_000}
+	inviteEnvelope := vnet.GetRootAsEnvelope(EncodePartyInvite(inviteWant), 0)
+	if inviteEnvelope.PayloadType() != vnet.PayloadPartyInvite {
+		t.Fatalf("invite payload = %s", inviteEnvelope.PayloadType())
+	}
+	inviteTable := payloadTable(t, inviteEnvelope)
+	invite := new(vnet.PartyInvite)
+	invite.Init(inviteTable.Bytes, inviteTable.Pos)
+	if got := (PartyInvite{FromEntityID: invite.FromEntityId(), FromName: string(invite.FromName()), ExpiresMS: invite.ExpiresMs()}); got != inviteWant {
+		t.Errorf("party invite = %+v, want %+v", got, inviteWant)
 	}
 }
 
@@ -888,6 +965,70 @@ func TestAnEmptyEntitySnapshotIsStillASnapshot(t *testing.T) {
 	}
 }
 
+func TestEntitySnapshotCarriesPartyInAuthoritativeOrder(t *testing.T) {
+	t.Parallel()
+
+	// Recipient 91 is the leader. Its own id is deliberately absent from members:
+	// EncodeEntitySnapshot does not receive that id separately, so this producer fixture
+	// pins the recipient-aware invariant the frame-only Rust decoder cannot prove.
+	want := []PartyMemberState{
+		{EntityID: 17, Pos: [3]float32{1.5, 62, -8}, Health: 44, MaxHealth: 50, Alive: true},
+		{EntityID: 23, Pos: [3]float32{-2, 70.25, 11}, Health: 0, MaxHealth: 80, Alive: false},
+	}
+	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+		Tick:                8,
+		Vitals:              PlayerVitals{Health: 100, MaxHealth: 100, LifeState: vnet.LifeStateAlive},
+		PartyLeaderEntityID: 91,
+		PartyMembers:        want,
+	}), 0)
+	table := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(table.Bytes, table.Pos)
+
+	if got := snapshot.PartyLeaderEntityId(); got != 91 {
+		t.Fatalf("party leader = %d, want recipient 91", got)
+	}
+	if got := snapshot.PartyMembersLength(); got != len(want) {
+		t.Fatalf("party members = %d, want %d", got, len(want))
+	}
+	for index, expected := range want {
+		var member vnet.PartyMemberState
+		if !snapshot.PartyMembers(&member, index) {
+			t.Fatalf("party member %d is absent", index)
+		}
+		pos := member.Pos(nil)
+		got := PartyMemberState{
+			EntityID: member.EntityId(), Pos: [3]float32{pos.X(), pos.Y(), pos.Z()},
+			Health: member.Health(), MaxHealth: member.MaxHealth(), Alive: member.Alive(),
+		}
+		if got != expected {
+			t.Errorf("party member %d = %+v, want %+v", index, got, expected)
+		}
+		if got.EntityID == 91 {
+			t.Errorf("party member %d repeats recipient id 91", index)
+		}
+	}
+}
+
+func TestEntitySnapshotOmitsThePartyVectorWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+		Tick:                3,
+		Vitals:              PlayerVitals{Health: 10, MaxHealth: 10, LifeState: vnet.LifeStateAlive},
+		PartyLeaderEntityID: 91,
+	}), 0)
+	table := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(table.Bytes, table.Pos)
+	if got := snapshot.PartyLeaderEntityId(); got != 91 {
+		t.Errorf("party leader = %d, want 91", got)
+	}
+	if got := snapshot.PartyMembersLength(); got != 0 {
+		t.Errorf("empty party member vector has length %d", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Editing the world
 // ---------------------------------------------------------------------------
@@ -1263,6 +1404,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.Craft":     {byte(vnet.RefusedActionCraft), 4},
 		"RefusedAction.Repair":    {byte(vnet.RefusedActionRepair), 5},
 		"RefusedAction.DropItem":  {byte(vnet.RefusedActionDropItem), 6},
+		"RefusedAction.Chat":      {byte(vnet.RefusedActionChat), 7},
+		"RefusedAction.Party":     {byte(vnet.RefusedActionParty), 8},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1276,9 +1419,9 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// **A drop has one for exactly that reason read the other way.** Every question a refused
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
-	// seven is the count, and it is what says nobody added an eighth for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 7 {
-		t.Errorf("RefusedAction has %d members, want 7 — a removal is refused in silence by design", got)
+	// nine is the count, and it is what says nobody added another for a removal.
+	if got := len(vnet.EnumNamesRefusedAction); got != 9 {
+		t.Errorf("RefusedAction has %d members, want 9 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -1296,6 +1439,12 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"SlotChanged":        {byte(vnet.RefusalReasonSlotChanged), 9},
 		"InventoryBusy":      {byte(vnet.RefusalReasonInventoryBusy), 10},
 		"TentAlreadyPlaced":  {byte(vnet.RefusalReasonTentAlreadyPlaced), 11},
+		"TooFast":            {byte(vnet.RefusalReasonTooFast), 12},
+		"PartyFull":          {byte(vnet.RefusalReasonPartyFull), 13},
+		"NoSuchPlayer":       {byte(vnet.RefusalReasonNoSuchPlayer), 14},
+		"AlreadyInParty":     {byte(vnet.RefusalReasonAlreadyInParty), 15},
+		"NoInvite":           {byte(vnet.RefusalReasonNoInvite), 16},
+		"NotLeader":          {byte(vnet.RefusalReasonNotLeader), 17},
 		"MalformedNoAnchor":  {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":    {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":      {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -1305,8 +1454,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 16 {
-		t.Errorf("RefusalReason has %d members, want 16 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 22 {
+		t.Errorf("RefusalReason has %d members, want 22 — a new one needs a decision, not a test edit", got)
 	}
 }
 

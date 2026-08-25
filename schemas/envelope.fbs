@@ -101,7 +101,18 @@ union Payload {
 
   // -- V15. A client request, and therefore a bump owed: a V14 server cannot name
   //    this tag and closes the session rather than dropping it.
-  ConsumeRequest          // 28
+  ConsumeRequest,         // 28
+
+  // -- V20. Appended, so the tags of 1..28 are untouched.
+  //
+  //    The two requests carry the bump: an older server cannot name either client
+  //    payload and closes the session rather than dropping it, so a V20 client must
+  //    not discover that mismatch only when somebody chats or asks for a party.
+  //    The two server messages are their event counterparts and remain append-only.
+  ChatRequest,            // 29
+  ChatMessage,            // 30
+  PartyRequest,           // 31
+  PartyInvite             // 32
 }
 
 table Envelope {

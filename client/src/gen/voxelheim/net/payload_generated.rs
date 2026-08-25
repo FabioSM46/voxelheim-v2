@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 28;
+pub const ENUM_MAX_PAYLOAD: u8 = 32;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 29] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 33] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -47,6 +47,10 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 29] = [
     Payload::LeaveRequest,
     Payload::LeaveStarted,
     Payload::ConsumeRequest,
+    Payload::ChatRequest,
+    Payload::ChatMessage,
+    Payload::PartyRequest,
+    Payload::PartyInvite,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -102,9 +106,13 @@ impl Payload {
     pub const LeaveRequest: Self = Self(26);
     pub const LeaveStarted: Self = Self(27);
     pub const ConsumeRequest: Self = Self(28);
+    pub const ChatRequest: Self = Self(29);
+    pub const ChatMessage: Self = Self(30);
+    pub const PartyRequest: Self = Self(31);
+    pub const PartyInvite: Self = Self(32);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 28;
+    pub const ENUM_MAX: u8 = 32;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -135,6 +143,10 @@ impl Payload {
         Self::LeaveRequest,
         Self::LeaveStarted,
         Self::ConsumeRequest,
+        Self::ChatRequest,
+        Self::ChatMessage,
+        Self::PartyRequest,
+        Self::PartyInvite,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -168,6 +180,10 @@ impl Payload {
             Self::LeaveRequest => Some("LeaveRequest"),
             Self::LeaveStarted => Some("LeaveStarted"),
             Self::ConsumeRequest => Some("ConsumeRequest"),
+            Self::ChatRequest => Some("ChatRequest"),
+            Self::ChatMessage => Some("ChatMessage"),
+            Self::PartyRequest => Some("PartyRequest"),
+            Self::PartyInvite => Some("PartyInvite"),
             _ => None,
         }
     }

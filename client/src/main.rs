@@ -19,13 +19,17 @@
 //                             not send or read yet, plus flatc's ENUM_* constants
 //   * extra_unused_lifetimes— `impl<'a> Follow<'a>` on the zero-field offset enums
 //   * derivable_impls       — hand-written `Default` impls flatc could derive
+//   * wrong_self_convention — accessors for schema fields prefixed with `from_`
+//   * unnecessary_cast      — byte-sized fields in generated struct setters
 // Anything beyond that list is a signal to look at the generator, not to widen it.
 #[path = "gen/mod.rs"]
 #[allow(
     unused_imports,
     dead_code,
     clippy::extra_unused_lifetimes,
-    clippy::derivable_impls
+    clippy::derivable_impls,
+    clippy::wrong_self_convention,
+    clippy::unnecessary_cast
 )]
 mod wire;
 
