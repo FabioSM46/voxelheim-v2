@@ -60,7 +60,7 @@ const BUNDLE_COLLAR_OFFSET: f32 = DROP_EDGE * 0.31;
 const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 
 /// Modes whose UI owns the view instead of the 3D world.
-const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
+const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
 
 /// The shared world-space meshes and the small set of item colours created so far.
 ///

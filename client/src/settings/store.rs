@@ -575,6 +575,7 @@ mod tests {
         assert_eq!(settings.bindings().key(Control::Chat), KeyCode::KeyW);
         assert_eq!(settings.bindings().key(Control::Back), KeyCode::KeyS);
         assert_eq!(settings.bindings().key(Control::Inventory), KeyCode::KeyE);
+        assert_eq!(settings.bindings().key(Control::Interact), KeyCode::KeyF);
         assert_eq!(settings.bindings().key(Control::Menu), KeyCode::Escape);
     }
 

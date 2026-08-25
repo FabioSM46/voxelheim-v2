@@ -11,6 +11,7 @@ mod hotbar;
 mod icon;
 mod inventory;
 mod login;
+mod loot;
 mod menu;
 mod party;
 mod servers;
@@ -137,6 +138,7 @@ impl Plugin for UiPlugin {
             .init_resource::<ViewMode>()
             .add_message::<InventoryClick>()
             .add_message::<CraftClick>()
+            .add_message::<crate::player::LootTakeClick>()
             .add_message::<DisconnectRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
             // when no account service is configured. `add_message` is idempotent,
@@ -160,6 +162,7 @@ impl Plugin for UiPlugin {
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
                 login::LoginPlugin,
+                loot::LootUiPlugin,
                 menu::MenuPlugin,
                 party::PartyUiPlugin,
                 servers::ServerListUiPlugin,
@@ -281,7 +284,7 @@ fn choose_input_mode(
         return;
     };
 
-    if vitals.dead() && *mode == InputMode::Inventory {
+    if vitals.dead() && matches!(*mode, InputMode::Inventory | InputMode::Loot) {
         set_mode(&mut mode, InputMode::Playing);
     }
 
@@ -312,10 +315,9 @@ fn choose_input_mode(
         .map_or_else(Default::default, |settings| *settings.bindings());
 
     if keys.just_pressed(bindings.key(Control::Menu)) {
-        let next = if *mode == InputMode::Menu {
-            InputMode::Playing
-        } else {
-            InputMode::Menu
+        let next = match *mode {
+            InputMode::Menu | InputMode::Loot => InputMode::Playing,
+            InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
         };
         set_mode(&mut mode, next);
         return;
@@ -333,6 +335,7 @@ fn choose_input_mode(
         let next = match *mode {
             InputMode::Playing => InputMode::Inventory,
             InputMode::Inventory => InputMode::Playing,
+            InputMode::Loot => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
         };

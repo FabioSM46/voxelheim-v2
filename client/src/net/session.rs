@@ -229,6 +229,10 @@ pub(super) enum SessionEvent {
     Chat(ChatMessage),
     /// One still-live party invitation, preserved in wire order for the ECS log.
     PartyInvite(PartyInvite),
+    /// One complete authoritative corpse-container revision.
+    LootState(codec::LootState),
+    /// The authoritative end of one corpse-container view.
+    LootClosed(codec::LootClosed),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1397,6 +1401,12 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::PartyInvite(invite)) => {
                     events.send(SessionEvent::PartyInvite(invite)).ok()?;
+                }
+                Ok(Transition::LootState(state)) => {
+                    events.send(SessionEvent::LootState(state)).ok()?;
+                }
+                Ok(Transition::LootClosed(closed)) => {
+                    events.send(SessionEvent::LootClosed(closed)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;

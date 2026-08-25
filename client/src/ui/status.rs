@@ -536,6 +536,16 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::MalformedSlot
         | RefusalReason::MalformedKind => None,
     };
+    let loot_reason = match refused.reason {
+        RefusalReason::CorpseUnavailable => Some("that corpse is no longer available"),
+        RefusalReason::LootNotOwned => Some("those spoils are not yours"),
+        RefusalReason::OutOfReach => Some("that corpse is too far away"),
+        RefusalReason::StaleRevision => Some("the contents changed; review them and try again"),
+        RefusalReason::InventoryBusy => Some("your pack was busy; try again"),
+        RefusalReason::InventoryFull => Some("your pack is full"),
+        RefusalReason::PlayerIsDead => Some("you cannot loot while dead"),
+        _ => None,
+    };
 
     match (refused.action, refused.reason) {
         (RefusedAction::PlaceStructure, _) => {
@@ -558,6 +568,9 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         }
         (RefusedAction::Party, RefusalReason::NotLeader) => {
             Some("Cannot change party: only the party leader can do that".to_owned())
+        }
+        (RefusedAction::OpenLoot | RefusedAction::TakeLoot, _) => {
+            loot_reason.map(|reason| format!("Cannot loot: {reason}"))
         }
         _ => None,
     }
@@ -1094,7 +1107,7 @@ mod tests {
     /// that `match`. A reason appended later without a sentence fails
     /// [`every_reason_is_either_a_sentence_or_a_deliberate_silence`] only because this list
     /// has to be extended by hand to compile past it.
-    const EVERY_REASON: [RefusalReason; 22] = [
+    const EVERY_REASON: [RefusalReason; 26] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1113,6 +1126,10 @@ mod tests {
         RefusalReason::AlreadyInParty,
         RefusalReason::NoInvite,
         RefusalReason::NotLeader,
+        RefusalReason::CorpseUnavailable,
+        RefusalReason::LootNotOwned,
+        RefusalReason::StaleRevision,
+        RefusalReason::InventoryFull,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1127,6 +1144,10 @@ mod tests {
             | RefusalReason::AlreadyInParty
             | RefusalReason::NoInvite
             | RefusalReason::NotLeader => RefusedAction::Party,
+            RefusalReason::CorpseUnavailable
+            | RefusalReason::LootNotOwned
+            | RefusalReason::StaleRevision
+            | RefusalReason::InventoryFull => RefusedAction::OpenLoot,
             _ => RefusedAction::PlaceStructure,
         };
         ActionRefused {
@@ -1193,6 +1214,29 @@ mod tests {
             ),
         ] {
             assert_eq!(describe_refusal(&refusal(reason)).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn loot_refusals_tell_the_player_what_to_do_or_why_the_action_stopped() {
+        for (reason, fragment) in [
+            (RefusalReason::CorpseUnavailable, "no longer available"),
+            (RefusalReason::LootNotOwned, "not yours"),
+            (RefusalReason::OutOfReach, "too far away"),
+            (RefusalReason::StaleRevision, "review them and try again"),
+            (RefusalReason::InventoryBusy, "try again"),
+            (RefusalReason::InventoryFull, "pack is full"),
+            (RefusalReason::PlayerIsDead, "while dead"),
+        ] {
+            for action in [RefusedAction::OpenLoot, RefusedAction::TakeLoot] {
+                let line = describe_refusal(&ActionRefused {
+                    action,
+                    reason,
+                    anchor: None,
+                })
+                .expect("a loot refusal has a sentence");
+                assert!(line.contains(fragment), "{action:?}/{reason:?}: {line}");
+            }
         }
     }
 

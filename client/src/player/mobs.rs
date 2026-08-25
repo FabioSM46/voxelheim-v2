@@ -148,7 +148,10 @@ const VARGR_COLLAPSE_ROLL: f32 = 1.15;
 const VARGR_LEG_SPLAY: f32 = 1.9;
 
 /// Modes whose UI owns the view instead of the 3D world. The same rule drops obey.
-const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
+const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
+
+/// A restrained amber wash for a corpse the server says this recipient may open.
+const LOOTABLE_COLOUR: Color = Color::srgb(0.58, 0.47, 0.24);
 
 /// The undead grey a draugr is drawn in.
 const DRAUGR_BODY_COLOUR: Color = Color::srgb(0.36, 0.40, 0.38);
@@ -207,6 +210,7 @@ pub(super) struct MobVisuals {
     deer: SpeciesVisuals,
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
+    lootable_material: Handle<StandardMaterial>,
 }
 
 impl MobVisuals {
@@ -227,6 +231,7 @@ pub(super) struct Mob {
     entity_id: u64,
     kind: MobKind,
     action: MobAction,
+    lootable: bool,
 
     /// The health the last snapshot reported. A *decrease* is what flashes; anything
     /// else — unchanged, or the higher health of a replacement that reused nothing —
@@ -251,8 +256,8 @@ pub(super) struct Mob {
     /// How long this body has been going down, or `None` while the server is not saying
     /// it is.
     ///
-    /// **It exists exactly while the newest snapshot says [`MobAction::Dying`]** and is
-    /// recomputed from that every time one arrives, which is what keeps the fall a
+    /// **It exists while the newest snapshot says [`MobAction::Dying`] or
+    /// [`MobAction::Corpse`]** and is recomputed from that every time one arrives, which keeps the fall a
     /// consequence of an authoritative transition rather than a state this side entered on
     /// its own. Local time advances it; nothing reads it back as a fact.
     ///
@@ -319,6 +324,7 @@ pub(super) fn create_visuals(
             head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
         },
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
+        lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
     });
 }
 
@@ -458,6 +464,7 @@ pub(super) fn apply_snapshots(
 
     let interval = Duration::from_secs(1) / u32::from(session.0.tick_rate);
     let drawn = buffer.sample_mobs(Instant::now(), interval);
+    let lootable: HashSet<u64> = buffer.accessible_loot_corpses().iter().copied().collect();
     let by_id: HashMap<u64, InterpolatedMob> = drawn.iter().copied().collect();
     let mut placed = HashSet::with_capacity(drawn.len());
     let visibility = mob_visibility(*mode);
@@ -484,12 +491,15 @@ pub(super) fn apply_snapshots(
         mob.health = state.health;
         mob.action = state.action;
         mob.kind = state.kind;
-        // **The fall exists exactly while the server says the creature is dying**, and it
+        mob.lootable = state.action == MobAction::Corpse && lootable.contains(&mob.entity_id);
+        // **The fall exists while the server says dying or corpse**, and it
         // is recomputed from the action every time a snapshot lands rather than started by
         // an edge this side detected. Written this way round so there is no transition to
-        // miss: an action that is not `Dying` has no fall, whatever the previous one was.
+        // miss: any other action has no fall, whatever the previous one was. Corpse
+        // preserves an in-progress fall and starts already landed when first seen.
         mob.falling = match state.action {
             MobAction::Dying => Some(mob.falling.unwrap_or(Duration::ZERO)),
+            MobAction::Corpse => Some(mob.falling.unwrap_or(FALL_TIME)),
             _ => None,
         };
 
@@ -500,7 +510,14 @@ pub(super) fn apply_snapshots(
         if !placed.insert(*entity_id) {
             continue;
         }
-        spawn_mob(&mut commands, &visuals, *entity_id, state, visibility);
+        spawn_mob(
+            &mut commands,
+            &visuals,
+            *entity_id,
+            state,
+            lootable.contains(entity_id),
+            visibility,
+        );
     }
 }
 
@@ -509,6 +526,7 @@ fn spawn_mob(
     visuals: &MobVisuals,
     entity_id: u64,
     state: &InterpolatedMob,
+    lootable: bool,
     visibility: Visibility,
 ) {
     let owner = commands
@@ -517,13 +535,18 @@ fn spawn_mob(
                 entity_id,
                 kind: state.kind,
                 action: state.action,
+                lootable,
                 // The first snapshot of a body is not an impact, whatever its health.
                 health: state.health,
                 flash: None,
                 yaw: state.yaw,
                 lean: lean_for(state.action),
                 // A body first seen already dying falls from upright — see the field.
-                falling: (state.action == MobAction::Dying).then_some(Duration::ZERO),
+                falling: match state.action {
+                    MobAction::Dying => Some(Duration::ZERO),
+                    MobAction::Corpse => Some(FALL_TIME),
+                    _ => None,
+                },
             },
             Transform::from_translation(state.pos).with_rotation(Quat::from_rotation_y(state.yaw)),
             visibility,
@@ -684,7 +707,7 @@ pub(super) fn animate(
 
     // The kind and how far down the body is: between them, everything a child needs — one
     // says which materials it wears, the other where the legs are.
-    let mut poses: HashMap<Entity, (MobKind, f32)> = HashMap::new();
+    let mut poses: HashMap<Entity, (MobKind, f32, bool)> = HashMap::new();
     let mut flashing = HashSet::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
@@ -719,11 +742,11 @@ pub(super) fn animate(
             }
         }
 
-        poses.insert(entity, (mob.kind, down));
+        poses.insert(entity, (mob.kind, down, mob.lootable));
     }
 
     for (part, mut material, mut transform) in &mut parts {
-        let Some((kind, down)) = poses.get(&part.owner).copied() else {
+        let Some((kind, down, lootable)) = poses.get(&part.owner).copied() else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
             continue;
@@ -732,6 +755,8 @@ pub(super) fn animate(
 
         let next = if flashing.contains(&part.owner) {
             visuals.flash_material.clone()
+        } else if lootable {
+            visuals.lootable_material.clone()
         } else if part.part == MobPart::Head {
             species.head_material.clone()
         } else {
@@ -829,6 +854,18 @@ mod tests {
             Snapshot {
                 server_tick: tick,
                 mobs,
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+    }
+
+    fn deliver_lootable(app: &mut App, tick: u32, mob: MobState, accessible: bool) {
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: tick,
+                mobs: vec![mob],
+                accessible_loot_corpses: accessible.then_some(mob.entity_id).into_iter().collect(),
                 ..Default::default()
             },
             Instant::now(),
@@ -1265,6 +1302,50 @@ mod tests {
             fallen.z > 0.99,
             "a draugr that fell over ended up with its head at {fallen}, want it behind at +Z"
         );
+    }
+
+    #[test]
+    fn dying_becomes_a_highlighted_corpse_without_restarting_or_replacing_the_body() {
+        let mut app = headless();
+        deliver(&mut app, 1, vec![draugr(900, 0.0, 0, MobAction::Dying)]);
+        app.update();
+        let_the_body_land(&mut app);
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<Entity, With<Mob>>();
+            query.single(world).expect("one dying body")
+        };
+
+        deliver_lootable(&mut app, 2, draugr(900, 0.0, 0, MobAction::Corpse), true);
+        app.update();
+        let (after, lootable) = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &Mob)>();
+            let (entity, mob) = query.single(world).expect("one corpse");
+            (entity, mob.lootable)
+        };
+        assert_eq!(after, before, "Dying -> Corpse replaced the visual entity");
+        assert!(lootable);
+        assert!((drawn_rotation(&mut app) * Vec3::Y).z > 0.99);
+
+        let highlight = app
+            .world()
+            .resource::<MobVisuals>()
+            .lootable_material
+            .clone();
+        assert!(
+            parts(&mut app)
+                .iter()
+                .all(|(_, material)| *material == highlight)
+        );
+
+        deliver_lootable(&mut app, 3, draugr(900, 0.0, 0, MobAction::Corpse), false);
+        app.update();
+        assert!(!{
+            let world = app.world_mut();
+            let mut query = world.query::<&Mob>();
+            query.single(world).expect("one corpse").lootable
+        });
     }
 
     /// A vargr collapses sideways with its legs sliding out from under it.

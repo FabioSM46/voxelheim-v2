@@ -155,11 +155,11 @@ const WIDE_BUTTON: f32 = 40.0;
 /// The most rows any one tab may draw.
 ///
 /// **The number the layout is sized from, and the reason the strip does not move.** Both tabs
-/// draw at most nine rows today, and a content area sized to "whatever this tab needs" would be
-/// stable purely by that coincidence — until the ninth row arrived on one of them, which is
+/// draw at most ten rows today, and a content area sized to "whatever this tab needs" would be
+/// stable purely by that coincidence — until another row arrived on one of them, which is
 /// how `ui/inventory.rs` ended up with the geometry #251 describes.
 /// `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails rather than the panel jumping.
-const CONTENT_ROWS: usize = 9;
+const CONTENT_ROWS: usize = 10;
 
 /// The height of the area a tab's contents are drawn in, in logical pixels.
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
