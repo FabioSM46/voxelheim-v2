@@ -31,25 +31,36 @@ func TestAJoinedPlayerCarriesOneSwordAndNothingElse(t *testing.T) {
 	}
 }
 
-// The registry is what makes a slot durable, and the sword is the only entry that is.
-func TestOnlyTheSwordWearsOut(t *testing.T) {
+// The registry is what makes a slot durable, and the complete durable set is explicit.
+func TestOnlyTheAgreedEquipmentWearsOut(t *testing.T) {
 	t.Parallel()
 
-	for _, item := range []ItemID{ItemStone, ItemDirt, ItemSnow, ItemLog, ItemRawCoal, ItemRawIron} {
-		if got := stackOf(item, 1); got.durable() {
-			t.Errorf("%d is durable: %+v, want a resource", item, got)
+	want := map[ItemID]uint16{
+		ItemRustySword:      RustySwordMaxDurability,
+		ItemIronSword:       IronSwordMaxDurability,
+		ItemShovel:          ToolMaxDurability,
+		ItemPickaxe:         ToolMaxDurability,
+		ItemAxe:             ToolMaxDurability,
+		ItemLeatherCap:      LeatherArmourMaxDurability,
+		ItemLeatherJerkin:   LeatherArmourMaxDurability,
+		ItemLeatherLeggings: LeatherArmourMaxDurability,
+		ItemIronHelm:        IronArmourMaxDurability,
+		ItemIronCuirass:     IronArmourMaxDurability,
+		ItemIronGreaves:     IronArmourMaxDurability,
+	}
+	for id, definition := range itemRegistry {
+		maximum, durable := want[id]
+		if got := definition.maxDurability != 0; got != durable {
+			t.Errorf("item %d durable=%v, want %v", id, got, durable)
+			continue
 		}
-	}
-	sword := stackOf(ItemRustySword, 1)
-	if !sword.durable() {
-		t.Fatalf("the rusty sword is not durable: %+v", sword)
-	}
-	if sword.durability != RustySwordMaxDurability || sword.maxDurability != RustySwordMaxDurability {
-		t.Errorf("a new sword is %d/%d, want %d/%d",
-			sword.durability, sword.maxDurability, RustySwordMaxDurability, RustySwordMaxDurability)
-	}
-	if sword.count != 1 {
-		t.Errorf("a new sword has count %d, want 1", sword.count)
+		if !durable {
+			continue
+		}
+		stack := stackOf(id, 2)
+		if !stack.durable() || stack.durability != maximum || stack.maxDurability != maximum || stack.count != 1 {
+			t.Errorf("new durable item %d is %+v, want one whole item at %d/%d", id, stack, maximum, maximum)
+		}
 	}
 }
 

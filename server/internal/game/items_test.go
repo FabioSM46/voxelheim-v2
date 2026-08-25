@@ -74,6 +74,51 @@ func TestBothMeatsCarryTheirPinnedIDsAndResourceStats(t *testing.T) {
 	}
 }
 
+func TestTheSixArmourPiecesCarryTheirPinnedIDsAndStats(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		item ItemID
+		id   ItemID
+		want itemDefinition
+	}{
+		{ItemLeatherCap, 21, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornHead, armour: 5, maxDurability: LeatherArmourMaxDurability}},
+		{ItemLeatherJerkin, 22, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornChest, armour: 5, maxDurability: LeatherArmourMaxDurability}},
+		{ItemLeatherLeggings, 23, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 5, maxDurability: LeatherArmourMaxDurability}},
+		{ItemIronHelm, 24, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability}},
+		{ItemIronCuirass, 25, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability}},
+		{ItemIronGreaves, 26, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability}},
+	} {
+		if tc.item != tc.id {
+			t.Errorf("armour item id = %d, want appended wire id %d", tc.item, tc.id)
+		}
+		got, registered := itemByID(tc.item)
+		if !registered {
+			t.Errorf("armour item %d is not registered", tc.item)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("armour item %d row = %+v, want %+v", tc.item, got, tc.want)
+		}
+	}
+}
+
+func TestOnlyWearableItemsCarryArmourStatsAndEveryWearableIsDurable(t *testing.T) {
+	t.Parallel()
+
+	for id, definition := range itemRegistry {
+		hasArmourStats := definition.armour != 0 || definition.threat != 0
+		wearable := definition.wornAt != wornNowhere
+		if hasArmourStats != wearable {
+			t.Errorf("item %d wornAt=%d armour=%d threat=%d; want stats iff wearable",
+				id, definition.wornAt, definition.armour, definition.threat)
+		}
+		if wearable && definition.maxDurability == 0 {
+			t.Errorf("wearable item %d has no durability", id)
+		}
+	}
+}
+
 func TestRawAndCookedMeatAreTheOnlyFoods(t *testing.T) {
 	t.Parallel()
 

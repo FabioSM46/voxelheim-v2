@@ -197,6 +197,52 @@ func TestARepairRestoresTheStonesAmountAndNeverPastTheMaximum(t *testing.T) {
 	}
 }
 
+func TestArmourUsesTheExistingRepairRule(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		kit     ItemID
+		armour  ItemID
+		start   uint16
+		maximum uint16
+		restore uint16
+	}{
+		{"a leather cap with a leather patch", ItemLeatherPatch, ItemLeatherCap, 40, LeatherArmourMaxDurability, LeatherPatchRestore},
+		{"an iron helm with a sharpening stone", ItemSharpeningStone, ItemIronHelm, 90, IronArmourMaxDurability, SharpeningStoneRestore},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.stockPack(player, ingredient{tc.kit, 1})
+			h.equipWorn(player, 1, tc.armour, tc.start)
+
+			state, err := h.repair(player, 0, 1)
+			if err != nil {
+				t.Fatalf("repairing item %d: %v", tc.armour, err)
+			}
+			want := min(tc.start+tc.restore, tc.maximum)
+			if got := state.Stacks[1]; got.ItemID != uint16(tc.armour) || got.Count != 1 || got.Durability != want || got.MaxDurability != tc.maximum {
+				t.Errorf("mended armour is %+v, want item %d at %d/%d", got, tc.armour, want, tc.maximum)
+			}
+		})
+	}
+
+	h := newStructureHarness(t)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.stockPack(player, ingredient{ItemLeatherPatch, 1})
+	h.equipWorn(player, 1, ItemLeatherCap, LeatherArmourMaxDurability)
+	before := h.pack(player)
+	if _, err := h.repair(player, 0, 1); err == nil {
+		t.Fatal("a full-durability armour piece accepted a repair")
+	}
+	if after := h.pack(player); after != before {
+		t.Error("the refused full-durability armour repair changed the pack")
+	}
+}
+
 // One stone per mend, and the stack that holds it is the only other slot that moves.
 func TestARepairSpendsExactlyOneStone(t *testing.T) {
 	t.Parallel()

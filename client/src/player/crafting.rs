@@ -66,6 +66,15 @@ pub(super) const ITEM_AXE: u16 = 18;
 /// module produces it; inventory imports the same declaration to route consumption.
 pub(super) const ITEM_COOKED_MEAT: u16 = 20;
 
+/// The six wearable products appended after cooked meat. Presentation and routing only:
+/// the server registry decides where they may be worn and what crafting actually yields.
+pub(super) const ITEM_LEATHER_CAP: u16 = 21;
+pub(super) const ITEM_LEATHER_JERKIN: u16 = 22;
+pub(super) const ITEM_LEATHER_LEGGINGS: u16 = 23;
+pub(super) const ITEM_IRON_HELM: u16 = 24;
+pub(super) const ITEM_IRON_CUIRASS: u16 = 25;
+pub(super) const ITEM_IRON_GREAVES: u16 = 26;
+
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ingredient {
@@ -118,7 +127,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 10] = [
+pub const RECIPES: [Recipe; 16] = [
     Recipe {
         id: RecipeId::Forge,
         ingredients: &[
@@ -267,6 +276,96 @@ pub const RECIPES: [Recipe; 10] = [
             count: 1,
         },
         station: Some(StructureKind::Campfire),
+    },
+    Recipe {
+        id: RecipeId::LeatherCap,
+        ingredients: &[Ingredient {
+            item_id: ITEM_VARGR_PELT,
+            count: 3,
+        }],
+        product: Ingredient {
+            item_id: ITEM_LEATHER_CAP,
+            count: 1,
+        },
+        station: None,
+    },
+    Recipe {
+        id: RecipeId::LeatherJerkin,
+        ingredients: &[Ingredient {
+            item_id: ITEM_VARGR_PELT,
+            count: 5,
+        }],
+        product: Ingredient {
+            item_id: ITEM_LEATHER_JERKIN,
+            count: 1,
+        },
+        station: None,
+    },
+    Recipe {
+        id: RecipeId::LeatherLeggings,
+        ingredients: &[Ingredient {
+            item_id: ITEM_VARGR_PELT,
+            count: 4,
+        }],
+        product: Ingredient {
+            item_id: ITEM_LEATHER_LEGGINGS,
+            count: 1,
+        },
+        station: None,
+    },
+    Recipe {
+        id: RecipeId::IronHelm,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_RAW_IRON,
+                count: 3,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_COAL,
+                count: 1,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_IRON_HELM,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
+    },
+    Recipe {
+        id: RecipeId::IronCuirass,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_RAW_IRON,
+                count: 5,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_COAL,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_IRON_CUIRASS,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
+    },
+    Recipe {
+        id: RecipeId::IronGreaves,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_RAW_IRON,
+                count: 4,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_COAL,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_IRON_GREAVES,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
     },
 ];
 
@@ -497,6 +596,21 @@ mod tests {
         );
         assert_eq!(cost(RecipeId::LeatherPatch), vec![(ITEM_VARGR_PELT, 2)]);
         assert_eq!(cost(RecipeId::CookedMeat), vec![(ITEM_RAW_MEAT, 1)]);
+        assert_eq!(cost(RecipeId::LeatherCap), vec![(ITEM_VARGR_PELT, 3)]);
+        assert_eq!(cost(RecipeId::LeatherJerkin), vec![(ITEM_VARGR_PELT, 5)]);
+        assert_eq!(cost(RecipeId::LeatherLeggings), vec![(ITEM_VARGR_PELT, 4)]);
+        assert_eq!(
+            cost(RecipeId::IronHelm),
+            vec![(ITEM_RAW_IRON, 3), (ITEM_RAW_COAL, 1)]
+        );
+        assert_eq!(
+            cost(RecipeId::IronCuirass),
+            vec![(ITEM_RAW_IRON, 5), (ITEM_RAW_COAL, 2)]
+        );
+        assert_eq!(
+            cost(RecipeId::IronGreaves),
+            vec![(ITEM_RAW_IRON, 4), (ITEM_RAW_COAL, 2)]
+        );
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -517,6 +631,24 @@ mod tests {
                 RecipeId::CookedMeat,
                 ITEM_COOKED_MEAT,
                 Some(StructureKind::Campfire),
+            ),
+            (RecipeId::LeatherCap, ITEM_LEATHER_CAP, None),
+            (RecipeId::LeatherJerkin, ITEM_LEATHER_JERKIN, None),
+            (RecipeId::LeatherLeggings, ITEM_LEATHER_LEGGINGS, None),
+            (
+                RecipeId::IronHelm,
+                ITEM_IRON_HELM,
+                Some(StructureKind::Forge),
+            ),
+            (
+                RecipeId::IronCuirass,
+                ITEM_IRON_CUIRASS,
+                Some(StructureKind::Forge),
+            ),
+            (
+                RecipeId::IronGreaves,
+                ITEM_IRON_GREAVES,
+                Some(StructureKind::Forge),
             ),
         ] {
             let row = recipe(id).expect("every member has a row");

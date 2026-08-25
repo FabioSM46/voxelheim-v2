@@ -89,6 +89,10 @@ namespace Voxelheim.Net;
 /// `PlayerAppearance`.** A V18 client requires a non-zero `equipment_slots` count that
 /// a V17 server never sends. Without the bump the peers would handshake cleanly and the
 /// client would refuse a welcome whose inventory layout it cannot interpret.
+///
+/// **V19 appends six wearable members to `RecipeID`.** A V19 client may send any of
+/// those enum values in a `CraftRequest`; a V18 server cannot name them and would fail
+/// only after a clean handshake, on the first attempt to craft armour.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -96,7 +100,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 18
+  Current = 19
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

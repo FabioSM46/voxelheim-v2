@@ -185,6 +185,33 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		station:      vnet.StructureKindCampfire,
 		experience:   3,
 	},
+
+	// Three field recipes, like the leather patch: a hunt can be worked into protection
+	// where it ends, without inventing a tanning station this batch deliberately excludes.
+	vnet.RecipeIDLeatherCap: {
+		ingredients: []ingredient{{ItemVargrPelt, 3}}, product: ItemLeatherCap, productCount: 1,
+	},
+	vnet.RecipeIDLeatherJerkin: {
+		ingredients: []ingredient{{ItemVargrPelt, 5}}, product: ItemLeatherJerkin, productCount: 1,
+	},
+	vnet.RecipeIDLeatherLeggings: {
+		ingredients: []ingredient{{ItemVargrPelt, 4}}, product: ItemLeatherLeggings, productCount: 1,
+	},
+
+	// The iron set earns the forge's existing ten experience and spends raw ore plus coal
+	// directly, on the same no-smelting-chain terms as the iron sword.
+	vnet.RecipeIDIronHelm: {
+		ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemIronHelm, productCount: 1,
+		station: vnet.StructureKindForge, experience: 10,
+	},
+	vnet.RecipeIDIronCuirass: {
+		ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemIronCuirass, productCount: 1,
+		station: vnet.StructureKindForge, experience: 10,
+	},
+	vnet.RecipeIDIronGreaves: {
+		ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
+		station: vnet.StructureKindForge, experience: 10,
+	},
 }
 
 // craft spends a recipe's ingredients and inserts its product, or changes nothing.
