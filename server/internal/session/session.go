@@ -1303,6 +1303,32 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		log.Debug("drop applied", "slot", request.Slot)
 		return nil
 
+	case vnet.PayloadChatRequest:
+		if player == nil || msg.Chat == nil {
+			// Decode either supplies the request or fails the frame. Keep the guard so a
+			// malformed Message constructed inside the process cannot dereference nil.
+			log.Debug("chat arrived with no player or line; discarding")
+			return nil
+		}
+
+		if cErr := player.Chat(msg.Chat.Text); cErr != nil {
+			// Text, death and leaving are ordinary silent refusals. The cadence limit is
+			// different because the client can wait and retry it; that one actionable
+			// answer uses the blocking path so a full queue cannot make it disappear.
+			log.Debug("refusing chat", "reason", cErr.Error())
+			if !errors.Is(cErr, game.ErrChatTooFast) {
+				return nil
+			}
+			refusal := protocol.ActionRefused{
+				Action: vnet.RefusedActionChat,
+				Reason: vnet.RefusalReasonTooFast,
+			}
+			if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+				return fmt.Errorf("session: send chat rate-limit refusal: %w", sErr)
+			}
+		}
+		return nil
+
 	case vnet.PayloadLeaveRequest:
 		if player == nil || msg.LeaveRequest == nil {
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)

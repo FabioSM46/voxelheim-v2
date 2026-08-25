@@ -487,11 +487,11 @@ const resendRefillPerSecond = game.TerminalFallSpeed / world.ChunkSize
 // precisely this volume. So a full bucket buys the worst client one extra join, and after
 // that the refill rate is all it has.
 //
-// This is the first rate limit in this repository. The two the server still wants are
-// recorded in server/AGENTS.md, and both are the socket-level backpressure policy rather
-// than another copy of this: what is bounded here is the *chunk work* a client can ask
-// for, not the messages it can send. A request refused by Resendable costs a mutex and a
-// map lookup and spends nothing, deliberately.
+// This is the first rate limit in this repository; world chat is the second. What is
+// bounded here is *chunk work* a client can ask for, not the text messages it can send.
+// A request refused by Resendable costs a mutex and a map lookup and spends nothing,
+// deliberately. The remaining socket-level backpressure gaps are recorded in
+// server/AGENTS.md.
 type resendLimiter struct {
 	capacity float64
 	refill   float64

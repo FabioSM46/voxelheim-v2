@@ -17,6 +17,16 @@ import "time"
 // and the results from `EntitySnapshot`; how fast a player walks is not something
 // it is told, because it is not something it decides.
 const (
+	// MaxChatBytes bounds one accepted world-chat line after surrounding whitespace
+	// is trimmed. Four times the character-name allowance makes room for a line, not
+	// a paragraph, and bytes are what the wire and its buffers pay for.
+	MaxChatBytes = 256
+
+	// ChatBurst is how many accepted lines one identity may send immediately. The
+	// bucket starts full; ChatRefillPerSecond restores one line of credit each second.
+	ChatBurst           = 5
+	ChatRefillPerSecond = 1.0
+
 	// WalkSpeed is the horizontal speed of a player at full intent, in blocks per
 	// second. Roughly a brisk walk at one block to the metre.
 	//
