@@ -39,6 +39,9 @@ type collector struct {
 	inventories []protocol.InventoryState
 	refusals    []protocol.ActionRefused
 	chats       []protocol.ChatMessage
+	invites     []protocol.PartyInvite
+	partyLeader uint64
+	party       []protocol.PartyMemberState
 
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
@@ -95,6 +98,22 @@ func (c *collector) absorb(frame []byte) {
 		c.snapshots++
 		snapshot := new(vnet.EntitySnapshot)
 		snapshot.Init(table.Bytes, table.Pos)
+		c.partyLeader = snapshot.PartyLeaderEntityId()
+		c.party = c.party[:0]
+		for i := range snapshot.PartyMembersLength() {
+			var member vnet.PartyMemberState
+			if !snapshot.PartyMembers(&member, i) {
+				continue
+			}
+			pos := member.Pos(nil)
+			if pos == nil {
+				continue
+			}
+			c.party = append(c.party, protocol.PartyMemberState{
+				EntityID: member.EntityId(), Pos: [3]float32{pos.X(), pos.Y(), pos.Z()},
+				Health: member.Health(), MaxHealth: member.MaxHealth(), Alive: member.Alive(),
+			})
+		}
 		for i := range snapshot.EntitiesLength() {
 			var entity vnet.EntityState
 			if !snapshot.Entities(&entity, i) {
@@ -220,6 +239,15 @@ func (c *collector) absorb(frame []byte) {
 			SenderName:     string(chat.SenderName()),
 			Text:           string(chat.Text()),
 		})
+
+	case vnet.PayloadPartyInvite:
+		invite := new(vnet.PartyInvite)
+		invite.Init(table.Bytes, table.Pos)
+		c.invites = append(c.invites, protocol.PartyInvite{
+			FromEntityID: invite.FromEntityId(),
+			FromName:     string(invite.FromName()),
+			ExpiresMS:    invite.ExpiresMs(),
+		})
 	}
 }
 
@@ -235,6 +263,18 @@ func (c *collector) chatMessages() []protocol.ChatMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.chats)
+}
+
+func (c *collector) partyInvites() []protocol.PartyInvite {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.invites)
+}
+
+func (c *collector) partyState() (uint64, []protocol.PartyMemberState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.partyLeader, slices.Clone(c.party)
 }
 
 // blockUpdates is every voxel change the session has been told about, in order.

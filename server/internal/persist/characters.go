@@ -367,6 +367,13 @@ func acceptName(name string) (accepted, folded string, err error) {
 	return accepted, fold(accepted), nil
 }
 
+// AcceptName exposes the world's existing character-name shape to the session
+// boundary for live name lookups. It does not reserve or store the name; Create
+// remains the only operation that does either.
+func AcceptName(name string) (accepted, folded string, err error) {
+	return acceptName(name)
+}
+
 // fold is the form two names are compared in. One function rather than a ToLower at
 // each call site, because the property being kept is that the index and every lookup
 // agree — and two spellings of the fold is one bug away from a name that is taken and

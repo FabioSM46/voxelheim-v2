@@ -27,6 +27,15 @@ const (
 	ChatBurst           = 5
 	ChatRefillPerSecond = 1.0
 
+	// MaxPartySize includes the leader. Five keeps a cooperative group large enough
+	// for every current role without making out-of-view state an unbounded fan-out.
+	MaxPartySize = 5
+
+	// PartyInviteTTL is how long an unanswered invitation remains actionable. NewSim
+	// converts it once to authoritative ticks; a client only presents the remaining
+	// duration and never decides expiry.
+	PartyInviteTTL = 60 * time.Second
+
 	// WalkSpeed is the horizontal speed of a player at full intent, in blocks per
 	// second. Roughly a brisk walk at one block to the metre.
 	//

@@ -1329,6 +1329,39 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	case vnet.PayloadPartyRequest:
+		if player == nil || msg.Party == nil {
+			log.Debug("party request arrived with no player or intent; discarding")
+			return nil
+		}
+
+		request := *msg.Party
+		targetName := request.TargetName
+		if request.Action == vnet.PartyActionInvite || request.Action == vnet.PartyActionKick {
+			accepted, _, nErr := persist.AcceptName(targetName)
+			if nErr != nil {
+				// A malformed display name is not an actionable party outcome. Keep the
+				// session alive and never quote the untrusted text into the log.
+				log.Debug("refusing malformed party target", "action", request.Action.String(), "reason", nErr.Error())
+				return nil
+			}
+			targetName = accepted
+		}
+
+		reason, pErr := player.Party(request.Action, targetName)
+		if pErr == nil {
+			return nil
+		}
+		log.Debug("refusing party request", "action", request.Action.String(), "reason", pErr.Error(), "code", reason.String())
+		if reason == vnet.RefusalReasonUnknown {
+			return nil
+		}
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionParty, Reason: reason}
+		if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+			return fmt.Errorf("session: send party refusal: %w", sErr)
+		}
+		return nil
+
 	case vnet.PayloadLeaveRequest:
 		if player == nil || msg.LeaveRequest == nil {
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)
