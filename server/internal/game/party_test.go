@@ -51,6 +51,19 @@ func TestPartyTargetsHaveTheCharacterNameShape(t *testing.T) {
 	if maxPartyTargetBytes != persist.MaxNameBytes {
 		t.Fatalf("party target cap = %d, persisted name cap = %d", maxPartyTargetBytes, persist.MaxNameBytes)
 	}
+	for _, name := range []string{"Eivor", "SKJALD", "Åsa", "Kari", "ᛁvar"} {
+		_, persistedFold, err := persist.AcceptName(name)
+		if err != nil {
+			t.Fatalf("persist.AcceptName(%q): %v", name, err)
+		}
+		_, partyFold, err := acceptPartyTarget(name)
+		if err != nil {
+			t.Fatalf("acceptPartyTarget(%q): %v", name, err)
+		}
+		if partyFold != persistedFold {
+			t.Errorf("party fold for %q = %q, persisted fold = %q", name, partyFold, persistedFold)
+		}
+	}
 	for name, target := range map[string]string{
 		"empty":        "  ",
 		"too long":     strings.Repeat("a", persist.MaxNameBytes+1),
