@@ -734,7 +734,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// stored character. Nothing the client said at any point in this handshake
 			// reaches it, and a creation's appearance reaches it only by having been
 			// written down first.
-			admitted, jErr := sim.Join(entityID, self.ID, self.Name, cfg.Spawn, self.Appearance, self.Life, trySend)
+			admitted, jErr := sim.JoinCharacter(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend)
 			if jErr != nil {
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}

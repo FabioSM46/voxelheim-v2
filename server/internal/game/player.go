@@ -147,10 +147,12 @@ type Sim struct {
 	// that names every other entity. byName is the one live display-name lookup and
 	// exists only for party Invite and Kick; names were accepted and made globally
 	// unique by persistence before Join receives them.
-	parties          map[uint64]*party
-	byName           map[string]*Player
-	partyInviteTicks uint64
-	currentTick      uint64
+	parties           map[uint64]*party
+	partyMemberships  map[partyMemberKey]uint64
+	byName            map[string]*Player
+	partyInviteTicks  uint64
+	partyOfflineTicks uint64
+	currentTick       uint64
 
 	// tickOfDay is where the world stands in its day, and it is always less than
 	// DayLengthTicks. See clock.go for everything about it; the field is here because
@@ -299,8 +301,10 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		chatNow:            SystemClock{}.Now,
 		pendingExperience:  make(map[characterKey]ExperienceAward),
 		parties:            make(map[uint64]*party),
+		partyMemberships:   make(map[partyMemberKey]uint64),
 		byName:             make(map[string]*Player),
 		partyInviteTicks:   uint64(ticksFor(PartyInviteTTL, tickRate)),
+		partyOfflineTicks:  uint64(ticksFor(PartyOfflineGrace, tickRate)),
 		drops:              make(map[uint64]*itemDrop),
 		mobs:               make(map[uint64]*mob),
 		structures:         make(map[uint64]*structure),
@@ -357,6 +361,10 @@ type intent struct {
 type Player struct {
 	sim      *Sim
 	entityID uint64
+	// characterID is the server-minted identity of the stored character this session
+	// is playing. Unlike entityID it survives reconnects, and unlike playerID it does
+	// not identify another character owned by the same account.
+	characterID uint64
 
 	// playerID is who this player *is*, across connections; entityID is what names
 	// them in this one. Two identifiers rather than one because they answer different
@@ -529,6 +537,16 @@ type Player struct {
 // deliver is how a snapshot reaches that session, and it must not block — Step calls
 // it under the simulation's lock. It returns false for a frame it dropped.
 func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
+	return s.JoinCharacter(entityID, playerID, entityID, name, spawn, appearance, resume, deliver)
+}
+
+// JoinCharacter admits one stored character under a new live entity id. CharacterID
+// is the stable identity minted by persistence; session is the production caller.
+// Join remains a compact helper for game tests whose entity ids stand in for it.
+func (s *Sim) JoinCharacter(entityID uint64, playerID identity.PlayerID, characterID uint64, name string, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
+	if characterID == 0 {
+		return nil, errors.New("game: character id 0 is reserved")
+	}
 	if deliver == nil {
 		return nil, errors.New("game: deliver must not be nil")
 	}
@@ -566,11 +584,12 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 	}
 
 	p := &Player{
-		sim:        s,
-		entityID:   entityID,
-		playerID:   playerID,
-		name:       name,
-		appearance: appearance,
+		sim:         s,
+		entityID:    entityID,
+		characterID: characterID,
+		playerID:    playerID,
+		name:        name,
+		appearance:  appearance,
 		// Empty, and that is the reconnect rule rather than an initialisation detail: a
 		// new session has described nobody to this client, so everything it can see is
 		// described again — including the players it was already looking at a moment ago.
@@ -634,6 +653,7 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 	s.players[entityID] = p
 	s.byIdentity[playerID] = p
 	s.byName[foldPlayerName(name)] = p
+	s.rebindPartyMemberLocked(p)
 	return p, nil
 }
 
@@ -660,7 +680,7 @@ func (s *Sim) Leave(p *Player) {
 		// A mob tap is keyed independently of this session object, but its offline
 		// baseline must include everything this session earned before it left.
 		s.rememberTapExperienceLocked(characterKeyOf(p.playerID, p.name), p.experience)
-		s.removeFromPartyLocked(p)
+		s.markPartyMemberOfflineLocked(p)
 		s.clearInvitesFromLocked(p.entityID)
 		p.setMiningLocked(nil)
 		p.mineCompleting = false
@@ -1091,7 +1111,7 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			}
 		}
 
-		partyLeader, partyMembers := s.partySnapshotLocked(viewer)
+		partyLeader, partyMembers, partyRoster := s.partySnapshotLocked(viewer)
 
 		// The wire field is a uint32 while ticks are counted in uint64. At 20 Hz the
 		// truncation wraps after about seven years of uptime, and both sides compare
@@ -1126,10 +1146,12 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			// the invariant holds because advanceClockLocked above is the only thing
 			// that writes it and RestoreClock refuses anything outside the day.
 			TickOfDay: s.tickOfDay,
-			// PartyMembers deliberately excludes this viewer. A leader is therefore either
-			// the viewer itself or one of these entries, exactly as the V20 contract says.
+			// PartyMembers deliberately excludes this viewer and every offline roster entry.
+			// PartyRoster carries the stable complete order; its first entry remains the
+			// leader even when PartyLeaderEntityID is zero because that leader is offline.
 			PartyLeaderEntityID: partyLeader,
 			PartyMembers:        partyMembers,
+			PartyRoster:         partyRoster,
 		}
 		if !viewer.deliver(protocol.EncodeEntitySnapshot(snapshot)) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
