@@ -334,6 +334,28 @@ func (p *Player) partyMember() partyMember {
 	return partyMember{key: p.partyMemberKey(), name: p.name, player: p}
 }
 
+// startBossEncounterLocked freezes the first valid pull's eligibility exactly once.
+// Target acquisition and valid damage both call it; whichever arrives first wins.
+//
+// The copied roster deliberately includes dead and offline persistent members. Party
+// mutations after this point edit a different slice and cannot change the encounter.
+// The caller holds Sim.mu.
+func (s *Sim) startBossEncounterLocked(m *mob, first *Player) {
+	if m == nil || first == nil || m.encounter != nil || !m.species().isBoss() {
+		return
+	}
+
+	roster := []corpseOwner{first.corpseOwner()}
+	held := s.parties[first.partyID]
+	if first.partyID != 0 && held != nil && len(held.members) > 0 {
+		roster = make([]corpseOwner, 0, len(held.members))
+		for _, member := range held.members {
+			roster = append(roster, corpseOwnerFromPartyKey(member.key))
+		}
+	}
+	m.encounter = &bossEncounter{roster: roster}
+}
+
 func (s *Sim) clearInvitesFromLocked(entityID uint64) {
 	for _, player := range s.players {
 		if player.invite != nil && player.invite.from == entityID {

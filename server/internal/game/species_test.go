@@ -59,6 +59,9 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 		if kind == vnet.MobKindUnknown {
 			continue
 		}
+		if def.rank != mobRankNormal && def.rank != mobRankBoss {
+			t.Errorf("%s has unknown rank %d; every species must explicitly be normal or boss", kind, def.rank)
+		}
 		if def.maxHealth == 0 {
 			t.Errorf("%s has no health, so it arrives dead", kind)
 		}
@@ -137,6 +140,7 @@ func TestTheDeerRowIsPassivePrey(t *testing.T) {
 	t.Parallel()
 
 	want := mobDefinition{
+		rank:       mobRankNormal,
 		maxHealth:  20,
 		experience: 5,
 		speed:      4.0,
@@ -189,6 +193,7 @@ func TestTheDraugrsNumbersSurvivedTheMoveIntoTheRegistry(t *testing.T) {
 	t.Parallel()
 
 	want := mobDefinition{
+		rank:        mobRankNormal,
 		maxHealth:   60,
 		experience:  15,
 		speed:       3.2,

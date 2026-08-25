@@ -165,7 +165,7 @@ func (s *Sim) removeSpentMobsLocked(players []*Player, mobs []*mob) bool {
 		}
 
 		if daylight && m.species().nocturnal && huntable(players, m.target) == nil {
-			delete(s.mobs, m.entityID)
+			s.discardMobLocked(m)
 			s.log.Debug("mob left with the night", "entity_id", m.entityID, "kind", m.kind,
 				"tick_of_day", s.tickOfDay)
 			removed = true
@@ -183,12 +183,24 @@ func (s *Sim) removeSpentMobsLocked(players []*Player, mobs []*mob) bool {
 		if m.unseenTicks <= s.mobDespawnTicks {
 			continue
 		}
-		delete(s.mobs, m.entityID)
+		s.discardMobLocked(m)
 		s.log.Debug("mob left every streamed cube", "entity_id", m.entityID, "kind", m.kind,
 			"unseen_ticks", m.unseenTicks)
 		removed = true
 	}
 	return removed
+}
+
+// discardMobLocked is the non-kill exit. It consumes neither loot RNG nor the corpse
+// transition, and clears every earned/combat claim before the entity leaves the world.
+// A future boss reset can use this same boundary instead of growing a second reward path.
+func (s *Sim) discardMobLocked(m *mob) {
+	if m == nil {
+		return
+	}
+	delete(s.mobs, m.entityID)
+	m.firstHit = nil
+	m.encounter = nil
 }
 
 // watchedBy reports whether any connected player is streaming the chunk this mob stands

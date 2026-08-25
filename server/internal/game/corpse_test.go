@@ -67,14 +67,14 @@ func TestCorpseRollIsStableAcrossRepeatedOpens(t *testing.T) {
 	h.killWithTheStarterBlade(player, id)
 
 	h.sim.mu.Lock()
-	want := h.sim.corpses[id].lootState()
+	want := h.sim.corpses[id].lootState(&h.sim.corpses[id].container)
 	h.sim.mu.Unlock()
 	for tick := uint32(1); tick <= 3; tick++ {
 		if reason, err := player.OpenLoot(protocol.LootOpenRequest{CorpseID: id, ClientTick: tick}); err != nil {
 			t.Fatalf("open %d = %s, %v", tick, reason, err)
 		}
 		h.sim.mu.Lock()
-		got := h.sim.corpses[id].lootState()
+		got := h.sim.corpses[id].lootState(&h.sim.corpses[id].container)
 		h.sim.mu.Unlock()
 		if got.Revision != want.Revision || len(got.Entries) != len(want.Entries) || got.Entries[0] != want.Entries[0] {
 			t.Fatalf("open %d rerolled or mutated %+v into %+v", tick, want, got)
@@ -168,7 +168,7 @@ func TestBusyInventoryLeavesCorpseRetryable(t *testing.T) {
 		t.Fatalf("busy take = %s, %v", reason, err)
 	}
 	h.sim.mu.Lock()
-	entries := len(h.sim.corpses[id].entries)
+	entries := len(h.sim.corpses[id].container.entries)
 	h.sim.mu.Unlock()
 	if entries != 1 {
 		t.Errorf("busy inventory consumed loot; %d entries remain", entries)
@@ -201,11 +201,11 @@ func TestInventoryAndOpenLootStatesRetryIndependently(t *testing.T) {
 	player.inventoryDirty = false
 	sim.corpses[9] = &corpse{
 		entityID: 9, kind: vnet.MobKindDraugr, pos: [3]float64{0.5, 64, 0.5}, chunk: player.chunk,
-		owner: player.corpseOwner(), revision: 1, expiresTick: sim.corpseLifetimeTicks,
-		entries: []corpseEntry{
+		owner: player.corpseOwner(), expiresTick: sim.corpseLifetimeTicks,
+		container: corpseContainer{revision: 1, entries: []corpseEntry{
 			{entryID: 1, stack: stackOf(ItemBone, 1)},
 			{entryID: 2, stack: stackOf(ItemBone, 1)},
-		},
+		}},
 	}
 	sim.mu.Unlock()
 	if _, err := player.OpenLoot(protocol.LootOpenRequest{CorpseID: 9, ClientTick: 1}); err != nil {
@@ -243,7 +243,7 @@ func TestCorpseExpiresAtExactlyTenSimulationMinutes(t *testing.T) {
 		t.Run(time.Duration(rate).String(), func(t *testing.T) {
 			h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
 			h.sim.mu.Lock()
-			h.sim.corpses[9] = &corpse{entityID: 9, kind: vnet.MobKindVargr, entries: []corpseEntry{{entryID: 1, stack: stackOf(ItemVargrPelt, 1)}}, revision: 1, expiresTick: h.sim.corpseLifetimeTicks}
+			h.sim.corpses[9] = &corpse{entityID: 9, kind: vnet.MobKindVargr, container: corpseContainer{entries: []corpseEntry{{entryID: 1, stack: stackOf(ItemVargrPelt, 1)}}, revision: 1}, expiresTick: h.sim.corpseLifetimeTicks}
 			h.sim.mu.Unlock()
 			h.advance(int(h.sim.corpseLifetimeTicks) - 1)
 			h.sim.mu.Lock()

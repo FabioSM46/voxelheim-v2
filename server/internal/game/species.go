@@ -45,6 +45,11 @@ import (
 // reason: today the answer is "no such species", and the day there is one, this is where
 // it gets written down.
 type mobDefinition struct {
+	// rank classifies the encounter contract for this species. Unknown is not a
+	// usable default: every registry row must explicitly say normal or boss, so a
+	// future boss cannot silently take the normal round-robin loot path.
+	rank mobRank
+
 	// maxHealth is what one arrives with, and the denominator of the health a snapshot
 	// carries for it.
 	maxHealth uint16
@@ -129,6 +134,18 @@ type mobDefinition struct {
 	loot []lootRoll
 }
 
+type mobRank uint8
+
+const (
+	mobRankUnknown mobRank = iota
+	mobRankNormal
+	mobRankBoss
+)
+
+func (d mobDefinition) isBoss() bool { return d.rank == mobRankBoss }
+
+func (r mobRank) valid() bool { return r == mobRankNormal || r == mobRankBoss }
+
 // mobRegistry is every species this world can hold, and the only place their numbers
 // live.
 //
@@ -149,6 +166,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// for that 60-health fight: meaningful progress, but deliberately short of a level
 	// after three kills.
 	vnet.MobKindDraugr: {
+		rank:        mobRankNormal,
 		maxHealth:   60,
 		experience:  15,
 		speed:       3.2,
@@ -189,6 +207,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// Twenty experience prices that speed above the draugr's fifteen even though the
 	// vargr has less health: the fight is worth more because walking away is not an answer.
 	vnet.MobKindVargr: {
+		rank:        mobRankNormal,
 		maxHealth:   35,
 		experience:  20,
 		speed:       5.4,
@@ -212,6 +231,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// the low end of the hunt: only 20 health, below both predators, but its speed still
 	// makes bringing down food an active pursuit rather than free progress.
 	vnet.MobKindDeer: {
+		rank:       mobRankNormal,
 		maxHealth:  20,
 		experience: 5,
 		speed:      4.0,
@@ -230,7 +250,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 // [Sim.spawnMobLocked], which is the one place that answer is acted on.
 func mobByKind(kind vnet.MobKind) (mobDefinition, bool) {
 	def, ok := mobRegistry[kind]
-	return def, ok
+	return def, ok && def.rank.valid()
 }
 
 // species is this mob's registry row.
@@ -259,6 +279,9 @@ func (m *mob) species() mobDefinition { return mobRegistry[m.kind] }
 func spawnableSpecies(night bool) []vnet.MobKind {
 	kinds := make([]vnet.MobKind, 0, len(mobRegistry))
 	for kind, def := range mobRegistry {
+		if !def.rank.valid() {
+			continue
+		}
 		if def.nocturnal && !night {
 			continue
 		}
