@@ -167,6 +167,40 @@ func TestReconnectKeepsTheIdentityChatBucket(t *testing.T) {
 	}
 }
 
+func TestAFullChatLimiterIsPrunedWhenTheNextLineArrives(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	now := time.Unix(300, 0)
+	h.sim.chatNow = func() time.Time { return now }
+	first, err := h.sim.Join(51, testPlayerID(51), "Eira", [3]float32{0.5, 64, 0.5}, testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("first Join: %v", err)
+	}
+	second, err := h.sim.Join(52, testPlayerID(52), "Liv", [3]float32{0.5, 64, 0.5}, testAppearance(), nil, (&dropSink{}).deliver)
+	if err != nil {
+		t.Fatalf("second Join: %v", err)
+	}
+
+	if err := first.Chat("one line"); err != nil {
+		t.Fatalf("first Chat: %v", err)
+	}
+	if got := len(h.sim.chatLimiters); got != 1 {
+		t.Fatalf("chat limiter count = %d after first line, want 1", got)
+	}
+
+	now = now.Add(time.Duration(ChatBurst) * time.Second)
+	if err := second.Chat("later line"); err != nil {
+		t.Fatalf("second Chat: %v", err)
+	}
+	if got := len(h.sim.chatLimiters); got != 1 {
+		t.Errorf("chat limiter count = %d after stale entry was fully refilled, want 1", got)
+	}
+	if _, retained := h.sim.chatLimiters[first.playerID]; retained {
+		t.Error("fully refilled limiter was retained")
+	}
+}
+
 func TestDeadAndLeavingPlayersSayNothing(t *testing.T) {
 	t.Parallel()
 

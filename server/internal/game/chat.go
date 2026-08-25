@@ -42,6 +42,25 @@ func (l *chatLimiter) allow(now time.Time) bool {
 	return true
 }
 
+// fullAt reports whether elapsed refill time has restored the whole burst. A
+// fully restored limiter carries no information: deleting it is equivalent to
+// retaining it and bounds the identity-keyed map to recent chat activity.
+func (l *chatLimiter) fullAt(now time.Time) bool {
+	if l.tokens >= ChatBurst {
+		return true
+	}
+	elapsed := now.Sub(l.last)
+	return elapsed > 0 && l.tokens+elapsed.Seconds()*ChatRefillPerSecond >= ChatBurst
+}
+
+func (s *Sim) pruneChatLimitersLocked(now time.Time) {
+	for playerID, limiter := range s.chatLimiters {
+		if limiter.fullAt(now) {
+			delete(s.chatLimiters, playerID)
+		}
+	}
+}
+
 // acceptChat turns untrusted display text into one line the world chat may carry.
 // Errors never quote the text or the control rune that caused them.
 func acceptChat(text string) (string, error) {
@@ -78,6 +97,7 @@ func (p *Player) Chat(text string) error {
 	}
 
 	now := p.sim.chatNow()
+	p.sim.pruneChatLimitersLocked(now)
 	limiter := p.sim.chatLimiters[p.playerID]
 	if limiter == nil {
 		limiter = newChatLimiter(now)

@@ -127,8 +127,9 @@ type Sim struct {
 
 	// chatLimiters are keyed by the identity that survives a connection, not by the
 	// Player allocated for one session. Keeping the bucket here is what makes a
-	// reconnect resume the same allowance instead of manufacturing a fresh burst.
-	// See chat.go, where the clock and retention rule are documented.
+	// reconnect resume the same allowance instead of manufacturing a fresh burst. A
+	// bucket is removed once elapsed time has completely refilled it, because at that
+	// point retaining it and creating a new full bucket are equivalent. See chat.go.
 	chatLimiters map[identity.PlayerID]*chatLimiter
 	chatNow      func() time.Time
 

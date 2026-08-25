@@ -24,6 +24,10 @@ func TestWorldChatReachesBothSessionsAndOnlyRateLimitAnswers(t *testing.T) {
 	for line := 1; line <= game.ChatBurst; line++ {
 		sender.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: fmt.Sprintf(" line %d ", line)})
 	}
+	// Queue the sixth line before waiting on delivery: observing the five broadcasts
+	// can take arbitrary wall time under load, while the rate-limit assertion must ask
+	// about the same initial burst.
+	sender.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "line 6"})
 	waitUntil(t, "five accepted chat lines to reach both sessions", func() bool {
 		return len(senderFrames.chatMessages()) == game.ChatBurst &&
 			len(receiverFrames.chatMessages()) == game.ChatBurst
@@ -42,7 +46,6 @@ func TestWorldChatReachesBothSessionsAndOnlyRateLimitAnswers(t *testing.T) {
 		}
 	}
 
-	sender.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "line 6"})
 	waitUntil(t, "the sixth line's rate-limit refusal", func() bool {
 		return len(senderFrames.actionRefusals()) == 1
 	})
