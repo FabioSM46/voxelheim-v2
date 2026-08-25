@@ -439,9 +439,12 @@ The client samples the controls, sends what the player is *trying* to do at the 
   that index. The server resolves the item in its authoritative inventory, and its next
   complete state is the only thing that changes the displayed contents. The welcome also
   announces a non-empty trailing equipment subset; the pack grid draws only the slots between
-  the hotbar and that subset. Equipment has no cells or body rendering yet, so the three worn ids
-  in a described appearance are state carried forward for a later renderer, not a client-side
-  equipment rule.
+  the hotbar and that subset. The inventory screen draws the trailing subset as a labelled
+  head/chest/legs column beside the pack and routes every press through the same slot-index
+  message as an ordinary cell. `ARMOUR_SLOTS` may tint a mismatched destination as a courtesy,
+  but the press still leaves and the server still decides. Equipment has no body rendering yet,
+  so the three worn ids in a described appearance remain state carried forward for a later
+  renderer, not a client-side equipment rule.
 - **Item drops are snapshot entities, not pickup candidates.** `player/drops.rs` uses the
   newest `drops` vector as the complete existence set and interpolates positions through the
   same two-snapshot buffer as player bodies. Proximity and clicks are not inputs. Spin and bob
