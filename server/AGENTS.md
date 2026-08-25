@@ -493,6 +493,10 @@ package can avoid the import would create two truths to keep in step for no bene
   every *other* member even outside ordinary view, so its leader is either the recipient or one of
   those entries. Appearance uses the same consent boundary to deliver names and levels out of view,
   and membership teardown forgets that description edge so a later party must describe it again.
+  A mob kill shares its registry experience only with living members within `PartyShareRadius` of
+  the creature: equal integer shares, with the remainder kept by the killer. Mining and crafting
+  stay personal rewards, and every recipient still goes through `Sim.awardExperienceLocked` so a
+  shared level-up invalidates appearances exactly like a solo one.
 - **`Registry.Unsubscribe` is the broadcast's `Sim.Leave`.** It takes the lock
   `BroadcastChunk` holds *while it sends*, so once it returns nothing can still be sending to
   that session — and `Serve` calls it **before** `close(out)`, because a send on a closed
