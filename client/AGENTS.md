@@ -442,9 +442,9 @@ The client samples the controls, sends what the player is *trying* to do at the 
   the hotbar and that subset. The inventory screen draws the trailing subset as a labelled
   head/chest/legs column beside the pack and routes every press through the same slot-index
   message as an ordinary cell. `ARMOUR_SLOTS` may tint a mismatched destination as a courtesy,
-  but the press still leaves and the server still decides. Equipment has no body rendering yet,
-  so the three worn ids in a described appearance remain state carried forward for a later
-  renderer, not a client-side equipment rule.
+  but the press still leaves and the server still decides. The three worn ids in a described
+  appearance also select optional head, chest and legs overlays on world bodies. That renderer
+  reads only the server's latest description; it never infers equipment from the local pack.
 - **Item drops are snapshot entities, not pickup candidates.** `player/drops.rs` uses the
   newest `drops` vector as the complete existence set and interpolates positions through the
   same two-snapshot buffer as player bodies. Proximity and clicks are not inputs. Spin and bob
@@ -650,14 +650,17 @@ belongs to the server and a character with more hair is not a taller character.
 into meshes for the bodies the snapshots drive. Two tables would be two answers to "what does a shirt
 colour cover", and the first thing two answers do is disagree.
 
-**Sixteen meshes for a whole settlement.** Every player is the same geometry and only the colours
-differ, so each independently moving piece is merged into one mesh at startup — eleven for the
-pieces whose shape is fixed and one per hair model — and nothing is ever rebuilt. Splitting the arms
-and legs creates pivots, not per-player geometry: every body still shares those handles. Materials
-are keyed on the wire's colour itself, so two
-players in the same walnut tunic share one `StandardMaterial` and the palettes bound how many there
-can be; the map is swept whenever a body leaves, because a server is free to describe a colour nobody
-can choose and sixteen million of those is a map rather than a palette.
+**Nineteen meshes for a whole settlement.** Every player is the same geometry and only the colours
+and server-described equipment differ, so each independently moving piece is merged into one mesh
+at startup — eleven fixed body pieces, one per hair model and one per equipment slot — and nothing
+is ever rebuilt. Splitting the arms and legs creates pivots, not per-player geometry: every body
+still shares those handles. Armour is three optional overlay children; changing the worn ids adds,
+removes or re-materialises them without replacing the body. The helmet and cuirass occupy a second
+half-notch wrapping tier where hair can cross them, while greaves occupy the first tier over the
+trousers, so different materials never share a plane. Materials are keyed on colour plus finish:
+the ordinary rig and leather stay rough, while iron is smoother and slightly metallic. The map is
+swept against the appearances and worn ids still in view, because a server may describe colours this
+client cannot choose and a cache filled by the wire must remain a cache rather than a history.
 
 Four rules hold the numbers together:
 

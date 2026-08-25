@@ -130,6 +130,34 @@ pub enum BodyPiece {
     Eyes,
 }
 
+/// One server-described equipment slot drawn over the ordinary rig.
+///
+/// These are deliberately not [`BodyPiece`] variants: the character-creation preview
+/// consumes every body piece and must stay armour-free, while a world body adds only the
+/// overlays named by its last [`crate::net::PlayerAppearance`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArmourPiece {
+    Head,
+    Chest,
+    Legs,
+}
+
+impl ArmourPiece {
+    pub const ALL: [Self; 3] = [Self::Head, Self::Chest, Self::Legs];
+
+    /// The layer above the body this overlay occupies.
+    ///
+    /// Hair already wraps the head and, on the long models, the shoulders at one
+    /// [`PROUD`] tier. Helmet and cuirass occupy the second tier so their faces cannot
+    /// fight that hair beneath them; greaves wrap the flush trousers at the first tier.
+    const fn layer(self) -> Layer {
+        match self {
+            Self::Head | Self::Chest => Layer::Wrapping(2),
+            Self::Legs => Layer::Wrapping(1),
+        }
+    }
+}
+
 impl BodyPiece {
     /// Every independently drawn piece, back to front by colour family.
     pub const ALL: [Self; 12] = [
@@ -259,7 +287,7 @@ impl BodyPart {
     const fn layer(self) -> Layer {
         match self {
             Self::Skin | Self::Shirt | Self::Trousers | Self::Shoes => Layer::Flush,
-            Self::Hair => Layer::Wrapping,
+            Self::Hair => Layer::Wrapping(1),
             Self::Eyes => Layer::Facing,
         }
     }
@@ -271,7 +299,7 @@ enum Layer {
     /// The box is exactly what the table says. Everything the body is built from.
     Flush,
     /// Half a notch proud on every face, so it wraps what is under it. The hair.
-    Wrapping,
+    Wrapping(u8),
     /// Half a notch proud of the face and of nothing else. The eyes — a dot on a cheek
     /// rather than a bead stuck to it.
     Facing,
@@ -312,9 +340,14 @@ pub struct PlacedBox {
 /// notch forwards, so the hair never shares a plane with the skull and the eyes never
 /// share one with the face.
 pub fn placed(part: BodyPart, cell: PartBox) -> PlacedBox {
-    let (grow, forward) = match part.layer() {
+    placed_in_layer(part.layer(), cell)
+}
+
+/// Places one box on a presentation layer of the shared body grid.
+fn placed_in_layer(layer: Layer, cell: PartBox) -> PlacedBox {
+    let (grow, forward) = match layer {
         Layer::Flush => (0.0, 0.0),
-        Layer::Wrapping => (PROUD, 0.0),
+        Layer::Wrapping(tiers) => (PROUD * f32::from(tiers), 0.0),
         Layer::Facing => (0.0, PROUD),
     };
 
@@ -339,6 +372,24 @@ pub fn placed(part: BodyPart, cell: PartBox) -> PlacedBox {
             -(z.0 + z.1) / 2.0 * NOTCH_XZ,
         ),
     }
+}
+
+/// The model-sheet boxes one equipment overlay wraps.
+pub fn armour_boxes(piece: ArmourPiece) -> &'static [PartBox] {
+    match piece {
+        // The helmet wraps the head and leaves the neck visible.
+        ArmourPiece::Head => &SKIN[1..2],
+        // One item covers the torso and both sleeves, as the server describes one chest
+        // slot rather than three independently wearable pieces.
+        ArmourPiece::Chest => &CUIRASS,
+        // Greaves are one worn item wrapped around both trouser boxes.
+        ArmourPiece::Legs => &TROUSERS,
+    }
+}
+
+/// Places an armour box over the ordinary body without changing that body's envelope.
+pub fn placed_armour(piece: ArmourPiece, cell: PartBox) -> PlacedBox {
+    placed_in_layer(piece.layer(), cell)
 }
 
 /// The boxes one part is drawn from.
@@ -484,6 +535,25 @@ const SHIRT: [PartBox; 3] = [
     PartBox {
         x: (5, 7),
         y: (18, 25),
+        z: (-1, 1),
+    },
+];
+
+/// The cuirass follows the tunic torso and covers the upper sleeves.
+///
+/// Its arm plates stop two notches above the fists before the outer wrapping tier is
+/// applied. Growing the full tunic sleeves would put their side faces on the fists' side
+/// faces over a positive height, which is the colour-plane fight rule 2 forbids.
+const CUIRASS: [PartBox; 3] = [
+    SHIRT[0],
+    PartBox {
+        x: (-7, -5),
+        y: (21, 25),
+        z: (-1, 1),
+    },
+    PartBox {
+        x: (5, 7),
+        y: (21, 25),
         z: (-1, 1),
     },
 ];
@@ -838,6 +908,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn armour_wraps_every_body_colour_without_sharing_a_plane() {
+        for model in HairModel::ALL {
+            let worn = Appearance::new(0, 1, 2, 3, model, 4).expect("all are colours");
+            let body = drawn(worn);
+            for piece in ArmourPiece::ALL {
+                for cell in armour_boxes(piece) {
+                    let overlay = spans(placed_armour(piece, *cell));
+                    for (part, box_) in &body {
+                        let under = spans(*box_);
+                        for axis in 0..3 {
+                            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                            if !overlaps(overlay[u], under[u]) || !overlaps(overlay[v], under[v]) {
+                                continue;
+                            }
+                            for side in [overlay[axis].0, overlay[axis].1] {
+                                for face in [under[axis].0, under[axis].1] {
+                                    assert!(
+                                        (side - face).abs() > f32::EPSILON,
+                                        "{piece:?} armour and {part:?} share plane {side} on \
+                                         axis {axis} while wearing {model:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_helmet_occupies_the_second_proud_tier_over_hair() {
+        let head = placed(BodyPart::Skin, SKIN[1]);
+        let hair = placed(BodyPart::Hair, SKIN[1]);
+        let helmet = placed_armour(ArmourPiece::Head, SKIN[1]);
+
+        let tier = Vec3::splat(2.0 * PROUD * NOTCH_XZ);
+        assert!((hair.size - head.size).abs_diff_eq(tier, 1e-6));
+        assert!((helmet.size - hair.size).abs_diff_eq(tier, 1e-6));
     }
 
     /// Every part takes its own colour, and no two take the same field. A body drawn
