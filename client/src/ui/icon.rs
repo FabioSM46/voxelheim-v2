@@ -344,6 +344,14 @@ pub(crate) fn host_bundle() -> impl Bundle {
     )
 }
 
+/// Draws one immutable icon while a freshly rebuilt UI row is being spawned.
+pub(crate) fn spawn(host: &mut ChildSpawnerCommands<'_>, icon: StackIcon) {
+    let base = icon.colour.to_linear();
+    for part in parts(icon.shape) {
+        host.spawn(part_bundle(part, base));
+    }
+}
+
 /// The icon host inside one cell.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct IconHost;

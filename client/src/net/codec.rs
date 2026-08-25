@@ -1508,8 +1508,6 @@ pub struct PartyInvite {
 }
 
 /// Intent to open one server-owned corpse container.
-// V21 establishes this outbound contract before the loot interaction UI lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootOpenRequest {
     pub corpse_id: u64,
@@ -1517,8 +1515,6 @@ pub struct LootOpenRequest {
 }
 
 /// Intent to move one stable entry from one authoritative revision.
-// V21 establishes this outbound contract before the loot interaction UI lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootTakeRequest {
     pub corpse_id: u64,
