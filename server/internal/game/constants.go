@@ -76,6 +76,14 @@ const (
 	// the subtraction at the strike cannot underflow.
 	ArmourScale uint16 = 100
 
+	// ThreatScale is the denominator for the tenths of hostile attention a worn
+	// item records. Full iron contributes fifteen, so its weight is 2.5: on the
+	// comparison scale a tank ten blocks away scores four, the same as a naked
+	// player at four, and the existing identity tie can put the tank first. That
+	// is the point — heavy armour creates the tank by what the player wears rather
+	// than by a class the server was told they chose.
+	ThreatScale = 10
+
 	// HealthPerLevel is how much maximum health each level after the first adds.
 	//
 	// Five makes a level-30 player reach 245 health, 2.45 times the level-one base.

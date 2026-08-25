@@ -295,15 +295,17 @@ func huntable(players []*Player, entityID uint64) *Player {
 // out of range stops being returned, and every state above reads that as "no target"
 // without any of them having to watch for it.
 //
-// Nearest wins; equal distances resolve by entity id, which the sorted list makes
-// automatic. O(players) per mob per tick, knowingly — the same trade the snapshot
-// visibility below records, and a spatial index is worth building when the quadratic
-// term matters rather than one issue before.
+// Lowest distance-to-threat-weight wins; equal scores resolve by entity id. The raw
+// distance still decides whether somebody is inside the species' aggro range, so armour
+// can reorder visible prey and can never make a creature notice farther away. O(players)
+// per mob per tick, knowingly — the same trade the snapshot visibility below records,
+// and a spatial index is worth building when the quadratic term matters rather than one
+// issue before.
 func (m *mob) chooseTargetLocked(players []*Player) *Player {
 	def := m.species()
 
 	var best *Player
-	bestDistance := math.Inf(1)
+	bestScore := math.Inf(1)
 
 	for _, p := range players {
 		// Dead players and freshly respawned ones are not prey. The second is what stops
@@ -316,10 +318,10 @@ func (m *mob) chooseTargetLocked(players []*Player) *Player {
 		if distance > def.aggroRange {
 			continue
 		}
-		// Strictly nearer, so the first player at a tied distance keeps it — and the
-		// list is sorted by identity, which is what makes the tie deterministic.
-		if distance < bestDistance {
-			best, bestDistance = p, distance
+		weight := 1 + float64(p.worn.threat)/ThreatScale
+		score := distance / weight
+		if score < bestScore || (score == bestScore && (best == nil || p.entityID < best.entityID)) {
+			best, bestScore = p, score
 		}
 	}
 

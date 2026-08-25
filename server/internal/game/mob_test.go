@@ -197,6 +197,84 @@ func TestADraugrHuntsTheNearestPlayerAndBreaksTiesByIdentity(t *testing.T) {
 	}
 }
 
+func TestHeavyArmourDrawsADraugrPastANearerUnarmouredPlayer(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	id := h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
+	farPos := [3]float32{10.5, 64, 0.5}
+	fullIron := lifeWearing(t, farPos,
+		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemIronCuirass),
+		fullTestArmour(ItemIronGreaves),
+	)
+	tank, _ := h.joinLife(7, farPos, &fullIron)
+	near, _ := h.join(9, [3]float32{5.5, 64, 0.5})
+
+	h.step()
+	if got := h.mob(id).target; got != tank.entityID {
+		t.Errorf("target = %d, want the farther full-iron player %d", got, tank.entityID)
+	}
+
+	// Take every piece off through the authoritative move path. The next pursuit tick
+	// re-chooses, reads the refreshed cached summary and goes back to raw proximity.
+	for offset, from := range []int{equipmentHead, equipmentChest, equipmentLegs} {
+		if _, err := tank.MoveInventory(protocol.InventoryMoveRequest{
+			From: uint8(from), To: uint8(protocol.HotbarSlots) + uint8(offset), Count: 1,
+		}); err != nil {
+			t.Fatalf("remove armour from equipment slot %d: %v", from, err)
+		}
+	}
+	h.step()
+	if got := h.mob(id).target; got != near.entityID {
+		t.Errorf("target after stripping armour = %d, want nearer player %d", got, near.entityID)
+	}
+}
+
+func TestThreatNeverExtendsADraugrsAggroRange(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	h.keepNight()
+	id := h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
+	outside := [3]float32{float32(draugrRow.aggroRange + 2), 64, 0.5}
+	fullIron := lifeWearing(t, outside,
+		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemIronCuirass),
+		fullTestArmour(ItemIronGreaves),
+	)
+	h.joinLife(1, outside, &fullIron)
+	h.step()
+
+	got := h.mob(id)
+	if got.target != 0 || got.action != vnet.MobActionIdle {
+		t.Errorf("outside armoured player produced target=%d action=%s, want no target and Idle",
+			got.target, got.action)
+	}
+}
+
+func TestADeerStillFleesFromTheNearestPlayerRegardlessOfArmour(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	id := h.spawnMobAt(vnet.MobKindDeer, [3]float32{0.5, 64, 0.5})
+	farPos := [3]float32{-9.5, 64, 0.5}
+	fullIron := lifeWearing(t, farPos,
+		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemIronCuirass),
+		fullTestArmour(ItemIronGreaves),
+	)
+	h.joinLife(1, farPos, &fullIron)
+	h.join(2, [3]float32{5.5, 64, 0.5})
+	h.step()
+
+	got := h.mob(id)
+	if got.action != vnet.MobActionFlee || got.vel[0] >= 0 || got.vel[2] != 0 {
+		t.Errorf("deer is action=%s velocity=%v, want flight on -X from the nearer player",
+			got.action, got.vel)
+	}
+}
+
 func TestADraugrIgnoresWhatItCannotHunt(t *testing.T) {
 	t.Parallel()
 
