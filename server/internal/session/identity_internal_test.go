@@ -399,6 +399,132 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	}
 }
 
+func TestOfflineMobExperienceRaisesOnlyTheCharacterThatOwnedTheTap(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, _ := internalIdentities(t, store)
+	owner := identity.IDOf(identity.Account{31})
+	character, err := store.Create(owner, "Eivor", testAppearance())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	original := persist.Record{
+		Pos: [3]float64{4, 65, -4}, Health: 73, Hunger: 29, Experience: 10,
+	}
+	if err := store.Save(character.ID, original); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	award := game.ExperienceAward{PlayerID: owner, CharacterName: "Eivor", Experience: 25}
+	if persisted, err := identities.RememberExperience(award); err != nil {
+		t.Fatalf("RememberExperience: %v", err)
+	} else if !persisted {
+		t.Fatal("RememberExperience did not persist the award")
+	}
+	// The absolute total makes both a retry and an older delayed write harmless.
+	if persisted, err := identities.RememberExperience(award); err != nil {
+		t.Fatalf("RememberExperience retry: %v", err)
+	} else if !persisted {
+		t.Fatal("RememberExperience retry did not find the durable award")
+	}
+	if persisted, err := identities.RememberExperience(game.ExperienceAward{
+		PlayerID: owner, CharacterName: "Eivor", Experience: 20,
+	}); err != nil {
+		t.Fatalf("RememberExperience with an older total: %v", err)
+	} else if !persisted {
+		t.Fatal("RememberExperience with an older total did not find the newer durable award")
+	}
+
+	saved, found, err := store.Load(character.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("the offline award wrote no record")
+	}
+	if saved.Experience != 25 {
+		t.Errorf("stored experience = %d, want 25", saved.Experience)
+	}
+	if saved.Pos != original.Pos || saved.Health != original.Health || saved.Hunger != original.Hunger {
+		t.Errorf("offline experience changed the life to %v/%d/%d, want %v/%d/%d",
+			saved.Pos, saved.Health, saved.Hunger, original.Pos, original.Health, original.Hunger)
+	}
+	if _, err := identities.RememberExperience(game.ExperienceAward{
+		PlayerID: identity.PlayerID{99}, CharacterName: "Eivor", Experience: 30,
+	}); err == nil {
+		t.Error("an award under another owner was accepted")
+	}
+}
+
+func TestOfflineMobExperienceWithoutARecordIsNotReportedAsPersisted(t *testing.T) {
+	t.Parallel()
+
+	store := persist.NewMemoryStore()
+	identities, _ := internalIdentities(t, store)
+	owner := identity.IDOf(identity.Account{32})
+	if _, err := store.Create(owner, "Eivor", testAppearance()); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	persisted, err := identities.RememberExperience(game.ExperienceAward{
+		PlayerID: owner, CharacterName: "Eivor", Experience: 15,
+	})
+	if err != nil {
+		t.Fatalf("RememberExperience: %v", err)
+	}
+	if persisted {
+		t.Fatal("an ephemeral store with no record reported the award as durable")
+	}
+}
+
+func TestOfflineMobExperienceWaitsForTheDepartedSessionsFinalRecord(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, _ := internalIdentities(t, store)
+	owner := identity.IDOf(identity.Account{33})
+	character, err := store.Create(owner, "Eivor", testAppearance())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !identities.claim(owner) {
+		t.Fatal("the player was already claimed")
+	}
+	self := identities.playing(Admitted{ID: owner}, character, false, nil)
+	award := game.ExperienceAward{PlayerID: owner, CharacterName: "Eivor", Experience: 55}
+
+	// The simulation has removed this session, but its teardown still owns one final
+	// write at 40. The award must stay queued until that write has landed.
+	if persisted, err := identities.RememberExperience(award); err != nil {
+		t.Fatalf("RememberExperience before teardown: %v", err)
+	} else if persisted {
+		t.Fatal("the award persisted before the departed session wrote its final record")
+	}
+	if err := identities.Remember(self, game.Life{Health: 100, Hunger: 100, Experience: 40}); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	if persisted, err := identities.RememberExperience(award); err != nil {
+		t.Fatalf("RememberExperience after teardown: %v", err)
+	} else if !persisted {
+		t.Fatal("the award did not persist after the teardown finalised")
+	}
+
+	saved, found, err := store.Load(character.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found || saved.Experience != award.Experience {
+		t.Fatalf("stored experience = %d (found %t), want %d", saved.Experience, found, award.Experience)
+	}
+}
+
 // The autosave does write for a session that is still running, which is the other half
 // of the rule above — a skip that skipped everybody would pass that test too.
 func TestAnAutosaveWritesForALiveSession(t *testing.T) {

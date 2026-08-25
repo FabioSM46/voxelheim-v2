@@ -789,6 +789,25 @@ func (s *server) savePlayersLoop(ctx context.Context) error {
 			if err := s.identities.RememberAll(s.sim.Records()); err != nil {
 				s.log.Error("saving the connected players failed; they will be retried", "error", err)
 			}
+			s.flushExperienceAwards()
+		}
+	}
+}
+
+// flushExperienceAwards writes every mob award earned after its tap owner left the
+// simulation. Each write is an absolute lifetime total and is acknowledged
+// independently: one damaged record cannot discard another character's reward, and a
+// failed write remains queued for the next autosave.
+func (s *server) flushExperienceAwards() {
+	for _, award := range s.sim.PendingExperienceAwards() {
+		persisted, err := s.identities.RememberExperience(award)
+		if err != nil {
+			s.log.Error("saving offline mob experience failed; it will be retried",
+				"player_id", award.PlayerID.Short(), "error", err)
+			continue
+		}
+		if persisted {
+			s.sim.AcknowledgeExperienceAward(award)
 		}
 	}
 }
@@ -935,6 +954,11 @@ func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
 	accepting.Wait()
 	s.registry.CloseAll()
 	workers.Wait()
+
+	// A mob can die after its tap owner disconnected and after that session wrote its
+	// final record. The award is queued by the simulation and this is the last durable
+	// write after both the tick and every session have stopped changing it.
+	s.flushExperienceAwards()
 
 	if err := s.chunks.Flush(); err != nil {
 		s.log.Error("saving the world failed; edits since the last autosave are lost", "error", err)
