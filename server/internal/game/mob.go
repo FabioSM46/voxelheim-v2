@@ -89,6 +89,11 @@ type mob struct {
 	// A mob reset discards this mob and therefore the tap; a fresh spawn starts untapped.
 	firstHit *mobTap
 
+	// encounter is the immutable personal-loot roster of a boss once combat begins.
+	// It stores stable character identities only: no session pointer and no live party
+	// object can revise an earned place after the pull.
+	encounter *bossEncounter
+
 	// actionTicks is what remains of a windup or a recovery. Ticks, not a deadline —
 	// the simulation's only clock is Step.
 	actionTicks uint32
@@ -113,6 +118,10 @@ type mobTap struct {
 	characterID   uint64
 	characterName string
 	experience    uint32
+}
+
+type bossEncounter struct {
+	roster []corpseOwner
 }
 
 // ticksFor is a duration in ticks at a rate, and never zero.
@@ -204,7 +213,7 @@ func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
 			delete(s.mobs, m.entityID)
 			corpse := s.makeCorpseLocked(m)
 			s.log.Debug("a body became a corpse", "entity_id", m.entityID, "kind", m.kind,
-				"pos", m.pos, "loot_entries", len(corpse.entries))
+				"pos", m.pos, "loot_entries", corpse.entryCount())
 			continue
 		}
 		m.step(s, players)
@@ -227,9 +236,9 @@ func (m *mob) step(s *Sim, players []*Player) {
 			// would be unreadable — the player who reacted to it is not the one it hit.
 			m.stepWindup(s, huntable(players, m.target))
 		case vnet.MobActionRecovery:
-			m.stepRecovery(m.chooseTargetLocked(players))
+			m.stepRecovery(m.chooseTargetLocked(s, players))
 		default:
-			m.stepPursuit(s, m.chooseTargetLocked(players))
+			m.stepPursuit(s, m.chooseTargetLocked(s, players))
 		}
 	}
 
@@ -317,7 +326,7 @@ func huntable(players []*Player, entityID uint64) *Player {
 // per mob per tick, knowingly — the same trade the snapshot visibility below records,
 // and a spatial index is worth building when the quadratic term matters rather than one
 // issue before.
-func (m *mob) chooseTargetLocked(players []*Player) *Player {
+func (m *mob) chooseTargetLocked(s *Sim, players []*Player) *Player {
 	def := m.species()
 
 	var best *Player
@@ -343,6 +352,7 @@ func (m *mob) chooseTargetLocked(players []*Player) *Player {
 
 	m.target = 0
 	if best != nil {
+		s.startBossEncounterLocked(m, best)
 		m.target = best.entityID
 	}
 	return best

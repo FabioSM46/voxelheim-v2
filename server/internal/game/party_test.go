@@ -661,7 +661,7 @@ func TestRemovingCursorPreservesCyclicOrderAndAssignmentIsFrozen(t *testing.T) {
 	held.lootCursor = second.partyMemberKey()
 	h.sim.removePartyMemberLocked(leader.partyID, second.partyMemberKey())
 	owner := h.sim.corpseOwnerLocked(newMobTap(leader), leader.pos)
-	c := &corpse{entityID: 99, owner: owner, kind: vnet.MobKindVargr, entries: []corpseEntry{{entryID: 1, stack: stackOf(ItemVargrPelt, 1)}}}
+	c := &corpse{entityID: 99, owner: owner, kind: vnet.MobKindVargr, container: corpseContainer{entries: []corpseEntry{{entryID: 1, stack: stackOf(ItemVargrPelt, 1)}}}}
 	h.sim.corpses[c.entityID] = c
 	h.sim.removePartyMemberLocked(leader.partyID, third.partyMemberKey())
 	h.sim.mu.Unlock()

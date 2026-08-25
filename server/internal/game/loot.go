@@ -33,6 +33,11 @@ type corpseEntry struct {
 	stack   inventoryStack
 }
 
+type corpseContainer struct {
+	entries  []corpseEntry
+	revision uint32
+}
+
 // corpseOwner is exactly the stable account-plus-character boundary. Display names
 // and connection entity ids may change without changing an earned container right.
 type corpseOwner struct {
@@ -61,14 +66,61 @@ type corpse struct {
 	yaw      float64
 	chunk    world.Coord
 
-	owner       corpseOwner
-	entries     []corpseEntry
-	revision    uint32
+	owner     corpseOwner
+	container corpseContainer
+	// personal is non-nil only for boss corpses. Each stable character owns an
+	// independent entry slice and revision; normal mobs keep one container above.
+	personal    map[corpseOwner]*corpseContainer
 	expiresTick uint64
 }
 
 func (c *corpse) ownedBy(p *Player) bool {
-	return c != nil && p != nil && c.owner == p.corpseOwner()
+	_, ok := c.containerFor(p)
+	return ok
+}
+
+func (c *corpse) containerFor(p *Player) (*corpseContainer, bool) {
+	if c == nil || p == nil {
+		return nil, false
+	}
+	owner := p.corpseOwner()
+	if c.personal != nil {
+		container, ok := c.personal[owner]
+		return container, ok
+	}
+	if c.owner != owner {
+		return nil, false
+	}
+	return &c.container, true
+}
+
+func (c *corpse) hasLoot() bool {
+	if c == nil {
+		return false
+	}
+	if c.personal == nil {
+		return len(c.container.entries) > 0
+	}
+	for _, container := range c.personal {
+		if len(container.entries) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *corpse) entryCount() int {
+	if c == nil {
+		return 0
+	}
+	if c.personal == nil {
+		return len(c.container.entries)
+	}
+	count := 0
+	for _, container := range c.personal {
+		count += len(container.entries)
+	}
+	return count
 }
 
 func (c *corpse) state() protocol.MobState {
@@ -109,20 +161,35 @@ func (s *Sim) mobSnapshotsLocked(mobs []*mob) []mobSnapshot {
 
 // makeCorpseLocked is the only killed-mob transition. The caller holds Sim.mu.
 func (s *Sim) makeCorpseLocked(m *mob) *corpse {
-	owner := corpseOwner{}
-	if m.firstHit != nil {
-		owner = s.corpseOwnerLocked(m.firstHit, m.pos)
-	}
 	c := &corpse{
 		entityID:    m.entityID,
 		kind:        m.kind,
 		pos:         m.pos,
 		yaw:         m.yaw,
 		chunk:       m.chunk,
-		owner:       owner,
-		entries:     s.rollLootLocked(m),
-		revision:    1,
 		expiresTick: s.currentTick + s.corpseLifetimeTicks,
+	}
+	if m.species().isBoss() {
+		var roster []corpseOwner
+		if m.encounter != nil {
+			roster = m.encounter.roster
+		} else if m.firstHit != nil {
+			// Defensive fallback for a future damage caller that forgets to start the
+			// encounter. It may preserve the tap, but it may never route a boss through
+			// normal-party round robin or consult mutable membership at death.
+			roster = []corpseOwner{{playerID: m.firstHit.playerID, characterID: m.firstHit.characterID}}
+		}
+		c.personal = make(map[corpseOwner]*corpseContainer, len(roster))
+		// Roster order is RNG order. The map is only the lookup after every roll
+		// has settled, so opening order can never influence the sequence.
+		for _, owner := range roster {
+			c.personal[owner] = &corpseContainer{entries: s.rollLootLocked(m), revision: 1}
+		}
+	} else {
+		if m.firstHit != nil {
+			c.owner = s.corpseOwnerLocked(m.firstHit, m.pos)
+		}
+		c.container = corpseContainer{entries: s.rollLootLocked(m), revision: 1}
 	}
 	s.corpses[c.entityID] = c
 	return c
@@ -250,7 +317,7 @@ func (p *Player) OpenLoot(req protocol.LootOpenRequest) (vnet.RefusalReason, err
 	}
 	p.haveLootOpenTick, p.lastLootOpenTick = true, req.ClientTick
 
-	c, reason, err := p.accessibleCorpseLocked(req.CorpseID)
+	c, _, reason, err := p.accessibleCorpseLocked(req.CorpseID)
 	if err != nil {
 		return reason, err
 	}
@@ -277,19 +344,19 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 	}
 	p.haveLootTakeTick, p.lastLootTakeTick = true, req.ClientTick
 
-	c, reason, err := p.accessibleCorpseLocked(req.CorpseID)
+	c, container, reason, err := p.accessibleCorpseLocked(req.CorpseID)
 	if err != nil {
 		return reason, err
 	}
 	if p.openLootID != c.entityID {
 		return vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse container is not open")
 	}
-	if req.Revision != c.revision {
-		return vnet.RefusalReasonStaleRevision, fmt.Errorf("loot revision %d is not current revision %d", req.Revision, c.revision)
+	if req.Revision != container.revision {
+		return vnet.RefusalReasonStaleRevision, fmt.Errorf("loot revision %d is not current revision %d", req.Revision, container.revision)
 	}
 	entryIndex := -1
-	for index := range c.entries {
-		if c.entries[index].entryID == req.EntryID {
+	for index := range container.entries {
+		if container.entries[index].entryID == req.EntryID {
 			entryIndex = index
 			break
 		}
@@ -301,47 +368,52 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()
-	if !p.inventory.insertWholeStackLocked(c.entries[entryIndex].stack) {
+	if !p.inventory.insertWholeStackLocked(container.entries[entryIndex].stack) {
 		return vnet.RefusalReasonInventoryFull, errors.New("the whole loot entry does not fit")
 	}
 
-	c.entries = append(c.entries[:entryIndex], c.entries[entryIndex+1:]...)
-	c.revision++
+	container.entries = append(container.entries[:entryIndex], container.entries[entryIndex+1:]...)
+	container.revision++
 	p.inventoryDirty = true
 	p.lootDirty = true
-	if len(c.entries) == 0 {
+	if !c.hasLoot() {
 		p.sim.removeCorpseLocked(c.entityID)
 	}
 	return vnet.RefusalReasonUnknown, nil
 }
 
-func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, vnet.RefusalReason, error) {
+func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, vnet.RefusalReason, error) {
 	c := p.sim.corpses[id]
-	if c == nil || len(c.entries) == 0 || !withinView(p.chunk, c.chunk, p.sim.viewDistance) {
-		return nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse is unavailable")
+	if c == nil || !withinView(p.chunk, c.chunk, p.sim.viewDistance) {
+		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse is unavailable")
 	}
-	if !c.ownedBy(p) {
-		return nil, vnet.RefusalReasonLootNotOwned, errors.New("the corpse belongs to another character")
+	container, owned := c.containerFor(p)
+	if !owned {
+		return nil, nil, vnet.RefusalReasonLootNotOwned, errors.New("the corpse belongs to another character")
+	}
+	if len(container.entries) == 0 {
+		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the character's corpse container is empty")
 	}
 	if distance := boxDistance(playerBox(p.pos), mobRegistry[c.kind].body.boxAt(c.pos)); math.IsNaN(distance) || distance > EditReach {
-		return nil, vnet.RefusalReasonOutOfReach, fmt.Errorf("the corpse is %.2f blocks away, past the reach of %.1f", distance, EditReach)
+		return nil, nil, vnet.RefusalReasonOutOfReach, fmt.Errorf("the corpse is %.2f blocks away, past the reach of %.1f", distance, EditReach)
 	}
-	return c, vnet.RefusalReasonUnknown, nil
+	return c, container, vnet.RefusalReasonUnknown, nil
 }
 
 // canOpenCorpseLocked is the snapshot-side form of the same access rule. It carries
 // no reason because a snapshot advertises capabilities rather than refusals.
 func (p *Player) canOpenCorpseLocked(c *corpse) bool {
-	if c == nil || len(c.entries) == 0 || p.cannotActLocked() != nil ||
-		!withinView(p.chunk, c.chunk, p.sim.viewDistance) || !c.ownedBy(p) {
+	container, owned := c.containerFor(p)
+	if c == nil || !owned || len(container.entries) == 0 || p.cannotActLocked() != nil ||
+		!withinView(p.chunk, c.chunk, p.sim.viewDistance) {
 		return false
 	}
 	return boxDistance(playerBox(p.pos), mobRegistry[c.kind].body.boxAt(c.pos)) <= EditReach
 }
 
-func (c *corpse) lootState() protocol.LootState {
-	entries := make([]protocol.LootEntry, len(c.entries))
-	for index, entry := range c.entries {
+func (c *corpse) lootState(container *corpseContainer) protocol.LootState {
+	entries := make([]protocol.LootEntry, len(container.entries))
+	for index, entry := range container.entries {
 		entries[index] = protocol.LootEntry{
 			EntryID:       entry.entryID,
 			ItemID:        uint16(entry.stack.item),
@@ -350,7 +422,7 @@ func (c *corpse) lootState() protocol.LootState {
 			MaxDurability: entry.stack.maxDurability,
 		}
 	}
-	return protocol.LootState{CorpseID: c.entityID, Revision: c.revision, Entries: entries}
+	return protocol.LootState{CorpseID: c.entityID, Revision: container.revision, Entries: entries}
 }
 
 // offerLootLocked retries explicit closures before the currently open full state. A
@@ -367,13 +439,14 @@ func (p *Player) offerLootLocked() {
 		return
 	}
 	c := p.sim.corpses[p.openLootID]
-	if c == nil || !c.ownedBy(p) || len(c.entries) == 0 {
+	container, owned := c.containerFor(p)
+	if c == nil || !owned || len(container.entries) == 0 {
 		p.queueLootClosedLocked(p.openLootID)
 		p.openLootID = 0
 		p.lootDirty = false
 		return
 	}
-	if p.deliver(protocol.EncodeLootState(c.lootState())) {
+	if p.deliver(protocol.EncodeLootState(c.lootState(container))) {
 		p.lootDirty = false
 	}
 }
