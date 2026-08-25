@@ -67,8 +67,8 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 pub(crate) use appearance::{
-    BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
-    held_item_anchor as body_held_item_anchor, piece_boxes, placed as placed_box,
+    ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
+    held_item_anchor as body_held_item_anchor, piece_boxes, placed as placed_box, placed_armour,
 };
 
 pub use camera::{Orbit, ViewMode, WorldCamera};
@@ -368,16 +368,17 @@ impl InputCadence {
 
 /// The meshes every body is drawn from, built once at startup and shared by everybody.
 ///
-/// **Sixteen meshes for a whole settlement.** Every player is the same geometry and only
-/// the colours differ, so each independently moving piece is merged once at startup —
-/// eleven fixed pieces and one per hair model. Nothing here is ever rebuilt: a body that
-/// changes its hair swaps a handle, and every body shares the same limb geometry.
+/// **Twenty-two meshes for a whole settlement.** Every player shares eleven fixed body
+/// pieces, five hair meshes and six independently moving armour segments. Nothing here
+/// is ever rebuilt: a description change swaps handles or optional children in place.
 #[derive(Resource, Debug)]
 pub(crate) struct PlayerVisuals {
     fixed: [(BodyPiece, Handle<Mesh>); BodyPiece::FIXED.len()],
     /// One per model, paired with the model it draws. An array rather than a map because
     /// there are five of them and `HairModel` is deliberately not a number.
     hair: [(HairModel, Handle<Mesh>); HairModel::ALL.len()],
+    /// One shared overlay mesh per independently moving armour segment.
+    armour: [(ArmourSegment, Handle<Mesh>); ArmourSegment::ALL.len()],
 }
 
 impl PlayerVisuals {
@@ -409,15 +410,20 @@ impl PlayerVisuals {
                 .map_or_else(|| self.fixed[0].1.clone(), |(_, mesh)| mesh.clone()),
         }
     }
+
+    fn armour_mesh(&self, segment: ArmourSegment) -> Handle<Mesh> {
+        self.armour
+            .iter()
+            .find(|(drawn, _)| *drawn == segment)
+            .map_or_else(|| self.armour[0].1.clone(), |(_, mesh)| mesh.clone())
+    }
 }
 
-/// One material per colour, rather than one per player.
+/// One material per colour and finish, rather than one per player.
 ///
-/// **Keyed on the colour itself, which is what makes twenty players in view cost twenty
-/// bodies and not a hundred materials**: two people in the same walnut tunic share one
-/// `StandardMaterial`, and the palettes the character screen offers bound how many there
-/// can be. The key is the wire's `0x00RRGGBB`, so the value a server sent is the value
-/// this map is asked about — no rounding, and nothing to disagree about.
+/// Two people in the same walnut tunic share one `StandardMaterial`; two iron overlays
+/// share another. Finish belongs in the key because identical colours with matte and
+/// metallic surfaces are not the same material.
 ///
 /// Swept by [`apply_snapshots`] rather than grown for ever: a server is free to describe a
 /// colour nobody can choose, and sixteen million of them is a map. The sweep is triggered
@@ -425,30 +431,110 @@ impl PlayerVisuals {
 /// cache changing size — see there for why the difference matters. An entry dropped while a
 /// body still wears it costs nothing, because the body holds a strong handle to the
 /// material and the next one asking for that colour simply makes it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BodyColour {
+    /// A server-sent sRGB appearance colour.
+    Srgb(u32),
+    /// A display-registry colour, already converted to linear space.
+    Linear([u32; 4]),
+}
+
+impl BodyColour {
+    fn item(item_id: u16) -> Self {
+        Self::Linear(item_linear_rgba(item_id).map(f32::to_bits))
+    }
+
+    fn colour(self) -> Color {
+        match self {
+            Self::Srgb(colour) => Color::srgb_u8(
+                ((colour >> 16) & 0xFF) as u8,
+                ((colour >> 8) & 0xFF) as u8,
+                (colour & 0xFF) as u8,
+            ),
+            Self::Linear(channels) => {
+                let [r, g, b, a] = channels.map(f32::from_bits);
+                Color::linear_rgba(r, g, b, a)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BodyFinish {
+    Matte,
+    Leather,
+    Iron,
+}
+
+impl BodyFinish {
+    fn armour(item_id: u16) -> Self {
+        match item_id {
+            crafting::ITEM_LEATHER_CAP
+            | crafting::ITEM_LEATHER_JERKIN
+            | crafting::ITEM_LEATHER_LEGGINGS => Self::Leather,
+            crafting::ITEM_IRON_HELM
+            | crafting::ITEM_IRON_CUIRASS
+            | crafting::ITEM_IRON_GREAVES => Self::Iron,
+            // A newer server's item is still drawn in the registry's loud fallback
+            // colour, but this build does not guess that it is metal.
+            _ => Self::Matte,
+        }
+    }
+
+    const fn roughness(self) -> f32 {
+        match self {
+            Self::Matte | Self::Leather => 0.9,
+            Self::Iron => 0.55,
+        }
+    }
+
+    const fn metallic(self) -> f32 {
+        match self {
+            Self::Matte | Self::Leather => 0.0,
+            Self::Iron => 0.35,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BodyMaterialKey {
+    colour: BodyColour,
+    finish: BodyFinish,
+}
+
+impl BodyMaterialKey {
+    const fn appearance(colour: u32) -> Self {
+        Self {
+            colour: BodyColour::Srgb(colour),
+            finish: BodyFinish::Matte,
+        }
+    }
+
+    fn armour(item_id: u16) -> Self {
+        Self {
+            colour: BodyColour::item(item_id),
+            finish: BodyFinish::armour(item_id),
+        }
+    }
+}
+
 #[derive(Resource, Debug, Default)]
-pub(crate) struct BodyMaterials(HashMap<u32, Handle<StandardMaterial>>);
+pub(crate) struct BodyMaterials(HashMap<BodyMaterialKey, Handle<StandardMaterial>>);
 
 impl BodyMaterials {
     /// The material for one colour, making it the first time it is asked for.
     fn of(
         &mut self,
-        colour: u32,
+        key: BodyMaterialKey,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
         self.0
-            .entry(colour)
+            .entry(key)
             .or_insert_with(|| {
                 materials.add(StandardMaterial {
-                    // The wire's colours are sRGB, which is what `srgb_u8` takes. The
-                    // character screen's swatches read the same bytes the same way, and
-                    // that is the whole of why a shirt is the colour it was chosen to be.
-                    base_color: Color::srgb_u8(
-                        ((colour >> 16) & 0xFF) as u8,
-                        ((colour >> 8) & 0xFF) as u8,
-                        (colour & 0xFF) as u8,
-                    ),
-                    // Cloth and leather, not armour. Nothing in this world is polished.
-                    perceptual_roughness: 0.9,
+                    base_color: key.colour.colour(),
+                    perceptual_roughness: key.finish.roughness(),
+                    metallic: key.finish.metallic(),
                     ..default()
                 })
             })
@@ -481,9 +567,34 @@ impl Wardrobe<'_> {
             (
                 piece,
                 self.visuals.mesh(piece, model),
-                self.palette.of(part.colour(worn), self.materials),
+                self.palette.of(
+                    BodyMaterialKey::appearance(part.colour(worn)),
+                    self.materials,
+                ),
             )
         })
+    }
+
+    /// The optional overlays named by the server's latest description.
+    fn armour(
+        &mut self,
+        worn: Worn,
+    ) -> Vec<(ArmourSegment, Handle<Mesh>, Handle<StandardMaterial>)> {
+        ArmourSegment::ALL
+            .into_iter()
+            .filter_map(|segment| {
+                let piece = segment.piece();
+                let item_id = worn.armour(piece);
+                (item_id != 0).then(|| {
+                    (
+                        segment,
+                        self.visuals.armour_mesh(segment),
+                        self.palette
+                            .of(BodyMaterialKey::armour(item_id), self.materials),
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -715,13 +826,60 @@ pub struct LocalPlayer;
 /// what colour they are and reversing the map that made them. It is also what makes
 /// dressing a body idempotent — an appearance that has not changed changes nothing.
 ///
-/// The local player has none, because it has no body: see [`spawn_body`].
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
-struct Worn(Appearance);
+/// The local player carries the same component and overlays as everybody else; first
+/// person hides the body rather than constructing a second wardrobe.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct Worn {
+    appearance: Appearance,
+    head: u16,
+    chest: u16,
+    legs: u16,
+}
+
+impl Worn {
+    const fn bare(appearance: Appearance) -> Self {
+        Self {
+            appearance,
+            head: 0,
+            chest: 0,
+            legs: 0,
+        }
+    }
+
+    fn described(description: &Described) -> Self {
+        Self {
+            appearance: description.appearance,
+            head: description.worn_head,
+            chest: description.worn_chest,
+            legs: description.worn_legs,
+        }
+    }
+
+    const fn armour(self, piece: ArmourPiece) -> u16 {
+        match piece {
+            ArmourPiece::Head => self.head,
+            ArmourPiece::Chest => self.chest,
+            ArmourPiece::Legs => self.legs,
+        }
+    }
+
+    fn material_keys(self) -> impl Iterator<Item = BodyMaterialKey> {
+        ArmourPiece::ALL
+            .into_iter()
+            .map(move |piece| self.armour(piece))
+            .filter(|item_id| *item_id != 0)
+            .map(BodyMaterialKey::armour)
+    }
+}
 
 /// One independently placeable mesh of one body.
 #[derive(Component, Debug, Clone, Copy)]
 struct BodyVisual(BodyPiece);
+
+/// One optional equipment segment, kept separate from the base rig so the character
+/// preview remains bare and a server update can add or remove it in place.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct ArmourVisual(ArmourSegment);
 
 /// The stride sample the interpolator produced for this frame.
 ///
@@ -793,6 +951,8 @@ fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>
     commands.insert_resource(PlayerVisuals {
         fixed: BodyPiece::FIXED.map(|piece| (piece, meshes.add(piece_mesh(piece, ANY_HAIR)))),
         hair: HairModel::ALL.map(|model| (model, meshes.add(piece_mesh(BodyPiece::Hair, model)))),
+        armour: ArmourSegment::ALL
+            .map(|segment| (segment, meshes.add(armour_segment_mesh(segment)))),
     });
 }
 
@@ -825,6 +985,17 @@ fn piece_mesh(piece: BodyPiece, model: HairModel) -> Mesh {
     };
     merge_all(&mut merged, boxes, "player body");
     merged
+}
+
+/// One worn segment authored around the pivot of the body piece underneath it.
+///
+/// A cuirass is one logical server slot but its sleeves move with the arms, just as the
+/// two greaves move with their respective legs. The six shared meshes preserve those
+/// pivots without changing the three-slot wire contract.
+fn armour_segment_mesh(segment: ArmourSegment) -> Mesh {
+    let placed = placed_armour(segment.piece(), segment.cell());
+    Mesh::from(Cuboid::from_size(placed.size))
+        .translated_by(placed.centre - segment.body_piece().pivot())
 }
 
 /// Reads the controls into [`MoveIntent`] and [`LookState`].
@@ -1099,11 +1270,7 @@ fn apply_snapshots(
         let description = match described {
             Some(described) => {
                 described.drawn = true;
-                Some((
-                    described.appearance,
-                    described.name.as_str(),
-                    described.level,
-                ))
+                Some(&*described)
             }
             None => None,
         };
@@ -1141,17 +1308,24 @@ fn apply_snapshots(
     // costs nothing and the map is allowed a little slack before it is cleaned. What it is
     // not allowed is to grow: the ceiling moves with the cache, and the cache is the size
     // of a view.
-    let justified = (appearances.0.len() + 1) * BodyPart::IN_DRAWING_ORDER.len();
+    let per_description = BodyPart::IN_DRAWING_ORDER.len() + ArmourPiece::ALL.len();
+    let justified = (appearances.0.len() + 1) * per_description;
     if wardrobe.palette.0.len() > justified {
-        let live: HashSet<u32> = appearances
+        let live: HashSet<BodyMaterialKey> = appearances
             .0
             .values()
             .flat_map(|described| {
-                BodyPart::IN_DRAWING_ORDER.map(|part| part.colour(described.appearance))
+                BodyPart::IN_DRAWING_ORDER
+                    .map(|part| BodyMaterialKey::appearance(part.colour(described.appearance)))
+                    .into_iter()
+                    .chain(Worn::described(described).material_keys())
             })
-            .chain(BodyPart::IN_DRAWING_ORDER.map(|part| part.colour(PLACEHOLDER_APPEARANCE)))
+            .chain(
+                BodyPart::IN_DRAWING_ORDER
+                    .map(|part| BodyMaterialKey::appearance(part.colour(PLACEHOLDER_APPEARANCE))),
+            )
             .collect();
-        wardrobe.palette.0.retain(|colour, _| live.contains(colour));
+        wardrobe.palette.0.retain(|key, _| live.contains(key));
     }
 }
 
@@ -1217,38 +1391,74 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
 fn dress_bodies(
     appearances: Res<Appearances>,
     mut dressing: Dressing<'_>,
-    mut bodies: Query<(&Body, &mut Worn, &Children)>,
-    mut parts: Query<(
-        &BodyVisual,
-        &mut Mesh3d,
-        &mut MeshMaterial3d<StandardMaterial>,
-    )>,
+    mut bodies: Query<(Entity, &Body, &mut Worn, &Children)>,
+    mut parts: Query<
+        (
+            &BodyVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<ArmourVisual>,
+    >,
+    mut overlays: Query<
+        (
+            Entity,
+            &ArmourVisual,
+            &mut Mesh3d,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<BodyVisual>,
+    >,
+    mut commands: Commands,
 ) {
     let Some(mut wardrobe) = dressing.wardrobe() else {
         return;
     };
 
-    for (body, mut worn, children) in &mut bodies {
+    for (owner, body, mut worn, children) in &mut bodies {
         let Some(described) = appearances.0.get(&body.0) else {
             continue;
         };
-        if described.appearance == worn.0 {
+        let next = Worn::described(described);
+        if next == *worn {
             continue;
         }
-        worn.0 = described.appearance;
+        let appearance_changed = next.appearance != worn.appearance;
+        *worn = next;
 
-        let outfit = wardrobe.outfit(described.appearance);
+        let outfit = wardrobe.outfit(next.appearance);
+        let armour = wardrobe.armour(next);
+        let mut present = HashSet::with_capacity(armour.len());
 
         for child in children {
-            let Ok((visual, mut mesh, mut material)) = parts.get_mut(*child) else {
+            if let Ok((visual, mut mesh, mut material)) = parts.get_mut(*child) {
+                if !appearance_changed {
+                    continue;
+                }
+                let Some((_, shape, colour)) =
+                    outfit.iter().find(|(piece, _, _)| *piece == visual.0)
+                else {
+                    continue;
+                };
+                if mesh.0 != *shape {
+                    mesh.0 = shape.clone();
+                }
+                if material.0 != *colour {
+                    material.0 = colour.clone();
+                }
+                continue;
+            }
+
+            let Ok((entity, visual, mut mesh, mut material)) = overlays.get_mut(*child) else {
                 continue;
             };
-            let Some((_, shape, colour)) = outfit.iter().find(|(piece, _, _)| *piece == visual.0)
+            let Some((_, shape, colour)) =
+                armour.iter().find(|(segment, _, _)| *segment == visual.0)
             else {
+                commands.entity(entity).despawn();
                 continue;
             };
-            // The hair is the one part whose *shape* a player chooses, so it is the one
-            // piece where a mesh handle can change. Every fixed piece swaps only colour.
+            present.insert(visual.0);
             if mesh.0 != *shape {
                 mesh.0 = shape.clone();
             }
@@ -1256,6 +1466,20 @@ fn dress_bodies(
                 material.0 = colour.clone();
             }
         }
+
+        commands.entity(owner).with_children(|parent| {
+            for (segment, mesh, material) in armour {
+                if present.contains(&segment) {
+                    continue;
+                }
+                parent.spawn((
+                    ArmourVisual(segment),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    resting_piece_transform(segment.body_piece()),
+                ));
+            }
+        });
     }
 }
 
@@ -1312,22 +1536,26 @@ fn spawn_body(
     wardrobe: &mut Wardrobe<'_>,
     entity_id: u64,
     local_entity_id: u64,
-    description: Option<(Appearance, &str, u16)>,
+    description: Option<&Described>,
     state: &interpolate::Interpolated,
     dead: bool,
 ) {
     let local = entity_id == local_entity_id;
     let (worn, name_plate) = match description {
-        Some((appearance, name, level)) => (appearance, Some((name, level))),
-        None => (PLACEHOLDER_APPEARANCE, None),
+        Some(description) => (
+            Worn::described(description),
+            Some((description.name.as_str(), description.level)),
+        ),
+        None => (Worn::bare(PLACEHOLDER_APPEARANCE), None),
     };
-    let parts = wardrobe.outfit(worn);
+    let parts = wardrobe.outfit(worn.appearance);
+    let armour = wardrobe.armour(worn);
     let placed = placement(state);
     let walk = WalkPose::from(state);
     let owner = commands
         .spawn((
             Body(entity_id),
-            Worn(worn),
+            worn,
             walk,
             camera::DeathFall::newly_seen(dead),
             placed,
@@ -1349,6 +1577,14 @@ fn spawn_body(
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
                 resting_piece_transform(piece),
+            ));
+        }
+        for (segment, mesh, material) in armour {
+            parent.spawn((
+                ArmourVisual(segment),
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                resting_piece_transform(segment.body_piece()),
             ));
         }
     });
@@ -1516,7 +1752,8 @@ pub(crate) fn resting_piece_transform(piece: BodyPiece) -> Transform {
 fn animate_walking_bodies(
     buffer: Res<SnapshotBuffer>,
     bodies: Query<(&Body, &WalkPose, &Children)>,
-    mut parts: Query<(&BodyVisual, &mut Transform)>,
+    mut parts: Query<(&BodyVisual, &mut Transform), Without<ArmourVisual>>,
+    mut armour: Query<(&ArmourVisual, &mut Transform), Without<BodyVisual>>,
 ) {
     for (body, walk, children) in &bodies {
         let stride = if walk.moving && !buffer.player_is_dead(body.0) {
@@ -1526,23 +1763,28 @@ fn animate_walking_bodies(
         };
 
         for child in children {
-            let Ok((visual, mut transform)) = parts.get_mut(*child) else {
-                continue;
+            if let Ok((visual, mut transform)) = parts.get_mut(*child) {
+                apply_walk_transform(visual.0, stride, &mut transform);
+            } else if let Ok((visual, mut transform)) = armour.get_mut(*child) {
+                apply_walk_transform(visual.0.body_piece(), stride, &mut transform);
             };
-            let angle = match visual.0.limb() {
-                Some(Limb::LeftLeg | Limb::RightArm) => stride,
-                Some(Limb::RightLeg | Limb::LeftArm) => -stride,
-                None => 0.0,
-            };
-            let next = Transform {
-                translation: visual.0.pivot(),
-                rotation: Quat::from_rotation_x(angle),
-                ..default()
-            };
-            if *transform != next {
-                *transform = next;
-            }
         }
+    }
+}
+
+fn apply_walk_transform(piece: BodyPiece, stride: f32, transform: &mut Transform) {
+    let angle = match piece.limb() {
+        Some(Limb::LeftLeg | Limb::RightArm) => stride,
+        Some(Limb::RightLeg | Limb::LeftArm) => -stride,
+        None => 0.0,
+    };
+    let next = Transform {
+        translation: piece.pivot(),
+        rotation: Quat::from_rotation_x(angle),
+        ..default()
+    };
+    if *transform != next {
+        *transform = next;
     }
 }
 
