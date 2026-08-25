@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 32;
+pub const ENUM_MAX_PAYLOAD: u8 = 36;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 33] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 37] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -51,6 +51,10 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 33] = [
     Payload::ChatMessage,
     Payload::PartyRequest,
     Payload::PartyInvite,
+    Payload::LootOpenRequest,
+    Payload::LootTakeRequest,
+    Payload::LootState,
+    Payload::LootClosed,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -110,9 +114,13 @@ impl Payload {
     pub const ChatMessage: Self = Self(30);
     pub const PartyRequest: Self = Self(31);
     pub const PartyInvite: Self = Self(32);
+    pub const LootOpenRequest: Self = Self(33);
+    pub const LootTakeRequest: Self = Self(34);
+    pub const LootState: Self = Self(35);
+    pub const LootClosed: Self = Self(36);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 32;
+    pub const ENUM_MAX: u8 = 36;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -147,6 +155,10 @@ impl Payload {
         Self::ChatMessage,
         Self::PartyRequest,
         Self::PartyInvite,
+        Self::LootOpenRequest,
+        Self::LootTakeRequest,
+        Self::LootState,
+        Self::LootClosed,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -184,6 +196,10 @@ impl Payload {
             Self::ChatMessage => Some("ChatMessage"),
             Self::PartyRequest => Some("PartyRequest"),
             Self::PartyInvite => Some("PartyInvite"),
+            Self::LootOpenRequest => Some("LootOpenRequest"),
+            Self::LootTakeRequest => Some("LootTakeRequest"),
+            Self::LootState => Some("LootState"),
+            Self::LootClosed => Some("LootClosed"),
             _ => None,
         }
     }

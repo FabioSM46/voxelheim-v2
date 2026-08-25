@@ -390,6 +390,9 @@ impl Handshake {
             (Phase::Established, Message::PartyInvite(invite)) => {
                 Ok(Transition::PartyInvite(invite))
             }
+            // Decoded and validated now; ECS ownership lands with the loot UI issue.
+            (Phase::Established, Message::LootState(_)) => Ok(Transition::Ignored("LootState")),
+            (Phase::Established, Message::LootClosed(_)) => Ok(Transition::Ignored("LootClosed")),
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -410,6 +413,8 @@ impl Handshake {
             (_, Message::LeaveStarted(_)) => Err(HandshakeError::Premature("LeaveStarted")),
             (_, Message::Chat(_)) => Err(HandshakeError::Premature("ChatMessage")),
             (_, Message::PartyInvite(_)) => Err(HandshakeError::Premature("PartyInvite")),
+            (_, Message::LootState(_)) => Err(HandshakeError::Premature("LootState")),
+            (_, Message::LootClosed(_)) => Err(HandshakeError::Premature("LootClosed")),
         }
     }
 }

@@ -392,14 +392,14 @@ func (rcv *EntitySnapshot) DropDurabilitiesLength() int {
 // / worn ground item pristine in presentation while the server later returned it worn.
 // / `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
 // / different state to the same drop after a clean handshake.
-// / The current party leader's entity id, or `0` when the recipient is in no party.
+// / The current party leader's live entity id, or `0` when there is no party **or the
+// / stable leader at `party_roster[0]` is offline**.
 // /
 // / A non-zero leader may be the recipient itself or one of `party_members`. The
-// / decoder that sees only this frame can compare it with the member vector but cannot
-// / reject an absent match: it does not know the recipient id from the earlier welcome,
-// / so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
-// / empty member vector. The converse is not
-// / frame-verifiable: a non-zero leader with no other members may be the recipient.
+// / decoder that sees only this frame compares it with the roster's first entry: an
+// / online leader must carry that same non-zero entity id, and an offline leader must
+// / carry zero. When the roster is empty this field and `party_members` are both empty.
+// / A non-zero leader may be the recipient and therefore absent from `party_members`.
 func (rcv *EntitySnapshot) PartyLeaderEntityId() uint64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
 	if o != 0 {
@@ -408,14 +408,14 @@ func (rcv *EntitySnapshot) PartyLeaderEntityId() uint64 {
 	return 0
 }
 
-// / The current party leader's entity id, or `0` when the recipient is in no party.
+// / The current party leader's live entity id, or `0` when there is no party **or the
+// / stable leader at `party_roster[0]` is offline**.
 // /
 // / A non-zero leader may be the recipient itself or one of `party_members`. The
-// / decoder that sees only this frame can compare it with the member vector but cannot
-// / reject an absent match: it does not know the recipient id from the earlier welcome,
-// / so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
-// / empty member vector. The converse is not
-// / frame-verifiable: a non-zero leader with no other members may be the recipient.
+// / decoder that sees only this frame compares it with the roster's first entry: an
+// / online leader must carry that same non-zero entity id, and an offline leader must
+// / carry zero. When the roster is empty this field and `party_members` are both empty.
+// / A non-zero leader may be the recipient and therefore absent from `party_members`.
 func (rcv *EntitySnapshot) MutatePartyLeaderEntityId(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(22, n)
 }
@@ -436,9 +436,10 @@ func (rcv *EntitySnapshot) MutatePartyLeaderEntityId(n uint64) bool {
 // /     `health <= max_health`
 // /   - the recipient's own entity id never appears; this must be checked by a layer that
 // /     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
-// /   - a zero `party_leader_entity_id` requires this vector to be empty
+// /   - every member maps to an online non-zero entity in `party_roster`
+// /   - when the roster is empty this vector is empty
 // /   - a non-zero leader is either the recipient or one of the members; the
-// /     recipient-aware consumer must check which when it has the welcome and snapshot together
+// /     recipient-aware consumer checks which when it has the welcome and snapshot together
 func (rcv *EntitySnapshot) PartyMembers(obj *PartyMemberState, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
@@ -474,11 +475,84 @@ func (rcv *EntitySnapshot) PartyMembersLength() int {
 // /     `health <= max_health`
 // /   - the recipient's own entity id never appears; this must be checked by a layer that
 // /     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
-// /   - a zero `party_leader_entity_id` requires this vector to be empty
+// /   - every member maps to an online non-zero entity in `party_roster`
+// /   - when the roster is empty this vector is empty
 // /   - a non-zero leader is either the recipient or one of the members; the
-// /     recipient-aware consumer must check which when it has the welcome and snapshot together
+// /     recipient-aware consumer checks which when it has the welcome and snapshot together
+// / The complete ordered party roster, including the recipient. Empty means no party;
+// / otherwise the first entry is the leader. Unlike `party_members`, this remains complete
+// / when a member disconnects and uses stable character identity for every position.
+// /
+// / `party_leader_entity_id` is the first entry's live entity id while the leader is
+// / online and zero while that leader is offline. Zero therefore no longer implies that
+// / `party_members` or this roster is empty; it never names an online entity.
+func (rcv *EntitySnapshot) PartyRoster(obj *PartyRosterMember, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *EntitySnapshot) PartyRosterLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / The complete ordered party roster, including the recipient. Empty means no party;
+// / otherwise the first entry is the leader. Unlike `party_members`, this remains complete
+// / when a member disconnects and uses stable character identity for every position.
+// /
+// / `party_leader_entity_id` is the first entry's live entity id while the leader is
+// / online and zero while that leader is offline. Zero therefore no longer implies that
+// / `party_members` or this roster is empty; it never names an online entity.
+// / Corpse ids that still hold loot this recipient may access. Each id is exactly the
+// / `entity_id` of one `mobs` entry whose action is `Corpse`; a receiver rejects an id
+// / that names no such body. Complete per snapshot:
+// / a later vector replaces the former one, absence and empty both mean none, and ids
+// / are non-zero and unique. It carries access, never contents; opening one asks the
+// / server for a per-recipient `LootState`.
+func (rcv *EntitySnapshot) AccessibleLootCorpses(j int) uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetUint64(a + flatbuffers.UOffsetT(j*8))
+	}
+	return 0
+}
+
+func (rcv *EntitySnapshot) AccessibleLootCorpsesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / Corpse ids that still hold loot this recipient may access. Each id is exactly the
+// / `entity_id` of one `mobs` entry whose action is `Corpse`; a receiver rejects an id
+// / that names no such body. Complete per snapshot:
+// / a later vector replaces the former one, absence and empty both mean none, and ids
+// / are non-zero and unique. It carries access, never contents; opening one asks the
+// / server for a per-recipient `LootState`.
+func (rcv *EntitySnapshot) MutateAccessibleLootCorpses(j int, n uint64) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateUint64(a+flatbuffers.UOffsetT(j*8), n)
+	}
+	return false
+}
+
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(13)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -533,6 +607,18 @@ func EntitySnapshotAddPartyMembers(builder *flatbuffers.Builder, partyMembers fl
 }
 func EntitySnapshotStartPartyMembersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(32, numElems, 8)
+}
+func EntitySnapshotAddPartyRoster(builder *flatbuffers.Builder, partyRoster flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(11, flatbuffers.UOffsetT(partyRoster), 0)
+}
+func EntitySnapshotStartPartyRosterVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func EntitySnapshotAddAccessibleLootCorpses(builder *flatbuffers.Builder, accessibleLootCorpses flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(accessibleLootCorpses), 0)
+}
+func EntitySnapshotStartAccessibleLootCorpsesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(8, numElems, 8)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

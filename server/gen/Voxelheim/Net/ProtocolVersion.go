@@ -94,6 +94,11 @@ import "strconv"
 // / An older server cannot name either new client payload and would close the session
 // / after a clean handshake. The snapshot vector also carries health and position outside
 // / ordinary view for consenting party members; a pre-V20 server never sends that state.
+// /
+// / **V21 adds corpse-loot requests and complete per-recipient loot state.** Both requests
+// / travel client -> server, so a V20 server would close the session on an unknown payload
+// / after a clean handshake. `EntitySnapshot` also gains the accessible-corpse set and the
+// / stable party roster; a V20 client cannot represent either an offline member or leader.
 type ProtocolVersion uint16
 
 const (
@@ -102,7 +107,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 20
+	ProtocolVersionCurrent ProtocolVersion = 21
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

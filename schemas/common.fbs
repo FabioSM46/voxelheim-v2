@@ -98,6 +98,11 @@ namespace Voxelheim.Net;
 /// An older server cannot name either new client payload and would close the session
 /// after a clean handshake. The snapshot vector also carries health and position outside
 /// ordinary view for consenting party members; a pre-V20 server never sends that state.
+///
+/// **V21 adds corpse-loot requests and complete per-recipient loot state.** Both requests
+/// travel client -> server, so a V20 server would close the session on an unknown payload
+/// after a clean handshake. `EntitySnapshot` also gains the accessible-corpse set and the
+/// stable party roster; a V20 client cannot represent either an offline member or leader.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -105,7 +110,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 20
+  Current = 21
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

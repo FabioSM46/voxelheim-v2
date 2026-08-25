@@ -98,6 +98,16 @@ pub mod voxelheim {
         pub use self::party_request_generated::*;
         mod party_invite_generated;
         pub use self::party_invite_generated::*;
+        mod loot_open_request_generated;
+        pub use self::loot_open_request_generated::*;
+        mod loot_take_request_generated;
+        pub use self::loot_take_request_generated::*;
+        mod loot_entry_generated;
+        pub use self::loot_entry_generated::*;
+        mod loot_state_generated;
+        pub use self::loot_state_generated::*;
+        mod loot_closed_generated;
+        pub use self::loot_closed_generated::*;
         mod action_refused_generated;
         pub use self::action_refused_generated::*;
         mod entity_state_generated;
@@ -114,6 +124,8 @@ pub mod voxelheim {
         pub use self::structure_state_generated::*;
         mod party_member_state_generated;
         pub use self::party_member_state_generated::*;
+        mod party_roster_member_generated;
+        pub use self::party_roster_member_generated::*;
         mod entity_snapshot_generated;
         pub use self::entity_snapshot_generated::*;
         mod inventory_state_generated;

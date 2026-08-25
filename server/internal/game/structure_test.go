@@ -1250,6 +1250,12 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonAlreadyInParty,
 		vnet.RefusalReasonNoInvite,
 		vnet.RefusalReasonNotLeader,
+		// V21 reserves the authoritative corpse-loot answers for the dependent loot
+		// simulation issue. They are still world/state refusals, never client defects.
+		vnet.RefusalReasonCorpseUnavailable,
+		vnet.RefusalReasonLootNotOwned,
+		vnet.RefusalReasonStaleRevision,
+		vnet.RefusalReasonInventoryFull,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1267,10 +1273,11 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	}
 
 	// Membership, in the shape the Payload union is checked in over in protocol: a reason
-	// added without a decision fails here rather than reaching a client with no sentence
-	// for it. The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 22 {
-		t.Errorf("RefusalReason has %d members, want 22 — a new one needs a producer and a sentence on the client, not a test edit", got)
+	// added without a decision fails here. V21's four loot members have their client
+	// vocabulary now and receive producers in the dependent authoritative loot issue.
+	// The count includes Unknown.
+	if got := len(vnet.EnumNamesRefusalReason); got != 26 {
+		t.Errorf("RefusalReason has %d members, want 26 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

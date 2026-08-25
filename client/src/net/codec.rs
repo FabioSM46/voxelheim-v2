@@ -433,6 +433,8 @@ pub enum MobAction {
     /// here. Zero `health` does not distinguish them either — it arrives *with* this
     /// action rather than instead of it.
     Dying,
+    /// Dead, inert and retained as an authoritative loot container until expiry.
+    Corpse,
 }
 
 impl MobAction {
@@ -444,6 +446,7 @@ impl MobAction {
             fb::MobAction::Recovery => Some(Self::Recovery),
             fb::MobAction::Dying => Some(Self::Dying),
             fb::MobAction::Flee => Some(Self::Flee),
+            fb::MobAction::Corpse => Some(Self::Corpse),
             _ => None,
         }
     }
@@ -990,6 +993,16 @@ pub struct PartyMemberState {
     pub alive: bool,
 }
 
+/// One character in the complete stable party roster. `entity_id == 0` exactly while
+/// offline; `character_id` and order survive reconnects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartyRosterMember {
+    pub character_id: u64,
+    pub entity_id: u64,
+    pub name: String,
+    pub online: bool,
+}
+
 /// One tick of authoritative state for everything a session can see.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
@@ -1043,6 +1056,11 @@ pub struct Snapshot {
     /// `ServerWelcome.entity_id` must verify that the recipient itself is absent and
     /// that a leader not listed here is the recipient.
     pub party_members: Vec<PartyMemberState>,
+    /// Complete authoritative party order, including this recipient and beginning with
+    /// the leader. Unlike `party_members`, offline characters remain here.
+    pub party_roster: Vec<PartyRosterMember>,
+    /// Complete set of corpse containers this recipient may currently open.
+    pub accessible_loot_corpses: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -1066,6 +1084,8 @@ impl Default for Snapshot {
             dead_players: Vec::new(),
             party_leader_entity_id: 0,
             party_members: Vec::new(),
+            party_roster: Vec::new(),
+            accessible_loot_corpses: Vec::new(),
         }
     }
 }
@@ -1161,6 +1181,8 @@ pub enum RefusedAction {
     Repair,
     Chat,
     Party,
+    OpenLoot,
+    TakeLoot,
 }
 
 impl RefusedAction {
@@ -1175,6 +1197,8 @@ impl RefusedAction {
             fb::RefusedAction::Repair => Self::Repair,
             fb::RefusedAction::Chat => Self::Chat,
             fb::RefusedAction::Party => Self::Party,
+            fb::RefusedAction::OpenLoot => Self::OpenLoot,
+            fb::RefusedAction::TakeLoot => Self::TakeLoot,
             _ => Self::Unknown,
         }
     }
@@ -1214,6 +1238,10 @@ pub enum RefusalReason {
     AlreadyInParty,
     NoInvite,
     NotLeader,
+    CorpseUnavailable,
+    LootNotOwned,
+    StaleRevision,
+    InventoryFull,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1244,6 +1272,10 @@ impl RefusalReason {
             fb::RefusalReason::AlreadyInParty => Self::AlreadyInParty,
             fb::RefusalReason::NoInvite => Self::NoInvite,
             fb::RefusalReason::NotLeader => Self::NotLeader,
+            fb::RefusalReason::CorpseUnavailable => Self::CorpseUnavailable,
+            fb::RefusalReason::LootNotOwned => Self::LootNotOwned,
+            fb::RefusalReason::StaleRevision => Self::StaleRevision,
+            fb::RefusalReason::InventoryFull => Self::InventoryFull,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1475,6 +1507,50 @@ pub struct PartyInvite {
     pub expires_ms: u32,
 }
 
+/// Intent to open one server-owned corpse container.
+// V21 establishes this outbound contract before the loot interaction UI lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootOpenRequest {
+    pub corpse_id: u64,
+    pub client_tick: u32,
+}
+
+/// Intent to move one stable entry from one authoritative revision.
+// V21 establishes this outbound contract before the loot interaction UI lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootTakeRequest {
+    pub corpse_id: u64,
+    pub entry_id: u64,
+    pub revision: u32,
+    pub client_tick: u32,
+}
+
+/// One authoritative stack in a corpse container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootEntry {
+    pub entry_id: u64,
+    pub item_id: u16,
+    pub count: u16,
+    pub durability: u16,
+    pub max_durability: u16,
+}
+
+/// Complete per-recipient contents for one corpse revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LootState {
+    pub corpse_id: u64,
+    pub revision: u32,
+    pub entries: Vec<LootEntry>,
+}
+
+/// Explicit end of one open corpse container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootClosed {
+    pub corpse_id: u64,
+}
+
 /// A decoded `ServerReject`.
 ///
 /// [`Self::describe`] is the one place the code and the detail become a single
@@ -1588,6 +1664,10 @@ pub enum Message {
     Chat(ChatMessage),
     /// One live party invitation. ECS delivery is intentionally a later issue.
     PartyInvite(PartyInvite),
+    /// Complete authoritative corpse contents for this recipient.
+    LootState(LootState),
+    /// The named corpse container is no longer openable.
+    LootClosed(LootClosed),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -1849,6 +1929,49 @@ pub enum DecodeError {
     },
     /// Members exist while the leader id says there is no party.
     PartyMembersWithoutLeader,
+    /// A stable roster member carries reserved character id zero.
+    PartyRosterWithoutCharacter,
+    /// A stable character appears twice in the roster.
+    DuplicatePartyCharacter(u64),
+    /// An online roster member carries no entity, or an offline one carries one.
+    PartyRosterOnlineMismatch {
+        character_id: u64,
+        entity_id: u64,
+        online: bool,
+    },
+    /// A non-zero online entity appears twice in the stable roster.
+    DuplicatePartyRosterEntity(u64),
+    /// A roster member omitted its display name. Empty remains legal.
+    PartyRosterWithoutName(u64),
+    /// The legacy live leader projection disagrees with the first stable roster entry.
+    PartyLeaderRosterMismatch { expected: u64, actual: u64 },
+    /// An online combat member is absent or offline in the stable roster.
+    PartyMemberMissingFromRoster(u64),
+    /// The accessible-corpse vector carries reserved identity zero.
+    AccessibleCorpseWithoutIdentity,
+    /// One corpse appears twice in the complete accessibility set.
+    DuplicateAccessibleCorpse(u64),
+    /// An accessible corpse id does not name a mob in Corpse action in this snapshot.
+    AccessibleCorpseWithoutMob(u64),
+    /// A loot payload carries reserved corpse identity zero.
+    LootWithoutCorpse(&'static str),
+    /// A complete state carries no revision.
+    LootWithoutRevision,
+    /// A complete state omitted its non-empty entry vector.
+    LootWithoutEntries(u64),
+    /// A loot entry has no stable identity.
+    LootEntryWithoutIdentity(u64),
+    /// A stable entry id appears twice in one container.
+    DuplicateLootEntry { corpse_id: u64, entry_id: u64 },
+    /// A loot stack is empty or carries an impossible durability pair.
+    InvalidLootEntry {
+        corpse_id: u64,
+        entry_id: u64,
+        item_id: u16,
+        count: u16,
+        durability: u16,
+        max_durability: u16,
+    },
     /// A message that must describe a face carries no `appearance` table at all.
     ///
     /// Refused rather than filled in with [`PLACEHOLDER_APPEARANCE`]: the placeholder
@@ -2138,6 +2261,74 @@ impl fmt::Display for DecodeError {
             Self::PartyMembersWithoutLeader => {
                 write!(f, "party_members is non-empty while party leader id is 0")
             }
+            Self::PartyRosterWithoutCharacter => {
+                write!(f, "a party roster member carries reserved character id 0")
+            }
+            Self::DuplicatePartyCharacter(character_id) => {
+                write!(f, "party_roster names character {character_id} twice")
+            }
+            Self::PartyRosterOnlineMismatch {
+                character_id,
+                entity_id,
+                online,
+            } => write!(
+                f,
+                "party roster character {character_id} has entity {entity_id} with online={online}"
+            ),
+            Self::DuplicatePartyRosterEntity(entity_id) => {
+                write!(f, "party_roster names online entity {entity_id} twice")
+            }
+            Self::PartyRosterWithoutName(character_id) => {
+                write!(f, "party roster character {character_id} carries no name")
+            }
+            Self::PartyLeaderRosterMismatch { expected, actual } => write!(
+                f,
+                "party leader entity id is {actual}, want roster leader entity id {expected}"
+            ),
+            Self::PartyMemberMissingFromRoster(entity_id) => {
+                write!(
+                    f,
+                    "party member entity {entity_id} is not online in party_roster"
+                )
+            }
+            Self::AccessibleCorpseWithoutIdentity => {
+                write!(f, "accessible_loot_corpses carries reserved id 0")
+            }
+            Self::DuplicateAccessibleCorpse(corpse_id) => {
+                write!(f, "accessible_loot_corpses names {corpse_id} twice")
+            }
+            Self::AccessibleCorpseWithoutMob(corpse_id) => write!(
+                f,
+                "accessible loot corpse {corpse_id} does not name a MobAction::Corpse"
+            ),
+            Self::LootWithoutCorpse(kind) => write!(f, "{kind} carries reserved corpse id 0"),
+            Self::LootWithoutRevision => write!(f, "LootState carries revision 0"),
+            Self::LootWithoutEntries(corpse_id) => {
+                write!(f, "LootState for corpse {corpse_id} carries no entries")
+            }
+            Self::LootEntryWithoutIdentity(corpse_id) => {
+                write!(f, "LootState for corpse {corpse_id} carries entry id 0")
+            }
+            Self::DuplicateLootEntry {
+                corpse_id,
+                entry_id,
+            } => {
+                write!(
+                    f,
+                    "LootState for corpse {corpse_id} names entry {entry_id} twice"
+                )
+            }
+            Self::InvalidLootEntry {
+                corpse_id,
+                entry_id,
+                item_id,
+                count,
+                durability,
+                max_durability,
+            } => write!(
+                f,
+                "LootState corpse {corpse_id} entry {entry_id} is item {item_id} x{count} at {durability}/{max_durability}"
+            ),
             Self::MissingAppearance { at } => write!(f, "{at} carries no appearance"),
             Self::AppearanceColorReserved { field, value } => write!(
                 f,
@@ -2391,6 +2582,22 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 expires_ms,
             }))
         }
+        fb::Payload::LootState => {
+            let payload = envelope
+                .payload_as_loot_state()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::LootState(loot_state(&payload)?))
+        }
+        fb::Payload::LootClosed => {
+            let payload = envelope
+                .payload_as_loot_closed()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let corpse_id = payload.corpse_id();
+            if corpse_id == 0 {
+                return Err(DecodeError::LootWithoutCorpse("LootClosed"));
+            }
+            Ok(Message::LootClosed(LootClosed { corpse_id }))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -2414,7 +2621,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::LeaveRequest
         | fb::Payload::ConsumeRequest
         | fb::Payload::ChatRequest
-        | fb::Payload::PartyRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::PartyRequest
+        | fb::Payload::LootOpenRequest
+        | fb::Payload::LootTakeRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -2432,6 +2641,72 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // arm distinguishable from the ones above at runtime, and so testable.
         _ => Ok(Message::Deferred(UNKNOWN_VARIANT)),
     }
+}
+
+/// Copies and validates one complete per-recipient corpse container.
+fn loot_state(state: &fb::LootState<'_>) -> Result<LootState, DecodeError> {
+    let corpse_id = state.corpse_id();
+    if corpse_id == 0 {
+        return Err(DecodeError::LootWithoutCorpse("LootState"));
+    }
+    let revision = state.revision();
+    if revision == 0 {
+        return Err(DecodeError::LootWithoutRevision);
+    }
+    let entries = state
+        .entries()
+        .ok_or(DecodeError::LootWithoutEntries(corpse_id))?;
+    if entries.is_empty() {
+        return Err(DecodeError::LootWithoutEntries(corpse_id));
+    }
+
+    let mut decoded = Vec::with_capacity(entries.len());
+    let mut identities = HashSet::new();
+    for entry in &entries {
+        let entry_id = entry.entry_id();
+        if entry_id == 0 {
+            return Err(DecodeError::LootEntryWithoutIdentity(corpse_id));
+        }
+        if !identities.insert(entry_id) {
+            return Err(DecodeError::DuplicateLootEntry {
+                corpse_id,
+                entry_id,
+            });
+        }
+        let item_id = entry.item_id();
+        let count = entry.count();
+        let durability = entry.durability();
+        let max_durability = entry.max_durability();
+        let invalid = item_id == 0
+            || count == 0
+            || if max_durability == 0 {
+                durability != 0
+            } else {
+                durability > max_durability || count != 1
+            };
+        if invalid {
+            return Err(DecodeError::InvalidLootEntry {
+                corpse_id,
+                entry_id,
+                item_id,
+                count,
+                durability,
+                max_durability,
+            });
+        }
+        decoded.push(LootEntry {
+            entry_id,
+            item_id,
+            count,
+            durability,
+            max_durability,
+        });
+    }
+    Ok(LootState {
+        corpse_id,
+        revision,
+        entries: decoded,
+    })
 }
 
 /// Copies one appearance out of a frame and enforces every invariant
@@ -2808,12 +3083,82 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
             });
         }
     }
-    // This is the complete frame-only implication. The converse is deliberately not
-    // enforced: a non-zero leader with no listed members can be the recipient itself.
-    // Whether an unlisted leader is that recipient needs ServerWelcome.entity_id, which
-    // this single-frame decoder does not have.
-    if party_leader_entity_id == 0 && !party_members.is_empty() {
-        return Err(DecodeError::PartyMembersWithoutLeader);
+    let mut party_roster = Vec::new();
+    let mut character_ids = HashSet::new();
+    let mut roster_entity_ids = HashSet::new();
+    if let Some(list) = snapshot.party_roster() {
+        party_roster.reserve(list.len());
+        for member in list.iter() {
+            let character_id = member.character_id();
+            if character_id == 0 {
+                return Err(DecodeError::PartyRosterWithoutCharacter);
+            }
+            if !character_ids.insert(character_id) {
+                return Err(DecodeError::DuplicatePartyCharacter(character_id));
+            }
+            let entity_id = member.entity_id();
+            let online = member.online();
+            if online != (entity_id != 0) {
+                return Err(DecodeError::PartyRosterOnlineMismatch {
+                    character_id,
+                    entity_id,
+                    online,
+                });
+            }
+            if entity_id != 0 && !roster_entity_ids.insert(entity_id) {
+                return Err(DecodeError::DuplicatePartyRosterEntity(entity_id));
+            }
+            let name = member
+                .name()
+                .ok_or(DecodeError::PartyRosterWithoutName(character_id))?
+                .to_owned();
+            party_roster.push(PartyRosterMember {
+                character_id,
+                entity_id,
+                name,
+                online,
+            });
+        }
+    }
+
+    if party_roster.is_empty() {
+        if party_leader_entity_id != 0 || !party_members.is_empty() {
+            return Err(DecodeError::PartyMembersWithoutLeader);
+        }
+    } else {
+        let expected_leader = party_roster[0].entity_id;
+        if party_leader_entity_id != expected_leader {
+            return Err(DecodeError::PartyLeaderRosterMismatch {
+                expected: expected_leader,
+                actual: party_leader_entity_id,
+            });
+        }
+        for member in &party_members {
+            if !roster_entity_ids.contains(&member.entity_id) {
+                return Err(DecodeError::PartyMemberMissingFromRoster(member.entity_id));
+            }
+        }
+    }
+
+    let mut accessible_loot_corpses = Vec::new();
+    let mut accessible_ids = HashSet::new();
+    if let Some(list) = snapshot.accessible_loot_corpses() {
+        accessible_loot_corpses.reserve(list.len());
+        for corpse_id in list.iter() {
+            if corpse_id == 0 {
+                return Err(DecodeError::AccessibleCorpseWithoutIdentity);
+            }
+            if !accessible_ids.insert(corpse_id) {
+                return Err(DecodeError::DuplicateAccessibleCorpse(corpse_id));
+            }
+            if !mobs
+                .iter()
+                .any(|mob| mob.entity_id == corpse_id && mob.action == MobAction::Corpse)
+            {
+                return Err(DecodeError::AccessibleCorpseWithoutMob(corpse_id));
+            }
+            accessible_loot_corpses.push(corpse_id);
+        }
     }
 
     Ok(Snapshot {
@@ -2829,6 +3174,8 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         dead_players,
         party_leader_entity_id,
         party_members,
+        party_roster,
+        accessible_loot_corpses,
     })
 }
 
@@ -3332,6 +3679,46 @@ pub fn encode_party_request(request: &PartyRequest) -> Vec<u8> {
     finish_envelope(builder, fb::Payload::PartyRequest, payload.as_union_value())
 }
 
+/// Builds one corpse-open intent. It carries identity and client ordering only.
+// V21 establishes this outbound contract before the loot interaction UI lands.
+#[allow(dead_code)]
+pub fn encode_loot_open_request(request: &LootOpenRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::LootOpenRequest::create(
+        &mut builder,
+        &fb::LootOpenRequestArgs {
+            corpse_id: request.corpse_id,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::LootOpenRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one stable-entry take intent. Stack contents and inventory outcome stay absent.
+// V21 establishes this outbound contract before the loot interaction UI lands.
+#[allow(dead_code)]
+pub fn encode_loot_take_request(request: &LootTakeRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::LootTakeRequest::create(
+        &mut builder,
+        &fb::LootTakeRequestArgs {
+            corpse_id: request.corpse_id,
+            entry_id: request.entry_id,
+            revision: request.revision,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::LootTakeRequest,
+        payload.as_union_value(),
+    )
+}
+
 /// Writes one appearance table and returns its offset.
 ///
 /// Must be called while no other table is open: a nested table is reached through an
@@ -3691,7 +4078,7 @@ fn finish_envelope(
 /// can produce a client's input.
 #[cfg(test)]
 pub(super) mod server_side {
-    use super::{FlatBufferBuilder, MAX_CHUNK_SIZE, WorldClock, fb, finish_envelope};
+    use super::{FlatBufferBuilder, LootEntry, MAX_CHUNK_SIZE, WorldClock, fb, finish_envelope};
 
     /// The token [`WelcomeWire::default`] carries: a legal one, so a test that is
     /// not about identity never has to name it.
@@ -4070,6 +4457,14 @@ pub(super) mod server_side {
         pub alive: bool,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    pub struct PartyRosterMemberWire<'a> {
+        pub character_id: u64,
+        pub entity_id: u64,
+        pub name: Option<&'a str>,
+        pub online: bool,
+    }
+
     impl StructureStateWire {
         /// A valid tent, for a test to break one field of.
         pub fn tent(structure_id: u64, owner_entity_id: u64) -> Self {
@@ -4256,17 +4651,34 @@ pub(super) mod server_side {
         party_leader_entity_id: u64,
         party_members: &[PartyMemberStateWire],
     ) -> Vec<u8> {
-        encode_entity_snapshot_with_explicit_durabilities(
-            1,
-            &[],
-            &[],
-            &[],
-            PlayerVitalsWire::default(),
-            &[],
-            &[],
-            party_leader_entity_id,
-            party_members,
-        )
+        if party_leader_entity_id == 0 {
+            return encode_entity_snapshot_with_explicit_durabilities(
+                1,
+                &[],
+                &[],
+                &[],
+                PlayerVitalsWire::default(),
+                &[],
+                &[],
+                party_leader_entity_id,
+                party_members,
+            );
+        }
+        let mut roster = vec![PartyRosterMemberWire {
+            character_id: 1,
+            entity_id: party_leader_entity_id,
+            name: Some("Leader"),
+            online: true,
+        }];
+        roster.extend(party_members.iter().enumerate().map(|(index, member)| {
+            PartyRosterMemberWire {
+                character_id: index as u64 + 2,
+                entity_id: member.entity_id,
+                name: Some("Member"),
+                online: member.entity_id != 0,
+            }
+        }));
+        encode_entity_snapshot_with_roster(party_leader_entity_id, party_members, &roster, &[])
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4454,6 +4866,7 @@ pub(super) mod server_side {
                 drop_durabilities: None,
                 party_leader_entity_id: 0,
                 party_members: None,
+                ..Default::default()
             },
         );
 
@@ -4503,6 +4916,7 @@ pub(super) mod server_side {
                 drop_durabilities: None,
                 party_leader_entity_id: 0,
                 party_members: None,
+                ..Default::default()
             },
         );
 
@@ -4772,6 +5186,137 @@ pub(super) mod server_side {
         );
         finish_envelope(builder, fb::Payload::PartyInvite, payload.as_union_value())
     }
+
+    pub fn encode_loot_state(
+        corpse_id: u64,
+        revision: u32,
+        entries: Option<&[LootEntry]>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let entries = entries.map(|entries| {
+            let laid_out: Vec<_> = entries
+                .iter()
+                .map(|entry| {
+                    fb::LootEntry::new(
+                        entry.entry_id,
+                        entry.item_id,
+                        entry.count,
+                        entry.durability,
+                        entry.max_durability,
+                    )
+                })
+                .collect();
+            builder.create_vector(&laid_out)
+        });
+        let payload = fb::LootState::create(
+            &mut builder,
+            &fb::LootStateArgs {
+                corpse_id,
+                revision,
+                entries,
+            },
+        );
+        finish_envelope(builder, fb::Payload::LootState, payload.as_union_value())
+    }
+
+    pub fn encode_loot_closed(corpse_id: u64) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let payload = fb::LootClosed::create(&mut builder, &fb::LootClosedArgs { corpse_id });
+        finish_envelope(builder, fb::Payload::LootClosed, payload.as_union_value())
+    }
+
+    pub fn encode_entity_snapshot_with_roster(
+        party_leader_entity_id: u64,
+        party_members: &[PartyMemberStateWire],
+        roster: &[PartyRosterMemberWire<'_>],
+        accessible_corpses: &[u64],
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+
+        let laid_out: Vec<fb::PartyMemberState> = party_members
+            .iter()
+            .map(|member| {
+                fb::PartyMemberState::new(
+                    member.entity_id,
+                    &fb::Vec3::new(member.pos[0], member.pos[1], member.pos[2]),
+                    member.health,
+                    member.max_health,
+                    member.alive,
+                )
+            })
+            .collect();
+        let party_members = builder.create_vector(&laid_out);
+
+        let roster_offsets: Vec<_> = roster
+            .iter()
+            .map(|member| {
+                let name = member.name.map(|name| builder.create_string(name));
+                fb::PartyRosterMember::create(
+                    &mut builder,
+                    &fb::PartyRosterMemberArgs {
+                        character_id: member.character_id,
+                        entity_id: member.entity_id,
+                        name,
+                        online: member.online,
+                    },
+                )
+            })
+            .collect();
+        let roster = builder.create_vector(&roster_offsets);
+        let accessible = builder.create_vector(accessible_corpses);
+        let mob_offsets: Vec<_> = accessible_corpses
+            .iter()
+            .map(|corpse_id| {
+                let mut mob = fb::MobStateBuilder::new(&mut builder);
+                mob.add_entity_id(*corpse_id);
+                mob.add_kind(fb::MobKind::Draugr);
+                mob.add_pos(&fb::Vec3::new(0.0, 0.0, 0.0));
+                mob.add_vel(&fb::Vec3::new(0.0, 0.0, 0.0));
+                mob.add_max_health(60);
+                mob.add_action(fb::MobAction::Corpse);
+                mob.finish()
+            })
+            .collect();
+        let mobs = builder.create_vector(&mob_offsets);
+        let vitals = PlayerVitalsWire::default();
+        let self_vitals = fb::PlayerVitals::create(
+            &mut builder,
+            &fb::PlayerVitalsArgs {
+                health: vitals.health,
+                max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
+                life_state: vitals.life_state,
+                respawn_ticks: vitals.respawn_ticks,
+                invulnerable: vitals.invulnerable,
+            },
+        );
+        let mut table = fb::EntitySnapshotBuilder::new(&mut builder);
+        table.add_server_tick(1);
+        table.add_self_vitals(self_vitals);
+        if !mob_offsets.is_empty() {
+            table.add_mobs(mobs);
+        }
+        table.add_party_leader_entity_id(party_leader_entity_id);
+        if !laid_out.is_empty() {
+            table.add_party_members(party_members);
+        }
+        if !roster_offsets.is_empty() {
+            table.add_party_roster(roster);
+        }
+        if !accessible_corpses.is_empty() {
+            table.add_accessible_loot_corpses(accessible);
+        }
+        let payload = table.finish();
+        finish_envelope(
+            builder,
+            fb::Payload::EntitySnapshot,
+            payload.as_union_value(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -4779,17 +5324,18 @@ mod tests {
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
         ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PartyMemberStateWire,
-        PlayerVitalsWire, StructureStateWire, WelcomeWire, encode_action_refused,
-        encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
-        encode_bare_entity_snapshot, encode_block_update, encode_chat_message, encode_chunk_data,
-        encode_chunk_unload, encode_entity_snapshot, encode_entity_snapshot_with,
-        encode_entity_snapshot_with_dead, encode_entity_snapshot_with_drop_durabilities,
-        encode_entity_snapshot_with_drops, encode_entity_snapshot_with_party,
+        PartyRosterMemberWire, PlayerVitalsWire, StructureStateWire, WelcomeWire,
+        encode_action_refused, encode_bare_block_update, encode_bare_chunk_data,
+        encode_bare_chunk_unload, encode_bare_entity_snapshot, encode_block_update,
+        encode_chat_message, encode_chunk_data, encode_chunk_unload, encode_entity_snapshot,
+        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
+        encode_entity_snapshot_with_party, encode_entity_snapshot_with_roster,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_leave_started, encode_mine_progress,
-        encode_party_invite, encode_player_appearance, encode_player_appearance_with_worn,
-        encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
-        encode_server_welcome,
+        encode_inventory_state_with_durability, encode_leave_started, encode_loot_closed,
+        encode_loot_state, encode_mine_progress, encode_party_invite, encode_player_appearance,
+        encode_player_appearance_with_worn, encode_player_appearance_without_level,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
     };
     use super::*;
 
@@ -4902,14 +5448,18 @@ mod tests {
     /// **V20 appends chat and party requests plus party state in snapshots.** A V19
     /// server cannot name either request and would otherwise fail only on first use.
     ///
+    /// **V21 appends two corpse-loot requests and two authoritative answers.** A V20
+    /// server cannot name either request; stable roster and corpse access also append to
+    /// snapshots so offline party state cannot be silently discarded.
+    ///
     /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v20_names_chat_and_party() {
+    fn protocol_v21_names_corpse_loot() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 20);
+        assert_eq!(fb::ProtocolVersion::Current.0, 21);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -4943,6 +5493,10 @@ mod tests {
             (fb::Payload::ChatMessage, 30),
             (fb::Payload::PartyRequest, 31),
             (fb::Payload::PartyInvite, 32),
+            (fb::Payload::LootOpenRequest, 33),
+            (fb::Payload::LootTakeRequest, 34),
+            (fb::Payload::LootState, 35),
+            (fb::Payload::LootClosed, 36),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -4958,7 +5512,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            33,
+            37,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -4988,7 +5542,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 33] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 37] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -5022,6 +5576,10 @@ mod tests {
         (fb::Payload::ChatMessage, Handling::Consumed),
         (fb::Payload::PartyRequest, Handling::ClientOnly),
         (fb::Payload::PartyInvite, Handling::Consumed),
+        (fb::Payload::LootOpenRequest, Handling::ClientOnly),
+        (fb::Payload::LootTakeRequest, Handling::ClientOnly),
+        (fb::Payload::LootState, Handling::Consumed),
+        (fb::Payload::LootClosed, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -5216,6 +5774,8 @@ mod tests {
         assert_eq!(fb::RefusedAction::DropItem.0, 6);
         assert_eq!(fb::RefusedAction::Chat.0, 7);
         assert_eq!(fb::RefusedAction::Party.0, 8);
+        assert_eq!(fb::RefusedAction::OpenLoot.0, 9);
+        assert_eq!(fb::RefusedAction::TakeLoot.0, 10);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -5226,7 +5786,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            9,
+            11,
             "a removal is refused in silence by design"
         );
 
@@ -5249,6 +5809,10 @@ mod tests {
             (fb::RefusalReason::AlreadyInParty, 15),
             (fb::RefusalReason::NoInvite, 16),
             (fb::RefusalReason::NotLeader, 17),
+            (fb::RefusalReason::CorpseUnavailable, 18),
+            (fb::RefusalReason::LootNotOwned, 19),
+            (fb::RefusalReason::StaleRevision, 20),
+            (fb::RefusalReason::InventoryFull, 21),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -5258,7 +5822,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            22,
+            26,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -5281,6 +5845,10 @@ mod tests {
             RefusalReason::AlreadyInParty,
             RefusalReason::NoInvite,
             RefusalReason::NotLeader,
+            RefusalReason::CorpseUnavailable,
+            RefusalReason::LootNotOwned,
+            RefusalReason::StaleRevision,
+            RefusalReason::InventoryFull,
         ] {
             assert!(
                 !reason.is_client_defect(),
@@ -5329,6 +5897,7 @@ mod tests {
         // wire, so a renumbering would draw one action where the server said another.
         assert_eq!(fb::MobAction::Dying.0, 5);
         assert_eq!(fb::MobAction::Flee.0, 6);
+        assert_eq!(fb::MobAction::Corpse.0, 7);
     }
 
     /// The same guarantee for V4's vocabulary, and the zero carries more weight here:
@@ -6751,6 +7320,8 @@ mod tests {
                     dead_players: vec![],
                     party_leader_entity_id: 0,
                     party_members: vec![],
+                    party_roster: vec![],
+                    accessible_loot_corpses: vec![],
                 })),
                 "{name}"
             );
@@ -7954,6 +8525,20 @@ mod tests {
                     max_health: 50,
                     alive: true,
                 }],
+                party_roster: vec![
+                    PartyRosterMember {
+                        character_id: 1,
+                        entity_id: 91,
+                        name: "Leader".to_owned(),
+                        online: true,
+                    },
+                    PartyRosterMember {
+                        character_id: 2,
+                        entity_id: 17,
+                        name: "Member".to_owned(),
+                        online: true,
+                    },
+                ],
                 ..Default::default()
             }))
         );
@@ -8007,6 +8592,211 @@ mod tests {
         assert_eq!(
             decode(&encode_entity_snapshot_with_party(17, &[member, member])),
             Err(DecodeError::DuplicatePartyMember(17))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V21 — persistent roster and corpse loot contract
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loot_requests_carry_only_identity_revision_and_ordering() {
+        let open = LootOpenRequest {
+            corpse_id: 400,
+            client_tick: 91,
+        };
+        let frame = encode_loot_open_request(&open);
+        assert_eq!(decode(&frame), Ok(Message::ClientOnly("LootOpenRequest")));
+        let envelope = fb::root_as_envelope(&frame).expect("valid loot-open request");
+        let wire = envelope
+            .payload_as_loot_open_request()
+            .expect("LootOpenRequest payload");
+        assert_eq!((wire.corpse_id(), wire.client_tick()), (400, 91));
+
+        let take = LootTakeRequest {
+            corpse_id: 400,
+            entry_id: 7,
+            revision: 3,
+            client_tick: 92,
+        };
+        let frame = encode_loot_take_request(&take);
+        assert_eq!(decode(&frame), Ok(Message::ClientOnly("LootTakeRequest")));
+        let envelope = fb::root_as_envelope(&frame).expect("valid loot-take request");
+        let wire = envelope
+            .payload_as_loot_take_request()
+            .expect("LootTakeRequest payload");
+        assert_eq!(
+            (
+                wire.corpse_id(),
+                wire.entry_id(),
+                wire.revision(),
+                wire.client_tick()
+            ),
+            (400, 7, 3, 92)
+        );
+    }
+
+    #[test]
+    fn loot_state_is_complete_and_rejects_invalid_entries() {
+        let entries = [
+            LootEntry {
+                entry_id: 7,
+                item_id: 31,
+                count: 4,
+                durability: 0,
+                max_durability: 0,
+            },
+            LootEntry {
+                entry_id: 8,
+                item_id: 9,
+                count: 1,
+                durability: 3,
+                max_durability: 10,
+            },
+        ];
+        assert_eq!(
+            decode(&encode_loot_state(400, 2, Some(&entries))),
+            Ok(Message::LootState(LootState {
+                corpse_id: 400,
+                revision: 2,
+                entries: entries.to_vec(),
+            }))
+        );
+        assert_eq!(
+            decode(&encode_loot_state(0, 2, Some(&entries))),
+            Err(DecodeError::LootWithoutCorpse("LootState"))
+        );
+        assert_eq!(
+            decode(&encode_loot_state(400, 0, Some(&entries))),
+            Err(DecodeError::LootWithoutRevision)
+        );
+        for absent in [None, Some(&[][..])] {
+            assert_eq!(
+                decode(&encode_loot_state(400, 2, absent)),
+                Err(DecodeError::LootWithoutEntries(400))
+            );
+        }
+
+        let invalid = LootEntry {
+            entry_id: 0,
+            ..entries[0]
+        };
+        assert_eq!(
+            decode(&encode_loot_state(400, 2, Some(&[invalid]))),
+            Err(DecodeError::LootEntryWithoutIdentity(400))
+        );
+        assert_eq!(
+            decode(&encode_loot_state(400, 2, Some(&[entries[0], entries[0]]))),
+            Err(DecodeError::DuplicateLootEntry {
+                corpse_id: 400,
+                entry_id: 7,
+            })
+        );
+        let invalid = LootEntry {
+            entry_id: 9,
+            item_id: 12,
+            count: 2,
+            durability: 1,
+            max_durability: 10,
+        };
+        assert!(matches!(
+            decode(&encode_loot_state(400, 2, Some(&[invalid]))),
+            Err(DecodeError::InvalidLootEntry { entry_id: 9, .. })
+        ));
+    }
+
+    #[test]
+    fn loot_closed_requires_the_corpse_identity() {
+        assert_eq!(
+            decode(&encode_loot_closed(400)),
+            Ok(Message::LootClosed(LootClosed { corpse_id: 400 }))
+        );
+        assert_eq!(
+            decode(&encode_loot_closed(0)),
+            Err(DecodeError::LootWithoutCorpse("LootClosed"))
+        );
+    }
+
+    #[test]
+    fn an_offline_leader_and_online_members_share_one_stable_roster() {
+        let member = PartyMemberStateWire {
+            entity_id: 17,
+            pos: [1.0, 2.0, 3.0],
+            health: 40,
+            max_health: 50,
+            alive: true,
+        };
+        let roster = [
+            PartyRosterMemberWire {
+                character_id: 101,
+                entity_id: 0,
+                name: Some("Leader"),
+                online: false,
+            },
+            PartyRosterMemberWire {
+                character_id: 202,
+                entity_id: 17,
+                name: Some("Member"),
+                online: true,
+            },
+        ];
+        let decoded = decode(&encode_entity_snapshot_with_roster(
+            0,
+            &[member],
+            &roster,
+            &[800],
+        ));
+        let Ok(Message::Snapshot(snapshot)) = decoded else {
+            panic!("offline leader snapshot did not decode: {decoded:?}");
+        };
+        assert_eq!(snapshot.party_leader_entity_id, 0);
+        assert_eq!(snapshot.party_roster[0].character_id, 101);
+        assert!(!snapshot.party_roster[0].online);
+        assert_eq!(snapshot.party_members[0].entity_id, 17);
+        assert_eq!(snapshot.accessible_loot_corpses, vec![800]);
+        assert!(
+            snapshot
+                .mobs
+                .iter()
+                .any(|mob| mob.entity_id == 800 && mob.action == MobAction::Corpse)
+        );
+
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_roster(
+                99,
+                &[member],
+                &roster,
+                &[]
+            )),
+            Err(DecodeError::PartyLeaderRosterMismatch {
+                expected: 0,
+                actual: 99,
+            })
+        );
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_roster(
+                0,
+                &[PartyMemberStateWire {
+                    entity_id: 18,
+                    ..member
+                }],
+                &roster,
+                &[]
+            )),
+            Err(DecodeError::PartyMemberMissingFromRoster(18))
+        );
+        let broken = [PartyRosterMemberWire {
+            entity_id: 0,
+            online: true,
+            ..roster[0]
+        }];
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_roster(0, &[], &broken, &[])),
+            Err(DecodeError::PartyRosterOnlineMismatch {
+                character_id: 101,
+                entity_id: 0,
+                online: true,
+            })
         );
     }
 
