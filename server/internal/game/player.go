@@ -657,6 +657,9 @@ func (s *Sim) Leave(p *Player) {
 	// rejoin that already replaced it must not be evicted by the old session's
 	// cleanup. Same reasoning as world.Cache.forget.
 	if held, ok := s.players[p.entityID]; ok && held == p {
+		// A mob tap is keyed independently of this session object, but its offline
+		// baseline must include everything this session earned before it left.
+		s.rememberTapExperienceLocked(characterKeyOf(p.playerID, p.name), p.experience)
 		s.removeFromPartyLocked(p)
 		s.clearInvitesFromLocked(p.entityID)
 		p.setMiningLocked(nil)

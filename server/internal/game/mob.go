@@ -6,6 +6,7 @@ import (
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -78,15 +79,15 @@ type mob struct {
 	// has left is a pointer the simulation would still step.
 	target uint64
 
-	// firstHitBy is the player who first dealt damage to this creature, or nil until
+	// firstHit is the character who first dealt damage to this creature, or nil until
 	// one does. That first valid hit taps the mob for experience: later attackers may
 	// help or land the killing blow, but they cannot transfer the award to themselves.
 	//
-	// A pointer rather than an entity id is deliberate. The Player keeps the stable
-	// account identity and character name after its session leaves, so death and
-	// disconnection do not erase the tap. A mob reset discards this mob and therefore
-	// the pointer; a fresh spawn starts untapped.
-	firstHitBy *Player
+	// Account identity plus character name survive every session object. The lifetime
+	// total is refreshed when that character leaves and after each offline award, so a
+	// disconnect/reconnect cycle cannot make a retained tap compute from stale progress.
+	// A mob reset discards this mob and therefore the tap; a fresh spawn starts untapped.
+	firstHit *mobTap
 
 	// actionTicks is what remains of a windup or a recovery. Ticks, not a deadline —
 	// the simulation's only clock is Step.
@@ -99,6 +100,18 @@ type mob struct {
 	// streamed cube. Reset to zero the moment anybody can see it again, and the
 	// director removes it once it passes MobDespawnGrace — see spawn.go.
 	unseenTicks uint32
+}
+
+// mobTap is a session-independent claim on one mob's experience.
+//
+// playerID alone is not enough because one account may play several characters. The
+// original spelling is retained for persistence and the folded spelling is derived
+// only for comparisons. experience is the last authoritative lifetime total observed
+// while the character was live or received another offline award.
+type mobTap struct {
+	playerID      identity.PlayerID
+	characterName string
+	experience    uint32
 }
 
 // ticksFor is a duration in ticks at a rate, and never zero.

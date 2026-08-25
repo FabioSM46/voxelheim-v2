@@ -20,6 +20,14 @@ func characterKeyOf(playerID identity.PlayerID, name string) characterKey {
 	return characterKey{playerID: playerID, foldedName: foldPlayerName(name)}
 }
 
+func newMobTap(p *Player) *mobTap {
+	return &mobTap{playerID: p.playerID, characterName: p.name, experience: p.experience}
+}
+
+func (t *mobTap) key() characterKey {
+	return characterKeyOf(t.playerID, t.characterName)
+}
+
 // MaxLevel is the last level the progression curve can produce.
 //
 // Thirty levels make the linear steps below accumulate to 21,750 lifetime
@@ -96,11 +104,7 @@ func experienceBefore(level uint16) uint32 {
 // The caller holds sim.mu.
 func (p *Player) awardExperienceLocked(amount uint32) (leveledUp bool) {
 	before := levelFor(p.experience)
-	if p.experience >= ExperienceCap || amount >= ExperienceCap-p.experience {
-		p.experience = ExperienceCap
-	} else {
-		p.experience += amount
-	}
+	p.experience = experienceAfter(p.experience, amount)
 	after := levelFor(p.experience)
 	if after <= before {
 		return false
@@ -115,6 +119,15 @@ func (p *Player) awardExperienceLocked(amount uint32) (leveledUp bool) {
 		p.health += HealthPerLevel * (after - before)
 	}
 	return true
+}
+
+// experienceAfter adds an award to an absolute lifetime total without allowing either
+// overflow or progress past the level cap.
+func experienceAfter(total, amount uint32) uint32 {
+	if total >= ExperienceCap || amount >= ExperienceCap-total {
+		return ExperienceCap
+	}
+	return total + amount
 }
 
 // awardExperienceLocked applies one authoritative award and makes a crossed level
@@ -135,38 +148,55 @@ func (s *Sim) awardExperienceLocked(p *Player, amount uint32) (leveledUp bool) {
 }
 
 // currentTapOwnerLocked returns the current session playing the character that made
-// the first hit, or the departed Player retained by the mob when that character is
-// offline. Reconnecting on another character under the same account does not move the
-// tap.
+// the first hit. Reconnecting on another character under the same account does not
+// move the tap, and an offline character has no Player to return.
 //
 // The caller holds sim.mu.
-func (s *Sim) currentTapOwnerLocked(tagged *Player) *Player {
-	if tagged == nil {
+func (s *Sim) currentTapOwnerLocked(tap *mobTap) *Player {
+	if tap == nil {
 		return nil
 	}
-	current := s.byIdentity[tagged.playerID]
-	if current != nil && foldPlayerName(current.name) == foldPlayerName(tagged.name) {
+	current := s.byIdentity[tap.playerID]
+	if current != nil && foldPlayerName(current.name) == foldPlayerName(tap.characterName) {
 		return current
 	}
-	return tagged
+	return nil
 }
 
-// rememberOfflineExperienceLocked keeps the absolute total an offline tap owner has
-// earned until persistence confirms it. A later award replaces it with the newer
-// total; it is never added to an earlier queued value.
+// rememberTapExperienceLocked refreshes every live mob tap held by one character.
+// It never moves a tap backwards: an older session finishing teardown after a newer
+// one cannot erase progress the newer session or an offline award already established.
 //
 // The caller holds sim.mu.
-func (s *Sim) rememberOfflineExperienceLocked(p *Player) {
-	key := characterKeyOf(p.playerID, p.name)
-	held, pending := s.pendingExperience[key]
-	if pending && held.Experience >= p.experience {
-		return
+func (s *Sim) rememberTapExperienceLocked(key characterKey, total uint32) {
+	for _, candidate := range s.mobs {
+		if candidate.firstHit != nil && candidate.firstHit.key() == key && candidate.firstHit.experience < total {
+			candidate.firstHit.experience = total
+		}
 	}
-	s.pendingExperience[key] = ExperienceAward{
-		PlayerID:      p.playerID,
-		CharacterName: p.name,
-		Experience:    p.experience,
+}
+
+// awardOfflineExperienceLocked adds one mob award to the newest lifetime total the
+// simulation knows for the tapped character and queues the resulting absolute total
+// until persistence confirms it. Pending awards and every other live tap participate
+// in that total, so several mobs dying after a disconnect each count exactly once.
+//
+// The caller holds sim.mu.
+func (s *Sim) awardOfflineExperienceLocked(tap *mobTap, amount uint32) ExperienceAward {
+	key := tap.key()
+	base := tap.experience
+	if held, pending := s.pendingExperience[key]; pending && held.Experience > base {
+		base = held.Experience
 	}
+	total := experienceAfter(base, amount)
+	award := ExperienceAward{
+		PlayerID:      tap.playerID,
+		CharacterName: tap.characterName,
+		Experience:    total,
+	}
+	s.pendingExperience[key] = award
+	s.rememberTapExperienceLocked(key, total)
+	return award
 }
 
 // PendingExperienceAwards returns a snapshot of offline tap awards waiting to be

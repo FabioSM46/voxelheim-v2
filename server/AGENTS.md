@@ -498,9 +498,11 @@ package can avoid the import would create two truths to keep in step for no bene
   not erase the tap; only discarding/resetting that mob does. If the owner is online and belongs to
   a party when the mob dies, the award is shared with living members within `PartyShareRadius` of
   the creature: equal integer shares, with the remainder kept by the tap owner even when dead. An
-  offline owner receives the full award, queued as an absolute lifetime total and written through
-  the player autosave (plus the final shutdown flush), so retrying cannot award it twice and an
-  immediate reconnect sees it before persistence runs. Mining and crafting stay personal rewards,
+  offline owner receives the full award, keyed by account and character rather than by a session
+  pointer and queued as an absolute lifetime total. Disconnect/reconnect cycles refresh that total,
+  and the player autosave (plus the final shutdown flush) acknowledges it only after a durable write,
+  so retrying cannot award it twice and an immediate reconnect sees it before persistence runs.
+  Mining and crafting stay personal rewards,
   and every online recipient still goes through `Sim.awardExperienceLocked` so a shared level-up
   invalidates appearances exactly like a solo one.
 - **`Registry.Unsubscribe` is the broadcast's `Sim.Leave`.** It takes the lock

@@ -806,33 +806,52 @@ func (i *Identities) Remember(self Resolved, life game.Life) error {
 // Character name and owner are checked together. Names are unique within the world,
 // but the owner check is what prevents an account-scoped identity from accidentally
 // applying one character's reward to another account if an impossible index mismatch
-// ever reaches this boundary.
-func (i *Identities) RememberExperience(award game.ExperienceAward) error {
+// ever reaches this boundary. persisted is false without an error when no durable
+// write has happened yet; the caller must retain the award and retry it later.
+func (i *Identities) RememberExperience(award game.ExperienceAward) (persisted bool, err error) {
 	i.writeMu.Lock()
 	defer i.writeMu.Unlock()
 
 	character, known := i.store.Named(award.CharacterName)
 	if !known || character.Owner != award.PlayerID {
-		return errors.New("session: offline experience names no matching character")
+		return false, errors.New("session: offline experience names no matching character")
+	}
+	if i.sessionMayStillWrite(award.PlayerID, character.ID) {
+		// Sim.Leave precedes the teardown record write. A mob may die in that gap,
+		// but persisting and acknowledging its award here would let Remember land the
+		// departed session's older total afterwards. Keep the award queued until that
+		// session has written its last word.
+		return false, nil
 	}
 	rec, found, err := i.store.Load(character.ID)
 	if err != nil {
-		return fmt.Errorf("session: reading the offline experience record: %w", err)
+		return false, fmt.Errorf("session: reading the offline experience record: %w", err)
 	}
 	if !found {
 		// A memory store deliberately keeps no life. The award still remains true for
-		// this process through Sim's reconnect path, and there is no disk on which it
-		// could become more durable.
-		return nil
+		// this process through Sim's reconnect path, but it has not become durable and
+		// therefore must not be acknowledged out of that map.
+		return false, nil
 	}
 	if rec.Experience >= award.Experience {
-		return nil
+		return true, nil
 	}
 	rec.Experience = award.Experience
 	if err := i.store.Save(character.ID, rec); err != nil {
-		return fmt.Errorf("session: writing the offline experience record: %w", err)
+		return false, fmt.Errorf("session: writing the offline experience record: %w", err)
 	}
-	return nil
+	return true, nil
+}
+
+// sessionMayStillWrite reports whether one live session can still put an older total
+// onto character's record. The caller holds writeMu, which orders this answer against
+// Remember's final write; mu only protects the claim itself.
+func (i *Identities) sessionMayStillWrite(id identity.PlayerID, character persist.CharacterID) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	held, live := i.live[id]
+	return live && !held.finalised && held.character == character
 }
 
 // RememberAll writes a record for every identity in lives that still has a session

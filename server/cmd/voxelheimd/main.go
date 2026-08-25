@@ -800,12 +800,15 @@ func (s *server) savePlayersLoop(ctx context.Context) error {
 // failed write remains queued for the next autosave.
 func (s *server) flushExperienceAwards() {
 	for _, award := range s.sim.PendingExperienceAwards() {
-		if err := s.identities.RememberExperience(award); err != nil {
+		persisted, err := s.identities.RememberExperience(award)
+		if err != nil {
 			s.log.Error("saving offline mob experience failed; it will be retried",
 				"player_id", award.PlayerID.Short(), "error", err)
 			continue
 		}
-		s.sim.AcknowledgeExperienceAward(award)
+		if persisted {
+			s.sim.AcknowledgeExperienceAward(award)
+		}
 	}
 }
 
