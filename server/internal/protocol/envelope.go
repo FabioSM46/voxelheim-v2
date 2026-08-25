@@ -627,8 +627,9 @@ type EntitySnapshot struct {
 	// from the world underneath it.
 	TickOfDay uint32
 
-	// PartyLeaderEntityID is zero only when the recipient has no party. A non-zero
-	// leader may be the recipient itself, so it need not occur in PartyMembers.
+	// PartyLeaderEntityID is zero when the recipient has no party or the party's
+	// leader is offline. A non-zero leader may be the recipient itself, so it need
+	// not occur in PartyMembers.
 	PartyLeaderEntityID uint64
 
 	// PartyMembers excludes the recipient. The caller that knows that recipient's id
