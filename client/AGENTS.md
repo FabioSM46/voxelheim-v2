@@ -80,6 +80,7 @@ keeps meaning "everything the client is".
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
+| `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache | infer membership, health, leadership, invitation state or any party outcome from local intent |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — and the frame-rate readout in whichever of the four corners the setting names | reach into another module's internals, grow a health bar, or call the snapshot age a round trip |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
@@ -1838,13 +1839,15 @@ Recorded here so the next reader does not mistake them for oversights:
   Despawning and re-spawning would restart the interpolation and blink the body. The server sends
   the appearance *ahead* of the snapshot that first carries the entity where it can, which makes the
   placeholder rare rather than impossible.
-- **Both body caches are the size of a view, not of a session.** An entity that leaves takes its
-  cached appearance and server-owned name with it, and `Player.described` on the server drops its
-  own entry at the same moment — so a player who walks back into view is described again and
-  neither side had to be told. The one case a snapshot cannot answer is a `PlayerAppearance`
-  description for an entity no snapshot has ever mentioned; it is held for `APPEARANCE_GRACE` and
-  then dropped, which is what stops a server that describes entities it never shows from growing a
-  map for as long as the connection lasts.
+- **The body cache is the size of a view; the appearance cache is the view plus the party.** An
+  entity that leaves both takes its cached appearance and server-owned name with it, and
+  `Player.described` on the server drops its own entry at the same moment — so a player who walks
+  back into view is described again and neither side had to be told. Party membership is the one
+  server-sent reason an out-of-view description remains live: `ui/party.rs` still has a row to
+  name. The one case neither complete set can answer is a `PlayerAppearance` description for an
+  entity no snapshot has ever mentioned; it is held for `APPEARANCE_GRACE` and then dropped, which
+  stops a server that describes entities it never shows or groups with from growing a map for as
+  long as the connection lasts.
 - **No cross-chunk lighting, ambient occlusion, shadows, LOD or frustum-driven requests.** One
   directional light with shadow maps off, plus a per-camera ambient term and a per-camera distance
   fog — all three on the server's clock — and one `PointLight` per campfire in view, which is on

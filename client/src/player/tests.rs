@@ -73,6 +73,42 @@ fn deliver(app: &mut App, tick: u32, entities: Vec<EntityState>, at: Instant) {
     );
 }
 
+fn deliver_party(
+    app: &mut App,
+    tick: u32,
+    entities: Vec<EntityState>,
+    leader_entity_id: u64,
+    members: Vec<crate::net::PartyMemberState>,
+    at: Instant,
+) {
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: tick,
+            entities,
+            drops: vec![],
+            party_leader_entity_id: leader_entity_id,
+            party_members: members,
+            ..Default::default()
+        },
+        at,
+    );
+}
+
+fn party_member(
+    entity_id: u64,
+    health: u16,
+    max_health: u16,
+    alive: bool,
+) -> crate::net::PartyMemberState {
+    crate::net::PartyMemberState {
+        entity_id,
+        pos: [0.0, 64.0, 0.0],
+        health,
+        max_health,
+        alive,
+    }
+}
+
 /// The five colours a character wears, none of them [`appearance::EYE_COLOUR`], so a body
 /// built from them has one material per part and a test can tell them apart.
 const A_SKIN: u32 = 0x00C6_8642;
@@ -1385,7 +1421,7 @@ fn only_a_described_remote_body_gets_a_fixed_size_name_plate() {
         an_appearance(HairModel::Braided),
     );
     describe_as(&mut app, 99, "Astrid", an_appearance(HairModel::Topknot));
-    deliver(
+    deliver_party(
         &mut app,
         1,
         vec![
@@ -1393,6 +1429,8 @@ fn only_a_described_remote_body_gets_a_fixed_size_name_plate() {
             state(98, [2.0, 64.0, 0.0], 0.0),
             state(99, [4.0, 64.0, 0.0], 0.0),
         ],
+        99,
+        vec![party_member(99, 70, 100, true)],
         Instant::now(),
     );
     app.update();
@@ -1417,6 +1455,62 @@ fn only_a_described_remote_body_gets_a_fixed_size_name_plate() {
         .get::<TextFont>()
         .expect("the plate has a fixed font");
     assert_eq!(font.font_size, FontSize::Px(NAME_PLATE_FONT_SIZE));
+    assert_eq!(
+        world.entity(plate).get::<TextColor>().unwrap().0,
+        PARTY_PLATE_COLOUR,
+        "the authoritative party set tints the plate"
+    );
+    deliver(
+        &mut app,
+        2,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now() + INTERVAL,
+    );
+    app.update();
+    let (plate, _) = name_plate_of(&mut app, 99).unwrap();
+    assert_eq!(
+        app.world().entity(plate).get::<TextColor>().unwrap().0,
+        DEFAULT_PLATE_COLOUR,
+        "leaving restores the ordinary plate colour on the next reconcile"
+    );
+}
+
+#[test]
+fn party_uses_only_accepted_snapshots_and_clears_without_a_session() {
+    let mut app = headless_player();
+    let start = Instant::now();
+    describe_as(&mut app, 99, "Eivor", an_appearance(HairModel::Cropped));
+    deliver_party(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        LOCAL_ID,
+        vec![party_member(99, 75, 100, true)],
+        start,
+    );
+    app.update();
+    assert_eq!(app.world().resource::<Party>().members[0].entity_id, 99);
+    assert_eq!(
+        app.world_mut().resource_mut::<PartyLogInbox>().take(),
+        ["Eivor joined the party", "You are now the party leader"]
+    );
+
+    deliver_party(&mut app, 1, vec![], 0, vec![], start + INTERVAL);
+    app.update();
+    assert_eq!(app.world().resource::<Party>().members[0].entity_id, 99);
+    assert!(
+        app.world_mut()
+            .resource_mut::<PartyLogInbox>()
+            .take()
+            .is_empty()
+    );
+
+    app.world_mut().remove_resource::<Session>();
+    app.update();
+    assert_eq!(*app.world().resource::<Party>(), Party::default());
 }
 
 #[test]
