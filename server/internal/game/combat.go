@@ -130,6 +130,10 @@ func (p *Player) resolveSwingLocked() {
 	p.attackCooldown = p.sim.attackCooldown
 
 	if target := p.sim.swingTargetLocked(p); target != nil {
+		// A valid hit can be the pull before the boss has had a tick in which to
+		// acquire a target. Freeze eligibility before damage can make the transition
+		// lethal; the target-acquisition path calls the same idempotent helper.
+		p.sim.startBossEncounterLocked(target, p)
 		if target.firstHit == nil {
 			target.firstHit = newMobTap(p)
 		}
