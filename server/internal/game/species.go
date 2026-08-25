@@ -114,7 +114,7 @@ type mobDefinition struct {
 	// The false here is a real answer rather than an unset field; see the type's doc.
 	nocturnal bool
 
-	// loot is what a *kill* leaves on the ground, one line per item, rolled from the
+	// loot is what a *kill* stores in its corpse, one line per item, rolled from the
 	// simulation's own generator — see loot.go, which owns the roll and the spawn.
 	//
 	// **A field of the row rather than a table of its own**, for the reason every number

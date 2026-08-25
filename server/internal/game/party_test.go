@@ -587,6 +587,92 @@ func TestPartySnapshotCarriesEveryOtherMemberRegardlessOfView(t *testing.T) {
 	}
 }
 
+func TestCorpseRoundRobinIsLeaderFirstAndWraps(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	second, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, second, second.name)
+	inviteAndAccept(t, leader, third, third.name)
+
+	tap := newMobTap(leader)
+	h.sim.mu.Lock()
+	got := []corpseOwner{
+		h.sim.corpseOwnerLocked(tap, leader.pos),
+		h.sim.corpseOwnerLocked(tap, leader.pos),
+		h.sim.corpseOwnerLocked(tap, leader.pos),
+		h.sim.corpseOwnerLocked(tap, leader.pos),
+	}
+	h.sim.mu.Unlock()
+	want := []corpseOwner{leader.corpseOwner(), second.corpseOwner(), third.corpseOwner(), leader.corpseOwner()}
+	if !slices.Equal(got, want) {
+		t.Fatalf("round robin = %+v, want leader-first wrap %+v", got, want)
+	}
+}
+
+func TestCorpseRoundRobinSkipsOnlyIneligibleRosterSlots(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	offline, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	far, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{float32(PartyShareRadius + 2), 64, 0.5})
+	dead, _ := joinPartyPlayer(t, h, 4, "Dag", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, offline, offline.name)
+	inviteAndAccept(t, leader, far, far.name)
+	inviteAndAccept(t, leader, dead, dead.name)
+	h.sim.Leave(offline)
+	h.hurt(dead, PlayerMaxHealth)
+	deathPos := [3]float64{0.5, 64, 0.5}
+
+	h.sim.mu.Lock()
+	held := h.sim.parties[leader.partyID]
+	held.lootCursor = offline.partyMemberKey()
+	owner := h.sim.corpseOwnerLocked(newMobTap(leader), deathPos)
+	cursor := held.lootCursor
+	h.sim.mu.Unlock()
+	if owner != dead.corpseOwner() {
+		t.Fatalf("offline and out-of-range slots were not skipped, or dead online slot was: owner %+v", owner)
+	}
+	if cursor != leader.partyMemberKey() {
+		t.Fatalf("cursor after dead member = %+v, want wrapped leader", cursor)
+	}
+	h.sim.Leave(dead)
+	h.sim.mu.Lock()
+	leader.pos = [3]float64{PartyShareRadius + 2, 64, 0.5}
+	fallback := h.sim.corpseOwnerLocked(newMobTap(leader), deathPos)
+	h.sim.mu.Unlock()
+	if fallback != leader.corpseOwner() {
+		t.Fatalf("no eligible roster member chose %+v, want first-tap fallback %+v", fallback, leader.corpseOwner())
+	}
+}
+
+func TestRemovingCursorPreservesCyclicOrderAndAssignmentIsFrozen(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	leader, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	second, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	third, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, leader, second, second.name)
+	inviteAndAccept(t, leader, third, third.name)
+
+	h.sim.mu.Lock()
+	held := h.sim.parties[leader.partyID]
+	held.lootCursor = second.partyMemberKey()
+	h.sim.removePartyMemberLocked(leader.partyID, second.partyMemberKey())
+	owner := h.sim.corpseOwnerLocked(newMobTap(leader), leader.pos)
+	c := &corpse{entityID: 99, owner: owner, kind: vnet.MobKindVargr, entries: []corpseEntry{{entryID: 1, stack: stackOf(ItemVargrPelt, 1)}}}
+	h.sim.corpses[c.entityID] = c
+	h.sim.removePartyMemberLocked(leader.partyID, third.partyMemberKey())
+	h.sim.mu.Unlock()
+	if owner != third.corpseOwner() {
+		t.Fatalf("removing cursor chose %+v, want old cyclic successor %+v", owner, third.corpseOwner())
+	}
+	if !c.ownedBy(third) || c.ownedBy(leader) {
+		t.Error("party mutation after assignment changed corpse ownership")
+	}
+}
+
 func snapshotRosterIDs(t *testing.T, snapshot *vnet.EntitySnapshot) []uint64 {
 	t.Helper()
 	ids := make([]uint64, 0, snapshot.PartyRosterLength())

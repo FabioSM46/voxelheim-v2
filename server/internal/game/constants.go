@@ -41,10 +41,15 @@ const (
 	// deterministic and independent of scheduler timing.
 	PartyOfflineGrace = 10 * time.Minute
 
-	// PartyShareRadius is how near a living party member must stand to share a kill.
+	// PartyShareRadius is how near an online party member must stand to share a kill.
 	// Thirty-two blocks is twice the draugr's sixteen-block aggro range, so everybody
 	// spread across one fight counts, and well inside the default streamed view.
 	PartyShareRadius = 32.0
+
+	// CorpseLifetime is how long an owned normal-mob container remains lootable.
+	// NewSim converts it to authoritative ticks; opening a corpse never moves the
+	// deadline and no wall clock participates in expiry.
+	CorpseLifetime = 10 * time.Minute
 
 	// WalkSpeed is the horizontal speed of a player at full intent, in blocks per
 	// second. Roughly a brisk walk at one block to the metre.
@@ -226,8 +231,8 @@ const (
 	// next. The one number below that is not the *director*'s is MobDeathDuration, and it
 	// is here for the same reason the rest are not: it holds for every species alike.
 
-	// MobDeathDuration is how long a killed creature's body stays in the world before it
-	// stops existing and what it left behind reaches the ground.
+	// MobDeathDuration is how long a killed creature stays Dying before it becomes an
+	// inert owned corpse and its loot container is rolled.
 	//
 	// **Not a registry column, and the rule species.go states is why.** Every number that
 	// describes one creature is a row in mobRegistry; a column that would hold the same

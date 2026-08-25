@@ -111,20 +111,17 @@ func dropLifetimeTicks(tickRate uint8) int {
 // spawnDrop puts one stack of items in the world at the centre of a voxel and returns
 // the identity it was given.
 //
-// The wearless form used by every world-produced drop: a mined block's yield, a structure
-// taken back or brought down, and what a kill left behind. Player.DropItem reaches the same
+// The wearless form used by world-produced drops: a mined block's yield and a structure
+// taken back or brought down. Player.DropItem reaches the same
 // creation core with its authoritative wear and server-resolved landing position, so both forms
 // keep one entity, lifetime, physics and pickup path.
 //
-// **The third of those is now late, and it is late in its caller rather than here.** A kill
-// puts the creature into [vnet.MobActionDying] and its loot reaches this function
-// MobDeathDuration afterwards, when the body stops existing — a delay the drop knows nothing
-// about, because "when may this exist" was decided by the thing that decided the kill. The
-// list is still four; only the moment the third one fires moved.
+// Normal-mob loot deliberately does not reach this path: it remains in an owned corpse
+// container until an explicit whole-entry transfer succeeds.
 //
 // **Called with Sim.mu not held**, because this takes it. Anything that decides a drop
 // inside the tick hands what it decided out through a return value and lets a caller outside
-// the lock spawn it — [Sim.spawnLoot] and [Sim.dropCollapsed]; the argument is in loot.go.
+// the lock spawn it, as [Sim.dropCollapsed] does.
 //
 // It refuses an empty or unregistered item rather than creating an entity the wire
 // forbids: schemas/player.fbs states that a drop's item_id and count are never zero.

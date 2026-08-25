@@ -163,6 +163,18 @@ func (i *inventory) insertStackLocked(stack inventoryStack) uint16 {
 	return i.slots.insertStack(stack)
 }
 
+// insertWholeStackLocked applies one authoritative entry only when every item fits.
+// The insertion rule itself runs on a copy, so a full pack cannot leave a partial
+// stack behind and a separate capacity predicate cannot drift from the real insert.
+func (i *inventory) insertWholeStackLocked(stack inventoryStack) bool {
+	next := i.slots
+	if remaining := next.insertStack(stack); remaining != 0 {
+		return false
+	}
+	i.slots = next
+	return true
+}
+
 func (t *slotTable) insertStack(stack inventoryStack) uint16 {
 	if !stack.durable() {
 		if stack.durability != 0 {

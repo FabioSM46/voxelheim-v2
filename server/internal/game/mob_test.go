@@ -733,13 +733,19 @@ func TestAKilledDraugrGoesDownAndThenLeavesTheWorld(t *testing.T) {
 	if _, live := h.mobState(first); live {
 		t.Fatal("the body outlived the whole of its own death")
 	}
-	// By identity rather than by count: it is night with a player connected, so the
-	// director has had two and a half seconds to put fresh creatures in that snapshot and
-	// a total would be asserting the director's behaviour instead of this one's.
+	// By identity rather than by count: the entity stays continuous as an inert corpse,
+	// while the director may also have added fresh creatures during the death.
+	var shownCorpse bool
 	for _, state := range newestSnapshotMobs(t, out) {
 		if state.EntityID == first {
-			t.Error("a body that stopped existing is still in the snapshot")
+			shownCorpse = true
+			if state.Action != vnet.MobActionCorpse || state.Health != 0 {
+				t.Errorf("completed death projects as %s with %d health, want inert Corpse", state.Action, state.Health)
+			}
 		}
+	}
+	if !shownCorpse {
+		t.Error("completed death did not preserve its entity identity as a corpse")
 	}
 
 	// Nothing comes back at that spot. The director may put a creature *somewhere* —
