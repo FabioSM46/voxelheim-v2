@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"sync"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
@@ -123,6 +124,14 @@ type Sim struct {
 
 	mu      sync.Mutex
 	players map[uint64]*Player
+
+	// chatLimiters are keyed by the identity that survives a connection, not by the
+	// Player allocated for one session. Keeping the bucket here is what makes a
+	// reconnect resume the same allowance instead of manufacturing a fresh burst. A
+	// bucket is removed once elapsed time has completely refilled it, because at that
+	// point retaining it and creating a new full bucket are equivalent. See chat.go.
+	chatLimiters map[identity.PlayerID]*chatLimiter
+	chatNow      func() time.Time
 
 	// tickOfDay is where the world stands in its day, and it is always less than
 	// DayLengthTicks. See clock.go for everything about it; the field is here because
@@ -267,6 +276,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		attackCooldown:     ticksFor(SwordCooldown, tickRate),
 		log:                log,
 		players:            make(map[uint64]*Player),
+		chatLimiters:       make(map[identity.PlayerID]*chatLimiter),
+		chatNow:            SystemClock{}.Now,
 		drops:              make(map[uint64]*itemDrop),
 		mobs:               make(map[uint64]*mob),
 		structures:         make(map[uint64]*structure),
