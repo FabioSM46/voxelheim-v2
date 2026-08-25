@@ -119,6 +119,31 @@ func TestOnlyWearableItemsCarryArmourStatsAndEveryWearableIsDurable(t *testing.T
 	}
 }
 
+// One item may occupy each body slot, so the strongest possible set is the
+// strongest registered row for head, chest and legs. Sweep that combination rather
+// than summing the catalogue: adding a second helmet must not consume armour budget
+// when the player can never wear both helmets at once.
+func TestEveryWearableCombinationFitsTheArmourScale(t *testing.T) {
+	t.Parallel()
+
+	var strongest [wornLegs + 1]uint16
+	for id, definition := range itemRegistry {
+		if definition.wornAt == wornNowhere {
+			continue
+		}
+		if definition.wornAt > wornLegs {
+			t.Errorf("wearable item %d names unknown body slot %d", id, definition.wornAt)
+			continue
+		}
+		strongest[definition.wornAt] = max(strongest[definition.wornAt], definition.armour)
+	}
+
+	sum := uint32(strongest[wornHead]) + uint32(strongest[wornChest]) + uint32(strongest[wornLegs])
+	if sum >= uint32(ArmourScale) {
+		t.Errorf("the strongest wearable combination carries %d armour points against scale %d", sum, ArmourScale)
+	}
+}
+
 func TestRawAndCookedMeatAreTheOnlyFoods(t *testing.T) {
 	t.Parallel()
 

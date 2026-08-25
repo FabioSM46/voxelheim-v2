@@ -384,6 +384,16 @@ type Player struct {
 	lifeState    vnet.LifeState
 	respawnTicks uint32
 
+	// worn is the combat summary derived from the three equipment slots. It is not
+	// persisted: the slots are, and Join rebuilds this value from them. Guarded by
+	// sim.mu and written only by refreshWornLocked while inventory.mu is held too.
+	// That lets the tick read armour and threat without taking the inventory lock — a
+	// lock a session goroutine may hold across an in-memory world write.
+	worn struct {
+		armour uint16
+		threat uint16
+	}
+
 	// sinceDamageTicks is how long since the last landed hit, regenTicks how far
 	// through the current point of regeneration, and hungerTicks how far through the
 	// next point of ordinary hunger drain. regenPoints counts the health already bought
@@ -578,6 +588,9 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 		// structures at a session that had already ended.
 		return nil, fmt.Errorf("game: player %s is already in the simulation as entity %d", playerID.Short(), live.entityID)
 	}
+	p.inventory.mu.Lock()
+	p.refreshWornLocked()
+	p.inventory.mu.Unlock()
 	s.players[entityID] = p
 	s.byIdentity[playerID] = p
 	return p, nil

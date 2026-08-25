@@ -132,6 +132,7 @@ func (p *Player) Repair(req protocol.RepairRequest) (protocol.InventoryState, er
 		return protocol.InventoryState{}, fmt.Errorf(
 			"slot %d holds no usable kit for slot %d", req.KitSlot, req.TargetSlot)
 	}
+	p.refreshWornLocked()
 
 	p.sim.log.Debug("repair applied",
 		"entity_id", p.entityID, "kit_slot", req.KitSlot,

@@ -285,6 +285,26 @@ func TestAVargrIsFasterThanAWalkingPlayerAndDiesQuicker(t *testing.T) {
 	}
 }
 
+// The armour rows and the species rows meet in this arithmetic. Read both sides
+// from their registries so a rebalance has one source of truth, while pinning the
+// two resulting blows the design chose.
+func TestFullIronLeavesThePinnedDraugrAndVargrBlows(t *testing.T) {
+	t.Parallel()
+
+	armour := itemRegistry[ItemIronHelm].armour +
+		itemRegistry[ItemIronCuirass].armour +
+		itemRegistry[ItemIronGreaves].armour
+	reduced := func(damage uint16) uint16 {
+		return uint16(uint32(damage) * uint32(ArmourScale-armour) / uint32(ArmourScale))
+	}
+	if got := reduced(draugrRow.damage); got != 7 {
+		t.Errorf("full iron leaves a draugr blow at %d, want 7", got)
+	}
+	if got := reduced(vargrRow.damage); got != 4 {
+		t.Errorf("full iron leaves a vargr blow at %d, want 4", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Who may arrive, and when
 // ---------------------------------------------------------------------------

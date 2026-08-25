@@ -55,13 +55,65 @@ func newVitalsHarnessAt(t *testing.T, tickRate uint8, terrain Terrain, viewDista
 
 func (h *vitalsHarness) join(entityID uint64, pos [3]float32) (*Player, *dropSink) {
 	h.t.Helper()
+	return h.joinLife(entityID, pos, nil)
+}
+
+func (h *vitalsHarness) joinLife(entityID uint64, pos [3]float32, life *Life) (*Player, *dropSink) {
+	h.t.Helper()
 
 	out := &dropSink{}
-	player, err := h.sim.Join(entityID, testPlayerID(entityID), testCharacterName, pos, testAppearance(), nil, out.deliver)
+	player, err := h.sim.Join(entityID, testPlayerID(entityID), testCharacterName, pos, testAppearance(), life, out.deliver)
 	if err != nil {
 		h.t.Fatalf("Join: %v", err)
 	}
 	return player, out
+}
+
+type testArmourPiece struct {
+	item       ItemID
+	durability uint16
+}
+
+// lifeWearing builds the stored-life shape Join really receives. The registry chooses
+// each matching slot and maximum, so these tests cannot put a valid piece on the wrong
+// body location or restate its durability ceiling.
+func lifeWearing(t *testing.T, pos [3]float32, pieces ...testArmourPiece) Life {
+	t.Helper()
+
+	life := Life{
+		Pos:    [3]float64{float64(pos[0]), float64(pos[1]), float64(pos[2])},
+		Health: PlayerMaxHealth,
+		Hunger: PlayerMaxHunger,
+		Slots:  [protocol.InventorySlots]protocol.InventoryStack{},
+	}
+	for _, piece := range pieces {
+		definition, registered := itemByID(piece.item)
+		if !registered {
+			t.Fatalf("test armour item %d is not registered", piece.item)
+		}
+		var slot int
+		switch definition.wornAt {
+		case wornHead:
+			slot = equipmentHead
+		case wornChest:
+			slot = equipmentChest
+		case wornLegs:
+			slot = equipmentLegs
+		default:
+			t.Fatalf("test armour item %d is not wearable", piece.item)
+		}
+		life.Slots[slot] = protocol.InventoryStack{
+			ItemID:        uint16(piece.item),
+			Count:         1,
+			Durability:    piece.durability,
+			MaxDurability: definition.maxDurability,
+		}
+	}
+	return life
+}
+
+func fullTestArmour(item ItemID) testArmourPiece {
+	return testArmourPiece{item: item, durability: itemRegistry[item].maxDurability}
 }
 
 func (h *vitalsHarness) step() {
@@ -262,6 +314,37 @@ func TestALongFallCostsHealth(t *testing.T) {
 	}
 }
 
+func TestFullIronDoesNotSoftenAFall(t *testing.T) {
+	t.Parallel()
+
+	landedHealth := func(t *testing.T, iron bool) uint16 {
+		t.Helper()
+		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+		pos := [3]float32{0.5, 104, 0.5}
+		var player *Player
+		if iron {
+			life := lifeWearing(t, pos,
+				fullTestArmour(ItemIronHelm),
+				fullTestArmour(ItemIronCuirass),
+				fullTestArmour(ItemIronGreaves),
+			)
+			player, _ = h.joinLife(1, pos, &life)
+		} else {
+			player, _ = h.join(1, pos)
+		}
+		return h.fallUntilLanded(player).Health
+	}
+
+	naked := landedHealth(t, false)
+	armoured := landedHealth(t, true)
+	if naked == PlayerMaxHealth {
+		t.Fatal("the comparison fall cost nothing, so it cannot discriminate armour")
+	}
+	if armoured != naked {
+		t.Errorf("full iron left %d health after the fall, want the unarmoured %d", armoured, naked)
+	}
+}
+
 // The maximum-speed fall, which the formula makes fatal by construction.
 func TestAFallAtTerminalSpeedKills(t *testing.T) {
 	t.Parallel()
@@ -356,6 +439,151 @@ func TestDamageClampsAndRefusesTheCasesThatAreNotHits(t *testing.T) {
 	h.hurt(player, 10)
 	if got := h.vitals(player).RespawnTicks; got != h.sim.deathTicks {
 		t.Errorf("damaging a corpse restarted the countdown: %d, want %d", got, h.sim.deathTicks)
+	}
+}
+
+func poisonWornSummary(p *Player) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	p.worn.armour = ArmourScale - 1
+	p.worn.threat = ArmourScale - 1
+}
+
+func assertWornSummaryFresh(t *testing.T, p *Player) {
+	t.Helper()
+
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+
+	var armour, threat uint16
+	for _, stack := range p.inventory.slots[equipmentFirst:] {
+		if stack.durability == 0 {
+			continue
+		}
+		definition, registered := itemByID(stack.item)
+		if !registered {
+			continue
+		}
+		armour += definition.armour
+		threat += definition.threat
+	}
+	if p.worn.armour != armour || p.worn.threat != threat {
+		t.Errorf("cached worn summary is armour=%d threat=%d, fresh slots say armour=%d threat=%d",
+			p.worn.armour, p.worn.threat, armour, threat)
+	}
+}
+
+// This list is the inventory-mutation boundary the cache depends on. Each case drives
+// the public entry point (or the tick's death transition), poisons the cache first where
+// possible, and compares it with a fresh slot recomputation afterwards. Adding a new
+// mutation entry point means making an explicit decision in this list.
+func TestEveryInventoryMutationRefreshesTheWornSummary(t *testing.T) {
+	pos := [3]float32{0.5, 64, 0.5}
+
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T) *Player
+	}{
+		{
+			name: "Join",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := lifeWearing(t, pos, fullTestArmour(ItemIronHelm))
+				player, _ := h.joinLife(1, pos, &life)
+				return player
+			},
+		},
+		{
+			name: "MoveInventory",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := Life{Pos: [3]float64{0.5, 64, 0.5}, Health: PlayerMaxHealth, Hunger: PlayerMaxHunger}
+				life.Slots[1] = protocol.InventoryStack{ItemID: uint16(ItemLeatherCap), Count: 1,
+					Durability: LeatherArmourMaxDurability, MaxDurability: LeatherArmourMaxDurability}
+				player, _ := h.joinLife(1, pos, &life)
+				poisonWornSummary(player)
+				if _, err := player.MoveInventory(protocol.InventoryMoveRequest{From: 1, To: uint8(equipmentHead), Count: 1}); err != nil {
+					t.Fatalf("MoveInventory: %v", err)
+				}
+				return player
+			},
+		},
+		{
+			name: "Repair",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := lifeWearing(t, pos, testArmourPiece{item: ItemLeatherCap, durability: 0})
+				life.Slots[1] = protocol.InventoryStack{ItemID: uint16(ItemLeatherPatch), Count: 1}
+				player, _ := h.joinLife(1, pos, &life)
+				poisonWornSummary(player)
+				if _, err := player.Repair(protocol.RepairRequest{KitSlot: 1, TargetSlot: uint8(equipmentHead)}); err != nil {
+					t.Fatalf("Repair: %v", err)
+				}
+				return player
+			},
+		},
+		{
+			name: "Craft",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := lifeWearing(t, pos, fullTestArmour(ItemLeatherCap))
+				life.Slots[1] = protocol.InventoryStack{ItemID: uint16(ItemVargrPelt), Count: 3}
+				player, _ := h.joinLife(1, pos, &life)
+				poisonWornSummary(player)
+				if _, err := player.Craft(protocol.CraftRequest{Recipe: vnet.RecipeIDLeatherCap}); err != nil {
+					t.Fatalf("Craft: %v", err)
+				}
+				return player
+			},
+		},
+		{
+			name: "Consume",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := lifeWearing(t, pos, fullTestArmour(ItemLeatherCap))
+				life.Hunger = 0
+				life.Slots[1] = protocol.InventoryStack{ItemID: uint16(ItemRawMeat), Count: 1}
+				player, _ := h.joinLife(1, pos, &life)
+				poisonWornSummary(player)
+				if _, err := player.Consume(protocol.ConsumeRequest{Slot: 1}); err != nil {
+					t.Fatalf("Consume: %v", err)
+				}
+				return player
+			},
+		},
+		{
+			name: "DropItem",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := lifeWearing(t, pos, fullTestArmour(ItemLeatherCap))
+				player, _ := h.joinLife(1, pos, &life)
+				poisonWornSummary(player)
+				if _, err := player.DropItem(protocol.DropItemRequest{Slot: uint8(equipmentHead)}); err != nil {
+					t.Fatalf("DropItem: %v", err)
+				}
+				return player
+			},
+		},
+		{
+			name: "death penalty",
+			run: func(t *testing.T) *Player {
+				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+				life := lifeWearing(t, pos, testArmourPiece{item: ItemLeatherCap, durability: 1})
+				player, _ := h.joinLife(1, pos, &life)
+				poisonWornSummary(player)
+				h.hurt(player, PlayerMaxHealth)
+				h.step()
+				return player
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertWornSummaryFresh(t, tc.run(t))
+		})
 	}
 }
 

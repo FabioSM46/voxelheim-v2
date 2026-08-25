@@ -69,6 +69,13 @@ const (
 	// denominator of every health display the client draws.
 	PlayerMaxHealth = 100
 
+	// ArmourScale is the denominator for the percentage points every wearable row
+	// records in itemRegistry. A value of 30 therefore leaves seventy percent of a
+	// mob's blow. TestEveryWearableCombinationFitsTheArmourScale sweeps the strongest
+	// piece for each body slot and keeps every possible worn sum below this number, so
+	// the subtraction at the strike cannot underflow.
+	ArmourScale uint16 = 100
+
 	// HealthPerLevel is how much maximum health each level after the first adds.
 	//
 	// Five makes a level-30 player reach 245 health, 2.45 times the level-one base.
