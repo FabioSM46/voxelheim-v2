@@ -552,43 +552,35 @@ impl RefusalInbox {
     }
 }
 
-/// Every accepted world-chat line not yet consumed by the on-screen log.
+/// One entry in the ordered conversation stream shown by the chat log.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatEntry {
+    Message(ChatMessage),
+    PartyInvite(PartyInvite),
+}
+
+/// Every accepted world-chat line and party invitation not yet consumed by the log.
 ///
-/// The first consumer takes every value in wire order. Chat is a conversation, not a
-/// latest-state snapshot: collapsing two lines into one would silently erase speech.
+/// Both payloads share one inbox so their relative wire order survives an ECS frame.
+/// Chat is a conversation, not a latest-state snapshot: collapsing or regrouping two
+/// entries would silently rewrite it.
 #[derive(Resource, Debug, Default)]
-pub struct ChatInbox(Vec<ChatMessage>);
+pub struct ChatInbox(Vec<ChatEntry>);
 
 impl ChatInbox {
-    /// Takes every queued line in wire order, leaving the inbox empty.
-    pub fn take(&mut self) -> Vec<ChatMessage> {
+    /// Takes every queued entry in wire order, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<ChatEntry> {
         std::mem::take(&mut self.0)
     }
 
     #[cfg(test)]
-    pub fn push(&mut self, message: ChatMessage) {
-        self.0.push(message);
+    pub fn push(&mut self, entry: ChatEntry) {
+        self.0.push(entry);
     }
 
     #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.0.len()
-    }
-}
-
-/// Every still-live party invitation not yet consumed by the on-screen log.
-#[derive(Resource, Debug, Default)]
-pub struct PartyInviteInbox(Vec<PartyInvite>);
-
-impl PartyInviteInbox {
-    /// Takes every queued invitation in wire order, leaving the inbox empty.
-    pub fn take(&mut self) -> Vec<PartyInvite> {
-        std::mem::take(&mut self.0)
-    }
-
-    #[cfg(test)]
-    pub fn push(&mut self, invite: PartyInvite) {
-        self.0.push(invite);
     }
 }
 
@@ -875,7 +867,6 @@ impl Plugin for NetPlugin {
             .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
             .init_resource::<ChatInbox>()
-            .init_resource::<PartyInviteInbox>()
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
             .add_message::<ConnectRequest>()
@@ -1353,9 +1344,8 @@ struct Inboxes<'w> {
     appearances: ResMut<'w, AppearanceInbox>,
     refusals: ResMut<'w, RefusalInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
-    // NetPlugin always initialises both, so a live client never drops these queues.
+    // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
-    party_invites: Option<ResMut<'w, PartyInviteInbox>>,
 }
 
 /// Applies everything the net thread has said since the last frame.
@@ -1500,12 +1490,12 @@ fn drain_session_events(
             // received text as a command or as identity.
             Ok(SessionEvent::Chat(message)) => {
                 if let Some(chat) = inboxes.chat.as_deref_mut() {
-                    chat.0.push(message);
+                    chat.0.push(ChatEntry::Message(message));
                 }
             }
             Ok(SessionEvent::PartyInvite(invite)) => {
-                if let Some(invites) = inboxes.party_invites.as_deref_mut() {
-                    invites.0.push(invite);
+                if let Some(chat) = inboxes.chat.as_deref_mut() {
+                    chat.0.push(ChatEntry::PartyInvite(invite));
                 }
             }
 

@@ -13,8 +13,8 @@ use bevy::prelude::*;
 use bevy::time::Real;
 
 use crate::net::{
-    ChatInbox, ChatRequest, DrainNetwork, Outbound, PartyAction, PartyInviteInbox, PartyRequest,
-    Sent, encode_chat_request, encode_party_request,
+    ChatEntry, ChatInbox, ChatRequest, DrainNetwork, Outbound, PartyAction, PartyRequest, Sent,
+    encode_chat_request, encode_party_request,
 };
 use crate::player::{ApplyInputMode, InputMode};
 
@@ -64,7 +64,6 @@ impl Plugin for ChatUiPlugin {
         app.init_resource::<ChatLine>()
             .init_resource::<ChatLog>()
             .init_resource::<ChatInbox>()
-            .init_resource::<PartyInviteInbox>()
             .add_message::<KeyboardInput>()
             .add_systems(Startup, spawn_chat)
             .add_systems(
@@ -131,21 +130,24 @@ fn spawn_chat(mut commands: Commands) {
 fn ingest_server_lines(
     time: Res<Time<Real>>,
     mut chat: ResMut<ChatInbox>,
-    mut invites: ResMut<PartyInviteInbox>,
     mut log: ResMut<ChatLog>,
 ) {
     let now = time.elapsed();
-    for message in chat.take() {
-        let sender = bounded_display(&message.sender_name, SENDER_CHARACTERS);
-        let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
-        log.push(format!("{sender}: {text}"), now);
-    }
-    for invite in invites.take() {
-        let sender = bounded_display(&invite.from_name, SENDER_CHARACTERS);
-        log.push(
-            format!("{sender} invites you to a party — /accept or /decline"),
-            now,
-        );
+    for entry in chat.take() {
+        match entry {
+            ChatEntry::Message(message) => {
+                let sender = bounded_display(&message.sender_name, SENDER_CHARACTERS);
+                let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
+                log.push(format!("{sender}: {text}"), now);
+            }
+            ChatEntry::PartyInvite(invite) => {
+                let sender = bounded_display(&invite.from_name, SENDER_CHARACTERS);
+                log.push(
+                    format!("{sender} invites you to a party — /accept or /decline"),
+                    now,
+                );
+            }
+        }
     }
 }
 
@@ -214,7 +216,8 @@ fn send_line(line: String, outbound: Option<&mut Outbound>, log: &mut ChatLog, n
 }
 
 fn outgoing_frame(line: &str, log: &mut ChatLog, now: Duration) -> Option<Vec<u8>> {
-    if line.trim().is_empty() {
+    let line = line.trim();
+    if line.is_empty() {
         return None;
     }
     if !line.starts_with('/') {
@@ -367,10 +370,10 @@ mod tests {
         let mut log = ChatLog::default();
         let cases = [
             ("/invite Eivor", PartyAction::Invite, "Eivor"),
-            ("/accept", PartyAction::Accept, ""),
-            ("/decline", PartyAction::Decline, ""),
-            ("/leave", PartyAction::Leave, ""),
-            ("/kick Eivor", PartyAction::Kick, "Eivor"),
+            (" /accept ", PartyAction::Accept, ""),
+            ("/decline ", PartyAction::Decline, ""),
+            ("/leave   ", PartyAction::Leave, ""),
+            ("/kick Eivor ", PartyAction::Kick, "Eivor"),
         ];
         for (line, action, target_name) in cases {
             assert_eq!(
@@ -413,29 +416,32 @@ mod tests {
     #[test]
     fn inboxes_keep_every_value_in_wire_order() {
         let mut chat = ChatInbox::default();
-        for sender_entity_id in [7, 9] {
-            chat.push(ChatMessage {
-                sender_entity_id,
-                sender_name: sender_entity_id.to_string(),
-                text: "hello".to_owned(),
-            });
-        }
-        assert_eq!(chat.pending(), 2);
-        assert_eq!(
-            chat.take()
-                .into_iter()
-                .map(|message| message.sender_entity_id)
-                .collect::<Vec<_>>(),
-            vec![7, 9]
-        );
-
-        let mut invites = PartyInviteInbox::default();
-        invites.push(PartyInvite {
+        chat.push(ChatEntry::PartyInvite(PartyInvite {
             from_entity_id: 11,
             from_name: "Eivor".to_owned(),
             expires_ms: 5_000,
-        });
-        assert_eq!(invites.take()[0].from_entity_id, 11);
+        }));
+        for sender_entity_id in [7, 9] {
+            chat.push(ChatEntry::Message(ChatMessage {
+                sender_entity_id,
+                sender_name: sender_entity_id.to_string(),
+                text: "hello".to_owned(),
+            }));
+        }
+        assert_eq!(chat.pending(), 3);
+        let entries = chat.take();
+        assert!(matches!(
+            &entries[0],
+            ChatEntry::PartyInvite(invite) if invite.from_entity_id == 11
+        ));
+        assert!(matches!(
+            &entries[1],
+            ChatEntry::Message(message) if message.sender_entity_id == 7
+        ));
+        assert!(matches!(
+            &entries[2],
+            ChatEntry::Message(message) if message.sender_entity_id == 9
+        ));
     }
 
     #[test]

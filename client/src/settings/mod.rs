@@ -378,8 +378,11 @@ impl Bindings {
 
     /// The complete assignment `named` describes, or `None` when it is not one.
     ///
-    /// Controls it leaves out keep their defaults; the answer is `None` — and the caller
-    /// then keeps *all* the defaults — when the result would break the invariant above.
+    /// Controls it leaves out keep their defaults when those keys are free. If a named
+    /// binding already uses a newly added control's default, the named binding wins and
+    /// the omitted control takes the first free default before falling back to another
+    /// offered key. That is how an older complete settings file survives a new control.
+    /// The answer is `None` when two controls named by the file share a key.
     ///
     /// **A set, and deliberately not a sequence of [`Self::rebind`] calls.** The file names
     /// every control at once, so two bindings that trade keys cross over halfway through —
@@ -387,16 +390,32 @@ impl Bindings {
     /// a time against the defaults refuses the second of the pair. That is a configuration a
     /// player saved and could not load again; `store`'s round trip is what found it.
     fn from_pairs(named: &[(Control, KeyCode)]) -> Option<Self> {
-        let mut bindings = Self::default();
+        let mut keys = [None; CONTROLS.len()];
         for (control, key) in named {
-            bindings.keys[*control as usize] = *key;
+            key_name(*key)?;
+            keys[*control as usize] = Some(*key);
         }
-        for (index, key) in bindings.keys.iter().enumerate() {
-            if key_name(*key).is_none() || bindings.keys[..index].contains(key) {
+        for (index, key) in keys.iter().enumerate() {
+            if key.is_some() && keys[..index].contains(key) {
                 return None;
             }
         }
-        Some(bindings)
+
+        for control in CONTROLS {
+            let index = control as usize;
+            if keys[index].is_some() {
+                continue;
+            }
+            let free = std::iter::once(control.default_key())
+                .chain(CONTROLS.map(Control::default_key))
+                .chain(REBINDABLE_KEYS.iter().map(|(key, _)| *key))
+                .find(|candidate| !keys.iter().flatten().any(|key| key == candidate))?;
+            keys[index] = Some(free);
+        }
+
+        Some(Self {
+            keys: keys.map(|key| key.expect("every omitted control was assigned a free key")),
+        })
     }
 
     /// Makes `control` answer to `key`, or refuses and changes nothing.

@@ -1281,11 +1281,12 @@ opened the line cannot become its first character.
 
 **Only locally typed text is command syntax.** `/invite`, `/accept`, `/decline`, `/leave` and
 `/kick` become typed `PartyRequest`s; every other non-empty non-command line becomes a
-`ChatRequest`, and an unknown slash command stays local as a log line. A `ChatMessage` or
-`PartyInvite` received from the
-server is display text only, bounded and stripped of layout controls before Bevy sees it, never
-parsed or used as identity. `ChatInbox` preserves every chat message in wire order for its first
-consumer. The log holds eight lines, fades them after twelve seconds of `Time<Real>`, and shows all
+`ChatRequest`, and an unknown slash command stays local as a log line. Surrounding whitespace is
+removed before that routing, matching the server's accepted line. A `ChatMessage` or `PartyInvite`
+received from the server is display text only, bounded and stripped of layout controls before Bevy
+sees it, never parsed or used as identity. Both share one `ChatInbox`, which preserves their
+relative wire order for its first consumer. The log holds eight lines, fades them after twelve
+seconds of `Time<Real>`, and shows all
 eight fully while chat is open; there is no persistence, scrollback, timestamp or channel state.
 
 ## Choosing who goes in

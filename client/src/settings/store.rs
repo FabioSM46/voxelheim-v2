@@ -558,6 +558,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_pre_chat_settings_file_keeps_every_named_binding_when_t_was_already_used() {
+        let scratch = Scratch::new("settings-before-chat");
+        let path = scratch.join("settings");
+        fs::write(
+            &path,
+            "bind forward t\nbind back s\nbind left a\nbind right d\n\
+             bind jump space\nbind inventory e\nbind menu escape\n",
+        )
+        .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(settings.bindings().key(Control::Forward), KeyCode::KeyT);
+        assert_eq!(settings.bindings().key(Control::Chat), KeyCode::KeyW);
+        assert_eq!(settings.bindings().key(Control::Back), KeyCode::KeyS);
+        assert_eq!(settings.bindings().key(Control::Inventory), KeyCode::KeyE);
+        assert_eq!(settings.bindings().key(Control::Menu), KeyCode::Escape);
+    }
+
     /// **Two controls that trade keys still load** — read one rebinding at a time, the
     /// second of the pair lands on a key the *defaults* still hold and is refused. See
     /// `Bindings::from_pairs`.
