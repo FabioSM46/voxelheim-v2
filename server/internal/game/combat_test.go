@@ -102,25 +102,26 @@ func TestThreeSwingsKillADraugr(t *testing.T) {
 	}
 }
 
-func TestOnlyTheKillingBlowAwardsTheSwingingPlayer(t *testing.T) {
+func TestTheFirstPlayerToHitOwnsTheExperienceWhoeverLandsTheKillingBlow(t *testing.T) {
 	t.Parallel()
 
-	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
-	bystander, _ := h.join(2, [3]float32{10.5, 64, 10.5})
-	player.inventory.mu.Lock()
-	player.inventory.slots[0] = stackOf(ItemIronSword, 1)
-	player.inventory.mu.Unlock()
+	h, first, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
+	finisher, _ := h.join(2, [3]float32{0.5, 64, 0.5})
+	for _, player := range []*Player{first, finisher} {
+		player.inventory.mu.Lock()
+		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.mu.Unlock()
+	}
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(first, 0, 1); err != nil {
 		t.Fatalf("first swing: %v", err)
 	}
 	h.step()
-	if got := experienceOf(player); got != 0 {
+	if got := experienceOf(first); got != 0 {
 		t.Fatalf("non-killing blow awarded %d experience, want 0", got)
 	}
 
-	h.advance(int(h.sim.attackCooldown))
-	if err := h.swing(player, 0, 2); err != nil {
+	if err := h.swing(finisher, 0, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -128,11 +129,183 @@ func TestOnlyTheKillingBlowAwardsTheSwingingPlayer(t *testing.T) {
 	if got := h.mobHealth(id); got != 0 {
 		t.Fatalf("draugr has %d health after two iron swings, want 0", got)
 	}
-	if got := experienceOf(player); got != uint32(draugrRow.experience) {
-		t.Errorf("swinging player has %d experience, want %d", got, draugrRow.experience)
+	if got := experienceOf(first); got != uint32(draugrRow.experience) {
+		t.Errorf("first hitter has %d experience, want %d", got, draugrRow.experience)
 	}
-	if got := experienceOf(bystander); got != 0 {
-		t.Errorf("bystander has %d experience, want 0", got)
+	if got := experienceOf(finisher); got != 0 {
+		t.Errorf("out-of-party finisher has %d experience, want 0", got)
+	}
+}
+
+func TestADeadFirstHitterStillReceivesTheExperience(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	owner, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	for _, player := range []*Player{owner, finisher} {
+		player.inventory.mu.Lock()
+		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.mu.Unlock()
+	}
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	if err := h.swing(owner, 0, 1); err != nil {
+		t.Fatalf("tapping swing: %v", err)
+	}
+	h.step()
+	h.hurt(owner, PlayerMaxHealth)
+	if err := h.swing(finisher, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := h.mobHealth(mobID); got != 0 {
+		t.Fatalf("draugr has %d health after two iron swings, want 0", got)
+	}
+	if got := experienceOf(owner); got != uint32(draugrRow.experience) {
+		t.Errorf("dead tap owner received %d experience, want %d", got, draugrRow.experience)
+	}
+	if got := experienceOf(finisher); got != 0 {
+		t.Errorf("finisher received %d experience, want 0", got)
+	}
+}
+
+func TestADisconnectedFirstHitterKeepsTheAwardAndReceivesItOnReconnect(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	owner, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	for _, player := range []*Player{owner, finisher} {
+		player.inventory.mu.Lock()
+		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.mu.Unlock()
+	}
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	if err := h.swing(owner, 0, 1); err != nil {
+		t.Fatalf("tapping swing: %v", err)
+	}
+	h.step()
+	h.sim.Leave(owner)
+	if err := h.swing(finisher, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := h.mobHealth(mobID); got != 0 {
+		t.Fatalf("draugr has %d health after two iron swings, want 0", got)
+	}
+	if got := experienceOf(owner); got != 0 {
+		t.Errorf("departed session object received %d experience after it left", got)
+	}
+	awards := h.sim.PendingExperienceAwards()
+	if len(awards) != 1 || awards[0].PlayerID != owner.playerID || awards[0].CharacterName != owner.name || awards[0].Experience != uint32(draugrRow.experience) {
+		t.Fatalf("pending offline awards = %+v, want this character at %d experience", awards, draugrRow.experience)
+	}
+
+	out := &dropSink{}
+	returned, err := h.sim.Join(3, owner.playerID, owner.name, [3]float32{0.5, 64, 0.5},
+		testAppearance(), nil, out.deliver)
+	if err != nil {
+		t.Fatalf("reconnecting the tap owner: %v", err)
+	}
+	if got := experienceOf(returned); got != uint32(draugrRow.experience) {
+		t.Errorf("reconnected tap owner has %d experience, want %d", got, draugrRow.experience)
+	}
+}
+
+func TestAnOfflineTapUsesProgressFromTheOwnersLatestSession(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	owner, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	for _, player := range []*Player{owner, finisher} {
+		player.inventory.mu.Lock()
+		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.mu.Unlock()
+	}
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	if err := h.swing(owner, 0, 1); err != nil {
+		t.Fatalf("tapping swing: %v", err)
+	}
+	h.step()
+	h.sim.Leave(owner)
+
+	// A reconnect creates a new Player object. Progress earned by that session must
+	// replace the tap's earlier baseline before it disconnects again.
+	out := &dropSink{}
+	returned, err := h.sim.Join(3, owner.playerID, owner.name, [3]float32{0.5, 64, 0.5},
+		testAppearance(), nil, out.deliver)
+	if err != nil {
+		t.Fatalf("first reconnect: %v", err)
+	}
+	h.sim.mu.Lock()
+	returned.experience = 40
+	h.sim.mu.Unlock()
+	h.sim.Leave(returned)
+
+	if err := h.swing(finisher, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+	if got := h.mobHealth(mobID); got != 0 {
+		t.Fatalf("draugr has %d health after two iron swings, want 0", got)
+	}
+
+	want := uint32(40 + draugrRow.experience)
+	awards := h.sim.PendingExperienceAwards()
+	if len(awards) != 1 || awards[0].Experience != want {
+		t.Fatalf("pending offline awards = %+v, want the latest session total plus the kill (%d)", awards, want)
+	}
+	resumed, err := h.sim.Join(4, owner.playerID, owner.name, [3]float32{0.5, 64, 0.5},
+		testAppearance(), nil, out.deliver)
+	if err != nil {
+		t.Fatalf("second reconnect: %v", err)
+	}
+	if got := experienceOf(resumed); got != want {
+		t.Errorf("reconnected tap owner has %d experience, want %d", got, want)
+	}
+}
+
+func TestTheFirstHitOwnersPartySharesEvenWhenAnOutsiderFinishesTheMob(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	owner, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
+	finisher, _ := h.join(3, [3]float32{0.5, 64, 0.5})
+	inviteAndAccept(t, owner, member, "Bjorn")
+	for _, player := range []*Player{owner, finisher} {
+		player.inventory.mu.Lock()
+		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.mu.Unlock()
+	}
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	if err := h.swing(owner, 0, 1); err != nil {
+		t.Fatalf("tapping swing: %v", err)
+	}
+	h.step()
+	if err := h.swing(finisher, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := h.mobHealth(mobID); got != 0 {
+		t.Fatalf("draugr has %d health after two iron swings, want 0", got)
+	}
+	if got := experienceOf(owner); got != 8 {
+		t.Errorf("tap owner received %d experience, want 8 including the remainder", got)
+	}
+	if got := experienceOf(member); got != 7 {
+		t.Errorf("tap owner's party member received %d experience, want 7", got)
+	}
+	if got := experienceOf(finisher); got != 0 {
+		t.Errorf("out-of-party finisher received %d experience, want 0", got)
 	}
 }
 

@@ -133,12 +133,24 @@ func (p *Player) resolveSwingLocked() {
 	p.attackCooldown = p.sim.attackCooldown
 
 	if target := p.sim.swingTargetLocked(p); target != nil {
+		if target.firstHit == nil {
+			target.firstHit = newMobTap(p)
+		}
 		if p.sim.damageMobLocked(target, damage) {
+			owner := p.sim.currentTapOwnerLocked(target.firstHit)
 			amount := uint32(target.species().experience)
-			recipients := []*Player{p}
+			if owner == nil {
+				award := p.sim.awardOfflineExperienceLocked(target.firstHit, amount)
+				p.sim.log.Debug("experience awarded",
+					"player_id", award.PlayerID.Short(), "source", "mob kill (offline tap)",
+					"amount", amount, "mob_kind", target.kind.String(), "share_count", 1)
+				return
+			}
+
+			recipients := []*Player{owner}
 			source := "mob kill"
-			if p.partyID != 0 {
-				recipients = p.membersNearLocked(target.pos, PartyShareRadius)
+			if owner.partyID != 0 {
+				recipients = owner.membersNearLocked(target.pos, PartyShareRadius)
 				source = "mob kill (shared)"
 			}
 
@@ -146,7 +158,7 @@ func (p *Player) resolveSwingLocked() {
 			share, remainder := amount/shareCount, amount%shareCount
 			for _, recipient := range recipients {
 				received := share
-				if recipient == p {
+				if recipient == owner {
 					received += remainder
 				}
 				p.sim.awardExperienceLocked(recipient, received)

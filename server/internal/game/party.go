@@ -260,10 +260,10 @@ func (s *Sim) samePartyLocked(a, b *Player) bool {
 }
 
 // membersNearLocked returns the recipient set for one of this player's shared
-// kill awards. The killer is first and always included; resolveSwingLocked has
-// already proved they are alive and close enough to land the killing blow. Every
-// other member is read from authoritative party state and must be alive and within
-// radius of pos by Euclidean standing-position distance.
+// kill awards. The player who first hit the mob is first and always included;
+// resolveSwingLocked has already proved they are still online. The tap owner remains
+// included when dead; every other member is read from authoritative party state and
+// must be alive and within radius of pos by Euclidean standing-position distance.
 //
 // The caller holds Sim.mu.
 func (p *Player) membersNearLocked(pos [3]float64, radius float64) []*Player {
