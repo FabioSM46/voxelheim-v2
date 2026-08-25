@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 22] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 26] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -36,6 +36,10 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 22] = [
     RefusalReason::AlreadyInParty,
     RefusalReason::NoInvite,
     RefusalReason::NotLeader,
+    RefusalReason::CorpseUnavailable,
+    RefusalReason::LootNotOwned,
+    RefusalReason::StaleRevision,
+    RefusalReason::InventoryFull,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -122,6 +126,14 @@ impl RefusalReason {
     pub const NoInvite: Self = Self(16);
     /// This party operation is reserved for the current leader.
     pub const NotLeader: Self = Self(17);
+    /// The named corpse has expired, reset, been emptied or never existed for this player.
+    pub const CorpseUnavailable: Self = Self(18);
+    /// The player is not the solo tap owner or the normal-party round-robin owner.
+    pub const LootNotOwned: Self = Self(19);
+    /// The request names a loot revision older or newer than the complete state now held.
+    pub const StaleRevision: Self = Self(20);
+    /// The inventory has no slot able to receive the authoritative loot entry.
+    pub const InventoryFull: Self = Self(21);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -156,6 +168,10 @@ impl RefusalReason {
         Self::AlreadyInParty,
         Self::NoInvite,
         Self::NotLeader,
+        Self::CorpseUnavailable,
+        Self::LootNotOwned,
+        Self::StaleRevision,
+        Self::InventoryFull,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -182,6 +198,10 @@ impl RefusalReason {
             Self::AlreadyInParty => Some("AlreadyInParty"),
             Self::NoInvite => Some("NoInvite"),
             Self::NotLeader => Some("NotLeader"),
+            Self::CorpseUnavailable => Some("CorpseUnavailable"),
+            Self::LootNotOwned => Some("LootNotOwned"),
+            Self::StaleRevision => Some("StaleRevision"),
+            Self::InventoryFull => Some("InventoryFull"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

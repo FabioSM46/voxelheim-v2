@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 8;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 10;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 9] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 11] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -27,6 +27,8 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 9] = [
     RefusedAction::DropItem,
     RefusedAction::Chat,
     RefusedAction::Party,
+    RefusedAction::OpenLoot,
+    RefusedAction::TakeLoot,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -67,9 +69,11 @@ impl RefusedAction {
     pub const DropItem: Self = Self(6);
     pub const Chat: Self = Self(7);
     pub const Party: Self = Self(8);
+    pub const OpenLoot: Self = Self(9);
+    pub const TakeLoot: Self = Self(10);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 8;
+    pub const ENUM_MAX: u8 = 10;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -80,6 +84,8 @@ impl RefusedAction {
         Self::DropItem,
         Self::Chat,
         Self::Party,
+        Self::OpenLoot,
+        Self::TakeLoot,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -93,6 +99,8 @@ impl RefusedAction {
             Self::DropItem => Some("DropItem"),
             Self::Chat => Some("Chat"),
             Self::Party => Some("Party"),
+            Self::OpenLoot => Some("OpenLoot"),
+            Self::TakeLoot => Some("TakeLoot"),
             _ => None,
         }
     }

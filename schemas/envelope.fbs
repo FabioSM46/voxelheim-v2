@@ -112,7 +112,17 @@ union Payload {
   ChatRequest,            // 29
   ChatMessage,            // 30
   PartyRequest,           // 31
-  PartyInvite             // 32
+  PartyInvite,            // 32
+
+  // -- V21. Appended, so the tags of 1..32 are untouched.
+  //
+  //    The requests carry the bump: an older server cannot name either client payload
+  //    and closes the session instead of dropping it. The two server messages are the
+  //    complete per-recipient answer and its explicit end marker.
+  LootOpenRequest,        // 33
+  LootTakeRequest,        // 34
+  LootState,              // 35
+  LootClosed              // 36
 }
 
 table Envelope {

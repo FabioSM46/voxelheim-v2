@@ -22,8 +22,8 @@ const (
 	/// Cannot attack again until this expires. The server's answer to attack cadence.
 	MobActionRecovery MobAction = 4
 	/// Killed, and going down. The creature has no health left and is not coming back;
-	/// the server holds the body here for a fixed span and then stops sending it, and
-	/// what the kill left behind reaches the ground at that moment and not before.
+	/// the server holds the fall here for its presentation span and then advances the
+	/// same entity to `Corpse`. Ordinary mob loot never becomes a ground drop.
 	///
 	/// **It is the only statement of death this contract makes about a mob, and it is
 	/// what a receiver must animate on.** There is no `LifeState` beside a `MobState` and
@@ -35,11 +35,14 @@ const (
 	/// gameplay fact the server is already stating.
 	///
 	/// Nothing about the pose is here. How long a body takes to go down, and which way it
-	/// falls, are presentation; how long the server keeps sending this action, and when
-	/// the drop exists, are not.
+	/// falls, are presentation; when the server advances it to `Corpse` is not.
 	MobActionDying MobAction = 5
 	/// Moving directly away from the nearest live player the server chose as a threat.
 	MobActionFlee MobAction = 6
+	/// Dead and available as a server-owned loot container. The body neither moves nor
+	/// acts, and remains until its authoritative expiry rather than becoming a ground drop.
+	/// Which recipients may open it is carried separately and per recipient.
+	MobActionCorpse MobAction = 7
 )
 
 var EnumNamesMobAction = map[MobAction]string{
@@ -50,6 +53,7 @@ var EnumNamesMobAction = map[MobAction]string{
 	MobActionRecovery: "Recovery",
 	MobActionDying:    "Dying",
 	MobActionFlee:     "Flee",
+	MobActionCorpse:   "Corpse",
 }
 
 var EnumValuesMobAction = map[string]MobAction{
@@ -60,6 +64,7 @@ var EnumValuesMobAction = map[string]MobAction{
 	"Recovery": MobActionRecovery,
 	"Dying":    MobActionDying,
 	"Flee":     MobActionFlee,
+	"Corpse":   MobActionCorpse,
 }
 
 func (v MobAction) String() string {

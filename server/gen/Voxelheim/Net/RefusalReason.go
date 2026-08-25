@@ -82,6 +82,14 @@ const (
 	RefusalReasonNoInvite RefusalReason = 16
 	/// This party operation is reserved for the current leader.
 	RefusalReasonNotLeader RefusalReason = 17
+	/// The named corpse has expired, reset, been emptied or never existed for this player.
+	RefusalReasonCorpseUnavailable RefusalReason = 18
+	/// The player is not the solo tap owner or the normal-party round-robin owner.
+	RefusalReasonLootNotOwned RefusalReason = 19
+	/// The request names a loot revision older or newer than the complete state now held.
+	RefusalReasonStaleRevision RefusalReason = 20
+	/// The inventory has no slot able to receive the authoritative loot entry.
+	RefusalReasonInventoryFull RefusalReason = 21
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -115,6 +123,10 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonAlreadyInParty:     "AlreadyInParty",
 	RefusalReasonNoInvite:           "NoInvite",
 	RefusalReasonNotLeader:          "NotLeader",
+	RefusalReasonCorpseUnavailable:  "CorpseUnavailable",
+	RefusalReasonLootNotOwned:       "LootNotOwned",
+	RefusalReasonStaleRevision:      "StaleRevision",
+	RefusalReasonInventoryFull:      "InventoryFull",
 	RefusalReasonMalformedNoAnchor:  "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:    "MalformedFacing",
 	RefusalReasonMalformedSlot:      "MalformedSlot",
@@ -140,6 +152,10 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"AlreadyInParty":     RefusalReasonAlreadyInParty,
 	"NoInvite":           RefusalReasonNoInvite,
 	"NotLeader":          RefusalReasonNotLeader,
+	"CorpseUnavailable":  RefusalReasonCorpseUnavailable,
+	"LootNotOwned":       RefusalReasonLootNotOwned,
+	"StaleRevision":      RefusalReasonStaleRevision,
+	"InventoryFull":      RefusalReasonInventoryFull,
 	"MalformedNoAnchor":  RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":    RefusalReasonMalformedFacing,
 	"MalformedSlot":      RefusalReasonMalformedSlot,
