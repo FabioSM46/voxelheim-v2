@@ -493,10 +493,16 @@ package can avoid the import would create two truths to keep in step for no bene
   every *other* member even outside ordinary view, so its leader is either the recipient or one of
   those entries. Appearance uses the same consent boundary to deliver names and levels out of view,
   and membership teardown forgets that description edge so a later party must describe it again.
-  A mob kill shares its registry experience only with living members within `PartyShareRadius` of
-  the creature: equal integer shares, with the remainder kept by the killer. Mining and crafting
-  stay personal rewards, and every recipient still goes through `Sim.awardExperienceLocked` so a
-  shared level-up invalidates appearances exactly like a solo one.
+  The first player to damage a mob taps its registry experience: later attackers may help or land
+  the killing blow, but they cannot transfer that award to themselves. Death and disconnection do
+  not erase the tap; only discarding/resetting that mob does. If the owner is online and belongs to
+  a party when the mob dies, the award is shared with living members within `PartyShareRadius` of
+  the creature: equal integer shares, with the remainder kept by the tap owner even when dead. An
+  offline owner receives the full award, queued as an absolute lifetime total and written through
+  the player autosave (plus the final shutdown flush), so retrying cannot award it twice and an
+  immediate reconnect sees it before persistence runs. Mining and crafting stay personal rewards,
+  and every online recipient still goes through `Sim.awardExperienceLocked` so a shared level-up
+  invalidates appearances exactly like a solo one.
 - **`Registry.Unsubscribe` is the broadcast's `Sim.Leave`.** It takes the lock
   `BroadcastChunk` holds *while it sends*, so once it returns nothing can still be sending to
   that session — and `Serve` calls it **before** `close(out)`, because a send on a closed

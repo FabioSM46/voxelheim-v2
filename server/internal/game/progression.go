@@ -1,5 +1,25 @@
 package game
 
+import "github.com/FabioSM46/voxelheim-v2/server/internal/identity"
+
+// ExperienceAward is an offline character's authoritative lifetime total after a
+// tapped mob died. It is an absolute total rather than a delta so persistence may
+// retry it without ever awarding the same kill twice.
+type ExperienceAward struct {
+	PlayerID      identity.PlayerID
+	CharacterName string
+	Experience    uint32
+}
+
+type characterKey struct {
+	playerID   identity.PlayerID
+	foldedName string
+}
+
+func characterKeyOf(playerID identity.PlayerID, name string) characterKey {
+	return characterKey{playerID: playerID, foldedName: foldPlayerName(name)}
+}
+
 // MaxLevel is the last level the progression curve can produce.
 //
 // Thirty levels make the linear steps below accumulate to 21,750 lifetime
@@ -112,4 +132,66 @@ func (s *Sim) awardExperienceLocked(p *Player, amount uint32) (leveledUp bool) {
 		s.forgetDescribedLocked(p.entityID)
 	}
 	return leveledUp
+}
+
+// currentTapOwnerLocked returns the current session playing the character that made
+// the first hit, or the departed Player retained by the mob when that character is
+// offline. Reconnecting on another character under the same account does not move the
+// tap.
+//
+// The caller holds sim.mu.
+func (s *Sim) currentTapOwnerLocked(tagged *Player) *Player {
+	if tagged == nil {
+		return nil
+	}
+	current := s.byIdentity[tagged.playerID]
+	if current != nil && foldPlayerName(current.name) == foldPlayerName(tagged.name) {
+		return current
+	}
+	return tagged
+}
+
+// rememberOfflineExperienceLocked keeps the absolute total an offline tap owner has
+// earned until persistence confirms it. A later award replaces it with the newer
+// total; it is never added to an earlier queued value.
+//
+// The caller holds sim.mu.
+func (s *Sim) rememberOfflineExperienceLocked(p *Player) {
+	key := characterKeyOf(p.playerID, p.name)
+	held, pending := s.pendingExperience[key]
+	if pending && held.Experience >= p.experience {
+		return
+	}
+	s.pendingExperience[key] = ExperienceAward{
+		PlayerID:      p.playerID,
+		CharacterName: p.name,
+		Experience:    p.experience,
+	}
+}
+
+// PendingExperienceAwards returns a snapshot of offline tap awards waiting to be
+// persisted. It clears nothing: the caller acknowledges each successful absolute
+// write separately, so a disk error leaves the award ready for the next autosave.
+func (s *Sim) PendingExperienceAwards() []ExperienceAward {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	awards := make([]ExperienceAward, 0, len(s.pendingExperience))
+	for _, award := range s.pendingExperience {
+		awards = append(awards, award)
+	}
+	return awards
+}
+
+// AcknowledgeExperienceAward forgets an offline award once that absolute total is on
+// disk. A newer total queued while the write was in flight is retained.
+func (s *Sim) AcknowledgeExperienceAward(saved ExperienceAward) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	key := characterKeyOf(saved.PlayerID, saved.CharacterName)
+	held, pending := s.pendingExperience[key]
+	if pending && held.Experience <= saved.Experience {
+		delete(s.pendingExperience, key)
+	}
 }

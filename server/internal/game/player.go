@@ -133,6 +133,16 @@ type Sim struct {
 	chatLimiters map[identity.PlayerID]*chatLimiter
 	chatNow      func() time.Time
 
+	// pendingExperience is every mob award earned after its tap owner left the
+	// simulation and not yet confirmed on that character's stored record. The key is
+	// both the account identity and the folded character name: an account may own
+	// several characters, while names are unique within one world.
+	//
+	// Values are absolute lifetime totals rather than deltas, so retrying a save can
+	// never award twice. Join also reads this map before publishing a returning body,
+	// which closes the race between an offline kill and an immediate reconnect.
+	pendingExperience map[characterKey]ExperienceAward
+
 	// parties are authoritative membership groups keyed by ids from the same source
 	// that names every other entity. byName is the one live display-name lookup and
 	// exists only for party Invite and Kick; names were accepted and made globally
@@ -287,6 +297,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		players:            make(map[uint64]*Player),
 		chatLimiters:       make(map[identity.PlayerID]*chatLimiter),
 		chatNow:            SystemClock{}.Now,
+		pendingExperience:  make(map[characterKey]ExperienceAward),
 		parties:            make(map[uint64]*party),
 		byName:             make(map[string]*Player),
 		partyInviteTicks:   uint64(ticksFor(PartyInviteTTL, tickRate)),
@@ -613,6 +624,9 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 		// an entity id, so an overwrite would point every one of the displaced player's
 		// structures at a session that had already ended.
 		return nil, fmt.Errorf("game: player %s is already in the simulation as entity %d", playerID.Short(), live.entityID)
+	}
+	if pending, earned := s.pendingExperience[characterKeyOf(playerID, name)]; earned && pending.Experience > p.experience {
+		p.awardExperienceLocked(pending.Experience - p.experience)
 	}
 	p.inventory.mu.Lock()
 	p.refreshWornLocked()

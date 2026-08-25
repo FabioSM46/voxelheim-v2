@@ -399,6 +399,61 @@ func TestAnAutosaveDoesNotUndoATeardown(t *testing.T) {
 	}
 }
 
+func TestOfflineMobExperienceRaisesOnlyTheCharacterThatOwnedTheTap(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, _ := internalIdentities(t, store)
+	owner := identity.IDOf(identity.Account{31})
+	character, err := store.Create(owner, "Eivor", testAppearance())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	original := persist.Record{
+		Pos: [3]float64{4, 65, -4}, Health: 73, Hunger: 29, Experience: 10,
+	}
+	if err := store.Save(character.ID, original); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	award := game.ExperienceAward{PlayerID: owner, CharacterName: "Eivor", Experience: 25}
+	if err := identities.RememberExperience(award); err != nil {
+		t.Fatalf("RememberExperience: %v", err)
+	}
+	// The absolute total makes both a retry and an older delayed write harmless.
+	if err := identities.RememberExperience(award); err != nil {
+		t.Fatalf("RememberExperience retry: %v", err)
+	}
+	if err := identities.RememberExperience(game.ExperienceAward{
+		PlayerID: owner, CharacterName: "Eivor", Experience: 20,
+	}); err != nil {
+		t.Fatalf("RememberExperience with an older total: %v", err)
+	}
+
+	saved, found, err := store.Load(character.ID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("the offline award wrote no record")
+	}
+	if saved.Experience != 25 {
+		t.Errorf("stored experience = %d, want 25", saved.Experience)
+	}
+	if saved.Pos != original.Pos || saved.Health != original.Health || saved.Hunger != original.Hunger {
+		t.Errorf("offline experience changed the life to %v/%d/%d, want %v/%d/%d",
+			saved.Pos, saved.Health, saved.Hunger, original.Pos, original.Health, original.Hunger)
+	}
+	if err := identities.RememberExperience(game.ExperienceAward{
+		PlayerID: identity.PlayerID{99}, CharacterName: "Eivor", Experience: 30,
+	}); err == nil {
+		t.Error("an award under another owner was accepted")
+	}
+}
+
 // The autosave does write for a session that is still running, which is the other half
 // of the rule above — a skip that skipped everybody would pass that test too.
 func TestAnAutosaveWritesForALiveSession(t *testing.T) {

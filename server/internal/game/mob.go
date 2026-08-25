@@ -78,6 +78,16 @@ type mob struct {
 	// has left is a pointer the simulation would still step.
 	target uint64
 
+	// firstHitBy is the player who first dealt damage to this creature, or nil until
+	// one does. That first valid hit taps the mob for experience: later attackers may
+	// help or land the killing blow, but they cannot transfer the award to themselves.
+	//
+	// A pointer rather than an entity id is deliberate. The Player keeps the stable
+	// account identity and character name after its session leaves, so death and
+	// disconnection do not erase the tap. A mob reset discards this mob and therefore
+	// the pointer; a fresh spawn starts untapped.
+	firstHitBy *Player
+
 	// actionTicks is what remains of a windup or a recovery. Ticks, not a deadline —
 	// the simulation's only clock is Step.
 	actionTicks uint32
