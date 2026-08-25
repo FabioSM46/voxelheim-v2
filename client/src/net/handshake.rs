@@ -157,6 +157,19 @@ pub enum HandshakeError {
         vitals_say_dead: bool,
         entity_id: u64,
     },
+    /// A non-empty party roster omitted the recipient of this snapshot.
+    ///
+    /// The roster is complete and includes the recipient, but only the welcome carries
+    /// that recipient's entity id. The frame decoder therefore cannot enforce this half
+    /// of the contract on its own.
+    PartyRosterWithoutRecipient(u64),
+    /// The combat members are not the ordered projection of the roster's other online
+    /// characters.
+    ///
+    /// This simultaneously keeps the recipient out, keeps every other online member in,
+    /// and preserves authoritative party order. Offline roster entries have no combat
+    /// state and are omitted from `expected`.
+    PartyMembersDisagree { expected: Vec<u64>, got: Vec<u64> },
 }
 
 impl fmt::Display for HandshakeError {
@@ -196,6 +209,14 @@ impl fmt::Display for HandshakeError {
                 "EntitySnapshot says self_vitals dead={vitals_say_dead} while dead_players says \
                  dead={} for this session's own entity {entity_id}",
                 !vitals_say_dead
+            ),
+            Self::PartyRosterWithoutRecipient(entity_id) => write!(
+                f,
+                "EntitySnapshot party_roster does not include this session's own entity {entity_id}"
+            ),
+            Self::PartyMembersDisagree { expected, got } => write!(
+                f,
+                "EntitySnapshot party_members ids are {got:?}, want the roster's other online ids {expected:?} in order"
             ),
         }
     }
@@ -334,6 +355,23 @@ impl Handshake {
                 // playing. Neither is a frame to go on reading.
                 let entity_id = self.entity_id.unwrap_or_default();
                 let vitals_say_dead = snapshot.self_vitals.life_state == LifeState::Dead;
+                let recipient_in_roster = snapshot
+                    .party_roster
+                    .iter()
+                    .any(|member| member.entity_id == entity_id);
+                let expected_party_members: Vec<u64> = snapshot
+                    .party_roster
+                    .iter()
+                    .filter_map(|member| {
+                        (member.entity_id != 0 && member.entity_id != entity_id)
+                            .then_some(member.entity_id)
+                    })
+                    .collect();
+                let party_members: Vec<u64> = snapshot
+                    .party_members
+                    .iter()
+                    .map(|member| member.entity_id)
+                    .collect();
 
                 if self.clock.declared() && snapshot.tick_of_day >= self.clock.day_length_ticks {
                     Err(HandshakeError::TickOfDay {
@@ -344,6 +382,13 @@ impl Handshake {
                     Err(HandshakeError::OwnDeathDisagrees {
                         vitals_say_dead,
                         entity_id,
+                    })
+                } else if !snapshot.party_roster.is_empty() && !recipient_in_roster {
+                    Err(HandshakeError::PartyRosterWithoutRecipient(entity_id))
+                } else if party_members != expected_party_members {
+                    Err(HandshakeError::PartyMembersDisagree {
+                        expected: expected_party_members,
+                        got: party_members,
                     })
                 } else {
                     Ok(Transition::Snapshot(snapshot))
@@ -801,6 +846,93 @@ mod tests {
                     }),
                     "{name}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn a_party_roster_must_include_this_session() {
+        let mut handshake = established();
+        let snapshot = Snapshot {
+            party_roster: vec![super::super::codec::PartyRosterMember {
+                character_id: 101,
+                entity_id: 17,
+                name: "Other".to_owned(),
+                online: true,
+            }],
+            party_members: vec![super::super::codec::PartyMemberState {
+                entity_id: 17,
+                pos: [1.0, 2.0, 3.0],
+                health: 40,
+                max_health: 50,
+                alive: true,
+            }],
+            ..snapshot()
+        };
+
+        assert_eq!(
+            handshake.apply(Message::Snapshot(snapshot)),
+            Err(HandshakeError::PartyRosterWithoutRecipient(7))
+        );
+    }
+
+    #[test]
+    fn party_members_are_the_ordered_online_roster_without_this_session() {
+        let member = |entity_id| super::super::codec::PartyMemberState {
+            entity_id,
+            pos: [1.0, 2.0, 3.0],
+            health: 40,
+            max_health: 50,
+            alive: true,
+        };
+        let roster_member =
+            |character_id, entity_id, name: &str| super::super::codec::PartyRosterMember {
+                character_id,
+                entity_id,
+                name: name.to_owned(),
+                online: entity_id != 0,
+            };
+        let roster = vec![
+            roster_member(101, 0, "Offline leader"),
+            roster_member(202, 7, "Self"),
+            roster_member(303, 17, "First online member"),
+            roster_member(404, 0, "Offline member"),
+            roster_member(505, 19, "Second online member"),
+        ];
+
+        for (name, party_members, expected) in [
+            ("complete and ordered", vec![member(17), member(19)], None),
+            (
+                "recipient included",
+                vec![member(7), member(17), member(19)],
+                Some(vec![7, 17, 19]),
+            ),
+            ("online member missing", vec![member(17)], Some(vec![17])),
+            (
+                "online members reordered",
+                vec![member(19), member(17)],
+                Some(vec![19, 17]),
+            ),
+        ] {
+            let mut handshake = established();
+            let snapshot = Snapshot {
+                party_roster: roster.clone(),
+                party_members,
+                ..snapshot()
+            };
+            let applied = handshake.apply(Message::Snapshot(snapshot.clone()));
+
+            if let Some(got) = expected {
+                assert_eq!(
+                    applied,
+                    Err(HandshakeError::PartyMembersDisagree {
+                        expected: vec![17, 19],
+                        got,
+                    }),
+                    "{name}"
+                );
+            } else {
+                assert_eq!(applied, Ok(Transition::Snapshot(snapshot)), "{name}");
             }
         }
     }
