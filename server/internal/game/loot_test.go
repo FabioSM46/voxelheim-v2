@@ -3,7 +3,6 @@ package game
 import (
 	"io"
 	"log/slog"
-	"math"
 	"testing"
 	"time"
 
@@ -23,22 +22,6 @@ import (
 
 // drops is every drop in the world, in identity order, copied under the lock that owns
 // them. A copy rather than the pointers, because a test reads them on its own goroutine
-// while the tick goroutine may still be stepping.
-func (h *vitalsHarness) drops() []itemDrop {
-	h.sim.mu.Lock()
-	defer h.sim.mu.Unlock()
-
-	live := h.sim.sortedDropsLocked()
-	seen := make([]itemDrop, len(live))
-	for i, d := range live {
-		seen[i] = *d
-	}
-	return seen
-}
-
-// strikeDown swings until the named creature is killed, and reports where it was standing
-// on the tick the last blow landed.
-//
 // **The creature is dying when this returns, not gone.** A blow no longer removes anything
 // and no longer puts anything on the ground: the body stays in the world in
 // MobActionDying for MobDeathDuration, and what it left behind is rolled when that runs
@@ -103,15 +86,6 @@ func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64
 	}
 	h.t.Fatalf("creature %d was still in the world after the whole of its death", id)
 	return [3]float64{}
-}
-
-// standAt moves a player to an exact position, the way a test needs rather than the way
-// the integrator would.
-func (h *vitalsHarness) standAt(p *Player, pos [3]float64) {
-	h.sim.mu.Lock()
-	defer h.sim.mu.Unlock()
-	p.pos = pos
-	p.chunk = chunkAt(pos)
 }
 
 // armedAgainst is a player holding the starter blade with one creature of the named
@@ -194,102 +168,12 @@ func TestNothingConsumesABoneYet(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// What a kill leaves
-// ---------------------------------------------------------------------------
-
-// A draugr killed with the starter blade leaves its bones where it stood.
-//
-// The count is exact rather than "one or two": the roll comes from the simulation's own
-// generator, seeded from the package's shared world seed, so the first kill in this world
-// leaves exactly one bone and will do so on every run and every machine. That is the
-// whole reason the generator is owned and locked the way it is.
-func TestAKilledDraugrLeavesItsBonesWhereItStood(t *testing.T) {
-	t.Parallel()
-
-	h, player, _, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-	stood := h.killWithTheStarterBlade(player, id)
-
-	left := h.drops()
-	if len(left) != 1 {
-		t.Fatalf("a dead draugr left %d drops, want exactly one", len(left))
-	}
-	if left[0].item != ItemBone {
-		t.Errorf("a dead draugr left item %d, want bones (%d)", left[0].item, ItemBone)
-	}
-	if left[0].count != 1 {
-		t.Errorf("a dead draugr left %d bones; this world's first roll is exactly 1", left[0].count)
-	}
-
-	// At the mob's position, through the drop path a mined block already uses: the voxel
-	// it was standing in, with the box centred in it.
-	want := dropSpawnPos(voxelAt(stood))
-	for axis := range 3 {
-		if math.Abs(left[0].pos[axis]-want[axis]) > dropTolerance {
-			t.Fatalf("the bones are at %v, want the draugr's own voxel at %v", left[0].pos, want)
-		}
-	}
-}
-
-// A vargr leaves exactly one pelt, and the fixed count is the balance: two pelts make one
-// patch, so a vargr is half a repair whatever the generator says.
-func TestAKilledVargrLeavesOnePelt(t *testing.T) {
-	t.Parallel()
-
-	h, player, _, id := armedAgainst(t, vnet.MobKindVargr, [3]float64{0.5, 64, -1.5})
-	h.killWithTheStarterBlade(player, id)
-
-	left := h.drops()
-	if len(left) != 1 {
-		t.Fatalf("a dead vargr left %d drops, want exactly one", len(left))
-	}
-	if left[0].item != ItemVargrPelt || left[0].count != 1 {
-		t.Errorf("a dead vargr left %d of item %d, want 1 pelt (%d)",
-			left[0].count, left[0].item, ItemVargrPelt)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// The wait, which is the server's
-// ---------------------------------------------------------------------------
-
-// Nothing is on the ground until the body has stopped existing, and then everything is.
-//
-// **This is the whole of the delay, asserted tick by tick rather than at the two ends.**
-// A test that killed a draugr, waited three seconds and found a bone would pass equally
-// against a server that spawned it on the instant of the blow — the interesting claim is
-// that the ground is empty for every tick in between, which is what makes the wait a wait.
-func TestNothingReachesTheGroundUntilTheBodyHasGone(t *testing.T) {
-	t.Parallel()
-
-	h, player, _, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-	h.strikeDown(player, id)
-
-	for tick := 1; tick <= int(h.sim.mobDeathTicks)+1; tick++ {
-		_, live := h.mobState(id)
-		if got := h.sim.DropCount(); got != 0 && live {
-			t.Fatalf("%d drops were on the ground at tick %d of the death, while the body was still there",
-				got, tick)
-		}
-		if !live {
-			// The reap ran on the previous tick and Step spawned what it produced, which
-			// is where the bone appears. The body and the drop are never both present.
-			if got := h.sim.DropCount(); got != 1 {
-				t.Fatalf("the body went and left %d drops, want the one bone the roll makes", got)
-			}
-			return
-		}
-		h.step()
-	}
-	t.Fatal("the body never stopped existing, so nothing it left ever reached the ground")
-}
-
 // The wait is the same wall-clock length at every tick rate, which is what makes it the
 // server's rather than a count of frames.
 //
 // **A client cannot shorten it and cannot lengthen it**, because nothing a client sends is
 // read anywhere on this path: the countdown is set from MobDeathDuration at construction,
-// spent by Step, and the drop does not exist until it runs out. The rate sweep is what says
+// spent by Step, and the corpse does not exist until it runs out. The rate sweep is what says
 // so mechanically — an operator's -tick-rate is the only thing that changes how many ticks
 // the wait takes, and it changes nothing about how long it lasts.
 //
@@ -418,41 +302,6 @@ func TestABodyGoingDownStopsDoingEverythingElse(t *testing.T) {
 // What a despawn leaves, which is nothing
 // ---------------------------------------------------------------------------
 
-// The dawn does not take a body that is already going down, and the kill's loot survives it.
-//
-// **The two rules point opposite ways and the death has to win.** A nocturnal creature
-// hunting nobody is exactly what the daylight removes, and a killed one hunts nobody by
-// construction — its target is cleared at the blow — so every tick of every death that
-// straddles a dawn matched the removal rule. Removing it there would delete loot a player
-// had already earned, which is the one thing "a despawn leaves nothing" was never meant to
-// say.
-func TestTheDawnDoesNotTakeABodyThatIsGoingDown(t *testing.T) {
-	t.Parallel()
-
-	// Night, so the draugr may be killed without the daylight taking it first; the clock is
-	// then wound to the dawn while the body is on its way down.
-	h, player, _, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-	h.keepNight()
-	h.strikeDown(player, id)
-
-	if err := h.sim.RestoreClock(NightEndTicks); err != nil {
-		t.Fatalf("RestoreClock: %v", err)
-	}
-	h.step()
-	if _, live := h.mobState(id); !live {
-		t.Fatal("the dawn took a body that was still going down, and its loot with it")
-	}
-
-	h.advance(int(h.sim.mobDeathTicks) + 2)
-	if _, live := h.mobState(id); live {
-		t.Fatal("the body outlived its own death")
-	}
-	left := h.drops()
-	if len(left) != 1 || left[0].item != ItemBone {
-		t.Fatalf("a draugr killed just before the dawn left %v, want its bones", left)
-	}
-}
-
 // Loot is the reward for a kill, not for having existed.
 //
 // Both removals the director performs, because they are two rules in one loop and a
@@ -500,99 +349,6 @@ func TestADespawnedMobLeavesNothing(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The lock discipline
-// ---------------------------------------------------------------------------
-
-// A kill resolved inside the tick does not deadlock, and its drop is in the very next
-// snapshot.
-//
-// **The deadlock is the hazard this whole design is arranged around**: the swing is
-// judged under Sim.mu and spawnDrop takes Sim.mu itself, so a naive spawn at the point of
-// death would wedge the tick goroutine for ever on the first kill anybody made. The
-// budget below is a deadlock detector rather than a performance assertion — a wedged tick
-// never finishes, and a slow machine finishes in milliseconds.
-//
-// The "very next" is exact and worth stating, and the tick it is counted from moved: the
-// loot is spawned after the tick that *reaped the body* has already encoded its snapshots,
-// so it appears in the tick after that one — the same tick a mined block's drop waits. The
-// kill itself is MobDeathDuration earlier and puts nothing anywhere.
-func TestAKillInsideTheTickNeitherDeadlocksNorMissesTheNextSnapshot(t *testing.T) {
-	t.Parallel()
-
-	h, player, out, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h.killWithTheStarterBlade(player, id)
-	}()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the tick never returned from a kill: spawning loot under Sim.mu deadlocks it")
-	}
-
-	if drops := len(out.snapshotDrops(t)); drops != 0 {
-		t.Errorf("the snapshot of the reaping tick already carried %d drops; loot spawns after it", drops)
-	}
-
-	h.step()
-	shown := out.snapshotDrops(t)
-	if len(shown) != 1 {
-		t.Fatalf("the snapshot after the kill carries %d drops, want the one the draugr left", len(shown))
-	}
-	if shown[0].ItemID != uint16(ItemBone) || shown[0].Count != 1 {
-		t.Errorf("the snapshot carries %d of item %d, want 1 bone (%d)",
-			shown[0].Count, shown[0].ItemID, ItemBone)
-	}
-	if shown[0].Durability != 0 || shown[0].MaxDurability != 0 {
-		t.Errorf("the loot roll carries durability %d/%d, want a wearless world drop",
-			shown[0].Durability, shown[0].MaxDurability)
-	}
-}
-
-// Loot is an ordinary drop: it ages, it merges with what is already there, and it is
-// collected by walking over it. There is no special case for it anywhere.
-func TestLootIsAnOrdinaryDropInEveryRespect(t *testing.T) {
-	t.Parallel()
-
-	// Far enough that walking is still what collects it — the drop lands outside the
-	// pickup radius, which is what lets two kills pile up before anybody takes them.
-	corpse := [3]float64{0.5, 64, -1.5}
-	h, player, _, first := armedAgainst(t, vnet.MobKindDraugr, corpse)
-	h.killWithTheStarterBlade(player, first)
-
-	// A second corpse in the same spot, so what is on the ground is one drop rather than
-	// two: merging is the drop path's rule and loot goes through it unchanged. The wait
-	// is the blade's own cooldown, which Attack refuses a second fight inside.
-	h.advance(int(h.sim.attackCooldown) + 1)
-	second := h.placeSpeciesAt(vnet.MobKindDraugr, corpse)
-	h.killWithTheStarterBlade(player, second)
-	h.step()
-
-	left := h.drops()
-	if len(left) != 1 {
-		t.Fatalf("two draugr killed in one spot left %d drops, want one merged pile", len(left))
-	}
-	if left[0].count != 2 {
-		t.Errorf("the merged pile holds %d bones, want the 1 each of two kills left", left[0].count)
-	}
-
-	// And then it is picked up by walking onto it, through the collector that has no idea
-	// where the stack came from. The delay has long since elapsed, which is the other half
-	// of "an ordinary drop": loot is not collectable on the tick it appears either.
-	h.standAt(player, corpse)
-	for range dropPickupDelayTicks + 2 {
-		h.step()
-		if heldCount(player.InventoryState(), ItemBone) == 2 {
-			return
-		}
-	}
-	t.Errorf("the bones were never collected: the pack holds %d and %d are on the ground",
-		heldCount(player.InventoryState(), ItemBone), h.sim.DropCount())
-}
-
-// ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
 
@@ -629,10 +385,10 @@ func TestTheSameWorldLeavesTheSameLoot(t *testing.T) {
 		counts := make([]uint16, 0, times)
 		for range times {
 			left := sim.rollLootLocked(sim.mobs[id])
-			if len(left) != 1 || left[0].item != ItemBone {
+			if len(left) != 1 || left[0].stack.item != ItemBone {
 				t.Fatalf("a draugr rolled %v, want one line of bones", left)
 			}
-			counts = append(counts, left[0].count)
+			counts = append(counts, left[0].stack.count)
 		}
 		return counts
 	}
@@ -776,36 +532,4 @@ func TestAPatchIsRefusedWhereAStoneWouldBe(t *testing.T) {
 			t.Error("the refused repair changed the pack")
 		}
 	})
-}
-
-// The wire shape of a loot drop is the shape every other drop has: a non-zero item and a
-// non-zero count, which is what schemas/player.fbs requires of the vector it travels in.
-//
-// Asked of the encoded states rather than of the simulation's own structs, because the
-// contract is about what crosses the wire — and spawnDrop's two refusals are the only
-// thing standing between a rolled count of zero and a frame no client may decode.
-func TestLootSatisfiesTheDropContract(t *testing.T) {
-	t.Parallel()
-
-	h, player, _, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-	h.killWithTheStarterBlade(player, id)
-	h.step()
-
-	left := h.drops()
-	if len(left) == 0 {
-		t.Fatal("nothing was left behind, so this test asked nothing")
-	}
-	live := make([]*itemDrop, len(left))
-	for i := range left {
-		live[i] = &left[i]
-	}
-	for _, state := range dropStates(live) {
-		if state.ItemID == uint16(ItemNone) || state.Count == 0 {
-			t.Errorf("a loot drop encodes as %d of item %d, and the contract forbids a zero in either",
-				state.Count, state.ItemID)
-		}
-		if _, registered := itemByID(ItemID(state.ItemID)); !registered {
-			t.Errorf("a loot drop names item %d, which no registry entry describes", state.ItemID)
-		}
-	}
 }

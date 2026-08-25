@@ -21,7 +21,10 @@ func characterKeyOf(playerID identity.PlayerID, name string) characterKey {
 }
 
 func newMobTap(p *Player) *mobTap {
-	return &mobTap{playerID: p.playerID, characterName: p.name, experience: p.experience}
+	return &mobTap{
+		playerID: p.playerID, characterID: p.characterID,
+		characterName: p.name, experience: p.experience,
+	}
 }
 
 func (t *mobTap) key() characterKey {

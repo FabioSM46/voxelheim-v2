@@ -97,8 +97,8 @@ type Sim struct {
 	mobDespawnTicks uint32
 
 	// mobDeathTicks is MobDeathDuration in the ticks Step counts: how long a killed
-	// creature's body lies in the world before it stops existing and its loot reaches the
-	// ground. Derived per server for the reason deathTicks is — two and a half seconds of
+	// creature remains Dying before it becomes a lootable corpse. Derived per server for
+	// the reason deathTicks is — two and a half seconds of
 	// dying has to be two and a half seconds at every rate.
 	//
 	// **It is neither of the two above.** The director's removals take away a creature
@@ -106,6 +106,10 @@ type Sim struct {
 	// one counts a creature that has already been killed out of the world, and it is the
 	// only countdown loot waits on.
 	mobDeathTicks uint32
+
+	// corpseLifetimeTicks is CorpseLifetime in authoritative ticks. A corpse records
+	// its absolute expiry tick when Dying completes; opening it never changes this.
+	corpseLifetimeTicks uint64
 
 	// attackCooldown is SwordCooldown in the ticks Step counts, so a blade recovers in
 	// six hundred milliseconds whatever rate the server is run at.
@@ -173,6 +177,11 @@ type Sim struct {
 	// director puts them back where the players actually are, which is a better answer
 	// than a file could give.
 	mobs map[uint64]*mob
+
+	// corpses are killed normal mobs after their Dying duration. Kept separately from
+	// mobs so they cannot act, collide, acquire a target or count toward spawn ceilings;
+	// the snapshot projection merges both collections back into entity-id order.
+	corpses map[uint64]*corpse
 
 	// spawns is the director's random source: seeded from the world seed at
 	// construction and advanced only here, under this lock, inside Step.
@@ -245,7 +254,7 @@ type Sim struct {
 // cannot, and the seam it reads chunks through has no seed on it. What the number buys
 // is that the spawn director's choices and a kill's yield are properties of the *world*
 // rather than of the process — two runs of the same world, given the same ticks, place
-// the same creatures in the same places and leave the same items on the same ground.
+// the same creatures in the same places and roll the same corpse entries.
 // Each generator gets its own PCG stream off this one seed, so neither is a function of
 // what the other has drawn. Any value is accepted, including zero: a seed is a starting
 // point and there is no such thing as a wrong one.
@@ -286,30 +295,32 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		protectionTicks: respawnProtectionTicks(tickRate),
 		regenDelayTicks: ticksFor(HealthRegenDelay, tickRate),
 
-		regenIntervalTicks: ticksFor(HealthRegenInterval, tickRate),
-		hungerDrainTicks:   ticksFor(HungerDrainInterval, tickRate),
-		mobTimings:         mobTimingsFor(tickRate),
-		spawnEvery:         ticksFor(SpawnDirectorInterval, tickRate),
-		mobDespawnTicks:    ticksFor(MobDespawnGrace, tickRate),
-		mobDeathTicks:      ticksFor(MobDeathDuration, tickRate),
-		spawns:             newSpawnRNG(worldSeed),
-		loot:               newLootRNG(worldSeed),
-		attackCooldown:     ticksFor(SwordCooldown, tickRate),
-		log:                log,
-		players:            make(map[uint64]*Player),
-		chatLimiters:       make(map[identity.PlayerID]*chatLimiter),
-		chatNow:            SystemClock{}.Now,
-		pendingExperience:  make(map[characterKey]ExperienceAward),
-		parties:            make(map[uint64]*party),
-		partyMemberships:   make(map[partyMemberKey]uint64),
-		byName:             make(map[string]*Player),
-		partyInviteTicks:   uint64(ticksFor(PartyInviteTTL, tickRate)),
-		partyOfflineTicks:  uint64(ticksFor(PartyOfflineGrace, tickRate)),
-		drops:              make(map[uint64]*itemDrop),
-		mobs:               make(map[uint64]*mob),
-		structures:         make(map[uint64]*structure),
-		byIdentity:         make(map[identity.PlayerID]*Player),
-		minersByPos:        make(map[[3]int32]map[*Player]struct{}),
+		regenIntervalTicks:  ticksFor(HealthRegenInterval, tickRate),
+		hungerDrainTicks:    ticksFor(HungerDrainInterval, tickRate),
+		mobTimings:          mobTimingsFor(tickRate),
+		spawnEvery:          ticksFor(SpawnDirectorInterval, tickRate),
+		mobDespawnTicks:     ticksFor(MobDespawnGrace, tickRate),
+		mobDeathTicks:       ticksFor(MobDeathDuration, tickRate),
+		corpseLifetimeTicks: uint64(ticksFor(CorpseLifetime, tickRate)),
+		spawns:              newSpawnRNG(worldSeed),
+		loot:                newLootRNG(worldSeed),
+		attackCooldown:      ticksFor(SwordCooldown, tickRate),
+		log:                 log,
+		players:             make(map[uint64]*Player),
+		chatLimiters:        make(map[identity.PlayerID]*chatLimiter),
+		chatNow:             SystemClock{}.Now,
+		pendingExperience:   make(map[characterKey]ExperienceAward),
+		parties:             make(map[uint64]*party),
+		partyMemberships:    make(map[partyMemberKey]uint64),
+		byName:              make(map[string]*Player),
+		partyInviteTicks:    uint64(ticksFor(PartyInviteTTL, tickRate)),
+		partyOfflineTicks:   uint64(ticksFor(PartyOfflineGrace, tickRate)),
+		drops:               make(map[uint64]*itemDrop),
+		mobs:                make(map[uint64]*mob),
+		corpses:             make(map[uint64]*corpse),
+		structures:          make(map[uint64]*structure),
+		byIdentity:          make(map[identity.PlayerID]*Player),
+		minersByPos:         make(map[[3]int32]map[*Player]struct{}),
 	}, nil
 }
 
@@ -465,6 +476,21 @@ type Player struct {
 	// the tick that sets it and the tick that clears it, and the inventory lock is only
 	// ever taken here without waiting. See offerInventoryLocked.
 	inventoryDirty bool
+
+	// One open normal-mob container per session. lootDirty is the complete LootState
+	// still owed after an open or accepted take; lootClosures are LootClosed frames
+	// still owed after switching, emptying or expiry. Each is cleared only after its
+	// own non-blocking delivery succeeds.
+	openLootID   uint64
+	lootDirty    bool
+	lootClosures []uint64
+
+	// Open and take have independent client ordering for the same reason attack and
+	// mining do: activity on one message must not silence a different intent stream.
+	haveLootOpenTick bool
+	lastLootOpenTick uint32
+	haveLootTakeTick bool
+	lastLootTakeTick uint32
 
 	// described is every entity this session has been told the appearance of, against
 	// the tick it was last visible on. **This player is the viewer here, not the
@@ -851,21 +877,15 @@ func (p *Player) NextChunk(ctx context.Context) (world.Coord, error) {
 // intent.
 func (p *Player) WakeStreaming() { p.chunks.ring() }
 
-// Step advances the world by one tick, delivers what every session can see, and puts
-// whatever died in it on the ground.
-//
-// **Two functions, and the split is the lock.** stepWorld below is the tick, and it holds
-// Sim.mu for the whole of it; spawnLoot runs after that lock has been released, because
-// Sim.spawnDrop takes it itself. It is exactly the pairing edit.go already has for a
-// structure a break brought down — collapseStructuresAt collects under the lock,
-// dropCollapsed spawns outside it — and it is why a kill on tick N is a drop on tick
-// N+1. See loot.go, where the whole argument lives.
+// Step advances the authoritative world by one tick. Normal-mob loot remains inside
+// Sim.mu because the Dying-to-Corpse transition only mutates simulation-owned state;
+// ordinary world drops retain their separate session-safe spawn path.
 func (s *Sim) Step(tick uint64) {
-	s.spawnLoot(s.stepWorld(tick))
+	s.stepWorld(tick)
 }
 
-// stepWorld advances every player, drop, creature and clock by one tick, delivers what
-// every session can see, and returns the loot the kills in it left behind.
+// stepWorld advances every player, drop, creature, corpse and clock by one tick and
+// delivers what every session can see.
 //
 // Runs on the tick goroutine, holding one lock for the whole tick — which is what
 // makes Leave a guarantee rather than a hope.
@@ -876,9 +896,8 @@ func (s *Sim) Step(tick uint64) {
 // when a session's queue is full. Dropping is right rather than merely convenient: a
 // snapshot describes one tick and is worthless by the time a full queue drains, so
 // waiting for room would stall every other player's tick in order to deliver something
-// already stale. Spawning a drop *would* block — on this very lock — which is why the
-// loot leaves through the return value rather than through Sim.spawnDrop.
-func (s *Sim) stepWorld(tick uint64) []lootDrop {
+// already stale. Inventory and loot-container states instead retain dirty flags and retry.
+func (s *Sim) stepWorld(tick uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -890,6 +909,7 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	s.advanceClockLocked()
 	s.currentTick = tick
 	s.advancePartyInvitesLocked(tick)
+	s.expireCorpsesLocked(tick)
 
 	players := s.sortedPlayersLocked()
 
@@ -926,20 +946,17 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	// produced, so network scheduling cannot choose an in-between one to be judged at,
 	// and a draugr killed here cannot land an attack later in the same tick.
 	//
-	// **A swing produces nothing to carry out of here any more.** A blow that kills starts
-	// the creature dying; what it left behind reaches the ground MobDeathDuration later,
-	// from the reap below, and travels out through the same return value it always did.
+	// A blow that kills only starts the Dying duration. The reap below later creates the
+	// server-owned corpse and rolls its container without involving the ground-drop path.
 	for _, p := range players {
 		p.resolveSwingLocked()
 	}
 
 	// The mobs, after the players have moved so a chase steers at the position this tick
 	// produced rather than the last one's — and after the swings above. This is also where
-	// a body whose time is up stops existing, which is why the loot comes from here: it is
-	// gathered rather than spawned, and carried out of this function for Step to put on the
-	// ground once the lock is gone. Nil for every tick nothing finished dying in, which is
-	// almost all of them.
-	mobs, loot := s.advanceMobsLocked(players)
+	// a body whose time is up becomes an inert owned corpse. The transition and its one
+	// loot roll happen here under the same lock as the final resting position.
+	mobs := s.advanceMobsLocked(players)
 
 	// And the director last, after the creatures it manages have been advanced: what it
 	// spawns is judged against the positions this tick produced, and what it removes it
@@ -965,7 +982,7 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	structures := s.sortedStructuresLocked()
 
 	dropped := dropStates(drops)
-	prowling := mobStates(mobs)
+	projectedMobs := s.mobSnapshotsLocked(mobs)
 	standing := s.structureStatesLocked(structures)
 
 	// Ahead of the snapshots, deliberately. An inventory state is not superseded by the
@@ -973,6 +990,7 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	// be this one.
 	for _, p := range players {
 		p.offerInventoryLocked()
+		p.offerLootLocked()
 	}
 
 	// One snapshot per session, carrying only the entities that session can see.
@@ -980,7 +998,8 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	// quadratic term matters and not one issue before.
 	visible := make([]protocol.EntityState, 0, len(states))
 	visibleDrops := make([]protocol.ItemDropState, 0, len(dropped))
-	visibleMobs := make([]protocol.MobState, 0, len(prowling))
+	visibleMobs := make([]protocol.MobState, 0, len(projectedMobs))
+	visibleLootCorpses := make([]uint64, 0)
 	visibleStructures := make([]protocol.StructureState, 0, len(standing))
 	// **Filled from the same pass that fills `visible`, and that is what keeps the two
 	// agreeing.** The contract says every id here names a player in the same snapshot's
@@ -1095,9 +1114,13 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 		// draw; a mob beyond that cube would be a creature standing on terrain the
 		// client has never been sent.
 		visibleMobs = visibleMobs[:0]
-		for i, m := range mobs {
-			if withinView(viewer.chunk, m.chunk, s.viewDistance) {
-				visibleMobs = append(visibleMobs, prowling[i])
+		visibleLootCorpses = visibleLootCorpses[:0]
+		for _, shown := range projectedMobs {
+			if withinView(viewer.chunk, shown.chunk, s.viewDistance) {
+				visibleMobs = append(visibleMobs, shown.state)
+				if viewer.canOpenCorpseLocked(shown.corpse) {
+					visibleLootCorpses = append(visibleLootCorpses, shown.corpse.entityID)
+				}
 			}
 		}
 
@@ -1122,8 +1145,8 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			Entities: visible,
 			Drops:    visibleDrops,
 			// The newest snapshot is the complete set of what this session can see. A
-			// mob that stops appearing has stopped existing for this viewer — because it
-			// died, or because it walked out of the cube — and the client despawns it
+			// mob or corpse that stops appearing has stopped existing for this viewer —
+			// because it expired, emptied, or moved out of the cube — and the client despawns it
 			// rather than inferring which.
 			Mobs: visibleMobs,
 			// The same complete-existence-set rule. A structure that stops appearing has
@@ -1149,9 +1172,10 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			// PartyMembers deliberately excludes this viewer and every offline roster entry.
 			// PartyRoster carries the stable complete order; its first entry remains the
 			// leader even when PartyLeaderEntityID is zero because that leader is offline.
-			PartyLeaderEntityID: partyLeader,
-			PartyMembers:        partyMembers,
-			PartyRoster:         partyRoster,
+			PartyLeaderEntityID:   partyLeader,
+			PartyMembers:          partyMembers,
+			PartyRoster:           partyRoster,
+			AccessibleLootCorpses: visibleLootCorpses,
 		}
 		if !viewer.deliver(protocol.EncodeEntitySnapshot(snapshot)) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
@@ -1164,7 +1188,6 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 		}
 	}
 
-	return loot
 }
 
 // sortedPlayersLocked is every connected player in identity order.
