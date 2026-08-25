@@ -579,6 +579,15 @@ fn exactly_one_held_item_renderer_owns_each_playing_view() {
         Visibility::Inherited
     );
 
+    *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+    app.update();
+    assert_eq!(view_model_visibility(&mut app), Visibility::Hidden);
+    assert_eq!(
+        body_held_item(&mut app)[0].visibility,
+        Visibility::Inherited,
+        "chat keeps the held-item presentation in the live world"
+    );
+
     *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
     app.update();
     assert_eq!(view_model_visibility(&mut app), Visibility::Hidden);
@@ -2689,8 +2698,8 @@ fn the_pointer_turns_the_view_the_way_the_pointer_moved() {
 }
 
 #[test]
-fn inventory_and_menu_modes_ignore_movement_and_camera_input() {
-    for mode in [InputMode::Inventory, InputMode::Menu] {
+fn non_playing_modes_ignore_movement_and_camera_input() {
+    for mode in [InputMode::Chat, InputMode::Inventory, InputMode::Menu] {
         let mut app = headless_player();
         app.add_plugins(InputPlugin);
         app.update();

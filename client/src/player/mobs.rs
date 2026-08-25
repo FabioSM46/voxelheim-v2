@@ -1103,6 +1103,18 @@ mod tests {
         );
         app.update();
 
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Visibility, With<Mob>>();
+            assert!(
+                query
+                    .iter(world)
+                    .all(|visibility| *visibility == Visibility::Visible)
+            );
+        }
+
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
         app.update();
 

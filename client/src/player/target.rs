@@ -2088,8 +2088,8 @@ mod tests {
     }
 
     #[test]
-    fn inventory_and_menu_modes_disable_targeting_and_block_requests() {
-        for mode in [InputMode::Inventory, InputMode::Menu] {
+    fn non_playing_modes_disable_targeting_and_block_requests() {
+        for mode in [InputMode::Chat, InputMode::Inventory, InputMode::Menu] {
             let wall = IVec3::new(3, 81, 0);
             let (mut app, sent) = clicking_app(store_with(&[wall]));
             app.update();

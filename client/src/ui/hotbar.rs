@@ -212,6 +212,23 @@ mod tests {
         assert_eq!(cells[0].2, BorderColor::all(CELL_EDGE));
     }
 
+    #[test]
+    fn chat_hides_the_hotbar_without_removing_its_cells() {
+        let mut app = app();
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+
+        let world = app.world_mut();
+        let mut root = world.query_filtered::<&Visibility, With<HotbarRoot>>();
+        assert_eq!(
+            *root.single(world).expect("one hotbar root"),
+            Visibility::Hidden
+        );
+        let mut cells = world.query_filtered::<Entity, With<HotbarCell>>();
+        assert_eq!(cells.iter(world).count(), 3);
+    }
+
     /// Every slot with something in it draws that thing; the empty one draws nothing.
     ///
     /// The same assertion the pack makes, on the row a player looks at while playing —

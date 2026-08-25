@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_and_menu_hide_the_crosshair_and_its_ring() {
+    fn non_playing_modes_hide_the_crosshair_and_its_ring() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<InputMode>()
@@ -273,7 +273,7 @@ mod tests {
         app.update();
         assert_eq!(root_visibility(&mut app), Visibility::Visible);
 
-        for mode in [InputMode::Inventory, InputMode::Menu] {
+        for mode in [InputMode::Chat, InputMode::Inventory, InputMode::Menu] {
             *app.world_mut().resource_mut::<InputMode>() = mode;
             app.update();
             assert_eq!(

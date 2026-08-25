@@ -287,7 +287,10 @@ fn show_health_bar(
     vitals: Res<SelfVitals>,
     mut roots: Query<&mut Visibility, With<HealthRoot>>,
 ) {
-    let next = if *mode == InputMode::Playing && session.is_some() && vitals.get().is_some() {
+    let next = if matches!(*mode, InputMode::Playing | InputMode::Chat)
+        && session.is_some()
+        && vitals.get().is_some()
+    {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -677,6 +680,10 @@ mod tests {
     #[test]
     fn the_pause_menu_and_the_inventory_hide_the_bar_but_not_the_death_overlay() {
         let mut app = hud(dead(40));
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        assert_eq!(bar_visibility(&mut app), Visibility::Visible);
 
         for mode in [InputMode::Inventory, InputMode::Menu] {
             *app.world_mut().resource_mut::<InputMode>() = mode;

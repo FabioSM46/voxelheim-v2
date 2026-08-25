@@ -79,6 +79,7 @@ keeps meaning "everything the client is".
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
+| `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — and the frame-rate readout in whichever of the four corners the setting names | reach into another module's internals, grow a health bar, or call the snapshot age a round trip |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
@@ -1269,6 +1270,24 @@ meant for the one control must not also reach the world — and a locked, invisi
 screen whose whole content is one button is a button nobody can press. `Escape` cannot leave it: a
 login screen is deliberately not dismissible, and `show_menu` is the other half, so the pause menu
 is not drawn underneath.
+
+**Chat owns text, not the world.** `InputMode::Chat` keeps the cursor captured and leaves mobs,
+the authoritative vital bars and the selected held-item presentation visible, while the same
+`InputGate` that closes inventory and menu input closes aiming, actions, movement and camera
+sampling. The inventory, crafting screen, hotbar, crosshair, settings and pause menu remain hidden;
+`T` is a normal stored `Control::Chat` binding, while Enter and Escape belong to the text field and
+are intentionally not rebindable. The opening frame drains its `KeyboardInput`, so the key that
+opened the line cannot become its first character.
+
+**Only locally typed text is command syntax.** `/invite`, `/accept`, `/decline`, `/leave` and
+`/kick` become typed `PartyRequest`s; every other non-empty non-command line becomes a
+`ChatRequest`, and an unknown slash command stays local as a log line. Surrounding whitespace is
+removed before that routing, matching the server's accepted line. A `ChatMessage` or `PartyInvite`
+received from the server is display text only, bounded and stripped of layout controls before Bevy
+sees it, never parsed or used as identity. Both share one `ChatInbox`, which preserves their
+relative wire order for its first consumer. The log holds eight lines, fades them after twelve
+seconds of `Time<Real>`, and shows all
+eight fully while chat is open; there is no persistence, scrollback, timestamp or channel state.
 
 ## Choosing who goes in
 
