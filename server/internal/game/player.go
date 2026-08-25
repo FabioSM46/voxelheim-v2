@@ -133,6 +133,15 @@ type Sim struct {
 	chatLimiters map[identity.PlayerID]*chatLimiter
 	chatNow      func() time.Time
 
+	// parties are authoritative membership groups keyed by ids from the same source
+	// that names every other entity. byName is the one live display-name lookup and
+	// exists only for party Invite and Kick; names were accepted and made globally
+	// unique by persistence before Join receives them.
+	parties          map[uint64]*party
+	byName           map[string]*Player
+	partyInviteTicks uint64
+	currentTick      uint64
+
 	// tickOfDay is where the world stands in its day, and it is always less than
 	// DayLengthTicks. See clock.go for everything about it; the field is here because
 	// this is the struct mu guards.
@@ -278,6 +287,9 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		players:            make(map[uint64]*Player),
 		chatLimiters:       make(map[identity.PlayerID]*chatLimiter),
 		chatNow:            SystemClock{}.Now,
+		parties:            make(map[uint64]*party),
+		byName:             make(map[string]*Player),
+		partyInviteTicks:   uint64(ticksFor(PartyInviteTTL, tickRate)),
 		drops:              make(map[uint64]*itemDrop),
 		mobs:               make(map[uint64]*mob),
 		structures:         make(map[uint64]*structure),
@@ -364,6 +376,9 @@ type Player struct {
 	name string
 
 	// Everything below is guarded by sim.mu.
+	partyID uint64
+	invite  *partyInvite
+
 	pos      [3]float64
 	vel      [3]float64
 	yaw      float64
@@ -604,6 +619,7 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 	p.inventory.mu.Unlock()
 	s.players[entityID] = p
 	s.byIdentity[playerID] = p
+	s.byName[foldPlayerName(name)] = p
 	return p, nil
 }
 
@@ -627,6 +643,8 @@ func (s *Sim) Leave(p *Player) {
 	// rejoin that already replaced it must not be evicted by the old session's
 	// cleanup. Same reasoning as world.Cache.forget.
 	if held, ok := s.players[p.entityID]; ok && held == p {
+		s.removeFromPartyLocked(p)
+		s.clearInvitesFromLocked(p.entityID)
 		p.setMiningLocked(nil)
 		p.mineCompleting = false
 		p.mineReset = nil
@@ -637,6 +655,10 @@ func (s *Sim) Leave(p *Player) {
 		// one exactly while its player is in the other" a property rather than a hope.
 		if current, indexed := s.byIdentity[p.playerID]; indexed && current == p {
 			delete(s.byIdentity, p.playerID)
+		}
+		folded := foldPlayerName(p.name)
+		if current, indexed := s.byName[folded]; indexed && current == p {
+			delete(s.byName, folded)
 		}
 	}
 }
@@ -829,6 +851,8 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 	// therefore sees one value, and there is no ordering question about which half of a
 	// tick ran before the day moved.
 	s.advanceClockLocked()
+	s.currentTick = tick
+	s.advancePartyInvitesLocked(tick)
 
 	players := s.sortedPlayersLocked()
 
@@ -941,18 +965,26 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 		visible = visible[:0]
 		visibleDead = visibleDead[:0]
 		for i, p := range players {
-			if !withinView(viewer.chunk, p.chunk, s.viewDistance) {
-				continue
-			}
-			visible = append(visible, states[i])
+			inView := withinView(viewer.chunk, p.chunk, s.viewDistance)
+			if inView {
+				visible = append(visible, states[i])
 
-			// **The viewer's own death goes in this vector like everybody else's**, which
-			// is the point of the field rather than an accident of the loop: a session is
-			// inside its own view, so the body it is watching go down and the bodies
-			// beside it are stated the same way and cannot drift apart. Its vitals still
-			// carry the health and the countdown; those are per-recipient and this is not.
-			if !p.alive() {
-				visibleDead = append(visibleDead, p.entityID)
+				// **The viewer's own death goes in this vector like everybody else's**, which
+				// is the point of the field rather than an accident of the loop: a session is
+				// inside its own view, so the body it is watching go down and the bodies
+				// beside it are stated the same way and cannot drift apart. Its vitals still
+				// carry the health and the countdown; those are per-recipient and this is not.
+				if !p.alive() {
+					visibleDead = append(visibleDead, p.entityID)
+				}
+			}
+
+			// Party membership is the narrow exception to appearance visibility: the HUD
+			// needs the existing name/level description for a consenting party-mate even
+			// when their body is outside the streamed terrain cube. Their EntityState stays
+			// view-bound; position and health use PartyMembers below.
+			if !inView && !s.samePartyLocked(viewer, p) {
+				continue
 			}
 
 			// **The appearance, once per entity per time it enters this viewer's cube**,
@@ -1042,6 +1074,8 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			}
 		}
 
+		partyLeader, partyMembers := s.partySnapshotLocked(viewer)
+
 		// The wire field is a uint32 while ticks are counted in uint64. At 20 Hz the
 		// truncation wraps after about seven years of uptime, and both sides compare
 		// ticks with wrap-aware arithmetic, so a wrap is a discontinuity in a log line
@@ -1075,6 +1109,10 @@ func (s *Sim) stepWorld(tick uint64) []lootDrop {
 			// the invariant holds because advanceClockLocked above is the only thing
 			// that writes it and RestoreClock refuses anything outside the day.
 			TickOfDay: s.tickOfDay,
+			// PartyMembers deliberately excludes this viewer. A leader is therefore either
+			// the viewer itself or one of these entries, exactly as the V20 contract says.
+			PartyLeaderEntityID: partyLeader,
+			PartyMembers:        partyMembers,
 		}
 		if !viewer.deliver(protocol.EncodeEntitySnapshot(snapshot)) {
 			// Debug, not warn: a full queue is a slow client rather than a broken

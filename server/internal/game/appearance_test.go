@@ -194,6 +194,54 @@ func TestANewSessionIsToldEveryAppearanceAgain(t *testing.T) {
 	}
 }
 
+func TestOutOfViewPartyMatesAreDescribedAndForgottenOnLeave(t *testing.T) {
+	t.Parallel()
+
+	h := newHarnessAt(t, flatWorld{groundTop: 63}, game.DefaultTickRate, 0)
+	leaderOut, memberOut := &sink{}, &sink{}
+	leader, err := h.sim.Join(1, testPlayerID(1), "Astrid", [3]float32{0.5, 67, 0.5}, testAppearance(), nil, leaderOut.deliver)
+	if err != nil {
+		t.Fatalf("Join leader: %v", err)
+	}
+	member, err := h.sim.Join(2, testPlayerID(2), "Bjorn", [3]float32{32.5, 67, 0.5}, testAppearance(), nil, memberOut.deliver)
+	if err != nil {
+		t.Fatalf("Join member: %v", err)
+	}
+
+	if reason, err := leader.Party(vnet.PartyActionInvite, "Bjorn"); err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("Invite = %s, %v", reason, err)
+	}
+	if reason, err := member.Party(vnet.PartyActionAccept, ""); err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("Accept = %s, %v", reason, err)
+	}
+	h.step()
+	if got := leaderOut.describedAs(t, member.EntityID()); got != 1 {
+		t.Errorf("leader received %d out-of-view member descriptions, want 1", got)
+	}
+	if got := memberOut.describedAs(t, leader.EntityID()); got != 1 {
+		t.Errorf("member received %d out-of-view leader descriptions, want 1", got)
+	}
+
+	if reason, err := member.Party(vnet.PartyActionLeave, ""); err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("Leave = %s, %v", reason, err)
+	}
+	h.step()
+	if got := leaderOut.describedAs(t, member.EntityID()); got != 1 {
+		t.Errorf("leaving the party produced an extra out-of-view description: %d", got)
+	}
+
+	if reason, err := leader.Party(vnet.PartyActionInvite, "Bjorn"); err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("second Invite = %s, %v", reason, err)
+	}
+	if reason, err := member.Party(vnet.PartyActionAccept, ""); err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("second Accept = %s, %v", reason, err)
+	}
+	h.step()
+	if got := leaderOut.describedAs(t, member.EntityID()); got != 2 {
+		t.Errorf("re-joining produced %d total descriptions, want 2 — the former party link was not forgotten", got)
+	}
+}
+
 // The appearance reaching Join has come off a disk, and from Join it goes out on a wire
 // where a client is required to refuse anything the contract forbids. So it is checked
 // at that boundary, exactly as a stored life is — the alternative is a session that

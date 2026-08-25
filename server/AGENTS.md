@@ -486,6 +486,13 @@ package can avoid the import would create two truths to keep in step for no bene
   deliberate deviation from the issue's `player.go` field pointer in favour of its behavioural
   requirement that reconnecting does not refill. Invalid text and a body that cannot act spend
   nothing; an accepted line spends one token even when every outbound queue drops it.
+- **A party is live simulation state, never a client claim.** `Sim.parties` owns ordered
+  membership and leadership, while `byName` exists only to resolve Invite and Kick against the
+  stored character name. Invitations expire on the authoritative tick and disappear with the
+  session; parties are neither persisted nor resumed on reconnect. The per-viewer snapshot lists
+  every *other* member even outside ordinary view, so its leader is either the recipient or one of
+  those entries. Appearance uses the same consent boundary to deliver names and levels out of view,
+  and membership teardown forgets that description edge so a later party must describe it again.
 - **`Registry.Unsubscribe` is the broadcast's `Sim.Leave`.** It takes the lock
   `BroadcastChunk` holds *while it sends*, so once it returns nothing can still be sending to
   that session — and `Serve` calls it **before** `close(out)`, because a send on a closed

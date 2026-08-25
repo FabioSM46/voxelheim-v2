@@ -299,6 +299,11 @@ func editConfig() session.Config {
 // so a session halfway through its first view legitimately holds less than it will.
 func admit(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game.Sim, peers *session.Registry, entityID uint64) (*fakeConn, *collector) {
 	t.Helper()
+	return admitNamed(t, cfg, chunks, sim, peers, entityID, "Eivor")
+}
+
+func admitNamed(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game.Sim, peers *session.Registry, entityID uint64, name string) (*fakeConn, *collector) {
+	t.Helper()
 
 	conn := newFakeConn()
 	frames := collect(t, conn)
@@ -321,7 +326,7 @@ func admit(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game.Sim,
 	})
 
 	conn.in <- hello(byte(entityID))
-	createCharacter(conn, "Eivor")
+	createCharacter(conn, name)
 	view := (2*int(cfg.ViewDistance) + 1)
 	wantChunks := view * view * view
 	waitUntil(t, "the session's first view to arrive", func() bool {
