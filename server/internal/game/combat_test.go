@@ -386,6 +386,32 @@ func TestAPartyKillWithNobodyElseInRangeKeepsTheFullAward(t *testing.T) {
 	}
 }
 
+func TestAPartyKillDoesNotShareWithAnOfflineRosterMember(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	offline, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, -1.5})
+	inviteAndAccept(t, killer, offline, offline.name)
+	h.sim.Leave(offline)
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	h.sim.mu.Lock()
+	h.sim.mobs[mobID].health = RustySwordDamage
+	h.sim.mu.Unlock()
+	if err := h.swing(killer, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := experienceOf(killer); got != uint32(draugrRow.experience) {
+		t.Errorf("online killer received %d experience, want %d", got, draugrRow.experience)
+	}
+	if got := experienceOf(offline); got != 0 {
+		t.Errorf("offline roster member received %d shared experience", got)
+	}
+}
+
 func TestEverySpeciesSharesExactlyItsRegistryExperience(t *testing.T) {
 	t.Parallel()
 

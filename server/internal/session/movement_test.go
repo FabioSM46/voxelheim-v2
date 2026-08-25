@@ -42,6 +42,7 @@ type collector struct {
 	invites     []protocol.PartyInvite
 	partyLeader uint64
 	party       []protocol.PartyMemberState
+	partyRoster []protocol.PartyRosterMember
 
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
@@ -112,6 +113,17 @@ func (c *collector) absorb(frame []byte) {
 			c.party = append(c.party, protocol.PartyMemberState{
 				EntityID: member.EntityId(), Pos: [3]float32{pos.X(), pos.Y(), pos.Z()},
 				Health: member.Health(), MaxHealth: member.MaxHealth(), Alive: member.Alive(),
+			})
+		}
+		c.partyRoster = c.partyRoster[:0]
+		for i := range snapshot.PartyRosterLength() {
+			member := new(vnet.PartyRosterMember)
+			if !snapshot.PartyRoster(member, i) {
+				continue
+			}
+			c.partyRoster = append(c.partyRoster, protocol.PartyRosterMember{
+				CharacterID: member.CharacterId(), EntityID: member.EntityId(),
+				Name: string(member.Name()), Online: member.Online(),
 			})
 		}
 		for i := range snapshot.EntitiesLength() {
@@ -275,6 +287,12 @@ func (c *collector) partyState() (uint64, []protocol.PartyMemberState) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.partyLeader, slices.Clone(c.party)
+}
+
+func (c *collector) rosterState() []protocol.PartyRosterMember {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.partyRoster)
 }
 
 // blockUpdates is every voxel change the session has been told about, in order.
