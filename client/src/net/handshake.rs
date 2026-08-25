@@ -29,9 +29,9 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, Message,
-    MineProgress, PartyInvite, PlayerAppearance, Reject, SessionParams, Snapshot, WorldClock,
-    WorldUpdate,
+    ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
+    LootState, Message, MineProgress, PartyInvite, PlayerAppearance, Reject, SessionParams,
+    Snapshot, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -100,6 +100,10 @@ pub enum Transition {
     Chat(ChatMessage),
     /// One still-live invitation issued by the authoritative server.
     PartyInvite(PartyInvite),
+    /// A complete authoritative corpse-container revision.
+    LootState(LootState),
+    /// The authoritative end of an open corpse container.
+    LootClosed(LootClosed),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -435,9 +439,8 @@ impl Handshake {
             (Phase::Established, Message::PartyInvite(invite)) => {
                 Ok(Transition::PartyInvite(invite))
             }
-            // Decoded and validated now; ECS ownership lands with the loot UI issue.
-            (Phase::Established, Message::LootState(_)) => Ok(Transition::Ignored("LootState")),
-            (Phase::Established, Message::LootClosed(_)) => Ok(Transition::Ignored("LootClosed")),
+            (Phase::Established, Message::LootState(state)) => Ok(Transition::LootState(state)),
+            (Phase::Established, Message::LootClosed(closed)) => Ok(Transition::LootClosed(closed)),
 
             // -- And the same payloads before there is a session --------------------
             //

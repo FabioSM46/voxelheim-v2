@@ -182,18 +182,20 @@ pub enum Control {
     Right,
     Jump,
     Chat,
+    Interact,
     Inventory,
     Menu,
 }
 
 /// Every control, in the order the settings screen lists them.
-pub const CONTROLS: [Control; 8] = [
+pub const CONTROLS: [Control; 9] = [
     Control::Forward,
     Control::Back,
     Control::Left,
     Control::Right,
     Control::Jump,
     Control::Chat,
+    Control::Interact,
     Control::Inventory,
     Control::Menu,
 ];
@@ -208,6 +210,7 @@ impl Control {
             Self::Right => "right",
             Self::Jump => "jump",
             Self::Chat => "chat",
+            Self::Interact => "interact",
             Self::Inventory => "inventory",
             Self::Menu => "menu",
         }
@@ -222,6 +225,7 @@ impl Control {
             Self::Right => "Strafe right",
             Self::Jump => "Jump",
             Self::Chat => "Chat",
+            Self::Interact => "Interact",
             Self::Inventory => "Inventory",
             Self::Menu => "Pause menu",
         }
@@ -241,6 +245,7 @@ impl Control {
             Self::Right => KeyCode::KeyD,
             Self::Jump => KeyCode::Space,
             Self::Chat => KeyCode::KeyT,
+            Self::Interact => KeyCode::KeyF,
             Self::Inventory => KeyCode::KeyE,
             Self::Menu => KeyCode::Escape,
         }
@@ -923,6 +928,7 @@ mod tests {
             (Control::Left, KeyCode::KeyA),
             (Control::Right, KeyCode::KeyD),
             (Control::Jump, KeyCode::Space),
+            (Control::Interact, KeyCode::KeyF),
             (Control::Inventory, KeyCode::KeyE),
             (Control::Menu, KeyCode::Escape),
         ] {

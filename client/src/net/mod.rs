@@ -471,6 +471,28 @@ impl InventoryInbox {
     }
 }
 
+/// Loot payloads not yet consumed by the player presentation, in wire order.
+#[derive(Resource, Debug, Default)]
+pub struct LootInbox(Vec<LootEvent>);
+
+/// The two server-owned changes one open loot window can receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LootEvent {
+    State(LootState),
+    Closed(LootClosed),
+}
+
+impl LootInbox {
+    pub fn take(&mut self) -> Vec<LootEvent> {
+        std::mem::take(&mut self.0)
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, event: LootEvent) {
+        self.0.push(event);
+    }
+}
+
 /// Authoritative mining progress not yet consumed by the player presentation.
 ///
 /// Ordered like the wire. The player may keep only the newest entry in one frame,
@@ -865,6 +887,7 @@ impl Plugin for NetPlugin {
         app.init_resource::<WorldInbox>()
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
+            .init_resource::<LootInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
@@ -1342,6 +1365,8 @@ struct Inboxes<'w> {
     world: ResMut<'w, WorldInbox>,
     snapshots: ResMut<'w, SnapshotInbox>,
     inventories: ResMut<'w, InventoryInbox>,
+    // Optional only for focused boundary tests that install the drain directly.
+    loot: Option<ResMut<'w, LootInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
     refusals: ResMut<'w, RefusalInbox>,
@@ -1473,6 +1498,17 @@ fn drain_session_events(
 
             // Complete state, queued for the player module rather than interpreted here.
             Ok(SessionEvent::Inventory(inventory)) => inboxes.inventories.0.push(inventory),
+
+            Ok(SessionEvent::LootState(state)) => {
+                if let Some(loot) = inboxes.loot.as_deref_mut() {
+                    loot.0.push(LootEvent::State(state));
+                }
+            }
+            Ok(SessionEvent::LootClosed(closed)) => {
+                if let Some(loot) = inboxes.loot.as_deref_mut() {
+                    loot.0.push(LootEvent::Closed(closed));
+                }
+            }
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),

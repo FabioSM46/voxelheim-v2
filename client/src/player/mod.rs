@@ -53,6 +53,7 @@ mod hands;
 mod interpolate;
 mod inventory;
 mod items;
+mod loot;
 mod mobs;
 mod sky;
 mod structures;
@@ -84,12 +85,14 @@ pub use items::item_label;
 #[cfg(test)]
 pub(crate) use items::known_item_ids;
 pub(crate) use items::{ItemShape, item_linear_rgba, item_shape};
+pub use loot::{LootTakeClick, LootWindow};
 pub(crate) use sky::Daylight;
 pub use target::{ApplyMiningFeedback, MiningFeedback};
 
 use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
-    PartyMemberState, PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
+    PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox,
+    encode_player_input,
 };
 use crate::settings::{Bindings, Control, DEFAULT_LOOK_SENSITIVITY, Settings};
 // `pub use` rather than `use` for the pitch limit: it is a build invariant rather than a
@@ -167,6 +170,8 @@ pub enum InputMode {
     Chat,
     /// Pointer released and the authoritative inventory visible.
     Inventory,
+    /// Pointer released over one authoritative corpse container.
+    Loot,
     /// Pointer released and the pause menu visible.
     Menu,
 }
@@ -280,6 +285,7 @@ impl Plugin for PlayerPlugin {
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
                     forget_party_without_a_session.after(ApplySnapshots),
+                    forget_snapshots_without_a_session.after(ApplySnapshots),
                     forget_bodies_without_a_session.after(ApplySnapshots),
                     // The selected slot can change in `ApplyInventory`, and the local body
                     // is materialised in `ApplySnapshots`. Read both answers only after
@@ -302,6 +308,7 @@ impl Plugin for PlayerPlugin {
             // newest complete state and the ordering inside `CraftingPlugin` is written
             // against its system set.
             .add_plugins(crafting::CraftingPlugin)
+            .add_plugins(loot::LootPlugin)
             // After the camera plugin, because the ray starts at the camera and the
             // ordering inside `BlockTargetPlugin` is written against its system set.
             .add_plugins(combat::CombatPlugin)
@@ -660,7 +667,9 @@ impl Appearances {
 /// The complete party answer carried by the newest accepted snapshot.
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
 pub struct Party {
-    pub leader_entity_id: u64,
+    /// Complete authoritative order, including this character and offline members.
+    pub roster: Vec<PartyRosterMember>,
+    /// Live combat values for the roster's other online members.
     pub members: Vec<PartyMemberState>,
 }
 
@@ -1227,7 +1236,7 @@ fn ingest_snapshots(
         // the sun backwards — the one thing `SkyClock` promises it never does.
         let tick_of_day = snapshot.tick_of_day;
         let next_party = Party {
-            leader_entity_id: snapshot.party_leader_entity_id,
+            roster: snapshot.party_roster.clone(),
             members: snapshot.party_members.clone(),
         };
         if buffer.accept(snapshot, at) {
@@ -1236,34 +1245,45 @@ fn ingest_snapshots(
             // UI that reads it.
             set_if_changed(&mut outputs.vitals, SelfVitals(Some(self_vitals)));
             outputs.sky.anchor(tick_of_day, at);
+            let recipient = outputs
+                .session
+                .as_deref()
+                .map(|session| session.0.entity_id);
             let old_ids: HashSet<u64> = outputs
                 .party
-                .members
+                .roster
                 .iter()
-                .map(|member| member.entity_id)
+                .filter(|member| Some(member.entity_id) != recipient)
+                .map(|member| member.character_id)
                 .collect();
             let new_ids: HashSet<u64> = next_party
-                .members
+                .roster
                 .iter()
-                .map(|member| member.entity_id)
+                .filter(|member| Some(member.entity_id) != recipient)
+                .map(|member| member.character_id)
                 .collect();
-            for entity_id in new_ids.difference(&old_ids) {
-                let name = outputs
-                    .appearances
-                    .identity(*entity_id)
-                    .map_or_else(|| "Unknown".to_owned(), |(name, _)| name);
+            for character_id in new_ids.difference(&old_ids) {
+                let name = next_party
+                    .roster
+                    .iter()
+                    .find(|member| member.character_id == *character_id)
+                    .map_or("Unknown", |member| member.name.as_str());
                 outputs.party_log.0.push(format!("{name} joined the party"));
             }
-            for entity_id in old_ids.difference(&new_ids) {
+            for character_id in old_ids.difference(&new_ids) {
                 let name = outputs
-                    .appearances
-                    .identity(*entity_id)
-                    .map_or_else(|| "Unknown".to_owned(), |(name, _)| name);
+                    .party
+                    .roster
+                    .iter()
+                    .find(|member| member.character_id == *character_id)
+                    .map_or_else(|| "Unknown".to_owned(), |member| member.name.clone());
                 outputs.party_log.0.push(format!("{name} left the party"));
             }
             if let Some(session) = outputs.session.as_deref()
-                && next_party.leader_entity_id == session.0.entity_id
-                && outputs.party.leader_entity_id != session.0.entity_id
+                && next_party.roster.first().map(|leader| leader.entity_id)
+                    == Some(session.0.entity_id)
+                && outputs.party.roster.first().map(|leader| leader.entity_id)
+                    != Some(session.0.entity_id)
             {
                 outputs
                     .party_log
@@ -1284,7 +1304,6 @@ struct SnapshotOutputs<'w> {
     vitals: ResMut<'w, SelfVitals>,
     sky: ResMut<'w, sky::SkyClock>,
     session: Option<Res<'w, Session>>,
-    appearances: Res<'w, Appearances>,
     party: ResMut<'w, Party>,
     party_log: ResMut<'w, PartyLogInbox>,
 }
@@ -1299,6 +1318,16 @@ fn forget_party_without_a_session(
         if !party_log.0.is_empty() {
             party_log.0.clear();
         }
+    }
+}
+
+/// Ensures a reconnect accepts its own tick sequence and reconstructs only from it.
+fn forget_snapshots_without_a_session(
+    session: Option<Res<Session>>,
+    mut buffer: ResMut<SnapshotBuffer>,
+) {
+    if session.is_none() && !buffer.is_empty() {
+        buffer.clear();
     }
 }
 

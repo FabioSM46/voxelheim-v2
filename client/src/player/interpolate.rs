@@ -96,6 +96,69 @@ pub struct SnapshotBuffer {
 }
 
 impl SnapshotBuffer {
+    /// Drops every answer from a session that has ended.
+    pub(super) fn clear(&mut self) {
+        self.previous = None;
+        self.latest = None;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.previous.is_none() && self.latest.is_none()
+    }
+
+    /// The nearest corpse the newest server answer says this recipient may loot.
+    ///
+    /// Distance only controls which intent the presentation originates. The server
+    /// rechecks reach and ownership; this client never infers either one.
+    pub(super) fn nearest_accessible_corpse(
+        &self,
+        player_id: u64,
+        max_distance: f32,
+    ) -> Option<u64> {
+        let latest = &self.latest.as_ref()?.snapshot;
+        let player = latest
+            .entities
+            .iter()
+            .find(|entity| entity.entity_id == player_id)
+            .map(|entity| Vec3::from_array(entity.pos))?;
+
+        latest
+            .mobs
+            .iter()
+            .filter(|mob| {
+                mob.action == MobAction::Corpse
+                    && latest.accessible_loot_corpses.contains(&mob.entity_id)
+            })
+            .filter_map(|mob| {
+                let distance = player.distance_squared(Vec3::from_array(mob.pos));
+                (distance <= max_distance * max_distance).then_some((distance, mob.entity_id))
+            })
+            .min_by(|left, right| {
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+            })
+            .map(|(_, entity_id)| entity_id)
+    }
+
+    /// Whether the newest complete snapshot still offers this corpse to the recipient.
+    pub(super) fn corpse_is_accessible(&self, corpse_id: u64) -> bool {
+        self.latest.as_ref().is_some_and(|latest| {
+            latest.snapshot.accessible_loot_corpses.contains(&corpse_id)
+                && latest
+                    .snapshot
+                    .mobs
+                    .iter()
+                    .any(|mob| mob.entity_id == corpse_id && mob.action == MobAction::Corpse)
+        })
+    }
+
+    pub(super) fn accessible_loot_corpses(&self) -> &[u64] {
+        self.latest
+            .as_ref()
+            .map_or(&[], |latest| &latest.snapshot.accessible_loot_corpses)
+    }
+
     /// Takes a snapshot, keeping it and the one before it.
     ///
     /// Returns `false` for a snapshot that is not newer than the newest one held. Server

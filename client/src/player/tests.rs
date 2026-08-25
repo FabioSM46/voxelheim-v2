@@ -79,8 +79,26 @@ fn deliver_party(
     entities: Vec<EntityState>,
     leader_entity_id: u64,
     members: Vec<crate::net::PartyMemberState>,
+    member_names: &[&str],
     at: Instant,
 ) {
+    let mut roster: Vec<crate::net::PartyRosterMember> = members
+        .iter()
+        .zip(member_names)
+        .map(|(member, name)| crate::net::PartyRosterMember {
+            character_id: member.entity_id,
+            entity_id: member.entity_id,
+            name: (*name).to_owned(),
+            online: true,
+        })
+        .collect();
+    roster.push(crate::net::PartyRosterMember {
+        character_id: LOCAL_ID,
+        entity_id: LOCAL_ID,
+        name: "This session".to_owned(),
+        online: true,
+    });
+    roster.sort_by_key(|member| member.entity_id != leader_entity_id);
     app.world_mut().resource_mut::<SnapshotInbox>().push(
         Snapshot {
             server_tick: tick,
@@ -88,6 +106,7 @@ fn deliver_party(
             drops: vec![],
             party_leader_entity_id: leader_entity_id,
             party_members: members,
+            party_roster: roster,
             ..Default::default()
         },
         at,
@@ -1431,6 +1450,7 @@ fn only_a_described_remote_body_gets_a_fixed_size_name_plate() {
         ],
         99,
         vec![party_member(99, 70, 100, true)],
+        &["Astrid"],
         Instant::now(),
     );
     app.update();
@@ -1489,6 +1509,7 @@ fn party_uses_only_accepted_snapshots_and_clears_without_a_session() {
         vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
         LOCAL_ID,
         vec![party_member(99, 75, 100, true)],
+        &["Eivor"],
         start,
     );
     app.update();
@@ -1498,7 +1519,7 @@ fn party_uses_only_accepted_snapshots_and_clears_without_a_session() {
         ["Eivor joined the party", "You are now the party leader"]
     );
 
-    deliver_party(&mut app, 1, vec![], 0, vec![], start + INTERVAL);
+    deliver_party(&mut app, 1, vec![], 0, vec![], &[], start + INTERVAL);
     app.update();
     assert_eq!(app.world().resource::<Party>().members[0].entity_id, 99);
     assert!(
@@ -1511,6 +1532,23 @@ fn party_uses_only_accepted_snapshots_and_clears_without_a_session() {
     app.world_mut().remove_resource::<Session>();
     app.update();
     assert_eq!(*app.world().resource::<Party>(), Party::default());
+
+    app.insert_resource(session());
+    deliver_party(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [1.0, 64.0, 0.0], 0.0)],
+        99,
+        vec![party_member(99, 50, 100, true)],
+        &["Eivor"],
+        start + INTERVAL * 2,
+    );
+    app.update();
+    assert_eq!(
+        app.world().resource::<Party>().roster[0].name,
+        "Eivor",
+        "the reconnect inherited the previous session's tick ordering"
+    );
 }
 
 #[test]
