@@ -391,6 +391,83 @@ table LeaveStarted {
   remaining_ms: uint;
 }
 
+/// One line a player asks the server to send to the world chat. Client -> server,
+/// and intent only.
+///
+/// The contract carries display text and states no acceptance rule. Length, cadence,
+/// and whether the line may be delivered are server decisions; putting any of them
+/// here would let a framing rule close a connection where the authoritative chat rule
+/// should answer. The server may later refuse this request with `ActionRefused.Chat`.
+///
+/// Decoder invariant: `text` is copied verbatim, the empty string and any length
+/// included. It is shown, never parsed, and never used as an identity.
+table ChatRequest {
+  text: string;
+}
+
+/// One world-chat line the authoritative server accepted. Server -> client.
+///
+/// Both strings are display text: they are shown and never parsed. The entity id is
+/// the session handle that lets a consumer associate the line with a visible player;
+/// the name is carried as text because an appearance description and a chat line are
+/// separate streams and may arrive in either order.
+///
+/// Decoder invariants:
+///   - `sender_entity_id` is non-zero
+///   - `sender_name` is present; the empty string remains legal display text
+///   - `text` is copied verbatim, absent and empty included
+table ChatMessage {
+  sender_entity_id: ulong;
+  sender_name: string;
+  text: string;
+}
+
+/// Which party operation a `PartyRequest` asks the authoritative server to perform.
+///
+/// Append-only. Zero exists so an absent field fails closed at the receiver instead of
+/// becoming a real operation.
+enum PartyAction : ubyte {
+  Unknown = 0,
+  Invite = 1,
+  Accept = 2,
+  Decline = 3,
+  Leave = 4,
+  Kick = 5
+}
+
+/// One request to change party membership. Client -> server, and intent only.
+///
+/// `target_name` is read only for `Invite` and `Kick`, copied verbatim, and never an
+/// identity: the server resolves it against its own live name index. It is ignored for
+/// `Accept`, `Decline`, and `Leave`; an empty value is therefore an ordinary encoding.
+/// Every membership outcome remains the server's decision.
+///
+/// Decoder invariants:
+///   - `action` is a known non-zero `PartyAction`; `Unknown` and unrecognised members
+///     fail closed
+///   - `target_name` is copied verbatim, the empty string and any length included
+table PartyRequest {
+  action: PartyAction;
+  target_name: string;
+}
+
+/// A pending party invitation the authoritative server delivers. Server -> client.
+///
+/// `expires_ms` is a remaining count at the moment the frame is produced, never a
+/// deadline. A client may count it down for presentation, but expiration and whether an
+/// acceptance still succeeds remain server decisions — the same division
+/// `LeaveStarted.remaining_ms` records.
+///
+/// Decoder invariants:
+///   - `from_entity_id` is non-zero
+///   - `from_name` is present; the empty string remains legal display text
+///   - `expires_ms` is non-zero
+table PartyInvite {
+  from_entity_id: ulong;
+  from_name: string;
+  expires_ms: uint;
+}
+
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is
@@ -422,7 +499,9 @@ enum RefusedAction : ubyte {
   EditBlock = 3,
   Craft = 4,
   Repair = 5,
-  DropItem = 6
+  DropItem = 6,
+  Chat = 7,
+  Party = 8
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -502,6 +581,24 @@ enum RefusalReason : ubyte {
   /// This player already has a tent standing. One tent to a player, because a tent is
   /// where they come back to and two answers to that is a choice nobody made.
   TentAlreadyPlaced = 11,
+
+  /// Chat was sent faster than the server's authoritative rate allows.
+  TooFast = 12,
+
+  /// The party already holds the maximum number of members.
+  PartyFull = 13,
+
+  /// No online player matches the target display name.
+  NoSuchPlayer = 14,
+
+  /// The player the request concerns already belongs to a party.
+  AlreadyInParty = 15,
+
+  /// There is no live invitation for this player to accept or decline.
+  NoInvite = 16,
+
+  /// This party operation is reserved for the current leader.
+  NotLeader = 17,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -889,6 +986,26 @@ table StructureState {
   owner_entity_id: ulong;
 }
 
+/// One other member of the recipient's party, carried in every snapshot while the
+/// party exists.
+///
+/// A struct because this is fixed, hot data: health and position for a small bounded
+/// group, inlined rather than reached through one table offset per member. It deliberately
+/// carries no name or appearance; those already travel through `PlayerAppearance`.
+///
+/// Decoder invariants, together with the owning `EntitySnapshot`:
+///   - `entity_id` is non-zero and appears only once in `party_members`
+///   - `pos` is finite
+///   - `max_health` is non-zero and `health <= max_health`
+///   - the recipient's own entity id never appears
+struct PartyMemberState {
+  entity_id: ulong;
+  pos: Vec3;
+  health: ushort;
+  max_health: ushort;
+  alive: bool;
+}
+
 /// The authoritative state of every entity a session can see, for one tick.
 ///
 /// The client renders from these, interpolating between the two most recent. It
@@ -1005,6 +1122,37 @@ table EntitySnapshot {
   /// `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
   /// different state to the same drop after a clean handshake.
   drop_durabilities: [ItemDropDurability];
+
+  /// The current party leader's entity id, or `0` when the recipient is in no party.
+  ///
+  /// A non-zero leader may be the recipient itself or one of `party_members`. The
+  /// decoder that sees only this frame can compare it with the member vector but cannot
+  /// reject an absent match: it does not know the recipient id from the earlier welcome,
+  /// so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
+  /// empty member vector. The converse is not
+  /// frame-verifiable: a non-zero leader with no other members may be the recipient.
+  party_leader_entity_id: ulong;
+
+  /// Every **other** member of the recipient's party, in authoritative party order.
+  /// Empty when the recipient is in no party.
+  ///
+  /// **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
+  /// state only for bodies already present in `entities`, and `PlayerVitals` exposes one
+  /// player's health only to that player. Party membership is explicit consent to share
+  /// position and health with the other members, including outside the streamed view, so
+  /// this vector is the narrow exception rather than a field on `EntityState` paid by every
+  /// visible player. For everyone outside a party it is absent and costs zero bytes.
+  ///
+  /// Decoder invariants:
+  ///   - no `entity_id` appears twice
+  ///   - every member has finite `pos`, non-zero `max_health`, and
+  ///     `health <= max_health`
+  ///   - the recipient's own entity id never appears; this must be checked by a layer that
+  ///     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
+  ///   - a zero `party_leader_entity_id` requires this vector to be empty
+  ///   - a non-zero leader is either the recipient or one of the members; the
+  ///     recipient-aware consumer must check which when it has the welcome and snapshot together
+  party_members: [PartyMemberState];
 }
 
 /// Everything the player is carrying, as the server holds it.

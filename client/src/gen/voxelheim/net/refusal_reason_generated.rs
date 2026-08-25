@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 16] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 22] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -30,6 +30,12 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 16] = [
     RefusalReason::SlotChanged,
     RefusalReason::InventoryBusy,
     RefusalReason::TentAlreadyPlaced,
+    RefusalReason::TooFast,
+    RefusalReason::PartyFull,
+    RefusalReason::NoSuchPlayer,
+    RefusalReason::AlreadyInParty,
+    RefusalReason::NoInvite,
+    RefusalReason::NotLeader,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -104,6 +110,18 @@ impl RefusalReason {
     /// This player already has a tent standing. One tent to a player, because a tent is
     /// where they come back to and two answers to that is a choice nobody made.
     pub const TentAlreadyPlaced: Self = Self(11);
+    /// Chat was sent faster than the server's authoritative rate allows.
+    pub const TooFast: Self = Self(12);
+    /// The party already holds the maximum number of members.
+    pub const PartyFull: Self = Self(13);
+    /// No online player matches the target display name.
+    pub const NoSuchPlayer: Self = Self(14);
+    /// The player the request concerns already belongs to a party.
+    pub const AlreadyInParty: Self = Self(15);
+    /// There is no live invitation for this player to accept or decline.
+    pub const NoInvite: Self = Self(16);
+    /// This party operation is reserved for the current leader.
+    pub const NotLeader: Self = Self(17);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -132,6 +150,12 @@ impl RefusalReason {
         Self::SlotChanged,
         Self::InventoryBusy,
         Self::TentAlreadyPlaced,
+        Self::TooFast,
+        Self::PartyFull,
+        Self::NoSuchPlayer,
+        Self::AlreadyInParty,
+        Self::NoInvite,
+        Self::NotLeader,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -152,6 +176,12 @@ impl RefusalReason {
             Self::SlotChanged => Some("SlotChanged"),
             Self::InventoryBusy => Some("InventoryBusy"),
             Self::TentAlreadyPlaced => Some("TentAlreadyPlaced"),
+            Self::TooFast => Some("TooFast"),
+            Self::PartyFull => Some("PartyFull"),
+            Self::NoSuchPlayer => Some("NoSuchPlayer"),
+            Self::AlreadyInParty => Some("AlreadyInParty"),
+            Self::NoInvite => Some("NoInvite"),
+            Self::NotLeader => Some("NotLeader"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

@@ -488,6 +488,66 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_chat_request(&self) -> Option<ChatRequest<'a>> {
+        if self.payload_type() == Payload::ChatRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { ChatRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_chat_message(&self) -> Option<ChatMessage<'a>> {
+        if self.payload_type() == Payload::ChatMessage {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { ChatMessage::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_party_request(&self) -> Option<PartyRequest<'a>> {
+        if self.payload_type() == Payload::PartyRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PartyRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_party_invite(&self) -> Option<PartyInvite<'a>> {
+        if self.payload_type() == Payload::PartyInvite {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PartyInvite::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -527,6 +587,10 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::LeaveRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveRequest>>("Payload::LeaveRequest", pos),
           Payload::LeaveStarted => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveStarted>>("Payload::LeaveStarted", pos),
           Payload::ConsumeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ConsumeRequest>>("Payload::ConsumeRequest", pos),
+          Payload::ChatRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChatRequest>>("Payload::ChatRequest", pos),
+          Payload::ChatMessage => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ChatMessage>>("Payload::ChatMessage", pos),
+          Payload::PartyRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PartyRequest>>("Payload::PartyRequest", pos),
+          Payload::PartyInvite => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PartyInvite>>("Payload::PartyInvite", pos),
           _ => Ok(()),
         }
      })?
@@ -860,6 +924,46 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::ConsumeRequest => {
                 if let Some(x) = self.payload_as_consume_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::ChatRequest => {
+                if let Some(x) = self.payload_as_chat_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::ChatMessage => {
+                if let Some(x) = self.payload_as_chat_message() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PartyRequest => {
+                if let Some(x) = self.payload_as_party_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PartyInvite => {
+                if let Some(x) = self.payload_as_party_invite() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

@@ -70,6 +70,18 @@ const (
 	/// This player already has a tent standing. One tent to a player, because a tent is
 	/// where they come back to and two answers to that is a choice nobody made.
 	RefusalReasonTentAlreadyPlaced RefusalReason = 11
+	/// Chat was sent faster than the server's authoritative rate allows.
+	RefusalReasonTooFast RefusalReason = 12
+	/// The party already holds the maximum number of members.
+	RefusalReasonPartyFull RefusalReason = 13
+	/// No online player matches the target display name.
+	RefusalReasonNoSuchPlayer RefusalReason = 14
+	/// The player the request concerns already belongs to a party.
+	RefusalReasonAlreadyInParty RefusalReason = 15
+	/// There is no live invitation for this player to accept or decline.
+	RefusalReasonNoInvite RefusalReason = 16
+	/// This party operation is reserved for the current leader.
+	RefusalReasonNotLeader RefusalReason = 17
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -97,6 +109,12 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonSlotChanged:        "SlotChanged",
 	RefusalReasonInventoryBusy:      "InventoryBusy",
 	RefusalReasonTentAlreadyPlaced:  "TentAlreadyPlaced",
+	RefusalReasonTooFast:            "TooFast",
+	RefusalReasonPartyFull:          "PartyFull",
+	RefusalReasonNoSuchPlayer:       "NoSuchPlayer",
+	RefusalReasonAlreadyInParty:     "AlreadyInParty",
+	RefusalReasonNoInvite:           "NoInvite",
+	RefusalReasonNotLeader:          "NotLeader",
 	RefusalReasonMalformedNoAnchor:  "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:    "MalformedFacing",
 	RefusalReasonMalformedSlot:      "MalformedSlot",
@@ -116,6 +134,12 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"SlotChanged":        RefusalReasonSlotChanged,
 	"InventoryBusy":      RefusalReasonInventoryBusy,
 	"TentAlreadyPlaced":  RefusalReasonTentAlreadyPlaced,
+	"TooFast":            RefusalReasonTooFast,
+	"PartyFull":          RefusalReasonPartyFull,
+	"NoSuchPlayer":       RefusalReasonNoSuchPlayer,
+	"AlreadyInParty":     RefusalReasonAlreadyInParty,
+	"NoInvite":           RefusalReasonNoInvite,
+	"NotLeader":          RefusalReasonNotLeader,
 	"MalformedNoAnchor":  RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":    RefusalReasonMalformedFacing,
 	"MalformedSlot":      RefusalReasonMalformedSlot,

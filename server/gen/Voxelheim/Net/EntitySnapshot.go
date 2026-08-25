@@ -392,8 +392,93 @@ func (rcv *EntitySnapshot) DropDurabilitiesLength() int {
 // / worn ground item pristine in presentation while the server later returned it worn.
 // / `ProtocolVersion.Current` therefore moves rather than allowing two peers to assign
 // / different state to the same drop after a clean handshake.
+// / The current party leader's entity id, or `0` when the recipient is in no party.
+// /
+// / A non-zero leader may be the recipient itself or one of `party_members`. The
+// / decoder that sees only this frame can compare it with the member vector but cannot
+// / reject an absent match: it does not know the recipient id from the earlier welcome,
+// / so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
+// / empty member vector. The converse is not
+// / frame-verifiable: a non-zero leader with no other members may be the recipient.
+func (rcv *EntitySnapshot) PartyLeaderEntityId() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / The current party leader's entity id, or `0` when the recipient is in no party.
+// /
+// / A non-zero leader may be the recipient itself or one of `party_members`. The
+// / decoder that sees only this frame can compare it with the member vector but cannot
+// / reject an absent match: it does not know the recipient id from the earlier welcome,
+// / so a recipient-aware consumer must pin the full disjunction. Zero is legal only with an
+// / empty member vector. The converse is not
+// / frame-verifiable: a non-zero leader with no other members may be the recipient.
+func (rcv *EntitySnapshot) MutatePartyLeaderEntityId(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(22, n)
+}
+
+// / Every **other** member of the recipient's party, in authoritative party order.
+// / Empty when the recipient is in no party.
+// /
+// / **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
+// / state only for bodies already present in `entities`, and `PlayerVitals` exposes one
+// / player's health only to that player. Party membership is explicit consent to share
+// / position and health with the other members, including outside the streamed view, so
+// / this vector is the narrow exception rather than a field on `EntityState` paid by every
+// / visible player. For everyone outside a party it is absent and costs zero bytes.
+// /
+// / Decoder invariants:
+// /   - no `entity_id` appears twice
+// /   - every member has finite `pos`, non-zero `max_health`, and
+// /     `health <= max_health`
+// /   - the recipient's own entity id never appears; this must be checked by a layer that
+// /     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
+// /   - a zero `party_leader_entity_id` requires this vector to be empty
+// /   - a non-zero leader is either the recipient or one of the members; the
+// /     recipient-aware consumer must check which when it has the welcome and snapshot together
+func (rcv *EntitySnapshot) PartyMembers(obj *PartyMemberState, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 32
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *EntitySnapshot) PartyMembersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / Every **other** member of the recipient's party, in authoritative party order.
+// / Empty when the recipient is in no party.
+// /
+// / **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
+// / state only for bodies already present in `entities`, and `PlayerVitals` exposes one
+// / player's health only to that player. Party membership is explicit consent to share
+// / position and health with the other members, including outside the streamed view, so
+// / this vector is the narrow exception rather than a field on `EntityState` paid by every
+// / visible player. For everyone outside a party it is absent and costs zero bytes.
+// /
+// / Decoder invariants:
+// /   - no `entity_id` appears twice
+// /   - every member has finite `pos`, non-zero `max_health`, and
+// /     `health <= max_health`
+// /   - the recipient's own entity id never appears; this must be checked by a layer that
+// /     also holds `ServerWelcome.entity_id`, not by a frame-only decoder
+// /   - a zero `party_leader_entity_id` requires this vector to be empty
+// /   - a non-zero leader is either the recipient or one of the members; the
+// /     recipient-aware consumer must check which when it has the welcome and snapshot together
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(9)
+	builder.StartObject(11)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -439,6 +524,15 @@ func EntitySnapshotAddDropDurabilities(builder *flatbuffers.Builder, dropDurabil
 }
 func EntitySnapshotStartDropDurabilitiesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(16, numElems, 8)
+}
+func EntitySnapshotAddPartyLeaderEntityId(builder *flatbuffers.Builder, partyLeaderEntityId uint64) {
+	builder.PrependUint64Slot(9, partyLeaderEntityId, 0)
+}
+func EntitySnapshotAddPartyMembers(builder *flatbuffers.Builder, partyMembers flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(10, flatbuffers.UOffsetT(partyMembers), 0)
+}
+func EntitySnapshotStartPartyMembersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(32, numElems, 8)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

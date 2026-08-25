@@ -96,11 +96,40 @@ type Message struct {
 	LeaveRequest       *LeaveRequest
 	SelectCharacter    *SelectCharacterRequest
 	CreateCharacter    *CreateCharacterRequest
+	Chat               *ChatRequest
+	Party              *PartyRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
 // is the authority boundary: the server owns how long the character remains.
 type LeaveRequest struct{}
+
+// ChatRequest is display text copied verbatim from one client request. Whether the
+// server accepts, rate-limits or delivers it is a simulation decision.
+type ChatRequest struct {
+	Text string
+}
+
+// PartyRequest is one intent to change party membership. TargetName is display text,
+// never an identity; the authoritative game resolves it for Invite and Kick only.
+type PartyRequest struct {
+	Action     vnet.PartyAction
+	TargetName string
+}
+
+// ChatMessage is one chat line the authoritative server accepted.
+type ChatMessage struct {
+	SenderEntityID uint64
+	SenderName     string
+	Text           string
+}
+
+// PartyInvite is one still-live invitation delivered by the authoritative server.
+type PartyInvite struct {
+	FromEntityID uint64
+	FromName     string
+	ExpiresMS    uint32
+}
 
 // ClientHello is a decoded handshake request.
 type ClientHello struct {
@@ -459,6 +488,15 @@ type StructureState struct {
 	OwnerEntityID uint64
 }
 
+// PartyMemberState is one other member of a snapshot recipient's party.
+type PartyMemberState struct {
+	EntityID  uint64
+	Pos       [3]float32
+	Health    uint16
+	MaxHealth uint16
+	Alive     bool
+}
+
 // PlayerVitals is one recipient's authoritative health and life state.
 //
 // Server to client, and per recipient: a snapshot carries the vitals of the player it
@@ -541,6 +579,14 @@ type EntitySnapshot struct {
 	// a message of its own would arrive on its own schedule and put the sky a tick away
 	// from the world underneath it.
 	TickOfDay uint32
+
+	// PartyLeaderEntityID is zero only when the recipient has no party. A non-zero
+	// leader may be the recipient itself, so it need not occur in PartyMembers.
+	PartyLeaderEntityID uint64
+
+	// PartyMembers excludes the recipient. The caller that knows that recipient's id
+	// owns that invariant; this encoder only lays out the authoritative projection.
+	PartyMembers []PartyMemberState
 }
 
 // ChunkResendRequest is one decoded ask for a chunk the client has lost. **A request
@@ -1155,6 +1201,36 @@ func Decode(frame []byte) (msg Message, err error) {
 			return Message{}, fmt.Errorf("%w: CreateCharacterRequest appearance is absent", ErrMalformed)
 		}
 		msg.CreateCharacter = create
+
+	case vnet.PayloadChatRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.ChatRequest
+		request.Init(table.Bytes, table.Pos)
+		// Display text, copied exactly as sent. Empty, absent and arbitrarily long
+		// strings are framing-valid; the authoritative chat rule decides acceptance.
+		msg.Chat = &ChatRequest{Text: string(request.Text())}
+
+	case vnet.PayloadPartyRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.PartyRequest
+		request.Init(table.Bytes, table.Pos)
+		action := request.Action()
+		switch action {
+		case vnet.PartyActionInvite, vnet.PartyActionAccept, vnet.PartyActionDecline,
+			vnet.PartyActionLeave, vnet.PartyActionKick:
+		default:
+			return Message{}, fmt.Errorf("%w: PartyRequest action %d is unknown", ErrMalformed, action)
+		}
+		msg.Party = &PartyRequest{
+			Action:     action,
+			TargetName: string(request.TargetName()),
+		}
 	}
 
 	return msg, nil
@@ -1504,7 +1580,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 			durableDrops++
 		}
 	}
-	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + 128)
+	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + 128)
 
 	// Every table a vector points at must be finished before that vector opens, so the
 	// mob tables are built first and the vector below only carries their offsets. The
@@ -1619,6 +1695,22 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		deadOffset = b.EndVector(len(s.DeadPlayers))
 	}
 
+	// Like dead players and drop wear, the no-party case costs no vector and no
+	// vtable slot. Members are structs, built back to front so the authoritative
+	// party order survives on the wire.
+	var partyMembersOffset flatbuffers.UOffsetT
+	if len(s.PartyMembers) > 0 {
+		vnet.EntitySnapshotStartPartyMembersVector(b, len(s.PartyMembers))
+		for i := len(s.PartyMembers) - 1; i >= 0; i-- {
+			member := s.PartyMembers[i]
+			vnet.CreatePartyMemberState(b, member.EntityID,
+				member.Pos[0], member.Pos[1], member.Pos[2],
+				member.Health, member.MaxHealth, member.Alive,
+			)
+		}
+		partyMembersOffset = b.EndVector(len(s.PartyMembers))
+	}
+
 	vnet.EntitySnapshotStart(b)
 	vnet.EntitySnapshotAddServerTick(b, s.Tick)
 	vnet.EntitySnapshotAddEntities(b, entitiesOffset)
@@ -1636,6 +1728,10 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	}
 	if dropDurabilitiesOffset != 0 {
 		vnet.EntitySnapshotAddDropDurabilities(b, dropDurabilitiesOffset)
+	}
+	vnet.EntitySnapshotAddPartyLeaderEntityId(b, s.PartyLeaderEntityID)
+	if partyMembersOffset != 0 {
+		vnet.EntitySnapshotAddPartyMembers(b, partyMembersOffset)
 	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 
@@ -1854,6 +1950,62 @@ func EncodeRemoveStructureRequest(r RemoveStructureRequest) []byte {
 	request := vnet.RemoveStructureRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadRemoveStructureRequest, request)
+}
+
+// EncodeChatRequest builds client chat intent for protocol round-trip tests. Text is
+// copied verbatim; acceptance belongs to the authoritative chat rule.
+func EncodeChatRequest(r ChatRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	text := b.CreateString(r.Text)
+
+	vnet.ChatRequestStart(b)
+	vnet.ChatRequestAddText(b, text)
+	request := vnet.ChatRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadChatRequest, request)
+}
+
+// EncodePartyRequest builds client party intent for protocol round-trip tests.
+func EncodePartyRequest(r PartyRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	target := b.CreateString(r.TargetName)
+
+	vnet.PartyRequestStart(b)
+	vnet.PartyRequestAddAction(b, r.Action)
+	vnet.PartyRequestAddTargetName(b, target)
+	request := vnet.PartyRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadPartyRequest, request)
+}
+
+// EncodeChatMessage builds one authoritative, accepted chat line. Strings are created
+// before the table opens, as FlatBuffers requires for referenced values.
+func EncodeChatMessage(message ChatMessage) []byte {
+	b := flatbuffers.NewBuilder(128)
+	senderName := b.CreateString(message.SenderName)
+	line := b.CreateString(message.Text)
+
+	vnet.ChatMessageStart(b)
+	vnet.ChatMessageAddSenderEntityId(b, message.SenderEntityID)
+	vnet.ChatMessageAddSenderName(b, senderName)
+	vnet.ChatMessageAddText(b, line)
+	chat := vnet.ChatMessageEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadChatMessage, chat)
+}
+
+// EncodePartyInvite builds one authoritative invitation with its remaining lifetime.
+func EncodePartyInvite(invite PartyInvite) []byte {
+	b := flatbuffers.NewBuilder(128)
+	fromName := b.CreateString(invite.FromName)
+
+	vnet.PartyInviteStart(b)
+	vnet.PartyInviteAddFromEntityId(b, invite.FromEntityID)
+	vnet.PartyInviteAddFromName(b, fromName)
+	vnet.PartyInviteAddExpiresMs(b, invite.ExpiresMS)
+	encoded := vnet.PartyInviteEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadPartyInvite, encoded)
 }
 
 // EncodeActionRefused builds the answer to an action the server would not perform.

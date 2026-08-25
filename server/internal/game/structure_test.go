@@ -1242,6 +1242,14 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonSlotChanged,
 		vnet.RefusalReasonInventoryBusy,
 		vnet.RefusalReasonTentAlreadyPlaced,
+		// V20's chat and party refusals share the same world/state group even though
+		// PlaceStructure never produces them.
+		vnet.RefusalReasonTooFast,
+		vnet.RefusalReasonPartyFull,
+		vnet.RefusalReasonNoSuchPlayer,
+		vnet.RefusalReasonAlreadyInParty,
+		vnet.RefusalReasonNoInvite,
+		vnet.RefusalReasonNotLeader,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1261,8 +1269,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// Membership, in the shape the Payload union is checked in over in protocol: a reason
 	// added without a decision fails here rather than reaching a client with no sentence
 	// for it. The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 16 {
-		t.Errorf("RefusalReason has %d members, want 16 — a new one needs a code in PlaceStructure and a sentence on the client, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 22 {
+		t.Errorf("RefusalReason has %d members, want 22 — a new one needs a producer and a sentence on the client, not a test edit", got)
 	}
 }
 
