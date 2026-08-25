@@ -89,7 +89,7 @@ pub use target::{ApplyMiningFeedback, MiningFeedback};
 
 use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
-    PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
+    PartyMemberState, PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox, encode_player_input,
 };
 use crate::settings::{Bindings, Control, DEFAULT_LOOK_SENSITIVITY, Settings};
 // `pub use` rather than `use` for the pitch limit: it is a build invariant rather than a
@@ -135,6 +135,9 @@ const NAME_PLATE_FONT_SIZE: f32 = 16.0;
 const NAME_PLATE_GAP: f32 = 0.14;
 /// Bound text layout on Unicode scalar boundaries without adding a grapheme crate.
 const NAME_PLATE_CHARACTERS: usize = 48;
+
+const DEFAULT_PLATE_COLOUR: Color = Color::WHITE;
+pub(crate) const PARTY_PLATE_COLOUR: Color = Color::srgb(0.45, 0.82, 1.0);
 
 /// The furthest a walking limb swings from rest.
 ///
@@ -192,6 +195,8 @@ impl Plugin for PlayerPlugin {
             .init_resource::<SnapshotBuffer>()
             .init_resource::<Appearances>()
             .init_resource::<SelfVitals>()
+            .init_resource::<Party>()
+            .init_resource::<PartyLogInbox>()
             .init_resource::<sky::SkyClock>()
             .init_resource::<PlayerStats>()
             // `init_resource` rather than `insert_resource`, and `NetPlugin` does the same:
@@ -225,10 +230,11 @@ impl Plugin for PlayerPlugin {
                     )
                         .chain(),
                     (
-                        ingest_snapshots,
-                        // Before the bodies, so an entity whose appearance and first
-                        // snapshot share a frame is dressed on that frame.
+                        // Before both the party diff and the bodies, so a description and
+                        // the snapshot that first names it in either surface share a name
+                        // on that frame.
                         ingest_appearances,
+                        ingest_snapshots,
                         apply_snapshots,
                         drops::apply_snapshots,
                         mobs::apply_snapshots,
@@ -273,6 +279,7 @@ impl Plugin for PlayerPlugin {
                         .in_set(ApplySnapshots),
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
+                    forget_party_without_a_session.after(ApplySnapshots),
                     forget_bodies_without_a_session.after(ApplySnapshots),
                     // The selected slot can change in `ApplyInventory`, and the local body
                     // is materialised in `ApplySnapshots`. Read both answers only after
@@ -635,12 +642,37 @@ impl Dressing<'_> {
 /// this module is what despawns one. `net` knows when a message arrived; it does not know
 /// when a player left.
 ///
-/// Bounded in two directions. An entity that leaves for good takes its entry with it, and
-/// the server describes it again if it comes back — its own `described` map is dropped
-/// per entity for the same reason, so the two sides agree without either being told.
-/// An entry that never finds a body is dropped after [`APPEARANCE_GRACE`].
+/// Bounded in two directions. An entity that leaves both the view and the party takes its
+/// entry with it. An entry that never finds a body or the party is dropped after
+/// [`APPEARANCE_GRACE`]. Party membership is the one server-sent reason an out-of-view
+/// description remains live: the HUD still has to name that row.
 #[derive(Resource, Debug, Default)]
-struct Appearances(HashMap<u64, Described>);
+pub(crate) struct Appearances(HashMap<u64, Described>);
+
+impl Appearances {
+    pub(crate) fn identity(&self, entity_id: u64) -> Option<(String, u16)> {
+        self.0
+            .get(&entity_id)
+            .map(|described| (name_plate_name(&described.name), described.level))
+    }
+}
+
+/// The complete party answer carried by the newest accepted snapshot.
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+pub struct Party {
+    pub leader_entity_id: u64,
+    pub members: Vec<PartyMemberState>,
+}
+
+/// Presentation lines derived from two accepted server answers, never from local intent.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct PartyLogInbox(Vec<String>);
+
+impl PartyLogInbox {
+    pub(crate) fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.0)
+    }
+}
 
 /// One cached appearance: what the server said, when it said it, and whether anything
 /// has been drawn wearing it yet.
@@ -1171,8 +1203,7 @@ fn send_player_input(
 fn ingest_snapshots(
     mut inbox: ResMut<SnapshotInbox>,
     mut buffer: ResMut<SnapshotBuffer>,
-    mut vitals: ResMut<SelfVitals>,
-    mut sky: ResMut<sky::SkyClock>,
+    mut outputs: SnapshotOutputs<'_>,
 ) {
     let arrived = inbox.take();
     if arrived.is_empty() {
@@ -1190,16 +1221,78 @@ fn ingest_snapshots(
         // late describes a moment already drawn, and letting it anchor the sky would run
         // the sun backwards — the one thing `SkyClock` promises it never does.
         let tick_of_day = snapshot.tick_of_day;
+        let next_party = Party {
+            leader_entity_id: snapshot.party_leader_entity_id,
+            members: snapshot.party_members.clone(),
+        };
         if buffer.accept(snapshot, at) {
             // The whole value, never a merge. `set_if_changed` because an unchanged answer
             // is not news — it is what lets the death countdown hold rather than churn the
             // UI that reads it.
-            set_if_changed(&mut vitals, SelfVitals(Some(self_vitals)));
-            sky.anchor(tick_of_day, at);
+            set_if_changed(&mut outputs.vitals, SelfVitals(Some(self_vitals)));
+            outputs.sky.anchor(tick_of_day, at);
+            let old_ids: HashSet<u64> = outputs
+                .party
+                .members
+                .iter()
+                .map(|member| member.entity_id)
+                .collect();
+            let new_ids: HashSet<u64> = next_party
+                .members
+                .iter()
+                .map(|member| member.entity_id)
+                .collect();
+            for entity_id in new_ids.difference(&old_ids) {
+                let name = outputs
+                    .appearances
+                    .identity(*entity_id)
+                    .map_or_else(|| "Unknown".to_owned(), |(name, _)| name);
+                outputs.party_log.0.push(format!("{name} joined the party"));
+            }
+            for entity_id in old_ids.difference(&new_ids) {
+                let name = outputs
+                    .appearances
+                    .identity(*entity_id)
+                    .map_or_else(|| "Unknown".to_owned(), |(name, _)| name);
+                outputs.party_log.0.push(format!("{name} left the party"));
+            }
+            if let Some(session) = outputs.session.as_deref()
+                && next_party.leader_entity_id == session.0.entity_id
+                && outputs.party.leader_entity_id != session.0.entity_id
+            {
+                outputs
+                    .party_log
+                    .0
+                    .push("You are now the party leader".to_owned());
+            }
+            set_if_changed(&mut outputs.party, next_party);
         } else {
             // Server ticks are monotonic per session, so this is a duplicate. Debug rather
             // than warn: it costs nothing and means nothing went wrong.
             debug!("a snapshot that was not newer than the newest held was discarded");
+        }
+    }
+}
+
+#[derive(SystemParam)]
+struct SnapshotOutputs<'w> {
+    vitals: ResMut<'w, SelfVitals>,
+    sky: ResMut<'w, sky::SkyClock>,
+    session: Option<Res<'w, Session>>,
+    appearances: Res<'w, Appearances>,
+    party: ResMut<'w, Party>,
+    party_log: ResMut<'w, PartyLogInbox>,
+}
+
+fn forget_party_without_a_session(
+    session: Option<Res<Session>>,
+    mut party: ResMut<Party>,
+    mut party_log: ResMut<PartyLogInbox>,
+) {
+    if session.is_none() {
+        set_if_changed(&mut party, Party::default());
+        if !party_log.0.is_empty() {
+            party_log.0.clear();
         }
     }
 }
@@ -1226,6 +1319,7 @@ fn forget_vitals_without_a_session(session: Option<Res<Session>>, mut vitals: Re
 fn apply_snapshots(
     buffer: Res<SnapshotBuffer>,
     session: Option<Res<Session>>,
+    party: Res<Party>,
     mut dressing: Dressing<'_>,
     mut appearances: ResMut<Appearances>,
     mut existing: Query<(Entity, &Body, &mut Transform, &mut WalkPose)>,
@@ -1296,6 +1390,10 @@ fn apply_snapshots(
     // for [`APPEARANCE_GRACE`] and no longer.
     appearances.0.retain(|entity_id, described| {
         drawn.iter().any(|(visible, _)| visible == entity_id)
+            || party
+                .members
+                .iter()
+                .any(|member| member.entity_id == *entity_id)
             || (!described.drawn && now.duration_since(described.at) < APPEARANCE_GRACE)
     });
 
@@ -1624,6 +1722,13 @@ fn name_plate_text(level: u16, name: &str) -> String {
     shown
 }
 
+fn name_plate_name(name: &str) -> String {
+    name_plate_text(0, name)
+        .strip_prefix("Lv 0 · ")
+        .unwrap_or(name)
+        .to_owned()
+}
+
 fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, level: u16) {
     commands.spawn((
         NamePlate(entity_id),
@@ -1642,7 +1747,7 @@ fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, level: 
             font_size: FontSize::Px(NAME_PLATE_FONT_SIZE),
             ..default()
         },
-        TextColor(Color::WHITE),
+        TextColor(DEFAULT_PLATE_COLOUR),
         TextLayout::no_wrap().with_justify(Justify::Center),
         TextShadow::default(),
         FocusPolicy::Pass,
@@ -1662,12 +1767,13 @@ fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, level: 
 fn sync_name_plates(
     session: Option<Res<Session>>,
     appearances: Res<Appearances>,
+    party: Res<Party>,
     bodies: Query<&Body>,
-    mut plates: Query<(Entity, &NamePlate, &mut Text)>,
+    mut plates: Query<(Entity, &NamePlate, &mut Text, &mut TextColor)>,
     mut commands: Commands,
 ) {
     let Some(local_entity_id) = session.map(|session| session.0.entity_id) else {
-        for (entity, _, _) in &mut plates {
+        for (entity, _, _, _) in &mut plates {
             commands.entity(entity).despawn();
         }
         return;
@@ -1675,7 +1781,7 @@ fn sync_name_plates(
 
     let body_ids: HashSet<u64> = bodies.iter().map(|body| body.0).collect();
     let mut existing = HashSet::with_capacity(body_ids.len());
-    for (entity, plate, mut text) in &mut plates {
+    for (entity, plate, mut text, mut colour) in &mut plates {
         let described = appearances.0.get(&plate.0);
         if plate.0 == local_entity_id || !body_ids.contains(&plate.0) || described.is_none() {
             commands.entity(entity).despawn();
@@ -1686,6 +1792,18 @@ fn sync_name_plates(
         let next = name_plate_text(described.level, &described.name);
         if text.0 != next {
             text.0 = next;
+        }
+        let next_colour = if party
+            .members
+            .iter()
+            .any(|member| member.entity_id == plate.0)
+        {
+            PARTY_PLATE_COLOUR
+        } else {
+            DEFAULT_PLATE_COLOUR
+        };
+        if colour.0 != next_colour {
+            colour.0 = next_colour;
         }
     }
 

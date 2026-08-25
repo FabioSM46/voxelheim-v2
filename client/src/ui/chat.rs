@@ -16,7 +16,7 @@ use crate::net::{
     ChatEntry, ChatInbox, ChatRequest, DrainNetwork, Outbound, PartyAction, PartyRequest, Sent,
     encode_chat_request, encode_party_request,
 };
-use crate::player::{ApplyInputMode, InputMode};
+use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
 use super::set_mode;
 
@@ -37,6 +37,7 @@ struct ChatLine(String);
 struct LogLine {
     text: String,
     added: Duration,
+    highlighted: bool,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -47,7 +48,22 @@ impl ChatLog {
         if self.0.len() == LINE_COUNT {
             self.0.pop_front();
         }
-        self.0.push_back(LogLine { text, added: now });
+        self.0.push_back(LogLine {
+            text,
+            added: now,
+            highlighted: false,
+        });
+    }
+
+    fn push_highlighted(&mut self, text: String, now: Duration) {
+        if self.0.len() == LINE_COUNT {
+            self.0.pop_front();
+        }
+        self.0.push_back(LogLine {
+            text,
+            added: now,
+            highlighted: true,
+        });
     }
 }
 
@@ -64,12 +80,14 @@ impl Plugin for ChatUiPlugin {
         app.init_resource::<ChatLine>()
             .init_resource::<ChatLog>()
             .init_resource::<ChatInbox>()
+            .init_resource::<PartyLogInbox>()
             .add_message::<KeyboardInput>()
             .add_systems(Startup, spawn_chat)
             .add_systems(
                 Update,
                 (
                     ingest_server_lines.after(DrainNetwork),
+                    ingest_party_lines.after(ApplySnapshots),
                     capture_chat.after(ApplyInputMode),
                     render_chat,
                 )
@@ -142,12 +160,22 @@ fn ingest_server_lines(
             }
             ChatEntry::PartyInvite(invite) => {
                 let sender = bounded_display(&invite.from_name, SENDER_CHARACTERS);
-                log.push(
+                log.push_highlighted(
                     format!("{sender} invites you to a party — /accept or /decline"),
                     now,
                 );
             }
         }
+    }
+}
+
+fn ingest_party_lines(
+    time: Res<Time<Real>>,
+    mut inbox: ResMut<PartyLogInbox>,
+    mut log: ResMut<ChatLog>,
+) {
+    for line in inbox.take() {
+        log.push(line, time.elapsed());
     }
 }
 
@@ -295,7 +323,11 @@ fn render_chat(
         };
         text.0.clone_from(&line.text);
         let alpha = line_alpha(*mode, visible, now.saturating_sub(line.added));
-        colour.0 = Color::srgba(1.0, 1.0, 1.0, alpha);
+        colour.0 = if line.highlighted {
+            Color::srgba(1.0, 0.72, 0.25, alpha)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, alpha)
+        };
     }
 
     let Ok(mut input) = input.single_mut() else {
@@ -442,6 +474,29 @@ mod tests {
             &entries[2],
             ChatEntry::Message(message) if message.sender_entity_id == 9
         ));
+    }
+
+    #[test]
+    fn an_invite_is_a_highlighted_line_with_both_commands() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ChatInbox>()
+            .init_resource::<ChatLog>()
+            .add_systems(Update, ingest_server_lines);
+        app.world_mut()
+            .resource_mut::<ChatInbox>()
+            .push(ChatEntry::PartyInvite(PartyInvite {
+                from_entity_id: 11,
+                from_name: "Eivor".to_owned(),
+                expires_ms: 5_000,
+            }));
+        app.update();
+        let line = app.world().resource::<ChatLog>().0.back().unwrap();
+        assert_eq!(
+            line.text,
+            "Eivor invites you to a party — /accept or /decline"
+        );
+        assert!(line.highlighted);
     }
 
     #[test]

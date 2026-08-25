@@ -12,6 +12,7 @@ mod icon;
 mod inventory;
 mod login;
 mod menu;
+mod party;
 mod servers;
 mod settings;
 mod status;
@@ -160,6 +161,7 @@ impl Plugin for UiPlugin {
                 inventory::InventoryUiPlugin,
                 login::LoginPlugin,
                 menu::MenuPlugin,
+                party::PartyUiPlugin,
                 servers::ServerListUiPlugin,
                 settings::SettingsScreenPlugin,
                 status::StatusUiPlugin,
