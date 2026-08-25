@@ -1,7 +1,10 @@
 package game
 
 import (
+	"bytes"
+	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 
@@ -130,6 +133,152 @@ func TestOnlyTheKillingBlowAwardsTheSwingingPlayer(t *testing.T) {
 	}
 	if got := experienceOf(bystander); got != 0 {
 		t.Errorf("bystander has %d experience, want 0", got)
+	}
+}
+
+func TestAPartyKillOnlySharesWithLivingMembersInsideTheRadius(t *testing.T) {
+	t.Parallel()
+
+	if PartyShareRadius != 2*draugrRow.aggroRange {
+		t.Fatalf("party share radius = %.1f, want twice the draugr aggro range %.1f",
+			PartyShareRadius, draugrRow.aggroRange)
+	}
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	var logs bytes.Buffer
+	h.sim.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	near, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{31.5, 64, -1.5})
+	far, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{33.5, 64, -1.5})
+	dead, _ := joinPartyPlayer(t, h, 4, "Dag", [3]float32{1.5, 64, -1.5})
+	inviteAndAccept(t, killer, near, "Bjorn")
+	inviteAndAccept(t, killer, far, "Cora")
+	inviteAndAccept(t, killer, dead, "Dag")
+	h.hurt(dead, PlayerMaxHealth)
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	h.sim.mu.Lock()
+	h.sim.mobs[mobID].health = RustySwordDamage
+	h.sim.mu.Unlock()
+	if err := h.swing(killer, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := experienceOf(killer); got != 8 {
+		t.Errorf("killer received %d experience, want 8 including the remainder", got)
+	}
+	if got := experienceOf(near); got != 7 {
+		t.Errorf("member inside the radius received %d experience, want 7", got)
+	}
+	if got := experienceOf(far); got != 0 {
+		t.Errorf("member one block past the radius received %d experience", got)
+	}
+	if got := experienceOf(dead); got != 0 {
+		t.Errorf("dead member received %d experience", got)
+	}
+
+	logged := logs.String()
+	if got := strings.Count(logged, `source="mob kill (shared)"`); got != 2 {
+		t.Errorf("shared source appears in %d award lines, want 2: %s", got, logged)
+	}
+	if got := strings.Count(logged, "share_count=2"); got != 2 {
+		t.Errorf("share count appears in %d award lines, want 2: %s", got, logged)
+	}
+}
+
+func TestAPartyKillWithNobodyElseInRangeKeepsTheFullAward(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	far, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{33.5, 64, -1.5})
+	inviteAndAccept(t, killer, far, "Bjorn")
+
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	h.sim.mu.Lock()
+	h.sim.mobs[mobID].health = RustySwordDamage
+	h.sim.mu.Unlock()
+	if err := h.swing(killer, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := experienceOf(killer); got != uint32(draugrRow.experience) {
+		t.Errorf("killer received %d experience, want the unchanged %d", got, draugrRow.experience)
+	}
+	if got := experienceOf(far); got != 0 {
+		t.Errorf("out-of-range member received %d experience", got)
+	}
+}
+
+func TestEverySpeciesSharesExactlyItsRegistryExperience(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range spawnableSpecies(true) {
+		definition := mobRegistry[kind]
+		t.Run(kind.String(), func(t *testing.T) {
+			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+			killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+			first, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
+			second, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{2.5, 64, 0.5})
+			inviteAndAccept(t, killer, first, "Bjorn")
+			inviteAndAccept(t, killer, second, "Cora")
+
+			mobID := h.spawnMobAt(kind, [3]float32{0.5, 64, -1.5})
+			h.sim.mu.Lock()
+			h.sim.mobs[mobID].health = RustySwordDamage
+			h.sim.mu.Unlock()
+			if err := h.swing(killer, 0, 1); err != nil {
+				t.Fatalf("killing swing: %v", err)
+			}
+			h.step()
+
+			amount := uint32(definition.experience)
+			wantShare, wantRemainder := amount/3, amount%3
+			gotKiller, gotFirst, gotSecond := experienceOf(killer), experienceOf(first), experienceOf(second)
+			if gotKiller != wantShare+wantRemainder || gotFirst != wantShare || gotSecond != wantShare {
+				t.Errorf("shares = [%d %d %d], want [%d %d %d] from registry amount %d",
+					gotKiller, gotFirst, gotSecond, wantShare+wantRemainder, wantShare, wantShare, amount)
+			}
+			if got := gotKiller + gotFirst + gotSecond; got != amount {
+				t.Errorf("shares sum to %d, want registry amount %d", got, amount)
+			}
+		})
+	}
+}
+
+func TestASharedKillLevelUpResendsThePartyMembersAppearance(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	killer, killerOut := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	member, memberOut := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
+	inviteAndAccept(t, killer, member, "Bjorn")
+	h.step()
+
+	memberShare := uint32(draugrRow.experience) / 2
+	h.sim.mu.Lock()
+	member.experience = experienceBefore(2) - memberShare
+	h.sim.mu.Unlock()
+	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+	h.sim.mu.Lock()
+	h.sim.mobs[mobID].health = RustySwordDamage
+	h.sim.mu.Unlock()
+	if err := h.swing(killer, 0, 1); err != nil {
+		t.Fatalf("killing swing: %v", err)
+	}
+	h.step()
+
+	if got := experienceOf(member); got != experienceBefore(2) {
+		t.Fatalf("member experience = %d, want level boundary %d", got, experienceBefore(2))
+	}
+	if got := appearanceLevels(t, killerOut, member.entityID); !equalLevels(got, []uint16{1, 2}) {
+		t.Errorf("killer received member appearance levels %v, want [1 2]", got)
+	}
+	if got := appearanceLevels(t, memberOut, member.entityID); !equalLevels(got, []uint16{1, 2}) {
+		t.Errorf("member received own appearance levels %v, want [1 2]", got)
 	}
 }
 

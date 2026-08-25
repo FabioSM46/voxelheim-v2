@@ -36,6 +36,11 @@ const (
 	// duration and never decides expiry.
 	PartyInviteTTL = 60 * time.Second
 
+	// PartyShareRadius is how near a living party member must stand to share a kill.
+	// Thirty-two blocks is twice the draugr's sixteen-block aggro range, so everybody
+	// spread across one fight counts, and well inside the default streamed view.
+	PartyShareRadius = 32.0
+
 	// WalkSpeed is the horizontal speed of a player at full intent, in blocks per
 	// second. Roughly a brisk walk at one block to the metre.
 	//

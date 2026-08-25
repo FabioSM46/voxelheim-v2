@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -256,6 +257,38 @@ func (s *Sim) onlineLocked(p *Player) bool {
 
 func (s *Sim) samePartyLocked(a, b *Player) bool {
 	return a != nil && b != nil && a.partyID != 0 && a.partyID == b.partyID
+}
+
+// membersNearLocked returns the recipient set for one of this player's shared
+// kill awards. The killer is first and always included; resolveSwingLocked has
+// already proved they are alive and close enough to land the killing blow. Every
+// other member is read from authoritative party state and must be alive and within
+// radius of pos by Euclidean standing-position distance.
+//
+// The caller holds Sim.mu.
+func (p *Player) membersNearLocked(pos [3]float64, radius float64) []*Player {
+	members := []*Player{p}
+	held := p.sim.parties[p.partyID]
+	if p.partyID == 0 || held == nil || radius < 0 {
+		return members
+	}
+
+	radiusSquared := radius * radius
+	for _, entityID := range held.members {
+		member := p.sim.players[entityID]
+		if member == nil || member == p || !member.alive() {
+			continue
+		}
+		var distanceSquared float64
+		for axis := range 3 {
+			delta := member.pos[axis] - pos[axis]
+			distanceSquared += delta * delta
+		}
+		if distanceSquared <= radiusSquared && !math.IsNaN(distanceSquared) {
+			members = append(members, member)
+		}
+	}
+	return members
 }
 
 func (s *Sim) partySnapshotLocked(viewer *Player) (uint64, []protocol.PartyMemberState) {
