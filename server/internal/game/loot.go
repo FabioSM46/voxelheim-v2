@@ -1,175 +1,384 @@
 package game
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
+
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-// What the dead leave behind.
-//
-// # A kill, and only a kill
-//
-// The table is a field of the registry row (species.go); everything about turning one
-// into items on the ground is here. There is exactly one caller — the reap in
-// [Sim.advanceMobsLocked], where a creature killed MobDeathDuration ago stops existing —
-// and that is the whole of the rule the issue asked for: a mob the director takes away at
-// dawn, or because nobody has been near it for five seconds, leaves nothing, because the
-// two removals in spawn.go do not come through here. Loot is the reward for the kill rather
-// than for having existed.
-//
-// # It is rolled when the body goes, not when the blow lands
-//
-// The blow used to be the caller. It is not, and the difference is two things.
-//
-// **When.** Nothing reaches the ground until the body has stopped existing — that delay is
-// the point of MobDeathDuration, and it is a server delay precisely so that a client cannot
-// have one item timetable and a client with the animation switched off another. Rolling at
-// the blow and holding the result would be the same wait with the answer decided early; it
-// would also mean carrying a rolled table on the mob for two and a half seconds, which is a
-// second place a kill's outcome lives.
-//
-// **Where.** The voxel comes from the creature's position at the moment it is rolled, and a
-// body falls while it is dying. Rolled at the blow, a draugr killed on a ledge would leave
-// its bones in the air it was hit in; rolled at the reap, they land where it came to rest.
-//
-// The generator is unaffected either way — [Sim.loot] is advanced only inside the locked
-// tick, so the same world and the same sequence of ticks still leave the same items.
-//
-// # The lock discipline, which is the real hazard
-//
-// A creature is reaped inside [Sim.advanceMobsLocked], which runs under Sim.mu — the tick
-// holds that lock for its whole duration. [Sim.spawnDrop] takes the same lock *itself*,
-// because its other callers are session goroutines off the tick. Calling it from inside the
-// tick would therefore deadlock the server on the first kill.
-//
-// So the tick **collects** the loot under the lock and **spawns** it after, which is the
-// shape edit.go already has for a structure a break brought down: collapseStructuresAt
-// takes the lock and returns what fell, dropCollapsed puts the items on the ground outside
-// it. [Sim.Step] is the one place that pairing happens for a kill — see the comment there,
-// which is why Step is two functions.
-//
-// The consequence is worth stating rather than discovering: loot spawns *after* the tick
-// that reaped the body has already encoded its snapshots, so a body that goes on tick N is
-// visible as a drop on tick N+1. That is one tick, it is the same tick a drop from a
-// mined block waits, and it is what makes the alternative — a re-entrant lock, or a
-// spawnDrop with a locked twin — unnecessary.
-//
-// # Determinism is a requirement here, not a preference
-//
-// Every count comes from [Sim.loot], seeded from the world seed and advanced only inside
-// the locked tick. No package-level rand, no reading of the wall clock: the same world
-// and the same sequence of ticks leave the same items on the same ground, which is what
-// lets a test assert an exact drop rather than a distribution.
+// Normal-mob loot belongs to the corpse, never to the ground. The roll happens once,
+// when Dying completes, and is stored with stable owner and entry identities. Opening
+// only projects that settled state and therefore consumes no random numbers.
 
-// mobLootStream is the second word of the loot generator's PCG seed.
-//
-// **Its own stream rather than a share of [Sim.spawns], and the reason is the one
-// mobSpawnStream already records from the other side.** PCG takes two words and only one
-// of them is the world's; the constant is what makes this *the loot stream*. Two systems
-// drawing from one generator is the mirror of two generators seeded identically: instead
-// of making independent choices in step, it makes them interfere — a kill would shift
-// every later spawn position in the world, so "where does the dark put the next creature"
-// would depend on what the player had killed. Neither system wants to know that about the
-// other, and spawn_test.go pins exact positions on the assumption that neither does.
 const mobLootStream = 0x766F78656C6C6F74 // "voxellot"
 
-// newLootRNG is the loot generator, from a world seed.
-//
-// The conversion is a reinterpretation rather than a range check, exactly as
-// [newSpawnRNG]'s is: every int64 maps to a distinct uint64, which is all a seed word has
-// to be.
 func newLootRNG(worldSeed int64) *rand.Rand {
 	return rand.New(rand.NewPCG(uint64(worldSeed), mobLootStream))
 }
 
-// lootRoll is one line of a species' loot table: an item, and how many of it a kill
-// leaves.
-//
-// The range is inclusive at both ends and min == max is a fixed count rather than a
-// special case, which is what keeps "one pelt" and "one or two bones" the same shape.
-// There is deliberately no chance field: a drop that sometimes does not happen is the
-// rare-loot design this issue keeps out of scope, and adding the column later is a
-// smaller change than removing a probability everything has come to expect.
 type lootRoll struct {
 	item     ItemID
 	min, max uint16
 }
 
-// lootDrop is one stack a kill left behind, waiting to be put on the ground.
-//
-// It carries the voxel rather than the mob, because by the time the tick spawns it the
-// creature is gone from Sim.mobs — a pointer to one would be a pointer to something that
-// has stopped existing. The voxel is where the body came to rest rather than where the blow
-// landed; see the note above on when this is rolled.
-type lootDrop struct {
-	item  ItemID
-	count uint16
-	voxel [3]int64
+type corpseEntry struct {
+	entryID uint64
+	stack   inventoryStack
 }
 
-// rollLootLocked is what this creature leaves behind, in its table's order.
-//
-// Called from the reap in [Sim.advanceMobsLocked], the moment a killed creature's body
-// stops existing, and from nowhere else. The caller holds Sim.mu, which is what guards the
-// generator — and has already taken the mob out of Sim.mobs, so the position read below is
-// the last one anything will ever have.
-//
-// A roll that comes out at zero is skipped rather than spawned: [Sim.spawnDrop] refuses a
-// zero count anyway, and the wire forbids one. Today no table can produce it, because the
-// sweep insists every line has a minimum of at least one.
-func (s *Sim) rollLootLocked(m *mob) []lootDrop {
-	table := m.species().loot
-	if len(table) == 0 {
-		return nil
+// corpseOwner is exactly the stable account-plus-character boundary. Display names
+// and connection entity ids may change without changing an earned container right.
+type corpseOwner struct {
+	playerID    identity.PlayerID
+	characterID uint64
+}
+
+func corpseOwnerFromPartyKey(key partyMemberKey) corpseOwner {
+	return corpseOwner{playerID: key.playerID, characterID: key.characterID}
+}
+
+func (p *Player) corpseOwner() corpseOwner {
+	if p == nil {
+		return corpseOwner{}
+	}
+	return corpseOwner{playerID: p.playerID, characterID: p.characterID}
+}
+
+// corpse is one server-owned normal-mob container. It is deliberately not a mob:
+// nothing steps it and spawn ceilings only count Sim.mobs. Its wire projection keeps
+// the killed entity id, species, yaw and final resting position continuous.
+type corpse struct {
+	entityID uint64
+	kind     vnet.MobKind
+	pos      [3]float64
+	yaw      float64
+	chunk    world.Coord
+
+	owner       corpseOwner
+	entries     []corpseEntry
+	revision    uint32
+	expiresTick uint64
+}
+
+func (c *corpse) ownedBy(p *Player) bool {
+	return c != nil && p != nil && c.owner == p.corpseOwner()
+}
+
+func (c *corpse) state() protocol.MobState {
+	def := mobRegistry[c.kind]
+	return protocol.MobState{
+		EntityID:  c.entityID,
+		Kind:      c.kind,
+		Pos:       toWire(c.pos),
+		Yaw:       float32(c.yaw),
+		Health:    0,
+		MaxHealth: def.maxHealth,
+		Action:    vnet.MobActionCorpse,
+	}
+}
+
+type mobSnapshot struct {
+	state  protocol.MobState
+	chunk  world.Coord
+	corpse *corpse
+}
+
+// mobSnapshotsLocked merges living/dying mobs and corpses in entity-id order. The
+// collection boundary stays internal: a receiver sees one continuous MobState stream.
+func (s *Sim) mobSnapshotsLocked(mobs []*mob) []mobSnapshot {
+	shown := make([]mobSnapshot, 0, len(mobs)+len(s.corpses))
+	states := mobStates(mobs)
+	for index, m := range mobs {
+		shown = append(shown, mobSnapshot{state: states[index], chunk: m.chunk})
+	}
+	for _, c := range s.corpses {
+		shown = append(shown, mobSnapshot{state: c.state(), chunk: c.chunk, corpse: c})
+	}
+	slices.SortFunc(shown, func(a, b mobSnapshot) int {
+		return compareEntityIDs(a.state.EntityID, b.state.EntityID)
+	})
+	return shown
+}
+
+// makeCorpseLocked is the only killed-mob transition. The caller holds Sim.mu.
+func (s *Sim) makeCorpseLocked(m *mob) *corpse {
+	owner := corpseOwner{}
+	if m.firstHit != nil {
+		owner = s.corpseOwnerLocked(m.firstHit, m.pos)
+	}
+	c := &corpse{
+		entityID:    m.entityID,
+		kind:        m.kind,
+		pos:         m.pos,
+		yaw:         m.yaw,
+		chunk:       m.chunk,
+		owner:       owner,
+		entries:     s.rollLootLocked(m),
+		revision:    1,
+		expiresTick: s.currentTick + s.corpseLifetimeTicks,
+	}
+	s.corpses[c.entityID] = c
+	return c
+}
+
+// corpseOwnerLocked resolves normal-party round robin at the death location. Offline
+// members are never eligible; living state is deliberately irrelevant. If nobody in
+// the retained roster is online and near, the first-tap character keeps the corpse.
+func (s *Sim) corpseOwnerLocked(tap *mobTap, pos [3]float64) corpseOwner {
+	tapped := partyMemberKey{
+		playerID:    tap.playerID,
+		characterID: tap.characterID,
+		foldedName:  foldPlayerName(tap.characterName),
+	}
+	partyID := s.partyMemberships[tapped]
+	held := s.parties[partyID]
+	if partyID == 0 || held == nil || len(held.members) == 0 {
+		return corpseOwnerFromPartyKey(tapped)
 	}
 
-	voxel := voxelAt(m.pos)
-	drops := make([]lootDrop, 0, len(table))
+	start := 0
+	for index := range held.members {
+		if held.members[index].key == held.lootCursor {
+			start = index
+			break
+		}
+	}
+	for offset := range len(held.members) {
+		index := (start + offset) % len(held.members)
+		member := &held.members[index]
+		if member.player == nil || !s.onlineLocked(member.player) {
+			continue
+		}
+		distanceSquared := standingDistanceSquared(member.player.pos, pos)
+		if math.IsNaN(distanceSquared) ||
+			distanceSquared > PartyShareRadius*PartyShareRadius {
+			continue
+		}
+		held.lootCursor = held.members[(index+1)%len(held.members)].key
+		return corpseOwnerFromPartyKey(member.key)
+	}
+
+	// The fallback is still an assignment. Advance after the tap owner's roster slot
+	// when it remains present, so unopened corpses never stall round robin.
+	for index := range held.members {
+		if held.members[index].key == tapped {
+			held.lootCursor = held.members[(index+1)%len(held.members)].key
+			break
+		}
+	}
+	return corpseOwnerFromPartyKey(tapped)
+}
+
+func standingDistanceSquared(a, b [3]float64) float64 {
+	var distance float64
+	for axis := range 3 {
+		delta := a[axis] - b[axis]
+		distance += delta * delta
+	}
+	return distance
+}
+
+// rollLootLocked rolls the species table exactly once, at the Corpse transition.
+func (s *Sim) rollLootLocked(m *mob) []corpseEntry {
+	table := m.species().loot
+	entries := make([]corpseEntry, 0, len(table))
 	for _, roll := range table {
 		count := roll.min
 		if roll.max > roll.min {
-			// Integer arithmetic, for the reason the spawn director's draw is: a float
-			// expression is allowed to round differently on another architecture, and a
-			// count asserted exactly should not depend on which machine ran the test.
-			// IntN is exclusive at the top, so the span is +1 — both ends of a lootRoll
-			// are inclusive.
 			count += uint16(s.loot.IntN(int(roll.max-roll.min) + 1))
 		}
 		if count == 0 {
 			continue
 		}
-		drops = append(drops, lootDrop{item: roll.item, count: count, voxel: voxel})
+		entries = append(entries, corpseEntry{
+			entryID: uint64(len(entries) + 1),
+			stack:   stackOf(roll.item, count),
+		})
 	}
-	return drops
+	return entries
 }
 
-// spawnLoot puts every rolled stack on the ground.
-//
-// **Called with no lock held**, because [Sim.spawnDrop] takes the simulation's own — the
-// contract [Sim.dropCollapsed] is written against, and the reason this is a separate
-// function from the roll above rather than the second half of it.
-//
-// Each stack goes through the ordinary drop path with no special case: it merges with
-// what is already lying there, it ages out after DropLifetime, and it is collected by
-// walking over it. A pile of bones from two draugr killed in the same spot is one drop,
-// by the rule a mining spree already produces one.
-func (s *Sim) spawnLoot(loot []lootDrop) {
-	for _, left := range loot {
-		s.spawnDrop(left.item, left.count, left.voxel)
+// expireCorpsesLocked removes bodies at the exact authoritative tick and schedules an
+// explicit close for any session that had the container open.
+func (s *Sim) expireCorpsesLocked(tick uint64) {
+	for id, c := range s.corpses {
+		if tick >= c.expiresTick {
+			s.removeCorpseLocked(id)
+		}
 	}
 }
 
-// voxelAt is the voxel a position stands in.
-//
-// Floor rather than a truncation, which is the same trap chunkAt records: truncation
-// rounds toward zero, so every negative coordinate would name the voxel one step back
-// along that axis and a creature killed at x = -0.5 would leave its bones in the cell
-// next door.
-//
-// A mob's position is the bottom of its box and the collision rests that a hair above the
-// face it landed on, so the y this names is the air the creature was standing in rather
-// than the ground under it — which is where a drop belongs, and where dropSpawnPos then
-// centres it.
+func (s *Sim) removeCorpseLocked(id uint64) {
+	if _, exists := s.corpses[id]; !exists {
+		return
+	}
+	delete(s.corpses, id)
+	for _, player := range s.players {
+		if player.openLootID == id {
+			player.openLootID = 0
+			player.lootDirty = false
+			player.queueLootClosedLocked(id)
+		}
+	}
+}
+
+func (p *Player) queueLootClosedLocked(id uint64) {
+	if id == 0 || slices.Contains(p.lootClosures, id) {
+		return
+	}
+	p.lootClosures = append(p.lootClosures, id)
+}
+
+// OpenLoot validates one open intent and schedules a complete LootState. The caller is
+// the session goroutine; no frame is lost to its queue because the tick retries it.
+func (p *Player) OpenLoot(req protocol.LootOpenRequest) (vnet.RefusalReason, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if err := p.cannotActLocked(); err != nil {
+		return vnet.RefusalReasonPlayerIsDead, err
+	}
+	if p.haveLootOpenTick && !newerTick(req.ClientTick, p.lastLootOpenTick) {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("stale loot-open client tick %d; newest is %d", req.ClientTick, p.lastLootOpenTick)
+	}
+	p.haveLootOpenTick, p.lastLootOpenTick = true, req.ClientTick
+
+	c, reason, err := p.accessibleCorpseLocked(req.CorpseID)
+	if err != nil {
+		return reason, err
+	}
+	if p.openLootID != 0 && p.openLootID != c.entityID {
+		p.queueLootClosedLocked(p.openLootID)
+	}
+	p.openLootID = c.entityID
+	p.lootDirty = true
+	return vnet.RefusalReasonUnknown, nil
+}
+
+// TakeLoot transfers one whole entry atomically. Busy and full inventories leave both
+// authoritative values untouched; an accepted transfer dirties inventory and loot
+// independently until each complete state has reached the session.
+func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if err := p.cannotActLocked(); err != nil {
+		return vnet.RefusalReasonPlayerIsDead, err
+	}
+	if p.haveLootTakeTick && !newerTick(req.ClientTick, p.lastLootTakeTick) {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("stale loot-take client tick %d; newest is %d", req.ClientTick, p.lastLootTakeTick)
+	}
+	p.haveLootTakeTick, p.lastLootTakeTick = true, req.ClientTick
+
+	c, reason, err := p.accessibleCorpseLocked(req.CorpseID)
+	if err != nil {
+		return reason, err
+	}
+	if p.openLootID != c.entityID {
+		return vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse container is not open")
+	}
+	if req.Revision != c.revision {
+		return vnet.RefusalReasonStaleRevision, fmt.Errorf("loot revision %d is not current revision %d", req.Revision, c.revision)
+	}
+	entryIndex := -1
+	for index := range c.entries {
+		if c.entries[index].entryID == req.EntryID {
+			entryIndex = index
+			break
+		}
+	}
+	if entryIndex < 0 {
+		return vnet.RefusalReasonCorpseUnavailable, fmt.Errorf("loot entry %d is unavailable", req.EntryID)
+	}
+	if !p.inventory.mu.TryLock() {
+		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
+	}
+	defer p.inventory.mu.Unlock()
+	if !p.inventory.insertWholeStackLocked(c.entries[entryIndex].stack) {
+		return vnet.RefusalReasonInventoryFull, errors.New("the whole loot entry does not fit")
+	}
+
+	c.entries = append(c.entries[:entryIndex], c.entries[entryIndex+1:]...)
+	c.revision++
+	p.inventoryDirty = true
+	p.lootDirty = true
+	if len(c.entries) == 0 {
+		p.sim.removeCorpseLocked(c.entityID)
+	}
+	return vnet.RefusalReasonUnknown, nil
+}
+
+func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, vnet.RefusalReason, error) {
+	c := p.sim.corpses[id]
+	if c == nil || len(c.entries) == 0 || !withinView(p.chunk, c.chunk, p.sim.viewDistance) {
+		return nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse is unavailable")
+	}
+	if !c.ownedBy(p) {
+		return nil, vnet.RefusalReasonLootNotOwned, errors.New("the corpse belongs to another character")
+	}
+	if distance := boxDistance(playerBox(p.pos), mobRegistry[c.kind].body.boxAt(c.pos)); math.IsNaN(distance) || distance > EditReach {
+		return nil, vnet.RefusalReasonOutOfReach, fmt.Errorf("the corpse is %.2f blocks away, past the reach of %.1f", distance, EditReach)
+	}
+	return c, vnet.RefusalReasonUnknown, nil
+}
+
+// canOpenCorpseLocked is the snapshot-side form of the same access rule. It carries
+// no reason because a snapshot advertises capabilities rather than refusals.
+func (p *Player) canOpenCorpseLocked(c *corpse) bool {
+	if c == nil || len(c.entries) == 0 || p.cannotActLocked() != nil ||
+		!withinView(p.chunk, c.chunk, p.sim.viewDistance) || !c.ownedBy(p) {
+		return false
+	}
+	return boxDistance(playerBox(p.pos), mobRegistry[c.kind].body.boxAt(c.pos)) <= EditReach
+}
+
+func (c *corpse) lootState() protocol.LootState {
+	entries := make([]protocol.LootEntry, len(c.entries))
+	for index, entry := range c.entries {
+		entries[index] = protocol.LootEntry{
+			EntryID:       entry.entryID,
+			ItemID:        uint16(entry.stack.item),
+			Count:         entry.stack.count,
+			Durability:    entry.stack.durability,
+			MaxDurability: entry.stack.maxDurability,
+		}
+	}
+	return protocol.LootState{CorpseID: c.entityID, Revision: c.revision, Entries: entries}
+}
+
+// offerLootLocked retries explicit closures before the currently open full state. A
+// successful send clears only the fact that frame satisfied.
+func (p *Player) offerLootLocked() {
+	for len(p.lootClosures) > 0 {
+		id := p.lootClosures[0]
+		if !p.deliver(protocol.EncodeLootClosed(protocol.LootClosed{CorpseID: id})) {
+			return
+		}
+		p.lootClosures = p.lootClosures[1:]
+	}
+	if !p.lootDirty || p.openLootID == 0 {
+		return
+	}
+	c := p.sim.corpses[p.openLootID]
+	if c == nil || !c.ownedBy(p) || len(c.entries) == 0 {
+		p.queueLootClosedLocked(p.openLootID)
+		p.openLootID = 0
+		p.lootDirty = false
+		return
+	}
+	if p.deliver(protocol.EncodeLootState(c.lootState())) {
+		p.lootDirty = false
+	}
+}
+
+// voxelAt remains the shared conversion used by world-produced drop tests and callers.
 func voxelAt(pos [3]float64) [3]int64 {
 	return [3]int64{
 		int64(math.Floor(pos[0])),

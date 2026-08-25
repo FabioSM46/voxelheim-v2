@@ -110,6 +110,7 @@ type mob struct {
 // while the character was live or received another offline award.
 type mobTap struct {
 	playerID      identity.PlayerID
+	characterID   uint64
 	characterName string
 	experience    uint32
 }
@@ -181,43 +182,35 @@ func (s *Sim) sortedMobsLocked() []*mob {
 // so a draugr killed this tick cannot land an attack in it. The spawn director runs
 // after this, so what it decides is decided against the targets chosen here.
 //
-// **The reap is the one place a killed creature stops existing, and it is where the loot
-// is rolled.** A kill sets [vnet.MobActionDying] and a countdown; nothing leaves the world
-// and nothing reaches the ground until that countdown runs out here. The roll happens at
-// this moment rather than at the blow, which is what makes the drop land where the body
-// came to rest — a draugr killed on a ledge falls off it first, and its bones belong at the
-// bottom rather than in the air it was hit in.
+// **The reap is the one place a killed creature becomes a corpse, and it is where the loot
+// is rolled.** A kill sets [vnet.MobActionDying] and a countdown; the owned container does
+// not exist until that countdown runs out here. The roll uses the final resting position,
+// after a body killed on a ledge has finished falling.
 //
 // **The body is taken away *before* it is stepped again**, which is what makes the count
 // exact rather than approximate: a creature killed on tick N is in the snapshots of ticks
 // N through N+mobDeathTicks-1 and in no later one. Stepping it first and reaping after
 // would spend the tick of the kill on the countdown and leave the body one snapshot short.
 //
-// **The loot leaves through the return value**, exactly as it did when the blow produced
-// it: [Sim.spawnDrop] takes the lock this function is running under. See loot.go, and
-// [Sim.Step], which is where the pair is put back together.
-//
 // The caller holds Sim.mu.
-func (s *Sim) advanceMobsLocked(players []*Player) ([]*mob, []lootDrop) {
+func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
 	mobs := s.sortedMobsLocked()
 
-	// In place over the list the sort just allocated, the shape keepLiveDrops uses. Nil
-	// loot for every tick nothing finished dying in, which is almost all of them.
+	// In place over the list the sort just allocated. Completed deaths move to the
+	// separate corpse collection and are omitted from this live-mob slice.
 	kept := mobs[:0]
-	var loot []lootDrop
 	for _, m := range mobs {
 		if m.dying() && m.actionTicks == 0 {
 			delete(s.mobs, m.entityID)
-			left := s.rollLootLocked(m)
-			loot = append(loot, left...)
-			s.log.Debug("a body stopped existing", "entity_id", m.entityID, "kind", m.kind,
-				"pos", m.pos, "loot", len(left))
+			corpse := s.makeCorpseLocked(m)
+			s.log.Debug("a body became a corpse", "entity_id", m.entityID, "kind", m.kind,
+				"pos", m.pos, "loot_entries", len(corpse.entries))
 			continue
 		}
 		m.step(s, players)
 		kept = append(kept, m)
 	}
-	return kept, loot
+	return kept
 }
 
 // step advances one mob by one tick, whatever species it is. The caller holds Sim.mu.
@@ -623,10 +616,10 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 // at the one place a creature is created — and the table it leaves behind, which is read
 // through the registry by rollLootLocked rather than named here.
 //
-// **A kill no longer removes anything, and nothing reaches the ground here.** The creature
+// **A kill no longer removes anything, and no container exists here.** The creature
 // is put into [vnet.MobActionDying] with a countdown, stays in Sim.mobs and stays in every
-// snapshot for MobDeathDuration, and [Sim.advanceMobsLocked] is what takes the body away
-// and rolls what it left. The body used to vanish on the tick of the blow, on the argument
+// snapshot for MobDeathDuration, and [Sim.advanceMobsLocked] is what changes it into an
+// inert corpse and rolls its container. The body used to vanish on the tick of the blow, on the argument
 // that "a corpse with a timer would be a second kind of thing for every consumer to know
 // about" — which was true, and the cost of not having one was that nothing could show a
 // creature falling over and the drop had to appear on the instant of death. A dying mob is

@@ -302,6 +302,8 @@ func (p *Player) respawnLocked() {
 	p.haveTick, p.lastTick = false, 0
 	p.haveMineTick, p.lastMineTick = false, 0
 	p.haveAttackTick, p.lastAttackTick = false, 0
+	p.haveLootOpenTick, p.lastLootOpenTick = false, 0
+	p.haveLootTakeTick, p.lastLootTakeTick = false, 0
 	// A new life swings immediately: the cooldown belonged to the blade of a player who
 	// is no longer standing there.
 	p.attackCooldown = 0

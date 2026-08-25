@@ -1362,6 +1362,51 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	case vnet.PayloadLootOpenRequest:
+		if player == nil || msg.LootOpen == nil {
+			log.Debug("loot open arrived with no player or intent; discarding")
+			return nil
+		}
+
+		request := *msg.LootOpen
+		reason, openErr := player.OpenLoot(request)
+		if openErr == nil {
+			return nil
+		}
+		log.Debug("refusing loot open", "corpse_id", request.CorpseID,
+			"client_tick", request.ClientTick, "reason", openErr.Error(), "code", reason.String())
+		if reason == vnet.RefusalReasonUnknown {
+			return nil
+		}
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionOpenLoot, Reason: reason}
+		if sendErr := send(protocol.EncodeActionRefused(refusal)); sendErr != nil {
+			return fmt.Errorf("session: send loot-open refusal: %w", sendErr)
+		}
+		return nil
+
+	case vnet.PayloadLootTakeRequest:
+		if player == nil || msg.LootTake == nil {
+			log.Debug("loot take arrived with no player or intent; discarding")
+			return nil
+		}
+
+		request := *msg.LootTake
+		reason, takeErr := player.TakeLoot(request)
+		if takeErr == nil {
+			return nil
+		}
+		log.Debug("refusing loot take", "corpse_id", request.CorpseID,
+			"entry_id", request.EntryID, "revision", request.Revision,
+			"client_tick", request.ClientTick, "reason", takeErr.Error(), "code", reason.String())
+		if reason == vnet.RefusalReasonUnknown {
+			return nil
+		}
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionTakeLoot, Reason: reason}
+		if sendErr := send(protocol.EncodeActionRefused(refusal)); sendErr != nil {
+			return fmt.Errorf("session: send loot-take refusal: %w", sendErr)
+		}
+		return nil
+
 	case vnet.PayloadLeaveRequest:
 		if player == nil || msg.LeaveRequest == nil {
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)

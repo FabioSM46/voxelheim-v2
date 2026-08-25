@@ -18,8 +18,9 @@ import (
 const maxPartyTargetBytes = 64
 
 type party struct {
-	leader  partyMemberKey
-	members []partyMember
+	leader     partyMemberKey
+	members    []partyMember
+	lootCursor partyMemberKey
 }
 
 // partyMemberKey names one character rather than one connection. The account keeps
@@ -149,7 +150,10 @@ func (p *Player) acceptPartyInviteLocked() (vnet.RefusalReason, error) {
 		partyID := p.sim.mintEntityID()
 		inviterMember := inviter.partyMember()
 		invitedMember := p.partyMember()
-		held := &party{leader: inviterMember.key, members: []partyMember{inviterMember, invitedMember}}
+		held := &party{
+			leader: inviterMember.key, members: []partyMember{inviterMember, invitedMember},
+			lootCursor: inviterMember.key,
+		}
 		p.sim.parties[partyID] = held
 		p.sim.partyMemberships[inviterMember.key] = partyID
 		p.sim.partyMemberships[invitedMember.key] = partyID
@@ -240,6 +244,12 @@ func (s *Sim) removePartyMemberLocked(partyID uint64, key partyMemberKey) bool {
 		return false
 	}
 	removed := held.members[index]
+	// The cursor names the next roster member to inspect. If that member leaves,
+	// preserve its meaning by moving it to the member that followed them in the old
+	// cyclic order before the slice is compacted.
+	if held.lootCursor == key && len(held.members) > 1 {
+		held.lootCursor = held.members[(index+1)%len(held.members)].key
+	}
 	if removed.player != nil && s.onlineLocked(removed.player) {
 		for memberIndex := range held.members {
 			member := held.members[memberIndex].player
@@ -267,6 +277,9 @@ func (s *Sim) removePartyMemberLocked(partyID uint64, key partyMemberKey) bool {
 	}
 	if held.leader == key {
 		held.leader = held.members[0].key
+	}
+	if held.lootCursor == (partyMemberKey{}) {
+		held.lootCursor = held.leader
 	}
 	return true
 }

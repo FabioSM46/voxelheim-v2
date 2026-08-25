@@ -85,12 +85,9 @@ func (p *Player) Attack(req protocol.AttackRequest) error {
 // whole of the ordering guarantee: a swing is judged against the positions this tick
 // produced, and a draugr killed by one cannot land an attack later in the same tick.
 //
-// **It returns nothing, and it used to return the loot.** A blow that kills no longer
-// produces anything to put on the ground: it starts the creature dying, and what it left
-// reaches the ground MobDeathDuration later, from the reap in Sim.advanceMobsLocked. The
-// lock argument that made the loot a return value is unchanged and now lives entirely
-// there — Sim.spawnDrop takes the lock this function is running under, so nothing inside
-// the tick may call it.
+// **It returns nothing, and it used to return the loot.** A blow that kills only starts
+// the creature Dying. Sim.advanceMobsLocked later creates the owned corpse and rolls its
+// container under the authoritative simulation lock; the ground-drop path is not involved.
 //
 // The caller holds Sim.mu.
 func (p *Player) resolveSwingLocked() {

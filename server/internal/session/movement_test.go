@@ -43,6 +43,9 @@ type collector struct {
 	partyLeader uint64
 	party       []protocol.PartyMemberState
 	partyRoster []protocol.PartyRosterMember
+	lootStates  []protocol.LootState
+	lootClosed  []uint64
+	accessible  []uint64
 
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
@@ -125,6 +128,10 @@ func (c *collector) absorb(frame []byte) {
 				CharacterID: member.CharacterId(), EntityID: member.EntityId(),
 				Name: string(member.Name()), Online: member.Online(),
 			})
+		}
+		c.accessible = c.accessible[:0]
+		for i := range snapshot.AccessibleLootCorpsesLength() {
+			c.accessible = append(c.accessible, snapshot.AccessibleLootCorpses(i))
 		}
 		for i := range snapshot.EntitiesLength() {
 			var entity vnet.EntityState
@@ -260,6 +267,27 @@ func (c *collector) absorb(frame []byte) {
 			FromName:     string(invite.FromName()),
 			ExpiresMS:    invite.ExpiresMs(),
 		})
+
+	case vnet.PayloadLootState:
+		loot := new(vnet.LootState)
+		loot.Init(table.Bytes, table.Pos)
+		state := protocol.LootState{CorpseID: loot.CorpseId(), Revision: loot.Revision()}
+		for index := range loot.EntriesLength() {
+			entry := new(vnet.LootEntry)
+			if !loot.Entries(entry, index) {
+				continue
+			}
+			state.Entries = append(state.Entries, protocol.LootEntry{
+				EntryID: entry.EntryId(), ItemID: entry.ItemId(), Count: entry.Count(),
+				Durability: entry.Durability(), MaxDurability: entry.MaxDurability(),
+			})
+		}
+		c.lootStates = append(c.lootStates, state)
+
+	case vnet.PayloadLootClosed:
+		closed := new(vnet.LootClosed)
+		closed.Init(table.Bytes, table.Pos)
+		c.lootClosed = append(c.lootClosed, closed.CorpseId())
 	}
 }
 
@@ -293,6 +321,12 @@ func (c *collector) rosterState() []protocol.PartyRosterMember {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.partyRoster)
+}
+
+func (c *collector) lootState() ([]protocol.LootState, []uint64, []uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.lootStates), slices.Clone(c.lootClosed), slices.Clone(c.accessible)
 }
 
 // blockUpdates is every voxel change the session has been told about, in order.
