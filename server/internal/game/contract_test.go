@@ -1,12 +1,59 @@
 package game
 
 import (
+	"math"
 	"testing"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 )
+
+// checkPartySnapshot executes the recipient-aware V20 invariants the frame-only
+// decoder cannot: the member vector excludes the recipient, while its leader may be
+// either that recipient or one of the vector entries.
+func checkPartySnapshot(t *testing.T, recipient uint64, snapshot *vnet.EntitySnapshot) {
+	t.Helper()
+
+	leader := snapshot.PartyLeaderEntityId()
+	seen := make(map[uint64]struct{}, snapshot.PartyMembersLength())
+	leaderAmongMembers := false
+	for index := range snapshot.PartyMembersLength() {
+		var member vnet.PartyMemberState
+		if !snapshot.PartyMembers(&member, index) {
+			t.Fatalf("party member %d is absent", index)
+		}
+		entityID := member.EntityId()
+		if entityID == 0 {
+			t.Errorf("party member %d carries reserved entity id 0", index)
+		}
+		if entityID == recipient {
+			t.Errorf("party member %d repeats recipient id %d", index, recipient)
+		}
+		if _, duplicate := seen[entityID]; duplicate {
+			t.Errorf("party entity id %d appears more than once", entityID)
+		}
+		seen[entityID] = struct{}{}
+		leaderAmongMembers = leaderAmongMembers || entityID == leader
+
+		pos := member.Pos(nil)
+		if pos == nil || math.IsNaN(float64(pos.X())) || math.IsInf(float64(pos.X()), 0) ||
+			math.IsNaN(float64(pos.Y())) || math.IsInf(float64(pos.Y()), 0) ||
+			math.IsNaN(float64(pos.Z())) || math.IsInf(float64(pos.Z()), 0) {
+			t.Errorf("party member %d carries no finite position", index)
+		}
+		if member.MaxHealth() == 0 || member.Health() > member.MaxHealth() {
+			t.Errorf("party member %d is %d/%d, want a non-zero maximum and no more health than it",
+				index, member.Health(), member.MaxHealth())
+		}
+	}
+	if leader == 0 && snapshot.PartyMembersLength() != 0 {
+		t.Error("party members are present with no leader")
+	}
+	if leader != 0 && leader != recipient && !leaderAmongMembers {
+		t.Errorf("leader %d is neither recipient %d nor one of the party members", leader, recipient)
+	}
+}
 
 // The V3 invariants schemas/player.fbs documents, executed against the frames the
 // simulation actually emits.
@@ -344,5 +391,30 @@ func TestTheInventoryTheSimulationEmitsSatisfiesTheDurabilityContract(t *testing
 	}
 	if seen == 0 {
 		t.Fatal("the session received no inventory state at all")
+	}
+}
+
+func TestEveryPartyProjectionTheTickEmitsSatisfiesTheContract(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
+	leader, leaderOut := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	second, secondOut := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{32.5, 64, 0.5})
+	third, thirdOut := joinPartyPlayer(t, h, 3, "Cora", [3]float32{64.5, 64, 0.5})
+	solo, soloOut := joinPartyPlayer(t, h, 4, "Dag", [3]float32{96.5, 64, 0.5})
+	inviteAndAccept(t, leader, second, "Bjorn")
+	inviteAndAccept(t, leader, third, "Cora")
+	h.step()
+
+	for _, tc := range []struct {
+		player *Player
+		out    *dropSink
+	}{
+		{leader, leaderOut},
+		{second, secondOut},
+		{third, thirdOut},
+		{solo, soloOut},
+	} {
+		checkPartySnapshot(t, tc.player.entityID, newestSnapshot(t, tc.out))
 	}
 }
