@@ -38,6 +38,7 @@ type collector struct {
 	progress    []protocol.MineProgress
 	inventories []protocol.InventoryState
 	refusals    []protocol.ActionRefused
+	chats       []protocol.ChatMessage
 
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
@@ -210,6 +211,15 @@ func (c *collector) absorb(frame []byte) {
 			record.Anchor, record.HasAnchor = [3]int32{anchor.X(), anchor.Y(), anchor.Z()}, true
 		}
 		c.refusals = append(c.refusals, record)
+
+	case vnet.PayloadChatMessage:
+		chat := new(vnet.ChatMessage)
+		chat.Init(table.Bytes, table.Pos)
+		c.chats = append(c.chats, protocol.ChatMessage{
+			SenderEntityID: chat.SenderEntityId(),
+			SenderName:     string(chat.SenderName()),
+			Text:           string(chat.Text()),
+		})
 	}
 }
 
@@ -218,6 +228,13 @@ func (c *collector) actionRefusals() []protocol.ActionRefused {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.refusals)
+}
+
+// chatMessages is every accepted world-chat line this session received, in order.
+func (c *collector) chatMessages() []protocol.ChatMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.chats)
 }
 
 // blockUpdates is every voxel change the session has been told about, in order.

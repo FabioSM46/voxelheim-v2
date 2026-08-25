@@ -471,7 +471,7 @@ package can avoid the import would create two truths to keep in step for no bene
   the session's view volume, one this session was never sent, and one that arrives faster than
   the bucket allows — silently, like every other refusal, because the contract has no rejection
   message and an honoured request is answered by the `ChunkData` that follows it.
-- **It is also the only rate limit in this repository, and both its numbers are derived.** The
+- **The chunk resend bucket is the first rate limit in this repository, and both its numbers are derived.** The
   burst is one view volume, `(2r+1)³`: the most a client can ever honestly need, and work the
   server already agreed to do for it once at join. The refill is
   `TerminalFallSpeed / ChunkSize` chunks a second — the fastest a player can cross chunk
@@ -479,6 +479,13 @@ package can avoid the import would create two truths to keep in step for no bene
   bounds *chunk work*, not messages: a request refused before the bucket is consulted costs a
   mutex and a map lookup, and bounding that is the socket-level backpressure policy the gaps
   below still ask for.
+- **World chat is the second rate limit, and the first on message text rather than work.** Five
+  accepted lines may arrive together and one line of credit returns each second. The bucket is
+  keyed by `identity.PlayerID` in `Sim`, not stored on `Player`: a `Player` is recreated for every
+  session, so putting it there would let a reconnect manufacture a fresh burst. That is a
+  deliberate deviation from the issue's `player.go` field pointer in favour of its behavioural
+  requirement that reconnecting does not refill. Invalid text and a body that cannot act spend
+  nothing; an accepted line spends one token even when every outbound queue drops it.
 - **`Registry.Unsubscribe` is the broadcast's `Sim.Leave`.** It takes the lock
   `BroadcastChunk` holds *while it sends*, so once it returns nothing can still be sending to
   that session — and `Serve` calls it **before** `close(out)`, because a send on a closed
