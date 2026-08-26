@@ -39,26 +39,64 @@ use crate::player::{
     AimCamera, ApplySnapshots, DeathFall, InputMode, LocalPlayer, SelfVitals, WorldCamera,
 };
 
-/// Width of the bar, in logical pixels.
-pub(super) const BAR_WIDTH: f32 = 260.0;
+/// Width of the bar, in logical pixels. Wide enough that the longest wire-valid reading
+/// fits across the track's interior — the first of the two assertions below.
+pub(super) const BAR_WIDTH: f32 = 320.0;
 
-/// Height of the bar, in logical pixels.
-pub(super) const BAR_HEIGHT: f32 = 18.0;
+/// Height of the bar, in logical pixels. Tall enough to hold that reading's line — the
+/// second of them.
+pub(super) const BAR_HEIGHT: f32 = 22.0;
 
 /// Thickness of the bar's edge. Thinner than a cell border: this is one long node rather
 /// than a grid, and the same weight would read as a frame around it.
 pub(super) const BAR_BORDER: f32 = 2.0;
 
-/// Horizontal space between a vital track and its numeric reading.
-pub(super) const BAR_COLUMN_GAP: f32 = 10.0;
-
-/// Width reserved for every vital label. The longest wire-valid experience reading
-/// (`u16` level and two `u32` progression values) fits without wrapping, and shorter
-/// health or hunger readings occupy the same column instead of moving their track.
-pub(super) const BAR_LABEL_WIDTH: f32 = 360.0;
-
 /// Shared vital label size, in logical pixels.
-pub(super) const BAR_LABEL_SIZE: f32 = 17.0;
+pub(super) const BAR_LABEL_SIZE: f32 = 14.0;
+
+/// The floor under [`BAR_LABEL_SIZE`]. A reading that does not fit is answered by a wider
+/// [`BAR_WIDTH`], never by shrinking the text, clipping it or abbreviating the experience
+/// format — so the size has a documented bottom and the width does not.
+const BAR_LABEL_MIN_SIZE: f32 = 14.0;
+
+/// The longest reading any of the three bars can be asked to draw, in characters:
+/// `Lv 65535 · 4294967295 / 4294967295`, a `u16` level and two `u32` progression values
+/// at their wire maxima. Health and hunger top out at `65535 / 65535`, thirteen.
+const LONGEST_READING_CHARS: f32 = 34.0;
+
+/// The advance of Bevy's embedded default font, in ems. FiraMono is monospace, so every
+/// glyph is exactly this wide and the fit below is an exact bound rather than an estimate.
+const DEFAULT_FONT_ADVANCE_EM: f32 = 0.6;
+
+/// Line height as a multiple of the font size: the scale in Bevy's `LineHeight` default,
+/// which every reading here inherits rather than setting. `parley` resolves that scale as
+/// `scale * font_size` exactly — the face's ascent, descent and line gap do not enter it —
+/// so one line is this tall whatever font ends up loaded.
+///
+/// It is still a number copied out of another crate, so the layout test reads `LineHeight`
+/// back off each spawned reading and fails if this stops being what Bevy will use.
+const LINE_HEIGHT_RATIO: f32 = 1.2;
+
+/// The track's interior: what an absolutely positioned child inset to zero on both sides
+/// actually spans, since an inset is measured from the padding box inside the border.
+const TRACK_INNER_WIDTH: f32 = BAR_WIDTH - 2.0 * BAR_BORDER;
+const TRACK_INNER_HEIGHT: f32 = BAR_HEIGHT - 2.0 * BAR_BORDER;
+
+/// The reading is drawn inside its track on one line, so both directions are bounds the
+/// build has to satisfy rather than things to check on a screenshot: text that outgrew the
+/// track would wrap, clip or spill over the world, and nothing at runtime would say so.
+const _: () = assert!(
+    LONGEST_READING_CHARS * DEFAULT_FONT_ADVANCE_EM * BAR_LABEL_SIZE <= TRACK_INNER_WIDTH,
+    "the longest wire-valid reading must fit across the track — widen BAR_WIDTH"
+);
+const _: () = assert!(
+    BAR_LABEL_SIZE * LINE_HEIGHT_RATIO <= TRACK_INNER_HEIGHT,
+    "the reading's line must fit down the track — raise BAR_HEIGHT"
+);
+const _: () = assert!(
+    BAR_LABEL_SIZE >= BAR_LABEL_MIN_SIZE,
+    "a reading that does not fit is answered by a wider BAR_WIDTH, not smaller text"
+);
 
 const BAR_CORNER_RADIUS: f32 = 3.0;
 
@@ -181,7 +219,7 @@ struct HealthTrack;
 #[derive(Component)]
 struct HealthFill;
 
-/// The numeric reading beside the bar, so a screenshot says what the bar means.
+/// The numeric reading inside the bar, so a screenshot says what the bar means.
 #[derive(Component)]
 struct HealthLabel;
 
@@ -217,9 +255,10 @@ struct HitPulse {
 
 /// The common row contract for health, hunger and experience.
 ///
-/// All three roots span the window and centre the same fixed-width track. The label is an
-/// absolutely positioned child of that track, so its reserved width cannot participate in
-/// flex layout and move the track away from the viewport's horizontal axis.
+/// All three roots span the window and centre the same fixed-width track. The reading is
+/// an absolutely positioned child of that track, so it cannot participate in the track's
+/// flex layout: it neither pushes the fill aside nor contributes a width of its own that
+/// could move the track off the viewport's horizontal axis.
 pub(super) fn vital_bar_root(bottom: f32) -> Node {
     Node {
         position_type: PositionType::Absolute,
@@ -240,29 +279,37 @@ pub(super) fn vital_bar_track() -> Node {
         flex_shrink: 0.0,
         border: UiRect::all(Val::Px(BAR_BORDER)),
         border_radius: BorderRadius::all(Val::Px(BAR_CORNER_RADIUS)),
-        // The label is positioned beyond the track's right edge. Keep overflow
-        // visible explicitly so the shared track never clips that child.
+        // Both children now belong inside the track, and both fit by construction: the
+        // fill is a percentage of it and the reading is bounded above. What still crosses
+        // the edge is the reading's `TextShadow`, which draws a few pixels down and right
+        // of the glyphs it follows while the line box already fills the track's interior
+        // to within a pixel. Clipping here would take that shadow's lower edge and nothing
+        // else, so the shared track stays non-clipping — for a reason of its own now,
+        // rather than the outside label this once carried.
         overflow: Overflow::visible(),
         ..default()
     }
 }
 
+/// The reading's box: the track's whole interior.
+///
+/// An absolute inset is measured from the padding box inside the border, so a zero on
+/// both sides spans exactly [`TRACK_INNER_WIDTH`] and gives
+/// [`TextLayout::with_justify`] the width to centre the glyphs across. Vertical centring
+/// is the `top` half plus [`vital_bar_label_transform`].
 pub(super) fn vital_bar_label() -> Node {
     Node {
         position_type: PositionType::Absolute,
-        left: Val::Percent(100.0),
+        left: Val::Px(0.0),
+        right: Val::Px(0.0),
         top: Val::Percent(50.0),
-        width: Val::Px(BAR_LABEL_WIDTH),
-        min_width: Val::Px(BAR_LABEL_WIDTH),
-        max_width: Val::Px(BAR_LABEL_WIDTH),
-        margin: UiRect::left(Val::Px(BAR_COLUMN_GAP)),
-        flex_shrink: 0.0,
         ..default()
     }
 }
 
-/// Centres a label on the track's vertical axis without depending on the text's computed
-/// line height.
+/// Centres a reading on its track's vertical axis without depending on the text's
+/// computed line height: `top: 50%` puts the box's top edge on the axis and this pulls it
+/// back up by half of its own height, whatever that turns out to be.
 pub(super) fn vital_bar_label_transform() -> UiTransform {
     UiTransform::from_translation(Val2::percent(0.0, -50.0))
 }
@@ -311,7 +358,7 @@ fn spawn_health_bar(mut commands: Commands) {
                         ..default()
                     },
                     TextColor(Color::WHITE),
-                    TextLayout::no_wrap(),
+                    TextLayout::no_wrap().with_justify(Justify::Center),
                     TextShadow::default(),
                 ));
             });
@@ -806,6 +853,7 @@ mod tests {
     //! bar looks right" is a screenshot and "the fill is exactly the server's ratio" is a
     //! test.
 
+    use bevy::text::LineHeight;
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
@@ -919,13 +967,86 @@ mod tests {
         (left, left + track_width)
     }
 
-    fn label_left(track_right: f32, label: &Node) -> f32 {
+    /// The reading's box, derived from the track it is absolutely positioned inside.
+    /// An absolute inset is measured from the padding box, so each side of the label sits
+    /// its own inset in from the inside of that side's border.
+    fn label_edges(track_left: f32, track_right: f32, label: &Node) -> (f32, f32) {
         assert_eq!(label.position_type, PositionType::Absolute);
-        assert_eq!(label.left, Val::Percent(100.0));
-        let Val::Px(gap) = label.margin.left else {
-            panic!("vital track/label gap is not fixed");
+        let (Val::Px(left_inset), Val::Px(right_inset)) = (label.left, label.right) else {
+            panic!("vital reading is not inset from both sides of its track in pixels");
         };
-        track_right + gap
+        (
+            track_left + BAR_BORDER + left_inset,
+            track_right - BAR_BORDER - right_inset,
+        )
+    }
+
+    /// The height the text pipeline will give a reading's single line.
+    ///
+    /// `LineHeight` and `TextFont` are components Bevy's `Text` requires, so both are read
+    /// off the spawned entity rather than restated from the constants above. `parley`
+    /// resolves `LineHeight::RelativeToFont(s)` as `s * font_size` and consults no font
+    /// metric doing it, so the answer is exact and — the point of reading it at all — a
+    /// Bevy release that changed the default scale, or a reading that set its own, lands
+    /// here instead of in the compile-time bound that assumes neither.
+    ///
+    /// The headless app runs no text pipeline, so there is no `ComputedNode` to ask; this
+    /// is the same arithmetic the pipeline would do, from the same two components, and it
+    /// is never zero.
+    fn reading_line_height<T: Component>(app: &mut App) -> f32 {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&LineHeight, &TextFont), With<T>>();
+        let (line_height, text_font) = query.single(world).expect("one matching reading");
+        let FontSize::Px(size) = text_font.font_size else {
+            panic!("a vital reading's font size is not fixed in pixels");
+        };
+        assert_eq!(size, BAR_LABEL_SIZE);
+        match *line_height {
+            LineHeight::RelativeToFont(scale) => {
+                assert_eq!(
+                    scale, LINE_HEIGHT_RATIO,
+                    "LINE_HEIGHT_RATIO is no longer the line height Bevy will use"
+                );
+                scale * size
+            }
+            LineHeight::Px(px) => px,
+        }
+    }
+
+    /// The reading's box down its track, in track-interior coordinates: `0.0` is the inside
+    /// of the top border and [`TRACK_INNER_HEIGHT`] the inside of the bottom one.
+    ///
+    /// `top: 50%` resolves against the containing block — the track's padding box — and puts
+    /// the reading's top edge on the track's vertical axis; the transform pulls it back up by
+    /// half of its own height. So both edges follow from the height the line is laid out at,
+    /// which is the one thing the compile-time bound has to assume.
+    fn label_vertical_edges(label: &Node, transform: &UiTransform, height: f32) -> (f32, f32) {
+        assert_eq!(label.position_type, PositionType::Absolute);
+        assert_eq!(
+            label.height,
+            Val::Auto,
+            "a vital reading with a height of its own would not be its line's height"
+        );
+        let Val::Percent(top) = label.top else {
+            panic!("a vital reading is not positioned down its track as a percentage");
+        };
+        let Val::Percent(shift) = transform.translation.y else {
+            panic!("a vital reading is not centred by a percentage of its own height");
+        };
+        let top = TRACK_INNER_HEIGHT * top / 100.0 + height * shift / 100.0;
+        (top, top + height)
+    }
+
+    fn ui_transform<T: Component>(app: &mut App) -> UiTransform {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&UiTransform, With<T>>();
+        *query.single(world).expect("one matching transform")
+    }
+
+    fn has_shadow<T: Component>(app: &mut App) -> bool {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, (With<T>, With<TextShadow>)>();
+        query.single(world).is_ok()
     }
 
     fn entity<T: Component>(app: &mut App) -> Entity {
@@ -1013,7 +1134,7 @@ mod tests {
         assert_eq!(health_track, experience_track);
         assert!(
             health_track.overflow.is_visible(),
-            "the track must not clip its absolutely positioned label"
+            "the track must not clip the shadow of the reading inside it"
         );
 
         let health_label = node::<HealthLabel>(&mut app);
@@ -1021,17 +1142,36 @@ mod tests {
         let experience_label = node::<ExperienceLabel>(&mut app);
         assert_eq!(health_label, hunger_label);
         assert_eq!(health_label, experience_label);
-        assert_eq!(health_label.width, Val::Px(BAR_LABEL_WIDTH));
-        assert_eq!(health_label.min_width, Val::Px(BAR_LABEL_WIDTH));
-        assert_eq!(health_label.max_width, Val::Px(BAR_LABEL_WIDTH));
+        // The reading spans its track's interior and carries no width of its own, so a
+        // longer string cannot widen its box and push past an edge.
+        assert_eq!(health_label.left, Val::Px(0.0));
+        assert_eq!(health_label.right, Val::Px(0.0));
+        assert_eq!(health_label.width, Val::Auto);
+        assert_eq!(health_label.min_width, Val::Auto);
+        assert_eq!(health_label.max_width, Val::Auto);
+        assert_eq!(health_label.margin, UiRect::DEFAULT);
+        // Vertical centring: the box's top edge on the track's axis, pulled back up by
+        // half its own height.
         assert_eq!(health_label.top, Val::Percent(50.0));
+        for transform in [
+            ui_transform::<HealthLabel>(&mut app),
+            ui_transform::<HungerLabel>(&mut app),
+            ui_transform::<ExperienceLabel>(&mut app),
+        ] {
+            assert_eq!(transform, vital_bar_label_transform());
+        }
         for layout in [
             text_layout::<HealthLabel>(&mut app),
             text_layout::<HungerLabel>(&mut app),
             text_layout::<ExperienceLabel>(&mut app),
         ] {
             assert_eq!(layout.linebreak, LineBreak::NoWrap);
+            assert_eq!(layout.justify, Justify::Center);
         }
+        // Legible over the fill at every ratio, which is what the shadow is for.
+        assert!(has_shadow::<HealthLabel>(&mut app));
+        assert!(has_shadow::<HungerLabel>(&mut app));
+        assert!(has_shadow::<ExperienceLabel>(&mut app));
 
         let track_label_pairs = [
             (
@@ -1053,9 +1193,62 @@ mod tests {
                 .get::<ChildOf>(label_entity)
                 .expect("every vital label is parented to its track");
             assert_eq!(parent.parent(), track_entity);
+            // Last, which is what draws the reading over the fill rather than under it.
+            let children = app
+                .world()
+                .get::<Children>(track_entity)
+                .expect("every vital track has children");
+            assert_eq!(children.last(), Some(&label_entity));
         }
 
         let hotbar_root = hotbar_root_node();
+
+        // The taller bars still stack experience, hunger, health from the bottom, still
+        // keep the documented gap, and the lowest of them still clears the hotbar.
+        let [
+            Val::Px(hotbar_bottom),
+            Val::Px(experience_bottom),
+            Val::Px(hunger_bottom),
+            Val::Px(health_bottom),
+        ] = [
+            hotbar_root.bottom,
+            experience_root.bottom,
+            hunger_root.bottom,
+            health_root.bottom,
+        ]
+        else {
+            panic!("a HUD row's distance from the bottom of the window is not fixed");
+        };
+        assert!(
+            experience_bottom >= hotbar_bottom + CELL_SIZE,
+            "the lowest vital bar must clear the hotbar at the current bar height"
+        );
+        assert_eq!(
+            hunger_bottom - experience_bottom,
+            BAR_HEIGHT + VITAL_BAR_GAP
+        );
+        assert_eq!(health_bottom - hunger_bottom, BAR_HEIGHT + VITAL_BAR_GAP);
+
+        // Each reading's line, at the height the text pipeline will lay it out at rather
+        // than the one the compile-time bound assumes.
+        let readings = [
+            (
+                &health_label,
+                ui_transform::<HealthLabel>(&mut app),
+                reading_line_height::<HealthLabel>(&mut app),
+            ),
+            (
+                &hunger_label,
+                ui_transform::<HungerLabel>(&mut app),
+                reading_line_height::<HungerLabel>(&mut app),
+            ),
+            (
+                &experience_label,
+                ui_transform::<ExperienceLabel>(&mut app),
+                reading_line_height::<ExperienceLabel>(&mut app),
+            ),
+        ];
+
         for viewport_width in [800.0, 1024.0, 1920.0] {
             let expected = track_edges(viewport_width, &health_root, &health_track);
             assert_eq!(
@@ -1071,10 +1264,40 @@ mod tests {
                 (expected.0 + expected.1) / 2.0,
                 viewport_axis(viewport_width, &hotbar_root)
             );
-            assert_eq!(
-                label_left(expected.1, &health_label),
-                expected.1 + BAR_COLUMN_GAP
-            );
+            // The reading is centred on the same axis, and its whole box lies inside
+            // the track rather than hanging off the right edge of it.
+            for (label, transform, line_height) in &readings {
+                let (label_left, label_right) = label_edges(expected.0, expected.1, label);
+                assert!(label_left >= expected.0 && label_right <= expected.1);
+                assert_eq!((label_left + label_right) / 2.0, viewport_width / 2.0);
+                // The compile-time fit is stated against `TRACK_INNER_WIDTH`; this is
+                // the width the node tree actually hands the reading, so a change to
+                // either inset cannot leave that assertion describing a box nothing has.
+                assert!(
+                    LONGEST_READING_CHARS * DEFAULT_FONT_ADVANCE_EM * BAR_LABEL_SIZE
+                        <= label_right - label_left
+                );
+                assert_eq!(label_right - label_left, TRACK_INNER_WIDTH);
+
+                // And the other axis, which the width above says nothing about. The
+                // compile-time bound is `BAR_LABEL_SIZE * LINE_HEIGHT_RATIO`, a formula
+                // over two constants; these are the same two values read back off the
+                // spawned reading, turned into the box the node tree gives it.
+                assert!(
+                    *line_height > 0.0,
+                    "a reading with no line height would make every bound below vacuous"
+                );
+                assert!(
+                    *line_height <= TRACK_INNER_HEIGHT,
+                    "the reading's line must fit down the track — raise BAR_HEIGHT"
+                );
+                let (label_top, label_bottom) =
+                    label_vertical_edges(label, transform, *line_height);
+                assert!(
+                    label_top >= 0.0 && label_bottom <= TRACK_INNER_HEIGHT,
+                    "the reading's whole box must lie inside the track, not merely fit across it"
+                );
+            }
         }
 
         let geometry_before = (
