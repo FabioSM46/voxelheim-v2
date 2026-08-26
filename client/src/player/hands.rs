@@ -2615,7 +2615,9 @@ mod tests {
 
         let (visibility, resting) = off_hand_shield(&mut app);
         assert_eq!(visibility, Visibility::Visible);
-        app.world_mut().write_message(SwingSent);
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
         app.update();
         assert_eq!(
             off_hand_shield(&mut app).1,

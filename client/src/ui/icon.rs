@@ -329,6 +329,7 @@ const BOW: [IconPart; 3] = [
         radius: 35.0,
         rotation: -0.24,
         shade: 0.18,
+        ..IconPart::PLAIN
     },
     IconPart {
         left: 28.0,
@@ -338,6 +339,7 @@ const BOW: [IconPart; 3] = [
         radius: 35.0,
         rotation: 0.24,
         shade: -0.18,
+        ..IconPart::PLAIN
     },
     IconPart {
         left: 58.0,
