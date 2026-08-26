@@ -631,13 +631,22 @@ const SKIN: [PartBox; 4] = [
     },
 ];
 
-/// Where a world-space item is held, at the centre of the character's right fist.
+/// The fist a world-space item is held in.
 ///
 /// Derived from the same box the rig draws rather than copying its notches into the
 /// renderer. A later arm pose can therefore move the fist and its item from one
 /// attachment point instead of reconciling two model sheets.
+///
+/// The whole box and not only its centre, because an item that *hangs* from the fist is
+/// seated against one of its faces. One answer keeps the face and the centre the same
+/// measurement of the same box.
+pub fn held_item_box() -> PlacedBox {
+    placed(BodyPart::Skin, SKIN[3])
+}
+
+/// Where a world-space item is held, at the centre of the character's right fist.
 pub fn held_item_anchor() -> Vec3 {
-    placed(BodyPart::Skin, SKIN[3]).centre
+    held_item_box().centre
 }
 
 /// One notch each, a notch and a half apart, which is where eyes are.

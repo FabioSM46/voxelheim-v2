@@ -606,14 +606,18 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     let parent = BodyPiece::RightFist.pivot();
     let grip = drawn.transform.transform_point(drops::blade_grip_centre()) + parent;
     let (fist_low, fist_high) = body_piece_bounds(&[BodyPiece::RightFist]);
+    let inside_fist = |point: Vec3| {
+        (0..3).all(|axis| point[axis] >= fist_low[axis] && point[axis] <= fist_high[axis])
+    };
     assert!(
-        (0..3).all(|axis| grip[axis] >= fist_low[axis] && grip[axis] <= fist_high[axis]),
-        "the rotated sword grip {grip:?} left the fist {fist_low:?}..{fist_high:?}"
+        inside_fist(grip),
+        "the hanging sword grip {grip:?} left the fist {fist_low:?}..{fist_high:?}"
     );
-    let blade_axis = drawn.transform.rotation * Vec3::Y;
+    // The sword's own +Y is its length, tip end. Hanging at rest maps it to world -Y.
+    let hang = drawn.transform.rotation * Vec3::Y;
     assert!(
-        blade_axis.y.abs() < 1e-6 && blade_axis.x > 0.6 && blade_axis.z < -0.6,
-        "the sword axis {blade_axis:?} is not horizontal and visible from rear and side"
+        hang.distance(Vec3::NEG_Y) < 1e-6,
+        "the sword's length axis {hang:?} does not point at the ground"
     );
     assert_eq!(drawn.visibility, Visibility::Inherited);
 
@@ -632,16 +636,79 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         .expect("the body-held blade mesh");
     let (blade_low, blade_high) = transformed_mesh_bounds(mesh, drawn.transform, parent);
     let (arm_low, arm_high) = body_piece_bounds(&[BodyPiece::RightSleeve, BodyPiece::RightFist]);
-    assert!(
-        blade_high.x > arm_high.x && blade_low.z < arm_low.z,
-        "the sword remains inside the right arm/fist: blade={blade_low:?}..{blade_high:?}, \
-         arm={arm_low:?}..{arm_high:?}"
-    );
 
     let transform_segment =
         |segment: [Vec3; 2]| segment.map(|point| drawn.transform.transform_point(point) + parent);
     let blade = transform_segment(drops::blade_span());
     let guard = transform_segment(drops::blade_guard_span());
+
+    // The guard is seated on the fist's lower face, so everything of the sword above that
+    // plane is grip and pommel and has to be closed inside the fist. The plane itself is
+    // shared by the guard's top face, whose ends reach past the fist by design, so the
+    // filter is strict.
+    let guard_seat = drawn.transform.transform_point(drops::blade_guard_base()) + parent;
+    assert!(
+        guard_seat.y <= fist_low.y + 1e-6,
+        "the cross guard's upper face {guard_seat:?} is above the fist's lower face {:?}",
+        fist_low.y
+    );
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        panic!("the body-held mesh must carry Float32x3 positions");
+    };
+    let held: Vec<Vec3> = positions
+        .iter()
+        .map(|position| drawn.transform.transform_point(Vec3::from_array(*position)) + parent)
+        .filter(|point| point.y > fist_low.y + 1e-4)
+        .collect();
+    assert!(
+        !held.is_empty(),
+        "no part of the sword is held inside the fist at all"
+    );
+    assert!(
+        held.iter().copied().all(inside_fist),
+        "the grip and pommel are not closed inside the fist {fist_low:?}..{fist_high:?}: \
+         {:?}..{:?}",
+        held.iter().copied().fold(Vec3::MAX, Vec3::min),
+        held.iter().copied().fold(Vec3::MIN, Vec3::max)
+    );
+    assert!(
+        blade.iter().all(|point| point.y < fist_low.y),
+        "the blade {blade:?} does not hang clear below the fist's lower face {:?}",
+        fist_low.y
+    );
+
+    // Half the guard's length on each of the body's horizontal axes, so it reads from
+    // directly behind the character and from the side alike.
+    let guard_span = guard[1] - guard[0];
+    let half = guard_span.length() / 2.0;
+    assert!(
+        guard_span.x.abs() >= half && guard_span.z.abs() >= half,
+        "the cross guard {guard_span:?} is edge-on to one of the two reference views"
+    );
+
+    // Every rig box but the right fist, which holds the grip and pommel on purpose. Two
+    // boxes are disjoint exactly when one axis separates them, which is what the three
+    // axis-aligned projections answer between them.
+    for piece in [
+        BodyPiece::RightTrouser,
+        BodyPiece::RightShoe,
+        BodyPiece::LeftTrouser,
+        BodyPiece::LeftShoe,
+        BodyPiece::Torso,
+        BodyPiece::RightSleeve,
+        BodyPiece::LeftSleeve,
+        BodyPiece::LeftFist,
+        BodyPiece::HeadAndNeck,
+    ] {
+        let (low, high) = body_piece_bounds(&[piece]);
+        assert!(
+            (0..3).any(|axis| blade_high[axis] <= low[axis] || blade_low[axis] >= high[axis]),
+            "the hanging sword {blade_low:?}..{blade_high:?} intersects {piece:?} \
+             {low:?}..{high:?}"
+        );
+    }
     for (view, horizontal_axis) in [("front", 0), ("side", 2)] {
         let visible_blade = projected_outside_fraction(blade, (arm_low, arm_high), horizontal_axis);
         assert!(
