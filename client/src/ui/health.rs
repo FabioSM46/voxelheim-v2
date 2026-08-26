@@ -217,9 +217,9 @@ struct HitPulse {
 
 /// The common row contract for health, hunger and experience.
 ///
-/// All three roots span the window and centre the same fixed-width track/label pair.
-/// Keeping the label column fixed makes the track's horizontal geometry independent of
-/// the text it contains, while the non-shrinking children preserve the shared dimensions.
+/// All three roots span the window and centre the same fixed-width track. The label is an
+/// absolutely positioned child of that track, so its reserved width cannot participate in
+/// flex layout and move the track away from the viewport's horizontal axis.
 pub(super) fn vital_bar_root(bottom: f32) -> Node {
     Node {
         position_type: PositionType::Absolute,
@@ -227,7 +227,6 @@ pub(super) fn vital_bar_root(bottom: f32) -> Node {
         right: Val::Px(0.0),
         bottom: Val::Px(bottom),
         display: Display::Flex,
-        column_gap: Val::Px(BAR_COLUMN_GAP),
         align_items: AlignItems::Center,
         justify_content: JustifyContent::Center,
         ..default()
@@ -247,12 +246,22 @@ pub(super) fn vital_bar_track() -> Node {
 
 pub(super) fn vital_bar_label() -> Node {
     Node {
+        position_type: PositionType::Absolute,
+        left: Val::Percent(100.0),
+        top: Val::Percent(50.0),
         width: Val::Px(BAR_LABEL_WIDTH),
         min_width: Val::Px(BAR_LABEL_WIDTH),
         max_width: Val::Px(BAR_LABEL_WIDTH),
+        margin: UiRect::left(Val::Px(BAR_COLUMN_GAP)),
         flex_shrink: 0.0,
         ..default()
     }
+}
+
+/// Centres a label on the track's vertical axis without depending on the text's computed
+/// line height.
+pub(super) fn vital_bar_label_transform() -> UiTransform {
+    UiTransform::from_translation(Val2::percent(0.0, -50.0))
 }
 
 /// Local presentation time after the authoritative countdown enters its final window.
@@ -277,30 +286,32 @@ fn spawn_health_bar(mut commands: Commands) {
                 BackgroundColor(BAR_TRACK),
                 BorderColor::all(CELL_EDGE),
             ))
-            .with_child((
-                HealthFill,
-                Node {
-                    // Zero until the server says otherwise. A bar that started full would
-                    // be this client asserting a health nobody has sent it.
-                    width: Val::Percent(0.0),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-                BackgroundColor(BAR_FILL),
-            ));
-
-            root.spawn((
-                HealthLabel,
-                vital_bar_label(),
-                Text::new(String::new()),
-                TextFont {
-                    font_size: FontSize::Px(BAR_LABEL_SIZE),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                TextLayout::no_wrap(),
-                TextShadow::default(),
-            ));
+            .with_children(|track| {
+                track.spawn((
+                    HealthFill,
+                    Node {
+                        // Zero until the server says otherwise. A bar that started full would
+                        // be this client asserting a health nobody has sent it.
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(BAR_FILL),
+                ));
+                track.spawn((
+                    HealthLabel,
+                    vital_bar_label(),
+                    vital_bar_label_transform(),
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(BAR_LABEL_SIZE),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                    TextLayout::no_wrap(),
+                    TextShadow::default(),
+                ));
+            });
         });
 }
 
@@ -799,6 +810,7 @@ mod tests {
     use crate::ui::experience::{
         ExperienceLabel, ExperienceRoot, ExperienceTrack, ExperienceUiPlugin,
     };
+    use crate::ui::hotbar::hotbar_root_node;
     use crate::ui::hunger::{HungerLabel, HungerRoot, HungerTrack, HungerUiPlugin};
 
     const TICK_RATE: u8 = 20;
@@ -880,31 +892,43 @@ mod tests {
         *query.single(world).expect("one matching text layout")
     }
 
-    fn horizontal_root_contract(node: &Node) -> (Val, Val, Val, AlignItems, JustifyContent) {
+    fn horizontal_root_contract(node: &Node) -> (Val, Val, AlignItems, JustifyContent) {
         (
             node.left,
             node.right,
-            node.column_gap,
             node.align_items,
             node.justify_content,
         )
     }
 
-    fn track_edges(viewport_width: f32, root: &Node, track: &Node, label: &Node) -> (f32, f32) {
+    fn viewport_axis(viewport_width: f32, root: &Node) -> f32 {
         assert_eq!(root.left, Val::Px(0.0));
         assert_eq!(root.right, Val::Px(0.0));
         assert_eq!(root.justify_content, JustifyContent::Center);
+        viewport_width / 2.0
+    }
+
+    fn track_edges(viewport_width: f32, root: &Node, track: &Node) -> (f32, f32) {
         let Val::Px(track_width) = track.width else {
             panic!("vital track width is not fixed");
         };
-        let Val::Px(label_width) = label.width else {
-            panic!("vital label width is not fixed");
-        };
-        let Val::Px(gap) = root.column_gap else {
+        let left = viewport_axis(viewport_width, root) - track_width / 2.0;
+        (left, left + track_width)
+    }
+
+    fn label_left(track_right: f32, label: &Node) -> f32 {
+        assert_eq!(label.position_type, PositionType::Absolute);
+        assert_eq!(label.left, Val::Percent(100.0));
+        let Val::Px(gap) = label.margin.left else {
             panic!("vital track/label gap is not fixed");
         };
-        let left = (viewport_width - track_width - gap - label_width) / 2.0;
-        (left, left + track_width)
+        track_right + gap
+    }
+
+    fn entity<T: Component>(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<T>>();
+        query.single(world).expect("one matching entity")
     }
 
     fn fill_width(app: &mut App) -> Val {
@@ -932,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn all_vital_tracks_share_one_horizontal_axis_for_short_and_long_labels() {
+    fn all_vital_tracks_and_the_hotbar_share_the_viewport_axis() {
         let shortest = PlayerVitals {
             health: 0,
             max_health: 1,
@@ -993,6 +1017,7 @@ mod tests {
         assert_eq!(health_label.width, Val::Px(BAR_LABEL_WIDTH));
         assert_eq!(health_label.min_width, Val::Px(BAR_LABEL_WIDTH));
         assert_eq!(health_label.max_width, Val::Px(BAR_LABEL_WIDTH));
+        assert_eq!(health_label.top, Val::Percent(50.0));
         for layout in [
             text_layout::<HealthLabel>(&mut app),
             text_layout::<HungerLabel>(&mut app),
@@ -1001,20 +1026,47 @@ mod tests {
             assert_eq!(layout.linebreak, LineBreak::NoWrap);
         }
 
-        for viewport_width in [800.0, 1280.0, 1920.0] {
-            let expected = track_edges(viewport_width, &health_root, &health_track, &health_label);
+        let track_label_pairs = [
+            (
+                entity::<HealthTrack>(&mut app),
+                entity::<HealthLabel>(&mut app),
+            ),
+            (
+                entity::<HungerTrack>(&mut app),
+                entity::<HungerLabel>(&mut app),
+            ),
+            (
+                entity::<ExperienceTrack>(&mut app),
+                entity::<ExperienceLabel>(&mut app),
+            ),
+        ];
+        for (track_entity, label_entity) in track_label_pairs {
+            let parent = app
+                .world()
+                .get::<ChildOf>(label_entity)
+                .expect("every vital label is parented to its track");
+            assert_eq!(parent.parent(), track_entity);
+        }
+
+        let hotbar_root = hotbar_root_node();
+        for viewport_width in [800.0, 1024.0, 1920.0] {
+            let expected = track_edges(viewport_width, &health_root, &health_track);
             assert_eq!(
-                track_edges(viewport_width, &hunger_root, &hunger_track, &hunger_label),
+                track_edges(viewport_width, &hunger_root, &hunger_track),
                 expected
             );
             assert_eq!(
-                track_edges(
-                    viewport_width,
-                    &experience_root,
-                    &experience_track,
-                    &experience_label,
-                ),
+                track_edges(viewport_width, &experience_root, &experience_track),
                 expected
+            );
+            assert_eq!((expected.0 + expected.1) / 2.0, viewport_width / 2.0);
+            assert_eq!(
+                (expected.0 + expected.1) / 2.0,
+                viewport_axis(viewport_width, &hotbar_root)
+            );
+            assert_eq!(
+                label_left(expected.1, &health_label),
+                expected.1 + BAR_COLUMN_GAP
             );
         }
 
