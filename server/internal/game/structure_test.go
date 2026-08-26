@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
 	"testing"
 
@@ -721,32 +722,63 @@ func TestAFireIsNotSomewhereToWork(t *testing.T) {
 // Removal
 // ---------------------------------------------------------------------------
 
-// Taking your own tent back: it stops standing, and the item is on the ground at the
-// anchor rather than back in the pack. A full inventory is a reason to leave something
-// lying there, never a reason to destroy it — the same rule a mined block obeys.
+// Taking your own structure back: it stops standing, and the item falls through free
+// space onto its intact support rather than beginning inside that support. Every kind,
+// because they all reach the same removal path and all have to be visible before pickup.
 func TestRemovingYourOwnStructureLeavesItsItemOnTheGround(t *testing.T) {
 	t.Parallel()
 
-	h := newStructureHarness(t)
-	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	planted := h.plantTent(player, [3]int32{0, 63, 0})
+	for _, tc := range []struct {
+		name string
+		item ItemID
+	}{
+		{"tent", ItemTent},
+		{"forge", ItemForge},
+		{"campfire", ItemCampfire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	if err := player.RemoveStructure(protocol.RemoveStructureRequest{StructureID: planted.structureID}); err != nil {
-		t.Fatalf("RemoveStructure: %v", err)
-	}
-	if standing := len(h.structures()); standing != 0 {
-		t.Errorf("%d structures stand in the world, want none", standing)
-	}
+			h := newStructureHarness(t)
+			player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.give(player, 0, tc.item, 1)
+			if _, _, err := player.PlaceStructure(placeRequest(0, [3]int32{0, 63, 0}, vnet.FacingNorth)); err != nil {
+				t.Fatalf("planting the %s: %v", tc.name, err)
+			}
+			planted := h.only()
 
-	dropped := h.sim.sortedDropsLocked()
-	if len(dropped) != 1 {
-		t.Fatalf("%d drops lie in the world, want the tent that was taken back", len(dropped))
-	}
-	if dropped[0].item != ItemTent || dropped[0].count != 1 {
-		t.Errorf("the drop is %d of item %d, want 1 tent", dropped[0].count, dropped[0].item)
-	}
-	if want := dropSpawnPos([3]int64{0, 63, 0}); dropped[0].pos != want {
-		t.Errorf("the tent dropped at %v, want the anchor at %v", dropped[0].pos, want)
+			if err := player.RemoveStructure(protocol.RemoveStructureRequest{StructureID: planted.structureID}); err != nil {
+				t.Fatalf("RemoveStructure: %v", err)
+			}
+			if standing := len(h.structures()); standing != 0 {
+				t.Errorf("%d structures stand in the world, want none", standing)
+			}
+
+			dropped := h.sim.sortedDropsLocked()
+			if len(dropped) != 1 {
+				t.Fatalf("%d drops lie in the world, want the %s that was taken back", len(dropped), tc.name)
+			}
+			if dropped[0].item != tc.item || dropped[0].count != 1 {
+				t.Errorf("the drop is %d of item %d, want 1 %s", dropped[0].count, dropped[0].item, tc.name)
+			}
+			if want := dropSpawnPos([3]int64{0, 64, 0}); dropped[0].pos != want {
+				t.Errorf("the %s dropped at %v, want free space above its support at %v", tc.name, dropped[0].pos, want)
+			}
+			if overlaps(h.world, dropped[0].box()) {
+				t.Errorf("the %s drop begins inside its supporting terrain at %v", tc.name, dropped[0].pos)
+			}
+
+			// The existing ten-tick delay is long enough for the drop to settle and be
+			// streamed before the nearby owner may collect it.
+			h.advance(dropPickupDelayTicks)
+			if got := dropped[0].pos[1]; math.Abs(got-64) > dropTolerance {
+				t.Errorf("the %s drop came to rest at y=%v, want the terrain surface at y=64", tc.name, got)
+			}
+			seen := out.snapshotDrops(t)
+			if len(seen) != 1 || seen[0].ItemID != uint16(tc.item) || seen[0].Pos != dropped[0].wirePos() {
+				t.Errorf("the settled %s drop snapshot is %+v, want item %d at %v", tc.name, seen, tc.item, dropped[0].wirePos())
+			}
+		})
 	}
 }
 

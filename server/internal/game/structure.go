@@ -451,7 +451,11 @@ func (p *Player) RemoveStructure(req protocol.RemoveStructureRequest) error {
 	// the registry, so the worst a failure here could cost is the item — and spawnDrop
 	// only refuses an unregistered one, which structureItem has already ruled out.
 	if item, known := structureItem(removed.kind); known {
-		p.sim.spawnDrop(item, 1, removed.anchorVoxel())
+		// Manual removal leaves the supporting anchor intact, so the free voxel above
+		// it is where the item can begin falling without intersecting terrain.
+		spawn := removed.anchorVoxel()
+		spawn[1]++
+		p.sim.spawnDrop(item, 1, spawn)
 	}
 
 	p.sim.log.Debug("structure removed",
