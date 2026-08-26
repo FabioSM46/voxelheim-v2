@@ -701,10 +701,16 @@ fn blade_base() -> f32 {
 
 /// The centre of the grip in a sword mesh built at `length`.
 ///
-/// Where the hand closes. The body attachment is seated by [`sword_guard_base`] instead —
-/// the fist is more than twice the grip's height, so seating by the grip would swallow the
-/// guard — and this is what its tests measure that seating against.
-#[cfg(test)]
+/// Where the hand closes, and what the first-person arrangement is derived from:
+/// [`item_translation`] seats this point at the fist's centre, which is what makes "guard
+/// flush above" and "pommel entirely below" the same statement as `HAND_SIZE.y ==
+/// GRIP_SIZE.y` rather than two placements tuned to agree.
+///
+/// The *body* attachment is seated by [`sword_guard_base`] instead — that fist is more than
+/// twice the grip's height, so seating it by the grip would swallow the guard — and this is
+/// what its tests measure that seating against. The two renderers therefore hold a sword by
+/// two different points of one model sheet, deliberately, because their fists are not the
+/// same size.
 pub(super) fn sword_grip_centre(length: f32) -> Vec3 {
     let grip = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y / 2.0;
     Vec3::Y * grip * (length / SWORD_LENGTH)
