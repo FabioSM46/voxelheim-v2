@@ -63,6 +63,7 @@ const (
 	PayloadLootTakeRequest        Payload = 34
 	PayloadLootState              Payload = 35
 	PayloadLootClosed             Payload = 36
+	PayloadMobHit                 Payload = 37
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -103,6 +104,7 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadLootTakeRequest:        "LootTakeRequest",
 	PayloadLootState:              "LootState",
 	PayloadLootClosed:             "LootClosed",
+	PayloadMobHit:                 "MobHit",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -143,6 +145,7 @@ var EnumValuesPayload = map[string]Payload{
 	"LootTakeRequest":        PayloadLootTakeRequest,
 	"LootState":              PayloadLootState,
 	"LootClosed":             PayloadLootClosed,
+	"MobHit":                 PayloadMobHit,
 }
 
 func (v Payload) String() string {

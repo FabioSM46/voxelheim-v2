@@ -72,6 +72,7 @@ pub(crate) use appearance::{
     held_item_anchor as body_held_item_anchor, piece_boxes, placed as placed_box, placed_armour,
 };
 
+pub(crate) use camera::AimCamera;
 pub use camera::{Orbit, ViewMode, WorldCamera};
 // The character screen's preview is the same rig with no server entity behind it, so it
 // is dressed out of the same wardrobe rather than from a second copy of the tables.

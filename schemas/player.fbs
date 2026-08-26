@@ -1014,6 +1014,22 @@ table MobState {
   action: MobAction;
 }
 
+/// One monster blow that reduced this recipient's authoritative health.
+///
+/// An event rather than snapshot state: the client uses it only to decide whether
+/// the attacker was outside its active camera frustum at impact. It must never
+/// infer one from a health delta or a mob action transition.
+///
+/// Invariants a decoder must enforce:
+///   - `attacker_entity_id` is non-zero
+///   - `attacker_pos` is present and every component is finite
+table MobHit {
+  attacker_entity_id: ulong;
+
+  /// The authoritative monster position at the instant its blow landed.
+  attacker_pos: Vec3;
+}
+
 /// What kind of thing a `StructureState` describes.
 ///
 /// Zero member for the same fail-closed reason as `MobKind.Unknown`: an unrecognised

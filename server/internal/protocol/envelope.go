@@ -510,6 +510,17 @@ type ActionRefused struct {
 	HasAnchor bool
 }
 
+// MobHit is one monster blow that reduced this recipient's authoritative health.
+//
+// Server to client and presentation-only. The attacker position is captured at impact;
+// the client decides only whether that point lies inside its active camera frustum.
+// Receiving this payload from a client is a direction error, so Message has no field
+// for it.
+type MobHit struct {
+	AttackerEntityID uint64
+	AttackerPos      [3]float32
+}
+
 // StructureState is one placed structure's authoritative state, as a snapshot carries
 // it.
 //
@@ -2202,6 +2213,23 @@ func EncodeActionRefused(r ActionRefused) []byte {
 	refused := vnet.ActionRefusedEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadActionRefused, refused)
+}
+
+// EncodeMobHit builds one landed monster-hit notification for its damaged recipient.
+//
+// The simulation supplies the non-zero id and finite position required by the contract.
+// Keeping validation at the simulation boundary matches every other outgoing payload:
+// this encoder lays out an authoritative value and does not hold a second opinion about
+// it.
+func EncodeMobHit(hit MobHit) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.MobHitStart(b)
+	vnet.MobHitAddAttackerEntityId(b, hit.AttackerEntityID)
+	vnet.MobHitAddAttackerPos(b, vnet.CreateVec3(b, hit.AttackerPos[0], hit.AttackerPos[1], hit.AttackerPos[2]))
+	payload := vnet.MobHitEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadMobHit, payload)
 }
 
 // EncodeCraftRequest builds one craft intent. The server never sends one, so this exists
