@@ -998,6 +998,29 @@ fn stack_item_id(stack: Option<crate::net::InventoryStack>) -> Option<u16> {
         .map(|stack| stack.item_id)
 }
 
+/// The local attachment of one world-scale item to the right fist.
+///
+/// Ordinary shapes retain the centre placement they already had. A sword's own Y axis is its
+/// length, so leaving its rotation at identity lays it up the arm. Turn that axis horizontal and
+/// diagonally outwards/forwards: both a rear and a side view then see a projection of the blade.
+/// Translation compensates for the rotation around the mesh origin, keeping the actual grip
+/// centre at the rig-derived anchor rather than putting the sword's midpoint there.
+fn body_held_item_transform(shape: ItemShape) -> Transform {
+    let anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
+    if shape != ItemShape::Blade {
+        return Transform::from_translation(anchor);
+    }
+
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+
+    let rotation = Quat::from_rotation_y(FRAC_PI_4) * Quat::from_rotation_z(-FRAC_PI_2);
+    Transform {
+        translation: anchor - rotation * drops::blade_grip_centre(),
+        rotation,
+        ..default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
@@ -2114,6 +2137,7 @@ fn refresh_body_held_item(
             BodyHeldItem { item_id, shape },
             Mesh3d(mesh),
             MeshMaterial3d(material),
+            body_held_item_transform(shape),
         ));
         if held_visibility
             .get(entity)
@@ -2128,7 +2152,7 @@ fn refresh_body_held_item(
         BodyHeldItem { item_id, shape },
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(body_held_item_anchor() - BodyPiece::RightFist.pivot()),
+        body_held_item_transform(shape),
         visibility,
     ));
 }

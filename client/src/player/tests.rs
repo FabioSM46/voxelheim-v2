@@ -13,6 +13,7 @@ use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::MouseMotion;
+use bevy::mesh::VertexAttributeValues;
 use bevy::time::TimeUpdateStrategy;
 
 use super::*;
@@ -496,6 +497,36 @@ fn view_model_visibility(app: &mut App) -> Visibility {
     *query.single(world).expect("one first-person view model")
 }
 
+fn transformed_mesh_bounds(mesh: &Mesh, transform: Transform, parent: Vec3) -> (Vec3, Vec3) {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        panic!("the body-held mesh must carry Float32x3 positions");
+    };
+    positions
+        .iter()
+        .map(|position| transform.transform_point(Vec3::from_array(*position)) + parent)
+        .fold((Vec3::MAX, Vec3::MIN), |(low, high), position| {
+            (low.min(position), high.max(position))
+        })
+}
+
+fn body_piece_bounds(pieces: &[BodyPiece]) -> (Vec3, Vec3) {
+    pieces
+        .iter()
+        .flat_map(|piece| {
+            piece_boxes(*piece, ANY_HAIR)
+                .iter()
+                .map(|cell| placed_box(piece.part(), *cell))
+        })
+        .fold((Vec3::MAX, Vec3::MIN), |(low, high), placed| {
+            (
+                low.min(placed.centre - placed.size / 2.0),
+                high.max(placed.centre + placed.size / 2.0),
+            )
+        })
+}
+
 #[test]
 fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     let mut app = headless_player();
@@ -531,9 +562,19 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         .get::<BodyVisual>(drawn.parent)
         .expect("the item is attached to a body piece");
     assert_eq!(parent_visual.0, BodyPiece::RightFist);
-    assert_eq!(
-        drawn.transform.translation,
-        body_held_item_anchor() - BodyPiece::RightFist.pivot()
+    let fist_anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
+    assert!(
+        drawn
+            .transform
+            .transform_point(drops::blade_grip_centre())
+            .abs_diff_eq(fist_anchor, 1e-6),
+        "the rotated sword grips at {:?}, not the fist anchor {fist_anchor:?}",
+        drawn.transform.transform_point(drops::blade_grip_centre())
+    );
+    let blade_axis = drawn.transform.rotation * Vec3::Y;
+    assert!(
+        blade_axis.y.abs() < 1e-6 && blade_axis.x > 0.6 && blade_axis.z < -0.6,
+        "the sword axis {blade_axis:?} is not horizontal and visible from rear and side"
     );
     assert_eq!(drawn.visibility, Visibility::Inherited);
 
@@ -544,6 +585,19 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     assert_eq!(
         drawn.mesh, drop_mesh,
         "the body item is exactly the drop-scale world asset, not the camera-space view model"
+    );
+    let mesh = app
+        .world()
+        .resource::<Assets<Mesh>>()
+        .get(&drawn.mesh)
+        .expect("the body-held blade mesh");
+    let (blade_low, blade_high) =
+        transformed_mesh_bounds(mesh, drawn.transform, BodyPiece::RightFist.pivot());
+    let (arm_low, arm_high) = body_piece_bounds(&[BodyPiece::RightSleeve, BodyPiece::RightFist]);
+    assert!(
+        blade_high.x > arm_high.x && blade_low.z < arm_low.z,
+        "the sword remains inside the right arm/fist: blade={blade_low:?}..{blade_high:?}, \
+         arm={arm_low:?}..{arm_high:?}"
     );
     let expected = item_linear_rgba(combat::ITEM_RUSTY_SWORD);
     let actual = app
@@ -559,17 +613,37 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
 }
 
 #[test]
-fn the_body_item_follows_selection_and_an_empty_slot_leaves_no_child() {
+fn only_blades_receive_the_body_attachment_rotation() {
+    let anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
+    for shape in ItemShape::ALL {
+        let transform = body_held_item_transform(shape);
+        if shape == ItemShape::Blade {
+            assert_ne!(transform.rotation, Quat::IDENTITY);
+            assert_ne!(transform.translation, anchor);
+        } else {
+            assert_eq!(transform.rotation, Quat::IDENTITY, "{shape:?} rotated");
+            assert_eq!(transform.translation, anchor, "{shape:?} moved");
+        }
+    }
+}
+
+#[test]
+fn the_body_item_changes_blade_block_blade_in_place_then_clears() {
     let mut app = headless_player();
     *app.world_mut().resource_mut::<Inventory>() = Inventory::from_stacks(vec![
+        crate::net::InventoryStack {
+            item_id: combat::ITEM_RUSTY_SWORD,
+            count: 1,
+            ..Default::default()
+        },
         crate::net::InventoryStack {
             item_id: items::ITEM_STONE,
             count: 1,
             ..Default::default()
         },
         crate::net::InventoryStack {
-            item_id: items::ITEM_RAW_COAL,
-            count: 2,
+            item_id: crafting::ITEM_IRON_SWORD,
+            count: 1,
             ..Default::default()
         },
         crate::net::InventoryStack::default(),
@@ -583,24 +657,44 @@ fn the_body_item_follows_selection_and_an_empty_slot_leaves_no_child() {
     );
     app.update();
 
-    let stone = body_held_item(&mut app);
-    assert_eq!(stone.len(), 1);
-    assert_eq!(stone[0].item.item_id, items::ITEM_STONE);
-    assert_eq!(stone[0].item.shape, ItemShape::Block);
-    let entity = stone[0].entity;
+    let rusty = body_held_item(&mut app);
+    assert_eq!(rusty.len(), 1);
+    assert_eq!(rusty[0].item.item_id, combat::ITEM_RUSTY_SWORD);
+    assert_eq!(rusty[0].item.shape, ItemShape::Blade);
+    assert_eq!(
+        rusty[0].transform,
+        body_held_item_transform(ItemShape::Blade)
+    );
+    let entity = rusty[0].entity;
 
     *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(1);
     app.update();
-    let coal = body_held_item(&mut app);
-    assert_eq!(coal.len(), 1);
+    let stone = body_held_item(&mut app);
+    assert_eq!(stone.len(), 1);
     assert_eq!(
-        coal[0].entity, entity,
+        stone[0].entity, entity,
         "a slot change updates the fist-held child in place"
     );
-    assert_eq!(coal[0].item.item_id, items::ITEM_RAW_COAL);
-    assert_eq!(coal[0].item.shape, ItemShape::Material);
+    assert_eq!(stone[0].item.item_id, items::ITEM_STONE);
+    assert_eq!(stone[0].item.shape, ItemShape::Block);
+    assert_eq!(
+        stone[0].transform,
+        body_held_item_transform(ItemShape::Block)
+    );
 
     *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(2);
+    app.update();
+    let iron = body_held_item(&mut app);
+    assert_eq!(iron.len(), 1);
+    assert_eq!(iron[0].entity, entity);
+    assert_eq!(iron[0].item.item_id, crafting::ITEM_IRON_SWORD);
+    assert_eq!(iron[0].item.shape, ItemShape::Blade);
+    assert_eq!(
+        iron[0].transform,
+        body_held_item_transform(ItemShape::Blade)
+    );
+
+    *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(3);
     app.update();
     assert!(
         body_held_item(&mut app).is_empty(),
