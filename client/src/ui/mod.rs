@@ -718,6 +718,7 @@ mod tests {
             life_state,
             respawn_ticks: if life_state == LifeState::Dead { 40 } else { 0 },
             invulnerable: false,
+            blocking: false,
         }
     }
 

@@ -19,6 +19,7 @@ use bevy::prelude::*;
 use super::crafting::{
     ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES, ITEM_IRON_HELM, ITEM_LEATHER_CAP,
     ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE,
+    ITEM_WOODEN_SHIELD,
 };
 use super::items::ITEM_RAW_MEAT;
 use super::{
@@ -530,7 +531,7 @@ pub(crate) const EQUIPMENT_ROUTES: [&[u16]; 4] = [
     &[ITEM_LEATHER_CAP, ITEM_IRON_HELM],
     &[ITEM_LEATHER_JERKIN, ITEM_IRON_CUIRASS],
     &[ITEM_LEATHER_LEGGINGS, ITEM_IRON_GREAVES],
-    &[],
+    &[ITEM_WOODEN_SHIELD],
 ];
 
 pub(crate) fn equipment_item_fits(item_id: u16, offset: u8) -> bool {
@@ -939,6 +940,7 @@ mod tests {
             },
             respawn_ticks: if dead { 60 } else { 0 },
             invulnerable: false,
+            blocking: false,
         }));
     }
 
@@ -1188,10 +1190,7 @@ mod tests {
     #[test]
     fn every_equipment_route_names_one_registry_item_once() {
         assert_eq!(EQUIPMENT_ROUTES.len(), 4);
-        assert!(
-            EQUIPMENT_ROUTES[3].is_empty(),
-            "no off-hand item exists yet"
-        );
+        assert_eq!(EQUIPMENT_ROUTES[3], &[ITEM_WOODEN_SHIELD]);
         for (slot, items) in EQUIPMENT_ROUTES.iter().enumerate() {
             for &item_id in *items {
                 assert_ne!(

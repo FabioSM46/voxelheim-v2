@@ -54,6 +54,7 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
+pub use codec::BlockRequest;
 #[allow(unused_imports)] // V20 protocol surface; ECS consumers land in later issues.
 pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
@@ -73,6 +74,7 @@ pub use codec::{
 // name nothing outside `net` can start deciding from.
 #[cfg(test)]
 pub use codec::ANY_TOKEN;
+pub use codec::encode_block_request;
 #[allow(unused_imports)] // V20 outbound encoders precede their UI controls.
 pub use codec::{
     encode_attack_request, encode_block_edit_request, encode_chat_request,

@@ -386,6 +386,7 @@ mod tests {
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
+            blocking: false,
         }
     }
 

@@ -2964,6 +2964,7 @@ mod tests {
             life_state: LifeState::Dead,
             respawn_ticks: 40,
             invulnerable: false,
+            blocking: false,
         });
         app.update();
         drain(&sent);

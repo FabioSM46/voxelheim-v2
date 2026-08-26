@@ -422,7 +422,12 @@ func (p *Player) refreshWornLocked() {
 		armour uint16
 		threat uint16
 	}
-	for _, stack := range p.inventory.slots[equipmentFirst:] {
+	var shield struct {
+		fraction uint16
+		slot     uint8
+	}
+	for slot := equipmentFirst; slot < len(p.inventory.slots); slot++ {
+		stack := p.inventory.slots[slot]
 		if stack.durability == 0 {
 			continue
 		}
@@ -432,8 +437,33 @@ func (p *Player) refreshWornLocked() {
 		}
 		worn.armour += definition.armour
 		worn.threat += definition.threat
+		if definition.wornAt == wornOffHand && definition.blockFraction > 0 {
+			shield.fraction = definition.blockFraction
+			shield.slot = uint8(slot)
+		}
 	}
 	p.worn = worn
+	p.wornShield = shield
+	if shield.fraction == 0 {
+		p.blocking = false
+	}
+}
+
+// spendShieldDurabilityLocked tries one point once; the caller holds sim.mu.
+func (p *Player) spendShieldDurabilityLocked() {
+	if p.wornShield.fraction == 0 || !p.inventory.mu.TryLock() {
+		return
+	}
+	defer p.inventory.mu.Unlock()
+
+	stack := &p.inventory.slots[p.wornShield.slot]
+	if stack.durability == 0 {
+		p.refreshWornLocked()
+		return
+	}
+	stack.durability--
+	p.inventoryDirty = true
+	p.refreshWornLocked()
 }
 
 // applyDeathPenaltyLocked wears by the approved death penalty every durable slot the

@@ -53,6 +53,8 @@ pub(crate) struct IconPart {
     shade: f32,
     /// Clockwise rotation about the part's own centre, in radians.
     rotation: f32,
+    /// Uses iron instead of the item's base colour.
+    iron: bool,
 }
 
 impl IconPart {
@@ -66,6 +68,7 @@ impl IconPart {
         radius: 0.0,
         shade: 0.0,
         rotation: 0.0,
+        iron: false,
     };
 }
 
@@ -178,6 +181,7 @@ const BLADE: [IconPart; 3] = [
         radius: 30.0,
         shade: -0.55,
         rotation: QUARTER_TURN,
+        iron: false,
     },
 ];
 
@@ -284,6 +288,37 @@ const ARMOUR: [IconPart; 3] = [
     },
 ];
 
+/// Wooden board, rim and iron boss.
+const SHIELD: [IconPart; 3] = [
+    IconPart {
+        left: 24.0,
+        top: 16.0,
+        width: 52.0,
+        height: 64.0,
+        radius: 24.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 30.0,
+        top: 66.0,
+        width: 40.0,
+        height: 17.0,
+        radius: 50.0,
+        shade: -0.22,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 40.0,
+        top: 35.0,
+        width: 20.0,
+        height: 20.0,
+        radius: 50.0,
+        shade: 0.72,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+];
+
 /// The rectangles one shape is drawn from, in the order they are stacked.
 ///
 /// **Exhaustive, with no wildcard arm.** A fifth [`ItemShape`] does not compile until it
@@ -299,6 +334,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Bundle => &BUNDLE,
         ItemShape::Tool => &TOOL,
         ItemShape::Armour => &ARMOUR,
+        ItemShape::Shield => &SHIELD,
     }
 }
 
@@ -397,6 +433,11 @@ pub(crate) fn redraw(
 
 /// One rectangle of a picture, as the nodes that draw it.
 fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
+    let base = if part.iron {
+        LinearRgba::new(0.30, 0.35, 0.42, 1.0)
+    } else {
+        base
+    };
     (
         IconRect,
         Node {

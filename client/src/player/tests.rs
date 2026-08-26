@@ -313,6 +313,22 @@ fn armour_transform(app: &mut App, entity_id: u64, segment: ArmourSegment) -> Tr
         .unwrap_or_else(|| panic!("entity {entity_id} has no {segment:?} armour segment"))
 }
 
+fn shield_transform(app: &mut App, entity_id: u64) -> Transform {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_else(|| panic!("entity {entity_id} has no body"));
+    let mut shields = world.query::<(&ShieldVisual, &Transform)>();
+    children
+        .into_iter()
+        .find_map(|child| shields.get(world, child).ok())
+        .map(|(_, transform)| *transform)
+        .unwrap_or_else(|| panic!("entity {entity_id} has no shield"))
+}
+
 fn child_count(app: &mut App, entity_id: u64) -> usize {
     let world = app.world_mut();
     let mut owners = world.query::<(&Body, &Children)>();
@@ -1294,6 +1310,54 @@ fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
 }
 
 #[test]
+fn a_remote_shield_and_left_arm_follow_authoritative_blocking_players() {
+    let mut app = headless_player();
+    describe_wearing(
+        &mut app,
+        99,
+        an_appearance(HairModel::Cropped),
+        [0, 0, 0, crafting::ITEM_WOODEN_SHIELD],
+    );
+    let now = Instant::now();
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            entities: vec![
+                state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+                state(99, [4.0, 64.0, 0.0], 0.0),
+            ],
+            blocking_players: vec![99],
+            ..Default::default()
+        },
+        now,
+    );
+    app.update();
+
+    assert_eq!(shield_transform(&mut app, 99), shield_pose(true));
+    assert_eq!(
+        piece_transform(&mut app, 99, BodyPiece::LeftSleeve).rotation,
+        Quat::from_rotation_x(-1.05),
+        "the blocking body did not raise its left arm"
+    );
+
+    deliver(
+        &mut app,
+        2,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        now + INTERVAL,
+    );
+    app.update();
+    assert_eq!(shield_transform(&mut app, 99), shield_pose(false));
+    assert_eq!(
+        piece_transform(&mut app, 99, BodyPiece::LeftSleeve),
+        resting_piece_transform(BodyPiece::LeftSleeve)
+    );
+}
+
+#[test]
 fn a_body_that_covers_no_horizontal_ground_keeps_its_limbs_at_rest() {
     let mut app = headless_player();
     let start = Instant::now() - INTERVAL;
@@ -2206,6 +2270,7 @@ fn vitals(health: u16, life_state: LifeState, respawn_ticks: u32) -> PlayerVital
         life_state,
         respawn_ticks,
         invulnerable: false,
+        blocking: false,
     }
 }
 

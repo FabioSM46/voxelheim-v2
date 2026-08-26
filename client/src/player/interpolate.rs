@@ -269,6 +269,12 @@ impl SnapshotBuffer {
             .is_some_and(|latest| latest.snapshot.dead_players.contains(&entity_id))
     }
 
+    pub fn player_is_blocking(&self, entity_id: u64) -> bool {
+        self.latest
+            .as_ref()
+            .is_some_and(|latest| latest.snapshot.blocking_players.contains(&entity_id))
+    }
+
     /// Every structure the newest snapshot names, exactly as it named them.
     ///
     /// **Not a sample, and it takes no `now`** — that is the whole point of the method
