@@ -145,12 +145,14 @@ const _: () = assert!(
 
 /// The fist's box contains the grip outright, on all three axes.
 ///
-/// The stronger half of the statement above, and the one the occlusion rests on: a box inside
-/// another box is hidden by it from every viewpoint outside that box, so no pose of any
-/// animation can bring the grip out in front of the hand — a rigid transform moves both
-/// together and containment survives it.
-/// [`the_hand_stays_closed_over_the_grip_through_every_animation`] measures that through the
-/// real merged mesh and the real presented transform rather than trusting this paragraph.
+/// The stronger half of the statement above — but **the fist's box is not a solid, and the
+/// occlusion does not rest on this assertion alone.** [`fist_mesh`] fills [`HAND_SIZE`] with
+/// a palm only [`PALM_DEPTH`] deep and a band of digits standing proud of it, and the digits
+/// leave gaps between them on purpose. A box inside a box is hidden by it from every
+/// viewpoint outside, but only where the outer box is *there*; through the gap between two
+/// fingers the surface a player looks at is the palm's, 7.8 mm further from the eye than the
+/// knuckles are. The convex solid that actually hides the grip is therefore the palm, and the
+/// assertion below is the one the occlusion rests on.
 ///
 /// `<=` rather than `<` on `Y` on purpose: `HAND_SIZE.y == GRIP_SIZE.y` is asserted above and
 /// is the whole of how [`item_translation`] places a blade, so requiring the grip to be
@@ -158,6 +160,28 @@ const _: () = assert!(
 const _: () = assert!(
     GRIP_SIZE.x <= HAND_SIZE.x && GRIP_SIZE.y <= HAND_SIZE.y && GRIP_SIZE.z <= HAND_SIZE.z,
     "the grip is not inside the fist that closes on it"
+);
+
+/// The palm alone is deep enough to cover the grip, with the digit band taken off it.
+///
+/// **This is the assertion the occlusion rests on, and it has 0.2 mm in it.** The palm's
+/// camera-facing face sits `PALM_DEPTH - HAND_SIZE.z / 2.0` from the model's centre plane —
+/// `0.0072` — because [`DIGIT_PROUD`] takes the digit band's depth *out* of the palm rather
+/// than adding it to the fist. The grip's own near face is at `GRIP_SIZE.z / 2.0`, `0.007`.
+/// The grip is inside the palm's convex box by two tenths of a millimetre, and that is what
+/// makes it hidden along **every** view ray rather than only along the ones a finger happens
+/// to be on: for a convex solid, a point inside it is behind the surface the solid presents
+/// from any viewpoint outside, and a rigid transform moves the pair together.
+///
+/// Raise [`DIGIT_PROUD`] and the palm thins from the back of that face forward, so this is
+/// the number that fails first — before anything looks wrong, and before
+/// [`the_hand_stays_closed_over_the_grip_through_every_animation`] has to find it by ray
+/// query. That test measures the same fact through the real merged mesh and the real
+/// presented transform, and its margin at rest is this one carried through perspective.
+const _: () = assert!(
+    GRIP_SIZE.z / 2.0 < PALM_DEPTH - HAND_SIZE.z / 2.0,
+    "the digit band has taken so much depth out of the palm that the grip stands in front of \
+     it, and a player sees the grip through the gap between two fingers"
 );
 
 /// Extra camera-space clearance for the blade composition during its reachable swings.
@@ -3824,8 +3848,11 @@ mod tests {
     /// grips it* — measured in camera space from the real merged mesh through
     /// [`presented_transform`] rather than from the constants that built it.
     /// `BLADE_CAMERA_OFFSET` carried the whole hilt 14 mm toward the eye, which left the grip
-    /// standing 6.0 mm in front of the fist's nearest surface at rest and up to 6.2 mm in
-    /// front of it mid-swing. It is 7.8 mm behind at rest now, and behind at every pose.
+    /// standing 6.0 mm in front of the fist's nearest vertex at rest and up to 6.2 mm in
+    /// front of it mid-swing. It is 7.8 mm behind that vertex at rest now, and behind it at
+    /// every pose — and, which is the statement that matters, 0.19 mm behind the surface the
+    /// hand actually presents along the grip's own view ray at rest, and never in front of it
+    /// anywhere in the sweep.
     ///
     /// **The guard is outside the section deliberately, and the boundary is the reason.** The
     /// issue draws the line at *the guard's rearward face*: below it is hilt, which the hand
@@ -3834,14 +3861,23 @@ mod tests {
     /// hand reads as a collar — and it sits entirely above the fist's top face, which
     /// [`both_blades_show_their_guard_grip_and_pommel_around_the_fist`] pins.
     ///
-    /// **Two comparisons, not one, and the second is why the first is not enough.** The grip
-    /// is checked against the fist's nearest *vertex*: it is a real quantity the pose changes,
-    /// and it is the stricter bound, since it is the nearest point of the hand anywhere rather
-    /// than the nearest point of the hand over the hilt. But "in front of the hand's nearest
-    /// corner" is not the same question as "drawn in front of the hand", and for the pommel —
-    /// which hangs beside the hand's lower edge rather than over it — it is the wrong one.
-    /// [`nearest_surface_at`] answers the right one per view ray, and the vertex comparison
-    /// stays in front of it as a short circuit that takes almost every pose.
+    /// **Two comparisons, not one, and the second is the one that is the property.** The grip
+    /// is checked against the fist's nearest *vertex* first: a real quantity the pose changes,
+    /// and a cheap one. But "in front of the hand's nearest corner" is not the same question
+    /// as "drawn in front of the hand", and the gap between the two is not a rounding error —
+    /// the fist's nearest vertex belongs to a finger, and [`fist_mesh`] leaves gaps between
+    /// its fingers deliberately. A point behind the knuckles can be looked at straight through
+    /// one of those gaps, where the surface is the palm's and 7.8 mm further away.
+    /// [`nearest_surface_at`] asks the real question per view ray, of every corner at every
+    /// pose.
+    ///
+    /// **It used to sit behind a short circuit, and the short circuit swallowed it whole.** A
+    /// corner behind the fist's nearest vertex was taken to be behind the hand's surface
+    /// everywhere — true of a convex solid, and this hand is a palm with five digits standing
+    /// proud of it. Every grip corner is inside the fist's bounding box, so the short circuit
+    /// took every corner at every pose and the ray query never ran for the grip at all; what
+    /// stood in its place was a closure that answered `0.0` for a ray the hand does not cover,
+    /// which is the visible-grip case scoring as a pass. Both are gone.
     ///
     /// The sweep is the one
     /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] walks — the three
@@ -3863,6 +3899,13 @@ mod tests {
         arcs.push(None);
         let mut closest_grip = f32::INFINITY;
         let mut rest_grip = f32::NAN;
+        // The grip is asked the per-ray question directly, and both halves of the answer are
+        // failures: a ray the hand does not cover at all, and a ray where the grip is in
+        // front of the surface the hand presents along it.
+        let mut grip_uncovered: Option<String> = None;
+        let mut grip_in_front = f32::NEG_INFINITY;
+        let mut grip_worst_pose = String::from("no pose");
+        let mut grip_behind_at_rest = f32::INFINITY;
         // The worst distance any pommel corner stands in front of the hand's own surface,
         // and the pose it happens in.
         let mut pommel_intrusion = 0.0f32;
@@ -3893,16 +3936,22 @@ mod tests {
                         };
                         let fist_near = nearest(&fist);
                         // How far one corner stands in front of the hand's *own surface along
-                        // its view ray*, or zero where the hand does not cover it at all — the
-                        // air beside the hand's lower edge is exactly where the pommel is meant
-                        // to hang, so "not covered" is an answer rather than a failure.
-                        let in_front_of_the_hand = |corner: &[f32; 3]| {
+                        // its view ray*, and `None` where the hand does not cover that ray at
+                        // all.
+                        //
+                        // **The option is returned rather than flattened, because the two
+                        // halves of the hilt mean opposite things by it.** For the grip an
+                        // uncovered ray *is* the defect — a point the hand does not cover is a
+                        // point a player can see — so `None` fails. For the pommel it is the
+                        // air below the fist's lower edge where #384 requires the pommel to
+                        // hang, so `None` is an answer. Collapsing both to `0.0` here was how
+                        // an earlier form of this test scored a visible grip as hidden.
+                        let in_front_of_the_hand = |corner: &[f32; 3]| -> Option<f32> {
                             let point = pose.transform_point(Vec3::from_array(*corner));
                             let depth = -point.z;
                             assert!(depth > 0.0, "{corner:?} landed behind the camera");
                             let flat = Vec2::new(point.x / depth, point.y / depth);
-                            nearest_surface_at(&hand, &pose, flat)
-                                .map_or(0.0, |surface| (point.z - surface).max(0.0))
+                            nearest_surface_at(&hand, &pose, flat).map(|surface| point.z - surface)
                         };
                         for Hilt {
                             item_id,
@@ -3919,40 +3968,53 @@ mod tests {
                                 -grip_margin
                             );
                             closest_grip = closest_grip.min(grip_margin);
-                            // The same per-ray question the pommel is asked below, and the
-                            // one that would answer for the grip if the containment above
-                            // ever stopped holding. It costs nothing while it does: a corner
-                            // behind the fist's nearest vertex is behind the hand's surface
-                            // everywhere, so the short circuit takes every pose.
+                            // **The per-ray question, asked of every grip corner at every
+                            // pose, with no short circuit in front of it.** There was one:
+                            // a corner behind the fist's nearest *vertex* was taken to be
+                            // behind the hand's surface everywhere. That is a statement
+                            // about a convex solid, and [`fist_mesh`] is a palm with four
+                            // fingers and a thumb standing proud of it — a corner can be
+                            // behind the knuckles' near face and still be looked at through
+                            // the gap between two fingers, where the surface is the palm's
+                            // and 7.8 mm further away. Every grip corner is inside the
+                            // fist's bounding box, so the short circuit took *every* corner
+                            // at *every* pose and the ray query never ran at all.
                             for corner in grip {
-                                if fist_near - pose.transform_point(Vec3::from_array(*corner)).z
-                                    > 0.0
-                                {
+                                let Some(front) = in_front_of_the_hand(corner) else {
+                                    grip_uncovered.get_or_insert_with(|| {
+                                        format!(
+                                            "sword {item_id}, corner {corner:?}, {shape:?} at \
+                                             {step}/32, bump {bump}/8, punch {punch}/4"
+                                        )
+                                    });
                                     continue;
+                                };
+                                if front > grip_in_front {
+                                    grip_in_front = front;
+                                    grip_worst_pose = format!(
+                                        "sword {item_id}, corner {corner:?}, {shape:?} at \
+                                         {step}/32, bump {bump}/8, punch {punch}/4"
+                                    );
                                 }
-                                assert!(
-                                    in_front_of_the_hand(corner) <= 0.0,
-                                    "sword {item_id}'s grip corner {corner:?} is drawn in \
-                                     front of the hand in {shape:?} at {step}/32, bump \
-                                     {bump}/8, punch {punch}/4"
-                                );
+                                if shape.is_none() && step == 0 && bump == 0 && punch == 0 {
+                                    grip_behind_at_rest = grip_behind_at_rest.min(-front);
+                                }
                             }
                             if shape.is_none() && step == 0 && bump == 0 && punch == 0 {
                                 rest_grip = grip_margin;
                             }
                             // The pommel is deliberately outside the fist, so the strict
-                            // containment the grip enjoys cannot be asked of it. The
-                            // comparison against the fist's nearest *vertex* is the cheap
-                            // short circuit: a corner already behind that is behind the hand's
-                            // surface everywhere, and only the handful of poses that fail it
-                            // pay for the 72-triangle ray query.
+                            // containment the grip enjoys cannot be asked of it — only how
+                            // far through the hand it reaches where the hand is in the way.
+                            // Uncovered is the pommel's normal state and scores zero; the
+                            // vertex short circuit that used to stand in front of this loop
+                            // is gone for the reason it is gone above, and it was wrong here
+                            // in the same direction: the surface along a corner's own ray is
+                            // never nearer than the mesh's nearest vertex, so a corner behind
+                            // that vertex can still be well in front of the surface.
                             for corner in pommel {
-                                if fist_near - pose.transform_point(Vec3::from_array(*corner)).z
-                                    > 0.0
-                                {
-                                    continue;
-                                }
-                                let front = in_front_of_the_hand(corner);
+                                let front = in_front_of_the_hand(corner)
+                                    .map_or(0.0, |front| front.max(0.0));
                                 if shape.is_none() && step == 0 && bump == 0 && punch == 0 {
                                     pommel_at_rest = pommel_at_rest.max(front);
                                 }
@@ -3970,41 +4032,79 @@ mod tests {
             }
         }
 
-        // **Two numbers, because the sweep's minimum and the rest pose say different things.**
+        // **The grip is asked two different questions, and only the second one is the
+        // property.**
         //
-        // Across every pose the grip stays behind the fist's nearest vertex, and the closest it
-        // comes is under a millimetre — at the steepest pitches the fist's own nearest corner
-        // and the grip's converge, which is arithmetic about two nested boxes rather than the
-        // grip emerging: the per-ray check inside the sweep is what would catch that, and the
-        // `const` containment beside [`GRIP_SIZE`] is why it cannot happen.
+        // The first is the cheap one: the grip stays behind the fist's nearest *vertex* at
+        // every pose, and the closest it comes is under a millimetre — at the steepest
+        // pitches the fist's own nearest corner and the grip's converge, which is arithmetic
+        // about two nested boxes rather than the grip emerging. At rest that margin is
+        // 7.8 mm, and the offset this replaces put the grip about 6 mm *proud* of the hand at
+        // that same pose, so the sign of the number is the fix.
         //
-        // The rest pose is the one the defect was reported from — "look at the held weapon in
-        // first person while standing still" — and there the margin is a real distance. The
-        // offset this replaces put the grip about 6 mm *proud* of the hand at that same pose,
-        // so the sign of this number is the fix and the size of it is the headroom.
+        // But "behind the hand's nearest corner" is not "behind the hand", and reading it as
+        // if it were is exactly how the fingers get to lie for the palm: the nearest corner
+        // belongs to the digit band, and between two fingers there is no digit band. The
+        // question that matters is the per-ray one below, and its numbers are an order of
+        // magnitude smaller because the surface it compares against is the palm's.
         assert!(
             closest_grip > 0.0,
-            "the grip reaches {closest_grip} of the fist's nearest surface across the sweep"
+            "the grip reaches {closest_grip} of the fist's nearest vertex across the sweep"
         );
         assert!(
             rest_grip > 0.005,
-            "the grip sits only {rest_grip} behind the fist's nearest surface at rest"
+            "the grip sits only {rest_grip} behind the fist's nearest vertex at rest"
         );
-        // **The pommel is bounded rather than excluded, and the bound is measured.**
+
+        // **The property itself, in two halves, because a grip can fail to be hidden in two
+        // ways.**
         //
-        // It is the one part of the hilt that is *meant* to be outside the fist — #384's
-        // property, the thing that says the hand is closed on a sword rather than being where
-        // the sword begins — so it hangs below the model's origin, and every animation that
-        // pitches the model over carries what is below the origin toward the eye. At the
-        // steepest reachable pitch its nearest bottom corner crosses the hand's lower edge by
-        // a little over a millimetre, which is a pommel rotating up past the wrist and is what
-        // a swung sword does.
+        // It can be in front of the surface the hand presents along its own view ray, and it
+        // can be on a ray the hand does not present a surface on at all. The second is the
+        // one an earlier form of this test scored as a pass: an uncovered ray answered `0.0`,
+        // which read as "flush with the hand" when what it means is "nothing of the hand is
+        // there". For the pommel below, an uncovered ray genuinely is an answer — that is the
+        // air under the fist where #384 requires the pommel to hang — and sharing one number
+        // between the two is what let the distinction go.
+        assert!(
+            grip_uncovered.is_none(),
+            "the hand covers no part of the ray through the grip at {} — an uncovered grip \
+             corner is one a player is looking straight at",
+            grip_uncovered.clone().unwrap_or_default()
+        );
+
+        // **The grip is never in front of the hand's own surface, and `GRAZE` is arithmetic
+        // rather than headroom.**
         //
-        // What matters is the size of it. `BLADE_CAMERA_OFFSET` carried the whole hilt 14 mm
-        // toward the eye, which put this corner about 7 mm through the hand at the same pose
-        // and the grip 6 mm proud of it *at rest*, where a player stands and looks. Two
-        // millimetres is the recorded ceiling: enough for the pommel to swing, far too little
-        // for a hilt to be drawn in front of the hand holding it.
+        // `GRIP_SIZE.y == HAND_SIZE.y`, so all eight grip corners lie exactly *on* the palm's
+        // top and bottom face planes — that equality is asserted as a `const` beside
+        // [`GRIP_SIZE`] and is how [`item_translation`] places a blade. At the poses where the
+        // nearest covering surface is one of those two flush faces, the true answer is exactly
+        // zero: the view ray meets the plane at the corner itself. `f32` reaches that zero
+        // from two directions — a rigid transform of the corner on one side, a `1/z`-
+        // interpolated barycentric of three transformed triangle corners on the other — and
+        // lands within a couple of micrometres of it. The worst the sweep produces is
+        // `1.98e-6`.
+        //
+        // Ten micrometres is the recorded ceiling. At the default 45° vertical field of view
+        // one pixel of a 1080-line viewport spans about 0.14 mm at the hand's depth, so the
+        // ceiling is a fourteenth of a pixel — it cannot absorb a protrusion anybody could
+        // see, and the `const` palm containment beside [`GRIP_SIZE`] is why there is none to
+        // absorb: a point inside a convex solid is behind that solid's surface from every
+        // viewpoint outside it.
+        const GRAZE: f32 = 1e-5;
+        assert!(
+            grip_in_front <= GRAZE,
+            "the grip stands {grip_in_front} in front of the hand's own surface at \
+             {grip_worst_pose}, past the {GRAZE} the flush faces can produce by arithmetic"
+        );
+        // And at rest — the pose the defect was reported from, standing still and looking at
+        // the held weapon — it is a real distance behind the palm, not a tie: the 0.2 mm the
+        // palm's containment of the grip has in it, carried through perspective.
+        assert!(
+            grip_behind_at_rest > 0.0001,
+            "the grip sits only {grip_behind_at_rest} behind the hand's own surface at rest"
+        );
         // **The pommel gets a bound rather than the grip's guarantee, and the reason is that
         // it is the half of the hilt that is *meant* to be outside the hand.**
         //
@@ -4019,11 +4119,17 @@ mod tests {
         // At rest — where the defect was reported from, standing still and looking at the
         // held weapon — nothing of the pommel is in front of the hand at all, and
         // `both_blades_show_their_guard_grip_and_pommel_around_the_fist` pins that pose
-        // strictly. Mid-swing the worst corner reaches about 24 mm through the hand. That
+        // strictly. Mid-swing the worst corner reaches about 27 mm through the hand. That
         // number was 37 mm before this change, because `BLADE_CAMERA_OFFSET` carried the whole
         // hilt 14 mm toward the eye on top of whatever the arc was already doing. 30 mm is the
         // recorded ceiling: it fails on a regression toward the old arrangement and does not
         // pretend the arcs have been fixed.
+        //
+        // It read 24 mm while the vertex short circuit stood in front of this loop, and the
+        // three millimetres between the two are the measure of what that short circuit was
+        // hiding: the surface along a corner's own ray is never *nearer* than the mesh's
+        // nearest vertex, so skipping a corner for being behind that vertex skips poses where
+        // the corner is well in front of the surface it is actually drawn against.
         assert!(
             pommel_at_rest <= 0.0,
             "the pommel stands {pommel_at_rest} in front of the hand at rest"
