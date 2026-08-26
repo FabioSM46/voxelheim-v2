@@ -473,6 +473,12 @@ type Player struct {
 		armour uint16
 		threat uint16
 	}
+	// Cached so the tick never takes inventory.mu to decide whether a block applies.
+	wornShield struct {
+		fraction uint16
+		slot     uint8
+	}
+	blocking bool
 
 	// sinceDamageTicks is how long since the last landed hit, regenTicks how far
 	// through the current point of regeneration, and hungerTicks how far through the
@@ -742,6 +748,7 @@ func (s *Sim) Leave(p *Player) {
 		p.setMiningLocked(nil)
 		p.mineCompleting = false
 		p.mineReset = nil
+		p.blocking = false
 		delete(s.players, p.entityID)
 		// The same "only the player that was handed in" guard, applied to the second
 		// index: a rejoin that already claimed this identity must keep it. The two maps
@@ -800,6 +807,7 @@ func (p *Player) BeginLeaving() {
 	p.mineReset = nil
 	p.mineCompleting = false
 	p.pendingSwing = nil
+	p.blocking = false
 }
 
 // cannotActLocked distinguishes a corpse from a lingering live body while giving every
@@ -1047,6 +1055,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	// Nil until somebody in view is dead, so the ordinary tick allocates nothing and the
 	// encoder writes no field at all.
 	var visibleDead []uint64
+	var visibleBlocking []uint64
 
 	// At most one encoded appearance per player per tick, built the first time a viewer
 	// turns out not to have been told about them and handed to every viewer after that.
@@ -1059,6 +1068,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	for _, viewer := range players {
 		visible = visible[:0]
 		visibleDead = visibleDead[:0]
+		visibleBlocking = visibleBlocking[:0]
 		for i, p := range players {
 			inView := withinView(viewer.chunk, p.chunk, s.viewDistance)
 			if inView {
@@ -1071,6 +1081,9 @@ func (s *Sim) stepWorld(tick uint64) {
 				// carry the health and the countdown; those are per-recipient and this is not.
 				if !p.alive() {
 					visibleDead = append(visibleDead, p.entityID)
+				}
+				if p.blocking {
+					visibleBlocking = append(visibleBlocking, p.entityID)
 				}
 			}
 
@@ -1211,7 +1224,8 @@ func (s *Sim) stepWorld(tick uint64) {
 			// this to the field above — the recipient's own id is here exactly when its
 			// vitals say Dead — and both come from `p.alive()` and `p.lifeState`, which
 			// are the same variable read twice.
-			DeadPlayers: visibleDead,
+			DeadPlayers:     visibleDead,
+			BlockingPlayers: visibleBlocking,
 			// The world's own time, the same for every recipient and the one field in
 			// here that is not about an entity. Always less than DayLengthTicks, which
 			// is what the welcome announced and what the client checks it against —

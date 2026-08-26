@@ -1104,6 +1104,14 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	case vnet.PayloadBlockRequest:
+		if player == nil || msg.Block == nil {
+			log.Debug("block intent arrived with no player to attribute it to; discarding")
+			return nil
+		}
+		player.Block(msg.Block.Active)
+		return nil
+
 	case vnet.PayloadPlaceStructureRequest:
 		if player == nil || msg.PlaceStructure == nil {
 			// Unreachable for the reason the cases above are, and stated for the same one:

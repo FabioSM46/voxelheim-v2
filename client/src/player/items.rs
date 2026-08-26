@@ -20,6 +20,7 @@
 //! anything.
 
 use super::combat::ITEM_RUSTY_SWORD;
+use super::crafting::ITEM_WOODEN_SHIELD;
 use super::crafting::{
     ITEM_AXE, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES, ITEM_IRON_HELM,
     ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
@@ -104,6 +105,8 @@ pub(crate) enum ItemShape {
     /// A compact plate with shoulders: every wearable piece uses one silhouette and the
     /// registry colour distinguishes worked leather from forged iron.
     Armour,
+    /// A wooden plate with a metal boss.
+    Shield,
 }
 
 impl ItemShape {
@@ -135,13 +138,14 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Block,
         Self::Material,
         Self::Blade,
         Self::Bundle,
         Self::Tool,
         Self::Armour,
+        Self::Shield,
     ];
 }
 
@@ -241,7 +245,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 26] = [
+pub(super) const ITEMS: [ItemDisplay; 27] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -426,6 +430,12 @@ pub(super) const ITEMS: [ItemDisplay; 26] = [
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
     },
+    ItemDisplay {
+        item_id: ITEM_WOODEN_SHIELD,
+        name: "wooden shield",
+        shape: ItemShape::Shield,
+        colour: ItemColour::Block(palette::LOG),
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -569,6 +579,7 @@ mod tests {
             ITEM_IRON_HELM,
             ITEM_IRON_CUIRASS,
             ITEM_IRON_GREAVES,
+            ITEM_WOODEN_SHIELD,
         ];
         for item_id in declared {
             assert!(
@@ -745,6 +756,17 @@ mod tests {
         assert_ne!(
             item_linear_rgba(ITEM_LEATHER_CAP),
             item_linear_rgba(ITEM_IRON_HELM)
+        );
+    }
+
+    #[test]
+    fn wooden_shield_has_its_appended_id_name_shape_and_log_colour() {
+        assert_eq!(ITEM_WOODEN_SHIELD, 27);
+        assert_eq!(item_label(ITEM_WOODEN_SHIELD), "wooden shield");
+        assert_eq!(item_shape(ITEM_WOODEN_SHIELD), ItemShape::Shield);
+        assert_eq!(
+            item_linear_rgba(ITEM_WOODEN_SHIELD),
+            palette::linear_rgba(palette::LOG)
         );
     }
 

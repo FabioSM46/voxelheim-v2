@@ -163,6 +163,10 @@ pub enum HandshakeError {
         vitals_say_dead: bool,
         entity_id: u64,
     },
+    OwnBlockingDisagrees {
+        vitals_say_blocking: bool,
+        entity_id: u64,
+    },
     /// A non-empty party roster omitted the recipient of this snapshot.
     ///
     /// The roster is complete and includes the recipient, but only the welcome carries
@@ -215,6 +219,13 @@ impl fmt::Display for HandshakeError {
                 "EntitySnapshot says self_vitals dead={vitals_say_dead} while dead_players says \
                  dead={} for this session's own entity {entity_id}",
                 !vitals_say_dead
+            ),
+            Self::OwnBlockingDisagrees {
+                vitals_say_blocking,
+                entity_id,
+            } => write!(
+                f,
+                "EntitySnapshot says self_vitals blocking={vitals_say_blocking} while blocking_players disagrees for this session's own entity {entity_id}"
             ),
             Self::PartyRosterWithoutRecipient(entity_id) => write!(
                 f,
@@ -361,6 +372,7 @@ impl Handshake {
                 // playing. Neither is a frame to go on reading.
                 let entity_id = self.entity_id.unwrap_or_default();
                 let vitals_say_dead = snapshot.self_vitals.life_state == LifeState::Dead;
+                let vitals_say_blocking = snapshot.self_vitals.blocking;
                 let recipient_in_roster = snapshot
                     .party_roster
                     .iter()
@@ -387,6 +399,11 @@ impl Handshake {
                 } else if vitals_say_dead != snapshot.dead_players.contains(&entity_id) {
                     Err(HandshakeError::OwnDeathDisagrees {
                         vitals_say_dead,
+                        entity_id,
+                    })
+                } else if vitals_say_blocking != snapshot.blocking_players.contains(&entity_id) {
+                    Err(HandshakeError::OwnBlockingDisagrees {
+                        vitals_say_blocking,
                         entity_id,
                     })
                 } else if !snapshot.party_roster.is_empty() && !recipient_in_roster {
@@ -788,6 +805,7 @@ mod tests {
             life_state: LifeState::Dead,
             respawn_ticks: 40,
             invulnerable: false,
+            blocking: false,
         };
 
         // The last row is the one that keeps this from being written as "dead_players must be
@@ -852,6 +870,53 @@ mod tests {
                         entity_id: 7,
                     }),
                     "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_snapshot_states_this_sessions_blocking_state_the_same_way_twice() {
+        for (vitals_say_blocking, blocking_players, accepted) in [
+            (false, vec![], true),
+            (true, vec![7], true),
+            (true, vec![], false),
+            (false, vec![7], false),
+            (false, vec![9], true),
+        ] {
+            let mut handshake = established();
+            let snapshot = Snapshot {
+                self_vitals: PlayerVitals {
+                    blocking: vitals_say_blocking,
+                    ..PlayerVitals::unharmed()
+                },
+                blocking_players,
+                entities: vec![
+                    super::super::codec::EntityState {
+                        entity_id: 7,
+                        pos: [0.0; 3],
+                        vel: [0.0; 3],
+                        yaw: 0.0,
+                    },
+                    super::super::codec::EntityState {
+                        entity_id: 9,
+                        pos: [0.0; 3],
+                        vel: [0.0; 3],
+                        yaw: 0.0,
+                    },
+                ],
+                ..snapshot()
+            };
+            let applied = handshake.apply(Message::Snapshot(snapshot.clone()));
+            if accepted {
+                assert_eq!(applied, Ok(Transition::Snapshot(snapshot)));
+            } else {
+                assert_eq!(
+                    applied,
+                    Err(HandshakeError::OwnBlockingDisagrees {
+                        vitals_say_blocking,
+                        entity_id: 7,
+                    })
                 );
             }
         }
@@ -973,6 +1038,7 @@ mod tests {
             life_state: LifeState::Dead,
             respawn_ticks: 40,
             invulnerable: false,
+            blocking: false,
         };
         let frame = |self_vitals: PlayerVitals, dead_players: Vec<u64>| Snapshot {
             self_vitals,

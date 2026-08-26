@@ -841,6 +841,7 @@ pub enum RecipeId {
     IronHelm,
     IronCuirass,
     IronGreaves,
+    WoodenShield,
 }
 
 impl RecipeId {
@@ -870,6 +871,7 @@ impl RecipeId {
             Self::IronHelm => fb::RecipeID::IronHelm,
             Self::IronCuirass => fb::RecipeID::IronCuirass,
             Self::IronGreaves => fb::RecipeID::IronGreaves,
+            Self::WoodenShield => fb::RecipeID::WoodenShield,
         }
     }
 }
@@ -911,6 +913,7 @@ pub struct PlayerVitals {
     /// Whether the server is currently refusing damage to this player. The server owns
     /// the timer; this is its answer.
     pub invulnerable: bool,
+    pub blocking: bool,
 }
 
 impl PlayerVitals {
@@ -933,6 +936,7 @@ impl PlayerVitals {
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
+            blocking: false,
         }
     }
 }
@@ -1092,6 +1096,7 @@ pub struct Snapshot {
     /// oversight: this half lands the contract, the server that fills it and the decoder that
     /// refuses a frame breaking it. The half that tips a body on it follows.
     pub dead_players: Vec<u64>,
+    pub blocking_players: Vec<u64>,
     /// Zero only when this session has no party. A non-zero value may name this
     /// session itself, so a frame-only decoder cannot require it to occur below.
     pub party_leader_entity_id: u64,
@@ -1126,6 +1131,7 @@ impl Default for Snapshot {
             structures: Vec::new(),
             tick_of_day: 0,
             dead_players: Vec::new(),
+            blocking_players: Vec::new(),
             party_leader_entity_id: 0,
             party_members: Vec::new(),
             party_roster: Vec::new(),
@@ -1379,6 +1385,13 @@ pub struct AttackRequest {
     pub slot: u8,
     /// This client's own tick counter — the same one `PlayerInput` uses, so the server
     /// sees the aim frame carrying that tick before the swing that names it.
+    pub client_tick: u32,
+}
+
+/// Starts or releases the held shield; the server validates the intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRequest {
+    pub active: bool,
     pub client_tick: u32,
 }
 
@@ -1954,6 +1967,10 @@ pub enum DecodeError {
     DeadPlayerNotInSnapshot(u64),
     /// The same entity id appears twice in `dead_players`.
     DeadPlayerNamedTwice(u64),
+    /// A blocking id is not visible.
+    BlockingPlayerNotInSnapshot(u64),
+    /// A blocking id is duplicated.
+    BlockingPlayerNamedTwice(u64),
     /// A structure carries the reserved identity 0.
     StructureWithoutIdentity,
     /// One id names a structure and a player, a drop, a mob, or another structure, in one
@@ -2297,6 +2314,13 @@ impl fmt::Display for DecodeError {
             ),
             Self::DeadPlayerNamedTwice(entity_id) => {
                 write!(f, "dead_players names {entity_id} twice")
+            }
+            Self::BlockingPlayerNotInSnapshot(entity_id) => write!(
+                f,
+                "blocking_players names {entity_id}, which is not a player in this snapshot"
+            ),
+            Self::BlockingPlayerNamedTwice(entity_id) => {
+                write!(f, "blocking_players names {entity_id} twice")
             }
             Self::StructureWithoutIdentity => {
                 write!(f, "a structure carries the reserved structure id 0")
@@ -3176,6 +3200,21 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         }
     }
 
+    let mut blocking_players = Vec::new();
+    let mut blocking_ids = HashSet::new();
+    if let Some(list) = snapshot.blocking_players() {
+        blocking_players.reserve(list.len());
+        for entity_id in list.iter() {
+            if !player_ids.contains(&entity_id) {
+                return Err(DecodeError::BlockingPlayerNotInSnapshot(entity_id));
+            }
+            if !blocking_ids.insert(entity_id) {
+                return Err(DecodeError::BlockingPlayerNamedTwice(entity_id));
+            }
+            blocking_players.push(entity_id);
+        }
+    }
+
     let party_leader_entity_id = snapshot.party_leader_entity_id();
     let mut party_members = Vec::new();
     let mut party_member_ids = HashSet::new();
@@ -3313,6 +3352,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         // number this function has never seen.
         tick_of_day: snapshot.tick_of_day(),
         dead_players,
+        blocking_players,
         party_leader_entity_id,
         party_members,
         party_roster,
@@ -3501,6 +3541,7 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
         life_state,
         respawn_ticks,
         invulnerable: vitals.invulnerable(),
+        blocking: vitals.blocking(),
     })
 }
 
@@ -4019,6 +4060,16 @@ pub fn encode_attack_request(request: &AttackRequest) -> Vec<u8> {
         fb::Payload::AttackRequest,
         payload.as_union_value(),
     )
+}
+
+/// Builds one shield-intent edge.
+pub fn encode_block_request(request: &BlockRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let mut table = fb::BlockRequestBuilder::new(&mut builder);
+    table.add_active(request.active);
+    table.add_client_tick(request.client_tick);
+    let payload = table.finish();
+    finish_envelope(builder, fb::Payload::BlockRequest, payload.as_union_value())
 }
 
 /// Builds one craft intent.
@@ -4695,6 +4746,7 @@ pub(super) mod server_side {
         pub life_state: fb::LifeState,
         pub respawn_ticks: u32,
         pub invulnerable: bool,
+        pub blocking: bool,
     }
 
     impl Default for PlayerVitalsWire {
@@ -4711,6 +4763,7 @@ pub(super) mod server_side {
                 life_state: fb::LifeState::Alive,
                 respawn_ticks: 0,
                 invulnerable: false,
+                blocking: false,
             }
         }
     }
@@ -4847,7 +4900,7 @@ pub(super) mod server_side {
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
-                blocking: false,
+                blocking: vitals.blocking,
             },
         );
 
@@ -4858,6 +4911,55 @@ pub(super) mod server_side {
         table.add_dead_players(dead);
         let payload = table.finish();
 
+        finish_envelope(
+            builder,
+            fb::Payload::EntitySnapshot,
+            payload.as_union_value(),
+        )
+    }
+
+    pub fn encode_entity_snapshot_with_blocking(
+        server_tick: u32,
+        entities: &[EntityStateWire],
+        vitals: PlayerVitalsWire,
+        blocking_players: &[u64],
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(entities.len() * 40 + 128);
+        let laid_out: Vec<fb::EntityState> = entities
+            .iter()
+            .map(|state| {
+                fb::EntityState::new(
+                    state.entity_id,
+                    &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
+                    &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
+                    state.yaw,
+                )
+            })
+            .collect();
+        let entities = builder.create_vector(&laid_out);
+        let blocking = builder.create_vector(blocking_players);
+        let self_vitals = fb::PlayerVitals::create(
+            &mut builder,
+            &fb::PlayerVitalsArgs {
+                health: vitals.health,
+                max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
+                life_state: vitals.life_state,
+                respawn_ticks: vitals.respawn_ticks,
+                invulnerable: vitals.invulnerable,
+                blocking: vitals.blocking,
+            },
+        );
+        let mut table = fb::EntitySnapshotBuilder::new(&mut builder);
+        table.add_server_tick(server_tick);
+        table.add_entities(entities);
+        table.add_self_vitals(self_vitals);
+        table.add_blocking_players(blocking);
+        let payload = table.finish();
         finish_envelope(
             builder,
             fb::Payload::EntitySnapshot,
@@ -5044,7 +5146,6 @@ pub(super) mod server_side {
             })
             .collect();
         let party_members = builder.create_vector(&laid_out);
-
         let self_vitals = fb::PlayerVitals::create(
             &mut builder,
             &fb::PlayerVitalsArgs {
@@ -5594,6 +5695,7 @@ pub(super) mod server_side {
 
 #[cfg(test)]
 mod tests {
+    use super::server_side;
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
         ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PartyMemberStateWire,
@@ -6236,6 +6338,7 @@ mod tests {
         assert_eq!(fb::RecipeID::IronHelm.0, 14);
         assert_eq!(fb::RecipeID::IronCuirass.0, 15);
         assert_eq!(fb::RecipeID::IronGreaves.0, 16);
+        assert_eq!(fb::RecipeID::WoodenShield.0, 17);
     }
 
     /// V7's members sit where they were appended, and the enums they were appended to
@@ -7616,6 +7719,7 @@ mod tests {
                     self_vitals: PlayerVitals::unharmed(),
                     structures: vec![],
                     dead_players: vec![],
+                    blocking_players: vec![],
                     party_leader_entity_id: 0,
                     party_members: vec![],
                     party_roster: vec![],
@@ -7740,6 +7844,41 @@ mod tests {
                 &[duplicate, duplicate]
             )),
             Err(DecodeError::DuplicateProjectile(42))
+        );
+    }
+
+    #[test]
+    fn raised_shield_players_decode_and_must_name_visible_players_once() {
+        let entities = [EntityStateWire::at(7, 0.0)];
+        let raised = PlayerVitalsWire {
+            blocking: true,
+            ..Default::default()
+        };
+        let Ok(Message::Snapshot(snapshot)) = decode(
+            &server_side::encode_entity_snapshot_with_blocking(1, &entities, raised, &[7]),
+        ) else {
+            panic!("a valid raised-shield snapshot did not decode");
+        };
+        assert!(snapshot.self_vitals.blocking);
+        assert_eq!(snapshot.blocking_players, vec![7]);
+
+        assert_eq!(
+            decode(&server_side::encode_entity_snapshot_with_blocking(
+                1,
+                &entities,
+                raised,
+                &[8],
+            )),
+            Err(DecodeError::BlockingPlayerNotInSnapshot(8))
+        );
+        assert_eq!(
+            decode(&server_side::encode_entity_snapshot_with_blocking(
+                1,
+                &entities,
+                raised,
+                &[7, 7],
+            )),
+            Err(DecodeError::BlockingPlayerNamedTwice(7))
         );
     }
 
@@ -8587,6 +8726,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_block_request_carries_only_the_edge_and_shared_tick() {
+        let frame = encode_block_request(&BlockRequest {
+            active: true,
+            client_tick: u32::MAX,
+        });
+        let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+        assert_eq!(envelope.payload_type(), fb::Payload::BlockRequest);
+        let request = envelope
+            .payload_as_block_request()
+            .expect("the payload is a block request");
+        assert!(request.active());
+        assert_eq!(request.client_tick(), u32::MAX);
+    }
+
     // -----------------------------------------------------------------------
     // Protocol V4 — craft intent
     // -----------------------------------------------------------------------
@@ -8622,6 +8776,7 @@ mod tests {
             (RecipeId::IronHelm, fb::RecipeID::IronHelm),
             (RecipeId::IronCuirass, fb::RecipeID::IronCuirass),
             (RecipeId::IronGreaves, fb::RecipeID::IronGreaves),
+            (RecipeId::WoodenShield, fb::RecipeID::WoodenShield),
         ];
 
         for (recipe, wire) in named {
@@ -9380,6 +9535,7 @@ mod tests {
                 life_state: fb::LifeState::Dead,
                 respawn_ticks: 60,
                 invulnerable: false,
+                blocking: false,
             },
         ) else {
             panic!("a valid dead player's snapshot did not decode");
@@ -9398,6 +9554,7 @@ mod tests {
                 life_state: LifeState::Dead,
                 respawn_ticks: 60,
                 invulnerable: false,
+                blocking: false,
             }
         );
     }

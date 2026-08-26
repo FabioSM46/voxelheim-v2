@@ -718,6 +718,7 @@ mod tests {
                     life_state,
                     respawn_ticks: 0,
                     invulnerable: false,
+                    blocking: false,
                 }))
                 .add_systems(Update, toggle_view);
 

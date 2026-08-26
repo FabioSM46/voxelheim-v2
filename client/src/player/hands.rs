@@ -23,6 +23,7 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
+use super::SelfVitals;
 use super::camera::{ViewMode, WorldCamera};
 use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
@@ -786,6 +787,7 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         }
         ItemShape::Tool => tool_mesh(),
         ItemShape::Armour => armour_mesh(),
+        ItemShape::Shield => shield_mesh(0.065),
     }
 }
 
@@ -807,8 +809,26 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         // The head stays above the hand and most of the haft remains visible below it.
         ItemShape::Tool => HAND_SIZE.y * 0.35,
         ItemShape::Armour => hand_top + ARMOUR_BODY_SIZE.y / 2.0 - HOLD_OVERLAP,
+        // Cross the knuckles so the carried shield is gripped, not floating.
+        ItemShape::Shield => hand_top + 0.024,
     };
     Vec3::Y * y
+}
+
+/// A wooden board and iron boss shared by hands, bodies and drops.
+pub(super) fn shield_mesh(size: f32) -> Mesh {
+    let mut board = tinted(
+        Mesh::from(Cuboid::from_size(Vec3::new(size, size * 0.82, size * 0.10))),
+        items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD),
+    );
+    let boss = tinted(
+        Mesh::from(Cylinder::new(size * 0.17, size * 0.14))
+            .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+            .translated_by(Vec3::Z * size * 0.10),
+        [0.55, 0.60, 0.66, 1.0],
+    );
+    merge_all(&mut board, [boss], "wooden shield");
+    board
 }
 
 /// The complete first-person arrangement: the player's fist and, when selected, the item
@@ -827,6 +847,8 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
 
     let item = if shape == ItemShape::Bundle {
         coloured_bundle_mesh(item_colour)
+    } else if shape == ItemShape::Shield {
+        item_mesh(item_id, shape)
     } else {
         coloured(item_mesh(item_id, shape), item_colour)
     }
@@ -840,6 +862,7 @@ pub(super) struct HandsPlugin;
 impl Plugin for HandsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HandAnimation>()
+            .init_resource::<SelfVitals>()
             // `PlayerPlugin` owns the appearance cache in the game. Initialised here too
             // because the focused animation tests build this plugin on its own.
             .init_resource::<super::Appearances>()
@@ -894,6 +917,14 @@ pub(super) struct HeldItem {
     skin_colour: u32,
 }
 
+#[derive(Component)]
+struct ViewModel;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct OffHandShield {
+    skin_colour: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HeldAppearance {
     item_id: Option<u16>,
@@ -906,6 +937,7 @@ struct HandVisuals {
     /// The one mesh asset the entity draws. Its contents change only when the selected
     /// item or the local player's skin colour changes; the handle and entity stay put.
     mesh: Handle<Mesh>,
+    shield_mesh: Handle<Mesh>,
 }
 
 /// Which of the three arcs an attack draws.
@@ -1073,6 +1105,12 @@ fn spawn_view_model(
     let appearance = selected_appearance(None);
     let skin_colour = PLACEHOLDER_APPEARANCE.skin_color();
     let mesh = meshes.add(held_mesh(skin_colour, appearance));
+    let shield_appearance = HeldAppearance {
+        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
+        shape: Some(ItemShape::Shield),
+        item_colour: Some(items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD)),
+    };
+    let shield_mesh_handle = meshes.add(held_mesh(skin_colour, shield_appearance));
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         unlit: true,
@@ -1082,7 +1120,10 @@ fn spawn_view_model(
         depth_bias: 1_000.0,
         ..default()
     });
-    let visuals = HandVisuals { mesh: mesh.clone() };
+    let visuals = HandVisuals {
+        mesh: mesh.clone(),
+        shield_mesh: shield_mesh_handle.clone(),
+    };
 
     commands.spawn((
         HeldItem {
@@ -1090,9 +1131,20 @@ fn spawn_view_model(
             shape: appearance.shape,
             skin_colour,
         },
+        ViewModel,
         Mesh3d(mesh),
-        MeshMaterial3d(material),
+        MeshMaterial3d(material.clone()),
         Transform::from_translation(BASE_TRANSLATION),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
+    commands.spawn((
+        OffHandShield { skin_colour },
+        ViewModel,
+        Mesh3d(shield_mesh_handle),
+        MeshMaterial3d(material),
+        Transform::from_translation(Vec3::new(-BASE_TRANSLATION.x, -0.035, -0.16))
+            .with_rotation(Quat::from_rotation_z(-0.48)),
         Visibility::Hidden,
         NotShadowCaster,
     ));
@@ -1103,7 +1155,7 @@ fn spawn_view_model(
 fn attach_to_camera(
     mut commands: Commands,
     cameras: Query<Entity, With<WorldCamera>>,
-    unattached: Query<Entity, (With<HeldItem>, Without<ChildOf>)>,
+    unattached: Query<Entity, (With<ViewModel>, Without<ChildOf>)>,
 ) {
     let Some(camera) = cameras.iter().next() else {
         return;
@@ -1152,12 +1204,36 @@ impl HandSubject<'_> {
     }
 }
 
+type HeldItemViewModelQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut HeldItem,
+        &'static Mesh3d,
+        &'static mut Visibility,
+    ),
+    Without<OffHandShield>,
+>;
+
+type OffHandShieldViewModelQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut OffHandShield,
+        &'static Mesh3d,
+        &'static mut Visibility,
+    ),
+    Without<HeldItem>,
+>;
+
 fn refresh_held_item(
     subject: HandSubject<'_>,
     mode: Res<InputMode>,
     view: Res<ViewMode>,
     mut assets: HandAssets<'_>,
-    mut held: Query<(&mut HeldItem, &Mesh3d, &mut Visibility)>,
+    mut held: HeldItemViewModelQuery<'_, '_>,
+    mut shields: OffHandShieldViewModelQuery<'_, '_>,
+    vitals: Res<SelfVitals>,
 ) {
     let (appearance, skin_colour) = subject.read();
     let view_mesh = assets.visuals.mesh.clone();
@@ -1199,6 +1275,48 @@ fn refresh_held_item(
         if *visibility != visible {
             *visibility = visible;
         }
+    }
+
+    let shield_equipped = subject.session.as_deref().is_some_and(|session| {
+        let params = session.0;
+        params.equipment_slots >= 4
+            && subject
+                .inventory
+                .slot(params.inventory_slots - params.equipment_slots + 3)
+                .is_some_and(|stack| {
+                    stack.item_id == super::crafting::ITEM_WOODEN_SHIELD
+                        && stack.count > 0
+                        && stack.durability > 0
+                })
+    });
+    let shield_visible = if visible == Visibility::Visible
+        && shield_equipped
+        && vitals.get().is_some_and(|vitals| vitals.blocking)
+    {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    let shield_mesh = assets.visuals.shield_mesh.clone();
+    for (mut shield, mesh, mut visibility) in &mut shields {
+        if shield.skin_colour != skin_colour {
+            shield.skin_colour = skin_colour;
+            if mesh.0 == shield_mesh
+                && let Some(mut mesh) = assets.meshes.get_mut(&shield_mesh)
+            {
+                *mesh = held_mesh(
+                    skin_colour,
+                    HeldAppearance {
+                        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
+                        shape: Some(ItemShape::Shield),
+                        item_colour: Some(items::item_linear_rgba(
+                            super::crafting::ITEM_WOODEN_SHIELD,
+                        )),
+                    },
+                );
+            }
+        }
+        *visibility = shield_visible;
     }
 }
 
@@ -1455,6 +1573,7 @@ mod tests {
             (ItemShape::Bundle, structures::ITEM_TENT),
             (ItemShape::Tool, crafting::ITEM_SHOVEL),
             (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
+            (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
         ]
     }
 
@@ -2381,6 +2500,49 @@ mod tests {
         let mut query = world.query::<(&HeldItem, &Visibility, &ChildOf)>();
         let (item, visibility, parent) = query.single(world).expect("one held view model");
         (*item, *visibility, parent.parent())
+    }
+
+    fn off_hand_shield(app: &mut App) -> (Visibility, Transform) {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&Visibility, &Transform), With<OffHandShield>>();
+        let (visibility, transform) = query.single(world).expect("one off-hand shield view model");
+        (*visibility, *transform)
+    }
+
+    #[test]
+    fn authoritative_blocking_shows_a_separate_left_hand_shield() {
+        let mut app = app();
+        let mut params = session().0;
+        params.inventory_slots = 8;
+        params.equipment_slots = 4;
+        app.insert_resource(Session(params));
+        let mut stacks = vec![InventoryStack::default(); 8];
+        stacks[7] = InventoryStack {
+            item_id: crafting::ITEM_WOODEN_SHIELD,
+            count: 1,
+            durability: 40,
+            max_durability: 40,
+        };
+        app.insert_resource(Inventory::from_stacks(stacks));
+        app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals {
+            blocking: true,
+            ..crate::net::PlayerVitals::unharmed()
+        })));
+        app.update();
+
+        let (visibility, resting) = off_hand_shield(&mut app);
+        assert_eq!(visibility, Visibility::Visible);
+        app.world_mut().write_message(SwingSent);
+        app.update();
+        assert_eq!(
+            off_hand_shield(&mut app).1,
+            resting,
+            "the right-hand swing moved the shield arm"
+        );
+
+        app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals::unharmed())));
+        app.update();
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
     }
 
     #[test]
