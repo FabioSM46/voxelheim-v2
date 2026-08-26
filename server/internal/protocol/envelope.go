@@ -580,14 +580,15 @@ type PlayerVitals struct {
 // schemas/player.fbs. Every float in it must be finite for the reason EntityState's
 // must, and the simulation is what guarantees that; this type only carries it.
 type MobState struct {
-	EntityID  uint64
-	Kind      vnet.MobKind
-	Pos       [3]float32
-	Vel       [3]float32
-	Yaw       float32
-	Health    uint16
-	MaxHealth uint16
-	Action    vnet.MobAction
+	EntityID       uint64
+	Kind           vnet.MobKind
+	Pos            [3]float32
+	Vel            [3]float32
+	Yaw            float32
+	Health         uint16
+	MaxHealth      uint16
+	Action         vnet.MobAction
+	TargetEntityID uint64
 }
 
 // EntitySnapshot is one tick of authoritative state, as one session sees it.
@@ -1696,6 +1697,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		vnet.MobStateAddHealth(b, mob.Health)
 		vnet.MobStateAddMaxHealth(b, mob.MaxHealth)
 		vnet.MobStateAddAction(b, mob.Action)
+		vnet.MobStateAddTargetEntityId(b, mob.TargetEntityID)
 		mobOffsets[i] = vnet.MobStateEnd(b)
 	}
 

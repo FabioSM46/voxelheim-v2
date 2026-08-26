@@ -83,6 +83,19 @@ type mob struct {
 	// has left is a pointer the simulation would still step.
 	target uint64
 
+	// threat is the hostile attention this creature remembers by live player entity
+	// identity. It exists only for hostile species, is touched only under Sim.mu and is
+	// neither persisted nor sent; the wire carries only target above. Float64 preserves
+	// half-point healing and the tenths-based worn multiplier without rounding them into
+	// different combat outcomes.
+	threat map[uint64]float64
+
+	// idleThreatTicks counts a full second eligible for decay. noTargetTicks counts
+	// consecutive ticks with target zero and clears the whole ledger at the forget
+	// threshold. Both are simulation time and both die with this mob.
+	idleThreatTicks uint32
+	noTargetTicks   uint32
+
 	// firstHit is the character who first dealt damage to this creature, or nil until
 	// one does. That first valid hit taps the mob for experience: later attackers may
 	// help or land the killing blow, but they cannot transfer the award to themselves.
@@ -169,6 +182,9 @@ func (s *Sim) spawnMobLocked(kind vnet.MobKind, pos [3]float64) (uint64, bool) {
 		health:   def.maxHealth,
 		action:   vnet.MobActionIdle,
 	}
+	if !def.passive {
+		m.threat = make(map[uint64]float64)
+	}
 	m.chunk = chunkAt(m.pos)
 	s.mobs[m.entityID] = m
 	return m.entityID, true
@@ -221,6 +237,7 @@ func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
 			continue
 		}
 		m.step(s, players)
+		m.advanceThreatLocked(s)
 		kept = append(kept, m)
 	}
 	return kept
@@ -238,7 +255,11 @@ func (m *mob) step(s *Sim, players []*Player) {
 			// The *committed* target, not a fresh choice. A telegraph is aimed at somebody,
 			// and one that landed on whoever happened to walk nearer while it played out
 			// would be unreadable — the player who reacted to it is not the one it hit.
-			m.stepWindup(s, huntable(players, m.target))
+			target := huntable(players, m.target)
+			if target != nil && boxDistance(m.species().body.boxAt(m.pos), playerBox(target.pos)) > m.species().aggroRange {
+				target = nil
+			}
+			m.stepWindup(s, target)
 		case vnet.MobActionRecovery:
 			m.stepRecovery(m.chooseTargetLocked(s, players))
 		default:
@@ -319,22 +340,17 @@ func huntable(players []*Player, entityID uint64) *Player {
 
 // chooseTargetLocked is the player this mob is hunting, or nil.
 //
-// It re-chooses every tick rather than holding onto one, which is what makes losing a
-// target free: a player who dies, respawns with protection, disconnects or simply walks
-// out of range stops being returned, and every state above reads that as "no target"
-// without any of them having to watch for it.
-//
-// Lowest distance-to-threat-weight wins; equal scores resolve by entity id. The raw
-// distance still decides whether somebody is inside the species' aggro range, so armour
-// can reorder visible prey and can never make a creature notice farther away. O(players)
-// per mob per tick, knowingly — the same trade the snapshot visibility below records,
-// and a spatial index is worth building when the quadratic term matters rather than one
-// issue before.
+// It re-chooses every tick rather than holding a player pointer, which is what makes
+// losing a target free: dead, protected, disconnected and out-of-range players are not
+// candidates. The ledger is the memory. Its highest positive entry wins, subject to the
+// current target's tenacity; only when nobody in range has positive threat does the old
+// distance / worn-weight comparison choose prey. O(players) per mob per tick, knowingly.
 func (m *mob) chooseTargetLocked(s *Sim, players []*Player) *Player {
 	def := m.species()
 
-	var best *Player
-	bestScore := math.Inf(1)
+	var current, bestThreat, fallback *Player
+	bestThreatValue := 0.0
+	fallbackScore := math.Inf(1)
 
 	for _, p := range players {
 		// Dead players and freshly respawned ones are not prey. The second is what stops
@@ -347,10 +363,26 @@ func (m *mob) chooseTargetLocked(s *Sim, players []*Player) *Player {
 		if distance > def.aggroRange {
 			continue
 		}
+		if p.entityID == m.target {
+			current = p
+		}
+		if value := m.threat[p.entityID]; value > bestThreatValue ||
+			(value == bestThreatValue && value > 0 && (bestThreat == nil || p.entityID < bestThreat.entityID)) {
+			bestThreat, bestThreatValue = p, value
+		}
 		weight := 1 + float64(p.worn.threat)/ThreatScale
 		score := distance / weight
-		if score < bestScore || (score == bestScore && (best == nil || p.entityID < best.entityID)) {
-			best, bestScore = p, score
+		if score < fallbackScore || (score == fallbackScore && (fallback == nil || p.entityID < fallback.entityID)) {
+			fallback, fallbackScore = p, score
+		}
+	}
+
+	best := fallback
+	if bestThreat != nil {
+		best = bestThreat
+		if current != nil && current != bestThreat &&
+			bestThreatValue <= m.threat[current.entityID]*ThreatSwitchRatio {
+			best = current
 		}
 	}
 
@@ -360,6 +392,104 @@ func (m *mob) chooseTargetLocked(s *Sim, players []*Player) *Player {
 		m.target = best.entityID
 	}
 	return best
+}
+
+// addThreatLocked adds positive hostile attention to this hostile, living mob.
+// Passive and dying creatures have no ledger and no caller may manufacture one for them.
+func (m *mob) addThreatLocked(entityID uint64, amount float64) {
+	if m == nil || m.threat == nil || m.dying() || entityID == 0 || amount <= 0 {
+		return
+	}
+	m.threat[entityID] += amount
+}
+
+// creditDamageThreatLocked records the actual health a player's hit removed, multiplied
+// by the cached worn threat weight. The cache is precisely what keeps this tick path from
+// taking the inventory lock.
+func (s *Sim) creditDamageThreatLocked(m *mob, player *Player, damage uint16) {
+	if player == nil || damage == 0 {
+		return
+	}
+	weight := 1 + float64(player.worn.threat)/ThreatScale
+	m.addThreatLocked(player.entityID, float64(damage)*weight)
+}
+
+// creditHealThreatLocked gives a healer half the health actually restored on every mob
+// currently hunting the healed player. A future sceptre calls this once after clamping
+// the heal; overhealing therefore arrives as restored zero and earns nothing.
+func (s *Sim) creditHealThreatLocked(healer, healed *Player, restored uint16) {
+	if healer == nil || healed == nil || restored == 0 {
+		return
+	}
+	for _, m := range s.mobs {
+		if m.target == healed.entityID {
+			m.addThreatLocked(healer.entityID, float64(restored)/2)
+		}
+	}
+}
+
+// creditBlockThreatLocked records the fixed taunt earned when blocker authoritatively
+// absorbed this mob's landed blow. The shield issue owns the block verdict and calls this
+// seam only after one succeeds.
+func (s *Sim) creditBlockThreatLocked(blocker *Player, m *mob) {
+	if blocker == nil {
+		return
+	}
+	m.addThreatLocked(blocker.entityID, ShieldTauntThreat)
+}
+
+// removeAllThreatFor erases one session identity from every hostile ledger and drops any
+// active hunt for it. Death and Leave both call it under Sim.mu, so even a mob whose blow
+// caused the death cannot project the invalid target later in the same tick.
+func (s *Sim) removeAllThreatFor(entityID uint64) {
+	if entityID == 0 {
+		return
+	}
+	for _, m := range s.mobs {
+		delete(m.threat, entityID)
+		if m.target == entityID {
+			m.target = 0
+		}
+	}
+}
+
+// advanceThreatLocked spends one tick of decay and forget time after the mob has chosen
+// this tick's action and target. Combat resets the decay interval; a complete idle second
+// subtracts once, and ten consecutive target-less seconds discard the ledger whole.
+func (m *mob) advanceThreatLocked(s *Sim) {
+	if m.threat == nil || m.dying() {
+		return
+	}
+
+	if m.target == 0 {
+		m.noTargetTicks++
+		if m.noTargetTicks >= s.threatForgetTicks {
+			clear(m.threat)
+			m.noTargetTicks = 0
+		}
+	} else {
+		m.noTargetTicks = 0
+	}
+
+	switch m.action {
+	case vnet.MobActionChase, vnet.MobActionWindup, vnet.MobActionRecovery:
+		m.idleThreatTicks = 0
+		return
+	}
+
+	m.idleThreatTicks++
+	if m.idleThreatTicks < s.threatDecayTicks {
+		return
+	}
+	m.idleThreatTicks = 0
+	for entityID, value := range m.threat {
+		value -= ThreatDecayPerSecond
+		if value <= 0 {
+			delete(m.threat, entityID)
+			continue
+		}
+		m.threat[entityID] = value
+	}
 }
 
 // stepPursuit is Idle and Chase, which are the same decision asked of a different answer.
@@ -389,6 +519,9 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		// attack costs, and this was not one.
 		m.action = vnet.MobActionIdle
 		m.actionTicks = 0
+		if target == nil {
+			m.target = 0
+		}
 		if target != nil {
 			m.action = vnet.MobActionChase
 		}
@@ -699,6 +832,9 @@ func (s *Sim) damageMobLocked(m *mob, amount uint16) bool {
 		// was chasing, so nothing reads a corpse as still hunting — the director's dawn rule
 		// asks exactly that question of every mob it considers.
 		m.target = 0
+		clear(m.threat)
+		m.idleThreatTicks = 0
+		m.noTargetTicks = 0
 		m.vel[0], m.vel[2] = 0, 0
 		s.log.Debug("mob died", "entity_id", m.entityID, "kind", m.kind,
 			"death_ticks", m.actionTicks)
@@ -728,8 +864,9 @@ func mobStates(mobs []*mob) []protocol.MobState {
 			// bar is drawn against the maximum of the species it is looking at. The
 			// kind travels beside it, which is what lets the client size the body it
 			// draws — the numbers themselves stay here.
-			MaxHealth: m.species().maxHealth,
-			Action:    m.action,
+			MaxHealth:      m.species().maxHealth,
+			Action:         m.action,
+			TargetEntityID: m.target,
 		}
 	}
 	return states

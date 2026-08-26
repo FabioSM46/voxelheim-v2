@@ -137,6 +137,7 @@ func (p *Player) dieLocked() {
 	// The combat seam this comment promised. A swing accepted before the blow that
 	// killed them does not land afterwards.
 	p.pendingSwing = nil
+	p.sim.removeAllThreatFor(p.entityID)
 
 	p.sim.log.Debug("player died", "entity_id", p.entityID, "respawn_ticks", p.respawnTicks)
 }

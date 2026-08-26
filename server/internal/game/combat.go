@@ -137,6 +137,8 @@ func (p *Player) resolveSwingLocked() {
 		if target.firstHit == nil {
 			target.firstHit = newMobTap(p)
 		}
+		dealt := min(damage, target.health)
+		p.sim.creditDamageThreatLocked(target, p, dealt)
 		if p.sim.damageMobLocked(target, damage) {
 			owner := p.sim.currentTapOwnerLocked(target.firstHit)
 			amount := uint32(target.species().experience)
