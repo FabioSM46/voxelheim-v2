@@ -36,19 +36,24 @@ struct HotbarCell(u8);
 fn spawn_hotbar_root(mut commands: Commands) {
     commands.spawn((
         HotbarRoot,
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(0.0),
-            right: Val::Px(0.0),
-            bottom: Val::Px(18.0),
-            display: Display::Flex,
-            column_gap: Val::Px(6.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
+        hotbar_root_node(),
         Visibility::Hidden,
         GlobalZIndex(12),
     ));
+}
+
+/// The viewport-spanning contract that keeps the hotbar on the horizontal axis.
+pub(super) fn hotbar_root_node() -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(0.0),
+        right: Val::Px(0.0),
+        bottom: Val::Px(18.0),
+        display: Display::Flex,
+        column_gap: Val::Px(6.0),
+        justify_content: JustifyContent::Center,
+        ..default()
+    }
 }
 
 fn build_hotbar(
