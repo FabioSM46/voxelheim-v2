@@ -63,8 +63,9 @@ pub use codec::{
     LootTakeRequest, MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction, MobHit, MobKind,
     MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
     PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
-    RecipeId, RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest,
-    SessionParams, Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate,
+    ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
+    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
+    WorldClock, WorldUpdate,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
