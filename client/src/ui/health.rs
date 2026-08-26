@@ -19,16 +19,25 @@
 //!   interpolation holding an entity's last position instead of extrapolating one.
 //! - Respawn protection is drawn, never counted. The server owns that timer; `invulnerable`
 //!   is its answer, and this module colours a border with it.
+//! - The vignette is opacity mapped from the same health ratio, with a transparent centre.
+//!   It changes only when a newer accepted snapshot replaces [`SelfVitals`].
+//! - The eyelids become eligible from the server's countdown, after the existing camera
+//!   fall has completed. Local time draws their closure but never opens them: only the
+//!   next authoritative Alive state removes the black frame.
 //!
 //! The overlay is a `bevy_ui` node like every other panel here, drawn through the one
 //! camera `player/camera.rs` owns. No second camera, no asset, no font file.
 
 use bevy::prelude::*;
+use bevy::ui::{ColorStop, FocusPolicy};
 use std::time::Duration;
 
+use super::menu::MENU_LAYER;
 use super::{CELL_EDGE, CELL_SIZE};
 use crate::net::{DrainNetwork, LifeState, MobHit, MobHitInbox, PlayerVitals, Session};
-use crate::player::{AimCamera, ApplySnapshots, InputMode, SelfVitals, WorldCamera};
+use crate::player::{
+    AimCamera, ApplySnapshots, DeathFall, InputMode, LocalPlayer, SelfVitals, WorldCamera,
+};
 
 /// Width of the bar, in logical pixels.
 pub(super) const BAR_WIDTH: f32 = 260.0;
@@ -81,6 +90,25 @@ const HIT_PULSE_DURATION: Duration = Duration::from_millis(300);
 const HIT_PULSE_ALPHA: f32 = 0.14;
 const HIT_PULSE_LAYER: i32 = 19;
 
+/// The darkest a living low-health edge becomes. The centre stays transparent at every
+/// value; this is only the opacity at the outside of the screen.
+const VIGNETTE_MAX_ALPHA: f32 = 0.72;
+const VIGNETTE_CLEAR_PERCENT: f32 = 52.0;
+const VIGNETTE_LAYER: i32 = 18;
+
+/// The final authoritative countdown window is one eyelid closure plus one full second
+/// of black. Local time draws the first part; only an Alive snapshot ends the second.
+const EYELID_CLOSE_DURATION: Duration = Duration::from_millis(300);
+const FINAL_BLACK_DURATION: Duration = Duration::from_secs(1);
+const DEATH_TRANSITION_LAYER: i32 = 35;
+
+const _: () = assert!(
+    VIGNETTE_LAYER < HIT_PULSE_LAYER
+        && HIT_PULSE_LAYER < DEATH_LAYER
+        && DEATH_LAYER < DEATH_TRANSITION_LAYER
+        && DEATH_TRANSITION_LAYER < MENU_LAYER
+);
+
 /// What the countdown says before the server has named a number.
 const NO_RESPAWN_YET: &str = "RESPAWNING";
 
@@ -94,17 +122,26 @@ impl Plugin for HealthUiPlugin {
             .init_resource::<SelfVitals>()
             .init_resource::<MobHitInbox>()
             .init_resource::<HitPulse>()
+            .init_resource::<DeathTransition>()
             .add_systems(
                 Startup,
-                (spawn_health_bar, spawn_death_overlay, spawn_hit_pulse),
+                (
+                    spawn_health_bar,
+                    spawn_low_health_vignette,
+                    spawn_death_overlay,
+                    spawn_death_transition,
+                    spawn_hit_pulse,
+                ),
             )
             .add_systems(
                 Update,
                 (
                     refresh_health_bar,
                     show_health_bar,
+                    refresh_low_health_vignette,
                     refresh_death_overlay,
                     show_death_overlay,
+                    drive_death_transition,
                     drive_hit_pulse,
                 )
                     // After the snapshot that carried the vitals has been applied, so a
@@ -143,12 +180,33 @@ struct DeathRoot;
 #[derive(Component)]
 struct RespawnText;
 
+/// A radial gradient whose transparent centre leaves the player's focus untouched.
+#[derive(Component)]
+struct LowHealthVignette;
+
+/// The layer that eventually covers the death text, but never the pause menu.
+#[derive(Component)]
+struct DeathTransitionRoot;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum Eyelid {
+    Upper,
+    Lower,
+}
+
 #[derive(Component)]
 struct HitPulseRoot;
 
 #[derive(Resource, Default)]
 struct HitPulse {
     remaining: Duration,
+}
+
+/// Local presentation time after the authoritative countdown enters its final window.
+/// `None` is not yet closing; a saturated duration is black until Alive arrives.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DeathTransition {
+    elapsed: Option<Duration>,
 }
 
 fn spawn_health_bar(mut commands: Commands) {
@@ -207,6 +265,22 @@ fn spawn_health_bar(mut commands: Commands) {
         });
 }
 
+fn spawn_low_health_vignette(mut commands: Commands) {
+    commands.spawn((
+        LowHealthVignette,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundGradient::from(vignette_gradient(0.0)),
+        FocusPolicy::Pass,
+        Visibility::Hidden,
+        GlobalZIndex(VIGNETTE_LAYER),
+    ));
+}
+
 fn spawn_death_overlay(mut commands: Commands) {
     commands
         .spawn((
@@ -249,6 +323,42 @@ fn spawn_death_overlay(mut commands: Commands) {
         });
 }
 
+fn spawn_death_transition(mut commands: Commands) {
+    commands
+        .spawn((
+            DeathTransitionRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            FocusPolicy::Pass,
+            Visibility::Hidden,
+            GlobalZIndex(DEATH_TRANSITION_LAYER),
+        ))
+        .with_children(|root| {
+            for eyelid in [Eyelid::Upper, Eyelid::Lower] {
+                let mut node = Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(0.0),
+                    ..default()
+                };
+                match eyelid {
+                    Eyelid::Upper => node.top = Val::Px(0.0),
+                    Eyelid::Lower => node.bottom = Val::Px(0.0),
+                }
+                root.spawn((
+                    eyelid,
+                    node,
+                    BackgroundColor(Color::BLACK),
+                    FocusPolicy::Pass,
+                ));
+            }
+        });
+}
+
 fn spawn_hit_pulse(mut commands: Commands) {
     commands.spawn((
         HitPulseRoot,
@@ -262,6 +372,119 @@ fn spawn_hit_pulse(mut commands: Commands) {
         Visibility::Hidden,
         GlobalZIndex(HIT_PULSE_LAYER),
     ));
+}
+
+/// Draws loss of peripheral visibility from the newest authoritative health ratio.
+/// The radial gradient is transparent through the centre, and the whole node disappears
+/// at full health and while dead rather than becoming a second death overlay.
+fn refresh_low_health_vignette(
+    session: Option<Res<Session>>,
+    vitals: Res<SelfVitals>,
+    mut vignettes: Query<(&mut BackgroundGradient, &mut Visibility), With<LowHealthVignette>>,
+) {
+    let current = vitals.get();
+    let alpha = current.map_or(0.0, vignette_alpha);
+    let visible = session.is_some()
+        && current.is_some_and(|vitals| vitals.life_state == LifeState::Alive)
+        && alpha > 0.0;
+    let next_visibility = if visible {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    let next_gradient = vitals
+        .is_changed()
+        .then(|| BackgroundGradient::from(vignette_gradient(alpha)));
+
+    for (mut gradient, mut visibility) in &mut vignettes {
+        if let Some(next) = &next_gradient
+            && *gradient != *next
+        {
+            *gradient = next.clone();
+        }
+        if *visibility != next_visibility {
+            *visibility = next_visibility;
+        }
+    }
+}
+
+/// Closes the eyes only once both authoritative inputs make it eligible: the player is
+/// still Dead near the end of the server's countdown, and the existing body/camera fall
+/// has completed. Once begun, local time only draws the 300 ms closure. It can never open
+/// the eyes or declare a respawn; black holds until the server sends Alive.
+fn drive_death_transition(
+    time: Res<Time>,
+    session: Option<Res<Session>>,
+    vitals: Res<SelfVitals>,
+    falls: Query<&DeathFall, With<LocalPlayer>>,
+    mut transition: ResMut<DeathTransition>,
+    mut roots: Query<&mut Visibility, With<DeathTransitionRoot>>,
+    mut eyelids: Query<(&Eyelid, &mut Node)>,
+) {
+    let Some(current) = vitals.get() else {
+        clear_death_transition(&mut transition, &mut roots, &mut eyelids);
+        return;
+    };
+    let Some(session) = session.as_deref() else {
+        clear_death_transition(&mut transition, &mut roots, &mut eyelids);
+        return;
+    };
+    if current.life_state == LifeState::Alive {
+        clear_death_transition(&mut transition, &mut roots, &mut eyelids);
+        return;
+    }
+
+    if let Some(elapsed) = transition.elapsed {
+        let next = (elapsed + time.delta()).min(EYELID_CLOSE_DURATION);
+        if next != elapsed {
+            transition.elapsed = Some(next);
+        }
+    } else {
+        let fall_finished = falls.single().is_ok_and(|fall| fall.finished());
+        if fall_finished && death_transition_due(current, session.0.tick_rate) {
+            // The threshold belongs to this frame, so its preceding delta cannot be
+            // charged to an animation that had not started yet.
+            transition.elapsed = Some(Duration::ZERO);
+        }
+    }
+
+    let progress = transition_progress(*transition);
+    let visibility = if transition.elapsed.is_some() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    for mut shown in &mut roots {
+        if *shown != visibility {
+            *shown = visibility;
+        }
+    }
+    set_eyelid_progress(progress, &mut eyelids);
+}
+
+fn clear_death_transition(
+    transition: &mut DeathTransition,
+    roots: &mut Query<&mut Visibility, With<DeathTransitionRoot>>,
+    eyelids: &mut Query<(&Eyelid, &mut Node)>,
+) {
+    if *transition != DeathTransition::default() {
+        *transition = DeathTransition::default();
+    }
+    for mut shown in roots {
+        if *shown != Visibility::Hidden {
+            *shown = Visibility::Hidden;
+        }
+    }
+    set_eyelid_progress(0.0, eyelids);
+}
+
+fn set_eyelid_progress(progress: f32, eyelids: &mut Query<(&Eyelid, &mut Node)>) {
+    let height = Val::Percent(50.0 * progress.clamp(0.0, 1.0));
+    for (_, mut node) in eyelids {
+        if node.height != height {
+            node.height = height;
+        }
+    }
 }
 
 /// Drains every hit once. Any attacker outside the active camera frustum restarts one
@@ -443,6 +666,54 @@ fn show_death_overlay(
     }
 }
 
+/// Edge opacity for a schema-valid authoritative health value.
+///
+/// Linear loss makes every decrease darker and every increase lighter on the snapshot
+/// that carries it. One living point remains just below the configured bound; zero is the
+/// only value that reaches it, and life state is deliberately not inferred from that.
+fn vignette_alpha(vitals: PlayerVitals) -> f32 {
+    let ratio = f32::from(vitals.health) / f32::from(vitals.max_health);
+    (VIGNETTE_MAX_ALPHA * (1.0 - ratio)).clamp(0.0, VIGNETTE_MAX_ALPHA)
+}
+
+/// A transparent centre and one darkening edge, shaped to the current node rather than
+/// to a fixed aspect ratio. Opacity changes; the unobscured centre never does.
+fn vignette_gradient(alpha: f32) -> RadialGradient {
+    let clear = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    RadialGradient::new(
+        UiPosition::CENTER,
+        RadialGradientShape::FarthestCorner,
+        vec![
+            ColorStop::percent(clear, 0.0),
+            ColorStop::percent(clear, VIGNETTE_CLEAR_PERCENT),
+            ColorStop::percent(
+                Color::srgba(0.0, 0.0, 0.0, alpha.clamp(0.0, VIGNETTE_MAX_ALPHA)),
+                100.0,
+            ),
+        ],
+    )
+}
+
+/// Whether the server's latest countdown has entered the final closure-plus-black window.
+/// Zero is eligible because it is either the exhausted count or a death whose first count
+/// has not arrived; the completed fall still prevents an immediate cut to black.
+fn death_transition_due(vitals: PlayerVitals, tick_rate: u8) -> bool {
+    if vitals.life_state != LifeState::Dead {
+        return false;
+    }
+    if vitals.respawn_ticks == 0 {
+        return true;
+    }
+    let remaining = Duration::from_secs_f64(f64::from(vitals.respawn_ticks) / f64::from(tick_rate));
+    remaining <= EYELID_CLOSE_DURATION + FINAL_BLACK_DURATION
+}
+
+fn transition_progress(transition: DeathTransition) -> f32 {
+    transition.elapsed.map_or(0.0, |elapsed| {
+        (elapsed.as_secs_f32() / EYELID_CLOSE_DURATION.as_secs_f32()).clamp(0.0, 1.0)
+    })
+}
+
 /// How much of the bar the server's health fills, as a percentage of its width.
 ///
 /// `max_health` is non-zero by decoder invariant — `net/codec.rs` refuses a zero before a
@@ -616,6 +887,48 @@ mod tests {
         *query.single(world).expect("one hit pulse")
     }
 
+    fn vignette(app: &mut App) -> (Visibility, RadialGradient) {
+        let world = app.world_mut();
+        let mut query =
+            world.query_filtered::<(&Visibility, &BackgroundGradient), With<LowHealthVignette>>();
+        let (visibility, gradient) = query.single(world).expect("one low-health vignette");
+        let Gradient::Radial(gradient) = &gradient.0[0] else {
+            panic!("low-health vignette is not radial");
+        };
+        (*visibility, gradient.clone())
+    }
+
+    fn edge_alpha(gradient: &RadialGradient) -> f32 {
+        gradient
+            .stops
+            .last()
+            .expect("one edge stop")
+            .color
+            .to_srgba()
+            .alpha
+    }
+
+    fn transition_visibility(app: &mut App) -> Visibility {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Visibility, With<DeathTransitionRoot>>();
+        *query.single(world).expect("one death transition")
+    }
+
+    fn eyelid_height(app: &mut App, wanted: Eyelid) -> Val {
+        let world = app.world_mut();
+        let mut query = world.query::<(&Eyelid, &Node)>();
+        query
+            .iter(world)
+            .find_map(|(eyelid, node)| (*eyelid == wanted).then_some(node.height))
+            .expect("requested eyelid")
+    }
+
+    fn add_fall(app: &mut App, elapsed: Duration) -> Entity {
+        let mut fall = DeathFall::default();
+        fall.advance(true, elapsed);
+        app.world_mut().spawn((LocalPlayer, fall)).id()
+    }
+
     // ---------------------------------------------------------------------------
     // The ratio
     // ---------------------------------------------------------------------------
@@ -652,6 +965,54 @@ mod tests {
         deliver(&mut app, dead(0));
         assert_eq!(fill_width(&mut app), Val::Percent(0.0));
         assert_eq!(label(&mut app), "0 / 100");
+    }
+
+    #[test]
+    fn living_health_loss_darkens_only_the_edges_monotonically() {
+        let samples = [100, 75, 50, 25, 1, 0].map(|health| vignette_alpha(vitals(health, 100)));
+        assert_eq!(samples[0], 0.0, "full health has no vignette");
+        assert!(samples.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            samples[4] < VIGNETTE_MAX_ALPHA,
+            "one living point stays below the configured opacity bound"
+        );
+        assert_eq!(samples[5], VIGNETTE_MAX_ALPHA);
+
+        let gradient = vignette_gradient(VIGNETTE_MAX_ALPHA);
+        assert_eq!(gradient.stops.len(), 3);
+        assert_eq!(gradient.stops[0].color.to_srgba().alpha, 0.0);
+        assert_eq!(gradient.stops[1].color.to_srgba().alpha, 0.0);
+        assert_eq!(
+            gradient.stops[1].point,
+            Val::Percent(VIGNETTE_CLEAR_PERCENT)
+        );
+        assert_eq!(edge_alpha(&gradient), VIGNETTE_MAX_ALPHA);
+    }
+
+    #[test]
+    fn accepted_health_updates_change_the_vignette_on_the_same_frame() {
+        let mut app = hud(vitals(100, 100));
+        let (visibility, gradient) = vignette(&mut app);
+        assert_eq!(visibility, Visibility::Hidden);
+        assert_eq!(edge_alpha(&gradient), 0.0);
+
+        deliver(&mut app, vitals(20, 100));
+        let (visibility, wounded) = vignette(&mut app);
+        assert_eq!(visibility, Visibility::Visible);
+
+        deliver(&mut app, vitals(80, 100));
+        let (_, healed) = vignette(&mut app);
+        assert!(edge_alpha(&healed) < edge_alpha(&wounded));
+
+        deliver(&mut app, vitals(100, 100));
+        assert_eq!(vignette(&mut app).0, Visibility::Hidden);
+
+        deliver(&mut app, dead(60));
+        assert_eq!(
+            vignette(&mut app).0,
+            Visibility::Hidden,
+            "life state, not zero health, selects the death presentation"
+        );
     }
 
     #[test]
@@ -772,6 +1133,122 @@ mod tests {
         );
         assert_eq!(fill_width(&mut app), Val::Percent(100.0));
         assert_eq!(label(&mut app), "100 / 100");
+    }
+
+    #[test]
+    fn the_eyelids_wait_for_both_the_countdown_window_and_the_finished_fall() {
+        assert!(!death_transition_due(dead(27), TICK_RATE));
+        assert!(death_transition_due(dead(26), TICK_RATE));
+        assert!(death_transition_due(dead(1), TICK_RATE));
+        assert!(death_transition_due(dead(0), TICK_RATE));
+        assert!(!death_transition_due(vitals(0, 100), TICK_RATE));
+
+        let mut app = hud(dead(26));
+        let body = add_fall(&mut app, Duration::from_millis(899));
+        app.update();
+        assert_eq!(death_visibility(&mut app), Visibility::Visible);
+        assert_eq!(transition_visibility(&mut app), Visibility::Hidden);
+
+        app.world_mut()
+            .get_mut::<DeathFall>(body)
+            .expect("local death fall")
+            .advance(true, Duration::from_millis(1));
+        app.update();
+        assert_eq!(transition_visibility(&mut app), Visibility::Visible);
+        assert_eq!(eyelid_height(&mut app, Eyelid::Upper), Val::Percent(0.0));
+        assert_eq!(eyelid_height(&mut app, Eyelid::Lower), Val::Percent(0.0));
+    }
+
+    #[test]
+    fn the_eyes_close_for_three_tenths_then_black_holds_until_alive() {
+        let mut app = hud(dead(26));
+        add_fall(&mut app, Duration::from_millis(900));
+        app.update();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+
+        app.update();
+        let Val::Percent(partial) = eyelid_height(&mut app, Eyelid::Upper) else {
+            panic!("upper eyelid height is not a percentage");
+        };
+        assert!(partial > 0.0 && partial < 50.0);
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<DeathTransition>().elapsed,
+            Some(EYELID_CLOSE_DURATION)
+        );
+        assert_eq!(eyelid_height(&mut app, Eyelid::Upper), Val::Percent(50.0));
+        assert_eq!(eyelid_height(&mut app, Eyelid::Lower), Val::Percent(50.0));
+
+        let authoritative = *app.world().resource::<SelfVitals>();
+        let mode = *app.world().resource::<InputMode>();
+        for _ in 0..20 {
+            app.update();
+        }
+        assert_eq!(transition_visibility(&mut app), Visibility::Visible);
+        assert_eq!(eyelid_height(&mut app, Eyelid::Upper), Val::Percent(50.0));
+        assert_eq!(*app.world().resource::<SelfVitals>(), authoritative);
+        assert_eq!(*app.world().resource::<InputMode>(), mode);
+
+        deliver(&mut app, vitals(100, 100));
+        assert_eq!(transition_visibility(&mut app), Visibility::Hidden);
+        assert_eq!(eyelid_height(&mut app, Eyelid::Upper), Val::Percent(0.0));
+        assert_eq!(
+            *app.world().resource::<DeathTransition>(),
+            DeathTransition::default()
+        );
+    }
+
+    #[test]
+    fn health_presentation_never_changes_the_camera_field_of_view() {
+        let mut app = hud(vitals(40, 100));
+        let fov = 0.73;
+        let camera = app
+            .world_mut()
+            .spawn((
+                WorldCamera,
+                Camera {
+                    is_active: true,
+                    ..default()
+                },
+                Projection::Perspective(PerspectiveProjection { fov, ..default() }),
+                Transform::default(),
+            ))
+            .id();
+
+        deliver(&mut app, vitals(1, 100));
+        let Projection::Perspective(projection) = app
+            .world()
+            .get::<Projection>(camera)
+            .expect("camera projection")
+        else {
+            panic!("camera stopped being perspective");
+        };
+        assert_eq!(projection.fov, fov);
+    }
+
+    #[test]
+    fn death_layers_cover_the_hud_but_leave_the_pause_menu_on_top() {
+        let mut app = hud(dead(27));
+        add_fall(&mut app, Duration::from_millis(900));
+        app.update();
+        assert_eq!(death_visibility(&mut app), Visibility::Visible);
+        assert_eq!(transition_visibility(&mut app), Visibility::Hidden);
+
+        let world = app.world_mut();
+        let death = *world
+            .query_filtered::<&GlobalZIndex, With<DeathRoot>>()
+            .single(world)
+            .expect("one death overlay");
+        let (transition, focus) = world
+            .query_filtered::<(&GlobalZIndex, &FocusPolicy), With<DeathTransitionRoot>>()
+            .single(world)
+            .expect("one death transition");
+        assert!(death.0 < transition.0);
+        assert_eq!(*transition, GlobalZIndex(DEATH_TRANSITION_LAYER));
+        assert_eq!(*focus, FocusPolicy::Pass);
     }
 
     #[test]

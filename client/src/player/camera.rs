@@ -401,7 +401,7 @@ fn settle_the_orbit(time: Res<Time>, mut orbit: ResMut<Orbit>) {
 /// Nothing reads it as a fact. It feeds a pose and a rig rotation and reaches no request,
 /// no snapshot and no decision.
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq)]
-pub(super) struct DeathFall(Option<Duration>);
+pub(crate) struct DeathFall(Option<Duration>);
 
 impl DeathFall {
     /// The pose of a body entering view for the first time.
@@ -414,7 +414,7 @@ impl DeathFall {
     }
 
     /// Advances or clears the presentation according to the newest server snapshot.
-    pub(super) fn advance(&mut self, dead: bool, delta: Duration) {
+    pub(crate) fn advance(&mut self, dead: bool, delta: Duration) {
         self.0 = if dead {
             Some(self.0.unwrap_or(Duration::ZERO) + delta)
         } else {
@@ -427,12 +427,17 @@ impl DeathFall {
     /// Squared, so it accelerates, and clamped, so it *ends* — the same curve a mob's fall
     /// uses, which is deliberate: a player watching their own body go down in third person
     /// is watching two falls, and two curves would be visible as one lagging the other.
-    pub(super) fn fallen(self) -> f32 {
+    pub(crate) fn fallen(self) -> f32 {
         let Some(elapsed) = self.0 else {
             return 0.0;
         };
         let progress = (elapsed.as_secs_f32() / DEATH_FALL_TIME.as_secs_f32()).clamp(0.0, 1.0);
         progress * progress
+    }
+
+    /// Whether the presentation has reached the pose its camera and body will hold.
+    pub(crate) fn finished(self) -> bool {
+        self.fallen() >= 1.0
     }
 }
 
