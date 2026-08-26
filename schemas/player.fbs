@@ -194,7 +194,11 @@ enum RecipeID : ubyte {
   LeatherLeggings = 13,
   IronHelm = 14,
   IronCuirass = 15,
-  IronGreaves = 16
+  IronGreaves = 16,
+
+  // V22 already reserves shield intent/state; this append ships on both V22 peers before
+  // release, so there is no released same-version peer and no second bump is needed.
+  WoodenShield = 17
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.

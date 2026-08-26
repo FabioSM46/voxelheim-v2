@@ -268,6 +268,7 @@ impl Plugin for PlayerPlugin {
                         // `apply_snapshots` just wrote. Limbs compose below the body's
                         // root, before the death fall composes onto that root.
                         animate_walking_bodies,
+                        pose_body_shields,
                         // **After `apply_snapshots`, which is a declared order and not an
                         // assumption.** That system writes the body's transform wholesale
                         // from the snapshot, and this composes a rotation onto it; the
@@ -402,6 +403,7 @@ pub(crate) struct PlayerVisuals {
     hair: [(HairModel, Handle<Mesh>); HairModel::ALL.len()],
     /// One shared overlay mesh per independently moving armour segment.
     armour: [(ArmourSegment, Handle<Mesh>); ArmourSegment::ALL.len()],
+    shield: Handle<Mesh>,
 }
 
 impl PlayerVisuals {
@@ -618,6 +620,16 @@ impl Wardrobe<'_> {
                 })
             })
             .collect()
+    }
+
+    fn shield(&mut self, worn: Worn) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
+        (worn.off_hand == crafting::ITEM_WOODEN_SHIELD).then(|| {
+            (
+                self.visuals.shield.clone(),
+                self.palette
+                    .of(BodyMaterialKey::appearance(0x00ff_ffff), self.materials),
+            )
+        })
     }
 }
 
@@ -928,6 +940,10 @@ impl Worn {
             .map(move |piece| self.armour(piece))
             .filter(|item_id| *item_id != 0)
             .map(BodyMaterialKey::armour)
+            .chain(
+                (self.off_hand == crafting::ITEM_WOODEN_SHIELD)
+                    .then_some(BodyMaterialKey::appearance(0x00ff_ffff)),
+            )
     }
 }
 
@@ -939,6 +955,10 @@ struct BodyVisual(BodyPiece);
 /// preview remains bare and a server update can add or remove it in place.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct ArmourVisual(ArmourSegment);
+
+/// A snapshot-driven left-forearm shield.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct ShieldVisual;
 
 /// The stride sample the interpolator produced for this frame.
 ///
@@ -1035,6 +1055,7 @@ fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>
         hair: HairModel::ALL.map(|model| (model, meshes.add(piece_mesh(BodyPiece::Hair, model)))),
         armour: ArmourSegment::ALL
             .map(|segment| (segment, meshes.add(armour_segment_mesh(segment)))),
+        shield: meshes.add(hands::shield_mesh(0.62)),
     });
 }
 
@@ -1579,6 +1600,7 @@ fn dress_bodies(
         ),
         Without<BodyVisual>,
     >,
+    shields: Query<Entity, With<ShieldVisual>>,
     mut commands: Commands,
 ) {
     let Some(mut wardrobe) = dressing.wardrobe() else {
@@ -1598,7 +1620,23 @@ fn dress_bodies(
 
         let outfit = wardrobe.outfit(next.appearance);
         let armour = wardrobe.armour(next);
+        let shield = wardrobe.shield(next);
         let mut present = HashSet::with_capacity(armour.len());
+        let current_shield = children.iter().find(|child| shields.contains(*child));
+        match (current_shield, shield) {
+            (Some(entity), None) => commands.entity(entity).despawn(),
+            (None, Some((mesh, material))) => {
+                commands.entity(owner).with_children(|parent| {
+                    parent.spawn((
+                        ShieldVisual,
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        shield_pose(false),
+                    ));
+                });
+            }
+            _ => {}
+        }
 
         for child in children {
             if let Ok((visual, mut mesh, mut material)) = parts.get_mut(*child) {
@@ -1720,6 +1758,7 @@ fn spawn_body(
     };
     let parts = wardrobe.outfit(worn.appearance);
     let armour = wardrobe.armour(worn);
+    let shield = wardrobe.shield(worn);
     let placed = placement(state);
     let walk = WalkPose::from(state);
     let owner = commands
@@ -1757,7 +1796,40 @@ fn spawn_body(
                 resting_piece_transform(segment.body_piece()),
             ));
         }
+        if let Some((mesh, material)) = shield {
+            parent.spawn((
+                ShieldVisual,
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                shield_pose(false),
+            ));
+        }
     });
+}
+
+fn shield_pose(raised: bool) -> Transform {
+    let anchor = BodyPiece::LeftFist.pivot() + Vec3::new(-0.08, 0.02, -0.10);
+    let rotation = if raised {
+        Quat::from_rotation_x(-1.02) * Quat::from_rotation_z(0.18)
+    } else {
+        Quat::from_rotation_x(-0.25) * Quat::from_rotation_z(-0.28)
+    };
+    Transform::from_translation(anchor).with_rotation(rotation)
+}
+
+fn pose_body_shields(
+    buffer: Res<SnapshotBuffer>,
+    bodies: Query<(&Body, &Children)>,
+    mut shields: Query<&mut Transform, With<ShieldVisual>>,
+) {
+    for (body, children) in &bodies {
+        let next = shield_pose(buffer.player_is_blocking(body.0));
+        for child in children {
+            if let Ok(mut transform) = shields.get_mut(*child) {
+                *transform = next;
+            }
+        }
+    }
 }
 
 /// Bounds hostile display text before it reaches Bevy's layout engine.
@@ -1946,6 +2018,7 @@ fn animate_walking_bodies(
     mut armour: Query<(&ArmourVisual, &mut Transform), Without<BodyVisual>>,
 ) {
     for (body, walk, children) in &bodies {
+        let blocking = buffer.player_is_blocking(body.0);
         let stride = if walk.moving && !buffer.player_is_dead(body.0) {
             walk.phase.sin() * WALK_SWING
         } else {
@@ -1954,16 +2027,17 @@ fn animate_walking_bodies(
 
         for child in children {
             if let Ok((visual, mut transform)) = parts.get_mut(*child) {
-                apply_walk_transform(visual.0, stride, &mut transform);
+                apply_walk_transform(visual.0, stride, blocking, &mut transform);
             } else if let Ok((visual, mut transform)) = armour.get_mut(*child) {
-                apply_walk_transform(visual.0.body_piece(), stride, &mut transform);
+                apply_walk_transform(visual.0.body_piece(), stride, blocking, &mut transform);
             };
         }
     }
 }
 
-fn apply_walk_transform(piece: BodyPiece, stride: f32, transform: &mut Transform) {
+fn apply_walk_transform(piece: BodyPiece, stride: f32, blocking: bool, transform: &mut Transform) {
     let angle = match piece.limb() {
+        Some(Limb::LeftArm) if blocking => -1.05,
         Some(Limb::LeftLeg | Limb::RightArm) => stride,
         Some(Limb::RightLeg | Limb::LeftArm) => -stride,
         None => 0.0,

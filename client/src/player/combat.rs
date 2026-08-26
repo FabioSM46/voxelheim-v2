@@ -16,10 +16,17 @@ use super::crafting;
 use super::inventory::{Inventory, SelectedSlot};
 use super::{ApplySnapshots, InputCadence, InputGate, ViewMode};
 use crate::net::{AttackRequest, Outbound, Sent, encode_attack_request};
+use crate::net::{BlockRequest, ConnectionState, encode_block_request};
 
 /// The button that swings, and the same one that mines. Which of the two it means is
 /// what [`blade_in_hand`] decides.
 const SWING_BUTTON: MouseButton = MouseButton::Left;
+const BLOCK_BUTTON: MouseButton = MouseButton::Right;
+
+#[derive(Resource, Debug, Default)]
+struct BlockIntent {
+    raised: bool,
+}
 
 /// Item id 7, the rusty sword, as `server/internal/game/items.go` appends it.
 ///
@@ -66,23 +73,73 @@ impl Plugin for CombatPlugin {
         // `PlayerCameraPlugin` owns it in the game; here too, so `InputGate` — which
         // reads it — resolves when this module is built on its own.
         app.init_resource::<ViewMode>();
-        app.add_message::<SwingSent>().add_systems(
-            Update,
-            send_attacks
-                .in_set(ApplyCombatInput)
-                // After the structure pick, because a press on this player's own camp is
-                // a removal rather than a swing and the pick is what says so.
-                .after(super::structures::AimStructures)
-                // After the snapshots for the reason every other input system is: the gate
-                // it reads is published there, and a frame stale means a click landing
-                // after the server said the player was dead.
-                .after(ApplySnapshots)
-                // After the tick-paced input, so the aim frame carrying this tick reaches
-                // the server before the swing that names it. The server resolves the swing
-                // against the aim it last accepted, and an attack that arrived first would
-                // be judged against the previous frame's facing.
-                .after(super::send_player_input),
-        );
+        app.init_resource::<BlockIntent>()
+            .add_message::<SwingSent>()
+            .add_systems(
+                Update,
+                send_attacks
+                    .in_set(ApplyCombatInput)
+                    // After the structure pick, because a press on this player's own camp is
+                    // a removal rather than a swing and the pick is what says so.
+                    .after(super::structures::AimStructures)
+                    // After the snapshots for the reason every other input system is: the gate
+                    // it reads is published there, and a frame stale means a click landing
+                    // after the server said the player was dead.
+                    .after(ApplySnapshots)
+                    // After the tick-paced input, so the aim frame carrying this tick reaches
+                    // the server before the swing that names it. The server resolves the swing
+                    // against the aim it last accepted, and an attack that arrived first would
+                    // be judged against the previous frame's facing.
+                    .after(super::send_player_input),
+            )
+            .add_systems(
+                Update,
+                send_block_edges
+                    .in_set(ApplyCombatInput)
+                    .after(ApplySnapshots)
+                    .after(super::send_player_input),
+            );
+    }
+}
+
+/// Sends right-button edges and lowers a local guard when gameplay input closes.
+fn send_block_edges(
+    buttons: Option<Res<ButtonInput<MouseButton>>>,
+    gate: InputGate<'_>,
+    cadence: Res<InputCadence>,
+    state: Option<Res<ConnectionState>>,
+    mut intent: ResMut<BlockIntent>,
+    outbound: Option<ResMut<Outbound>>,
+) {
+    let pressed = buttons
+        .as_deref()
+        .is_some_and(|buttons| buttons.pressed(BLOCK_BUTTON));
+    let just_pressed = buttons
+        .as_deref()
+        .is_some_and(|buttons| buttons.just_pressed(BLOCK_BUTTON));
+    let connected = state
+        .as_deref()
+        .is_some_and(|state| matches!(state, ConnectionState::Connected));
+    let desired = gate.may_act() && connected && pressed;
+
+    let active = if !intent.raised && desired && just_pressed {
+        true
+    } else if intent.raised && !desired {
+        false
+    } else {
+        return;
+    };
+
+    let sent = outbound.map_or(Sent::Closed, |mut outbound| {
+        outbound.send(encode_block_request(&BlockRequest {
+            active,
+            client_tick: cadence.client_tick,
+        }))
+    });
+    if active {
+        intent.raised = sent == Sent::Queued;
+    } else {
+        intent.raised = false;
     }
 }
 
@@ -277,6 +334,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
             .insert_resource(session())
+            .insert_resource(ConnectionState::Connected)
             .insert_resource(outbound)
             .add_plugins(PlayerPlugin);
 
@@ -361,6 +419,14 @@ mod tests {
         });
     }
 
+    fn block_button(app: &mut App, state: ButtonState) {
+        app.world_mut().write_message(MouseButtonInput {
+            button: BLOCK_BUTTON,
+            state,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+
     fn drain(sent: &Receiver<Vec<u8>>) {
         while sent.try_recv().is_ok() {}
     }
@@ -377,6 +443,56 @@ mod tests {
             }
         }
         found
+    }
+
+    fn blocks(sent: &Receiver<Vec<u8>>) -> Vec<(bool, u32)> {
+        let mut found = Vec::new();
+        while let Ok(frame) = sent.try_recv() {
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            if let Some(request) = envelope.payload_as_block_request() {
+                found.push((request.active(), request.client_tick()));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn right_button_sends_one_raise_and_one_release_edge() {
+        let (mut app, sent) = clicking_app(InventoryStack::default());
+        block_button(&mut app, ButtonState::Pressed);
+        app.update();
+        let raised_tick = app.world().resource::<InputCadence>().client_tick;
+        assert_eq!(blocks(&sent), vec![(true, raised_tick)]);
+
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            blocks(&sent).is_empty(),
+            "holding repeated the block request"
+        );
+
+        block_button(&mut app, ButtonState::Released);
+        app.update();
+        let released_tick = app.world().resource::<InputCadence>().client_tick;
+        assert_eq!(blocks(&sent), vec![(false, released_tick)]);
+    }
+
+    #[test]
+    fn a_ui_transition_releases_a_locally_raised_shield_once() {
+        let (mut app, sent) = clicking_app(InventoryStack::default());
+        block_button(&mut app, ButtonState::Pressed);
+        app.update();
+        drain(&sent);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        assert_eq!(
+            blocks(&sent).iter().map(|edge| edge.0).collect::<Vec<_>>(),
+            vec![false]
+        );
+        app.update();
+        assert!(blocks(&sent).is_empty(), "the automatic release repeated");
     }
 
     /// One press, one swing — from either blade, and the same swing from both.
@@ -503,6 +619,7 @@ mod tests {
                         life_state: crate::net::LifeState::Dead,
                         respawn_ticks: 40,
                         invulnerable: false,
+                        blocking: false,
                     });
             }),
         ] {

@@ -270,6 +270,9 @@ func TestTheRecipeTableIsTheSixteenAgreedRecipes(t *testing.T) {
 			ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
 			station: vnet.StructureKindForge, experience: 10,
 		},
+		vnet.RecipeIDWoodenShield: {
+			ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemWoodenShield, productCount: 1,
+		},
 	}
 
 	if len(recipeTable) != len(want) {

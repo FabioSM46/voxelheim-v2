@@ -831,6 +831,7 @@ mod tests {
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
+            blocking: false,
         }
     }
 
@@ -846,6 +847,7 @@ mod tests {
             life_state: LifeState::Dead,
             respawn_ticks,
             invulnerable: false,
+            blocking: false,
         }
     }
 
@@ -942,6 +944,7 @@ mod tests {
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
+            blocking: false,
         };
         let longest = PlayerVitals {
             health: u16::MAX,
@@ -954,6 +957,7 @@ mod tests {
             life_state: LifeState::Alive,
             respawn_ticks: 0,
             invulnerable: false,
+            blocking: false,
         };
 
         let mut app = App::new();

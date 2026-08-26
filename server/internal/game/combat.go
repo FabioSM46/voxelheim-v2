@@ -53,6 +53,10 @@ func (p *Player) Attack(req protocol.AttackRequest) error {
 	if err := p.cannotActLocked(); err != nil {
 		return err
 	}
+	if p.blocking {
+		// A shield up silently drops every swing before it creates pending state.
+		return nil
+	}
 
 	// Its own ordering guard, beside movement's and mining's rather than shared with
 	// them: the three arrive on different messages at different cadences, and one
@@ -77,6 +81,17 @@ func (p *Player) Attack(req protocol.AttackRequest) error {
 
 	p.pendingSwing = &pendingSwing{slot: req.Slot}
 	return nil
+}
+
+// Block silently accepts only a live player's usable off-hand shield.
+func (p *Player) Block(active bool) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	p.blocking = active && p.alive() && !p.leaving && p.wornShield.fraction > 0
+	if p.blocking {
+		p.pendingSwing = nil
+	}
 }
 
 // resolveSwingLocked judges this player's pending swing, if there is one.

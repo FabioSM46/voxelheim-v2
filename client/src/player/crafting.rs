@@ -74,6 +74,7 @@ pub(super) const ITEM_LEATHER_LEGGINGS: u16 = 23;
 pub(super) const ITEM_IRON_HELM: u16 = 24;
 pub(super) const ITEM_IRON_CUIRASS: u16 = 25;
 pub(super) const ITEM_IRON_GREAVES: u16 = 26;
+pub(crate) const ITEM_WOODEN_SHIELD: u16 = 27;
 
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +142,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 16] = [
+pub const RECIPES: [Recipe; 17] = [
     Recipe {
         id: RecipeId::Forge,
         category: RecipeCategory::Survival,
@@ -397,6 +398,25 @@ pub const RECIPES: [Recipe; 16] = [
         },
         station: Some(StructureKind::Forge),
     },
+    Recipe {
+        id: RecipeId::WoodenShield,
+        category: RecipeCategory::Armour,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 6,
+            },
+            Ingredient {
+                item_id: ITEM_VARGR_PELT,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_WOODEN_SHIELD,
+            count: 1,
+        },
+        station: None,
+    },
 ];
 
 /// What each of the three implements costs, spelled once.
@@ -585,6 +605,7 @@ mod tests {
             },
             respawn_ticks: if dead { 60 } else { 0 },
             invulnerable: false,
+            blocking: false,
         }));
     }
 
@@ -641,6 +662,10 @@ mod tests {
             cost(RecipeId::IronGreaves),
             vec![(ITEM_RAW_IRON, 4), (ITEM_RAW_COAL, 2)]
         );
+        assert_eq!(
+            cost(RecipeId::WoodenShield),
+            vec![(ITEM_LOG, 6), (ITEM_VARGR_PELT, 2)]
+        );
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -680,6 +705,7 @@ mod tests {
                 ITEM_IRON_GREAVES,
                 Some(StructureKind::Forge),
             ),
+            (RecipeId::WoodenShield, ITEM_WOODEN_SHIELD, None),
         ] {
             let row = recipe(id).expect("every member has a row");
             assert_eq!(

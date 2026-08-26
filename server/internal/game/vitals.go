@@ -70,6 +70,7 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 		Level:            level,
 		Experience:       experience,
 		ExperienceToNext: experienceToNext,
+		Blocking:         p.blocking,
 	}
 }
 
@@ -154,6 +155,7 @@ func (p *Player) dieLocked() {
 	// The combat seam this comment promised. A swing accepted before the blow that
 	// killed them does not land afterwards.
 	p.pendingSwing = nil
+	p.blocking = false
 	p.sim.removeAllThreatFor(p.entityID)
 
 	p.sim.log.Debug("player died", "entity_id", p.entityID, "respawn_ticks", p.respawnTicks)

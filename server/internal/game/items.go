@@ -75,6 +75,8 @@ const (
 	ItemIronHelm
 	ItemIronCuirass
 	ItemIronGreaves
+
+	ItemWoodenShield
 )
 
 // What each blade is worth, and the only copy of it.
@@ -118,6 +120,7 @@ const (
 	// three separate objects, so every piece carries the same maximum and its own wear.
 	LeatherArmourMaxDurability uint16 = 100
 	IronArmourMaxDurability    uint16 = 200
+	WoodenShieldMaxDurability  uint16 = 40
 
 	// SharpeningStoneRestore is how much wear one stone gives back, and it sits here for
 	// the reason the numbers above do: it describes the *stone*, not the act of repairing.
@@ -199,6 +202,9 @@ type itemDefinition struct {
 	// to do, which is the same answer and one that a third weapon does not have to be
 	// added to.
 	meleeDamage uint16
+
+	// Percentage of post-armour mob damage removed while raised.
+	blockFraction uint16
 
 	// repairRestore is how much durability one of this item gives back when it is spent
 	// mending something, and zero for everything that is not a repair kit — which today
@@ -337,6 +343,8 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemIronHelm:    {places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
 	ItemIronCuirass: {places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
 	ItemIronGreaves: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
+
+	ItemWoodenShield: {places: world.Air, maxStack: 1, wornAt: wornOffHand, maxDurability: WoodenShieldMaxDurability, blockFraction: 50},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

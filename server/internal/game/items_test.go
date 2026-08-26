@@ -103,19 +103,33 @@ func TestTheSixArmourPiecesCarryTheirPinnedIDsAndStats(t *testing.T) {
 	}
 }
 
-func TestOnlyWearableItemsCarryArmourStatsAndEveryWearableIsDurable(t *testing.T) {
+func TestOnlyWearableItemsCarryWornStatsAndEveryWearableIsDurable(t *testing.T) {
 	t.Parallel()
 
 	for id, definition := range itemRegistry {
-		hasArmourStats := definition.armour != 0 || definition.threat != 0
+		hasWornStats := definition.armour != 0 || definition.threat != 0 || definition.blockFraction != 0
 		wearable := definition.wornAt != wornNowhere
-		if hasArmourStats != wearable {
-			t.Errorf("item %d wornAt=%d armour=%d threat=%d; want stats iff wearable",
-				id, definition.wornAt, definition.armour, definition.threat)
+		if hasWornStats != wearable {
+			t.Errorf("item %d wornAt=%d armour=%d threat=%d block=%d; want stats iff wearable",
+				id, definition.wornAt, definition.armour, definition.threat, definition.blockFraction)
+		}
+		if definition.blockFraction > 100 {
+			t.Errorf("item %d blocks %d%%, want at most 100%%", id, definition.blockFraction)
 		}
 		if wearable && definition.maxDurability == 0 {
 			t.Errorf("wearable item %d has no durability", id)
 		}
+	}
+}
+
+func TestWoodenShieldHasItsPinnedIDAndStats(t *testing.T) {
+	t.Parallel()
+	if ItemWoodenShield != 27 {
+		t.Fatalf("wooden shield id = %d, want appended id 27", ItemWoodenShield)
+	}
+	want := itemDefinition{places: world.Air, maxStack: 1, wornAt: wornOffHand, maxDurability: WoodenShieldMaxDurability, blockFraction: 50}
+	if got, ok := itemByID(ItemWoodenShield); !ok || got != want {
+		t.Fatalf("wooden shield row = %+v, known=%v; want %+v", got, ok, want)
 	}
 }
 

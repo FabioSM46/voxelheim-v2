@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::hands::shield_mesh;
 use super::hands::{sword_grip_centre, sword_mesh};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
@@ -108,7 +109,13 @@ impl DropVisuals {
         // an item id, and handing it to a block-id lookup is exactly the bug
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
-        self.material_for_colour(item_linear_rgba(item_id), materials)
+        // White preserves the shield mesh's separate bark and iron vertex colours.
+        let colour = if item_id == super::crafting::ITEM_WOODEN_SHIELD {
+            [1.0; 4]
+        } else {
+            item_linear_rgba(item_id)
+        };
+        self.material_for_colour(colour, materials)
     }
 
     fn material_for_colour(
@@ -229,6 +236,7 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
             merged
         }
         ItemShape::Armour => armour_mesh(),
+        ItemShape::Shield => shield_mesh(DROP_EDGE * 2.0),
     }
 }
 

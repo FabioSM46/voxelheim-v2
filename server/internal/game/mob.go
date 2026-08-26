@@ -543,6 +543,12 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 	// Widen before multiplying so a future larger damage value cannot overflow uint16.
 	rawDamage := m.species().damage
 	damage := uint16(uint32(rawDamage) * uint32(ArmourScale-target.worn.armour) / uint32(ArmourScale))
+	blocked := target.blocking && target.wornShield.fraction > 0 && shieldFacesMob(target, m)
+	if blocked {
+		damage = uint16(uint32(damage) * uint32(100-target.wornShield.fraction) / 100)
+		target.spendShieldDurabilityLocked()
+		s.creditBlockThreatLocked(target, m)
+	}
 	if rawDamage != 0 && damage == 0 {
 		// A blow that connects always lands for something, even at the exact 100% test
 		// boundary. Production combinations stay below it by the registry sweep.
@@ -558,6 +564,14 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery
 	m.actionTicks = s.mobTimings[m.kind].recovery
+}
+
+// shieldFacesMob tests the guard's horizontal front half-plane, ignoring pitch.
+func shieldFacesMob(target *Player, m *mob) bool {
+	look := lookDirection(target.yaw, 0)
+	toMobX := m.pos[0] - target.pos[0]
+	toMobZ := m.pos[2] - target.pos[2]
+	return look[0]*toMobX+look[2]*toMobZ >= 0
 }
 
 // recordMobHitLocked retains the newest presentation events up to a fixed bound. Dropping

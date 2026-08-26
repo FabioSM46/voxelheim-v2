@@ -87,6 +87,7 @@ type Message struct {
 	MineRequest        *MineRequest
 	InventoryMove      *InventoryMoveRequest
 	Attack             *AttackRequest
+	Block              *BlockRequest
 	PlaceStructure     *PlaceStructureRequest
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
@@ -353,6 +354,12 @@ type AttackRequest struct {
 	ClientTick uint32
 }
 
+// BlockRequest carries intent only; the simulation resolves the off-hand.
+type BlockRequest struct {
+	Active     bool
+	ClientTick uint32
+}
+
 // CraftRequest is one decoded attempt to make something. **Intent, never outcome.**
 //
 // It names a recipe and nothing else: what that recipe costs, what it yields and whether
@@ -572,6 +579,7 @@ type PlayerVitals struct {
 	Level            uint16
 	Experience       uint32
 	ExperienceToNext uint32
+	Blocking         bool
 }
 
 // MobState is one mob's authoritative state, as a snapshot carries it.
@@ -629,6 +637,9 @@ type EntitySnapshot struct {
 	// disagree — schemas/player.fbs states it as a decoder invariant — so it is a
 	// disconnect rather than a cosmetic bug.
 	DeadPlayers []uint64
+
+	// Sparse visible players whose guard is raised.
+	BlockingPlayers []uint64
 
 	// TickOfDay is where this tick falls in the world's day, and zero for a server that
 	// keeps no clock — the same zero Welcome.DayLengthTicks uses to say so, and read
@@ -1127,6 +1138,18 @@ func Decode(frame []byte) (msg Message, err error) {
 		// simulation makes against state this package cannot see.
 		msg.Attack = &AttackRequest{
 			Slot:       request.Slot(),
+			ClientTick: request.ClientTick(),
+		}
+
+	case vnet.PayloadBlockRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.BlockRequest
+		request.Init(table.Bytes, table.Pos)
+		msg.Block = &BlockRequest{
+			Active:     request.Active(),
 			ClientTick: request.ClientTick(),
 		}
 
@@ -1749,6 +1772,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.PlayerVitalsAddLevel(b, s.Vitals.Level)
 	vnet.PlayerVitalsAddExperience(b, s.Vitals.Experience)
 	vnet.PlayerVitalsAddExperienceToNext(b, s.Vitals.ExperienceToNext)
+	vnet.PlayerVitalsAddBlocking(b, s.Vitals.Blocking)
 	vitalsOffset := vnet.PlayerVitalsEnd(b)
 
 	// A vector of structs must be complete before the table that references it
@@ -1818,6 +1842,15 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 			b.PrependUint64(s.DeadPlayers[i])
 		}
 		deadOffset = b.EndVector(len(s.DeadPlayers))
+	}
+
+	var blockingOffset flatbuffers.UOffsetT
+	if len(s.BlockingPlayers) > 0 {
+		vnet.EntitySnapshotStartBlockingPlayersVector(b, len(s.BlockingPlayers))
+		for i := len(s.BlockingPlayers) - 1; i >= 0; i-- {
+			b.PrependUint64(s.BlockingPlayers[i])
+		}
+		blockingOffset = b.EndVector(len(s.BlockingPlayers))
 	}
 
 	// Like dead players and drop wear, the no-party case costs no vector and no
@@ -1896,6 +1929,9 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	}
 	if projectilesOffset != 0 {
 		vnet.EntitySnapshotAddProjectiles(b, projectilesOffset)
+	}
+	if blockingOffset != 0 {
+		vnet.EntitySnapshotAddBlockingPlayers(b, blockingOffset)
 	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 
@@ -2077,6 +2113,17 @@ func EncodeAttackRequest(r AttackRequest) []byte {
 	request := vnet.AttackRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadAttackRequest, request)
+}
+
+func EncodeBlockRequest(r BlockRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.BlockRequestStart(b)
+	vnet.BlockRequestAddActive(b, r.Active)
+	vnet.BlockRequestAddClientTick(b, r.ClientTick)
+	request := vnet.BlockRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadBlockRequest, request)
 }
 
 // EncodePlaceStructureRequest builds one placement intent. The server never sends one,

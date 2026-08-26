@@ -1769,6 +1769,21 @@ func TestAttackRequestRoundTripsAsClientIntent(t *testing.T) {
 	}
 }
 
+func TestBlockRequestRoundTripsAsHeldIntent(t *testing.T) {
+	t.Parallel()
+	want := BlockRequest{Active: true, ClientTick: ^uint32(0)}
+	msg, err := Decode(EncodeBlockRequest(want))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if msg.Kind != vnet.PayloadBlockRequest || msg.Block == nil {
+		t.Fatalf("message = %+v, want BlockRequest", msg)
+	}
+	if *msg.Block != want {
+		t.Errorf("BlockRequest = %+v, want %+v", *msg.Block, want)
+	}
+}
+
 // The whole of what the wire carries, asserted by absence: a swing names a slot and a
 // tick, and there is no field for a victim, a position, an aim, a damage or a result.
 // The vtable is the only place that claim can be checked, because a field nobody added
@@ -2024,6 +2039,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"RecipeID.IronHelm":        {byte(vnet.RecipeIDIronHelm), 14},
 		"RecipeID.IronCuirass":     {byte(vnet.RecipeIDIronCuirass), 15},
 		"RecipeID.IronGreaves":     {byte(vnet.RecipeIDIronGreaves), 16},
+		"RecipeID.WoodenShield":    {byte(vnet.RecipeIDWoodenShield), 17},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2036,7 +2052,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]int{
 		"MobKind":       {len(vnet.EnumNamesMobKind), 4},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 17},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 18},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])
