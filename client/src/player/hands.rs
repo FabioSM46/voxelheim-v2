@@ -567,12 +567,22 @@ fn blade_base() -> f32 {
 
 /// The centre of the grip in a sword mesh built at `length`.
 ///
-/// The world-space renderer attaches the drop-scale sword by this point. Keeping the answer
-/// beside the furniture dimensions means an edit to the shared sword cannot leave its body
-/// attachment holding the old model sheet.
+/// Where the hand closes. The body attachment is seated by [`sword_guard_base`] instead —
+/// the fist is more than twice the grip's height, so seating by the grip would swallow the
+/// guard — and this is what its tests measure that seating against.
+#[cfg(test)]
 pub(super) fn sword_grip_centre(length: f32) -> Vec3 {
     let grip = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y / 2.0;
     Vec3::Y * grip * (length / SWORD_LENGTH)
+}
+
+/// The face of the cross guard the grip enters, in a sword mesh built at `length`.
+///
+/// [`blade_base`] is the guard's *other* face, the one the blade leaves from. Hang a sword
+/// point-down and the two swap places, so this one is what a fist seats against — asked for
+/// here rather than reconstructed from a span, for the same reason [`sword_grip_centre`] is.
+pub(super) fn sword_guard_base(length: f32) -> Vec3 {
+    Vec3::Y * (blade_base() - GUARD_SIZE.y) * (length / SWORD_LENGTH)
 }
 
 /// The blade's root and tip in a sword mesh built at `length`.
