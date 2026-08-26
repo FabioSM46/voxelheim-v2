@@ -18,6 +18,7 @@
 //! readable at a glance instead of on hover, and two items that share a palette entry stop
 //! being the same square.
 
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 use bevy::window::{PrimaryWindow, WindowResized};
@@ -30,7 +31,7 @@ use super::{
 use crate::net::{InventoryStack, Session, StructureKind};
 use crate::player::{
     ARMOUR_SLOTS, ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
-    InventoryClickKind, PickedStack, RECIPES, Recipe, item_label,
+    InventoryClickKind, PickedStack, RECIPES, Recipe, RecipeCategory, item_label,
 };
 
 pub(super) struct InventoryUiPlugin;
@@ -43,6 +44,7 @@ impl Plugin for InventoryUiPlugin {
         app.add_message::<CraftClick>()
             .add_message::<WindowResized>()
             .init_resource::<InventoryTab>()
+            .init_resource::<CraftFilter>()
             .init_resource::<InventoryWindowPosition>()
             .init_resource::<InventoryDrag>()
             .add_systems(Startup, spawn_inventory_screen)
@@ -61,6 +63,10 @@ impl Plugin for InventoryUiPlugin {
                     drag_inventory_window,
                     switch_tabs,
                     show_the_active_tab,
+                    switch_craft_filters,
+                    show_filtered_recipes,
+                    scroll_crafting,
+                    sync_craft_scrollbar,
                     hover_tooltip,
                     inventory_clicks,
                     craft_clicks,
@@ -139,6 +145,27 @@ struct InventoryCellState<'w> {
 #[derive(Component)]
 struct SlotTooltip;
 
+/// The filter strip inside the crafting tab.
+#[derive(Component)]
+struct CraftFilterStrip;
+
+/// One local-only recipe filter.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct CraftFilterButton(CraftFilter);
+
+/// The bounded viewport whose children are the recipe rows.
+#[derive(Component)]
+struct CraftScrollArea;
+
+/// The visible rail beside the crafting viewport.
+#[derive(Component)]
+struct CraftScrollbar;
+
+/// The passive thumb that mirrors [`ScrollPosition`]. Scrolling itself is driven by the
+/// mouse wheel so no extra Bevy feature or dependency is needed.
+#[derive(Component)]
+struct CraftScrollbarThumb;
+
 /// One recipe row, carrying the whole mirrored recipe it draws.
 ///
 /// The row holds the [`Recipe`] itself rather than an id to look up, because the mirror is
@@ -155,6 +182,41 @@ struct CraftTitle(Recipe);
 /// One ingredient's `held/needed` label inside a recipe row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct CraftCost(Ingredient);
+
+/// Which recipe shelf is visible inside the crafting tab.
+///
+/// `All` preserves the complete mirror and is the default; the other three are purely
+/// presentational sub-inventories over the same static rows.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum CraftFilter {
+    #[default]
+    All,
+    Survival,
+    Tools,
+    Armour,
+}
+
+impl CraftFilter {
+    const ALL: [Self; 4] = [Self::All, Self::Survival, Self::Tools, Self::Armour];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::All => "ALL",
+            Self::Survival => "SURVIVAL",
+            Self::Tools => "TOOLS",
+            Self::Armour => "ARMOUR",
+        }
+    }
+
+    const fn includes(self, category: RecipeCategory) -> bool {
+        match self {
+            Self::All => true,
+            Self::Survival => matches!(category, RecipeCategory::Survival),
+            Self::Tools => matches!(category, RecipeCategory::Tools),
+            Self::Armour => matches!(category, RecipeCategory::Armour),
+        }
+    }
+}
 
 /// A recipe whose materials are short. Flat and unlit by hover, so the row reads as inert
 /// rather than as one that did not respond.
@@ -202,6 +264,15 @@ const INVENTORY_WINDOW_PADDING: f32 = 24.0;
 
 /// The grab bar stays this tall regardless of which tab is active.
 const GRAB_AREA_HEIGHT: f32 = 34.0;
+
+/// One wheel line in logical pixels. A little under one recipe row, so a single notch
+/// advances the list without skipping over a compact recipe entirely.
+const CRAFT_SCROLL_LINE: f32 = 48.0;
+
+/// The scrollbar remains grabbable-looking even when the complete list is much longer
+/// than its viewport.
+const CRAFT_SCROLLBAR_WIDTH: f32 = 9.0;
+const CRAFT_SCROLLBAR_MIN_THUMB: f32 = 28.0;
 
 /// Enough horizontal grab bar to recover a window left past either side of the viewport.
 const MIN_VISIBLE_GRAB_WIDTH: f32 = 96.0;
@@ -356,7 +427,59 @@ fn spawn_inventory_screen(mut commands: Commands) {
                                     tab_panel_node(Display::None),
                                 ))
                                 .with_children(|crafting| {
-                                    spawn_recipe_rows(crafting);
+                                    spawn_craft_filter_strip(crafting);
+                                    crafting
+                                        .spawn(Node {
+                                            display: Display::Flex,
+                                            flex_direction: FlexDirection::Row,
+                                            flex_grow: 1.0,
+                                            min_height: Val::Px(0.0),
+                                            column_gap: Val::Px(8.0),
+                                            ..default()
+                                        })
+                                        .with_children(|body| {
+                                            body.spawn((
+                                                CraftScrollArea,
+                                                Node {
+                                                    display: Display::Flex,
+                                                    flex_direction: FlexDirection::Column,
+                                                    flex_grow: 1.0,
+                                                    min_width: Val::Px(0.0),
+                                                    min_height: Val::Px(0.0),
+                                                    row_gap: Val::Px(10.0),
+                                                    padding: UiRect::right(Val::Px(2.0)),
+                                                    overflow: Overflow::scroll_y(),
+                                                    ..default()
+                                                },
+                                                ScrollPosition::default(),
+                                            ))
+                                            .with_children(spawn_recipe_rows);
+                                            body.spawn((
+                                                CraftScrollbar,
+                                                Node {
+                                                    position_type: PositionType::Relative,
+                                                    width: Val::Px(CRAFT_SCROLLBAR_WIDTH),
+                                                    height: Val::Percent(100.0),
+                                                    flex_shrink: 0.0,
+                                                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(Color::srgb(0.045, 0.052, 0.066)),
+                                            ))
+                                            .with_child((
+                                                CraftScrollbarThumb,
+                                                Node {
+                                                    position_type: PositionType::Absolute,
+                                                    left: Val::Px(0.0),
+                                                    top: Val::Px(0.0),
+                                                    width: Val::Percent(100.0),
+                                                    height: Val::Percent(100.0),
+                                                    border_radius: BorderRadius::all(Val::Px(5.0)),
+                                                    ..default()
+                                                },
+                                                BackgroundColor(Color::srgb(0.30, 0.33, 0.40)),
+                                            ));
+                                        });
                                     crafting.spawn(hint("Click a recipe to craft    E: close"));
                                 });
                         });
@@ -372,6 +495,7 @@ fn tab_panel_node(display: Display) -> Node {
         display,
         flex_direction: FlexDirection::Column,
         width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
         left: Val::Px(0.0),
         top: Val::Px(0.0),
         row_gap: Val::Px(10.0),
@@ -410,6 +534,45 @@ fn tooltip_bundle() -> impl Bundle {
         // pointer outside it today; `Pass` is what stops that being load-bearing.
         FocusPolicy::Pass,
     )
+}
+
+/// Builds the four local shelves above the bounded recipe viewport.
+fn spawn_craft_filter_strip(panel: &mut ChildSpawnerCommands<'_>) {
+    panel
+        .spawn((
+            CraftFilterStrip,
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                flex_shrink: 0.0,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+        ))
+        .with_children(|strip| {
+            for filter in CraftFilter::ALL {
+                strip
+                    .spawn((
+                        CraftFilterButton(filter),
+                        Button,
+                        Node {
+                            padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(BUTTON),
+                    ))
+                    .with_child((
+                        Text::new(filter.label()),
+                        TextFont {
+                            font_size: FontSize::Px(14.0),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                        TextShadow::default(),
+                    ));
+            }
+        });
 }
 
 /// Builds one row per mirrored recipe, once.
@@ -920,6 +1083,141 @@ fn show_the_active_tab(active: Res<InventoryTab>, mut panels: Query<(&TabPanel, 
         // first `DerefMut` and `bevy_ui` lays a changed node's subtree out again.
         if node.display != next {
             node.display = next;
+        }
+    }
+}
+
+/// Selects one presentational recipe shelf and paints the strip from the shared palette.
+fn switch_craft_filters(
+    mode: Res<InputMode>,
+    active_tab: Res<InventoryTab>,
+    mut buttons: Query<(&CraftFilterButton, &Interaction, &mut BackgroundColor)>,
+    mut active_filter: ResMut<CraftFilter>,
+    mut scroll_areas: Query<&mut ScrollPosition, With<CraftScrollArea>>,
+) {
+    if *mode != InputMode::Inventory || *active_tab != InventoryTab::Crafting {
+        return;
+    }
+
+    let mut changed = false;
+    for (button, interaction, _) in &buttons {
+        if *interaction == Interaction::Pressed && *active_filter != button.0 {
+            *active_filter = button.0;
+            changed = true;
+        }
+    }
+    if changed {
+        for mut position in &mut scroll_areas {
+            if position.0 != Vec2::ZERO {
+                position.0 = Vec2::ZERO;
+            }
+        }
+    }
+
+    for (button, interaction, mut colour) in &mut buttons {
+        let next = if button.0 == *active_filter {
+            TAB_SELECTED
+        } else {
+            button_colour(interaction)
+        };
+        if colour.0 != next {
+            colour.0 = next;
+        }
+    }
+}
+
+/// Takes rows outside the selected shelf out of layout entirely.
+fn show_filtered_recipes(active: Res<CraftFilter>, mut rows: Query<(&CraftRow, &mut Node)>) {
+    for (row, mut node) in &mut rows {
+        let next = if active.includes(row.0.category) {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        if node.display != next {
+            node.display = next;
+        }
+    }
+}
+
+/// Returns a bounded logical scroll offset after one wheel movement.
+fn scrolled_offset(
+    current: f32,
+    wheel: f32,
+    unit: MouseScrollUnit,
+    visible: f32,
+    content: f32,
+) -> f32 {
+    let delta = match unit {
+        MouseScrollUnit::Line => -wheel * CRAFT_SCROLL_LINE,
+        MouseScrollUnit::Pixel => -wheel,
+    };
+    (current + delta).clamp(0.0, (content - visible).max(0.0))
+}
+
+/// Scrolls the active recipe shelf. The inventory owns the whole pointer while it is open,
+/// so the wheel may act anywhere on the crafting tab rather than only over a row.
+fn scroll_crafting(
+    mode: Res<InputMode>,
+    active_tab: Res<InventoryTab>,
+    scroll: Option<Res<AccumulatedMouseScroll>>,
+    mut areas: Query<(&mut ScrollPosition, &ComputedNode), With<CraftScrollArea>>,
+) {
+    if *mode != InputMode::Inventory || *active_tab != InventoryTab::Crafting {
+        return;
+    }
+    let Some(scroll) = scroll.filter(|scroll| scroll.delta.y != 0.0) else {
+        return;
+    };
+    for (mut position, computed) in &mut areas {
+        let scale = computed.inverse_scale_factor;
+        let visible = computed.size().y * scale;
+        let content = computed.content_size().y * scale;
+        let next = scrolled_offset(position.y, scroll.delta.y, scroll.unit, visible, content);
+        if position.y != next {
+            position.y = next;
+        }
+    }
+}
+
+/// Converts the viewport, content and rail sizes into a scrollbar thumb height and top.
+fn scrollbar_geometry(scroll: f32, visible: f32, content: f32, rail: f32) -> (f32, f32) {
+    if rail <= 0.0 || visible <= 0.0 || content <= visible {
+        return (rail.max(0.0), 0.0);
+    }
+    let thumb = (rail * visible / content).clamp(CRAFT_SCROLLBAR_MIN_THUMB.min(rail), rail);
+    let scroll_range = content - visible;
+    let travel = rail - thumb;
+    let top = scroll.clamp(0.0, scroll_range) / scroll_range * travel;
+    (thumb, top)
+}
+
+/// Mirrors the current scroll into the visible rail without touching layout when nothing
+/// moved. The bar is passive; wheel input remains the one scrolling gesture.
+fn sync_craft_scrollbar(
+    areas: Query<(&ScrollPosition, &ComputedNode), With<CraftScrollArea>>,
+    rails: Query<&ComputedNode, With<CraftScrollbar>>,
+    mut thumbs: Query<&mut Node, With<CraftScrollbarThumb>>,
+) {
+    let (Some((position, area)), Some(rail)) = (areas.iter().next(), rails.iter().next()) else {
+        return;
+    };
+    let area_scale = area.inverse_scale_factor;
+    let rail_scale = rail.inverse_scale_factor;
+    let (height, top) = scrollbar_geometry(
+        position.y,
+        area.size().y * area_scale,
+        area.content_size().y * area_scale,
+        rail.size().y * rail_scale,
+    );
+    for mut thumb in &mut thumbs {
+        let next_height = Val::Px(height);
+        let next_top = Val::Px(top);
+        if thumb.height != next_height {
+            thumb.height = next_height;
+        }
+        if thumb.top != next_top {
+            thumb.top = next_top;
         }
     }
 }
@@ -2248,6 +2546,26 @@ mod tests {
             .unwrap_or_else(|| panic!("{recipe:?} has a row"))
     }
 
+    fn filter_button(app: &mut App, filter: CraftFilter) -> Entity {
+        let world = app.world_mut();
+        let mut query = world.query::<(Entity, &CraftFilterButton)>();
+        query
+            .iter(world)
+            .find(|(_, button)| button.0 == filter)
+            .map(|(entity, _)| entity)
+            .unwrap_or_else(|| panic!("{filter:?} has a button"))
+    }
+
+    fn visible_recipes(app: &mut App) -> Vec<RecipeId> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&CraftRow, &Node)>();
+        query
+            .iter(world)
+            .filter(|(_, node)| node.display != Display::None)
+            .map(|(row, _)| row.0.id)
+            .collect()
+    }
+
     fn row_colour(app: &mut App, recipe: RecipeId) -> Color {
         let row = row_of(app, recipe);
         app.world()
@@ -2312,6 +2630,113 @@ mod tests {
                 "no row is headed {product}: {headings:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_complete_recipe_list_is_bounded_by_a_scroll_viewport_with_a_visible_bar() {
+        let mut app = app();
+        app.update();
+
+        let world = app.world_mut();
+        let mut areas = world.query_filtered::<(&Node, &ScrollPosition), With<CraftScrollArea>>();
+        let (area, position) = areas.single(world).expect("one crafting scroll area");
+        assert_eq!(area.overflow.y, OverflowAxis::Scroll);
+        assert_eq!(area.flex_grow, 1.0);
+        assert_eq!(area.min_height, Val::Px(0.0));
+        assert_eq!(position.0, Vec2::ZERO);
+
+        let mut rails = world.query_filtered::<Entity, With<CraftScrollbar>>();
+        let mut thumbs = world.query_filtered::<Entity, With<CraftScrollbarThumb>>();
+        assert_eq!(rails.iter(world).count(), 1, "the scroll area has no rail");
+        assert_eq!(
+            thumbs.iter(world).count(),
+            1,
+            "the scroll area has no thumb"
+        );
+
+        let mut panels = world.query::<(&TabPanel, &Node)>();
+        let crafting = panels
+            .iter(world)
+            .find(|(panel, _)| panel.0 == InventoryTab::Crafting)
+            .map(|(_, node)| node)
+            .expect("the crafting tab has a panel");
+        assert_eq!(crafting.height, Val::Percent(100.0));
+    }
+
+    #[test]
+    fn recipe_filters_partition_the_same_rows_without_originating_new_ones() {
+        let mut app = app();
+        app.update();
+
+        assert_eq!(*app.world().resource::<CraftFilter>(), CraftFilter::All);
+        assert_eq!(visible_recipes(&mut app).len(), RECIPES.len());
+
+        let crafting = tab_button(&mut app, InventoryTab::Crafting);
+        *app.world_mut()
+            .entity_mut(crafting)
+            .get_mut::<Interaction>()
+            .expect("the crafting tab is a button") = Interaction::Pressed;
+        app.update();
+
+        for (filter, category) in [
+            (CraftFilter::Survival, RecipeCategory::Survival),
+            (CraftFilter::Tools, RecipeCategory::Tools),
+            (CraftFilter::Armour, RecipeCategory::Armour),
+        ] {
+            for candidate in CraftFilter::ALL {
+                let button = filter_button(&mut app, candidate);
+                *app.world_mut()
+                    .entity_mut(button)
+                    .get_mut::<Interaction>()
+                    .expect("a filter is a button") = if candidate == filter {
+                    Interaction::Pressed
+                } else {
+                    Interaction::None
+                };
+            }
+            app.update();
+
+            let visible = visible_recipes(&mut app);
+            let expected: Vec<RecipeId> = RECIPES
+                .iter()
+                .filter(|recipe| recipe.category == category)
+                .map(|recipe| recipe.id)
+                .collect();
+            assert_eq!(visible, expected, "{filter:?} showed another shelf");
+        }
+
+        let world = app.world_mut();
+        let mut rows = world.query::<&CraftRow>();
+        assert_eq!(
+            rows.iter(world).count(),
+            RECIPES.len(),
+            "filtering added or removed mirrored rows"
+        );
+    }
+
+    #[test]
+    fn recipe_scroll_moves_by_input_unit_and_clamps_to_the_content() {
+        assert_eq!(
+            scrolled_offset(0.0, -1.0, MouseScrollUnit::Line, 200.0, 500.0),
+            CRAFT_SCROLL_LINE
+        );
+        assert_eq!(
+            scrolled_offset(48.0, 12.0, MouseScrollUnit::Pixel, 200.0, 500.0),
+            36.0
+        );
+        assert_eq!(
+            scrolled_offset(290.0, -10.0, MouseScrollUnit::Line, 200.0, 500.0),
+            300.0
+        );
+        assert_eq!(
+            scrolled_offset(50.0, -1.0, MouseScrollUnit::Line, 300.0, 200.0),
+            0.0,
+            "a shelf shorter than its viewport still scrolled"
+        );
+
+        let (thumb, top) = scrollbar_geometry(150.0, 200.0, 500.0, 100.0);
+        assert_eq!(thumb, 40.0);
+        assert_eq!(top, 30.0);
     }
 
     #[test]
