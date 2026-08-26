@@ -389,6 +389,27 @@ impl LifeState {
     }
 }
 
+/// Which authoritative projectile presentation a [`ProjectileState`] uses.
+///
+/// No `Unknown` variant, for the reason [`LifeState`] has none. A zero or a kind
+/// appended by a newer contract is not something this renderer can honestly draw,
+/// so the decoder refuses it instead of inventing a replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectileKind {
+    Arrow,
+    EnergyOrb,
+}
+
+impl ProjectileKind {
+    fn from_wire(value: fb::ProjectileKind) -> Option<Self> {
+        match value {
+            fb::ProjectileKind::Arrow => Some(Self::Arrow),
+            fb::ProjectileKind::EnergyOrb => Some(Self::EnergyOrb),
+            _ => None,
+        }
+    }
+}
+
 /// What kind of creature a [`MobState`] describes.
 ///
 /// No `Unknown` variant, for the reason [`LifeState`] has none. An unknown kind is a
@@ -947,6 +968,17 @@ pub struct EntityState {
     pub yaw: f32,
 }
 
+/// One projectile's authoritative state in a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectileState {
+    pub entity_id: u64,
+    pub pos: [f32; 3],
+    /// The newest server velocity is presentation input for heading and trail only.
+    /// Interpolation never integrates or extrapolates it.
+    pub vel: [f32; 3],
+    pub kind: ProjectileKind,
+}
+
 /// One authoritative dropped item beside the player entities in a snapshot.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ItemDropState {
@@ -1017,6 +1049,8 @@ pub struct Snapshot {
     pub entities: Vec<EntityState>,
     /// Every dropped item in view. Separate from `entities` by contract.
     pub drops: Vec<ItemDropState>,
+    /// Every projectile in view. The newest snapshot is the complete existence set.
+    pub projectiles: Vec<ProjectileState>,
     /// Every mob in view. The newest snapshot is the **complete** set: a mob that stops
     /// appearing has stopped existing for this session, and the reason is never
     /// inferred from its health.
@@ -1081,6 +1115,7 @@ impl Default for Snapshot {
             server_tick: 0,
             entities: Vec::new(),
             drops: Vec::new(),
+            projectiles: Vec::new(),
             mobs: Vec::new(),
             self_vitals: PlayerVitals::unharmed(),
             structures: Vec::new(),
@@ -1792,6 +1827,16 @@ pub enum DecodeError {
         field: &'static str,
         value: f32,
     },
+    /// A snapshot carries a projectile with a NaN or infinite component.
+    NonFiniteProjectile {
+        entity_id: u64,
+        field: &'static str,
+        value: f32,
+    },
+    /// Projectile kind zero, or a member this renderer does not know.
+    UnknownProjectileKind { entity_id: u64, value: u8 },
+    /// One id names two projectiles in the same complete vector.
+    DuplicateProjectile(u64),
     /// Item id 0 is reserved for no item and cannot name a drop.
     DropWithoutItem(u64),
     /// A drop with no items is despawned, never sent.
@@ -2108,6 +2153,21 @@ impl fmt::Display for DecodeError {
                 field,
                 value,
             } => write!(f, "drop {entity_id} has a non-finite {field}: {value}"),
+            Self::NonFiniteProjectile {
+                entity_id,
+                field,
+                value,
+            } => write!(
+                f,
+                "projectile {entity_id} has a non-finite {field}: {value}"
+            ),
+            Self::UnknownProjectileKind { entity_id, value } => {
+                write!(f, "projectile {entity_id} carries unknown kind {value}")
+            }
+            Self::DuplicateProjectile(entity_id) => write!(
+                f,
+                "projectile entity id {entity_id} appears twice in one snapshot"
+            ),
             Self::DropWithoutItem(entity_id) => {
                 write!(f, "drop {entity_id} carries reserved item id 0")
             }
@@ -3040,6 +3100,19 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         }
     }
 
+    let mut projectiles = Vec::new();
+    let mut projectile_ids = HashSet::new();
+    if let Some(list) = snapshot.projectiles() {
+        projectiles.reserve(list.len());
+        for state in &list {
+            let state = projectile_state(state)?;
+            if !projectile_ids.insert(state.entity_id) {
+                return Err(DecodeError::DuplicateProjectile(state.entity_id));
+            }
+            projectiles.push(state);
+        }
+    }
+
     let mut mobs = Vec::new();
     if let Some(list) = snapshot.mobs() {
         mobs.reserve(list.len());
@@ -3227,6 +3300,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         server_tick: snapshot.server_tick(),
         entities,
         drops,
+        projectiles,
         mobs,
         self_vitals: player_vitals(&snapshot.self_vitals())?,
         structures,
@@ -3499,6 +3573,46 @@ fn item_drop_state(state: &fb::ItemDropState) -> Result<ItemDropState, DecodeErr
         count,
         durability: 0,
         max_durability: 0,
+    })
+}
+
+/// Copies one projectile out of a snapshot and enforces every invariant attached
+/// to `ProjectileState` in the schema before a component reaches interpolation.
+fn projectile_state(state: &fb::ProjectileState) -> Result<ProjectileState, DecodeError> {
+    let entity_id = state.entity_id();
+    let checked = |field: &'static str, value: f32| -> Result<f32, DecodeError> {
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(DecodeError::NonFiniteProjectile {
+                entity_id,
+                field,
+                value,
+            })
+        }
+    };
+
+    let pos = state.pos();
+    let vel = state.vel();
+    let kind =
+        ProjectileKind::from_wire(state.kind()).ok_or(DecodeError::UnknownProjectileKind {
+            entity_id,
+            value: state.kind().0,
+        })?;
+
+    Ok(ProjectileState {
+        entity_id,
+        pos: [
+            checked("pos.x", pos.x())?,
+            checked("pos.y", pos.y())?,
+            checked("pos.z", pos.z())?,
+        ],
+        vel: [
+            checked("vel.x", vel.x())?,
+            checked("vel.y", vel.y())?,
+            checked("vel.z", vel.z())?,
+        ],
+        kind,
     })
 }
 
@@ -4454,6 +4568,26 @@ pub(super) mod server_side {
         }
     }
 
+    /// One projectile as it sits on the wire, before validation.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ProjectileStateWire {
+        pub entity_id: u64,
+        pub pos: [f32; 3],
+        pub vel: [f32; 3],
+        pub kind: fb::ProjectileKind,
+    }
+
+    impl ProjectileStateWire {
+        pub fn arrow(entity_id: u64, x: f32) -> Self {
+            Self {
+                entity_id,
+                pos: [x, 64.0, -2.0],
+                vel: [28.0, -3.0, 0.0],
+                kind: fb::ProjectileKind::Arrow,
+            }
+        }
+    }
+
     /// One sparse durability entry as it sits beside the fixed drop vector.
     /// Kept separate so decoder tests can construct orphaned and repeated entries.
     #[derive(Debug, Clone, Copy)]
@@ -4592,6 +4726,55 @@ pub(super) mod server_side {
             &[],
             PlayerVitalsWire::default(),
             &[],
+        )
+    }
+
+    /// Encodes the append-only projectile vector independently, including malformed
+    /// values a correct server never emits.
+    pub fn encode_entity_snapshot_with_projectiles(
+        server_tick: u32,
+        projectiles: &[ProjectileStateWire],
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(projectiles.len() * 40 + 128);
+        let laid_out: Vec<fb::ProjectileState> = projectiles
+            .iter()
+            .map(|state| {
+                fb::ProjectileState::new(
+                    state.entity_id,
+                    &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
+                    &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
+                    state.kind,
+                )
+            })
+            .collect();
+        let projectiles = builder.create_vector(&laid_out);
+        let vitals = PlayerVitalsWire::default();
+        let self_vitals = fb::PlayerVitals::create(
+            &mut builder,
+            &fb::PlayerVitalsArgs {
+                health: vitals.health,
+                max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
+                life_state: vitals.life_state,
+                respawn_ticks: vitals.respawn_ticks,
+                invulnerable: vitals.invulnerable,
+                blocking: false,
+            },
+        );
+
+        let mut table = fb::EntitySnapshotBuilder::new(&mut builder);
+        table.add_server_tick(server_tick);
+        table.add_self_vitals(self_vitals);
+        table.add_projectiles(projectiles);
+        let payload = table.finish();
+        finish_envelope(
+            builder,
+            fb::Payload::EntitySnapshot,
+            payload.as_union_value(),
         )
     }
 
@@ -5405,17 +5588,17 @@ mod tests {
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
         ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PartyMemberStateWire,
-        PartyRosterMemberWire, PlayerVitalsWire, StructureStateWire, WelcomeWire,
-        encode_action_refused, encode_bare_block_update, encode_bare_chunk_data,
+        PartyRosterMemberWire, PlayerVitalsWire, ProjectileStateWire, StructureStateWire,
+        WelcomeWire, encode_action_refused, encode_bare_block_update, encode_bare_chunk_data,
         encode_bare_chunk_unload, encode_bare_entity_snapshot, encode_block_update,
         encode_chat_message, encode_chunk_data, encode_chunk_unload, encode_entity_snapshot,
         encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
-        encode_entity_snapshot_with_party, encode_entity_snapshot_with_roster,
-        encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_leave_started, encode_loot_closed,
-        encode_loot_state, encode_mine_progress, encode_mob_hit, encode_party_invite,
-        encode_player_appearance, encode_player_appearance_with_worn,
+        encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
+        encode_entity_snapshot_with_roster, encode_entity_snapshot_without_vitals,
+        encode_inventory_state, encode_inventory_state_with_durability, encode_leave_started,
+        encode_loot_closed, encode_loot_state, encode_mine_progress, encode_mob_hit,
+        encode_party_invite, encode_player_appearance, encode_player_appearance_with_worn,
         encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
         encode_server_welcome,
     };
@@ -7419,6 +7602,7 @@ mod tests {
                     server_tick: 5,
                     entities: Vec::new(),
                     drops: Vec::new(),
+                    projectiles: Vec::new(),
                     mobs: vec![],
                     self_vitals: PlayerVitals::unharmed(),
                     structures: vec![],
@@ -7476,6 +7660,77 @@ mod tests {
         assert_eq!(
             decode(&frame(&[7, 7])),
             Err(DecodeError::DeadPlayerNamedTwice(7))
+        );
+    }
+
+    #[test]
+    fn a_snapshot_decodes_projectiles_in_wire_order() {
+        let projectiles = [
+            ProjectileStateWire::arrow(40, -1.0),
+            ProjectileStateWire {
+                entity_id: 41,
+                pos: [3.0, 70.5, 2.0],
+                vel: [-4.0, 1.5, 0.25],
+                kind: fb::ProjectileKind::EnergyOrb,
+            },
+        ];
+
+        let Ok(Message::Snapshot(snapshot)) =
+            decode(&encode_entity_snapshot_with_projectiles(88, &projectiles))
+        else {
+            panic!("the projectile snapshot did not decode");
+        };
+        assert_eq!(
+            snapshot.projectiles,
+            vec![
+                ProjectileState {
+                    entity_id: 40,
+                    pos: [-1.0, 64.0, -2.0],
+                    vel: [28.0, -3.0, 0.0],
+                    kind: ProjectileKind::Arrow,
+                },
+                ProjectileState {
+                    entity_id: 41,
+                    pos: [3.0, 70.5, 2.0],
+                    vel: [-4.0, 1.5, 0.25],
+                    kind: ProjectileKind::EnergyOrb,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_refuses_malformed_projectiles() {
+        let mut non_finite = ProjectileStateWire::arrow(40, 0.0);
+        non_finite.vel[1] = f32::NAN;
+        assert!(matches!(
+            decode(&encode_entity_snapshot_with_projectiles(1, &[non_finite])),
+            Err(DecodeError::NonFiniteProjectile {
+                entity_id: 40,
+                field: "vel.y",
+                value,
+            }) if value.is_nan()
+        ));
+
+        let unknown = ProjectileStateWire {
+            kind: fb::ProjectileKind(99),
+            ..ProjectileStateWire::arrow(41, 0.0)
+        };
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_projectiles(1, &[unknown])),
+            Err(DecodeError::UnknownProjectileKind {
+                entity_id: 41,
+                value: 99,
+            })
+        );
+
+        let duplicate = ProjectileStateWire::arrow(42, 0.0);
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_projectiles(
+                1,
+                &[duplicate, duplicate]
+            )),
+            Err(DecodeError::DuplicateProjectile(42))
         );
     }
 

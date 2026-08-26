@@ -55,6 +55,7 @@ mod inventory;
 mod items;
 mod loot;
 mod mobs;
+mod projectiles;
 mod sky;
 mod structures;
 mod target;
@@ -299,6 +300,7 @@ impl Plugin for PlayerPlugin {
                 )
                     .after(crate::net::DrainNetwork),
             )
+            .add_plugins(projectiles::ProjectilesPlugin)
             .add_plugins(camera::PlayerCameraPlugin)
             .add_systems(
                 Update,

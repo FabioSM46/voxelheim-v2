@@ -63,6 +63,7 @@ keeps meaning "everything the client is".
 | `world/palette.rs` | block id → colour, and which ids are solid | know about meshes or about the wire |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
+| `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
 | `player/items.rs` | one row per item id: its display name, its held shape, and the block-derived or item-only colour it draws as | hold a capability, a stat, or anything a rule is read from |
@@ -454,6 +455,12 @@ The client samples the controls, sends what the player is *trying* to do at the 
   live on a visual child driven by local time, while the parent transform stays exactly at the
   authoritative interpolated position. Inventory and menu modes hide that parent without
   despawning it, so opening UI cannot be mistaken for a pickup.
+- **Projectiles are snapshot drawings, never a client simulation.** `player/projectiles.rs`
+  samples each position on the same one-tick-delayed segment as a drop and uses the newest
+  velocity only to point an arrow or lay out an orb trail. It integrates no gravity, tests no
+  collision and extrapolates nowhere: when the newest complete snapshot omits an id, that body
+  is gone immediately. This stops an arrow the server has resolved as a hit from continuing
+  past the target on a local guess.
 - **Structures are snapshot entities that never move, and that is why they are not
   interpolated.** `StructureState` carries an anchor cell and a `Facing` — no position and
   no velocity — so `SnapshotBuffer::structures` hands the newest snapshot's list over with

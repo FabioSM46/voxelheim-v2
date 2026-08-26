@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 
 use crate::net::{
-    EntityState, ItemDropState, MobAction, MobKind, MobState, Snapshot, StructureState,
+    EntityState, ItemDropState, MobAction, MobKind, MobState, ProjectileKind, ProjectileState,
+    Snapshot, StructureState,
 };
 
 /// Where an entity should be drawn now.
@@ -57,6 +58,18 @@ const WALK_RADIANS_PER_BLOCK: f32 = TAU / 1.2;
 pub struct InterpolatedDrop {
     pub pos: Vec3,
     pub item_id: u16,
+}
+
+/// Where one authoritative projectile should be drawn now.
+///
+/// Position is sampled on the segment between snapshots. Kind and velocity come
+/// verbatim from the newest snapshot; velocity is presentation input and is never
+/// integrated into another position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterpolatedProjectile {
+    pub pos: Vec3,
+    pub vel: Vec3,
+    pub kind: ProjectileKind,
 }
 
 /// Where one mob should be drawn now, and what it is doing.
@@ -387,6 +400,56 @@ impl SnapshotBuffer {
             .collect()
     }
 
+    /// Where every authoritative projectile should be drawn at `now`.
+    ///
+    /// This has exactly the drop existence and interpolation rules. In particular,
+    /// velocity is never used to advance beyond the segment: a hit reported by omission
+    /// is absent immediately, and a quiet server leaves the body at the newest position.
+    pub fn sample_projectiles(
+        &self,
+        now: Instant,
+        interval: Duration,
+    ) -> Vec<(u64, InterpolatedProjectile)> {
+        let Some(latest) = &self.latest else {
+            return Vec::new();
+        };
+
+        let Some(previous) = &self.previous else {
+            return latest
+                .snapshot
+                .projectiles
+                .iter()
+                .map(|state| (state.entity_id, projectile_at_rest(state)))
+                .collect();
+        };
+
+        let weight = blend(
+            previous.snapshot.server_tick,
+            latest.snapshot.server_tick,
+            latest.at,
+            now,
+            interval,
+        );
+
+        latest
+            .snapshot
+            .projectiles
+            .iter()
+            .map(|state| {
+                let from = previous
+                    .snapshot
+                    .projectiles
+                    .iter()
+                    .find(|earlier| earlier.entity_id == state.entity_id);
+                let mut drawn = projectile_at_rest(state);
+                if let Some(from) = from {
+                    drawn.pos = projectile_position(from).lerp(projectile_position(state), weight);
+                }
+                (state.entity_id, drawn)
+            })
+            .collect()
+    }
+
     /// Where every mob the session can see should be drawn at `now`.
     ///
     /// Deliberately the drop sampling beside it, with one difference that is the whole of
@@ -486,6 +549,18 @@ fn drop_at_rest(state: &ItemDropState) -> InterpolatedDrop {
 }
 
 fn drop_position(state: &ItemDropState) -> Vec3 {
+    Vec3::from_array(state.pos)
+}
+
+fn projectile_at_rest(state: &ProjectileState) -> InterpolatedProjectile {
+    InterpolatedProjectile {
+        pos: projectile_position(state),
+        vel: Vec3::from_array(state.vel),
+        kind: state.kind,
+    }
+}
+
+fn projectile_position(state: &ProjectileState) -> Vec3 {
     Vec3::from_array(state.pos)
 }
 
@@ -1088,5 +1163,120 @@ mod mob_tests {
         assert_eq!(drawn.len(), 1);
         assert_eq!(drawn[0].1.pos.x, 4.0);
         assert_eq!(drawn[0].1.yaw, 0.75);
+    }
+}
+
+#[cfg(test)]
+mod projectile_tests {
+    use super::*;
+
+    const INTERVAL: Duration = Duration::from_millis(50);
+
+    fn projectile(entity_id: u64, x: f32, vel: [f32; 3], kind: ProjectileKind) -> ProjectileState {
+        ProjectileState {
+            entity_id,
+            pos: [x, 64.0, 0.0],
+            vel,
+            kind,
+        }
+    }
+
+    fn with_projectiles(tick: u32, projectiles: Vec<ProjectileState>) -> Snapshot {
+        Snapshot {
+            server_tick: tick,
+            projectiles,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_projectile_uses_the_segment_and_the_newest_velocity() {
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        buffer.accept(
+            with_projectiles(
+                1,
+                vec![projectile(
+                    700,
+                    0.0,
+                    [30.0, 2.0, 0.0],
+                    ProjectileKind::Arrow,
+                )],
+            ),
+            start,
+        );
+        buffer.accept(
+            with_projectiles(
+                2,
+                vec![projectile(
+                    700,
+                    4.0,
+                    [28.0, -3.0, 0.0],
+                    ProjectileKind::Arrow,
+                )],
+            ),
+            start + INTERVAL,
+        );
+
+        let drawn = buffer.sample_projectiles(start + INTERVAL + INTERVAL / 2, INTERVAL);
+        assert_eq!(drawn.len(), 1);
+        assert!((drawn[0].1.pos.x - 2.0).abs() < 1e-4);
+        assert_eq!(drawn[0].1.vel, Vec3::new(28.0, -3.0, 0.0));
+    }
+
+    #[test]
+    fn a_projectile_only_in_the_newest_snapshot_is_placed() {
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        buffer.accept(with_projectiles(1, vec![]), start);
+        buffer.accept(
+            with_projectiles(
+                2,
+                vec![projectile(
+                    701,
+                    12.0,
+                    [0.0, 1.0, 0.0],
+                    ProjectileKind::EnergyOrb,
+                )],
+            ),
+            start + INTERVAL,
+        );
+
+        let drawn = buffer.sample_projectiles(start + INTERVAL + INTERVAL / 2, INTERVAL);
+        assert_eq!(drawn[0].1.pos, Vec3::new(12.0, 64.0, 0.0));
+    }
+
+    #[test]
+    fn sampling_never_extrapolates_past_the_newest_position() {
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        buffer.accept(
+            with_projectiles(
+                1,
+                vec![projectile(
+                    700,
+                    0.0,
+                    [30.0, 0.0, 0.0],
+                    ProjectileKind::Arrow,
+                )],
+            ),
+            start,
+        );
+        buffer.accept(
+            with_projectiles(
+                2,
+                vec![projectile(
+                    700,
+                    4.0,
+                    [30.0, 0.0, 0.0],
+                    ProjectileKind::Arrow,
+                )],
+            ),
+            start + INTERVAL,
+        );
+
+        let much_later = start + Duration::from_secs(30);
+        let drawn = buffer.sample_projectiles(much_later, INTERVAL);
+        assert_eq!(drawn[0].1.pos, Vec3::new(4.0, 64.0, 0.0));
     }
 }
