@@ -54,6 +54,7 @@ impl<'a> MobState<'a> {
     pub const VT_HEALTH: ::flatbuffers::VOffsetT = 14;
     pub const VT_MAX_HEALTH: ::flatbuffers::VOffsetT = 16;
     pub const VT_ACTION: ::flatbuffers::VOffsetT = 18;
+    pub const VT_TARGET_ENTITY_ID: ::flatbuffers::VOffsetT = 20;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -70,6 +71,7 @@ impl<'a> MobState<'a> {
         args: &'args MobStateArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<MobState<'bldr>> {
         let mut builder = MobStateBuilder::new(_fbb);
+        builder.add_target_entity_id(args.target_entity_id);
         builder.add_entity_id(args.entity_id);
         builder.add_yaw(args.yaw);
         if let Some(x) = args.vel {
@@ -160,6 +162,20 @@ impl<'a> MobState<'a> {
                 .unwrap()
         }
     }
+    /// The player this mob is hunting on this tick, or zero when it has no target.
+    /// Presentation only: the client may draw the relationship but never acts on it,
+    /// computes threat or uses it to decide any gameplay outcome.
+    #[inline]
+    pub fn target_entity_id(&self) -> u64 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u64>(MobState::VT_TARGET_ENTITY_ID, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for MobState<'_> {
@@ -177,6 +193,7 @@ impl ::flatbuffers::Verifiable for MobState<'_> {
             .visit_field::<u16>("health", Self::VT_HEALTH, false)?
             .visit_field::<u16>("max_health", Self::VT_MAX_HEALTH, false)?
             .visit_field::<MobAction>("action", Self::VT_ACTION, false)?
+            .visit_field::<u64>("target_entity_id", Self::VT_TARGET_ENTITY_ID, false)?
             .finish();
         Ok(())
     }
@@ -190,6 +207,7 @@ pub struct MobStateArgs<'a> {
     pub health: u16,
     pub max_health: u16,
     pub action: MobAction,
+    pub target_entity_id: u64,
 }
 impl<'a> Default for MobStateArgs<'a> {
     #[inline]
@@ -203,6 +221,7 @@ impl<'a> Default for MobStateArgs<'a> {
             health: 0,
             max_health: 0,
             action: MobAction::Unknown,
+            target_entity_id: 0,
         }
     }
 }
@@ -249,6 +268,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> MobStateBuilder<'a, 'b, A> {
             .push_slot::<MobAction>(MobState::VT_ACTION, action, MobAction::Unknown);
     }
     #[inline]
+    pub fn add_target_entity_id(&mut self, target_entity_id: u64) {
+        self.fbb_
+            .push_slot::<u64>(MobState::VT_TARGET_ENTITY_ID, target_entity_id, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> MobStateBuilder<'a, 'b, A> {
@@ -276,6 +300,7 @@ impl ::core::fmt::Debug for MobState<'_> {
         ds.field("health", &self.health());
         ds.field("max_health", &self.max_health());
         ds.field("action", &self.action());
+        ds.field("target_entity_id", &self.target_entity_id());
         ds.finish()
     }
 }

@@ -99,6 +99,12 @@ import "strconv"
 // / travel client -> server, so a V20 server would close the session on an unknown payload
 // / after a clean handshake. `EntitySnapshot` also gains the accessible-corpse set and the
 // / stable party roster; a V20 client cannot represent either an offline member or leader.
+// /
+// / **V22 adds raised-shield intent and combat-role presentation state.** `BlockRequest`
+// / travels client -> server, so a V21 server would close the session on that unknown union
+// / member after a clean handshake. `EntitySnapshot.blocking_players` also has a required
+// / consistency invariant with `self_vitals.blocking`; a V21 server never sends the sparse
+// / vector or the matching vital, so a V22 client could not accept its authoritative answer.
 type ProtocolVersion uint16
 
 const (
@@ -107,7 +113,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 21
+	ProtocolVersionCurrent ProtocolVersion = 22
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

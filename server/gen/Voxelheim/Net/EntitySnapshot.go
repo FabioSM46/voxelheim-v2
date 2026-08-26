@@ -551,8 +551,77 @@ func (rcv *EntitySnapshot) MutateAccessibleLootCorpses(j int, n uint64) bool {
 	return false
 }
 
+// / Projectiles visible to this session. Absence and empty both mean that no projectile
+// / is in view. An arrow resting in terrain remains a projectile with zero velocity until
+// / the authoritative server drops it from this complete per-snapshot set.
+func (rcv *EntitySnapshot) Projectiles(obj *ProjectileState, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 40
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *EntitySnapshot) ProjectilesLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / Projectiles visible to this session. Absence and empty both mean that no projectile
+// / is in view. An arrow resting in terrain remains a projectile with zero velocity until
+// / the authoritative server drops it from this complete per-snapshot set.
+// / The entity ids of players in `entities` whose off-hand the server currently holds
+// / raised. Sparse like `dead_players`: absence and empty both mean nobody in view is
+// / blocking, and the newest snapshot is the complete answer.
+// /
+// / Decoder invariants:
+// /   - every id names a player in this snapshot's `entities`
+// /   - no id appears twice
+// /   - the recipient's own entity id is present exactly when `self_vitals.blocking`
+// /     is true; a frame where the two statements disagree is refused
+func (rcv *EntitySnapshot) BlockingPlayers(j int) uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetUint64(a + flatbuffers.UOffsetT(j*8))
+	}
+	return 0
+}
+
+func (rcv *EntitySnapshot) BlockingPlayersLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / The entity ids of players in `entities` whose off-hand the server currently holds
+// / raised. Sparse like `dead_players`: absence and empty both mean nobody in view is
+// / blocking, and the newest snapshot is the complete answer.
+// /
+// / Decoder invariants:
+// /   - every id names a player in this snapshot's `entities`
+// /   - no id appears twice
+// /   - the recipient's own entity id is present exactly when `self_vitals.blocking`
+// /     is true; a frame where the two statements disagree is refused
+func (rcv *EntitySnapshot) MutateBlockingPlayers(j int, n uint64) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateUint64(a+flatbuffers.UOffsetT(j*8), n)
+	}
+	return false
+}
+
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(13)
+	builder.StartObject(15)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -618,6 +687,18 @@ func EntitySnapshotAddAccessibleLootCorpses(builder *flatbuffers.Builder, access
 	builder.PrependUOffsetTSlot(12, flatbuffers.UOffsetT(accessibleLootCorpses), 0)
 }
 func EntitySnapshotStartAccessibleLootCorpsesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(8, numElems, 8)
+}
+func EntitySnapshotAddProjectiles(builder *flatbuffers.Builder, projectiles flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(13, flatbuffers.UOffsetT(projectiles), 0)
+}
+func EntitySnapshotStartProjectilesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(40, numElems, 8)
+}
+func EntitySnapshotAddBlockingPlayers(builder *flatbuffers.Builder, blockingPlayers flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(14, flatbuffers.UOffsetT(blockingPlayers), 0)
+}
+func EntitySnapshotStartBlockingPlayersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(8, numElems, 8)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {

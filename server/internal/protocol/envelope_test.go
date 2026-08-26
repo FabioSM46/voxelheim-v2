@@ -245,17 +245,21 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // **V21 appends two corpse-loot requests and their two server answers.** A V20 server
 // cannot name either request, and the snapshot gains stable roster and accessibility state.
 //
+// **V22 appends BlockRequest and raised-shield consistency state.** A V21 server cannot
+// name the client request, and a V22 client cannot accept a snapshot that omits the
+// matching blocking statements after a clean handshake.
+//
 // The rule that generalises, now that eight shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV21NamesCorpseLoot(t *testing.T) {
+func TestProtocolV22NamesCombatRoles(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 21 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 21", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 22 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 22", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -295,6 +299,7 @@ func TestProtocolV21NamesCorpseLoot(t *testing.T) {
 		vnet.PayloadLootState,
 		vnet.PayloadLootClosed,
 		vnet.PayloadMobHit,
+		vnet.PayloadBlockRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -1547,6 +1552,7 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.Party":     {byte(vnet.RefusedActionParty), 8},
 		"RefusedAction.OpenLoot":  {byte(vnet.RefusedActionOpenLoot), 9},
 		"RefusedAction.TakeLoot":  {byte(vnet.RefusedActionTakeLoot), 10},
+		"RefusedAction.Attack":    {byte(vnet.RefusedActionAttack), 11},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1561,8 +1567,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// nine is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 11 {
-		t.Errorf("RefusedAction has %d members, want 11 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 12 {
+		t.Errorf("RefusedAction has %d members, want 12 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -1590,6 +1596,7 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"LootNotOwned":       {byte(vnet.RefusalReasonLootNotOwned), 19},
 		"StaleRevision":      {byte(vnet.RefusalReasonStaleRevision), 20},
 		"InventoryFull":      {byte(vnet.RefusalReasonInventoryFull), 21},
+		"NoAmmunition":       {byte(vnet.RefusalReasonNoAmmunition), 22},
 		"MalformedNoAnchor":  {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":    {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":      {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -1599,8 +1606,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 26 {
-		t.Errorf("RefusalReason has %d members, want 26 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 27 {
+		t.Errorf("RefusalReason has %d members, want 27 — a new one needs a decision, not a test edit", got)
 	}
 }
 

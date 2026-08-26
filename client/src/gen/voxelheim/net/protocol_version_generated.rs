@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 21;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 22;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -115,6 +115,12 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// travel client -> server, so a V20 server would close the session on an unknown payload
 /// after a clean handshake. `EntitySnapshot` also gains the accessible-corpse set and the
 /// stable party roster; a V20 client cannot represent either an offline member or leader.
+///
+/// **V22 adds raised-shield intent and combat-role presentation state.** `BlockRequest`
+/// travels client -> server, so a V21 server would close the session on that unknown union
+/// member after a clean handshake. `EntitySnapshot.blocking_players` also has a required
+/// consistency invariant with `self_vitals.blocking`; a V21 server never sends the sparse
+/// vector or the matching vital, so a V22 client could not accept its authoritative answer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -125,10 +131,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(21);
+    pub const Current: Self = Self(22);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 21;
+    pub const ENUM_MAX: u16 = 22;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

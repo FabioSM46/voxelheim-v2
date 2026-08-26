@@ -2676,7 +2676,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::ChatRequest
         | fb::Payload::PartyRequest
         | fb::Payload::LootOpenRequest
-        | fb::Payload::LootTakeRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::LootTakeRequest
+        | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -4647,6 +4648,7 @@ pub(super) mod server_side {
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
+                blocking: false,
             },
         );
 
@@ -4856,6 +4858,7 @@ pub(super) mod server_side {
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
+                blocking: false,
             },
         );
 
@@ -4902,6 +4905,7 @@ pub(super) mod server_side {
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
+                blocking: false,
             },
         );
 
@@ -4952,6 +4956,7 @@ pub(super) mod server_side {
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
+                blocking: false,
             },
         );
 
@@ -5160,6 +5165,7 @@ pub(super) mod server_side {
                 worn_head: worn[0],
                 worn_chest: worn[1],
                 worn_legs: worn[2],
+                worn_offhand: 0,
             },
         );
         finish_envelope(
@@ -5358,6 +5364,7 @@ pub(super) mod server_side {
                 life_state: vitals.life_state,
                 respawn_ticks: vitals.respawn_ticks,
                 invulnerable: vitals.invulnerable,
+                blocking: false,
             },
         );
         let mut table = fb::EntitySnapshotBuilder::new(&mut builder);
@@ -5519,14 +5526,18 @@ mod tests {
     /// server cannot name either request; stable roster and corpse access also append to
     /// snapshots so offline party state cannot be silently discarded.
     ///
+    /// **V22 appends `BlockRequest` and raised-shield consistency state.** A V21 server
+    /// cannot name the client request, while a V22 client cannot accept snapshots that
+    /// omit the matching blocking statements after a clean handshake.
+    ///
     /// The rule that generalises, now that seven shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v21_names_corpse_loot() {
+    fn protocol_v22_names_combat_roles() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 21);
+        assert_eq!(fb::ProtocolVersion::Current.0, 22);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5565,6 +5576,7 @@ mod tests {
             (fb::Payload::LootState, 35),
             (fb::Payload::LootClosed, 36),
             (fb::Payload::MobHit, 37),
+            (fb::Payload::BlockRequest, 38),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -5580,7 +5592,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            38,
+            39,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -5610,7 +5622,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 38] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 39] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -5649,6 +5661,7 @@ mod tests {
         (fb::Payload::LootState, Handling::Consumed),
         (fb::Payload::LootClosed, Handling::Consumed),
         (fb::Payload::MobHit, Handling::Consumed),
+        (fb::Payload::BlockRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -5845,6 +5858,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::Party.0, 8);
         assert_eq!(fb::RefusedAction::OpenLoot.0, 9);
         assert_eq!(fb::RefusedAction::TakeLoot.0, 10);
+        assert_eq!(fb::RefusedAction::Attack.0, 11);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -5855,7 +5869,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            11,
+            12,
             "a removal is refused in silence by design"
         );
 
@@ -5882,6 +5896,7 @@ mod tests {
             (fb::RefusalReason::LootNotOwned, 19),
             (fb::RefusalReason::StaleRevision, 20),
             (fb::RefusalReason::InventoryFull, 21),
+            (fb::RefusalReason::NoAmmunition, 22),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -5891,7 +5906,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            26,
+            27,
             "a new reason needs a sentence here, not a test edit"
         );
 

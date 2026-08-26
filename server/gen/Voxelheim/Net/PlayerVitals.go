@@ -27,6 +27,8 @@ import (
 // /   - `life_state` agrees with `EntitySnapshot.dead_players`: the recipient's own entity
 // /     id is in that vector exactly when this says `Dead` — see that field, where the
 // /     reason one fact is stated twice is argued
+// /   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
+// /     entity id is in that vector exactly when this is true
 type PlayerVitals struct {
 	_tab flatbuffers.Table
 }
@@ -220,8 +222,24 @@ func (rcv *PlayerVitals) MutateExperienceToNext(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(22, n)
 }
 
+// / Whether the authoritative server currently holds this recipient's off-hand raised.
+// / Intent alone never makes this true; the server's equipment and durability rules do.
+func (rcv *PlayerVitals) Blocking() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+// / Whether the authoritative server currently holds this recipient's off-hand raised.
+// / Intent alone never makes this true; the server's equipment and durability rules do.
+func (rcv *PlayerVitals) MutateBlocking(n bool) bool {
+	return rcv._tab.MutateBoolSlot(24, n)
+}
+
 func PlayerVitalsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(10)
+	builder.StartObject(11)
 }
 func PlayerVitalsAddHealth(builder *flatbuffers.Builder, health uint16) {
 	builder.PrependUint16Slot(0, health, 0)
@@ -252,6 +270,9 @@ func PlayerVitalsAddExperience(builder *flatbuffers.Builder, experience uint32) 
 }
 func PlayerVitalsAddExperienceToNext(builder *flatbuffers.Builder, experienceToNext uint32) {
 	builder.PrependUint32Slot(9, experienceToNext, 0)
+}
+func PlayerVitalsAddBlocking(builder *flatbuffers.Builder, blocking bool) {
+	builder.PrependBoolSlot(10, blocking, false)
 }
 func PlayerVitalsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

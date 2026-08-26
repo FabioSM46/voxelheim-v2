@@ -127,7 +127,13 @@ union Payload {
   // -- Optional server-to-client presentation feedback. An older client drops
   //    the whole tag safely; a newer client against an older server receives no
   //    pulse. Existing tags remain untouched, so no protocol-version bump is owed.
-  MobHit                   // 37
+  MobHit,                  // 37
+
+  // -- V22. Appended, so the tags of 1..37 are untouched.
+  //
+  //    Client -> server intent. An older server cannot name this payload and closes
+  //    the session rather than dropping it, so the V22 protocol bump is owed.
+  BlockRequest             // 38
 }
 
 table Envelope {
