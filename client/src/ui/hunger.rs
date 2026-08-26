@@ -13,7 +13,9 @@ use bevy::prelude::*;
 use bevy::time::Real;
 
 use super::CELL_EDGE;
-use super::health::{BAR_BORDER, BAR_HEIGHT, BAR_WIDTH, HUNGER_BAR_BOTTOM};
+use super::health::{
+    BAR_LABEL_SIZE, HUNGER_BAR_BOTTOM, vital_bar_label, vital_bar_root, vital_bar_track,
+};
 use crate::net::{PlayerVitals, Session};
 use crate::player::{ApplySnapshots, InputMode, SelfVitals};
 
@@ -57,7 +59,10 @@ impl Plugin for HungerUiPlugin {
 
 /// The bar and everything inside it. Hidden and shown as one node.
 #[derive(Component)]
-struct HungerRoot;
+pub(super) struct HungerRoot;
+
+#[derive(Component)]
+pub(super) struct HungerTrack;
 
 /// The filled part. Its width is the server's ratio and its colour carries the reminder.
 #[derive(Component)]
@@ -65,7 +70,7 @@ struct HungerFill;
 
 /// The numeric reading beside the bar.
 #[derive(Component)]
-struct HungerLabel;
+pub(super) struct HungerLabel;
 
 /// Presentation-only state for the low-hunger cycle.
 ///
@@ -107,29 +112,14 @@ fn spawn_hunger_bar(mut commands: Commands) {
     commands
         .spawn((
             HungerRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                bottom: Val::Px(HUNGER_BAR_BOTTOM),
-                display: Display::Flex,
-                column_gap: Val::Px(10.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
+            vital_bar_root(HUNGER_BAR_BOTTOM),
             Visibility::Hidden,
             GlobalZIndex(12),
         ))
         .with_children(|root| {
             root.spawn((
-                Node {
-                    width: Val::Px(BAR_WIDTH),
-                    height: Val::Px(BAR_HEIGHT),
-                    border: UiRect::all(Val::Px(BAR_BORDER)),
-                    border_radius: BorderRadius::all(Val::Px(3.0)),
-                    ..default()
-                },
+                HungerTrack,
+                vital_bar_track(),
                 BackgroundColor(BAR_TRACK),
                 BorderColor::all(CELL_EDGE),
             ))
@@ -146,12 +136,14 @@ fn spawn_hunger_bar(mut commands: Commands) {
 
             root.spawn((
                 HungerLabel,
+                vital_bar_label(),
                 Text::new(String::new()),
                 TextFont {
-                    font_size: FontSize::Px(17.0),
+                    font_size: FontSize::Px(BAR_LABEL_SIZE),
                     ..default()
                 },
                 TextColor(Color::WHITE),
+                TextLayout::no_wrap(),
                 TextShadow::default(),
             ));
         });
@@ -293,7 +285,7 @@ mod tests {
 
     use super::*;
     use crate::net::{LifeState, SessionParams};
-    use crate::ui::health::{EXPERIENCE_BAR_BOTTOM, HEALTH_BAR_BOTTOM, VITAL_BAR_GAP};
+    use crate::ui::health::{BAR_HEIGHT, EXPERIENCE_BAR_BOTTOM, HEALTH_BAR_BOTTOM, VITAL_BAR_GAP};
 
     fn session() -> Session {
         Session(SessionParams {
