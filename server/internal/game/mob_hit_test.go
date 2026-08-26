@@ -7,6 +7,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
 func armMobBlow(t *testing.T, h *vitalsHarness, mobID uint64, target *Player) {
@@ -129,6 +130,31 @@ func TestAMobHitRetriesWithoutRepeatingTheDamage(t *testing.T) {
 	h.advance(3)
 	if hits := mobHits(t, out.all()); len(hits) != 1 {
 		t.Errorf("accepted MobHit was sent %d times, want once", len(hits))
+	}
+}
+
+func TestPendingMobHitsAreBoundedAndKeepTheNewestBlows(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.sim.mu.Lock()
+	for id := uint64(1); id <= maxPendingMobHits+2; id++ {
+		player.recordMobHitLocked(protocol.MobHit{AttackerEntityID: id})
+	}
+	count := len(player.pendingMobHits)
+	oldest := player.pendingMobHits[0].AttackerEntityID
+	newest := player.pendingMobHits[len(player.pendingMobHits)-1].AttackerEntityID
+	h.sim.mu.Unlock()
+
+	if count != maxPendingMobHits {
+		t.Fatalf("pending MobHit count = %d, want %d", count, maxPendingMobHits)
+	}
+	if oldest != 3 {
+		t.Errorf("oldest pending attacker = %d, want 3", oldest)
+	}
+	if newest != maxPendingMobHits+2 {
+		t.Errorf("newest pending attacker = %d, want %d", newest, maxPendingMobHits+2)
 	}
 }
 

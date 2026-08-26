@@ -269,6 +269,8 @@ fn spawn_hit_pulse(mut commands: Commands) {
 fn drive_hit_pulse(
     time: Res<Time>,
     mut inbox: ResMut<MobHitInbox>,
+    // WorldCamera is spawned as a root and is never parented. Transform is intentional:
+    // AimCamera mutates it earlier in this Update, before GlobalTransform propagation.
     cameras: Query<(&Camera, &Projection, &Transform), With<WorldCamera>>,
     mut pulse: ResMut<HitPulse>,
     mut roots: Query<(&mut BackgroundColor, &mut Visibility), With<HitPulseRoot>>,

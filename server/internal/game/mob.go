@@ -50,6 +50,10 @@ const (
 	// until this wider boundary is crossed. Twelve blocks starts a deer's flight and
 	// twenty-four ends it, so small movements at the edge cannot flap the state.
 	passiveFleeReleaseRange = 24.0
+
+	// Monster-hit feedback is presentation-only. Bound its retry backlog so a session
+	// whose outbound queue stays full cannot retain one allocation per landed blow.
+	maxPendingMobHits = 64
 )
 
 // mob is one live creature.
@@ -412,7 +416,7 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		damage = 1
 	}
 	if target.damageLocked(damage) {
-		target.pendingMobHits = append(target.pendingMobHits, protocol.MobHit{
+		target.recordMobHitLocked(protocol.MobHit{
 			AttackerEntityID: m.entityID,
 			AttackerPos:      toWire(m.pos),
 		})
@@ -421,6 +425,20 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery
 	m.actionTicks = s.mobTimings[m.kind].recovery
+}
+
+// recordMobHitLocked retains the newest presentation events up to a fixed bound. Dropping
+// the oldest event under prolonged congestion cannot change authoritative health; keeping
+// the newest gives the client the most relevant direction once delivery resumes.
+//
+// The caller holds Sim.mu.
+func (p *Player) recordMobHitLocked(hit protocol.MobHit) {
+	if len(p.pendingMobHits) == maxPendingMobHits {
+		copy(p.pendingMobHits, p.pendingMobHits[1:])
+		p.pendingMobHits[len(p.pendingMobHits)-1] = hit
+		return
+	}
+	p.pendingMobHits = append(p.pendingMobHits, hit)
 }
 
 // offerMobHitsLocked delivers landed monster-hit events in impact order and keeps the
