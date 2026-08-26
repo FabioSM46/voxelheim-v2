@@ -139,6 +139,17 @@ table AttackRequest {
   client_tick: uint;
 }
 
+/// Raising or lowering whatever the player currently holds in the off-hand.
+/// Client -> server, and intent only: the server decides whether the authoritative
+/// off-hand item can block, whether it has durability left and whether anything is
+/// actually raised. The request carries no item, slot, damage reduction or outcome.
+table BlockRequest {
+  active: bool;
+
+  /// The client's own tick counter, for ordering and staleness only.
+  client_tick: uint;
+}
+
 /// Which recipe a `CraftRequest` names.
 ///
 /// The wire carries the recipe's *identity*; what it costs and what it produces is the
@@ -584,7 +595,8 @@ enum RefusedAction : ubyte {
   Chat = 7,
   Party = 8,
   OpenLoot = 9,
-  TakeLoot = 10
+  TakeLoot = 10,
+  Attack = 11
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -695,6 +707,10 @@ enum RefusalReason : ubyte {
   /// The inventory has no slot able to receive the authoritative loot entry.
   InventoryFull = 21,
 
+  /// The selected launcher is usable, but no matching ammunition exists in the
+  /// player's authoritative hotbar or pack.
+  NoAmmunition = 22,
+
   // -- The request said something no correct client sends. A defect in the peer.
 
   /// The request carried no anchor at all. The origin is a real place, so an absent
@@ -787,6 +803,32 @@ struct EntityState {
   pos: Vec3;
   vel: Vec3;
   yaw: float;
+}
+
+/// Which settled projectile presentation the authoritative server is streaming.
+/// Zero is reserved for absent or unknown kinds, so a decoder refuses it.
+enum ProjectileKind : ubyte {
+  Unknown = 0,
+  Arrow = 1,
+  EnergyOrb = 2
+}
+
+/// One projectile in the authoritative world snapshot.
+///
+/// A struct because this is fixed-size hot state carried once per visible projectile
+/// per tick. Its field list can therefore never lose, reorder or change a field.
+///
+/// Decoder invariants:
+///   - every component of `pos` and `vel` is finite
+///   - `kind` is a known non-zero member
+///
+/// A consumer may leave the append-only projectile vector unread. Once it reads these
+/// values for presentation, it enforces both invariants before using any component.
+struct ProjectileState {
+  entity_id: ulong;
+  pos: Vec3;
+  vel: Vec3;
+  kind: ProjectileKind;
 }
 
 /// One dropped item in the authoritative world snapshot.
@@ -926,6 +968,8 @@ enum MobAction : ubyte {
 ///   - `life_state` agrees with `EntitySnapshot.dead_players`: the recipient's own entity
 ///     id is in that vector exactly when this says `Dead` — see that field, where the
 ///     reason one fact is stated twice is argued
+///   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
+///     entity id is in that vector exactly when this is true
 table PlayerVitals {
   /// Current health, in the same units as `max_health`. Zero is legal and means the
   /// player is dead — the server's transition to `Dead` is what makes it so, not the
@@ -965,6 +1009,10 @@ table PlayerVitals {
   /// Experience required to complete the current level. Never zero: it is the
   /// denominator of every experience display.
   experience_to_next: uint;
+
+  /// Whether the authoritative server currently holds this recipient's off-hand raised.
+  /// Intent alone never makes this true; the server's equipment and durability rules do.
+  blocking: bool;
 }
 
 /// One mob's authoritative state in a snapshot.
@@ -1012,6 +1060,11 @@ table MobState {
   max_health: ushort;
 
   action: MobAction;
+
+  /// The player this mob is hunting on this tick, or zero when it has no target.
+  /// Presentation only: the client may draw the relationship but never acts on it,
+  /// computes threat or uses it to decide any gameplay outcome.
+  target_entity_id: ulong;
 }
 
 /// One monster blow that reduced this recipient's authoritative health.
@@ -1306,6 +1359,25 @@ table EntitySnapshot {
   /// are non-zero and unique. It carries access, never contents; opening one asks the
   /// server for a per-recipient `LootState`.
   accessible_loot_corpses: [ulong];
+
+  /// Projectiles visible to this session. Absence and empty both mean that no projectile
+  /// is in view. An arrow resting in terrain remains a projectile with zero velocity until
+  /// the authoritative server drops it from this complete per-snapshot set.
+  projectiles: [ProjectileState];
+
+  /// The entity ids of players in `entities` whose off-hand the server currently holds
+  /// raised. Sparse like `dead_players`: absence and empty both mean nobody in view is
+  /// blocking, and the newest snapshot is the complete answer.
+  ///
+  /// Decoder invariants:
+  ///   - every id names a player in this snapshot's `entities`
+  ///   - no id appears twice
+  ///   - the recipient's own entity id is present exactly when `self_vitals.blocking`
+  ///     is true; a frame where the two statements disagree is refused
+  ///
+  /// A consumer may leave both append-only blocking fields unread. Once it reads either
+  /// for presentation, it validates this complete set and the cross-field agreement first.
+  blocking_players: [ulong];
 }
 
 /// Everything the player is carrying, as the server holds it.
@@ -1403,8 +1475,8 @@ table InventoryState {
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
 ///   - `level` is never zero
-///   - `worn_head`, `worn_chest` and `worn_legs` are item ids, with zero meaning that
-///     the corresponding equipment slot is empty
+///   - `worn_head`, `worn_chest`, `worn_legs` and `worn_offhand` are item ids, with zero
+///     meaning that the corresponding equipment slot is empty
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 table PlayerAppearance {
@@ -1435,4 +1507,7 @@ table PlayerAppearance {
 
   /// Item id in the trailing legs equipment slot, or zero when nothing is worn.
   worn_legs: ushort;
+
+  /// Item id in the trailing off-hand equipment slot, or zero when nothing is held.
+  worn_offhand: ushort;
 }

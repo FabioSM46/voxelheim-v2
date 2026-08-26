@@ -22,7 +22,8 @@ pub enum ServerWelcomeOffset {}
 ///   - `view_distance` must be in 0..=16: the streamed volume grows as
 ///     `(2 * view_distance + 1)^3` chunks, so the bound is what keeps a single
 ///     number from asking the client for gigabytes
-///   - `inventory_slots`, `hotbar_slots` and `equipment_slots` must all be non-zero
+///   - `inventory_slots` and `hotbar_slots` must be non-zero
+///   - `equipment_slots` must be in 1..=8, bounding the trailing equipment layout
 ///   - `hotbar_slots + equipment_slots` must be <= `inventory_slots`, because the
 ///     hotbar is the leading subset, equipment is the trailing subset, and the pack
 ///     occupies the slots between them
@@ -180,7 +181,8 @@ impl<'a> ServerWelcome<'a> {
     }
     /// Number of slot pairs in every `InventoryState.stacks` vector this session
     /// receives. The layout is the hotbar first, the pack in the middle, and equipment
-    /// last. The server currently announces 39.
+    /// last. The V22 equipment layout reserves 40: 9 hotbar, 27 pack and 4 equipment;
+    /// the consumer update that adopts the fourth slot is staged separately.
     #[inline]
     pub fn inventory_slots(&self) -> u8 {
         // Safety:
@@ -306,9 +308,10 @@ impl<'a> ServerWelcome<'a> {
         }
     }
     /// Trailing inventory slots reserved for worn equipment. These slots are part of
-    /// `inventory_slots`, and the server currently announces three: head, chest and legs,
-    /// in that order. The client uses this count to find where the pack ends; it never
-    /// decides which item is legal in a worn slot.
+    /// `inventory_slots`. The V22 equipment layout is four: head, chest, legs and off-hand,
+    /// in that slot order at the inventory tail; the consumer update that adopts the fourth
+    /// slot is staged separately. The client uses this count to find where the pack ends;
+    /// it never decides which item is legal in a worn slot.
     #[inline]
     pub fn equipment_slots(&self) -> u8 {
         // Safety:

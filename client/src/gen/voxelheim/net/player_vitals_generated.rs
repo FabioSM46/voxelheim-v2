@@ -26,6 +26,8 @@ pub enum PlayerVitalsOffset {}
 ///   - `life_state` agrees with `EntitySnapshot.dead_players`: the recipient's own entity
 ///     id is in that vector exactly when this says `Dead` — see that field, where the
 ///     reason one fact is stated twice is argued
+///   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
+///     entity id is in that vector exactly when this is true
 pub struct PlayerVitals<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -51,6 +53,7 @@ impl<'a> PlayerVitals<'a> {
     pub const VT_LEVEL: ::flatbuffers::VOffsetT = 18;
     pub const VT_EXPERIENCE: ::flatbuffers::VOffsetT = 20;
     pub const VT_EXPERIENCE_TO_NEXT: ::flatbuffers::VOffsetT = 22;
+    pub const VT_BLOCKING: ::flatbuffers::VOffsetT = 24;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -75,6 +78,7 @@ impl<'a> PlayerVitals<'a> {
         builder.add_hunger(args.hunger);
         builder.add_max_health(args.max_health);
         builder.add_health(args.health);
+        builder.add_blocking(args.blocking);
         builder.add_invulnerable(args.invulnerable);
         builder.add_life_state(args.life_state);
         builder.finish()
@@ -209,6 +213,19 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
+    /// Whether the authoritative server currently holds this recipient's off-hand raised.
+    /// Intent alone never makes this true; the server's equipment and durability rules do.
+    #[inline]
+    pub fn blocking(&self) -> bool {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<bool>(PlayerVitals::VT_BLOCKING, Some(false))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
@@ -228,6 +245,7 @@ impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
             .visit_field::<u16>("level", Self::VT_LEVEL, false)?
             .visit_field::<u32>("experience", Self::VT_EXPERIENCE, false)?
             .visit_field::<u32>("experience_to_next", Self::VT_EXPERIENCE_TO_NEXT, false)?
+            .visit_field::<bool>("blocking", Self::VT_BLOCKING, false)?
             .finish();
         Ok(())
     }
@@ -243,6 +261,7 @@ pub struct PlayerVitalsArgs {
     pub level: u16,
     pub experience: u32,
     pub experience_to_next: u32,
+    pub blocking: bool,
 }
 impl<'a> Default for PlayerVitalsArgs {
     #[inline]
@@ -258,6 +277,7 @@ impl<'a> Default for PlayerVitalsArgs {
             level: 0,
             experience: 0,
             experience_to_next: 0,
+            blocking: false,
         }
     }
 }
@@ -320,6 +340,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerVitalsBuilder<'a, 'b, A
             .push_slot::<u32>(PlayerVitals::VT_EXPERIENCE_TO_NEXT, experience_to_next, 0);
     }
     #[inline]
+    pub fn add_blocking(&mut self, blocking: bool) {
+        self.fbb_
+            .push_slot::<bool>(PlayerVitals::VT_BLOCKING, blocking, false);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerVitalsBuilder<'a, 'b, A> {
@@ -349,6 +374,7 @@ impl ::core::fmt::Debug for PlayerVitals<'_> {
         ds.field("level", &self.level());
         ds.field("experience", &self.experience());
         ds.field("experience_to_next", &self.experience_to_next());
+        ds.field("blocking", &self.blocking());
         ds.finish()
     }
 }

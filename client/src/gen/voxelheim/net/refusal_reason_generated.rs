@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 26] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 27] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -40,6 +40,7 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 26] = [
     RefusalReason::LootNotOwned,
     RefusalReason::StaleRevision,
     RefusalReason::InventoryFull,
+    RefusalReason::NoAmmunition,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -134,6 +135,9 @@ impl RefusalReason {
     pub const StaleRevision: Self = Self(20);
     /// The inventory has no slot able to receive the authoritative loot entry.
     pub const InventoryFull: Self = Self(21);
+    /// The selected launcher is usable, but no matching ammunition exists in the
+    /// player's authoritative hotbar or pack.
+    pub const NoAmmunition: Self = Self(22);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -172,6 +176,7 @@ impl RefusalReason {
         Self::LootNotOwned,
         Self::StaleRevision,
         Self::InventoryFull,
+        Self::NoAmmunition,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -202,6 +207,7 @@ impl RefusalReason {
             Self::LootNotOwned => Some("LootNotOwned"),
             Self::StaleRevision => Some("StaleRevision"),
             Self::InventoryFull => Some("InventoryFull"),
+            Self::NoAmmunition => Some("NoAmmunition"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

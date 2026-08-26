@@ -103,6 +103,13 @@ namespace Voxelheim.Net;
 /// travel client -> server, so a V20 server would close the session on an unknown payload
 /// after a clean handshake. `EntitySnapshot` also gains the accessible-corpse set and the
 /// stable party roster; a V20 client cannot represent either an offline member or leader.
+///
+/// **V22 adds raised-shield intent and combat-role presentation state.** `BlockRequest`
+/// travels client -> server, so a V21 server would close the session on that unknown union
+/// member after a clean handshake; that request is the break and the reason for the bump.
+/// The projectile, target, off-hand and paired blocking fields are append-only additions:
+/// older peers see their absent defaults, so those fields do not independently owe a bump.
+/// They share V22 so every dependent consumer builds from one settled contract.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -110,7 +117,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 21
+  Current = 22
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

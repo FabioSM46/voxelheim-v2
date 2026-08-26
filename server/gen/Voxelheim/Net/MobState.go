@@ -171,8 +171,26 @@ func (rcv *MobState) MutateAction(n MobAction) bool {
 	return rcv._tab.MutateByteSlot(18, byte(n))
 }
 
+// / The player this mob is hunting on this tick, or zero when it has no target.
+// / Presentation only: the client may draw the relationship but never acts on it,
+// / computes threat or uses it to decide any gameplay outcome.
+func (rcv *MobState) TargetEntityId() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / The player this mob is hunting on this tick, or zero when it has no target.
+// / Presentation only: the client may draw the relationship but never acts on it,
+// / computes threat or uses it to decide any gameplay outcome.
+func (rcv *MobState) MutateTargetEntityId(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(20, n)
+}
+
 func MobStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(8)
+	builder.StartObject(9)
 }
 func MobStateAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -197,6 +215,9 @@ func MobStateAddMaxHealth(builder *flatbuffers.Builder, maxHealth uint16) {
 }
 func MobStateAddAction(builder *flatbuffers.Builder, action MobAction) {
 	builder.PrependByteSlot(7, byte(action), 0)
+}
+func MobStateAddTargetEntityId(builder *flatbuffers.Builder, targetEntityId uint64) {
+	builder.PrependUint64Slot(8, targetEntityId, 0)
 }
 func MobStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

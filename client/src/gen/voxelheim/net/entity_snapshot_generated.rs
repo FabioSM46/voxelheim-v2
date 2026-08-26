@@ -38,6 +38,8 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_PARTY_MEMBERS: ::flatbuffers::VOffsetT = 24;
     pub const VT_PARTY_ROSTER: ::flatbuffers::VOffsetT = 26;
     pub const VT_ACCESSIBLE_LOOT_CORPSES: ::flatbuffers::VOffsetT = 28;
+    pub const VT_PROJECTILES: ::flatbuffers::VOffsetT = 30;
+    pub const VT_BLOCKING_PLAYERS: ::flatbuffers::VOffsetT = 32;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -55,6 +57,12 @@ impl<'a> EntitySnapshot<'a> {
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
         builder.add_party_leader_entity_id(args.party_leader_entity_id);
+        if let Some(x) = args.blocking_players {
+            builder.add_blocking_players(x);
+        }
+        if let Some(x) = args.projectiles {
+            builder.add_projectiles(x);
+        }
         if let Some(x) = args.accessible_loot_corpses {
             builder.add_accessible_loot_corpses(x);
         }
@@ -385,6 +393,47 @@ impl<'a> EntitySnapshot<'a> {
                 )
         }
     }
+    /// Projectiles visible to this session. Absence and empty both mean that no projectile
+    /// is in view. An arrow resting in terrain remains a projectile with zero velocity until
+    /// the authoritative server drops it from this complete per-snapshot set.
+    #[inline]
+    pub fn projectiles(&self) -> Option<::flatbuffers::Vector<'a, ProjectileState>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, ProjectileState>>>(
+                    EntitySnapshot::VT_PROJECTILES,
+                    None,
+                )
+        }
+    }
+    /// The entity ids of players in `entities` whose off-hand the server currently holds
+    /// raised. Sparse like `dead_players`: absence and empty both mean nobody in view is
+    /// blocking, and the newest snapshot is the complete answer.
+    ///
+    /// Decoder invariants:
+    ///   - every id names a player in this snapshot's `entities`
+    ///   - no id appears twice
+    ///   - the recipient's own entity id is present exactly when `self_vitals.blocking`
+    ///     is true; a frame where the two statements disagree is refused
+    ///
+    /// A consumer may leave both append-only blocking fields unread. Once it reads either
+    /// for presentation, it validates this complete set and the cross-field agreement first.
+    #[inline]
+    pub fn blocking_players(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u64>>>(
+                    EntitySnapshot::VT_BLOCKING_PLAYERS,
+                    None,
+                )
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -407,6 +456,8 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, PartyMemberState>>>("party_members", Self::VT_PARTY_MEMBERS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<PartyRosterMember>>>>("party_roster", Self::VT_PARTY_ROSTER, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("accessible_loot_corpses", Self::VT_ACCESSIBLE_LOOT_CORPSES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ProjectileState>>>("projectiles", Self::VT_PROJECTILES, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("blocking_players", Self::VT_BLOCKING_PLAYERS, false)?
      .finish();
         Ok(())
     }
@@ -439,6 +490,8 @@ pub struct EntitySnapshotArgs<'a> {
         >,
     >,
     pub accessible_loot_corpses: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+    pub projectiles: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ProjectileState>>>,
+    pub blocking_players: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -457,6 +510,8 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             party_members: None,
             party_roster: None,
             accessible_loot_corpses: None,
+            projectiles: None,
+            blocking_players: None,
         }
     }
 }
@@ -583,6 +638,26 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
         );
     }
     #[inline]
+    pub fn add_projectiles(
+        &mut self,
+        projectiles: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, ProjectileState>>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_PROJECTILES,
+            projectiles,
+        );
+    }
+    #[inline]
+    pub fn add_blocking_players(
+        &mut self,
+        blocking_players: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b, u64>>,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_BLOCKING_PLAYERS,
+            blocking_players,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -617,6 +692,8 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("party_members", &self.party_members());
         ds.field("party_roster", &self.party_roster());
         ds.field("accessible_loot_corpses", &self.accessible_loot_corpses());
+        ds.field("projectiles", &self.projectiles());
+        ds.field("blocking_players", &self.blocking_players());
         ds.finish()
     }
 }
