@@ -49,6 +49,19 @@ pub(super) const BAR_HEIGHT: f32 = 18.0;
 /// than a grid, and the same weight would read as a frame around it.
 pub(super) const BAR_BORDER: f32 = 2.0;
 
+/// Horizontal space between a vital track and its numeric reading.
+pub(super) const BAR_COLUMN_GAP: f32 = 10.0;
+
+/// Width reserved for every vital label. The longest wire-valid experience reading
+/// (`u16` level and two `u32` progression values) fits without wrapping, and shorter
+/// health or hunger readings occupy the same column instead of moving their track.
+pub(super) const BAR_LABEL_WIDTH: f32 = 360.0;
+
+/// Shared vital label size, in logical pixels.
+pub(super) const BAR_LABEL_SIZE: f32 = 17.0;
+
+const BAR_CORNER_RADIUS: f32 = 3.0;
+
 /// Distance from the bottom of the window to the experience bar, in logical pixels. It
 /// clears the hotbar, which is [`CELL_SIZE`] tall and sits 18 px up.
 pub(super) const EXPERIENCE_BAR_BOTTOM: f32 = 18.0 + CELL_SIZE + 14.0;
@@ -202,6 +215,46 @@ struct HitPulse {
     remaining: Duration,
 }
 
+/// The common row contract for health, hunger and experience.
+///
+/// All three roots span the window and centre the same fixed-width track/label pair.
+/// Keeping the label column fixed makes the track's horizontal geometry independent of
+/// the text it contains, while the non-shrinking children preserve the shared dimensions.
+pub(super) fn vital_bar_root(bottom: f32) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(0.0),
+        right: Val::Px(0.0),
+        bottom: Val::Px(bottom),
+        display: Display::Flex,
+        column_gap: Val::Px(BAR_COLUMN_GAP),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        ..default()
+    }
+}
+
+pub(super) fn vital_bar_track() -> Node {
+    Node {
+        width: Val::Px(BAR_WIDTH),
+        height: Val::Px(BAR_HEIGHT),
+        flex_shrink: 0.0,
+        border: UiRect::all(Val::Px(BAR_BORDER)),
+        border_radius: BorderRadius::all(Val::Px(BAR_CORNER_RADIUS)),
+        ..default()
+    }
+}
+
+pub(super) fn vital_bar_label() -> Node {
+    Node {
+        width: Val::Px(BAR_LABEL_WIDTH),
+        min_width: Val::Px(BAR_LABEL_WIDTH),
+        max_width: Val::Px(BAR_LABEL_WIDTH),
+        flex_shrink: 0.0,
+        ..default()
+    }
+}
+
 /// Local presentation time after the authoritative countdown enters its final window.
 /// `None` is not yet closing; a saturated duration is black until Alive arrives.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -213,30 +266,14 @@ fn spawn_health_bar(mut commands: Commands) {
     commands
         .spawn((
             HealthRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                bottom: Val::Px(HEALTH_BAR_BOTTOM),
-                display: Display::Flex,
-                column_gap: Val::Px(10.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
+            vital_bar_root(HEALTH_BAR_BOTTOM),
             Visibility::Hidden,
             GlobalZIndex(12),
         ))
         .with_children(|root| {
             root.spawn((
                 HealthTrack,
-                Node {
-                    width: Val::Px(BAR_WIDTH),
-                    height: Val::Px(BAR_HEIGHT),
-                    border: UiRect::all(Val::Px(BAR_BORDER)),
-                    border_radius: BorderRadius::all(Val::Px(3.0)),
-                    ..default()
-                },
+                vital_bar_track(),
                 BackgroundColor(BAR_TRACK),
                 BorderColor::all(CELL_EDGE),
             ))
@@ -254,12 +291,14 @@ fn spawn_health_bar(mut commands: Commands) {
 
             root.spawn((
                 HealthLabel,
+                vital_bar_label(),
                 Text::new(String::new()),
                 TextFont {
-                    font_size: FontSize::Px(17.0),
+                    font_size: FontSize::Px(BAR_LABEL_SIZE),
                     ..default()
                 },
                 TextColor(Color::WHITE),
+                TextLayout::no_wrap(),
                 TextShadow::default(),
             ));
         });
@@ -757,6 +796,10 @@ mod tests {
 
     use super::*;
     use crate::net::SessionParams;
+    use crate::ui::experience::{
+        ExperienceLabel, ExperienceRoot, ExperienceTrack, ExperienceUiPlugin,
+    };
+    use crate::ui::hunger::{HungerLabel, HungerRoot, HungerTrack, HungerUiPlugin};
 
     const TICK_RATE: u8 = 20;
 
@@ -823,6 +866,45 @@ mod tests {
         app.update();
     }
 
+    fn node<T: Component>(app: &mut App) -> Node {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Node, With<T>>();
+        query.single(world).expect("one matching node").clone()
+    }
+
+    fn text_layout<T: Component>(app: &mut App) -> TextLayout {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&TextLayout, With<T>>();
+        *query.single(world).expect("one matching text layout")
+    }
+
+    fn horizontal_root_contract(node: &Node) -> (Val, Val, Val, AlignItems, JustifyContent) {
+        (
+            node.left,
+            node.right,
+            node.column_gap,
+            node.align_items,
+            node.justify_content,
+        )
+    }
+
+    fn track_edges(viewport_width: f32, root: &Node, track: &Node, label: &Node) -> (f32, f32) {
+        assert_eq!(root.left, Val::Px(0.0));
+        assert_eq!(root.right, Val::Px(0.0));
+        assert_eq!(root.justify_content, JustifyContent::Center);
+        let Val::Px(track_width) = track.width else {
+            panic!("vital track width is not fixed");
+        };
+        let Val::Px(label_width) = label.width else {
+            panic!("vital label width is not fixed");
+        };
+        let Val::Px(gap) = root.column_gap else {
+            panic!("vital track/label gap is not fixed");
+        };
+        let left = (viewport_width - track_width - gap - label_width) / 2.0;
+        (left, left + track_width)
+    }
+
     fn fill_width(app: &mut App) -> Val {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Node, With<HealthFill>>();
@@ -845,6 +927,136 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Visibility, With<HealthRoot>>();
         *query.single(world).expect("one health root")
+    }
+
+    #[test]
+    fn all_vital_tracks_share_one_horizontal_axis_for_short_and_long_labels() {
+        let shortest = PlayerVitals {
+            health: 0,
+            max_health: 1,
+            hunger: 0,
+            max_hunger: 1,
+            level: 0,
+            experience: 0,
+            experience_to_next: 1,
+            life_state: LifeState::Alive,
+            respawn_ticks: 0,
+            invulnerable: false,
+        };
+        let longest = PlayerVitals {
+            health: u16::MAX,
+            max_health: u16::MAX,
+            hunger: u16::MAX,
+            max_hunger: u16::MAX,
+            level: u16::MAX,
+            experience: u32::MAX,
+            experience_to_next: u32::MAX,
+            life_state: LifeState::Alive,
+            respawn_ticks: 0,
+            invulnerable: false,
+        };
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(shortest))
+            .add_plugins((HealthUiPlugin, HungerUiPlugin, ExperienceUiPlugin));
+        app.update();
+
+        let health_root = node::<HealthRoot>(&mut app);
+        let hunger_root = node::<HungerRoot>(&mut app);
+        let experience_root = node::<ExperienceRoot>(&mut app);
+        assert_eq!(
+            horizontal_root_contract(&health_root),
+            horizontal_root_contract(&hunger_root)
+        );
+        assert_eq!(
+            horizontal_root_contract(&health_root),
+            horizontal_root_contract(&experience_root)
+        );
+
+        let health_track = node::<HealthTrack>(&mut app);
+        let hunger_track = node::<HungerTrack>(&mut app);
+        let experience_track = node::<ExperienceTrack>(&mut app);
+        assert_eq!(health_track, hunger_track);
+        assert_eq!(health_track, experience_track);
+
+        let health_label = node::<HealthLabel>(&mut app);
+        let hunger_label = node::<HungerLabel>(&mut app);
+        let experience_label = node::<ExperienceLabel>(&mut app);
+        assert_eq!(health_label, hunger_label);
+        assert_eq!(health_label, experience_label);
+        assert_eq!(health_label.width, Val::Px(BAR_LABEL_WIDTH));
+        assert_eq!(health_label.min_width, Val::Px(BAR_LABEL_WIDTH));
+        assert_eq!(health_label.max_width, Val::Px(BAR_LABEL_WIDTH));
+        for layout in [
+            text_layout::<HealthLabel>(&mut app),
+            text_layout::<HungerLabel>(&mut app),
+            text_layout::<ExperienceLabel>(&mut app),
+        ] {
+            assert_eq!(layout.linebreak, LineBreak::NoWrap);
+        }
+
+        for viewport_width in [800.0, 1280.0, 1920.0] {
+            let expected = track_edges(viewport_width, &health_root, &health_track, &health_label);
+            assert_eq!(
+                track_edges(viewport_width, &hunger_root, &hunger_track, &hunger_label),
+                expected
+            );
+            assert_eq!(
+                track_edges(
+                    viewport_width,
+                    &experience_root,
+                    &experience_track,
+                    &experience_label,
+                ),
+                expected
+            );
+        }
+
+        let geometry_before = (
+            node::<HealthRoot>(&mut app),
+            node::<HealthTrack>(&mut app),
+            node::<HealthLabel>(&mut app),
+            node::<HungerRoot>(&mut app),
+            node::<HungerTrack>(&mut app),
+            node::<HungerLabel>(&mut app),
+            node::<ExperienceRoot>(&mut app),
+            node::<ExperienceTrack>(&mut app),
+            node::<ExperienceLabel>(&mut app),
+        );
+        deliver(&mut app, longest);
+        assert_eq!(label(&mut app), "65535 / 65535");
+        assert_eq!(
+            {
+                let world = app.world_mut();
+                let mut query = world.query_filtered::<&Text, With<HungerLabel>>();
+                query.single(world).expect("one hunger label").0.clone()
+            },
+            "65535 / 65535"
+        );
+        assert_eq!(
+            {
+                let world = app.world_mut();
+                let mut query = world.query_filtered::<&Text, With<ExperienceLabel>>();
+                query.single(world).expect("one experience label").0.clone()
+            },
+            "Lv 65535 · 4294967295 / 4294967295"
+        );
+        assert_eq!(
+            geometry_before,
+            (
+                node::<HealthRoot>(&mut app),
+                node::<HealthTrack>(&mut app),
+                node::<HealthLabel>(&mut app),
+                node::<HungerRoot>(&mut app),
+                node::<HungerTrack>(&mut app),
+                node::<HungerLabel>(&mut app),
+                node::<ExperienceRoot>(&mut app),
+                node::<ExperienceTrack>(&mut app),
+                node::<ExperienceLabel>(&mut app),
+            )
+        );
     }
 
     fn death_visibility(app: &mut App) -> Visibility {

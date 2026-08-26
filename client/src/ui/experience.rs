@@ -13,7 +13,9 @@ use bevy::prelude::*;
 use bevy::time::Real;
 
 use super::CELL_EDGE;
-use super::health::{BAR_BORDER, BAR_HEIGHT, BAR_WIDTH, EXPERIENCE_BAR_BOTTOM};
+use super::health::{
+    BAR_LABEL_SIZE, EXPERIENCE_BAR_BOTTOM, vital_bar_label, vital_bar_root, vital_bar_track,
+};
 use crate::net::{PlayerVitals, Session};
 use crate::player::{ApplySnapshots, InputMode, SelfVitals};
 
@@ -29,9 +31,6 @@ const BAR_FILL: Color = Color::srgb(0.36, 0.48, 0.92);
 /// The level-up announcement at full opacity.
 const LEVEL_UP_FLASH: Color = Color::srgb(0.82, 0.88, 1.0);
 
-const BAR_COLUMN_GAP: f32 = 10.0;
-const BAR_CORNER_RADIUS: f32 = 3.0;
-const BAR_LABEL_SIZE: f32 = 17.0;
 const LEVEL_UP_LABEL_SIZE: f32 = 38.0;
 const EMPTY_PERCENT: f32 = 0.0;
 const FULL_PERCENT: f32 = 100.0;
@@ -62,7 +61,10 @@ impl Plugin for ExperienceUiPlugin {
 
 /// The experience bar and everything beside it. Hidden and shown as one node.
 #[derive(Component)]
-struct ExperienceRoot;
+pub(super) struct ExperienceRoot;
+
+#[derive(Component)]
+pub(super) struct ExperienceTrack;
 
 /// The filled portion. Its width is the server-sent progression ratio.
 #[derive(Component)]
@@ -70,7 +72,7 @@ struct ExperienceFill;
 
 /// The level and numeric progression beside the bar.
 #[derive(Component)]
-struct ExperienceLabel;
+pub(super) struct ExperienceLabel;
 
 /// The centred level-up announcement's root.
 #[derive(Component)]
@@ -124,29 +126,14 @@ fn spawn_experience_bar(mut commands: Commands) {
     commands
         .spawn((
             ExperienceRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(EMPTY_PERCENT),
-                right: Val::Px(EMPTY_PERCENT),
-                bottom: Val::Px(EXPERIENCE_BAR_BOTTOM),
-                display: Display::Flex,
-                column_gap: Val::Px(BAR_COLUMN_GAP),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
+            vital_bar_root(EXPERIENCE_BAR_BOTTOM),
             Visibility::Hidden,
             GlobalZIndex(HUD_LAYER),
         ))
         .with_children(|root| {
             root.spawn((
-                Node {
-                    width: Val::Px(BAR_WIDTH),
-                    height: Val::Px(BAR_HEIGHT),
-                    border: UiRect::all(Val::Px(BAR_BORDER)),
-                    border_radius: BorderRadius::all(Val::Px(BAR_CORNER_RADIUS)),
-                    ..default()
-                },
+                ExperienceTrack,
+                vital_bar_track(),
                 BackgroundColor(BAR_TRACK),
                 BorderColor::all(CELL_EDGE),
             ))
@@ -162,12 +149,14 @@ fn spawn_experience_bar(mut commands: Commands) {
 
             root.spawn((
                 ExperienceLabel,
+                vital_bar_label(),
                 Text::new(String::new()),
                 TextFont {
                     font_size: FontSize::Px(BAR_LABEL_SIZE),
                     ..default()
                 },
                 TextColor(Color::WHITE),
+                TextLayout::no_wrap(),
                 TextShadow::default(),
             ));
         });
@@ -365,7 +354,7 @@ mod tests {
 
     use super::*;
     use crate::net::{LifeState, SessionParams};
-    use crate::ui::health::{HUNGER_BAR_BOTTOM, VITAL_BAR_GAP};
+    use crate::ui::health::{BAR_HEIGHT, HUNGER_BAR_BOTTOM, VITAL_BAR_GAP};
 
     const STEP: Duration = Duration::from_millis(500);
 
