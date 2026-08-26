@@ -120,7 +120,7 @@ const StoreVersion uint32 = 8
 
 const (
 	previousStoreVersion   uint32 = 7
-	previousInventorySlots        = 39
+	previousInventorySlots int    = 39
 )
 
 // On-disk layout, little-endian throughout, one file per character.
@@ -504,7 +504,7 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 	}
 	if err := os.Rename(migratedDir, s.dir); err != nil {
 		if rollbackErr := os.Rename(aside, s.dir); rollbackErr != nil {
-			return false, fmt.Errorf("persist: installing migrated records: %w (rollback also failed: %v)", err, rollbackErr)
+			return false, fmt.Errorf("persist: installing migrated records: %w (rollback also failed: %w)", err, rollbackErr)
 		}
 		return false, fmt.Errorf("persist: installing migrated records: %w", err)
 	}
