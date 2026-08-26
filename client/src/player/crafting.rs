@@ -9,7 +9,7 @@
 //! What the mirror buys is the question a player actually asks — *what can I make, what
 //! does it cost, and what am I short of* — answered without a round trip. Graying out a
 //! row whose materials are short is a courtesy computed from [`Inventory::count`], exactly
-//! as [`super::combat::blade_in_hand`] is a courtesy: an honest UI does not ask for
+//! as [`super::combat::attack_item_in_hand`] is a courtesy: an honest UI does not ask for
 //! something it can already see will be declined. The server re-reads its own slots either
 //! way, and a refusal is silence.
 //!
@@ -24,7 +24,7 @@ use bevy::prelude::*;
 
 use super::inventory::{ApplyInventory, Inventory};
 use super::items::{
-    ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_RAW_MEAT, ITEM_STONE, ITEM_VARGR_PELT,
+    ITEM_BONE, ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_RAW_MEAT, ITEM_STONE, ITEM_VARGR_PELT,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use super::{
@@ -75,6 +75,10 @@ pub(super) const ITEM_IRON_HELM: u16 = 24;
 pub(super) const ITEM_IRON_CUIRASS: u16 = 25;
 pub(super) const ITEM_IRON_GREAVES: u16 = 26;
 pub(crate) const ITEM_WOODEN_SHIELD: u16 = 27;
+
+/// The launcher and ammunition appended after the wooden shield.
+pub(super) const ITEM_BOW: u16 = 28;
+pub(super) const ITEM_ARROW: u16 = 29;
 
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +146,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 17] = [
+pub const RECIPES: [Recipe; 19] = [
     Recipe {
         id: RecipeId::Forge,
         category: RecipeCategory::Survival,
@@ -417,6 +421,44 @@ pub const RECIPES: [Recipe; 17] = [
         },
         station: None,
     },
+    Recipe {
+        id: RecipeId::Bow,
+        category: RecipeCategory::Tools,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 3,
+            },
+            Ingredient {
+                item_id: ITEM_VARGR_PELT,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_BOW,
+            count: 1,
+        },
+        station: None,
+    },
+    Recipe {
+        id: RecipeId::Arrows,
+        category: RecipeCategory::Tools,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 1,
+            },
+            Ingredient {
+                item_id: ITEM_BONE,
+                count: 1,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_ARROW,
+            count: 4,
+        },
+        station: None,
+    },
 ];
 
 /// What each of the three implements costs, spelled once.
@@ -666,6 +708,11 @@ mod tests {
             cost(RecipeId::WoodenShield),
             vec![(ITEM_LOG, 6), (ITEM_VARGR_PELT, 2)]
         );
+        assert_eq!(
+            cost(RecipeId::Bow),
+            vec![(ITEM_LOG, 3), (ITEM_VARGR_PELT, 2)]
+        );
+        assert_eq!(cost(RecipeId::Arrows), vec![(ITEM_LOG, 1), (ITEM_BONE, 1)]);
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -706,6 +753,7 @@ mod tests {
                 Some(StructureKind::Forge),
             ),
             (RecipeId::WoodenShield, ITEM_WOODEN_SHIELD, None),
+            (RecipeId::Bow, ITEM_BOW, None),
         ] {
             let row = recipe(id).expect("every member has a row");
             assert_eq!(
@@ -718,6 +766,15 @@ mod tests {
             );
             assert_eq!(row.station, station, "{id:?}");
         }
+        let arrows = recipe(RecipeId::Arrows).expect("arrows have a row");
+        assert_eq!(
+            arrows.product,
+            Ingredient {
+                item_id: ITEM_ARROW,
+                count: 4
+            }
+        );
+        assert_eq!(arrows.station, None);
     }
 
     /// Every recipe the contract names has exactly one row, and nothing has two.

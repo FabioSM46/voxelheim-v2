@@ -979,8 +979,8 @@ func TestAnImplementIsNotAWeaponAndCarriesNoDamage(t *testing.T) {
 		if definition.repairRestore != 0 {
 			t.Errorf("item %d restores %d durability; an implement is not a repair kit", tool, definition.repairRestore)
 		}
-		// It wears out, like the blades do — and nothing in this game wears from *use*, so
-		// what this buys is that dying costs something. See #199.
+		// It wears out, like the blades do — and tools do not wear from *use*, so what this
+		// buys is that dying costs something. See #199.
 		if definition.maxDurability != ToolMaxDurability {
 			t.Errorf("item %d has %d durability, want %d", tool, definition.maxDurability, ToolMaxDurability)
 		}

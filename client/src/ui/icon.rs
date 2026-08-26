@@ -319,6 +319,39 @@ const SHIELD: [IconPart; 3] = [
     },
 ];
 
+/// A bowed stave in two limbs and its taut string.
+const BOW: [IconPart; 3] = [
+    IconPart {
+        left: 28.0,
+        top: 12.0,
+        width: 10.0,
+        height: 42.0,
+        radius: 35.0,
+        rotation: -0.24,
+        shade: 0.18,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 28.0,
+        top: 46.0,
+        width: 10.0,
+        height: 42.0,
+        radius: 35.0,
+        rotation: 0.24,
+        shade: -0.18,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 58.0,
+        top: 13.0,
+        width: 4.0,
+        height: 74.0,
+        radius: 20.0,
+        shade: 0.65,
+        ..IconPart::PLAIN
+    },
+];
+
 /// The rectangles one shape is drawn from, in the order they are stacked.
 ///
 /// **Exhaustive, with no wildcard arm.** A fifth [`ItemShape`] does not compile until it
@@ -335,6 +368,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Tool => &TOOL,
         ItemShape::Armour => &ARMOUR,
         ItemShape::Shield => &SHIELD,
+        ItemShape::Bow => &BOW,
     }
 }
 

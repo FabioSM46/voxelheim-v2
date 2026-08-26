@@ -120,9 +120,10 @@ table InventoryMoveRequest {
 /// repeated here. The movement frame carrying that tick is ordered ahead of the swing,
 /// and two claims to the same aim would be two claims to reconcile.
 ///
-/// There is no acknowledgement payload and no damage-result payload. A refused swing
-/// is silence; an accepted one becomes visible only through the authoritative
-/// `EntitySnapshot`, `PlayerVitals` and `InventoryState` that follow.
+/// There is no acknowledgement payload and no damage-result payload. A launcher missing
+/// ammunition receives `ActionRefused{Attack, NoAmmunition}`; other refused attacks remain
+/// silence. An accepted one becomes visible only through the authoritative `EntitySnapshot`,
+/// `PlayerVitals`, projectile state and `InventoryState` that follow.
 ///
 /// Decoder invariants the server enforces on this untrusted input:
 ///   - `slot` is copied verbatim, out-of-range values included. Whether an
@@ -198,7 +199,11 @@ enum RecipeID : ubyte {
 
   // V22 already reserves shield intent/state; this append ships on both V22 peers before
   // release, so there is no released same-version peer and no second bump is needed.
-  WoodenShield = 17
+  WoodenShield = 17,
+
+  // Bow and arrows follow the wooden shield without moving its assigned wire value.
+  Bow = 18,
+  Arrows = 19
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.

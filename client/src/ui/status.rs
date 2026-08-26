@@ -594,6 +594,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::LootNotOwned
         | RefusalReason::StaleRevision
         | RefusalReason::InventoryFull
+        | RefusalReason::NoAmmunition
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -612,6 +613,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     };
 
     match (refused.action, refused.reason) {
+        (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
         (RefusedAction::PlaceStructure, _) => {
             placement_reason.map(|reason| format!("Cannot build here: {reason}"))
         }
@@ -1171,7 +1173,7 @@ mod tests {
     /// that `match`. A reason appended later without a sentence fails
     /// [`every_reason_is_either_a_sentence_or_a_deliberate_silence`] only because this list
     /// has to be extended by hand to compile past it.
-    const EVERY_REASON: [RefusalReason; 26] = [
+    const EVERY_REASON: [RefusalReason; 27] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1194,6 +1196,7 @@ mod tests {
         RefusalReason::LootNotOwned,
         RefusalReason::StaleRevision,
         RefusalReason::InventoryFull,
+        RefusalReason::NoAmmunition,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1208,6 +1211,7 @@ mod tests {
             | RefusalReason::AlreadyInParty
             | RefusalReason::NoInvite
             | RefusalReason::NotLeader => RefusedAction::Party,
+            RefusalReason::NoAmmunition => RefusedAction::Attack,
             RefusalReason::CorpseUnavailable
             | RefusalReason::LootNotOwned
             | RefusalReason::StaleRevision
@@ -1244,9 +1248,24 @@ mod tests {
                  codes it cannot read, and for nothing else"
             );
             if let Some(line) = shown {
-                assert!(line.starts_with("Cannot "), "{reason:?} -> {line}");
+                assert!(
+                    line.starts_with("Cannot ") || line == "No arrows",
+                    "{reason:?} -> {line}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn a_bow_refused_for_ammunition_says_no_arrows_exactly() {
+        assert_eq!(
+            describe_refusal(&ActionRefused {
+                action: RefusedAction::Attack,
+                reason: RefusalReason::NoAmmunition,
+                anchor: None,
+            }),
+            Some("No arrows".to_owned())
+        );
     }
 
     #[test]

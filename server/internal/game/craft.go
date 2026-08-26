@@ -216,6 +216,15 @@ var recipeTable = map[vnet.RecipeID]recipe{
 	vnet.RecipeIDWoodenShield: {
 		ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemWoodenShield, productCount: 1,
 	},
+
+	// Ranged combat starts in the field: neither the bow nor its bone-tipped arrows
+	// needs a station. productCount is what makes one arrow craft produce a bundle of four.
+	vnet.RecipeIDBow: {
+		ingredients: []ingredient{{ItemLog, 3}, {ItemVargrPelt, 2}}, product: ItemBow, productCount: 1,
+	},
+	vnet.RecipeIDArrows: {
+		ingredients: []ingredient{{ItemLog, 1}, {ItemBone, 1}}, product: ItemArrow, productCount: 4,
+	},
 }
 
 // craft spends a recipe's ingredients and inserts its product, or changes nothing.

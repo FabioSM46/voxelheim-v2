@@ -19,7 +19,7 @@ use crate::net::{AttackRequest, Outbound, Sent, encode_attack_request};
 use crate::net::{BlockRequest, ConnectionState, encode_block_request};
 
 /// The button that swings, and the same one that mines. Which of the two it means is
-/// what [`blade_in_hand`] decides.
+/// what [`attack_item_in_hand`] decides.
 const SWING_BUTTON: MouseButton = MouseButton::Left;
 const BLOCK_BUTTON: MouseButton = MouseButton::Right;
 
@@ -35,13 +35,12 @@ struct BlockIntent {
 /// slot of stone is refused there whatever this constant says.
 pub(super) const ITEM_RUSTY_SWORD: u16 = 7;
 
-/// Every item id this client routes the left button to a swing for.
+/// Every item id this client routes the left button to an attack for.
 ///
 /// **A table rather than a comparison, and that is the whole of the change.** This used to
 /// be `item_id == ITEM_RUSTY_SWORD` — one weapon's name spelled inside the routing — which
-/// is exactly what `armedWithSwordLocked` stopped doing on the server when it began reading
-/// `meleeDamage` out of the item registry instead. A third blade is one more line here, as
-/// it is one more registry entry there, and neither is an edit to the predicate.
+/// is exactly what `armedWithSwordLocked` stopped doing on the server when it became
+/// `armedForAttackLocked` and began reading weapon behavior out of the item registry.
 ///
 /// It stays this client's own opinion and it still decides nothing: the server re-reads its
 /// own registry for every swing, so a wrong entry costs a request that is refused and can
@@ -49,21 +48,23 @@ pub(super) const ITEM_RUSTY_SWORD: u16 = 7;
 /// an item the server would have honoured and this list omitted, which is what the iron
 /// sword silently was: drawn as a blade, worth 40 damage server-side, and never asked for.
 ///
-/// **Deliberately one list and not a second registry.** legacy PR 128 collapses every per-item fact
-/// this client holds — display name, held shape, swatch — into a single table. *The left
-/// button swings this* is one more fact of that kind, so this becomes a column of that table
-/// and [`item_is_a_blade`] its accessor, with no call site and no test changed.
-const BLADES: &[u16] = &[ITEM_RUSTY_SWORD, crafting::ITEM_IRON_SWORD];
+/// `BLADE_SHAPES` is narrower and test-only: it pins blade presentation to this routing,
+/// while the bow is deliberately routed here without pretending to be a blade.
+#[cfg(test)]
+const BLADE_SHAPES: &[u16] = &[ITEM_RUSTY_SWORD, crafting::ITEM_IRON_SWORD];
+const LEFT_BUTTON_USES: &[u16] = &[
+    ITEM_RUSTY_SWORD,
+    crafting::ITEM_IRON_SWORD,
+    crafting::ITEM_BOW,
+];
 
-/// Whether this client routes the left button to a swing for one item id.
+/// Whether this client presents one item as a blade.
 ///
-/// Split from [`blade_in_hand`] because the two questions are not the same one: this asks
-/// about an *item*, and that asks about the *stack in the selected slot*, which also has to
-/// be there and not worn through. The split is what lets the sweep in the tests below hold
-/// this against `super::hands`'s idea of what a blade looks like item by item, with no stack
-/// to build and no durability to choose.
+/// Test-only because runtime routing asks [`attack_item_in_hand`]; this narrower predicate
+/// lets the sweep below compare the hand's blade vocabulary without inventing a stack.
+#[cfg(test)]
 pub(super) fn item_is_a_blade(item_id: u16) -> bool {
-    BLADES.contains(&item_id)
+    BLADE_SHAPES.contains(&item_id)
 }
 
 pub(super) struct CombatPlugin;
@@ -153,29 +154,28 @@ pub struct ApplyCombatInput;
 /// Sent whether the blow later hits or misses, because this client does not know which
 /// and will not find out except by watching the draugr's health in a later snapshot.
 ///
-/// **A unit struct, and it stays one.** `super::hands` draws three different arcs and picks
-/// between them itself, from a cursor that never leaves that module (#174) — so which shape
-/// plays is decided *downstream* of this message rather than carried by it, and there is no
-/// direction in which it could travel back. That is what keeps the picture from deciding
-/// anything: the `AttackRequest` below names a slot and a tick and has nowhere to put an
-/// animation, so three consecutive swings ask the server for exactly the same thing.
+/// The item id is presentation-only: `super::hands` uses it to select a blade arc or bow
+/// draw. The `AttackRequest` below still names only a slot and tick, so the picture cannot
+/// decide what the authoritative slot does.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SwingSent;
+pub(super) struct SwingSent {
+    /// Presentation only: the server still receives a slot and resolves its contents.
+    pub(super) item_id: u16,
+}
 
-/// Whether the selected slot presents a blade this client will swing with.
+/// Whether the selected slot presents a usable blade in tests.
 ///
-/// The one predicate, read by the sender below and by the mining path in
-/// [`super::target`], which is what makes the two mutually exclusive rather than merely
-/// unlikely to overlap. A blade worn through is not one: the server refuses a swing from
-/// it, so an honest UI mines instead of asking for something it knows will be declined.
+/// A blade worn through is not one: the server refuses its attack, so the presentation
+/// helper mirrors the same usable-stack rule as [`attack_item_in_hand`].
 ///
 /// **Worn through means zero under a non-zero maximum**, which is the pair
-/// `armedWithSwordLocked` reads and not the current value on its own. `max_durability > 0`
+/// `armedForAttackLocked` reads and not the current value on its own. `max_durability > 0`
 /// is already this client's answer to *does this wear out* — `super::inventory`'s
 /// `repair_request` asks it in exactly that shape — and a weapon that never wears out would
 /// carry `(0, 0)` like every resource does. Reading the current value alone would call such
 /// a weapon permanently broken the day somebody registered one, which is a courtesy refusing
 /// a swing the server would have granted: the one direction a courtesy must never fail in.
+#[cfg(test)]
 pub(super) fn blade_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> bool {
     inventory.slot(selected.0).is_some_and(|stack| {
         item_is_a_blade(stack.item_id)
@@ -184,11 +184,22 @@ pub(super) fn blade_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> b
     })
 }
 
+/// The selected attack-capable presentation item, if it is present and usable.
+/// Ammunition is deliberately absent: only the server decides whether a bow may fire.
+pub(super) fn attack_item_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> Option<u16> {
+    inventory.slot(selected.0).and_then(|stack| {
+        (LEFT_BUTTON_USES.contains(&stack.item_id)
+            && stack.count > 0
+            && (stack.max_durability == 0 || stack.durability > 0))
+            .then_some(stack.item_id)
+    })
+}
+
 /// The selected slot and what it holds, as the input systems ask about it.
 ///
 /// A bundle rather than two parameters, because both systems that route the left button
 /// need the pair and `send_block_edits` was already at the argument bound. Bundling also
-/// puts the shared question — is there a blade in hand — on one type instead of leaving
+/// puts the shared question — is there an attack item in hand — on one type instead of leaving
 /// two call sites to remember to ask it the same way.
 #[derive(SystemParam)]
 pub(super) struct HeldItem<'w> {
@@ -202,15 +213,15 @@ impl HeldItem<'_> {
         self.selected.0
     }
 
-    /// Whether that slot presents a blade this client will swing with.
-    pub(super) fn blade(&self) -> bool {
-        blade_in_hand(&self.inventory, &self.selected)
+    /// Which usable attack item that slot presents, if any.
+    pub(super) fn attack_item(&self) -> Option<u16> {
+        attack_item_in_hand(&self.inventory, &self.selected)
     }
 
     /// Which structure that slot would plant, if it plants one.
     ///
     /// Read by the placement sender in [`super::structures`] and by the block-edit path in
-    /// [`super::target`], for the reason [`Self::blade`] is read by two sites: one press
+    /// [`super::target`], for the reason [`Self::attack_item`] is read by two sites: one press
     /// must never ask for a voxel and a building at once, and asking the same function is
     /// what makes that structural.
     pub(super) fn structure(&self) -> Option<crate::net::StructureKind> {
@@ -223,7 +234,7 @@ impl HeldItem<'_> {
     }
 }
 
-/// Sends exactly one `AttackRequest` per press, while a blade is selected.
+/// Sends exactly one `AttackRequest` per press, while a usable attack item is selected.
 ///
 /// `just_pressed`, never `pressed`: a swing is an event and the server refuses a second
 /// one inside its cooldown anyway, so holding the button down would only fill the
@@ -252,9 +263,9 @@ fn send_attacks(
     if structure.0.is_some() {
         return;
     }
-    if !held.blade() {
+    let Some(item_id) = held.attack_item() else {
         return;
-    }
+    };
 
     let Some(mut outbound) = outbound else {
         return;
@@ -272,7 +283,7 @@ fn send_attacks(
     // than for a hit: whether the blow lands is not known here and never will be.
     match outbound.send(encode_attack_request(&request)) {
         Sent::Queued => {
-            swings.write(SwingSent);
+            swings.write(SwingSent { item_id });
         }
         Sent::Dropped => {
             warn!(
@@ -517,6 +528,18 @@ mod tests {
             );
             assert_eq!(found[0].0, 0, "{name}: the swing named the wrong slot");
         }
+    }
+
+    /// Local ammunition is never a gate: the server owns both the count and the refusal.
+    #[test]
+    fn one_click_with_a_bow_sends_an_attack_without_checking_for_arrows() {
+        let (mut app, sent) = clicking_app(blade_of(crafting::ITEM_BOW));
+        click(&mut app);
+        app.update();
+
+        assert_eq!(attacks(&sent).len(), 1);
+        let messages = app.world().resource::<Messages<SwingSent>>();
+        assert_eq!(messages.len(), 1, "the sent bow attack did not animate");
     }
 
     /// The swing carries the counter `PlayerInput` uses, so the server can order the aim

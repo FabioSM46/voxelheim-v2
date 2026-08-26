@@ -856,9 +856,9 @@ parts of it were already decided by the registry and by the slot invariants abov
 
 ## What a death costs, and the one question that decides it
 
-`applyDeathPenaltyLocked` in `internal/game/inventory.go` is the whole of it, and death is
-the whole of wear: nothing in this game wears out from being used, so this penalty is what
-durability means.
+`applyDeathPenaltyLocked` in `internal/game/inventory.go` is the whole death penalty. Blades,
+tools and armour do not wear from ordinary use; bows are the deliberate exception and spend
+one point per launch in the attack path.
 
 - **It reaches what the player has *on them*, and `carriedOnPerson` is the one answer to
   which slots those are.** The pack behind them is untouched, so a spare blade stowed away
@@ -1235,9 +1235,9 @@ kill. A draugr leaves 1..2 bones, a vargr leaves exactly one pelt, and two pelts
   is collected by walking over it, and is refused if the item is unregistered or the count is
   zero. `lootDrop` carries a voxel rather than a `*mob` because by the time it is spawned the
   creature has already left `Sim.mobs`.
-- **Nothing consumes a bone yet, and `TestNothingConsumesABoneYet` is what makes that a
-  claim.** It is the reagent GDD §7's engraving table will want. A resource with no sink is a
-  resource; the alternative was a creature that leaves nothing, which the sweep now refuses.
+- **Arrows are the only bone sink, and `TestOnlyArrowsConsumeBones` makes that a claim.**
+  One bone and one log make four arrows; no other recipe, durability or combat rule consumes
+  bone. The alternative was a creature that left a resource with no present use.
 
 ## Persisting the world, and what is deliberately not persisted
 
