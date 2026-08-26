@@ -1028,7 +1028,7 @@ fn stack_item_id(stack: Option<crate::net::InventoryStack>) -> Option<u16> {
 /// length, so leaving its rotation at identity lays it up the arm. Turn that axis horizontal and
 /// diagonally outwards/forwards: both a rear and a side view then see a projection of the blade.
 /// Translation compensates for the rotation around the mesh origin, keeping the actual grip
-/// centre at the rig-derived anchor rather than putting the sword's midpoint there.
+/// centre inside the rig-derived fist rather than putting the sword's midpoint there.
 fn body_held_item_transform(shape: ItemShape) -> Transform {
     let anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
     if shape != ItemShape::Blade {
@@ -1038,10 +1038,20 @@ fn body_held_item_transform(shape: ItemShape) -> Transform {
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
     let rotation = Quat::from_rotation_y(FRAC_PI_4) * Quat::from_rotation_z(-FRAC_PI_2);
+    // The fist is 0.2 blocks across both projected axes. Moving the grip 0.11 blocks
+    // along this 45-degree axis shifts each coordinate by about 0.078: still inside the
+    // fist, while the blade root clears its silhouette and the readable length no longer
+    // consists of one protruding tip.
+    const BLADE_GRIP_OUTSET: f32 = 0.11;
+    // The shared drop mesh is deliberately small on the ground. A modest body-only scale
+    // makes its furniture readable beside the 1.8-block rig without changing that asset.
+    const BODY_BLADE_SCALE: f32 = 1.25;
+    let grip_anchor = anchor + rotation * Vec3::Y * BLADE_GRIP_OUTSET;
+    let scale = Vec3::splat(BODY_BLADE_SCALE);
     Transform {
-        translation: anchor - rotation * drops::blade_grip_centre(),
+        translation: grip_anchor - rotation * (drops::blade_grip_centre() * scale),
         rotation,
-        ..default()
+        scale,
     }
 }
 
