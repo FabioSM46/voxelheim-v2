@@ -76,7 +76,7 @@ pub(crate) use camera::{AimCamera, DeathFall};
 pub use camera::{Orbit, ViewMode, WorldCamera};
 // The character screen's preview is the same rig with no server entity behind it, so it
 // is dressed out of the same wardrobe rather than from a second copy of the tables.
-pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe};
+pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe, RecipeCategory};
 pub use interpolate::SnapshotBuffer;
 pub(crate) use inventory::ARMOUR_SLOTS;
 pub use inventory::{
@@ -2248,6 +2248,42 @@ fn merge_all(into: &mut Mesh, parts: impl IntoIterator<Item = Mesh>, what: &'sta
             error!("the {what} mesh is missing a part: {err}");
         }
     }
+}
+
+/// Builds the rolled load and its two straps inside an exact outer bound.
+///
+/// The first-person hand and world drop pass different scales through this one shape
+/// recipe, so a tent cannot regress to a box in one surface while remaining a roll in the
+/// other. The returned meshes stay separate long enough for the roll to take the item's
+/// colour and the straps to take their shared brown.
+pub(super) fn rolled_bundle_parts(bounds: Vec3) -> (Mesh, Mesh) {
+    const ROLL_HEIGHT_RATIO: f32 = 0.52 / 0.62;
+    const ROLL_DEPTH_RATIO: f32 = 0.62 / 0.72;
+    const STRAP_WIDTH_RATIO: f32 = 0.12 / 1.15;
+    const STRAP_OFFSET_RATIO: f32 = 0.31 / 1.15;
+
+    let cylinder = |size: Vec3| {
+        Mesh::from(Cylinder::new(0.5, 1.0))
+            .rotated_by(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+            .scaled_by(size)
+    };
+    let roll = cylinder(Vec3::new(
+        bounds.x,
+        bounds.y * ROLL_HEIGHT_RATIO,
+        bounds.z * ROLL_DEPTH_RATIO,
+    ));
+    let strap_size = Vec3::new(bounds.x * STRAP_WIDTH_RATIO, bounds.y, bounds.z);
+    let strap_offset = bounds.x * STRAP_OFFSET_RATIO;
+    let mut straps = cylinder(strap_size).translated_by(Vec3::X * -strap_offset);
+    let other = cylinder(strap_size).translated_by(Vec3::X * strap_offset);
+    merge_all(&mut straps, [other], "packed-gear straps");
+    (roll, straps)
+}
+
+/// The leather cord shared by every packed structure, as linear vertex/material colour.
+pub(super) fn bundle_strap_linear_rgba() -> [f32; 4] {
+    let colour = Color::srgb_u8(106, 67, 35).to_linear();
+    [colour.red, colour.green, colour.blue, colour.alpha]
 }
 
 #[cfg(test)]

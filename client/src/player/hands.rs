@@ -27,9 +27,9 @@ use super::camera::{ViewMode, WorldCamera};
 use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
-use super::merge_all;
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
 use super::{HeldItemSurface, InputMode, held_item_surface, stack_item_id};
+use super::{bundle_strap_linear_rgba, merge_all, rolled_bundle_parts};
 use crate::net::{PLACEHOLDER_APPEARANCE, Session};
 #[cfg(test)]
 use crate::world::palette;
@@ -241,8 +241,9 @@ const RUST_MARK_SINK: f32 = 0.6;
 /// moved between sessions would be the one thing about it a player could not learn.
 const RUST_SEED: u32 = 0x5EED_0204;
 
-/// A carried structure: a bundle, wider than it is tall, so a tent under the arm does not
-/// read as another stackable cube.
+/// A carried structure's outer bound. [`rolled_bundle_parts`] fills it with the same roll
+/// and two straps used by the world drop, so a tent under the arm does not read as another
+/// stackable cube.
 const BUNDLE_SIZE: Vec3 = Vec3::new(0.075, 0.042, 0.048);
 
 /// An implement's haft: longer and thicker than a blade, because what tells a shovel from
@@ -739,6 +740,15 @@ fn coloured(mut mesh: Mesh, base: [f32; 4]) -> Mesh {
     mesh
 }
 
+/// One item-coloured roll with two brown leather straps.
+fn coloured_bundle_mesh(base: [f32; 4]) -> Mesh {
+    let (roll, straps) = rolled_bundle_parts(BUNDLE_SIZE);
+    let mut bundle = tinted(roll, base);
+    let straps = tinted(straps, bundle_strap_linear_rgba());
+    merge_all(&mut bundle, [straps], "held packed-gear bundle");
+    bundle
+}
+
 /// The geometry one held item contributes before it is arranged against the fist.
 ///
 /// Exhaustive over [`ItemShape`], so a new shape does not compile until the hand can hold
@@ -752,7 +762,11 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Block => Mesh::from(Cuboid::from_size(Vec3::splat(BLOCK_EDGE))),
         ItemShape::Material => Mesh::from(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
         ItemShape::Blade => sword_mesh(SWORD_LENGTH),
-        ItemShape::Bundle => Mesh::from(Cuboid::from_size(BUNDLE_SIZE)),
+        ItemShape::Bundle => {
+            let (mut roll, straps) = rolled_bundle_parts(BUNDLE_SIZE);
+            merge_all(&mut roll, [straps], "held packed-gear bundle");
+            roll
+        }
         ItemShape::Tool => tool_mesh(),
         ItemShape::Armour => armour_mesh(),
     }
@@ -794,8 +808,12 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
         return held;
     };
 
-    let item =
-        coloured(item_mesh(item_id, shape), item_colour).translated_by(item_translation(shape));
+    let item = if shape == ItemShape::Bundle {
+        coloured_bundle_mesh(item_colour)
+    } else {
+        coloured(item_mesh(item_id, shape), item_colour)
+    }
+    .translated_by(item_translation(shape));
     merge_all(&mut held, [item], "hand and held item");
     held
 }
@@ -2470,6 +2488,39 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(unknown.shape, Some(ItemShape::Material));
+    }
+
+    #[test]
+    fn a_held_tent_is_a_rolled_bundle_with_brown_straps() {
+        let item = item_mesh(structures::ITEM_TENT, ItemShape::Bundle);
+        assert!(
+            item.count_vertices() > Mesh::from(Cuboid::from_size(BUNDLE_SIZE)).count_vertices(),
+            "the held bundle is still one parallelepiped"
+        );
+        let points = positions(&item);
+        for (axis, expected) in BUNDLE_SIZE.to_array().into_iter().enumerate() {
+            let (low, high) = extent(&points, axis);
+            assert!(
+                (high - low - expected).abs() < 1e-6,
+                "the held bundle spans {} on axis {axis}, want {expected}",
+                high - low
+            );
+        }
+
+        let appearance = selected_appearance(Some(InventoryStack {
+            item_id: structures::ITEM_TENT,
+            count: 1,
+            ..Default::default()
+        }));
+        let colours = tints(&held_mesh(TEST_SKIN, appearance));
+        let canvas = appearance
+            .item_colour
+            .expect("the tent has a canvas colour")
+            .map(|channel| (channel * 255.0).round() as u8);
+        let straps = bundle_strap_linear_rgba().map(|channel| (channel * 255.0).round() as u8);
+        assert!(colours.contains(&canvas), "the roll lost the tent colour");
+        assert!(colours.contains(&straps), "the two straps are not brown");
+        assert_ne!(canvas, straps, "the straps disappeared into the canvas");
     }
 
     /// The forge's two products, once a player has made one.

@@ -498,6 +498,13 @@ The client samples the controls, sends what the player is *trying* to do at the 
   a courtesy must never produce: a row refusing a craft the server would have granted. The
   craft itself changes nothing locally; the complete `InventoryState` that follows is what
   moves a count, and a refusal is silence.
+
+  **The crafting tab is a bounded viewport, not the height of its rows.** `ALL` preserves
+  the complete mirror; `SURVIVAL`, `TOOLS` and `ARMOUR` are local presentation shelves over
+  those same rows, carried by `RecipeCategory` and never sent. The wheel moves one
+  `ScrollPosition` and the rail mirrors it, so adding a recipe cannot grow the tab below the
+  fixed inventory frame. Filtering uses `Display::None`, resets the viewport to the top and
+  neither creates nor removes a mirrored recipe.
 - **One cell press, four possible intents, and choosing between them is routing rather
   than authority.** A middle-click on known food sends a `ConsumeRequest` naming one slot;
   a picked sharpening stone dropped on a slot that wears out sends a `RepairRequest` naming
@@ -878,6 +885,12 @@ Both read the shape out of the row in `player/items.rs`, so what a player sees i
 they see in their hand, and neither surface re-decides what an item is. Items share five pictures,
 and a new item inherits one by being registered at all — the campfire did exactly that, arriving
 as a `Bundle` beside the tent and the forge and needing no new drawing.
+
+**A bundle is one rolled shape recipe at two scales.** `rolled_bundle_parts` supplies the
+first-person hand and the world drop with a horizontal roll and two raised straps inside each
+surface's existing bound. The roll keeps the item-table colour; the straps use the one shared
+brown. World drops keep those as two visual children so one material can stay item-coloured and
+the other brown, while the first-person white material reads both as vertex colours.
 
 **Keying the drawing on the shape rather than on item ids is the whole design.** The alternative
 that keeps the two surfaces honest by construction is rendering the held meshes to a texture — and
