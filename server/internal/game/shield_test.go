@@ -50,14 +50,14 @@ func TestBlockRequiresALiveUsableOffHandShieldAndCancelsAPendingSwing(t *testing
 		t.Fatal("empty off hand blocked")
 	}
 	equipShield(t, player, WoodenShieldMaxDurability)
-	if err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
+	if _, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
 		t.Fatalf("Attack: %v", err)
 	}
 	player.Block(true)
 	if !h.vitals(player).Blocking {
 		t.Fatal("usable shield did not block")
 	}
-	if err := player.Attack(protocol.AttackRequest{Slot: 255, ClientTick: 0}); err != nil {
+	if _, err := player.Attack(protocol.AttackRequest{Slot: 255, ClientTick: 0}); err != nil {
 		t.Fatalf("blocked Attack: %v", err)
 	}
 	h.sim.mu.Lock()

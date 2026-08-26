@@ -26,6 +26,7 @@ use bevy::prelude::*;
 use super::SelfVitals;
 use super::camera::{ViewMode, WorldCamera};
 use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
+use super::crafting::ITEM_BOW;
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
@@ -269,6 +270,10 @@ const TOOL_HEAD_SIZE: Vec3 = Vec3::new(0.052, 0.020, 0.026);
 const ARMOUR_BODY_SIZE: Vec3 = Vec3::new(0.060, 0.070, 0.016);
 const ARMOUR_SHOULDER_SIZE: Vec3 = Vec3::new(0.026, 0.018, 0.022);
 
+const BOW_LENGTH: f32 = 0.120;
+const BOW_STAVE: f32 = 0.009;
+const BOW_DEPTH: f32 = 0.008;
+
 /// A haft with a head across the top of it: one mesh, two boxes.
 ///
 /// Merged rather than parented, for the reason the body's parts are merged in
@@ -300,6 +305,57 @@ fn armour_mesh() -> Mesh {
     });
     merge_all(&mut armour, shoulders, "held armour");
     armour
+}
+
+/// One tapered rectangular limb between two points in the bow's XY silhouette.
+fn bow_limb(from: Vec2, to: Vec2, from_width: f32, to_width: f32) -> Mesh {
+    let along = (to - from).normalize();
+    let across = Vec2::new(-along.y, along.x);
+    let [from_left, from_right] = [
+        from + across * from_width / 2.0,
+        from - across * from_width / 2.0,
+    ];
+    let [to_left, to_right] = [to + across * to_width / 2.0, to - across * to_width / 2.0];
+    let point = |xy: Vec2, z: f32| Vec3::new(xy.x, xy.y, z);
+    let near = -BOW_DEPTH / 2.0;
+    let far = BOW_DEPTH / 2.0;
+    let fln = point(from_left, near);
+    let frn = point(from_right, near);
+    let tln = point(to_left, near);
+    let trn = point(to_right, near);
+    let flf = point(from_left, far);
+    let frf = point(from_right, far);
+    let tlf = point(to_left, far);
+    let trf = point(to_right, far);
+
+    let mut build = MeshBuild::default();
+    for face in [
+        [fln, frn, trn, tln],
+        [flf, tlf, trf, frf],
+        [fln, tln, tlf, flf],
+        [frn, frf, trf, trn],
+        [fln, flf, frf, frn],
+        [tln, trn, trf, tlf],
+    ] {
+        build.quad(face);
+    }
+    build.finish()
+}
+
+/// Two tapered curved limbs and a taut string, shared by held and dropped presentations.
+pub(super) fn bow_mesh(length: f32) -> Mesh {
+    let centre = Vec2::new(-BOW_LENGTH * 0.24, 0.0);
+    let lower_tip = Vec2::new(0.0, -BOW_LENGTH / 2.0);
+    let upper_tip = Vec2::new(0.0, BOW_LENGTH / 2.0);
+    let mut bow = bow_limb(centre, lower_tip, BOW_STAVE, BOW_STAVE * 0.55);
+    let upper = bow_limb(centre, upper_tip, BOW_STAVE, BOW_STAVE * 0.55);
+    let string = Mesh::from(Cuboid::from_size(Vec3::new(
+        BOW_STAVE * 0.22,
+        BOW_LENGTH,
+        BOW_DEPTH * 0.28,
+    )));
+    merge_all(&mut bow, [upper, string], "bow stave and string");
+    bow.scaled_by(Vec3::splat(length / BOW_LENGTH))
 }
 
 /// A closed fist: a palm with four knuckles standing proud of it.
@@ -788,6 +844,7 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Tool => tool_mesh(),
         ItemShape::Armour => armour_mesh(),
         ItemShape::Shield => shield_mesh(0.065),
+        ItemShape::Bow => bow_mesh(BOW_LENGTH),
     }
 }
 
@@ -811,6 +868,7 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Armour => hand_top + ARMOUR_BODY_SIZE.y / 2.0 - HOLD_OVERLAP,
         // Cross the knuckles so the carried shield is gripped, not floating.
         ItemShape::Shield => hand_top + 0.024,
+        ItemShape::Bow => HAND_SIZE.y * 0.20,
     };
     Vec3::Y * y
 }
@@ -960,6 +1018,8 @@ enum SwingShape {
     Lateral,
     /// Straight along the view, with the tip levelling as it goes.
     Thrust,
+    /// The string hand drawing back. Chosen only for a bow request.
+    Draw,
 }
 
 impl SwingShape {
@@ -977,7 +1037,11 @@ impl SwingShape {
     /// `ItemShape::ALL` also sat until a runtime reader turned up for it, and the day one
     /// turns up here the attribute comes off rather than the list changing.
     #[cfg(test)]
-    const ALL: [Self; 3] = [Self::Overhead, Self::Lateral, Self::Thrust];
+    const ALL: [Self; 4] = [Self::Overhead, Self::Lateral, Self::Thrust, Self::Draw];
+
+    /// The three blade arcs, excluding the bow's one-shot draw pose.
+    #[cfg(test)]
+    const BLADE_ARCS: [Self; 3] = [Self::Overhead, Self::Lateral, Self::Thrust];
 
     /// The shape that follows this one.
     ///
@@ -994,6 +1058,7 @@ impl SwingShape {
             Self::Overhead => Self::Lateral,
             Self::Lateral => Self::Thrust,
             Self::Thrust => Self::Overhead,
+            Self::Draw => Self::Overhead,
         }
     }
 }
@@ -1058,6 +1123,14 @@ fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
         SwingShape::Thrust => SwingPose {
             pitch: -arc * THRUST_LEVEL_RADIANS,
             reach: -arc * THRUST_REACH,
+            ..default()
+        },
+        SwingShape::Draw => SwingPose {
+            pitch: arc * 0.18,
+            roll: arc * 0.28,
+            // Back toward the string, while retaining enough near-plane clearance when a
+            // placement bump and the draw begin in the same frame.
+            reach: arc * 0.03,
             ..default()
         },
     }
@@ -1429,8 +1502,8 @@ impl HandIntent<'_, '_> {
     }
 
     /// Whether a swing request left this client this frame.
-    fn swing_sent(&mut self) -> bool {
-        self.swings.read().next().is_some()
+    fn swing_sent(&mut self) -> Option<u16> {
+        self.swings.read().next().map(|swing| swing.item_id)
     }
 }
 
@@ -1462,12 +1535,19 @@ fn animate_view_model(
     // still moves the rotation on. Restarting a swing therefore takes the next shape too,
     // which is what makes two clicks inside one animation read as two swings rather than
     // as one arc that stuttered.
-    if intent.swing_sent() {
+    if let Some(item_id) = intent.swing_sent() {
+        let shape = if item_id == ITEM_BOW {
+            SwingShape::Draw
+        } else {
+            next_animation.next_swing
+        };
         next_animation.attack = Some(Swing {
-            shape: next_animation.next_swing,
+            shape,
             elapsed: Duration::ZERO,
         });
-        next_animation.next_swing = next_animation.next_swing.after();
+        if item_id != ITEM_BOW {
+            next_animation.next_swing = next_animation.next_swing.after();
+        }
     }
     if let Some(swing) = next_animation.attack.as_mut() {
         swing.elapsed += time.delta();
@@ -1574,6 +1654,7 @@ mod tests {
             (ItemShape::Tool, crafting::ITEM_SHOVEL),
             (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
             (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
+            (ItemShape::Bow, crafting::ITEM_BOW),
         ]
     }
 
@@ -2107,13 +2188,11 @@ mod tests {
         );
     }
 
-    /// **The sword still fits the motion that already exists**, in all three of its arcs.
+    /// **Every attack presentation clears the near plane in every reachable pose.**
     ///
-    /// #174 replaced the one swing with three, and a shape that ends in a point is exactly the
-    /// kind of change that reads well in a cut and slices through the camera in a thrust. So
-    /// this walks the *real vertices* — not a bounding box, whose corners no vertex of this
-    /// shape occupies — through every arc frame by frame and asks the one question a near
-    /// plane asks.
+    /// #174 replaced the blade swing with three arcs; the bow adds one separate draw pose.
+    /// This walks the *real vertices* — not a bounding box, whose corners no vertex of the
+    /// shape occupies — through the poses that the input path can actually pair with it.
     ///
     /// The placement bump is swept alongside, because it is the only animation that carries
     /// the model *toward* the camera and it can coincide with a swing: a right click and a
@@ -2148,7 +2227,11 @@ mod tests {
 
         for appearance in appearances {
             let corners = positions(&held_mesh(TEST_SKIN, appearance));
-            let mut arcs: Vec<Option<SwingShape>> = SwingShape::ALL.map(Some).to_vec();
+            let mut arcs: Vec<Option<SwingShape>> = match appearance.shape {
+                Some(ItemShape::Blade) => SwingShape::BLADE_ARCS.map(Some).to_vec(),
+                Some(ItemShape::Bow) => vec![Some(SwingShape::Draw)],
+                _ => Vec::new(),
+            };
             arcs.push(None);
             for shape in arcs {
                 for step in 0..=32u8 {
@@ -2948,7 +3031,7 @@ mod tests {
     /// channel already spoken for and this would fail.
     #[test]
     fn each_shape_leads_with_a_channel_of_its_own() {
-        let peak: Vec<(SwingShape, SwingPose)> = SwingShape::ALL
+        let peak: Vec<(SwingShape, SwingPose)> = SwingShape::BLADE_ARCS
             .into_iter()
             .map(|shape| (shape, swing_pose(shape, ATTACK_SWING_TIME / 2)))
             .collect();
@@ -3001,7 +3084,7 @@ mod tests {
     fn the_rotation_never_draws_one_shape_twice_running() {
         let mut shape = SwingShape::default();
         let mut drawn = vec![shape];
-        for _ in 0..(SwingShape::ALL.len() * 2) {
+        for _ in 0..(SwingShape::BLADE_ARCS.len() * 2) {
             shape = shape.after();
             assert_ne!(
                 shape,
@@ -3010,7 +3093,7 @@ mod tests {
             );
             drawn.push(shape);
         }
-        for shape in SwingShape::ALL {
+        for shape in SwingShape::BLADE_ARCS {
             assert!(
                 drawn.contains(&shape),
                 "{shape:?} is in the vocabulary and never drawn: {drawn:?}"
@@ -3258,8 +3341,10 @@ mod tests {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
 
         let mut drawn = Vec::new();
-        for press in 0..(SwingShape::ALL.len() * 2) {
-            app.world_mut().write_message(SwingSent);
+        for press in 0..(SwingShape::BLADE_ARCS.len() * 2) {
+            app.world_mut().write_message(SwingSent {
+                item_id: ITEM_RUSTY_SWORD,
+            });
             app.update();
             let swing = app
                 .world()
@@ -3276,7 +3361,7 @@ mod tests {
                 "two swings running drew one arc: {drawn:?}"
             );
         }
-        for shape in SwingShape::ALL {
+        for shape in SwingShape::BLADE_ARCS {
             assert!(drawn.contains(&shape), "{shape:?} never played: {drawn:?}");
         }
 
@@ -3284,6 +3369,31 @@ mod tests {
         assert!(
             app.world().get_resource::<Session>().is_none(),
             "a session turned up, so this test says nothing about a refused swing"
+        );
+    }
+
+    #[test]
+    fn a_bow_request_draws_the_string_without_advancing_the_blade_rotation() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        let before = app.world().resource::<HandAnimation>().next_swing;
+        app.world_mut().write_message(SwingSent {
+            item_id: crafting::ITEM_BOW,
+        });
+        app.update();
+
+        let animation = *app.world().resource::<HandAnimation>();
+        assert_eq!(
+            animation.attack.expect("the bow played nothing").shape,
+            SwingShape::Draw
+        );
+        assert_eq!(animation.next_swing, before);
+        let pose = swing_pose(SwingShape::Draw, ATTACK_SWING_TIME / 2);
+        assert!(
+            pose.reach > 0.0,
+            "the draw did not pull back toward the camera"
         );
     }
 
@@ -3300,7 +3410,9 @@ mod tests {
         let mut app = hand_only_app();
         app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
 
-        app.world_mut().write_message(SwingSent);
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
         app.update();
         let first = app
             .world()
@@ -3310,7 +3422,9 @@ mod tests {
 
         // Part way in, and deliberately not to the end.
         app.update();
-        app.world_mut().write_message(SwingSent);
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
         app.update();
         let second = app
             .world()

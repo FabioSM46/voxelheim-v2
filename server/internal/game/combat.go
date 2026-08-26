@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
@@ -43,44 +44,54 @@ type pendingSwing struct {
 // what resolves the swing against the positions that tick produced, which is what stops
 // network scheduling from choosing an in-between position to be judged at.
 //
-// Every refusal is an error the session logs at debug and answers with silence. None of
-// them is a protocol failure: a stale tick, a slot outside the inventory and a second
-// click inside the cooldown are all things an honest client does.
-func (p *Player) Attack(req protocol.AttackRequest) error {
+// Every refusal is an error the session logs at debug. Missing launcher ammunition also
+// carries the actionable NoAmmunition answer; stale ticks, invalid slots and cooldown
+// refusals retain silence. None is a protocol failure.
+func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
 	if err := p.cannotActLocked(); err != nil {
-		return err
+		return vnet.RefusalReasonUnknown, err
 	}
 	if p.blocking {
 		// A shield up silently drops every swing before it creates pending state.
-		return nil
+		return vnet.RefusalReasonUnknown, nil
 	}
 
 	// Its own ordering guard, beside movement's and mining's rather than shared with
 	// them: the three arrive on different messages at different cadences, and one
 	// counter would let a fast stream of one silence the others.
 	if p.haveAttackTick && !newerTick(req.ClientTick, p.lastAttackTick) {
-		return fmt.Errorf("stale attack client tick %d; the newest accepted is %d", req.ClientTick, p.lastAttackTick)
+		return vnet.RefusalReasonUnknown, fmt.Errorf("stale attack client tick %d; the newest accepted is %d", req.ClientTick, p.lastAttackTick)
 	}
 	p.haveAttackTick, p.lastAttackTick = true, req.ClientTick
 
 	if req.Slot >= protocol.InventorySlots {
-		return fmt.Errorf("attack slot %d is outside %d slots", req.Slot, protocol.InventorySlots)
+		return vnet.RefusalReasonUnknown, fmt.Errorf("attack slot %d is outside %d slots", req.Slot, protocol.InventorySlots)
 	}
 	if p.pendingSwing != nil {
 		// Two clicks inside one tick. The first is already waiting to be judged and the
 		// second would either replace it or queue behind it; neither is a thing the
 		// player asked for, and both would let a client raise its own attack rate.
-		return errors.New("a swing is already waiting for the tick")
+		return vnet.RefusalReasonUnknown, errors.New("an attack is already waiting for the tick")
 	}
 	if p.attackCooldown > 0 {
-		return fmt.Errorf("the blade is recovering for %d more ticks", p.attackCooldown)
+		return vnet.RefusalReasonUnknown, fmt.Errorf("the weapon is recovering for %d more ticks", p.attackCooldown)
+	}
+
+	// A launcher with no ammunition gets the one actionable refusal this attack path
+	// carries. This is a session-goroutine admission check, so waiting for this player's
+	// inventory is safe; the tick repeats it with TryLock before spending anything.
+	p.inventory.mu.Lock()
+	missingAmmunition := !p.launcherHasAmmunitionLocked(req.Slot)
+	p.inventory.mu.Unlock()
+	if missingAmmunition {
+		return vnet.RefusalReasonNoAmmunition, errors.New("the launcher has no ammunition")
 	}
 
 	p.pendingSwing = &pendingSwing{slot: req.Slot}
-	return nil
+	return vnet.RefusalReasonUnknown, nil
 }
 
 // Block silently accepts only a live player's usable off-hand shield.
@@ -94,7 +105,29 @@ func (p *Player) Block(active bool) {
 	}
 }
 
-// resolveSwingLocked judges this player's pending swing, if there is one.
+// launcherHasAmmunitionLocked reports whether admission may queue this slot. Non-launchers,
+// worn-through launchers and unreadable rows return true: they retain the existing silent
+// attack refusal, while only a usable launcher missing its declared ammunition is explained.
+// The caller holds inventory.mu.
+func (p *Player) launcherHasAmmunitionLocked(slot uint8) bool {
+	stack, held := p.inventory.stackAtLocked(slot)
+	if !held {
+		return true
+	}
+	definition, registered := itemByID(stack.item)
+	if !registered || definition.launches == vnet.ProjectileKindUnknown ||
+		(stack.durable() && stack.durability == 0) {
+		return true
+	}
+	for _, candidate := range p.inventory.slots[:equipmentFirst] {
+		if candidate.item == definition.ammunition && candidate.count > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveAttackLocked judges this player's pending melee swing or launch, if there is one.
 //
 // Called from Step after every player has moved and before the mobs act, which is the
 // whole of the ordering guarantee: a swing is judged against the positions this tick
@@ -105,7 +138,7 @@ func (p *Player) Block(active bool) {
 // container under the authoritative simulation lock; the ground-drop path is not involved.
 //
 // The caller holds Sim.mu.
-func (p *Player) resolveSwingLocked() {
+func (p *Player) resolveAttackLocked() {
 	if p.attackCooldown > 0 {
 		p.attackCooldown--
 	}
@@ -121,7 +154,7 @@ func (p *Player) resolveSwingLocked() {
 		return
 	}
 
-	damage, sampled := p.armedWithSwordLocked(pending.slot)
+	armed, sampled := p.armedForAttackLocked(pending.slot)
 	if !sampled {
 		// A session goroutine holds the inventory. The tick never waits for it, and the
 		// swing is *kept* rather than dropped — a click the player made does not stop
@@ -133,7 +166,7 @@ func (p *Player) resolveSwingLocked() {
 	// Consumed exactly once, whatever the verdict below. Held any longer it would be a
 	// second swing; dropped before the check it would be no swing at all.
 	p.pendingSwing = nil
-	if damage == 0 {
+	if armed.meleeDamage == 0 && armed.launches == vnet.ProjectileKindUnknown {
 		// An empty slot, a stack of stone, or a blade worn through. Silence is the whole
 		// of the answer: the client is told nothing and sees nothing happen.
 		return
@@ -142,10 +175,21 @@ func (p *Player) resolveSwingLocked() {
 	// Paid before the search, so a miss costs exactly what a hit does. A client that
 	// swings at nothing to find out whether anything is there pays attack cadence for
 	// the question.
-	p.attackCooldown = p.sim.attackCooldown
+	if armed.launches != vnet.ProjectileKindUnknown {
+		p.attackCooldown = p.sim.bowCooldownTicks
+		p.sim.spawnProjectileLocked(
+			armed.launches,
+			p,
+			projectileOriginLocked(p),
+			lookDirection(p.current.yaw, p.current.pitch),
+			ArrowSpeed,
+		)
+		return
+	}
 
+	p.attackCooldown = p.sim.attackCooldown
 	if target := p.sim.swingTargetLocked(p); target != nil {
-		p.sim.creditMobDamageLocked(p, target, damage)
+		p.sim.creditMobDamageLocked(p, target, armed.meleeDamage)
 	}
 }
 
@@ -212,8 +256,14 @@ func (s *Sim) creditMobDamageLocked(p *Player, target *mob, damage uint16) {
 	}
 }
 
-// armedWithSwordLocked is what the named slot's contents do to a mob, and whether the
-// inventory could be read at all.
+type armedAttack struct {
+	meleeDamage uint16
+	launches    vnet.ProjectileKind
+}
+
+// armedForAttackLocked is what the named slot's contents do, and whether the inventory
+// could be read at all. A launch consumes its first non-equipment ammunition and one point
+// of launcher durability inside this same TryLock window.
 //
 // Two answers rather than one, because "nothing" and "could not ask" have to be told
 // apart: the first ends the swing and the second postpones it. The tick takes the
@@ -224,19 +274,19 @@ func (s *Sim) creditMobDamageLocked(p *Player, target *mob, damage uint16) {
 // spelled inside the combat code; it now asks what the slot is worth, and a zero — every
 // resource, every structure, the empty slot — is the same refusal it always was. The
 // second blade is therefore a registry entry, and the third will be too.
-func (p *Player) armedWithSwordLocked(slot uint8) (damage uint16, sampled bool) {
+func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 	if !p.inventory.mu.TryLock() {
-		return 0, false
+		return armedAttack{}, false
 	}
 	defer p.inventory.mu.Unlock()
 
 	stack, ok := p.inventory.stackAtLocked(slot)
 	if !ok {
-		return 0, true
+		return armedAttack{}, true
 	}
 	definition, registered := itemByID(stack.item)
-	if !registered || definition.meleeDamage == 0 {
-		return 0, true
+	if !registered || (definition.meleeDamage == 0 && definition.launches == vnet.ProjectileKindUnknown) {
+		return armedAttack{}, true
 	}
 	// Zero durability *under a non-zero maximum* is a blade that is worn through: still
 	// carried, still in its slot, and no longer a weapon. A sharpening stone is what
@@ -248,9 +298,40 @@ func (p *Player) armedWithSwordLocked(slot uint8) (damage uint16, sampled bool) 
 	// pair as "worn through" would make it permanently unusable the moment somebody
 	// registered one.
 	if stack.durable() && stack.durability == 0 {
-		return 0, true
+		return armedAttack{}, true
 	}
-	return definition.meleeDamage, true
+
+	if definition.launches != vnet.ProjectileKindUnknown {
+		if definition.ammunition == ItemNone {
+			return armedAttack{}, true
+		}
+		ammunitionSlot := -1
+		for candidate := range p.inventory.slots[:equipmentFirst] {
+			stack := p.inventory.slots[candidate]
+			if stack.item == definition.ammunition && stack.count > 0 {
+				ammunitionSlot = candidate
+				break
+			}
+		}
+		if ammunitionSlot < 0 {
+			// The session-side check already explained the ordinary case. This is the
+			// race where the last arrow moved before the tick, so the queued launch simply
+			// disappears and spends nothing.
+			return armedAttack{}, true
+		}
+		ammunition := &p.inventory.slots[ammunitionSlot]
+		ammunition.count--
+		if ammunition.count == 0 {
+			*ammunition = inventoryStack{}
+		}
+		launcher := &p.inventory.slots[slot]
+		if launcher.durable() {
+			launcher.durability--
+		}
+		p.inventoryDirty = true
+		return armedAttack{launches: definition.launches}, true
+	}
+	return armedAttack{meleeDamage: definition.meleeDamage}, true
 }
 
 // swingTargetLocked is the mob a swing lands on, or nil.

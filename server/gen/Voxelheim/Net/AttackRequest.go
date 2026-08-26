@@ -17,9 +17,10 @@ import (
 // / repeated here. The movement frame carrying that tick is ordered ahead of the swing,
 // / and two claims to the same aim would be two claims to reconcile.
 // /
-// / There is no acknowledgement payload and no damage-result payload. A refused swing
-// / is silence; an accepted one becomes visible only through the authoritative
-// / `EntitySnapshot`, `PlayerVitals` and `InventoryState` that follow.
+// / There is no acknowledgement payload and no damage-result payload. A launcher missing
+// / ammunition receives `ActionRefused{Attack, NoAmmunition}`; other refused attacks remain
+// / silence. An accepted one becomes visible only through the authoritative `EntitySnapshot`,
+// / `PlayerVitals`, projectile state and `InventoryState` that follow.
 // /
 // / Decoder invariants the server enforces on this untrusted input:
 // /   - `slot` is copied verbatim, out-of-range values included. Whether an

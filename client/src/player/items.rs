@@ -22,8 +22,8 @@
 use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::ITEM_WOODEN_SHIELD;
 use super::crafting::{
-    ITEM_AXE, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES, ITEM_IRON_HELM,
-    ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
+    ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES,
+    ITEM_IRON_HELM, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
     ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
@@ -107,6 +107,8 @@ pub(crate) enum ItemShape {
     Armour,
     /// A wooden plate with a metal boss.
     Shield,
+    /// A bent stave and string, distinct from a blade in every held and flat renderer.
+    Bow,
 }
 
 impl ItemShape {
@@ -138,7 +140,7 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Block,
         Self::Material,
         Self::Blade,
@@ -146,6 +148,7 @@ impl ItemShape {
         Self::Tool,
         Self::Armour,
         Self::Shield,
+        Self::Bow,
     ];
 }
 
@@ -170,6 +173,8 @@ enum ItemColour {
     RawMeat,
     /// Cooked meat. A browned swatch distinct from the raw ingredient. sRGB `#8B5A3C`.
     CookedMeat,
+    /// Bone-white shaft and point, kept distinct from other material rows. sRGB `#D8C9A3`.
+    Arrow,
 }
 
 /// `#59636D`, converted from sRGB to the linear space vertex colours use.
@@ -182,6 +187,8 @@ const LEATHER_LINEAR: [f32; 3] = [0.194_618, 0.076_185, 0.026_241];
 const RAW_MEAT_LINEAR: [f32; 3] = [0.332_452, 0.078_187, 0.078_187];
 /// `#8B5A3C`, converted from sRGB to the linear space vertex colours use.
 const COOKED_MEAT_LINEAR: [f32; 3] = [0.258_183, 0.102_242, 0.045_186];
+/// `#D8C9A3`, converted from sRGB to the linear space vertex colours use.
+const ARROW_LINEAR: [f32; 3] = [0.686_686, 0.584_078, 0.366_253];
 
 impl ItemColour {
     fn linear_rgba(self) -> [f32; 4] {
@@ -205,6 +212,10 @@ impl ItemColour {
             }
             Self::CookedMeat => {
                 let [r, g, b] = COOKED_MEAT_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::Arrow => {
+                let [r, g, b] = ARROW_LINEAR;
                 [r, g, b, 1.0]
             }
         }
@@ -245,7 +256,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 27] = [
+pub(super) const ITEMS: [ItemDisplay; 29] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -436,6 +447,18 @@ pub(super) const ITEMS: [ItemDisplay; 27] = [
         shape: ItemShape::Shield,
         colour: ItemColour::Block(palette::LOG),
     },
+    ItemDisplay {
+        item_id: ITEM_BOW,
+        name: "bow",
+        shape: ItemShape::Bow,
+        colour: ItemColour::Block(palette::LOG),
+    },
+    ItemDisplay {
+        item_id: ITEM_ARROW,
+        name: "arrow",
+        shape: ItemShape::Material,
+        colour: ItemColour::Arrow,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -580,6 +603,8 @@ mod tests {
             ITEM_IRON_CUIRASS,
             ITEM_IRON_GREAVES,
             ITEM_WOODEN_SHIELD,
+            ITEM_BOW,
+            ITEM_ARROW,
         ];
         for item_id in declared {
             assert!(

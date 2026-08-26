@@ -11,13 +11,13 @@ pub const ENUM_MIN_RECIPE_ID: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_RECIPE_ID: u8 = 17;
+pub const ENUM_MAX_RECIPE_ID: u8 = 19;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 18] = [
+pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 20] = [
     RecipeID::Unknown,
     RecipeID::Forge,
     RecipeID::IronSword,
@@ -36,6 +36,8 @@ pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 18] = [
     RecipeID::IronCuirass,
     RecipeID::IronGreaves,
     RecipeID::WoodenShield,
+    RecipeID::Bow,
+    RecipeID::Arrows,
 ];
 
 /// Which recipe a `CraftRequest` names.
@@ -76,9 +78,11 @@ impl RecipeID {
     pub const IronCuirass: Self = Self(15);
     pub const IronGreaves: Self = Self(16);
     pub const WoodenShield: Self = Self(17);
+    pub const Bow: Self = Self(18);
+    pub const Arrows: Self = Self(19);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 17;
+    pub const ENUM_MAX: u8 = 19;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Forge,
@@ -98,6 +102,8 @@ impl RecipeID {
         Self::IronCuirass,
         Self::IronGreaves,
         Self::WoodenShield,
+        Self::Bow,
+        Self::Arrows,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -120,6 +126,8 @@ impl RecipeID {
             Self::IronCuirass => Some("IronCuirass"),
             Self::IronGreaves => Some("IronGreaves"),
             Self::WoodenShield => Some("WoodenShield"),
+            Self::Bow => Some("Bow"),
+            Self::Arrows => Some("Arrows"),
             _ => None,
         }
     }

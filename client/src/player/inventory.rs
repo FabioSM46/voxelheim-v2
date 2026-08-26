@@ -454,7 +454,7 @@ fn move_request(from: u8, to: u8, count: u16, slots: u8) -> Option<InventoryMove
 /// **What it deliberately does not ask is whether the drop would be allowed.** The server
 /// refuses a slot that wears out, because a drop carries an item id and a count and nothing
 /// else. Mirroring that here would be this client deciding a gameplay outcome from a pack one
-/// message old, and it is the failure direction [`super::combat::BLADES`] records: a courtesy
+/// message old, and it is the failure direction [`super::combat::LEFT_BUTTON_USES`] records: a courtesy
 /// that guesses wrong refuses what the server would have granted. The honest shape of a
 /// refused drop is a stack that stays where it is.
 ///
@@ -1623,7 +1623,7 @@ mod tests {
     ///
     /// V11 lets the server carry its exact wear through the ground, but this side still
     /// predicts no acceptance. Filtering by durability here would be a second copy of a
-    /// server rule, risking the failure `combat::BLADES` records — a courtesy that guesses
+    /// server rule, risking the failure `combat::LEFT_BUTTON_USES` records — a courtesy that guesses
     /// wrong and refuses what the server would have granted. So the frame leaves, and only
     /// the authoritative inventory and snapshot can show what happened.
     #[test]

@@ -151,7 +151,7 @@ func helpsWith(item ItemID, block world.Block) bool {
 // **A slot this player cannot read is a bare hand**, and that is the fail-closed answer
 // rather than a refusal: the inventory lock is taken only if it is free — the same
 // `TryLock` an attack and a pickup take, for the reason recorded on
-// `armedWithSwordLocked` — so a contended tick must not turn into a refused mine. Mining
+// `armedForAttackLocked` — so a contended tick must not turn into a refused mine. Mining
 // with the wrong implement is exactly a bare hand, so the worst this can cost is one
 // target set at hand speed by a player who was holding a shovel.
 //

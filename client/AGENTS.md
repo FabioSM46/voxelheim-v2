@@ -551,7 +551,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   `player/inventory.rs` asks two things and no third: is the index one the contract permits,
   and does the last complete state show something in that cell. It deliberately does *not*
   predict whether the server will accept a slot — that is a gameplay outcome read from a
-  pack one message old, and it is the failure direction `combat::BLADES` records, where a
+  pack one message old, and it is the failure direction `combat::LEFT_BUTTON_USES` records, where a
   courtesy that guesses wrong refuses what the server would have granted. A worn blade is
   therefore asked about like anything else; acceptance arrives only through the complete
   inventory and the snapshot's sparse authoritative durability entry. The branch also runs
@@ -847,11 +847,12 @@ so it cannot be clipped and nobody has to measure a word.
 
 ## What the left button means, and the one table that answers it
 
-`combat::BLADES` is the list of item ids this client routes the left button to a swing for,
-and `combat::item_is_a_blade` is the only reader of it. It replaced an `item_id ==
+`combat::LEFT_BUTTON_USES` is the list of item ids this client routes the left button to an
+attack for: both blades and the bow. It replaced an `item_id ==
 ITEM_RUSTY_SWORD` comparison — one weapon's name spelled inside the routing — for the reason
-`armedWithSwordLocked` stopped comparing ids on the server and started reading `meleeDamage`
-out of the item registry: **a third blade should be an entry, not an edit to the predicate.**
+`armedWithSwordLocked` became `armedForAttackLocked` on the server and started reading either
+`meleeDamage` or `launches` out of the item registry: **a new weapon should be an entry, not an
+edit to the predicate.**
 
 Three things about it are worth keeping straight.
 
@@ -861,16 +862,16 @@ Three things about it are worth keeping straight.
   that is precisely what the iron sword was between legacy PRs 109 and 127, drawn as a blade in the
   hand, worth 40 damage on the server, and never once asked for, because this client would
   not send the frame. A table that fails open toward asking is the honest shape.
-- **`blade_in_hand` is the stack question, `item_is_a_blade` the item question**, and they
-  are deliberately separate functions. The stack also has to be there and not worn through,
+- **`attack_item_in_hand` is the stack question; `item_is_a_blade` remains the narrower
+  presentation test for sword shapes.** The stack also has to be there and not worn through,
   where **worn through means zero durability under a non-zero maximum** — the same pair the
   server reads, and never the current value alone. `max_durability > 0` is already this
   client's answer to *does this wear out* (`inventory::repair_request` asks it that way), and
   a weapon registered with no maximum would arrive as `(0, 0)` like every resource does; the
   narrower test would call it broken on arrival and refuse a swing the server would grant.
-- **The two opinions about a blade are pinned to each other by a test, not by discipline.**
-  `items::ItemShape::Blade` decides which items *draw* as a blade and `combat::BLADES`
-  decides which ones *swing*; they lived apart long enough to disagree once.
+- **The hand-drawn attack shapes are pinned to routing by tests, not by discipline.**
+  `items::ItemShape::Blade` decides which items *draw* as a blade and `combat::BLADE_SHAPES`
+  records that narrower shape set; `LEFT_BUTTON_USES` additionally names the hand-drawn bow.
   `every_item_the_hand_draws_as_a_blade_also_swings` in `player/combat.rs` sweeps a range of
   item ids, reads the mesh the hand is actually built from — written when the shape was private to
   `hands`, and kept because going through the built model checks one thing more than
