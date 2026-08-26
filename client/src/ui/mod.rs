@@ -807,6 +807,10 @@ mod tests {
         app.update();
         app.update();
         let _ = frames.try_recv().expect("the first announced tick is sent");
+        assert!(
+            frames.try_recv().is_err(),
+            "the clock-establishing update sent an input before any time elapsed"
+        );
 
         keyboard_edge(&mut app, KeyCode::KeyW, ButtonState::Pressed);
         keyboard_edge(&mut app, KeyCode::Space, ButtonState::Pressed);
