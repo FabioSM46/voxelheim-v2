@@ -808,14 +808,15 @@ func newestSnapshotMobs(t *testing.T, out *dropSink) []protocol.MobState {
 			t.Fatalf("mob %d carries no position or velocity", i)
 		}
 		mobs = append(mobs, protocol.MobState{
-			EntityID:  m.EntityId(),
-			Kind:      m.Kind(),
-			Pos:       [3]float32{pos.X(), pos.Y(), pos.Z()},
-			Vel:       [3]float32{vel.X(), vel.Y(), vel.Z()},
-			Yaw:       m.Yaw(),
-			Health:    m.Health(),
-			MaxHealth: m.MaxHealth(),
-			Action:    m.Action(),
+			EntityID:       m.EntityId(),
+			Kind:           m.Kind(),
+			Pos:            [3]float32{pos.X(), pos.Y(), pos.Z()},
+			Vel:            [3]float32{vel.X(), vel.Y(), vel.Z()},
+			Yaw:            m.Yaw(),
+			Health:         m.Health(),
+			MaxHealth:      m.MaxHealth(),
+			Action:         m.Action(),
+			TargetEntityID: m.TargetEntityId(),
 		})
 	}
 	return mobs
@@ -1176,7 +1177,7 @@ func TestTheWireFormCarriesEachSpeciesOwnKindAndMaximum(t *testing.T) {
 
 	states := mobStates([]*mob{
 		{entityID: 7, kind: vnet.MobKindDraugr, health: draugrRow.maxHealth, action: vnet.MobActionIdle},
-		{entityID: 9, kind: vnet.MobKindVargr, health: vargrRow.maxHealth, action: vnet.MobActionChase},
+		{entityID: 9, kind: vnet.MobKindVargr, health: vargrRow.maxHealth, action: vnet.MobActionChase, target: 23},
 	})
 	if len(states) != 2 {
 		t.Fatalf("two mobs produced %d states", len(states))
@@ -1201,6 +1202,13 @@ func TestTheWireFormCarriesEachSpeciesOwnKindAndMaximum(t *testing.T) {
 		if state.Health != state.MaxHealth {
 			t.Errorf("mob %d is %d/%d, and it was created at full health",
 				state.EntityID, state.Health, state.MaxHealth)
+		}
+		wantTarget := uint64(0)
+		if state.EntityID == 9 {
+			wantTarget = 23
+		}
+		if state.TargetEntityID != wantTarget {
+			t.Errorf("mob %d names target %d, want %d", state.EntityID, state.TargetEntityID, wantTarget)
 		}
 	}
 	if draugrRow.maxHealth == vargrRow.maxHealth {
