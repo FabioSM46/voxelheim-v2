@@ -572,10 +572,13 @@ The client samples the controls, sends what the player is *trying* to do at the 
   would otherwise lock a living player out of their own controls.
 - **Dead input suppression is usability, never authority.** `InputGate` bundles `InputMode`
   and `SelfVitals` so that *may this frame's input act on the world?* has one answer and one
-  place to change it: `may_aim` for the continuous questions (the raycast, the outline) and
-  `may_act` for the edge-triggered ones (a request leaving this client). Movement axes are
-  zeroed rather than the input stream being stopped — `PlayerInput` still has to carry the
-  yaw, and going quiet would itself be a decision — and the camera keeps turning, because
+  place to change it: `may_move` for the horizontal axes, `may_aim` for the continuous world
+  questions (the raycast, the outline) and `may_act` for the edge-triggered ones (a request
+  leaving this client). **Inventory is the deliberate split:** W/A/S/D keep producing
+  horizontal intent while the pack is open, but jump, camera look, aiming and world actions
+  remain closed; chat, loot and the pause menu still close movement too. Death zeroes the
+  axes rather than stopping the input stream — `PlayerInput` still has to carry the yaw, and
+  going quiet would itself be a decision — and the camera keeps turning, because
   `schemas/player.fbs` names the camera a client concern. The server refuses a dead player's
   request whatever the gate answers; what the gate buys is a client that does not fire
   intent into a refusal. It is read **after** `ApplySnapshots` everywhere, for the reason
