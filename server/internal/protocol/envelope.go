@@ -599,10 +599,11 @@ type MobState struct {
 // required field on the wire impossible for a caller to omit — flatc's Go output
 // carries no assertion of its own.
 type EntitySnapshot struct {
-	Tick     uint32
-	Entities []EntityState
-	Drops    []ItemDropState
-	Mobs     []MobState
+	Tick        uint32
+	Entities    []EntityState
+	Drops       []ItemDropState
+	Mobs        []MobState
+	Projectiles []ProjectileState
 
 	// Structures visible to this session, under the same rule the three vectors above
 	// obey. The newest snapshot is the complete existence set: a structure that stops
@@ -653,6 +654,15 @@ type EntitySnapshot struct {
 
 	// AccessibleLootCorpses is the complete set this recipient may currently open.
 	AccessibleLootCorpses []uint64
+}
+
+// ProjectileState is one server-owned projectile in a snapshot. Position and velocity
+// are authoritative and finite; Kind is a known non-zero wire member.
+type ProjectileState struct {
+	EntityID uint64
+	Kind     vnet.ProjectileKind
+	Pos      [3]float32
+	Vel      [3]float32
 }
 
 // ChunkResendRequest is one decoded ask for a chunk the client has lost. **A request
@@ -1680,7 +1690,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 			durableDrops++
 		}
 	}
-	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + len(s.PartyRoster)*64 + len(s.AccessibleLootCorpses)*8 + 128)
+	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.Projectiles)*40 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + len(s.PartyRoster)*64 + len(s.AccessibleLootCorpses)*8 + 128)
 
 	// Every table a vector points at must be finished before that vector opens, so the
 	// mob tables are built first and the vector below only carries their offsets. The
@@ -1764,6 +1774,20 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		)
 	}
 	dropsOffset := b.EndVector(len(s.Drops))
+
+	var projectilesOffset flatbuffers.UOffsetT
+	if len(s.Projectiles) > 0 {
+		vnet.EntitySnapshotStartProjectilesVector(b, len(s.Projectiles))
+		for i := len(s.Projectiles) - 1; i >= 0; i-- {
+			projectile := s.Projectiles[i]
+			vnet.CreateProjectileState(b, projectile.EntityID,
+				projectile.Pos[0], projectile.Pos[1], projectile.Pos[2],
+				projectile.Vel[0], projectile.Vel[1], projectile.Vel[2],
+				projectile.Kind,
+			)
+		}
+		projectilesOffset = b.EndVector(len(s.Projectiles))
+	}
 
 	// Wear is sparse: the common block, loot and structure drops pay no vector, no
 	// vtable slot and no per-element padding. Entries remain in drop order, making the
@@ -1869,6 +1893,9 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	}
 	if accessibleLootOffset != 0 {
 		vnet.EntitySnapshotAddAccessibleLootCorpses(b, accessibleLootOffset)
+	}
+	if projectilesOffset != 0 {
+		vnet.EntitySnapshotAddProjectiles(b, projectilesOffset)
 	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 

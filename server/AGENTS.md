@@ -609,6 +609,38 @@ the whole of it decided here. It is the only caller of `spawnPlayerStackDrop` th
   does not, and the contrast is the rule: every question a refused drop could answer is about
   the asking player's own pack, which they already hold a complete `InventoryState` of.
 
+## Projectiles, and the transient entity that moves fastest
+
+Arrows and energy orbs live in `Sim.projectiles`, take identities from the same source
+as players, drops and mobs, and are advanced after swings but before mobs. They are an
+authoritative answer rather than a client claim: the server owns their origin, velocity,
+gravity, collision, lifetime, target and effect, while the client receives only the
+complete visible set in `EntitySnapshot.projectiles`.
+
+- **One flight path serves both weapons.** A kind selects only the differences: arrows
+  accelerate under gravity, damage mobs and stick in terrain; energy orbs keep a constant
+  velocity, damage mobs, heal other living players and disappear on terrain. The bow and
+  sceptre only choose a registry row and call `spawnProjectileLocked`.
+- **The sweep is shorter than half a block.** Each tick is divided so no projectile move
+  exceeds `ProjectileMaxStep`; every travelled segment is slab-tested against living body
+  boxes. The nearest crossing wins, and terrain shortens the tested segment through
+  `moveAndCollide`, so neither a one-block wall nor a vargr can be tunnelled through.
+- **The owner is never a target.** Spawning advances the projectile's small body outside
+  the shooter's body before its first step. Arrows ignore every player; orbs may heal a
+  living player other than their owner. A retained stable owner reference lasts only as
+  long as the projectile, allowing a shot already in flight to establish the ordinary mob
+  tap after its session leaves; threat still belongs only to a live session.
+- **A non-resident chunk is a hold, never air.** No gravity is accumulated and no position
+  changes until the chunk is resident. Lifetimes continue to count authoritative ticks,
+  as drop lifetimes do.
+- **A stuck arrow is still a projectile.** It carries zero velocity in snapshots for three
+  seconds and then leaves the complete vector. An orb leaves on contact, and either kind
+  leaves silently when its flight lifetime expires.
+- **Nothing is persisted.** A restart loses every arrow and orb, including arrows resting
+  in terrain. A projectile is a moment in the live simulation, not a change to the world;
+  keeping one would also require deciding how flight and a three-second stuck lifetime age
+  while the server is off.
+
 ## Structures, and the entity that does not move
 
 A tent, a forge and a campfire are the third entity kind, and the first one the tick does

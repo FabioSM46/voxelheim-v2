@@ -105,6 +105,23 @@ func (p *Player) damageLocked(amount uint16) bool {
 	return true
 }
 
+// healLocked restores authoritative health up to this player's current maximum and
+// reports the amount actually restored. A direct heal is not regeneration: it neither
+// resets nor advances the quiet-time, interval or hunger counters. The caller holds
+// Sim.mu.
+func (p *Player) healLocked(amount uint16) uint16 {
+	if amount == 0 || !p.alive() {
+		return 0
+	}
+	maximum := p.maxHealthLocked()
+	if p.health >= maximum {
+		return 0
+	}
+	restored := min(amount, maximum-p.health)
+	p.health += restored
+	return restored
+}
+
 // dieLocked performs the transition to Dead, exactly once.
 //
 // Everything the player was in the middle of stops here rather than at each of the
