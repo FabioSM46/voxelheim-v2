@@ -842,6 +842,8 @@ pub enum RecipeId {
     IronCuirass,
     IronGreaves,
     WoodenShield,
+    Bow,
+    Arrows,
 }
 
 impl RecipeId {
@@ -872,6 +874,8 @@ impl RecipeId {
             Self::IronCuirass => fb::RecipeID::IronCuirass,
             Self::IronGreaves => fb::RecipeID::IronGreaves,
             Self::WoodenShield => fb::RecipeID::WoodenShield,
+            Self::Bow => fb::RecipeID::Bow,
+            Self::Arrows => fb::RecipeID::Arrows,
         }
     }
 }
@@ -1233,6 +1237,7 @@ pub enum RefusedAction {
     Party,
     OpenLoot,
     TakeLoot,
+    Attack,
 }
 
 impl RefusedAction {
@@ -1249,6 +1254,7 @@ impl RefusedAction {
             fb::RefusedAction::Party => Self::Party,
             fb::RefusedAction::OpenLoot => Self::OpenLoot,
             fb::RefusedAction::TakeLoot => Self::TakeLoot,
+            fb::RefusedAction::Attack => Self::Attack,
             _ => Self::Unknown,
         }
     }
@@ -1292,6 +1298,7 @@ pub enum RefusalReason {
     LootNotOwned,
     StaleRevision,
     InventoryFull,
+    NoAmmunition,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1326,6 +1333,7 @@ impl RefusalReason {
             fb::RefusalReason::LootNotOwned => Self::LootNotOwned,
             fb::RefusalReason::StaleRevision => Self::StaleRevision,
             fb::RefusalReason::InventoryFull => Self::InventoryFull,
+            fb::RefusalReason::NoAmmunition => Self::NoAmmunition,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -6105,6 +6113,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_attack_refused_for_ammunition_reaches_the_status_vocabulary() {
+        let frame = encode_action_refused(
+            fb::RefusedAction::Attack,
+            fb::RefusalReason::NoAmmunition,
+            None,
+        );
+        assert_eq!(
+            decode(&frame),
+            Ok(Message::ActionRefused(ActionRefused {
+                action: RefusedAction::Attack,
+                reason: RefusalReason::NoAmmunition,
+                anchor: None,
+            }))
+        );
+    }
+
     /// A refusal this build cannot read costs the sentence and nothing else.
     ///
     /// **The one message on this wire that must never fail a frame.** Every other decode
@@ -6339,6 +6364,8 @@ mod tests {
         assert_eq!(fb::RecipeID::IronCuirass.0, 15);
         assert_eq!(fb::RecipeID::IronGreaves.0, 16);
         assert_eq!(fb::RecipeID::WoodenShield.0, 17);
+        assert_eq!(fb::RecipeID::Bow.0, 18);
+        assert_eq!(fb::RecipeID::Arrows.0, 19);
     }
 
     /// V7's members sit where they were appended, and the enums they were appended to
@@ -8777,6 +8804,8 @@ mod tests {
             (RecipeId::IronCuirass, fb::RecipeID::IronCuirass),
             (RecipeId::IronGreaves, fb::RecipeID::IronGreaves),
             (RecipeId::WoodenShield, fb::RecipeID::WoodenShield),
+            (RecipeId::Bow, fb::RecipeID::Bow),
+            (RecipeId::Arrows, fb::RecipeID::Arrows),
         ];
 
         for (recipe, wire) in named {

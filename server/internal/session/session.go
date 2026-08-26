@@ -1092,15 +1092,23 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		// tick produces — resolving it here would let network scheduling pick which
 		// moment the world is measured at.
 		//
-		// Refusal is silence plus a debug line, exactly as a refused edit or a stale
-		// input is. There is no rejection message in the contract and no acknowledgement
-		// of any kind: a swing that did not land is a swing the client sees nothing from.
-		if aErr := player.Attack(*msg.Attack); aErr != nil {
+		// Missing launcher ammunition is actionable and uses the refusal channel. Every
+		// other admission refusal remains silence plus a debug line, and there is still no
+		// positive acknowledgement or damage-result message.
+		reason, aErr := player.Attack(*msg.Attack)
+		if aErr != nil {
 			log.Debug("refusing attack",
 				"reason", aErr.Error(),
+				"code", reason.String(),
 				"slot", msg.Attack.Slot,
 				"client_tick", msg.Attack.ClientTick,
 			)
+			if reason != vnet.RefusalReasonUnknown {
+				refusal := protocol.ActionRefused{Action: vnet.RefusedActionAttack, Reason: reason}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send attack refusal: %w", sErr)
+				}
+			}
 		}
 		return nil
 

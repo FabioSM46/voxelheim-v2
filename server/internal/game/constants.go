@@ -413,6 +413,10 @@ const (
 	// connecting.
 	SwordCooldown = 600 * time.Millisecond
 
+	// BowCooldownTicks is derived from this duration per simulation. One second is
+	// deliberately its own cadence rather than an alias of the blade's recovery.
+	BowCooldown = 1 * time.Second
+
 	// --- Projectiles ---------------------------------------------------------
 	//
 	// These are authoritative simulation numbers. The ranged-item registry only

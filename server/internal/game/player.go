@@ -120,6 +120,9 @@ type Sim struct {
 	// attackCooldown is SwordCooldown in the ticks Step counts, so a blade recovers in
 	// six hundred milliseconds whatever rate the server is run at.
 	attackCooldown uint32
+	// bowCooldownTicks is BowCooldown in authoritative ticks. Launchers choose this cadence
+	// independently of the sword's.
+	bowCooldownTicks uint32
 
 	// dropLifetime is DropLifetime expressed in the ticks Step counts, derived from the
 	// tick rate for the same reason the physics timestep is.
@@ -327,6 +330,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		spawns:              newSpawnRNG(worldSeed),
 		loot:                newLootRNG(worldSeed),
 		attackCooldown:      ticksFor(SwordCooldown, tickRate),
+		bowCooldownTicks:    ticksFor(BowCooldown, tickRate),
 		log:                 log,
 		players:             make(map[uint64]*Player),
 		chatLimiters:        make(map[identity.PlayerID]*chatLimiter),
@@ -980,7 +984,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	drops = s.mergeDropsLocked(drops)
 	drops = s.collectDropsLocked(players, drops)
 
-	// The swings, after every player has moved and before any mob acts. Both halves of
+	// The attacks, after every player has moved and before any mob acts. Both halves of
 	// that are the guarantee: a swing is judged against the positions this tick
 	// produced, so network scheduling cannot choose an in-between one to be judged at,
 	// and a draugr killed here cannot land an attack later in the same tick.
@@ -988,7 +992,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	// A blow that kills only starts the Dying duration. The reap below later creates the
 	// server-owned corpse and rolls its container without involving the ground-drop path.
 	for _, p := range players {
-		p.resolveSwingLocked()
+		p.resolveAttackLocked()
 	}
 
 	// Projectiles use the positions produced above and land before a mob acts, exactly

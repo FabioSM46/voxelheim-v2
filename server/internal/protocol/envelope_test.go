@@ -2040,6 +2040,8 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"RecipeID.IronCuirass":     {byte(vnet.RecipeIDIronCuirass), 15},
 		"RecipeID.IronGreaves":     {byte(vnet.RecipeIDIronGreaves), 16},
 		"RecipeID.WoodenShield":    {byte(vnet.RecipeIDWoodenShield), 17},
+		"RecipeID.Bow":             {byte(vnet.RecipeIDBow), 18},
+		"RecipeID.Arrows":          {byte(vnet.RecipeIDArrows), 19},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2052,7 +2054,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]int{
 		"MobKind":       {len(vnet.EnumNamesMobKind), 4},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 18},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 20},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])

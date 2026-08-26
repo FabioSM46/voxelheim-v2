@@ -3,6 +3,7 @@ package game
 import (
 	"testing"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -99,6 +100,31 @@ func TestTheSixArmourPiecesCarryTheirPinnedIDsAndStats(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("armour item %d row = %+v, want %+v", tc.item, got, tc.want)
+		}
+	}
+}
+
+func TestBowAndArrowCarryTheirPinnedIDsAndLauncherStats(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		item ItemID
+		id   ItemID
+		want itemDefinition
+	}{
+		{ItemBow, 28, itemDefinition{places: world.Air, maxStack: 1, maxDurability: BowMaxDurability, launches: vnet.ProjectileKindArrow, ammunition: ItemArrow}},
+		{ItemArrow, 29, itemDefinition{places: world.Air, maxStack: 32}},
+	} {
+		if tc.item != tc.id {
+			t.Errorf("item id = %d, want appended wire id %d", tc.item, tc.id)
+		}
+		got, registered := itemByID(tc.item)
+		if !registered {
+			t.Errorf("item %d is not registered", tc.item)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("item %d row = %+v, want %+v", tc.item, got, tc.want)
 		}
 	}
 }

@@ -354,7 +354,7 @@ func TestARepairNeedsNoStationAndNoNeighbours(t *testing.T) {
 // rather than through the number behind it: a swing that costs a draugr nothing, a stone,
 // and then a swing that costs it the blade's full damage.
 //
-// A worn-through swing deliberately pays no cooldown either — `resolveSwingLocked` returns
+// A worn-through swing deliberately pays no cooldown either — `resolveAttackLocked` returns
 // before setting one when the slot is worth zero damage — so the second swing here is not
 // waiting on cadence.
 func TestAWornThroughBladeSwingsAgainAfterARepair(t *testing.T) {

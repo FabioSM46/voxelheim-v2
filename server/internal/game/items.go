@@ -1,6 +1,9 @@
 package game
 
-import "github.com/FabioSM46/voxelheim-v2/server/internal/world"
+import (
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
+)
 
 // ItemID names one kind of thing an inventory stack may hold. It is deliberately
 // a different type from world.Block: some items place no voxel at all, and some
@@ -77,6 +80,11 @@ const (
 	ItemIronGreaves
 
 	ItemWoodenShield
+
+	// The first launcher and the ammunition it spends. Appended rather than inserted
+	// because item ids are already carried by inventories on the wire.
+	ItemBow
+	ItemArrow
 )
 
 // What each blade is worth, and the only copy of it.
@@ -110,8 +118,8 @@ const (
 	// somebody would try to read a ladder into.
 	//
 	// The iron blade's 200 is the scale, and it is the right one to borrow: a tool costs
-	// ore like the blade does, and **nothing in this game wears from use** — death is the
-	// only wear there is — so what this number buys is how many deaths an implement
+	// ore like the blade does, and tools do not wear from use — so what this number buys is
+	// how many deaths an implement
 	// survives rather than how many blocks it breaks. See #199, which is where that
 	// penalty is being narrowed to what a player has on them.
 	ToolMaxDurability uint16 = 200
@@ -121,6 +129,10 @@ const (
 	LeatherArmourMaxDurability uint16 = 100
 	IronArmourMaxDurability    uint16 = 200
 	WoodenShieldMaxDurability  uint16 = 40
+
+	// A bow wears from each shot rather than only from death. Its own maximum belongs
+	// beside the registry row for the same reason each blade's does.
+	BowMaxDurability uint16 = 60
 
 	// SharpeningStoneRestore is how much wear one stone gives back, and it sits here for
 	// the reason the numbers above do: it describes the *stone*, not the act of repairing.
@@ -206,6 +218,12 @@ type itemDefinition struct {
 	// Percentage of post-armour mob damage removed while raised.
 	blockFraction uint16
 
+	// launches is the authoritative projectile kind this item fires, and Unknown for
+	// everything that is not a launcher. ammunition names the item one launch spends.
+	// Both columns make a later launcher a registry row rather than a combat branch.
+	launches   vnet.ProjectileKind
+	ammunition ItemID
+
 	// repairRestore is how much durability one of this item gives back when it is spent
 	// mending something, and zero for everything that is not a repair kit — which today
 	// is every item but the sharpening stone and the leather patch.
@@ -290,10 +308,8 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// thing separating two otherwise identical rows: a bone is a small thing to carry a
 	// lot of, and a hide is not.
 	//
-	// **Nothing consumes a bone yet, and that is deliberate rather than unfinished.** It
-	// is the reagent GDD §7's engraving table will want, and registering it now is what
-	// lets a draugr leave one behind before the bench that spends it exists. A resource
-	// with no sink is a resource; the alternative was a creature that leaves nothing.
+	// Bones now have their first sink: the stationless arrow recipe. They remain ordinary
+	// resources here; the recipe owns how they are spent and the inventory owns the stack.
 	ItemBone:      {places: world.Air, maxStack: 64},
 	ItemVargrPelt: {places: world.Air, maxStack: 16},
 
@@ -345,6 +361,14 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemIronGreaves: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
 
 	ItemWoodenShield: {places: world.Air, maxStack: 1, wornAt: wornOffHand, maxDurability: WoodenShieldMaxDurability, blockFraction: 50},
+
+	// One bow launches one authoritative arrow and spends one matching ammunition item.
+	// The arrow itself is a wearless resource and stacks thirty-two deep.
+	ItemBow: {
+		places: world.Air, maxStack: 1, maxDurability: BowMaxDurability,
+		launches: vnet.ProjectileKindArrow, ammunition: ItemArrow,
+	},
+	ItemArrow: {places: world.Air, maxStack: 32},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

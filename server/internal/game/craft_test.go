@@ -198,9 +198,9 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 	}
 }
 
-// The recipe table is the sixteen the iterations agreed on, with the costs they agreed on. A
+// The recipe table is the nineteen this branch owns, with the costs they agreed on. A
 // balance pass edits this test and the table together; a typo edits only one of them.
-func TestTheRecipeTableIsTheSixteenAgreedRecipes(t *testing.T) {
+func TestTheRecipeTableIsTheNineteenAgreedRecipes(t *testing.T) {
 	t.Parallel()
 
 	want := map[vnet.RecipeID]recipe{
@@ -272,6 +272,12 @@ func TestTheRecipeTableIsTheSixteenAgreedRecipes(t *testing.T) {
 		},
 		vnet.RecipeIDWoodenShield: {
 			ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemWoodenShield, productCount: 1,
+		},
+		vnet.RecipeIDBow: {
+			ingredients: []ingredient{{ItemLog, 3}, {ItemVargrPelt, 2}}, product: ItemBow, productCount: 1,
+		},
+		vnet.RecipeIDArrows: {
+			ingredients: []ingredient{{ItemLog, 1}, {ItemBone, 1}}, product: ItemArrow, productCount: 4,
 		},
 	}
 
@@ -520,17 +526,20 @@ func TestTheStationlessRecipesNeedNothingBuilt(t *testing.T) {
 	for _, tc := range []struct {
 		id      vnet.RecipeID
 		product ItemID
+		count   uint16
 	}{
-		{vnet.RecipeIDForge, ItemForge},
-		{vnet.RecipeIDTent, ItemTent},
-		{vnet.RecipeIDCampfire, ItemCampfire},
+		{vnet.RecipeIDForge, ItemForge, 1},
+		{vnet.RecipeIDTent, ItemTent, 1},
+		{vnet.RecipeIDCampfire, ItemCampfire, 1},
 		// The fourth, and the one whose absent station is a design decision rather than a
 		// bootstrapping one: a patch is mended-in-the-field kit, so a forge requirement
 		// would mean walking home to make the thing that saves the walk.
-		{vnet.RecipeIDLeatherPatch, ItemLeatherPatch},
-		{vnet.RecipeIDLeatherCap, ItemLeatherCap},
-		{vnet.RecipeIDLeatherJerkin, ItemLeatherJerkin},
-		{vnet.RecipeIDLeatherLeggings, ItemLeatherLeggings},
+		{vnet.RecipeIDLeatherPatch, ItemLeatherPatch, 1},
+		{vnet.RecipeIDLeatherCap, ItemLeatherCap, 1},
+		{vnet.RecipeIDLeatherJerkin, ItemLeatherJerkin, 1},
+		{vnet.RecipeIDLeatherLeggings, ItemLeatherLeggings, 1},
+		{vnet.RecipeIDBow, ItemBow, 1},
+		{vnet.RecipeIDArrows, ItemArrow, 4},
 	} {
 		h := newStructureHarness(t)
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -540,8 +549,8 @@ func TestTheStationlessRecipesNeedNothingBuilt(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s with nothing built: %v", tc.id, err)
 		}
-		if got := heldCount(state, tc.product); got != 1 {
-			t.Errorf("%s yielded %d of item %d, want 1", tc.id, got, tc.product)
+		if got := heldCount(state, tc.product); got != tc.count {
+			t.Errorf("%s yielded %d of item %d, want %d", tc.id, got, tc.product, tc.count)
 		}
 	}
 	// And the forge-required ones are not: the same materials, no forge, no craft.

@@ -664,7 +664,7 @@ fn send_block_edits(
     // One of this player's own structures standing in front of the voxel takes the same
     // button for the same reason, and `super::structures` owns that one: a press cannot
     // both start digging a wall and ask for the tent pitched against it.
-    let swinging = held.blade() || aim.structure_captures_the_press();
+    let swinging = held.attack_item().is_some() || aim.structure_captures_the_press();
     let desired = buttons
         .as_deref()
         .filter(|buttons| playing && !swinging && buttons.pressed(BREAK_BUTTON))

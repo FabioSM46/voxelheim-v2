@@ -138,24 +138,26 @@ func TestTheLootItemsCarryThePinnedIdsAndTheirOwnStats(t *testing.T) {
 	}
 }
 
-// Nothing consumes a bone, and that is a decision rather than an oversight.
-//
-// GDD §7's engraving table is what will want them; until it exists a bone is a resource
-// with no sink, which is a resource. The claim is executed here rather than only written
-// down in items.go, so the day a recipe does spend one, this test is where the comment
-// gets corrected.
-func TestNothingConsumesABoneYet(t *testing.T) {
+// Bone-tipped arrows are the bone's first sink, and the recipe is the only one.
+func TestOnlyArrowsConsumeBones(t *testing.T) {
 	t.Parallel()
 
+	consumers := 0
 	for id, r := range recipeTable {
 		for _, needed := range r.ingredients {
 			if needed.item == ItemBone {
-				t.Errorf("%s costs %d bones; items.go says nothing spends them yet", id, needed.count)
+				consumers++
+				if id != vnet.RecipeIDArrows || needed.count != 1 {
+					t.Errorf("%s costs %d bones, want only Arrows costing one", id, needed.count)
+				}
 			}
 		}
 		if r.product == ItemBone {
 			t.Errorf("%s produces bones, which come off a corpse rather than out of a recipe", id)
 		}
+	}
+	if consumers != 1 {
+		t.Errorf("bone has %d recipe consumers, want exactly the arrow recipe", consumers)
 	}
 	// And a bone is not a weapon, a kit or a structure — the three things a non-zero
 	// field in its row would quietly make it.
@@ -163,7 +165,8 @@ func TestNothingConsumesABoneYet(t *testing.T) {
 	if !registered {
 		t.Fatal("the bone is not registered")
 	}
-	if bone.meleeDamage != 0 || bone.repairRestore != 0 || bone.maxDurability != 0 {
+	if bone.meleeDamage != 0 || bone.launches != vnet.ProjectileKindUnknown ||
+		bone.repairRestore != 0 || bone.maxDurability != 0 {
 		t.Errorf("the bone's row is %+v; it is a plain resource", bone)
 	}
 }
