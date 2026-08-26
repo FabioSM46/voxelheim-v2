@@ -257,6 +257,7 @@ mod tests {
                 health: 0,
                 max_health: 60,
                 action: MobAction::Corpse,
+                target_entity_id: 0,
             }],
             accessible_loot_corpses: vec![CORPSE],
             ..Default::default()
