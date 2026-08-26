@@ -61,12 +61,17 @@ const _: () = assert!(
 ///
 /// **Derived from [`BASE_TRANSLATION`] rather than written down.** The view model is placed
 /// at negative `Z`, which is only meaningful because the camera looks down `-Z`; the
-/// direction back toward the eye is therefore `+Z`, and [`BLADE_CAMERA_OFFSET`] is positive
-/// for exactly that reason. Reading the sign off the placement is what makes "the face the
-/// camera sees" a thing the compiler can check instead of a thing a comment can get
-/// backwards — and it *was* backwards: [`fist_mesh`]'s digit relief spent this whole change
-/// on the `-Z` face, the one the camera never sees, which is very plausibly why the hand
-/// still read as a flat slab in #384 even after it had fingers.
+/// direction back toward the eye is therefore `+Z`. Reading the sign off the placement is
+/// what makes "the face the camera sees" a thing the compiler can check instead of a thing a
+/// comment can get backwards — and it *was* backwards before #388: [`fist_mesh`]'s digit
+/// relief sat on the `-Z` face, the one the camera never sees, which is very plausibly why
+/// the hand still read as a flat slab in #384 even after it had fingers.
+///
+/// **It used to have a second reader and no longer does.** `BLADE_CAMERA_OFFSET` wrote the
+/// same direction as a sign and was asserted against this constant; #393 removed the offset,
+/// because a hilt held in front of the hand is a hilt the player can see, and the assertion
+/// moved to the containment [`GRIP_SIZE`] and [`HAND_SIZE`] state between them. What is left
+/// here is the face the relief goes on, which is [`fist_mesh`]'s question alone.
 const CAMERA_SIDE: f32 = if BASE_TRANSLATION.z < 0.0 { 1.0 } else { -1.0 };
 
 /// The whole of the closed fist: the box the palm, the fingers and the thumb fit inside.
@@ -109,31 +114,69 @@ const _: () = assert!(
     "the fist's width-to-height ratio left the range a hand occupies"
 );
 
-/// How far a blade's centre plane sits toward the camera from the fist's centre.
+/// The hilt the fist closes on fits *inside* the fist, so the hand hides it.
 ///
-/// The camera looks down -Z, so positive Z is the near side. Keeping the centre one
-/// millimetre inside the fist's front face leaves the grip anchored while every blade
-/// section still puts a near-facing surface in front of the fist. This is blade-only:
-/// the other held shapes already read clearly at their existing depth.
-const BLADE_CAMERA_OFFSET: f32 = HAND_SIZE.z / 2.0 - 0.001;
-
-/// The two statements of "which way the camera is" agree.
+/// **This is what the assertion tying `BLADE_CAMERA_OFFSET` to [`CAMERA_SIDE`] became, and
+/// the change of subject is the whole of #393.** That offset moved the entire sword — pommel,
+/// grip, guard and blade — to one millimetre inside the fist's near face, so that every blade
+/// section would win the depth test against the hand holding it. It was true when #382 wrote
+/// it: the fist was `0.07225` tall then and genuinely swallowed the blade. #388 made the fist
+/// `0.024` tall and seated the guard flush above its top face, and
+/// [`a_blade_rises_clear_of_the_fists_silhouette_instead_of_growing_out_of_it`] — a
+/// **screen-space** measurement that never depended on the offset — has read 0 of 101 blade
+/// sections inside the fist's outline ever since. The offset was left solving a problem
+/// nothing had, and its one remaining effect was the defect: it lifted the grip six
+/// millimetres out of the hand, into the only place a player could see it.
 ///
-/// [`CAMERA_SIDE`] reads it off the view model's placement and this offset writes it as a
-/// sign; a change to one that contradicts the other would move the blade behind the fist or
-/// the digits onto its far face, and neither shows up as anything but a rendering somebody
-/// has to look at.
+/// So the sword now sits on the fist's own centre plane, [`item_translation`] gives it no
+/// depth of its own, and "in front of the fist" stops being a question about a *sign* and
+/// becomes one about two half-depths. A sign assertion with no sign left in it is a check on
+/// nothing, which is worse than no check, so this is that statement re-derived against what
+/// actually holds the grip in the hand now.
+///
+/// Both halves of the hilt the hand closes over are named. The grip is what must never show.
+/// The pommel deliberately does show *below* the fist — that is #384's property, and the thing
+/// that says the hand is closed on a hilt rather than being where the hilt begins — but a
+/// pommel deeper than the fist would show in *front* of it exactly as the grip did.
 const _: () = assert!(
-    BLADE_CAMERA_OFFSET * CAMERA_SIDE > 0.0,
-    "the blade's camera offset and the fist's camera side disagree about where the eye is"
+    GRIP_SIZE.z < HAND_SIZE.z && POMMEL_SIZE.z < HAND_SIZE.z,
+    "the hilt the fist closes on is deeper than the fist, so it shows in front of the hand"
+);
+
+/// The fist's box contains the grip outright, on all three axes.
+///
+/// The stronger half of the statement above, and the one the occlusion rests on: a box inside
+/// another box is hidden by it from every viewpoint outside that box, so no pose of any
+/// animation can bring the grip out in front of the hand — a rigid transform moves both
+/// together and containment survives it.
+/// [`the_hand_stays_closed_over_the_grip_through_every_animation`] measures that through the
+/// real merged mesh and the real presented transform rather than trusting this paragraph.
+///
+/// `<=` rather than `<` on `Y` on purpose: `HAND_SIZE.y == GRIP_SIZE.y` is asserted above and
+/// is the whole of how [`item_translation`] places a blade, so requiring the grip to be
+/// *shorter* than the fist here would contradict it.
+const _: () = assert!(
+    GRIP_SIZE.x <= HAND_SIZE.x && GRIP_SIZE.y <= HAND_SIZE.y && GRIP_SIZE.z <= HAND_SIZE.z,
+    "the grip is not inside the fist that closes on it"
 );
 
 /// Extra camera-space clearance for the blade composition during its reachable swings.
 ///
-/// Moving the blade forward *inside* the merged mesh is what lets it win the fist's depth
-/// test. The same local offset rotates toward the camera during an overhead cut, so the
-/// complete blade composition sits four millimetres farther from the near plane. The
-/// blade-to-fist relationship is unchanged; other held shapes do not move.
+/// **Re-derived, because what it was buying clearance back from is gone.** It was written to
+/// repay what `BLADE_CAMERA_OFFSET` spent: a sword pushed forward inside the merged mesh
+/// rotates toward the eye during an overhead cut, so the whole model was set back to pay for
+/// it. There is no forward offset any more, and this is now simply the set-back the blade's
+/// *own* arcs need — a bound nothing else in the composition reaches.
+///
+/// An overhead cut is only ever drawn with a blade in hand — `combat.rs` routes the left
+/// button on the item id and the three arcs belong to the blades — so the pose that carries
+/// the view model nearest the camera is always one this offset has already pushed back.
+/// [`the_forearm_is_as_long_as_the_near_plane_permits`] spends it in the bound it derives for
+/// [`ARM_REACH`], and [`every_held_arrangement_clears_the_near_plane_through_every_swing`]
+/// sweeps the real vertices of every arrangement through every reachable pose against it. So
+/// it is not free to become zero now that its original reason has gone: dropping it shortens
+/// the arm the near plane permits to below the arm that is already there, which is #394's
+/// subject and not this change's.
 const BLADE_NEAR_PLANE_CLEARANCE: f32 = 0.004;
 
 /// How far a carried object sinks into the top of the fist holding it.
@@ -1205,9 +1248,17 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
 /// Where an item sits relative to the fist at the origin.
 ///
 /// Blocks, materials and bundles rest on the fingers. A sword is closed on by the middle of
-/// its grip, and sits at the fist's near face so the fist cannot depth-occlude its guard or
-/// blade. A tool puts the lower haft through the fist. These are translations of the approved
-/// geometry, not new shapes.
+/// its grip, on the fist's own centre plane, so the hand hides the grip it is closed on. A
+/// tool puts the lower haft through the fist. These are translations of the approved geometry,
+/// not new shapes.
+///
+/// **Nothing here has a depth of its own any more, and a blade least of all.** A blade carried
+/// `BLADE_CAMERA_OFFSET` in `Z` — the whole sword one millimetre inside the fist's near face,
+/// so every blade section would beat the hand in the depth test. #388 made that unnecessary by
+/// seating the guard above the fist's top face, and left it doing the one thing nobody wanted:
+/// standing the grip out in front of the hand that grips it (#393). The blade clears the fist
+/// on **screen** now, which is a stronger property than winning a depth test and is measured
+/// as one — see [`a_blade_rises_clear_of_the_fists_silhouette_instead_of_growing_out_of_it`].
 fn item_translation(shape: ItemShape) -> Vec3 {
     let hand_top = HAND_SIZE.y / 2.0;
     let y = match shape {
@@ -1233,15 +1284,7 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Bow => HAND_SIZE.y * 0.20,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
     };
-    Vec3::new(
-        0.0,
-        y,
-        if shape == ItemShape::Blade {
-            BLADE_CAMERA_OFFSET
-        } else {
-            0.0
-        },
-    )
+    Vec3::new(0.0, y, 0.0)
 }
 
 /// A wooden board and iron boss shared by hands, bodies and drops.
@@ -2187,6 +2230,53 @@ mod tests {
         negative || positive
     }
 
+    /// The camera-space `Z` of the nearest surface of `mesh` along the view ray through the
+    /// projected `point`, or `None` where the mesh does not cover it.
+    ///
+    /// **This is the question "is it drawn in front of the hand", and comparing against the
+    /// mesh's nearest *vertex* is not that question.** The fist's nearest vertex is one corner
+    /// of one box; a point hanging beside the hand's lower edge can be in front of that corner
+    /// and still be nowhere near the surface the hand actually presents along its own ray.
+    ///
+    /// `1/z` rather than `z` is what gets interpolated, because that is the quantity that is
+    /// affine in screen space for a plane in 3D — interpolating `z` itself would bend every
+    /// triangle toward the eye and answer a question about a surface that is not there.
+    fn nearest_surface_at(mesh: &Mesh, pose: &Transform, point: Vec2) -> Option<f32> {
+        let positions = positions(mesh);
+        let indices = mesh.indices().expect("a merged mesh carries indices");
+        let corners: Vec<usize> = indices.iter().collect();
+        let mut nearest: Option<f32> = None;
+        for triangle in corners.chunks_exact(3) {
+            let camera: [Vec3; 3] = std::array::from_fn(|corner| {
+                pose.transform_point(Vec3::from_array(positions[triangle[corner]]))
+            });
+            let depth = camera.map(|corner| -corner.z);
+            if depth.iter().any(|depth| *depth <= 0.0) {
+                continue;
+            }
+            let flat: [Vec2; 3] = std::array::from_fn(|corner| camera[corner].xy() / depth[corner]);
+            if !contains(flat, point) {
+                continue;
+            }
+            let area = (flat[1] - flat[0]).perp_dot(flat[2] - flat[0]);
+            if area.abs() < 1e-12 {
+                continue;
+            }
+            let weight = [
+                (flat[1] - point).perp_dot(flat[2] - point) / area,
+                (flat[2] - point).perp_dot(flat[0] - point) / area,
+                (flat[0] - point).perp_dot(flat[1] - point) / area,
+            ];
+            let reciprocal: f32 = (0..3).map(|corner| weight[corner] / depth[corner]).sum();
+            if reciprocal <= 0.0 {
+                continue;
+            }
+            let surface = -1.0 / reciprocal;
+            nearest = Some(nearest.map_or(surface, |best: f32| best.max(surface)));
+        }
+        nearest
+    }
+
     fn extent(positions: &[[f32; 3]], axis: usize) -> (f32, f32) {
         positions
             .iter()
@@ -2924,10 +3014,10 @@ mod tests {
 
     /// **The digit relief is on the face the camera actually looks at, and it was not.**
     ///
-    /// #175 put knuckles on the box's `-Z` face and this change put fingers and a thumb on the
-    /// same one. The camera looks down `-Z` — [`BLADE_CAMERA_OFFSET`] says so in its own doc,
-    /// and [`item_translation`] relies on it to keep a blade in front of the fist — so `-Z` is
-    /// the *far* face of the hand and nothing modelled there is ever turned toward the player.
+    /// #175 put knuckles on the box's `-Z` face and #388 put fingers and a thumb on the same
+    /// one. The camera looks down `-Z` — [`CAMERA_SIDE`] reads that off [`BASE_TRANSLATION`],
+    /// which is the one place the view model states where the eye is — so `-Z` is the *far*
+    /// face of the hand and nothing modelled there is ever turned toward the player.
     /// Every geometric assertion above passed against a mesh whose only relief faced away, and
     /// the hand went on reading as a flat slab, which is a fair reading of what #384 was
     /// actually filed about.
@@ -2989,20 +3079,25 @@ mod tests {
         );
     }
 
-    /// **A grip standing in front of the fist does not stand in front of all of it.**
+    /// **The fist closes *around* the grip rather than being as wide as it.**
     ///
-    /// [`BLADE_CAMERA_OFFSET`] puts the grip's near face six millimetres proud of the fist's,
-    /// which is what lets a blade win the depth test against the hand holding it. Now that the
-    /// digits are on that same near face, the same offset also decides whether the arrangement
-    /// reads as a hand closed on a hilt or as a bar floating in front of a slab: the grip is
-    /// [`GRIP_SIZE`]`.x` across and the fist is wider, so the outermost finger on each side
-    /// clears it and the thumb crosses past its inboard edge.
+    /// **Re-derived rather than deleted, and the premise it used to rest on was the defect.**
+    /// It was written when `BLADE_CAMERA_OFFSET` stood the grip's near face six millimetres
+    /// proud of the fist's, so the question it asked was which of the hand's relief that bar
+    /// left showing: two fingers behind the hilt was the arrangement, all of it behind the
+    /// hilt was the failure. #393 removed the offset, the grip is inside the fist's own box
+    /// now — [`the_hand_stays_closed_over_the_grip_through_every_animation`] measures that —
+    /// and nothing of the hand can be behind a hilt that is itself behind the hand.
     ///
-    /// Two of the four fingers do sit behind the grip, and that is the arrangement rather than
-    /// a defect — a hilt seen from the front hides the fingers directly behind it. What must
-    /// not happen is *all* of the relief disappearing behind it, which is what this pins.
+    /// The measurement survives its premise because it never depended on it: it reads
+    /// [`fist_mesh`] and [`GRIP_SIZE`]`.x` alone, and what those two say is that the hand is
+    /// **wider than the hilt it holds**, with relief on both sides of it and the thumb past
+    /// its inboard edge. That is the mesh-side statement of the containment the `const`
+    /// assertion beside [`GRIP_SIZE`] makes, and it is what stops a future edit from widening
+    /// a grip until the fist is a collar on it. Not weakened: every assertion below is the one
+    /// that was there, and only the reason they are worth making has moved.
     #[test]
-    fn the_outer_fingers_flank_the_grip_rather_than_hiding_behind_it() {
+    fn the_fist_closes_around_the_grip_rather_than_matching_its_width() {
         const EPSILON: f32 = 1e-6;
         let positions = positions(&fist_mesh());
         let near = |position: &[f32; 3]| position[2] * CAMERA_SIDE;
@@ -3535,6 +3630,8 @@ mod tests {
     fn both_blades_show_their_guard_grip_and_pommel_around_the_fist() {
         const EPSILON: f32 = 1e-6;
         let half = HAND_SIZE / 2.0;
+        // Read before the loop shadows `positions` with the sword's own.
+        let fist_corners = positions(&fist_mesh());
 
         for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
             let translation = item_translation(ItemShape::Blade);
@@ -3625,41 +3722,317 @@ mod tests {
                 "sword {item_id}'s grip centre {grip_centre:?} left the fist {half:?}"
             );
 
-            // Camera-space depth in the transform the renderer actually uses, sampled
-            // over the complete blade rather than inferred from its tip. `held_mesh`
-            // merges fist and item before `presented_transform` moves the one entity, so
-            // the near-plane clearance belongs on both points in this comparison. Using
-            // the presented transform here records that fact and prevents a later split
-            // into separately transformed geometry from silently invalidating it.
+            // **Camera-space depth in the transform the renderer actually uses, and the
+            // statement it makes is now the opposite one.** It used to require 95 of 101
+            // sampled blade sections to put a near-facing surface *in front of* the fist,
+            // which is what `BLADE_CAMERA_OFFSET` existed to deliver and which nothing else
+            // in the composition could satisfy — the whole sword was one millimetre inside
+            // the fist's near face, hilt included, so the grip stood out where the player
+            // could see it (#393). The blade does not need to win a depth test against the
+            // hand: it clears the hand on **screen**, which
+            // `a_blade_rises_clear_of_the_fists_silhouette_instead_of_growing_out_of_it`
+            // measures and which never depended on the offset.
             //
-            // The camera looks down -Z, so the larger camera-space Z must belong to the
-            // blade's near surface at the same model-space height as the fist's front
-            // plane. This lets the blade win the depth test where their projections
-            // overlap; the separate all-poses test below proves the complete merged mesh
-            // still remains behind the camera near plane.
-            const SAMPLES: usize = 101;
+            // What is worth pinning here is the half that *does* have to lose that depth
+            // test — the pommel-to-guard section of the hilt the fist is closed on. Read
+            // through `presented_transform` because that is the transform the renderer
+            // applies to the one merged entity, so a later split into separately transformed
+            // geometry cannot silently invalidate the comparison.
             let presentation =
                 presented_transform(&HandAnimation::default(), Some(ItemShape::Blade));
-            let visible = (0..SAMPLES)
-                .filter(|sample| {
-                    let fraction = *sample as f32 / (SAMPLES - 1) as f32;
-                    let y = blade_base() + BLADE_LENGTH * fraction;
-                    let blade_front = presentation.transform_point(Vec3::new(
-                        0.0,
-                        translation.y + y,
-                        translation.z + blade_at(y).half_width,
-                    ));
-                    let fist_front =
-                        presentation.transform_point(Vec3::new(0.0, translation.y + y, half.z));
-                    blade_front.z > fist_front.z + EPSILON
-                })
-                .count();
-            assert!(
-                visible * 100 >= SAMPLES * 95,
-                "only {visible}/{SAMPLES} sampled blade sections of sword {item_id} put a \
-                 camera-facing surface in front of the fist"
-            );
+            let toward_eye =
+                |corner: &[f32; 3]| presentation.transform_point(Vec3::from_array(*corner)).z;
+            let nearest = |corners: &[[f32; 3]]| {
+                corners
+                    .iter()
+                    .map(toward_eye)
+                    .fold(f32::NEG_INFINITY, f32::max)
+            };
+            let fist_near = nearest(&fist_corners);
+            for (part, corners) in [("grip", &grip), ("pommel", &pommel)] {
+                let part_near = nearest(corners);
+                assert!(
+                    part_near < fist_near - EPSILON,
+                    "sword {item_id}'s {part} reaches camera-space z {part_near} and the \
+                     fist's nearest surface is at {fist_near}, so the hand does not hide it"
+                );
+            }
         }
+    }
+
+    /// The two parts of one sword that the hand is closed over: everything between the
+    /// pommel's far end and the guard's rearward face.
+    struct Hilt {
+        item_id: u16,
+        grip: Vec<[f32; 3]>,
+        pommel: Vec<[f32; 3]>,
+    }
+
+    /// That section, read out of the real merged sword mesh rather than rebuilt from the
+    /// constants the measurements are meant to be independent of.
+    ///
+    /// Each furniture box has a unique half-depth, so its corners identify it after the parts
+    /// have been merged — a `Y`-only selection would also collect its neighbours on their
+    /// shared planes, and `GRIP_SIZE.y == HAND_SIZE.y` means *every* grip corner sits on one
+    /// of those planes. The extents are checked against the part sizes afterwards, so a
+    /// selector that silently found nothing cannot make the caller's assertions vacuous.
+    fn hilt_corners(item_id: u16) -> Hilt {
+        const EPSILON: f32 = 1e-6;
+        let translation = item_translation(ItemShape::Blade);
+        let sword = item_mesh(item_id, ItemShape::Blade).translated_by(translation);
+        let corners = positions(&sword);
+
+        let guard_low = blade_base() + translation.y - GUARD_SIZE.y;
+        let grip_low = guard_low - GRIP_SIZE.y;
+        let pommel_low = grip_low - POMMEL_SIZE.y;
+        let part = |half_depth: f32, low: f32, high: f32| -> Vec<[f32; 3]> {
+            corners
+                .iter()
+                .copied()
+                .filter(|corner| {
+                    ((corner[2] - translation.z).abs() - half_depth).abs() < EPSILON
+                        && corner[1] >= low - EPSILON
+                        && corner[1] <= high + EPSILON
+                })
+                .collect()
+        };
+        let grip = part(GRIP_SIZE.z / 2.0, grip_low, guard_low);
+        let pommel = part(POMMEL_SIZE.z / 2.0, pommel_low, grip_low);
+
+        for (name, part, size) in [("grip", &grip, GRIP_SIZE), ("pommel", &pommel, POMMEL_SIZE)] {
+            assert!(!part.is_empty(), "no {name} corners were selected");
+            for axis in 0..3 {
+                let (low, high) = extent(part, axis);
+                assert!(
+                    (high - low - size[axis]).abs() < EPSILON,
+                    "the {name} selection spans {} on axis {axis} and the part is {}",
+                    high - low,
+                    size[axis]
+                );
+            }
+        }
+        Hilt {
+            item_id,
+            grip,
+            pommel,
+        }
+    }
+
+    /// **The hand stays closed over the grip, in every frame of every animation there is.**
+    ///
+    /// This is the property #393 was filed about — *the sword's grip is behind the hand that
+    /// grips it* — measured in camera space from the real merged mesh through
+    /// [`presented_transform`] rather than from the constants that built it.
+    /// `BLADE_CAMERA_OFFSET` carried the whole hilt 14 mm toward the eye, which left the grip
+    /// standing 6.0 mm in front of the fist's nearest surface at rest and up to 6.2 mm in
+    /// front of it mid-swing. It is 7.8 mm behind at rest now, and behind at every pose.
+    ///
+    /// **The guard is outside the section deliberately, and the boundary is the reason.** The
+    /// issue draws the line at *the guard's rearward face*: below it is hilt, which the hand
+    /// closes on and must hide, and above it is the sword, which is how a player knows one is
+    /// held at all. The guard is deeper than the fist by design — a guard narrower than the
+    /// hand reads as a collar — and it sits entirely above the fist's top face, which
+    /// [`both_blades_show_their_guard_grip_and_pommel_around_the_fist`] pins.
+    ///
+    /// **Two comparisons, not one, and the second is why the first is not enough.** The grip
+    /// is checked against the fist's nearest *vertex*: it is a real quantity the pose changes,
+    /// and it is the stricter bound, since it is the nearest point of the hand anywhere rather
+    /// than the nearest point of the hand over the hilt. But "in front of the hand's nearest
+    /// corner" is not the same question as "drawn in front of the hand", and for the pommel —
+    /// which hangs beside the hand's lower edge rather than over it — it is the wrong one.
+    /// [`nearest_surface_at`] answers the right one per view ray, and the vertex comparison
+    /// stays in front of it as a short circuit that takes almost every pose.
+    ///
+    /// The sweep is the one
+    /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] walks — the three
+    /// blade arcs and the placement bump they can coincide with, plus rest — and the mining
+    /// loop besides, which a blade cannot reach: `player/target.rs` sends a swing instead of a
+    /// mining intent for both blades and `a_blade_in_hand_sends_a_swing_instead_of_mining`
+    /// pins it. It is swept anyway because the grip's containment is what makes the claim, and
+    /// containment does not care which animation is playing.
+    #[test]
+    fn the_hand_stays_closed_over_the_grip_through_every_animation() {
+        let hand = fist_mesh();
+        let fist = positions(&hand);
+        let swords: Vec<Hilt> = [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD]
+            .into_iter()
+            .map(hilt_corners)
+            .collect();
+
+        let mut arcs: Vec<Option<SwingShape>> = SwingShape::BLADE_ARCS.map(Some).to_vec();
+        arcs.push(None);
+        let mut closest_grip = f32::INFINITY;
+        let mut rest_grip = f32::NAN;
+        // The worst distance any pommel corner stands in front of the hand's own surface,
+        // and the pose it happens in.
+        let mut pommel_intrusion = 0.0f32;
+        let mut pommel_worst_pose = String::from("no pose");
+        let mut pommel_at_rest = 0.0f32;
+
+        for shape in arcs {
+            for step in 0..=32u8 {
+                for bump in 0..=8u8 {
+                    for punch in 0..=4u8 {
+                        let animation = HandAnimation {
+                            attack: shape.map(|shape| Swing {
+                                shape,
+                                elapsed: ATTACK_SWING_TIME.mul_f32(f32::from(step) / 32.0),
+                            }),
+                            bump_elapsed: Some(PLACE_BUMP_TIME.mul_f32(f32::from(bump) / 8.0)),
+                            mine_elapsed: Duration::from_secs_f32(
+                                f32::from(punch) / (4.0 * MINE_PUNCHES_PER_SECOND),
+                            ),
+                            ..Default::default()
+                        };
+                        let pose = presented_transform(&animation, Some(ItemShape::Blade));
+                        let nearest = |corners: &[[f32; 3]]| {
+                            corners
+                                .iter()
+                                .map(|corner| pose.transform_point(Vec3::from_array(*corner)).z)
+                                .fold(f32::NEG_INFINITY, f32::max)
+                        };
+                        let fist_near = nearest(&fist);
+                        // How far one corner stands in front of the hand's *own surface along
+                        // its view ray*, or zero where the hand does not cover it at all — the
+                        // air beside the hand's lower edge is exactly where the pommel is meant
+                        // to hang, so "not covered" is an answer rather than a failure.
+                        let in_front_of_the_hand = |corner: &[f32; 3]| {
+                            let point = pose.transform_point(Vec3::from_array(*corner));
+                            let depth = -point.z;
+                            assert!(depth > 0.0, "{corner:?} landed behind the camera");
+                            let flat = Vec2::new(point.x / depth, point.y / depth);
+                            nearest_surface_at(&hand, &pose, flat)
+                                .map_or(0.0, |surface| (point.z - surface).max(0.0))
+                        };
+                        for Hilt {
+                            item_id,
+                            grip,
+                            pommel,
+                        } in &swords
+                        {
+                            let grip_margin = fist_near - nearest(grip);
+                            assert!(
+                                grip_margin > 0.0,
+                                "sword {item_id}'s grip stands {} in front of the fist's \
+                                 nearest surface in {shape:?} at {step}/32, bump {bump}/8, \
+                                 punch {punch}/4",
+                                -grip_margin
+                            );
+                            closest_grip = closest_grip.min(grip_margin);
+                            // The same per-ray question the pommel is asked below, and the
+                            // one that would answer for the grip if the containment above
+                            // ever stopped holding. It costs nothing while it does: a corner
+                            // behind the fist's nearest vertex is behind the hand's surface
+                            // everywhere, so the short circuit takes every pose.
+                            for corner in grip {
+                                if fist_near - pose.transform_point(Vec3::from_array(*corner)).z
+                                    > 0.0
+                                {
+                                    continue;
+                                }
+                                assert!(
+                                    in_front_of_the_hand(corner) <= 0.0,
+                                    "sword {item_id}'s grip corner {corner:?} is drawn in \
+                                     front of the hand in {shape:?} at {step}/32, bump \
+                                     {bump}/8, punch {punch}/4"
+                                );
+                            }
+                            if shape.is_none() && step == 0 && bump == 0 && punch == 0 {
+                                rest_grip = grip_margin;
+                            }
+                            // The pommel is deliberately outside the fist, so the strict
+                            // containment the grip enjoys cannot be asked of it. The
+                            // comparison against the fist's nearest *vertex* is the cheap
+                            // short circuit: a corner already behind that is behind the hand's
+                            // surface everywhere, and only the handful of poses that fail it
+                            // pay for the 72-triangle ray query.
+                            for corner in pommel {
+                                if fist_near - pose.transform_point(Vec3::from_array(*corner)).z
+                                    > 0.0
+                                {
+                                    continue;
+                                }
+                                let front = in_front_of_the_hand(corner);
+                                if shape.is_none() && step == 0 && bump == 0 && punch == 0 {
+                                    pommel_at_rest = pommel_at_rest.max(front);
+                                }
+                                if front > pommel_intrusion {
+                                    pommel_intrusion = front;
+                                    pommel_worst_pose = format!(
+                                        "sword {item_id}, corner {corner:?}, {shape:?} at \
+                                         {step}/32, bump {bump}/8, punch {punch}/4"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // **Two numbers, because the sweep's minimum and the rest pose say different things.**
+        //
+        // Across every pose the grip stays behind the fist's nearest vertex, and the closest it
+        // comes is under a millimetre — at the steepest pitches the fist's own nearest corner
+        // and the grip's converge, which is arithmetic about two nested boxes rather than the
+        // grip emerging: the per-ray check inside the sweep is what would catch that, and the
+        // `const` containment beside [`GRIP_SIZE`] is why it cannot happen.
+        //
+        // The rest pose is the one the defect was reported from — "look at the held weapon in
+        // first person while standing still" — and there the margin is a real distance. The
+        // offset this replaces put the grip about 6 mm *proud* of the hand at that same pose,
+        // so the sign of this number is the fix and the size of it is the headroom.
+        assert!(
+            closest_grip > 0.0,
+            "the grip reaches {closest_grip} of the fist's nearest surface across the sweep"
+        );
+        assert!(
+            rest_grip > 0.005,
+            "the grip sits only {rest_grip} behind the fist's nearest surface at rest"
+        );
+        // **The pommel is bounded rather than excluded, and the bound is measured.**
+        //
+        // It is the one part of the hilt that is *meant* to be outside the fist — #384's
+        // property, the thing that says the hand is closed on a sword rather than being where
+        // the sword begins — so it hangs below the model's origin, and every animation that
+        // pitches the model over carries what is below the origin toward the eye. At the
+        // steepest reachable pitch its nearest bottom corner crosses the hand's lower edge by
+        // a little over a millimetre, which is a pommel rotating up past the wrist and is what
+        // a swung sword does.
+        //
+        // What matters is the size of it. `BLADE_CAMERA_OFFSET` carried the whole hilt 14 mm
+        // toward the eye, which put this corner about 7 mm through the hand at the same pose
+        // and the grip 6 mm proud of it *at rest*, where a player stands and looks. Two
+        // millimetres is the recorded ceiling: enough for the pommel to swing, far too little
+        // for a hilt to be drawn in front of the hand holding it.
+        // **The pommel gets a bound rather than the grip's guarantee, and the reason is that
+        // it is the half of the hilt that is *meant* to be outside the hand.**
+        //
+        // #384 requires it to show below the fist — that is what says the hand is closed on a
+        // sword rather than being where the sword begins — so it hangs 22 mm below the model's
+        // origin, and all three attack arcs rotate the whole model about that origin. Anything
+        // that far below the pivot travels, and part of what it travels across is the hand.
+        // Those arcs are #174's and this issue may not touch them, so the honest statement
+        // here is a *direction* and a ceiling rather than a guarantee somebody would have to
+        // change an animation to keep.
+        //
+        // At rest — where the defect was reported from, standing still and looking at the
+        // held weapon — nothing of the pommel is in front of the hand at all, and
+        // `both_blades_show_their_guard_grip_and_pommel_around_the_fist` pins that pose
+        // strictly. Mid-swing the worst corner reaches about 24 mm through the hand. That
+        // number was 37 mm before this change, because `BLADE_CAMERA_OFFSET` carried the whole
+        // hilt 14 mm toward the eye on top of whatever the arc was already doing. 30 mm is the
+        // recorded ceiling: it fails on a regression toward the old arrangement and does not
+        // pretend the arcs have been fixed.
+        assert!(
+            pommel_at_rest <= 0.0,
+            "the pommel stands {pommel_at_rest} in front of the hand at rest"
+        );
+        assert!(
+            pommel_intrusion < 0.030,
+            "the pommel stands {pommel_intrusion} in front of the hand's own surface at \
+             {pommel_worst_pose}, and 30 mm is the recorded ceiling"
+        );
     }
 
     /// **The blade rises clear of the fist rather than growing out of it.**
