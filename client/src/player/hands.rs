@@ -177,6 +177,89 @@ const FINGER_WIDTH: f32 = 0.20;
 /// puts it.
 const THUMB_SPAN: f32 = 0.55;
 
+/// The palm's own depth, once the digit band has taken its share out of [`HAND_SIZE`].
+///
+/// A `const` rather than a local in [`fist_mesh`] because [`forearm_mesh`] is built from it:
+/// the limb below the wrist is the palm's section carried on down, which is what keeps the
+/// digits standing proud of the arm as well as of the palm.
+const PALM_DEPTH: f32 = HAND_SIZE.z * (1.0 - DIGIT_PROUD);
+
+/// Where the palm's centre plane sits: pushed away from the eye, so the digits occupy the
+/// near face of the fist's box rather than growing it.
+const PALM_CENTRE_Z: f32 = -CAMERA_SIDE * (HAND_SIZE.z - PALM_DEPTH) / 2.0;
+
+/// How far the forearm reaches below the view model's origin.
+///
+/// **The near plane sets this number, and nothing about how an arm looks does.** The model
+/// sits at [`BASE_TRANSLATION`]`.z` and the camera's near plane is at `0.1`, which leaves
+/// eight centimetres of headroom — and the composition rotates about its *own* origin, so
+/// everything below that origin swings toward the eye during an overhead cut. At the tightest
+/// reachable pose — [`OVERHEAD_PITCH_RADIANS`] on top of the rest pitch, with the placement
+/// bump already carrying the model [`PLACE_BUMP_DISTANCE`] forward — a point `L` below the
+/// origin gives up about `0.84·L` of that headroom, and the arm's own half-width and
+/// half-depth spend a little more. This value leaves 3.3 mm of camera-space clearance;
+/// [`the_forearm_is_as_long_as_the_near_plane_permits`] re-derives the bound from the
+/// constants rather than trusting this paragraph, and
+/// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] sweeps the real
+/// vertices through every reachable pose.
+///
+/// **It may not simply grow to cover a wider field of view.** That is the trade #389 turned
+/// on: the arm is clipped by the bottom edge at every field of view the settings offer up to
+/// 60°, and past that its end comes into frame. Lengthening it to chase the 110° ceiling puts
+/// it through the camera on the first overhead cut, which is a worse failure than a visible
+/// end at a field of view almost nobody selects.
+const ARM_REACH: f32 = 0.058;
+
+/// How far the wrist is buried in the fist.
+///
+/// The same trick [`HOLD_OVERLAP`] plays for a carried object, for the same reason: a gap
+/// would leave the arm detached and a flush join would put two faces on one plane, which is
+/// the flicker rule `client/AGENTS.md` states for the body rig.
+const ARM_OVERLAP: f32 = 0.004;
+
+/// The wrist: the short section between the fist and the forearm proper.
+const WRIST_LENGTH: f32 = 0.012;
+
+/// How far the wrist is buried in the forearm below it, for the reason above.
+const ARM_JOIN: f32 = 0.002;
+
+/// How wide the wrist is, as a fraction of the fist's width.
+///
+/// **This is the only thing that says *hand* rather than *slab*, and that is a fact about the
+/// material rather than about anatomy.** The view model's material is `unlit`, so nothing in
+/// this composition is shaded: every skin-coloured face is exactly the same colour and the
+/// relief [`fist_mesh`] builds cannot be seen as relief. What a player reads is the outline,
+/// and an arm the fist's own width would restore precisely the tall flat rectangle #384 was
+/// filed about — the fix for a forearm-sized hand cannot be a hand-sized forearm. Three
+/// quarters is a wrist's real proportion and it puts a step in the silhouette at the one
+/// place the eye is looking for one.
+const WRIST_WIDTH: f32 = 0.75;
+
+/// And how wide the forearm swells back to below it.
+///
+/// Under one, so the fist still overhangs the whole limb: what must never happen is an arm
+/// broader than the hand on the end of it.
+const FOREARM_WIDTH: f32 = 0.93;
+
+/// The wrist is narrower than the fist and the forearm never outgrows it.
+const _: () = assert!(
+    WRIST_WIDTH < FOREARM_WIDTH && FOREARM_WIDTH < 1.0,
+    "the limb below the fist is not a wrist swelling into a forearm"
+);
+
+/// The view model's rest pose: how far the composition is pitched over and rolled inboard
+/// before any animation adds to it.
+///
+/// Named because more than [`animated_transform`] reasons about them now. The pitch is what
+/// tips the lower end of [`forearm_mesh`] toward the eye — which is why the near plane, not
+/// the frame, is what bounds the arm — and the roll is what leans the whole limb inboard on
+/// screen. Angling the arm outboard to cancel that roll was measured and rejected: at 16:9
+/// the bottom edge of the frame is far nearer than the right one, so the lean buys no extra
+/// field of view, and it opens a sliver of world along the fist's inboard edge where the
+/// fist's far face projects wider than the arm's.
+const REST_PITCH_RADIANS: f32 = -0.18;
+const REST_ROLL_RADIANS: f32 = -0.12;
+
 /// How much darker a rust mark is than the iron it sits on.
 ///
 /// **A multiplier, not a colour**, and that is what keeps `player/items.rs` the one answer
@@ -520,20 +603,15 @@ pub(super) fn sceptre_mesh(length: f32) -> Mesh {
 /// inboard face is not left blank either: the thumb reaches it, so the fist's silhouette
 /// breaks there too.
 fn fist_mesh() -> Mesh {
-    let palm_depth = HAND_SIZE.z * (1.0 - DIGIT_PROUD);
     let digit_depth = HAND_SIZE.z * DIGIT_PROUD;
     let mut merged = Mesh::from(Cuboid::from_size(Vec3::new(
         HAND_SIZE.x,
         HAND_SIZE.y,
-        palm_depth,
+        PALM_DEPTH,
     )))
     // Pushed away from the eye, so the digits below occupy the near face of the box rather
     // than growing it.
-    .translated_by(Vec3::new(
-        0.0,
-        0.0,
-        -CAMERA_SIDE * (HAND_SIZE.z - palm_depth) / 2.0,
-    ));
+    .translated_by(Vec3::new(0.0, 0.0, PALM_CENTRE_Z));
 
     // Every digit sits in the same band across the camera-facing side of the palm, so each
     // stands proud of it by exactly [`DIGIT_PROUD`] and none of them reaches past the box.
@@ -568,6 +646,68 @@ fn fist_mesh() -> Mesh {
 
     merge_all(&mut merged, fingers.chain([thumb]), "fist");
     merged
+}
+
+/// The forearm the fist is on the end of: a wrist and the limb below it, in the same skin
+/// the fist takes from the authoritative appearance.
+///
+/// **Why this exists at all.** #384 was right to forbid it — the defect there was the fist's
+/// proportion and geometry below it would have hidden that instead of fixing it — but the
+/// oversized box was also the only thing reaching the bottom of the viewport, so correcting
+/// the proportion left the hand hanging in mid air with the world visible underneath it
+/// (#389). This is that boundary being lifted now that the fist above it is right, and
+/// nothing here touches the fist: [`HAND_SIZE`], the six boxes above and [`item_translation`]
+/// are exactly what #388 left.
+///
+/// **Its section is the palm's, not the fist's.** [`PALM_DEPTH`] and [`PALM_CENTRE_Z`] are
+/// the palm box's own depth and placement, so the digit band still stands proud of the limb
+/// exactly as it stands proud of the palm — an arm reaching the digits' near plane would
+/// swallow the thumb, which sits at the bottom of that band. Carrying the palm's depth also
+/// keeps the far faces flush, and that matters more than it sounds: the whole composition is
+/// at positive `X`, so a *shallower* box projects further outboard, and an arm shallower than
+/// the fist leaves a sliver of world along the fist's inboard edge — the same defect being
+/// fixed here, one scale down.
+///
+/// **It runs straight down the model's own axis.** Angling it outboard toward the nearer
+/// right edge was the alternative #389 named, and it was measured: at 16:9 the bottom edge is
+/// reached first from every corner of the limb, so the lean buys no field of view, and it
+/// pulls the arm off the fist's inboard edge. See [`REST_PITCH_RADIANS`].
+///
+/// One mesh merged into [`held_mesh`] rather than a second entity, for the reason every other
+/// part of this composition is merged: `animate_view_model` drives one transform, and a
+/// second entity would be a second thing to keep in step with a swing.
+fn forearm_mesh() -> Mesh {
+    let wrist_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
+    let wrist_bottom = wrist_top - WRIST_LENGTH;
+    let mut arm = Mesh::from(Cuboid::from_size(Vec3::new(
+        HAND_SIZE.x * WRIST_WIDTH,
+        WRIST_LENGTH,
+        PALM_DEPTH,
+    )))
+    .translated_by(Vec3::new(
+        0.0,
+        (wrist_top + wrist_bottom) / 2.0,
+        PALM_CENTRE_Z,
+    ));
+
+    // The forearm runs from inside the wrist to exactly [`ARM_REACH`] below the origin, so
+    // the near-plane bound is stated once, on the constant, rather than being the sum of
+    // three lengths a reader has to add up.
+    let forearm_top = wrist_bottom + ARM_JOIN;
+    let forearm_length = forearm_top + ARM_REACH;
+    let forearm = Mesh::from(Cuboid::from_size(Vec3::new(
+        HAND_SIZE.x * FOREARM_WIDTH,
+        forearm_length,
+        PALM_DEPTH,
+    )))
+    .translated_by(Vec3::new(
+        0.0,
+        forearm_top - forearm_length / 2.0,
+        PALM_CENTRE_Z,
+    ));
+
+    merge_all(&mut arm, [forearm], "forearm");
+    arm
 }
 
 /// One cross-section of the blade: where it sits along the sword, how far it reaches to
@@ -1120,14 +1260,25 @@ pub(super) fn shield_mesh(size: f32) -> Mesh {
     board
 }
 
-/// The complete first-person arrangement: the player's fist and, when selected, the item
-/// it holds, merged into one coloured mesh.
+/// The complete first-person arrangement: the player's fist, the forearm it is on the end
+/// of and, when selected, the item it holds, merged into one coloured mesh.
 ///
 /// The fist is always first in the buffers. Besides making the mesh deterministic, that
 /// gives the tests a structural way to assert that every shape still contains the exact
-/// hand #175 approved instead of merely containing skin-coloured vertices somewhere.
+/// hand #175 approved instead of merely containing skin-coloured vertices somewhere. The
+/// forearm follows it and the item comes last, so that guarantee is unchanged.
+///
+/// **The arm takes the same skin colour from the same one source.** It is the same limb, so
+/// a second lookup would be a second answer to a question the authoritative appearance has
+/// already settled.
 fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
-    let mut held = tinted(fist_mesh(), linear_rgb(skin_colour));
+    let skin = linear_rgb(skin_colour);
+    let mut held = tinted(fist_mesh(), skin);
+    merge_all(
+        &mut held,
+        [tinted(forearm_mesh(), skin)],
+        "hand and forearm",
+    );
     let (Some(item_id), Some(shape), Some(item_colour)) =
         (appearance.item_id, appearance.shape, appearance.item_colour)
     else {
@@ -1855,11 +2006,13 @@ fn animated_transform(animation: &HandAnimation) -> Transform {
         // The mining punch is negative here for the reason `SwingPose::pitch` is negative
         // for a cut: one convention for *over toward what is being hit*, kept by every
         // animation in this file.
-        rotation: Quat::from_rotation_x(-0.18 - punch * MINE_PUNCH_RADIANS + swing.pitch)
-            // Identity at rest and for two of the three shapes, so nothing about where the
-            // hand sits or how it mines moves for the sake of the slash that needs it.
-            * Quat::from_rotation_y(swing.yaw)
-            * Quat::from_rotation_z(-0.12 - bump * 0.18 + swing.roll),
+        rotation: Quat::from_rotation_x(
+            REST_PITCH_RADIANS - punch * MINE_PUNCH_RADIANS + swing.pitch,
+        )
+        // Identity at rest and for two of the three shapes, so nothing about where the
+        // hand sits or how it mines moves for the sake of the slash that needs it.
+        * Quat::from_rotation_y(swing.yaw)
+            * Quat::from_rotation_z(REST_ROLL_RADIANS - bump * 0.18 + swing.roll),
         ..default()
     }
 }
@@ -1999,6 +2152,41 @@ mod tests {
     }
 
     /// The lowest and highest value a set of vertices reaches on one axis.
+    /// Every triangle of one mesh, projected through `pose` onto the plane the frame is
+    /// measured in.
+    ///
+    /// **Triangles rather than bounding boxes or hulls**, because the question this answers is
+    /// whether a pixel is on skin, and a bounding box says yes for the air beside a limb. It
+    /// is the same reason `a_blade_rises_clear_of_the_fists_silhouette_instead_of_growing_out_of_it`
+    /// gives for projecting real vertices — with the direction of the approximation reversed,
+    /// since here a superset would make the test pass rather than fail.
+    fn projected_triangles(mesh: &Mesh, pose: &Transform) -> Vec<[Vec2; 3]> {
+        let positions = positions(mesh);
+        let indices = mesh.indices().expect("a merged mesh carries indices");
+        let project = |index: usize| {
+            let point = pose.transform_point(Vec3::from_array(positions[index]));
+            let depth = -point.z;
+            assert!(depth > 0.0, "vertex {index} landed behind the camera");
+            Vec2::new(point.x / depth, point.y / depth)
+        };
+        let corners: Vec<usize> = indices.iter().collect();
+        corners
+            .chunks_exact(3)
+            .map(|corner| [project(corner[0]), project(corner[1]), project(corner[2])])
+            .collect()
+    }
+
+    /// Whether a projected triangle covers a point, winding-agnostic: the merged mesh carries
+    /// both faces of every box and one of each pair is wound away from the eye.
+    fn contains(triangle: [Vec2; 3], point: Vec2) -> bool {
+        let [a, b, c] = triangle;
+        let side = |from: Vec2, to: Vec2| (to - from).perp_dot(point - from);
+        let (first, second, third) = (side(a, b), side(b, c), side(c, a));
+        let negative = first <= 0.0 && second <= 0.0 && third <= 0.0;
+        let positive = first >= 0.0 && second >= 0.0 && third >= 0.0;
+        negative || positive
+    }
+
     fn extent(positions: &[[f32; 3]], axis: usize) -> (f32, f32) {
         positions
             .iter()
@@ -2483,6 +2671,19 @@ mod tests {
 
         for appearance in appearances {
             let corners = positions(&held_mesh(TEST_SKIN, appearance));
+            // **The arm is in this sweep, and that is asserted rather than assumed.** It is the
+            // lowest thing in the composition and therefore the part an overhead cut carries
+            // nearest the eye, so a merge that dropped it would leave this test measuring the
+            // one arrangement that was never at risk. `held_mesh` is what the renderer draws,
+            // so reading it is what makes the claim about the real mesh (#389).
+            let lowest = extent(&corners, 1).0;
+            assert!(
+                lowest <= -ARM_REACH + 1e-5,
+                "{:?} reaches only {lowest} below the origin, so the forearm at {} is not in \
+                 the buffers this sweep walks",
+                appearance.shape,
+                -ARM_REACH
+            );
             let mut arcs: Vec<Option<SwingShape>> = match appearance.shape {
                 Some(ItemShape::Blade) => SwingShape::BLADE_ARCS.map(Some).to_vec(),
                 Some(ItemShape::Bow) => vec![Some(SwingShape::Draw)],
@@ -2559,13 +2760,24 @@ mod tests {
     fn the_empty_hand_is_a_palm_with_four_fingers_and_a_thumb() {
         const PREVIOUS_HAND_SIZE: Vec3 = Vec3::new(0.03825, 0.07225, 0.03825);
 
-        let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
+        // **The fist, read on its own rather than through the empty arrangement.** It was read
+        // through `held_mesh` while the fist was the whole of that mesh; since #389 the empty
+        // hand is a fist *and a forearm*, and every measurement below — the extent against
+        // HAND_SIZE especially — is a statement about the fist alone. The arrangement is
+        // checked for what it is directly underneath, so nothing about the composition escapes
+        // being counted.
+        let mesh = fist_mesh();
         let one_box = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
 
         assert_eq!(
             mesh.count_vertices(),
             one_box * 6,
             "the fist is not exactly one palm, four fingers and a thumb"
+        );
+        assert_eq!(
+            held_mesh(TEST_SKIN, selected_appearance(None)).count_vertices(),
+            one_box * 8,
+            "the empty hand is not exactly that fist plus a wrist and a forearm"
         );
 
         // The other half of the proportion — no taller than the grip it closes on — is the
@@ -2906,6 +3118,353 @@ mod tests {
                 "{corner:?} projects to y {y}, clipped by the bottom edge"
             );
         }
+    }
+
+    /// The eight corners of the forearm's end cap: the one face of the limb that must never
+    /// be seen, because seeing it is seeing where the player's arm stops.
+    fn forearm_cap() -> [Vec3; 4] {
+        let half_width = HAND_SIZE.x * FOREARM_WIDTH / 2.0;
+        let half_depth = PALM_DEPTH / 2.0;
+        [
+            Vec3::new(-half_width, -ARM_REACH, PALM_CENTRE_Z - half_depth),
+            Vec3::new(-half_width, -ARM_REACH, PALM_CENTRE_Z + half_depth),
+            Vec3::new(half_width, -ARM_REACH, PALM_CENTRE_Z - half_depth),
+            Vec3::new(half_width, -ARM_REACH, PALM_CENTRE_Z + half_depth),
+        ]
+    }
+
+    /// The widest 16:9 field of view, in degrees, at which every one of `corners` is still
+    /// outside the frame under `pose`.
+    ///
+    /// **A number rather than a yes/no**, because the acceptance criterion #389 states is a
+    /// decision with a number attached: the arm cannot grow past what the near plane allows,
+    /// so the honest answer is the field of view at which its end arrives, measured.
+    fn widest_clipped_fov(corners: &[Vec3], pose: &Transform) -> f32 {
+        const ASPECT: f32 = 16.0 / 9.0;
+        corners
+            .iter()
+            .map(|corner| {
+                let point = pose.transform_point(*corner);
+                let depth = -point.z;
+                assert!(depth > 0.0, "{corner:?} landed behind the camera");
+                // Outside by whichever edge it clears first: the frustum is symmetric, so one
+                // half-angle tangent describes both, and the horizontal one is the aspect
+                // ratio wider.
+                let tangent = (-point.y / depth).max(point.x.abs() / (ASPECT * depth));
+                2.0 * tangent.atan().to_degrees()
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Every pose one animation reaches, as the transform the renderer would use.
+    fn animation_poses(
+        shape: Option<SwingShape>,
+        held: Option<ItemShape>,
+        bump: bool,
+        mining: bool,
+    ) -> Vec<Transform> {
+        let mut poses = Vec::new();
+        let bumps = if bump { 0..=16u8 } else { 0..=0u8 };
+        for step in 0..=32u8 {
+            for frame in bumps.clone() {
+                let animation = HandAnimation {
+                    attack: shape.map(|shape| Swing {
+                        shape,
+                        elapsed: ATTACK_SWING_TIME.mul_f32(f32::from(step) / 32.0),
+                    }),
+                    bump_elapsed: bump.then(|| PLACE_BUMP_TIME.mul_f32(f32::from(frame) / 16.0)),
+                    // One full punch: the loop repeats, so a whole cycle is every pose it has.
+                    mine_elapsed: if mining {
+                        Duration::from_secs_f32(f32::from(step) / 32.0 / MINE_PUNCHES_PER_SECOND)
+                    } else {
+                        Duration::ZERO
+                    },
+                    ..Default::default()
+                };
+                poses.push(presented_transform(&animation, held));
+            }
+        }
+        poses
+    }
+
+    /// **The forearm is exactly as long as the camera's near plane permits, and the bound is
+    /// re-derived here rather than trusted.**
+    ///
+    /// #389 asked for an arm and the near plane is what decides its length: the composition
+    /// rotates about its own origin, so everything below that origin swings toward the eye
+    /// during an overhead cut, and the placement bump has already carried the model forward
+    /// by then. This reads `near` off the real projection — the same source
+    /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] reads — and
+    /// re-derives the permitted reach from the constants the pose is built from, so a change
+    /// to the swing, to the bump or to the base placement fails here with the new bound
+    /// printed instead of failing as a hand that vanishes when you swing it.
+    #[test]
+    fn the_forearm_is_as_long_as_the_near_plane_permits() {
+        let mut app = app();
+        app.update();
+        let parent = held(&mut app).2;
+        let Projection::Perspective(projection) = app
+            .world()
+            .get::<Projection>(parent)
+            .expect("the world camera has a projection")
+        else {
+            panic!("the world camera is perspective");
+        };
+        let near = projection.near;
+
+        // The tightest pose the view model reaches: a full overhead cut with the placement
+        // bump at its peak. Both terms carry the model toward the eye.
+        let pitch = REST_PITCH_RADIANS - OVERHEAD_PITCH_RADIANS;
+        let roll = REST_ROLL_RADIANS - 0.18;
+        // **[`BLADE_NEAR_PLANE_CLEARANCE`] is part of the bound**, and it is not an
+        // optimism. An overhead cut is only ever drawn with a sword in hand — `combat.rs`
+        // routes the left button on the item id and the three arcs belong to the blades —
+        // so the pose that reaches nearest the camera is always the one this offset has
+        // already pushed back. It is the same pairing
+        // [`every_held_arrangement_clears_the_near_plane_through_every_swing`] sweeps, which
+        // is the test that would catch it if the routing ever widened.
+        let depth = BASE_TRANSLATION.z + PLACE_BUMP_DISTANCE - BLADE_NEAR_PLANE_CLEARANCE;
+        // How much of a point's own `-Y` that pose turns into camera-space `+Z`.
+        let toward_camera = -pitch.sin() * roll.cos();
+        // The limb's own half-section spends part of the headroom before its length does.
+        let section = pitch.sin() * roll.sin() * (HAND_SIZE.x * FOREARM_WIDTH / 2.0)
+            + pitch.cos() * (PALM_CENTRE_Z + PALM_DEPTH / 2.0);
+        let permitted = (-near - depth - section) / toward_camera;
+
+        assert!(
+            ARM_REACH <= permitted,
+            "the forearm reaches {ARM_REACH} below the origin and the near plane at {near} \
+             permits {permitted}"
+        );
+        // And it is not left needlessly short: an arm well inside the bound would be a
+        // shorter arm than the frame can be filled with, for no reason anybody wrote down.
+        assert!(
+            ARM_REACH > permitted * 0.9,
+            "the forearm reaches {ARM_REACH} where {permitted} was available, so it is short \
+             of the frame for no stated reason"
+        );
+    }
+
+    /// **The forearm joins the fist to the bottom of the frame with nothing showing through.**
+    ///
+    /// This is the defect #389 was filed about, measured the way a player meets it: a column
+    /// dropped from inside the palm has to stay on skin all the way off the bottom edge. It
+    /// walks the *real triangles* of the mesh the renderer draws, through the rest pose the
+    /// renderer uses, so a limb that merely exists in the buffers but does not line up under
+    /// the hand fails here.
+    ///
+    /// **The columns span the wrist rather than the fist**, deliberately. The wrist is
+    /// narrower than the fist — [`WRIST_WIDTH`] says why, and it is the only thing making the
+    /// composition read as a hand on an arm rather than as one flat rectangle — so the fist
+    /// overhangs it and world is visible past that overhang. That is a hand's own outline,
+    /// not a break in the limb. What must be continuous is the limb, and this is the band the
+    /// limb occupies.
+    #[test]
+    fn the_forearm_joins_the_fist_to_the_bottom_edge_with_no_gap() {
+        const ASPECT: f32 = 16.0 / 9.0;
+        const COLUMNS: usize = 33;
+        const STEP: f32 = 0.0005;
+
+        let field_of_view = crate::settings::Settings::default().field_of_view();
+        let half_height = (field_of_view.to_radians() / 2.0).tan();
+        let rest = presented_transform(&HandAnimation::default(), None);
+        let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
+        let triangles = projected_triangles(&mesh, &rest);
+
+        let project = |point: Vec3| {
+            let point = rest.transform_point(point);
+            Vec2::new(point.x / -point.z, point.y / -point.z)
+        };
+        // The wrist's own band, inset off its two silhouette edges: a convex outline is a
+        // single point at its extreme abscissa, which no sampled column can be inside.
+        let half_width = HAND_SIZE.x * WRIST_WIDTH / 2.0;
+        let wrist_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
+        let mut edges: Vec<f32> = [-half_width, half_width]
+            .into_iter()
+            .flat_map(|x| {
+                [-PALM_DEPTH / 2.0, PALM_DEPTH / 2.0].map(move |z| {
+                    [wrist_top - WRIST_LENGTH, wrist_top]
+                        .map(|y| project(Vec3::new(x, y, PALM_CENTRE_Z + z)).x)
+                })
+            })
+            .flatten()
+            .collect();
+        edges.sort_by(f32::total_cmp);
+        let (left, right) = (edges[0], edges[edges.len() - 1]);
+        let inset = (right - left) * 0.02;
+
+        // Start inside the palm, which every column of the wrist's band is under.
+        let start = project(Vec3::new(0.0, 0.0, PALM_CENTRE_Z)).y;
+        for column in 0..COLUMNS {
+            let fraction = column as f32 / (COLUMNS - 1) as f32;
+            let x = left + inset + (right - left - 2.0 * inset) * fraction;
+            let mut y = start;
+            while y > -half_height {
+                assert!(
+                    triangles
+                        .iter()
+                        .any(|triangle| contains(*triangle, Vec2::new(x, y))),
+                    "at {field_of_view}° and {ASPECT:.4}:1 the world shows through at ({x}, \
+                     {y}), between the fist and the bottom edge at {}",
+                    -half_height
+                );
+                y -= STEP;
+            }
+        }
+    }
+
+    /// **Where the end of the arm arrives, stated as a number for every animation there is.**
+    ///
+    /// #389 asked for exactly this and was explicit that the answer must not be left to be
+    /// discovered: the near plane caps [`ARM_REACH`], so above some field of view the limb's
+    /// end cap comes into frame, and the only unacceptable outcome is not knowing where.
+    ///
+    /// The two reach-away animations are the ones that arrive first, and the reason is
+    /// arithmetic rather than a defect in the arm. A thrust carries the whole model
+    /// [`THRUST_REACH`] further from the eye and a cast carries it the same distance, which is
+    /// more than half the base depth again — everything shrinks by that factor, the arm
+    /// included, while the frame does not. No arm short enough to survive an overhead cut is
+    /// long enough to stay clipped there, so both are clipped at the narrowest field of view
+    /// the settings offer and show their end above it.
+    #[test]
+    fn the_forearms_end_stays_out_of_frame_through_every_animation() {
+        let cap = forearm_cap();
+        let widest = |shape, held, bump, mining| {
+            animation_poses(shape, held, bump, mining)
+                .iter()
+                .map(|pose| widest_clipped_fov(&cap, pose))
+                .fold(f32::INFINITY, f32::min)
+        };
+
+        let mut narrowest = crate::settings::Settings::default();
+        narrowest.adjust(crate::settings::Knob::FieldOfView, -1_000);
+        let narrowest = narrowest.field_of_view();
+        let default = crate::settings::Settings::default().field_of_view();
+
+        // Measured on the geometry above; each is the widest field of view at which every
+        // corner of the end cap is still outside a 16:9 frame.
+        for (name, measured, floor) in [
+            ("at rest", widest(None, None, false, false), 60.0),
+            (
+                "through a placement bump",
+                widest(None, None, true, false),
+                60.0,
+            ),
+            (
+                "through a mining punch",
+                widest(None, None, false, true),
+                52.0,
+            ),
+            (
+                "through an overhead cut",
+                widest(
+                    Some(SwingShape::Overhead),
+                    Some(ItemShape::Blade),
+                    true,
+                    false,
+                ),
+                56.0,
+            ),
+            (
+                "through a lateral slash",
+                widest(
+                    Some(SwingShape::Lateral),
+                    Some(ItemShape::Blade),
+                    true,
+                    false,
+                ),
+                52.0,
+            ),
+            (
+                "through a bow draw",
+                widest(Some(SwingShape::Draw), Some(ItemShape::Bow), true, false),
+                60.0,
+            ),
+            (
+                "through a thrust",
+                widest(
+                    Some(SwingShape::Thrust),
+                    Some(ItemShape::Blade),
+                    true,
+                    false,
+                ),
+                narrowest,
+            ),
+            (
+                "through a sceptre cast",
+                widest(
+                    Some(SwingShape::Cast),
+                    Some(ItemShape::Sceptre),
+                    true,
+                    false,
+                ),
+                narrowest,
+            ),
+        ] {
+            assert!(
+                measured >= floor,
+                "the forearm's end shows {name} above {measured:.1}°, and {floor:.1}° is the \
+                 floor this change was accepted against"
+            );
+        }
+
+        // The two statements the acceptance criterion turns on, kept where they cannot drift
+        // apart from the sweep above: the resting arm is clipped at the default field of view
+        // with room to spare, and the reach-away arcs are clipped only at the narrowest one.
+        assert!(widest(None, None, true, false) > default);
+        assert!(
+            widest(
+                Some(SwingShape::Thrust),
+                Some(ItemShape::Blade),
+                true,
+                false
+            ) < default,
+            "a thrust no longer shows the arm's end at the default field of view, so this \
+             test is describing geometry that has moved"
+        );
+    }
+
+    /// **The off-hand shield hand gets the same arm, and the shield's own roll mirrors it.**
+    ///
+    /// `spawn_view_model` builds that entity from the same [`held_mesh`], so an arm added
+    /// there arrives on the left hand whether anybody decided it should or not — which is why
+    /// #389 asked for the decision to be made rather than discovered. It is kept: the left
+    /// hand needs a limb for the same reason the right one does, and the entity's own
+    /// `Rz(-0.48)` is larger than anything the arm carries, so the limb leans *outboard for a
+    /// left hand* — down and to the left — instead of being a right arm mirrored the wrong
+    /// way. That is measured here rather than assumed, because it is true by arithmetic on two
+    /// numbers that live in different functions.
+    #[test]
+    fn the_off_hand_shield_carries_a_left_arm_of_its_own() {
+        let mut app = app();
+        app.update();
+        let (_, shield) = off_hand_shield(&mut app);
+
+        let wrist = shield.transform_point(Vec3::new(0.0, -HAND_SIZE.y / 2.0, PALM_CENTRE_Z));
+        let end = shield.transform_point(Vec3::new(0.0, -ARM_REACH, PALM_CENTRE_Z));
+        assert!(
+            end.x < wrist.x,
+            "the shield hand's arm runs from x {} to x {}, which is inboard rather than out",
+            wrist.x,
+            end.x
+        );
+
+        let cap = forearm_cap();
+        for corner in cap {
+            let point = shield.transform_point(corner);
+            assert!(
+                -point.z > 0.1,
+                "the shield hand's arm carries {corner:?} to z {} against the near plane",
+                point.z
+            );
+        }
+        let default = crate::settings::Settings::default().field_of_view();
+        let widest = widest_clipped_fov(&cap, &shield);
+        assert!(
+            widest > default,
+            "the shield hand's arm shows its end above {widest:.1}°, inside the default \
+             {default}° field of view"
+        );
     }
 
     /// The cause of #240 was an exclusive mesh match: five item shapes replaced the fist.
