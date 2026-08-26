@@ -240,6 +240,9 @@ pub(super) fn vital_bar_track() -> Node {
         flex_shrink: 0.0,
         border: UiRect::all(Val::Px(BAR_BORDER)),
         border_radius: BorderRadius::all(Val::Px(BAR_CORNER_RADIUS)),
+        // The label is positioned beyond the track's right edge. Keep overflow
+        // visible explicitly so the shared track never clips that child.
+        overflow: Overflow::visible(),
         ..default()
     }
 }
@@ -1008,6 +1011,10 @@ mod tests {
         let experience_track = node::<ExperienceTrack>(&mut app);
         assert_eq!(health_track, hunger_track);
         assert_eq!(health_track, experience_track);
+        assert!(
+            health_track.overflow.is_visible(),
+            "the track must not clip its absolutely positioned label"
+        );
 
         let health_label = node::<HealthLabel>(&mut app);
         let hunger_label = node::<HungerLabel>(&mut app);
