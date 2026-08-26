@@ -82,11 +82,25 @@ pub struct Ingredient {
     pub count: u16,
 }
 
+/// The presentation shelf a recipe appears on in the crafting screen.
+///
+/// This is not a capability or a server rule: changing it only moves an existing row
+/// between client-side filters. The recipe id, ingredients, product and station remain
+/// the display mirror of the authoritative table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecipeCategory {
+    Survival,
+    Tools,
+    Armour,
+}
+
 /// One row of the crafting panel: what it costs, what it yields, where it can be made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Recipe {
     /// The identity, and the only field that ever reaches the server.
     pub id: RecipeId,
+    /// Which client-side shelf presents this row.
+    pub category: RecipeCategory,
     pub ingredients: &'static [Ingredient],
     pub product: Ingredient,
     /// The structure a player must be standing near, when the recipe needs one.
@@ -130,6 +144,7 @@ impl Recipe {
 pub const RECIPES: [Recipe; 16] = [
     Recipe {
         id: RecipeId::Forge,
+        category: RecipeCategory::Survival,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_STONE,
@@ -148,6 +163,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::IronSword,
+        category: RecipeCategory::Tools,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_RAW_IRON,
@@ -170,6 +186,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::SharpeningStone,
+        category: RecipeCategory::Tools,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_STONE,
@@ -188,6 +205,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::Tent,
+        category: RecipeCategory::Survival,
         ingredients: &[Ingredient {
             item_id: ITEM_LOG,
             count: 8,
@@ -203,6 +221,7 @@ pub const RECIPES: [Recipe; 16] = [
     // anything, and the night it is worth most is the night nobody has a forge.
     Recipe {
         id: RecipeId::Campfire,
+        category: RecipeCategory::Survival,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_LOG,
@@ -224,6 +243,7 @@ pub const RECIPES: [Recipe; 16] = [
     // having to walk home would be pointless if making it meant walking home.
     Recipe {
         id: RecipeId::LeatherPatch,
+        category: RecipeCategory::Survival,
         ingredients: &[Ingredient {
             item_id: ITEM_VARGR_PELT,
             count: 2,
@@ -240,6 +260,7 @@ pub const RECIPES: [Recipe; 16] = [
     // things in.
     Recipe {
         id: RecipeId::Shovel,
+        category: RecipeCategory::Tools,
         ingredients: TOOL_COST,
         product: Ingredient {
             item_id: ITEM_SHOVEL,
@@ -249,6 +270,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::Pickaxe,
+        category: RecipeCategory::Tools,
         ingredients: TOOL_COST,
         product: Ingredient {
             item_id: ITEM_PICKAXE,
@@ -258,6 +280,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::Axe,
+        category: RecipeCategory::Tools,
         ingredients: TOOL_COST,
         product: Ingredient {
             item_id: ITEM_AXE,
@@ -267,6 +290,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::CookedMeat,
+        category: RecipeCategory::Survival,
         ingredients: &[Ingredient {
             item_id: ITEM_RAW_MEAT,
             count: 1,
@@ -279,6 +303,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::LeatherCap,
+        category: RecipeCategory::Armour,
         ingredients: &[Ingredient {
             item_id: ITEM_VARGR_PELT,
             count: 3,
@@ -291,6 +316,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::LeatherJerkin,
+        category: RecipeCategory::Armour,
         ingredients: &[Ingredient {
             item_id: ITEM_VARGR_PELT,
             count: 5,
@@ -303,6 +329,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::LeatherLeggings,
+        category: RecipeCategory::Armour,
         ingredients: &[Ingredient {
             item_id: ITEM_VARGR_PELT,
             count: 4,
@@ -315,6 +342,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::IronHelm,
+        category: RecipeCategory::Armour,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_RAW_IRON,
@@ -333,6 +361,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::IronCuirass,
+        category: RecipeCategory::Armour,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_RAW_IRON,
@@ -351,6 +380,7 @@ pub const RECIPES: [Recipe; 16] = [
     },
     Recipe {
         id: RecipeId::IronGreaves,
+        category: RecipeCategory::Armour,
         ingredients: &[
             Ingredient {
                 item_id: ITEM_RAW_IRON,

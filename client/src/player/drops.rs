@@ -6,17 +6,17 @@
 //! module — the id disappears from the next snapshot.
 
 use std::collections::HashSet;
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::InputMode;
 use super::hands::sword_mesh;
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::merge_all;
+use super::{InputMode, bundle_strap_linear_rgba, rolled_bundle_parts};
 use crate::net::Session;
 #[cfg(test)]
 use crate::world::palette;
@@ -46,16 +46,6 @@ const BLADE_DROP_LENGTH: f32 = 1.25;
 /// reaches while [`animate`] tumbles it.
 const BUNDLE_DROP_SIZE: Vec3 = Vec3::new(DROP_EDGE * 1.15, DROP_EDGE * 0.62, DROP_EDGE * 0.72);
 
-/// The canvas roll inside [`BUNDLE_DROP_SIZE`].
-const BUNDLE_ROLL_SIZE: Vec3 = Vec3::new(BUNDLE_DROP_SIZE.x, DROP_EDGE * 0.52, DROP_EDGE * 0.62);
-
-/// One raised collar around the roll.
-const BUNDLE_COLLAR_SIZE: Vec3 =
-    Vec3::new(DROP_EDGE * 0.12, BUNDLE_DROP_SIZE.y, BUNDLE_DROP_SIZE.z);
-
-/// How far each collar sits from the centre of the packed roll.
-const BUNDLE_COLLAR_OFFSET: f32 = DROP_EDGE * 0.31;
-
 /// One full turn every eight seconds: visible, but not a propeller.
 const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 
@@ -73,6 +63,8 @@ pub(super) struct DropVisuals {
     /// shape — the reason a hundred dropped stones and one carried stone still cost one
     /// mesh rather than a hundred and one.
     shapes: Vec<(ItemShape, Handle<Mesh>)>,
+    /// The second shared mesh every bundle draws over its item-coloured roll.
+    bundle_straps: Handle<Mesh>,
     materials: Vec<([f32; 4], Handle<StandardMaterial>)>,
 }
 
@@ -108,7 +100,14 @@ impl DropVisuals {
         // an item id, and handing it to a block-id lookup is exactly the bug
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
-        let colour = item_linear_rgba(item_id);
+        self.material_for_colour(item_linear_rgba(item_id), materials)
+    }
+
+    fn material_for_colour(
+        &mut self,
+        colour: [f32; 4],
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
         if let Some((_, material)) = self
             .materials
             .iter()
@@ -142,6 +141,8 @@ pub(super) struct DroppedItem {
 #[derive(Component)]
 pub(super) struct DropVisual {
     owner: Entity,
+    /// Only the roll/body follows a changed item id; bundle straps keep their brown.
+    item_coloured: bool,
 }
 
 #[derive(SystemParam)]
@@ -151,12 +152,21 @@ pub(super) struct DropAssets<'w> {
 }
 
 pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+    let (_, bundle_straps) = rolled_bundle_parts(BUNDLE_DROP_SIZE);
     commands.insert_resource(DropVisuals {
         // Built from `ItemShape::ALL`, so a fifth shape gets a drop mesh by existing.
         shapes: ItemShape::ALL
             .into_iter()
-            .map(|shape| (shape, meshes.add(drop_mesh(shape))))
+            .map(|shape| {
+                let mesh = if shape == ItemShape::Bundle {
+                    rolled_bundle_parts(BUNDLE_DROP_SIZE).0
+                } else {
+                    drop_mesh(shape)
+                };
+                (shape, meshes.add(mesh))
+            })
             .collect(),
+        bundle_straps: meshes.add(bundle_straps),
         materials: Vec::new(),
     });
 }
@@ -232,23 +242,13 @@ fn armour_mesh() -> Mesh {
 
 /// One rolled, strapped load for every carried structure.
 ///
-/// The three primitive parts are merged before they become an asset. A drop — and the
-/// local body-held mirror that shares this world-space asset — therefore remains one mesh,
-/// one material, one entity and one transform under the existing spin and bob.
+/// The complete geometry is merged for shape tests; the running renderer keeps the roll
+/// and straps as two shared meshes so the first can take the item's colour and the second
+/// can remain brown. Both visual children receive the same cosmetic transform.
 fn bundle_mesh() -> Mesh {
-    let roll = |size: Vec3| {
-        // Bevy authors a cylinder along Y. Turn it onto X and scale its unit diameter and
-        // height independently so a round load can still honour the old rectangular bound.
-        Mesh::from(Cylinder::new(0.5, 1.0))
-            .rotated_by(Quat::from_rotation_z(FRAC_PI_2))
-            .scaled_by(size)
-    };
-
-    let mut bundle = roll(BUNDLE_ROLL_SIZE);
-    let collars = [-BUNDLE_COLLAR_OFFSET, BUNDLE_COLLAR_OFFSET]
-        .map(|x| roll(BUNDLE_COLLAR_SIZE).translated_by(Vec3::X * x));
-    merge_all(&mut bundle, collars, "dropped packed-gear bundle");
-    bundle
+    let (mut roll, straps) = rolled_bundle_parts(BUNDLE_DROP_SIZE);
+    merge_all(&mut roll, [straps], "dropped packed-gear bundle");
+    roll
 }
 
 /// Spawns, places, and despawns drops from the latest authoritative snapshot.
@@ -297,7 +297,7 @@ pub(super) fn apply_snapshots(
     for (owner, item_id) in changed_items {
         let material = visuals.material_for(item_id, &mut assets.materials);
         for (visual, mut current) in &mut drop_visuals {
-            if visual.owner == owner {
+            if visual.owner == owner && visual.item_coloured {
                 current.0 = material.clone();
             }
         }
@@ -340,11 +340,26 @@ fn spawn_drop(
         .id();
     commands.entity(owner).with_children(|parent| {
         parent.spawn((
-            DropVisual { owner },
+            DropVisual {
+                owner,
+                item_coloured: true,
+            },
             Mesh3d(mesh),
             MeshMaterial3d(material),
             Transform::default(),
         ));
+        if item_shape(state.item_id) == ItemShape::Bundle {
+            let strap_material = visuals.material_for_colour(bundle_strap_linear_rgba(), materials);
+            parent.spawn((
+                DropVisual {
+                    owner,
+                    item_coloured: false,
+                },
+                Mesh3d(visuals.bundle_straps.clone()),
+                MeshMaterial3d(strap_material),
+                Transform::default(),
+            ));
+        }
     });
 }
 
@@ -651,13 +666,9 @@ mod tests {
         }
     }
 
-    /// Tent, forge and campfire remain one visual kind, distinguished by palette colour.
-    ///
-    /// Three authoritative drops produce three visual children, each with exactly the one
-    /// shared mesh and one material component that the existing spin turns as a unit. The
-    /// material handles differ because `player/items.rs` names three distinct colours.
+    /// Tent, forge and campfire share the roll and straps, while keeping their own colour.
     #[test]
-    fn bundled_structures_share_one_mesh_and_are_told_apart_by_colour() {
+    fn bundled_structures_share_roll_and_brown_straps() {
         let mut app = headless_player();
         deliver(
             &mut app,
@@ -679,26 +690,71 @@ mod tests {
         }
 
         let world = app.world_mut();
-        let mut every_visual = world.query_filtered::<Entity, With<DropVisual>>();
-        assert_eq!(every_visual.iter(world).count(), 3);
-
-        let mut drawn = world
-            .query_filtered::<(&Mesh3d, &MeshMaterial3d<StandardMaterial>), With<DropVisual>>();
+        let mut drawn = world.query::<(&DropVisual, &Mesh3d, &MeshMaterial3d<StandardMaterial>)>();
         let presentations: Vec<_> = drawn
             .iter(world)
-            .map(|(mesh, material)| (mesh.0.clone(), material.0.clone()))
+            .map(|(visual, mesh, material)| {
+                (
+                    visual.owner,
+                    visual.item_coloured,
+                    mesh.0.clone(),
+                    material.0.clone(),
+                )
+            })
             .collect();
-        assert_eq!(presentations.len(), 3);
-        assert!(
-            presentations
-                .iter()
-                .all(|(mesh, _)| *mesh == presentations[0].0),
-            "the three Bundle items did not share one world-space mesh"
+        assert_eq!(
+            presentations.len(),
+            6,
+            "each bundle is a roll and its straps"
         );
-        for (index, (_, material)) in presentations.iter().enumerate() {
-            for (_, other) in &presentations[index + 1..] {
+
+        let rolls: Vec<_> = presentations
+            .iter()
+            .filter(|(_, item_coloured, _, _)| *item_coloured)
+            .collect();
+        let straps: Vec<_> = presentations
+            .iter()
+            .filter(|(_, item_coloured, _, _)| !*item_coloured)
+            .collect();
+        assert_eq!(rolls.len(), 3);
+        assert_eq!(straps.len(), 3);
+        assert!(
+            rolls.iter().all(|(_, _, mesh, _)| *mesh == rolls[0].2),
+            "the three bundles did not share one roll mesh"
+        );
+        assert!(
+            straps.iter().all(|(_, _, mesh, _)| *mesh == straps[0].2),
+            "the three bundles did not share one strap mesh"
+        );
+        for (index, (_, _, _, material)) in rolls.iter().enumerate() {
+            for (_, _, _, other) in &rolls[index + 1..] {
                 assert_ne!(material, other, "two Bundle colours became one material");
             }
+        }
+        assert!(
+            straps
+                .iter()
+                .all(|(_, _, _, material)| *material == straps[0].3),
+            "the straps do not share one brown material"
+        );
+
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let expected = bundle_strap_linear_rgba();
+        let [r, g, b, a] = expected;
+        assert_eq!(
+            materials
+                .get(&straps[0].3)
+                .expect("the strap material exists")
+                .base_color,
+            Color::linear_rgba(r, g, b, a)
+        );
+        for owner in rolls.iter().map(|(owner, _, _, _)| *owner) {
+            assert!(
+                straps
+                    .iter()
+                    .any(|(strap_owner, _, _, _)| *strap_owner == owner),
+                "a bundle roll has no straps"
+            );
         }
     }
 
