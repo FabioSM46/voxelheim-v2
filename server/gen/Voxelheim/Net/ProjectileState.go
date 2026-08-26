@@ -14,6 +14,9 @@ import (
 // / Decoder invariants:
 // /   - every component of `pos` and `vel` is finite
 // /   - `kind` is a known non-zero member
+// /
+// / A consumer may leave the append-only projectile vector unread. Once it reads these
+// / values for presentation, it enforces both invariants before using any component.
 type ProjectileState struct {
 	_tab flatbuffers.Struct
 }

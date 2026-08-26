@@ -418,6 +418,9 @@ impl<'a> EntitySnapshot<'a> {
     ///   - no id appears twice
     ///   - the recipient's own entity id is present exactly when `self_vitals.blocking`
     ///     is true; a frame where the two statements disagree is refused
+    ///
+    /// A consumer may leave both append-only blocking fields unread. Once it reads either
+    /// for presentation, it validates this complete set and the cross-field agreement first.
     #[inline]
     pub fn blocking_players(&self) -> Option<::flatbuffers::Vector<'a, u64>> {
         // Safety:

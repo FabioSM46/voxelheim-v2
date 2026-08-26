@@ -118,9 +118,10 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 ///
 /// **V22 adds raised-shield intent and combat-role presentation state.** `BlockRequest`
 /// travels client -> server, so a V21 server would close the session on that unknown union
-/// member after a clean handshake. `EntitySnapshot.blocking_players` also has a required
-/// consistency invariant with `self_vitals.blocking`; a V21 server never sends the sparse
-/// vector or the matching vital, so a V22 client could not accept its authoritative answer.
+/// member after a clean handshake; that request is the break and the reason for the bump.
+/// The projectile, target, off-hand and paired blocking fields are append-only additions:
+/// older peers see their absent defaults, so those fields do not independently owe a bump.
+/// They share V22 so every dependent consumer builds from one settled contract.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);

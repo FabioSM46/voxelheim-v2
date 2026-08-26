@@ -181,7 +181,8 @@ impl<'a> ServerWelcome<'a> {
     }
     /// Number of slot pairs in every `InventoryState.stacks` vector this session
     /// receives. The layout is the hotbar first, the pack in the middle, and equipment
-    /// last. The server currently announces 40: 9 hotbar, 27 pack and 4 equipment.
+    /// last. The V22 equipment layout reserves 40: 9 hotbar, 27 pack and 4 equipment;
+    /// the consumer update that adopts the fourth slot is staged separately.
     #[inline]
     pub fn inventory_slots(&self) -> u8 {
         // Safety:
@@ -307,9 +308,10 @@ impl<'a> ServerWelcome<'a> {
         }
     }
     /// Trailing inventory slots reserved for worn equipment. These slots are part of
-    /// `inventory_slots`, and the server currently announces four: head, chest, legs and
-    /// off-hand, in that slot order at the inventory tail. The client uses this count to
-    /// find where the pack ends; it never decides which item is legal in a worn slot.
+    /// `inventory_slots`. The V22 equipment layout is four: head, chest, legs and off-hand,
+    /// in that slot order at the inventory tail; the consumer update that adopts the fourth
+    /// slot is staged separately. The client uses this count to find where the pack ends;
+    /// it never decides which item is legal in a worn slot.
     #[inline]
     pub fn equipment_slots(&self) -> u8 {
         // Safety:

@@ -585,6 +585,9 @@ func (rcv *EntitySnapshot) ProjectilesLength() int {
 // /   - no id appears twice
 // /   - the recipient's own entity id is present exactly when `self_vitals.blocking`
 // /     is true; a frame where the two statements disagree is refused
+// /
+// / A consumer may leave both append-only blocking fields unread. Once it reads either
+// / for presentation, it validates this complete set and the cross-field agreement first.
 func (rcv *EntitySnapshot) BlockingPlayers(j int) uint64 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
@@ -611,6 +614,9 @@ func (rcv *EntitySnapshot) BlockingPlayersLength() int {
 // /   - no id appears twice
 // /   - the recipient's own entity id is present exactly when `self_vitals.blocking`
 // /     is true; a frame where the two statements disagree is refused
+// /
+// / A consumer may leave both append-only blocking fields unread. Once it reads either
+// / for presentation, it validates this complete set and the cross-field agreement first.
 func (rcv *EntitySnapshot) MutateBlockingPlayers(j int, n uint64) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
 	if o != 0 {
