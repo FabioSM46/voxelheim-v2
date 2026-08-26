@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::hands::sword_mesh;
+use super::hands::{sword_grip_centre, sword_mesh};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::merge_all;
@@ -38,6 +38,14 @@ const BOB_RADIANS_PER_SECOND: f32 = TAU / 2.0;
 /// ground reaches or how it tumbles moves — [`sword_mesh`] fills the same length with a
 /// weapon.
 const BLADE_DROP_LENGTH: f32 = 1.25;
+
+/// The point the body-held attachment closes its fist around.
+///
+/// The body and ground share this world-scale mesh. The attachment asks the mesh recipe for its
+/// grip rather than copying the furniture proportions into a second renderer.
+pub(super) fn blade_grip_centre() -> Vec3 {
+    sword_grip_centre(DROP_EDGE * BLADE_DROP_LENGTH)
+}
 
 /// The volume the packed-gear silhouette is allowed to occupy.
 ///
