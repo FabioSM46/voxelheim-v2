@@ -428,13 +428,30 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(players, name), old, 0o600); err != nil {
 		t.Fatalf("writing the v7 record: %v", err)
 	}
+	currentID := CharacterID(8)
+	current := Record{
+		Character:  currentID,
+		Owner:      testID(8),
+		Name:       "Astrid",
+		Appearance: testAppearance(),
+		LastSeen:   time.Unix(1_700_000_001, 0).UTC(),
+		Health:     88,
+		Hunger:     55,
+		Experience: 901,
+	}
+	current.Slots[protocol.InventorySlots-1] = protocol.InventoryStack{ItemID: 29, Count: 1, Durability: 60, MaxDurability: 100}
+	currentBytes := encodeRecord(current)
+	currentName := currentID.String() + recordFileExt
+	if err := os.WriteFile(filepath.Join(players, currentName), currentBytes, 0o600); err != nil {
+		t.Fatalf("writing the current record beside v7: %v", err)
+	}
 
 	store, err := OpenStore(worldDir)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	if store.Count() != 1 {
-		t.Fatalf("the migrated store holds %d characters, want 1", store.Count())
+	if store.Count() != 2 {
+		t.Fatalf("the migrated mixed-version store holds %d characters, want 2", store.Count())
 	}
 	got, found, err := store.Load(id)
 	if err != nil || !found {
@@ -445,6 +462,13 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	}
 	if got.Slots[protocol.InventorySlots-1] != (protocol.InventoryStack{}) {
 		t.Errorf("the inserted off-hand tail is %+v, want empty", got.Slots[protocol.InventorySlots-1])
+	}
+	gotCurrent, found, err := store.Load(currentID)
+	if err != nil || !found {
+		t.Fatalf("loading the preserved current character: found %v, err %v", found, err)
+	}
+	if gotCurrent.Slots[protocol.InventorySlots-1] != current.Slots[protocol.InventorySlots-1] {
+		t.Errorf("the current off-hand is %+v, want %+v", gotCurrent.Slots[protocol.InventorySlots-1], current.Slots[protocol.InventorySlots-1])
 	}
 
 	migrated, err := os.ReadFile(filepath.Join(players, name))
@@ -457,6 +481,13 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	if len(migrated) != len(old)+slotSize {
 		t.Errorf("the migrated record is %d bytes, want v7's %d plus one slot", len(migrated), len(old))
 	}
+	preservedCurrent, err := os.ReadFile(filepath.Join(players, currentName))
+	if err != nil {
+		t.Fatalf("reading the preserved current record: %v", err)
+	}
+	if !bytes.Equal(preservedCurrent, currentBytes) {
+		t.Error("the current record changed while it was copied into the replacement")
+	}
 	aside := store.SetAside()
 	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+supersededSuffix+"8.") {
 		t.Errorf("the v7 directory was kept as %q, want players.pre-v8.<timestamp>", base)
@@ -467,6 +498,13 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	}
 	if !bytes.Equal(kept, old) {
 		t.Error("the v7 record changed while it was kept aside")
+	}
+	keptCurrent, err := os.ReadFile(filepath.Join(aside, currentName))
+	if err != nil {
+		t.Fatalf("reading the original current record kept aside: %v", err)
+	}
+	if !bytes.Equal(keptCurrent, currentBytes) {
+		t.Error("the original current record changed while it was kept aside")
 	}
 }
 

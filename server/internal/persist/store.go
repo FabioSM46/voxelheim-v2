@@ -420,7 +420,9 @@ func (s *Store) Unreadable() []string {
 // its character looks like; a v4 record says nothing about hunger; a v5 record says
 // nothing about experience; a v6 record has no worn-equipment slots — so there is no
 // migration for those formats. V7 is the one lossless exception: its 39 positions map
-// directly to this format's first 39 and the new off-hand tail is empty.
+// directly to this format's first 39 and the new off-hand tail is empty. If current
+// records share the directory with v7 records, they are copied byte-for-byte into the
+// replacement before the original directory is kept aside.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
 // a fixed name would be destroyed by the second run that found something to move, which
@@ -447,14 +449,17 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 		record Record
 	}
 	var migrations []migration
+	var current []string
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != recordFileExt {
 			continue
 		}
 		version, ours := recordVersion(filepath.Join(s.dir, entry.Name()))
 		switch {
-		case !ours || version == StoreVersion:
+		case !ours:
 			continue
+		case version == StoreVersion:
+			current = append(current, entry.Name())
 		case version > StoreVersion:
 			return false, fmt.Errorf("%w: %s was written by a build that speaks format version %d; this build speaks %d and will not move a newer world aside",
 				world.ErrCorruptStore, s.dir, version, StoreVersion)
@@ -493,6 +498,24 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 			_ = os.RemoveAll(migratedDir)
 		}
 	}()
+	for _, name := range current {
+		path := filepath.Join(s.dir, name)
+		info, infoErr := os.Stat(path)
+		if infoErr != nil {
+			return false, fmt.Errorf("persist: inspecting current record %s during migration: %w", name, infoErr)
+		}
+		if info.Size() > int64(maxRecordSize) {
+			return false, fmt.Errorf("%w: current record %s is %d bytes, maximum is %d; refusing to omit it from migration",
+				world.ErrCorruptStore, name, info.Size(), maxRecordSize)
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return false, fmt.Errorf("persist: reading current record %s during migration: %w", name, readErr)
+		}
+		if err := world.WriteAtomic(filepath.Join(migratedDir, name), data); err != nil {
+			return false, fmt.Errorf("persist: preserving current record %s during migration: %w", name, err)
+		}
+	}
 	for _, migration := range migrations {
 		if err := world.WriteAtomic(filepath.Join(migratedDir, migration.name), encodeRecord(migration.record)); err != nil {
 			return false, fmt.Errorf("persist: migrating %s to format %d: %w", migration.name, StoreVersion, err)
