@@ -79,6 +79,7 @@ pub(crate) const ITEM_WOODEN_SHIELD: u16 = 27;
 /// The launcher and ammunition appended after the wooden shield.
 pub(super) const ITEM_BOW: u16 = 28;
 pub(super) const ITEM_ARROW: u16 = 29;
+pub(super) const ITEM_WOODEN_SCEPTRE: u16 = 30;
 
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +147,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 19] = [
+pub const RECIPES: [Recipe; 20] = [
     Recipe {
         id: RecipeId::Forge,
         category: RecipeCategory::Survival,
@@ -459,6 +460,29 @@ pub const RECIPES: [Recipe; 19] = [
         },
         station: None,
     },
+    Recipe {
+        id: RecipeId::WoodenSceptre,
+        category: RecipeCategory::Tools,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 3,
+            },
+            Ingredient {
+                item_id: ITEM_BONE,
+                count: 2,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_COAL,
+                count: 1,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_WOODEN_SCEPTRE,
+            count: 1,
+        },
+        station: None,
+    },
 ];
 
 /// What each of the three implements costs, spelled once.
@@ -713,6 +737,10 @@ mod tests {
             vec![(ITEM_LOG, 3), (ITEM_VARGR_PELT, 2)]
         );
         assert_eq!(cost(RecipeId::Arrows), vec![(ITEM_LOG, 1), (ITEM_BONE, 1)]);
+        assert_eq!(
+            cost(RecipeId::WoodenSceptre),
+            vec![(ITEM_LOG, 3), (ITEM_BONE, 2), (ITEM_RAW_COAL, 1)]
+        );
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -754,6 +782,7 @@ mod tests {
             ),
             (RecipeId::WoodenShield, ITEM_WOODEN_SHIELD, None),
             (RecipeId::Bow, ITEM_BOW, None),
+            (RecipeId::WoodenSceptre, ITEM_WOODEN_SCEPTRE, None),
         ] {
             let row = recipe(id).expect("every member has a row");
             assert_eq!(

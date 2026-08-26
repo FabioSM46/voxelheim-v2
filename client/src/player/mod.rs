@@ -91,7 +91,7 @@ pub(crate) use items::known_item_ids;
 pub(crate) use items::{ItemShape, item_linear_rgba, item_shape};
 pub use loot::{LootTakeClick, LootWindow};
 pub(crate) use sky::Daylight;
-pub use target::{ApplyMiningFeedback, MiningFeedback};
+pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 
 use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,

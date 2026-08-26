@@ -104,7 +104,7 @@ func TestTheSixArmourPiecesCarryTheirPinnedIDsAndStats(t *testing.T) {
 	}
 }
 
-func TestBowAndArrowCarryTheirPinnedIDsAndLauncherStats(t *testing.T) {
+func TestRangedItemsCarryTheirPinnedIDsAndLauncherStats(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -114,6 +114,7 @@ func TestBowAndArrowCarryTheirPinnedIDsAndLauncherStats(t *testing.T) {
 	}{
 		{ItemBow, 28, itemDefinition{places: world.Air, maxStack: 1, maxDurability: BowMaxDurability, launches: vnet.ProjectileKindArrow, ammunition: ItemArrow}},
 		{ItemArrow, 29, itemDefinition{places: world.Air, maxStack: 32}},
+		{ItemWoodenSceptre, 30, itemDefinition{places: world.Air, maxStack: 1, maxDurability: SceptreMaxDurability, launches: vnet.ProjectileKindEnergyOrb}},
 	} {
 		if tc.item != tc.id {
 			t.Errorf("item id = %d, want appended wire id %d", tc.item, tc.id)

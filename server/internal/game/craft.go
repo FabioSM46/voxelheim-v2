@@ -225,6 +225,10 @@ var recipeTable = map[vnet.RecipeID]recipe{
 	vnet.RecipeIDArrows: {
 		ingredients: []ingredient{{ItemLog, 1}, {ItemBone, 1}}, product: ItemArrow, productCount: 4,
 	},
+	vnet.RecipeIDWoodenSceptre: {
+		ingredients: []ingredient{{ItemLog, 3}, {ItemBone, 2}, {ItemRawCoal, 1}},
+		product:     ItemWoodenSceptre, productCount: 1,
+	},
 }
 
 // craft spends a recipe's ingredients and inserts its product, or changes nothing.

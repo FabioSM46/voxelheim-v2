@@ -415,7 +415,8 @@ const (
 
 	// BowCooldownTicks is derived from this duration per simulation. One second is
 	// deliberately its own cadence rather than an alias of the blade's recovery.
-	BowCooldown = 1 * time.Second
+	BowCooldown     = 1 * time.Second
+	SceptreCooldown = 750 * time.Millisecond
 
 	// --- Projectiles ---------------------------------------------------------
 	//

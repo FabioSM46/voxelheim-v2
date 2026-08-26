@@ -203,7 +203,8 @@ enum RecipeID : ubyte {
 
   // Bow and arrows follow the wooden shield without moving its assigned wire value.
   Bow = 18,
-  Arrows = 19
+  Arrows = 19,
+  WoodenSceptre = 20
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.

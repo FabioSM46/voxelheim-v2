@@ -778,6 +778,87 @@ func TestABowWithoutPackAmmunitionIsRefusedWithoutSpendingAnything(t *testing.T)
 	}
 }
 
+func TestASceptreLaunchesAnOrbWithoutAmmunitionAndCreditsActualHealingThreat(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
+	healer, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	healed, _ := h.join(2, [3]float32{-3.5, 64, 0.5})
+	h.hurt(healed, 20)
+	mobID := h.spawnDraugrAt([3]float32{5.5, 64, 0.5})
+	healer.inventory.mu.Lock()
+	healer.inventory.slots[0] = stackOf(ItemWoodenSceptre, 1)
+	healer.inventory.mu.Unlock()
+	h.aimAt(healer, math.Pi/2, 0)
+
+	h.sim.mu.Lock()
+	h.sim.mobs[mobID].target = healed.entityID
+	beforeThreat := h.sim.mobs[mobID].threat[healer.entityID]
+	beforeExperience := healer.experience
+	h.sim.mu.Unlock()
+
+	reason, err := healer.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	if err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("sceptre attack = (%s, %v), want accepted without ammunition", reason, err)
+	}
+	h.sim.mu.Lock()
+	healer.resolveAttackLocked()
+	if healer.attackCooldown != h.sim.sceptreCooldownTicks {
+		t.Errorf("sceptre cooldown = %d, want %d", healer.attackCooldown, h.sim.sceptreCooldownTicks)
+	}
+	if len(h.sim.projectiles) != 1 {
+		t.Fatalf("projectiles = %d, want one", len(h.sim.projectiles))
+	}
+	for _, projectile := range h.sim.projectiles {
+		if projectile.kind != vnet.ProjectileKindEnergyOrb {
+			t.Errorf("projectile kind = %s, want EnergyOrb", projectile.kind)
+		}
+		if math.Abs(vectorLength(projectile.vel)-OrbSpeed) > 1e-9 {
+			t.Errorf("orb speed = %v, want %v", vectorLength(projectile.vel), OrbSpeed)
+		}
+	}
+	h.sim.mu.Unlock()
+
+	if got := healer.InventoryState().Stacks[0].Durability; got != SceptreMaxDurability-1 {
+		t.Errorf("sceptre durability = %d, want %d", got, SceptreMaxDurability-1)
+	}
+	for range 6 {
+		advanceTestProjectiles(h)
+	}
+	if got := h.vitals(healed).Health; got != PlayerMaxHealth-20+OrbHeal {
+		t.Errorf("healed health = %d, want %d", got, PlayerMaxHealth-20+OrbHeal)
+	}
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	if got := h.sim.mobs[mobID].threat[healer.entityID] - beforeThreat; got != float64(OrbHeal)/2 {
+		t.Errorf("healing threat delta = %v, want %v", got, float64(OrbHeal)/2)
+	}
+	if healer.experience != beforeExperience {
+		t.Errorf("healing awarded experience: %d -> %d", beforeExperience, healer.experience)
+	}
+}
+
+func TestAWornThroughSceptreDoesNothing(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	player.inventory.mu.Lock()
+	player.inventory.slots[0] = stackOf(ItemWoodenSceptre, 1)
+	player.inventory.slots[0].durability = 0
+	player.inventory.mu.Unlock()
+
+	if _, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
+		t.Fatalf("worn sceptre admission: %v", err)
+	}
+	h.step()
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	if player.attackCooldown != 0 || len(h.sim.projectiles) != 0 {
+		t.Errorf("worn sceptre left cooldown=%d projectiles=%d", player.attackCooldown, len(h.sim.projectiles))
+	}
+}
+
 func TestAWornThroughBowAndAnArrowMovedBeforeTheTickSpendNothing(t *testing.T) {
 	t.Parallel()
 
