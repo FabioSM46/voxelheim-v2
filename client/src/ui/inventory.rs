@@ -20,7 +20,7 @@
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
-use bevy::ui::FocusPolicy;
+use bevy::ui::{FocusPolicy, UiSystems};
 use bevy::window::{PrimaryWindow, WindowResized};
 
 use super::icon::DrawnIcon;
@@ -66,14 +66,17 @@ impl Plugin for InventoryUiPlugin {
                     switch_craft_filters,
                     show_filtered_recipes,
                     scroll_crafting,
-                    sync_craft_scrollbar,
                     hover_tooltip,
                     inventory_clicks,
                     craft_clicks,
                 )
                     .chain()
                     .after(ApplyInventory),
-            );
+            )
+            // `ComputedNode` carries this frame's content and viewport sizes only after
+            // layout. Clamping here also covers a resize or filter change with no later
+            // wheel event to repair an offset that became too large.
+            .add_systems(PostUpdate, sync_craft_scrollbar.after(UiSystems::Layout));
     }
 }
 
@@ -1152,7 +1155,12 @@ fn scrolled_offset(
         MouseScrollUnit::Line => -wheel * CRAFT_SCROLL_LINE,
         MouseScrollUnit::Pixel => -wheel,
     };
-    (current + delta).clamp(0.0, (content - visible).max(0.0))
+    bounded_scroll_offset(current + delta, visible, content)
+}
+
+/// Keeps an existing offset inside the bounds reported by the latest UI layout.
+fn bounded_scroll_offset(current: f32, visible: f32, content: f32) -> f32 {
+    current.clamp(0.0, (content - visible).max(0.0))
 }
 
 /// Scrolls the active recipe shelf. The inventory owns the whole pointer while it is open,
@@ -1195,21 +1203,23 @@ fn scrollbar_geometry(scroll: f32, visible: f32, content: f32, rail: f32) -> (f3
 /// Mirrors the current scroll into the visible rail without touching layout when nothing
 /// moved. The bar is passive; wheel input remains the one scrolling gesture.
 fn sync_craft_scrollbar(
-    areas: Query<(&ScrollPosition, &ComputedNode), With<CraftScrollArea>>,
+    mut areas: Query<(&mut ScrollPosition, &ComputedNode), With<CraftScrollArea>>,
     rails: Query<&ComputedNode, With<CraftScrollbar>>,
     mut thumbs: Query<&mut Node, With<CraftScrollbarThumb>>,
 ) {
-    let (Some((position, area)), Some(rail)) = (areas.iter().next(), rails.iter().next()) else {
+    let (Some((mut position, area)), Some(rail)) = (areas.iter_mut().next(), rails.iter().next())
+    else {
         return;
     };
     let area_scale = area.inverse_scale_factor;
     let rail_scale = rail.inverse_scale_factor;
-    let (height, top) = scrollbar_geometry(
-        position.y,
-        area.size().y * area_scale,
-        area.content_size().y * area_scale,
-        rail.size().y * rail_scale,
-    );
+    let visible = area.size().y * area_scale;
+    let content = area.content_size().y * area_scale;
+    let bounded = bounded_scroll_offset(position.y, visible, content);
+    if position.y != bounded {
+        position.y = bounded;
+    }
+    let (height, top) = scrollbar_geometry(bounded, visible, content, rail.size().y * rail_scale);
     for mut thumb in &mut thumbs {
         let next_height = Val::Px(height);
         let next_top = Val::Px(top);
@@ -1623,6 +1633,8 @@ fn craft_clicks(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::super::{COUNT_PLATE, DrawnCell, FILLED_CELL, drawn_cell, icon};
     use super::*;
     use crate::net::{InventoryStack, RecipeId, SessionParams};
@@ -2737,6 +2749,51 @@ mod tests {
         let (thumb, top) = scrollbar_geometry(150.0, 200.0, 500.0, 100.0);
         assert_eq!(thumb, 40.0);
         assert_eq!(top, 30.0);
+    }
+
+    #[test]
+    fn a_layout_change_reclamps_scroll_without_another_wheel_event() {
+        let mut app = app();
+        app.update();
+
+        let (area, rail, thumb) = {
+            let world = app.world_mut();
+            let mut areas = world.query_filtered::<Entity, With<CraftScrollArea>>();
+            let mut rails = world.query_filtered::<Entity, With<CraftScrollbar>>();
+            let mut thumbs = world.query_filtered::<Entity, With<CraftScrollbarThumb>>();
+            (
+                areas.single(world).expect("one crafting scroll area"),
+                rails.single(world).expect("one crafting scrollbar"),
+                thumbs.single(world).expect("one crafting scrollbar thumb"),
+            )
+        };
+        app.world_mut().entity_mut(area).insert((
+            ScrollPosition(Vec2::new(0.0, 250.0)),
+            ComputedNode {
+                size: Vec2::new(600.0, 300.0),
+                content_size: Vec2::new(600.0, 400.0),
+                inverse_scale_factor: 1.0,
+                ..ComputedNode::DEFAULT
+            },
+        ));
+        app.world_mut().entity_mut(rail).insert(ComputedNode {
+            size: Vec2::new(CRAFT_SCROLLBAR_WIDTH, 100.0),
+            inverse_scale_factor: 1.0,
+            ..ComputedNode::DEFAULT
+        });
+
+        app.world_mut()
+            .run_system_once(sync_craft_scrollbar)
+            .expect("the post-layout scrollbar system runs");
+
+        assert_eq!(
+            app.world().get::<ScrollPosition>(area).unwrap().y,
+            100.0,
+            "the offset stayed beyond the shortened content"
+        );
+        let thumb = app.world().get::<Node>(thumb).unwrap();
+        assert_eq!(thumb.height, Val::Px(75.0));
+        assert_eq!(thumb.top, Val::Px(25.0));
     }
 
     #[test]
