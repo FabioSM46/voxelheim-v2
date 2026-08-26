@@ -9,6 +9,10 @@ use super::{BUTTON, button_colour};
 use crate::net::{DisconnectRequest, Session, SignInState};
 use crate::player::InputMode;
 
+/// Above every health and death presentation, so the controls that leave a dead session
+/// can never be covered by it.
+pub(super) const MENU_LAYER: i32 = 40;
+
 pub(super) struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
@@ -50,7 +54,7 @@ fn spawn_menu(mut commands: Commands) {
             },
             BackgroundColor(Color::srgba(0.012, 0.016, 0.024, 0.96)),
             Visibility::Hidden,
-            GlobalZIndex(40),
+            GlobalZIndex(MENU_LAYER),
         ))
         .with_children(|overlay| {
             overlay
