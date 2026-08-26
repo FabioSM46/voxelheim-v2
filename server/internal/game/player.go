@@ -125,6 +125,10 @@ type Sim struct {
 	// tick rate for the same reason the physics timestep is.
 	dropLifetime int
 
+	arrowLifetimeTicks uint32
+	orbLifetimeTicks   uint32
+	arrowStuckTicks    uint32
+
 	// hardness is handMiningTimes in the ticks Step counts, for the same reason again: the
 	// table is written in seconds because a block should take the same time to break
 	// whatever rate the server runs at. A block absent from it is not breakable.
@@ -173,6 +177,13 @@ type Sim struct {
 	// the same reasons: a snapshot names entities by id, and a merge or a pickup has to
 	// find one without scanning.
 	drops map[uint64]*itemDrop
+
+	// projectiles are transient authoritative entities. projectileOwners retains the
+	// firing session object only until its last shot disappears, so a shot that lands
+	// after Leave can still establish the stable character tap used by offline awards.
+	// Neither collection is persisted.
+	projectiles      map[uint64]*projectile
+	projectileOwners map[uint64]*Player
 
 	// mobs is every live creature, keyed by identity like players and drops and for the
 	// same reasons: a snapshot names entities by id, and a hit has to find one without
@@ -289,17 +300,20 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 	}
 
 	return &Sim{
-		dt:              1 / float64(tickRate),
-		viewDistance:    int32(viewDistance),
-		idleLimit:       idleLimitTicks(tickRate),
-		terrain:         terrain,
-		editor:          editor,
-		mintEntityID:    mintEntityID,
-		dropLifetime:    dropLifetimeTicks(tickRate),
-		hardness:        handMiningTicksFor(tickRate),
-		deathTicks:      deathDurationTicks(tickRate),
-		protectionTicks: respawnProtectionTicks(tickRate),
-		regenDelayTicks: ticksFor(HealthRegenDelay, tickRate),
+		dt:                 1 / float64(tickRate),
+		viewDistance:       int32(viewDistance),
+		idleLimit:          idleLimitTicks(tickRate),
+		terrain:            terrain,
+		editor:             editor,
+		mintEntityID:       mintEntityID,
+		dropLifetime:       dropLifetimeTicks(tickRate),
+		arrowLifetimeTicks: ticksFor(ArrowLifetime, tickRate),
+		orbLifetimeTicks:   ticksFor(OrbLifetime, tickRate),
+		arrowStuckTicks:    ticksFor(ArrowStuckTicks, tickRate),
+		hardness:           handMiningTicksFor(tickRate),
+		deathTicks:         deathDurationTicks(tickRate),
+		protectionTicks:    respawnProtectionTicks(tickRate),
+		regenDelayTicks:    ticksFor(HealthRegenDelay, tickRate),
 
 		regenIntervalTicks:  ticksFor(HealthRegenInterval, tickRate),
 		hungerDrainTicks:    ticksFor(HungerDrainInterval, tickRate),
@@ -324,6 +338,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		partyInviteTicks:    uint64(ticksFor(PartyInviteTTL, tickRate)),
 		partyOfflineTicks:   uint64(ticksFor(PartyOfflineGrace, tickRate)),
 		drops:               make(map[uint64]*itemDrop),
+		projectiles:         make(map[uint64]*projectile),
+		projectileOwners:    make(map[uint64]*Player),
 		mobs:                make(map[uint64]*mob),
 		corpses:             make(map[uint64]*corpse),
 		structures:          make(map[uint64]*structure),
@@ -967,6 +983,11 @@ func (s *Sim) stepWorld(tick uint64) {
 		p.resolveSwingLocked()
 	}
 
+	// Projectiles use the positions produced above and land before a mob acts, exactly
+	// like a swing. A lethal arrow therefore cannot leave its target one later attack in
+	// the same tick merely because the damage arrived through a different weapon.
+	projectiles := s.advanceProjectilesLocked(players)
+
 	// The mobs, after the players have moved so a chase steers at the position this tick
 	// produced rather than the last one's — and after the swings above. This is also where
 	// a body whose time is up becomes an inert owned corpse. The transition and its one
@@ -997,6 +1018,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	structures := s.sortedStructuresLocked()
 
 	dropped := dropStates(drops)
+	projectedProjectiles := projectileStates(projectiles)
 	projectedMobs := s.mobSnapshotsLocked(mobs)
 	standing := s.structureStatesLocked(structures)
 
@@ -1017,6 +1039,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	visibleMobs := make([]protocol.MobState, 0, len(projectedMobs))
 	visibleLootCorpses := make([]uint64, 0)
 	visibleStructures := make([]protocol.StructureState, 0, len(standing))
+	visibleProjectiles := make([]protocol.ProjectileState, 0, len(projectedProjectiles))
 	// **Filled from the same pass that fills `visible`, and that is what keeps the two
 	// agreeing.** The contract says every id here names a player in the same snapshot's
 	// entity vector, and a client refuses a frame where one does not; deriving it from a
@@ -1151,6 +1174,15 @@ func (s *Sim) stepWorld(tick uint64) {
 			}
 		}
 
+		// The same complete visibility rule as drops: a projectile is streamed only
+		// while it stands over terrain this viewer's chunk cube contains.
+		visibleProjectiles = visibleProjectiles[:0]
+		for i, shown := range projectiles {
+			if withinView(viewer.chunk, chunkAt(shown.pos), s.viewDistance) {
+				visibleProjectiles = append(visibleProjectiles, projectedProjectiles[i])
+			}
+		}
+
 		partyLeader, partyMembers, partyRoster := s.partySnapshotLocked(viewer)
 
 		// The wire field is a uint32 while ticks are counted in uint64. At 20 Hz the
@@ -1193,6 +1225,7 @@ func (s *Sim) stepWorld(tick uint64) {
 			PartyMembers:          partyMembers,
 			PartyRoster:           partyRoster,
 			AccessibleLootCorpses: visibleLootCorpses,
+			Projectiles:           visibleProjectiles,
 		}
 		if !viewer.deliver(protocol.EncodeEntitySnapshot(snapshot)) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
@@ -1201,7 +1234,7 @@ func (s *Sim) stepWorld(tick uint64) {
 			s.log.Debug("snapshot dropped: the session's outbound queue is full",
 				"entity_id", viewer.entityID, "tick", tick,
 				"entities", len(visible), "drops", len(visibleDrops), "mobs", len(visibleMobs),
-				"structures", len(visibleStructures))
+				"structures", len(visibleStructures), "projectiles", len(visibleProjectiles))
 		}
 	}
 

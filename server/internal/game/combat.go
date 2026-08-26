@@ -130,46 +130,70 @@ func (p *Player) resolveSwingLocked() {
 	p.attackCooldown = p.sim.attackCooldown
 
 	if target := p.sim.swingTargetLocked(p); target != nil {
-		// A valid hit can be the pull before the boss has had a tick in which to
-		// acquire a target. Freeze eligibility before damage can make the transition
-		// lethal; the target-acquisition path calls the same idempotent helper.
-		p.sim.startBossEncounterLocked(target, p)
+		p.sim.creditMobDamageLocked(p, target, damage)
+	}
+}
+
+// creditMobDamageLocked is the one path player-authored damage takes against a mob.
+// Melee and projectiles share tap ownership, threat, death and party/offline experience
+// exactly; a new delivery mechanism therefore cannot grow its own kill-credit rules.
+//
+// p may have left the live player map after firing a projectile. Its immutable character
+// identity still establishes the tap, damage still lands, and a kill follows the existing
+// offline-award path. Threat and boss participation remain live-session concerns.
+// The caller holds Sim.mu.
+func (s *Sim) creditMobDamageLocked(p *Player, target *mob, damage uint16) {
+	if target == nil || damage == 0 || target.health == 0 {
+		return
+	}
+
+	if p != nil {
+		if s.onlineLocked(p) {
+			// A valid hit can be the pull before the boss has had a tick in which to
+			// acquire a target. Freeze eligibility before damage can make it lethal.
+			s.startBossEncounterLocked(target, p)
+		}
 		if target.firstHit == nil {
 			target.firstHit = newMobTap(p)
 		}
 		dealt := min(damage, target.health)
-		p.sim.creditDamageThreatLocked(target, p, dealt)
-		if p.sim.damageMobLocked(target, damage) {
-			owner := p.sim.currentTapOwnerLocked(target.firstHit)
-			amount := uint32(target.species().experience)
-			if owner == nil {
-				award := p.sim.awardOfflineExperienceLocked(target.firstHit, amount)
-				p.sim.log.Debug("experience awarded",
-					"player_id", award.PlayerID.Short(), "source", "mob kill (offline tap)",
-					"amount", amount, "mob_kind", target.kind.String(), "share_count", 1)
-				return
-			}
-
-			recipients := []*Player{owner}
-			source := "mob kill"
-			if owner.partyID != 0 {
-				recipients = owner.membersNearLocked(target.pos, PartyShareRadius)
-				source = "mob kill (shared)"
-			}
-
-			shareCount := uint32(len(recipients))
-			share, remainder := amount/shareCount, amount%shareCount
-			for _, recipient := range recipients {
-				received := share
-				if recipient == owner {
-					received += remainder
-				}
-				p.sim.awardExperienceLocked(recipient, received)
-				p.sim.log.Debug("experience awarded",
-					"entity_id", recipient.entityID, "source", source, "amount", received,
-					"mob_kind", target.kind.String(), "share_count", shareCount)
-			}
+		if s.onlineLocked(p) {
+			s.creditDamageThreatLocked(target, p, dealt)
 		}
+	}
+
+	if !s.damageMobLocked(target, damage) || target.firstHit == nil {
+		return
+	}
+
+	owner := s.currentTapOwnerLocked(target.firstHit)
+	amount := uint32(target.species().experience)
+	if owner == nil {
+		award := s.awardOfflineExperienceLocked(target.firstHit, amount)
+		s.log.Debug("experience awarded",
+			"player_id", award.PlayerID.Short(), "source", "mob kill (offline tap)",
+			"amount", amount, "mob_kind", target.kind.String(), "share_count", 1)
+		return
+	}
+
+	recipients := []*Player{owner}
+	source := "mob kill"
+	if owner.partyID != 0 {
+		recipients = owner.membersNearLocked(target.pos, PartyShareRadius)
+		source = "mob kill (shared)"
+	}
+
+	shareCount := uint32(len(recipients))
+	share, remainder := amount/shareCount, amount%shareCount
+	for _, recipient := range recipients {
+		received := share
+		if recipient == owner {
+			received += remainder
+		}
+		s.awardExperienceLocked(recipient, received)
+		s.log.Debug("experience awarded",
+			"entity_id", recipient.entityID, "source", source, "amount", received,
+			"mob_kind", target.kind.String(), "share_count", shareCount)
 	}
 }
 
