@@ -575,13 +575,20 @@ pub(crate) fn drawn_cell(world: &World, cell: Entity) -> DrawnCell {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    use bevy::input::ButtonState;
+    use bevy::input::InputPlugin;
+    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::mouse::MouseMotion;
+    use bevy::time::TimeUpdateStrategy;
 
     use super::*;
     use crate::net::{
-        LifeState, PlayerVitals, ServerAddress, SessionParams, Snapshot, SnapshotInbox,
+        LifeState, Outbound, PlayerVitals, ServerAddress, SessionParams, Snapshot, SnapshotInbox,
     };
-    use crate::player::{ItemShape, PlayerPlugin, known_item_ids};
+    use crate::player::{ItemShape, LookState, MoveIntent, PlayerPlugin, known_item_ids};
+    use crate::wire::voxelheim::net as fb;
 
     fn session() -> Session {
         Session(SessionParams {
@@ -752,6 +759,115 @@ mod tests {
             *app.world().resource::<InputMode>(),
             InputMode::Playing,
             "the pack was still open a frame after the server said the player was dead"
+        );
+    }
+
+    /// Drives a keyboard edge through `InputPlugin` so `just_pressed` reaches `Update`.
+    fn keyboard_edge(app: &mut App, key_code: KeyCode, state: ButtonState) {
+        app.world_mut().write_message(KeyboardInput {
+            key_code,
+            logical_key: Key::Character("test".into()),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+
+    /// The movement fields the server observes in one outbound `PlayerInput`.
+    fn outbound_movement(frame: &[u8]) -> (f32, f32, bool) {
+        let envelope = fb::root_as_envelope(frame).expect("the client encoded a valid envelope");
+        let input = envelope
+            .payload_as_player_input()
+            .expect("the outbound frame is a PlayerInput");
+        (input.move_x(), input.move_z(), input.jump())
+    }
+
+    #[test]
+    fn the_inventory_transition_neutralises_the_next_outbound_input() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .insert_resource(session())
+            .insert_resource(ConnectionState::Connected)
+            // One frame is one announced input tick, so every state below is observed on
+            // the wire without sleeping or relying on wall-clock scheduling.
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                50,
+            )))
+            // The production registration, in production order: the player samples and
+            // sends while the UI owns the E transition and ApplyInputMode ordering.
+            .add_plugins((PlayerPlugin, UiPlugin));
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound);
+
+        // The first Time update establishes its clock; the second advances one manual
+        // interval. Settle both and discard that first neutral input tick.
+        app.update();
+        app.update();
+        let _ = frames.try_recv().expect("the first announced tick is sent");
+
+        keyboard_edge(&mut app, KeyCode::KeyW, ButtonState::Pressed);
+        keyboard_edge(&mut app, KeyCode::Space, ButtonState::Pressed);
+        app.update();
+        assert_eq!(
+            outbound_movement(&frames.try_recv().expect("held movement reaches the wire")),
+            (0.0, 1.0, true)
+        );
+
+        let look_before = *app.world().resource::<LookState>();
+        keyboard_edge(&mut app, KeyCode::KeyE, ButtonState::Pressed);
+        // The same frame also carries world-facing input. The inventory transition owns
+        // all of it: movement and jump must become neutral and mouse motion must not turn.
+        app.world_mut().write_message(MouseMotion {
+            delta: Vec2::new(80.0, -40.0),
+        });
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Inventory);
+        assert_eq!(*app.world().resource::<MoveIntent>(), MoveIntent::default());
+        assert_eq!(*app.world().resource::<LookState>(), look_before);
+        assert_eq!(
+            outbound_movement(
+                &frames
+                    .try_recv()
+                    .expect("the inventory-opening tick sends a neutral frame")
+            ),
+            (0.0, 0.0, false),
+            "the server observed stale held input after E opened the inventory"
+        );
+
+        // Held and newly pressed movement remain closed while the pack owns the input.
+        keyboard_edge(&mut app, KeyCode::KeyD, ButtonState::Pressed);
+        app.update();
+        assert_eq!(*app.world().resource::<MoveIntent>(), MoveIntent::default());
+        assert_eq!(
+            outbound_movement(&frames.try_recv().expect("the next input tick is sent")),
+            (0.0, 0.0, false)
+        );
+
+        // Releasing the stale controls before closing proves the transition samples no
+        // remembered direction. A later press, sampled after Playing returned, may move.
+        for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::Space] {
+            keyboard_edge(&mut app, key, ButtonState::Released);
+        }
+        keyboard_edge(&mut app, KeyCode::KeyE, ButtonState::Released);
+        app.update();
+        let _ = frames.try_recv().expect("the release tick is sent");
+        keyboard_edge(&mut app, KeyCode::KeyE, ButtonState::Pressed);
+        app.update();
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(
+            outbound_movement(&frames.try_recv().expect("the closing tick is sent")),
+            (0.0, 0.0, false)
+        );
+
+        keyboard_edge(&mut app, KeyCode::KeyA, ButtonState::Pressed);
+        app.update();
+        assert_eq!(
+            outbound_movement(&frames.try_recv().expect("fresh movement reaches the wire")),
+            (-1.0, 0.0, false)
         );
     }
 
