@@ -71,7 +71,7 @@ pub(super) struct ExperienceTrack;
 #[derive(Component)]
 struct ExperienceFill;
 
-/// The level and numeric progression beside the bar.
+/// The level and numeric progression inside the bar.
 #[derive(Component)]
 pub(super) struct ExperienceLabel;
 
@@ -158,7 +158,7 @@ fn spawn_experience_bar(mut commands: Commands) {
                         ..default()
                     },
                     TextColor(Color::WHITE),
-                    TextLayout::no_wrap(),
+                    TextLayout::no_wrap().with_justify(Justify::Center),
                     TextShadow::default(),
                 ));
             });
@@ -330,7 +330,7 @@ fn fill_percent(vitals: PlayerVitals) -> f32 {
         .clamp(EMPTY_PERCENT, FULL_PERCENT)
 }
 
-/// The complete progression reading drawn beside the bar.
+/// The complete progression reading drawn inside the bar.
 fn experience_label(vitals: PlayerVitals) -> String {
     format!(
         "Lv {} · {} / {}",

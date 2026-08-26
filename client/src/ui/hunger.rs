@@ -69,7 +69,7 @@ pub(super) struct HungerTrack;
 #[derive(Component)]
 struct HungerFill;
 
-/// The numeric reading beside the bar.
+/// The numeric reading inside the bar.
 #[derive(Component)]
 pub(super) struct HungerLabel;
 
@@ -145,7 +145,7 @@ fn spawn_hunger_bar(mut commands: Commands) {
                         ..default()
                     },
                     TextColor(Color::WHITE),
-                    TextLayout::no_wrap(),
+                    TextLayout::no_wrap().with_justify(Justify::Center),
                     TextShadow::default(),
                 ));
             });
