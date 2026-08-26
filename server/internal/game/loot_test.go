@@ -138,8 +138,8 @@ func TestTheLootItemsCarryThePinnedIdsAndTheirOwnStats(t *testing.T) {
 	}
 }
 
-// Bone-tipped arrows are the bone's first sink, and the recipe is the only one.
-func TestOnlyArrowsConsumeBones(t *testing.T) {
+// Arrows and the sceptre are the only sinks for bone.
+func TestOnlyArrowsAndTheSceptreConsumeBones(t *testing.T) {
 	t.Parallel()
 
 	consumers := 0
@@ -147,8 +147,12 @@ func TestOnlyArrowsConsumeBones(t *testing.T) {
 		for _, needed := range r.ingredients {
 			if needed.item == ItemBone {
 				consumers++
-				if id != vnet.RecipeIDArrows || needed.count != 1 {
-					t.Errorf("%s costs %d bones, want only Arrows costing one", id, needed.count)
+				want := map[vnet.RecipeID]uint16{
+					vnet.RecipeIDArrows:        1,
+					vnet.RecipeIDWoodenSceptre: 2,
+				}
+				if needed.count != want[id] {
+					t.Errorf("%s costs %d bones, want %d", id, needed.count, want[id])
 				}
 			}
 		}
@@ -156,8 +160,8 @@ func TestOnlyArrowsConsumeBones(t *testing.T) {
 			t.Errorf("%s produces bones, which come off a corpse rather than out of a recipe", id)
 		}
 	}
-	if consumers != 1 {
-		t.Errorf("bone has %d recipe consumers, want exactly the arrow recipe", consumers)
+	if consumers != 2 {
+		t.Errorf("bone has %d recipe consumers, want arrows and sceptre", consumers)
 	}
 	// And a bone is not a weapon, a kit or a structure — the three things a non-zero
 	// field in its row would quietly make it.

@@ -200,7 +200,7 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 
 // The recipe table is the nineteen this branch owns, with the costs they agreed on. A
 // balance pass edits this test and the table together; a typo edits only one of them.
-func TestTheRecipeTableIsTheNineteenAgreedRecipes(t *testing.T) {
+func TestTheRecipeTableIsTheTwentyAgreedRecipes(t *testing.T) {
 	t.Parallel()
 
 	want := map[vnet.RecipeID]recipe{
@@ -278,6 +278,10 @@ func TestTheRecipeTableIsTheNineteenAgreedRecipes(t *testing.T) {
 		},
 		vnet.RecipeIDArrows: {
 			ingredients: []ingredient{{ItemLog, 1}, {ItemBone, 1}}, product: ItemArrow, productCount: 4,
+		},
+		vnet.RecipeIDWoodenSceptre: {
+			ingredients: []ingredient{{ItemLog, 3}, {ItemBone, 2}, {ItemRawCoal, 1}},
+			product:     ItemWoodenSceptre, productCount: 1,
 		},
 	}
 

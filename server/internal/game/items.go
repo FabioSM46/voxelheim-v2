@@ -85,6 +85,9 @@ const (
 	// because item ids are already carried by inventories on the wire.
 	ItemBow
 	ItemArrow
+
+	// The ammunition-free launcher. Appended because item ids cross the wire.
+	ItemWoodenSceptre
 )
 
 // What each blade is worth, and the only copy of it.
@@ -132,7 +135,8 @@ const (
 
 	// A bow wears from each shot rather than only from death. Its own maximum belongs
 	// beside the registry row for the same reason each blade's does.
-	BowMaxDurability uint16 = 60
+	BowMaxDurability     uint16 = 60
+	SceptreMaxDurability uint16 = 50
 
 	// SharpeningStoneRestore is how much wear one stone gives back, and it sits here for
 	// the reason the numbers above do: it describes the *stone*, not the act of repairing.
@@ -369,6 +373,10 @@ var itemRegistry = map[ItemID]itemDefinition{
 		launches: vnet.ProjectileKindArrow, ammunition: ItemArrow,
 	},
 	ItemArrow: {places: world.Air, maxStack: 32},
+	ItemWoodenSceptre: {
+		places: world.Air, maxStack: 1, maxDurability: SceptreMaxDurability,
+		launches: vnet.ProjectileKindEnergyOrb,
+	},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an

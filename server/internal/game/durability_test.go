@@ -49,6 +49,7 @@ func TestOnlyTheAgreedEquipmentWearsOut(t *testing.T) {
 		ItemIronGreaves:     IronArmourMaxDurability,
 		ItemWoodenShield:    WoodenShieldMaxDurability,
 		ItemBow:             BowMaxDurability,
+		ItemWoodenSceptre:   SceptreMaxDurability,
 	}
 	for id, definition := range itemRegistry {
 		maximum, durable := want[id]

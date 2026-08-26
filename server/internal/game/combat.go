@@ -119,6 +119,9 @@ func (p *Player) launcherHasAmmunitionLocked(slot uint8) bool {
 		(stack.durable() && stack.durability == 0) {
 		return true
 	}
+	if definition.ammunition == ItemNone {
+		return true
+	}
 	for _, candidate := range p.inventory.slots[:equipmentFirst] {
 		if candidate.item == definition.ammunition && candidate.count > 0 {
 			return true
@@ -176,13 +179,17 @@ func (p *Player) resolveAttackLocked() {
 	// swings at nothing to find out whether anything is there pays attack cadence for
 	// the question.
 	if armed.launches != vnet.ProjectileKindUnknown {
-		p.attackCooldown = p.sim.bowCooldownTicks
+		cooldown, speed := p.sim.launchParameters(armed.launches)
+		if cooldown == 0 || speed == 0 {
+			return
+		}
+		p.attackCooldown = cooldown
 		p.sim.spawnProjectileLocked(
 			armed.launches,
 			p,
 			projectileOriginLocked(p),
 			lookDirection(p.current.yaw, p.current.pitch),
-			ArrowSpeed,
+			speed,
 		)
 		return
 	}
@@ -261,6 +268,19 @@ type armedAttack struct {
 	launches    vnet.ProjectileKind
 }
 
+// launchParameters is the authoritative cadence and initial speed for each projectile
+// kind a registry row may launch. Unknown kinds fail closed.
+func (s *Sim) launchParameters(kind vnet.ProjectileKind) (uint32, float64) {
+	switch kind {
+	case vnet.ProjectileKindArrow:
+		return s.bowCooldownTicks, ArrowSpeed
+	case vnet.ProjectileKindEnergyOrb:
+		return s.sceptreCooldownTicks, OrbSpeed
+	default:
+		return 0, 0
+	}
+}
+
 // armedForAttackLocked is what the named slot's contents do, and whether the inventory
 // could be read at all. A launch consumes its first non-equipment ammunition and one point
 // of launcher durability inside this same TryLock window.
@@ -302,27 +322,26 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 	}
 
 	if definition.launches != vnet.ProjectileKindUnknown {
-		if definition.ammunition == ItemNone {
-			return armedAttack{}, true
-		}
-		ammunitionSlot := -1
-		for candidate := range p.inventory.slots[:equipmentFirst] {
-			stack := p.inventory.slots[candidate]
-			if stack.item == definition.ammunition && stack.count > 0 {
-				ammunitionSlot = candidate
-				break
+		if definition.ammunition != ItemNone {
+			ammunitionSlot := -1
+			for candidate := range p.inventory.slots[:equipmentFirst] {
+				stack := p.inventory.slots[candidate]
+				if stack.item == definition.ammunition && stack.count > 0 {
+					ammunitionSlot = candidate
+					break
+				}
 			}
-		}
-		if ammunitionSlot < 0 {
-			// The session-side check already explained the ordinary case. This is the
-			// race where the last arrow moved before the tick, so the queued launch simply
-			// disappears and spends nothing.
-			return armedAttack{}, true
-		}
-		ammunition := &p.inventory.slots[ammunitionSlot]
-		ammunition.count--
-		if ammunition.count == 0 {
-			*ammunition = inventoryStack{}
+			if ammunitionSlot < 0 {
+				// The session-side check already explained the ordinary case. This is the
+				// race where the last arrow moved before the tick, so the queued launch simply
+				// disappears and spends nothing.
+				return armedAttack{}, true
+			}
+			ammunition := &p.inventory.slots[ammunitionSlot]
+			ammunition.count--
+			if ammunition.count == 0 {
+				*ammunition = inventoryStack{}
+			}
 		}
 		launcher := &p.inventory.slots[slot]
 		if launcher.durable() {
