@@ -294,6 +294,7 @@ func TestProtocolV21NamesCorpseLoot(t *testing.T) {
 		vnet.PayloadLootTakeRequest,
 		vnet.PayloadLootState,
 		vnet.PayloadLootClosed,
+		vnet.PayloadMobHit,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -381,6 +382,30 @@ func TestLootServerMessagesCarryCompleteEntriesAndExplicitClosure(t *testing.T) 
 	closed.Init(closedTable.Bytes, closedTable.Pos)
 	if closed.CorpseId() != 400 {
 		t.Errorf("closed corpse = %d, want 400", closed.CorpseId())
+	}
+}
+
+func TestMobHitCarriesAuthoritativeAttackerIdentityAndPosition(t *testing.T) {
+	t.Parallel()
+
+	want := MobHit{AttackerEntityID: 91, AttackerPos: [3]float32{1.5, 64, -2.5}}
+	env := vnet.GetRootAsEnvelope(EncodeMobHit(want), 0)
+	if env.PayloadType() != vnet.PayloadMobHit {
+		t.Fatalf("payload = %s, want MobHit", env.PayloadType())
+	}
+	table := payloadTable(t, env)
+	hit := new(vnet.MobHit)
+	hit.Init(table.Bytes, table.Pos)
+	pos := hit.AttackerPos(nil)
+	if pos == nil {
+		t.Fatal("attacker position is absent")
+	}
+	got := MobHit{
+		AttackerEntityID: hit.AttackerEntityId(),
+		AttackerPos:      [3]float32{pos.X(), pos.Y(), pos.Z()},
+	}
+	if got != want {
+		t.Errorf("MobHit = %+v, want %+v", got, want)
 	}
 }
 

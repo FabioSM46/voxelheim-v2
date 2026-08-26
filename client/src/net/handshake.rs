@@ -30,7 +30,7 @@ use std::fmt;
 
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
-    LootState, Message, MineProgress, PartyInvite, PlayerAppearance, Reject, SessionParams,
+    LootState, Message, MineProgress, MobHit, PartyInvite, PlayerAppearance, Reject, SessionParams,
     Snapshot, WorldClock, WorldUpdate,
 };
 
@@ -104,6 +104,8 @@ pub enum Transition {
     LootState(LootState),
     /// The authoritative end of an open corpse container.
     LootClosed(LootClosed),
+    /// One authoritative monster hit, admitted because a session exists.
+    MobHit(MobHit),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -441,6 +443,7 @@ impl Handshake {
             }
             (Phase::Established, Message::LootState(state)) => Ok(Transition::LootState(state)),
             (Phase::Established, Message::LootClosed(closed)) => Ok(Transition::LootClosed(closed)),
+            (Phase::Established, Message::MobHit(hit)) => Ok(Transition::MobHit(hit)),
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -463,6 +466,7 @@ impl Handshake {
             (_, Message::PartyInvite(_)) => Err(HandshakeError::Premature("PartyInvite")),
             (_, Message::LootState(_)) => Err(HandshakeError::Premature("LootState")),
             (_, Message::LootClosed(_)) => Err(HandshakeError::Premature("LootClosed")),
+            (_, Message::MobHit(_)) => Err(HandshakeError::Premature("MobHit")),
         }
     }
 }
@@ -1415,6 +1419,25 @@ mod tests {
         assert!(
             admitted.established(),
             "leaving remains an established session until the server closes it"
+        );
+    }
+
+    #[test]
+    fn a_mob_hit_only_belongs_to_an_established_session() {
+        let hit = MobHit {
+            attacker_entity_id: 42,
+            attacker_pos: [1.0, 64.0, -3.0],
+        };
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::MobHit(hit)),
+            Err(HandshakeError::Premature("MobHit"))
+        );
+
+        let mut admitted = established();
+        assert_eq!(
+            admitted.apply(Message::MobHit(hit)),
+            Ok(Transition::MobHit(hit))
         );
     }
 

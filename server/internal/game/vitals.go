@@ -84,9 +84,9 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 // not a hit — and negative damage is unrepresentable, which is the point of the type.
 //
 // The caller holds sim.mu.
-func (p *Player) damageLocked(amount uint16) {
+func (p *Player) damageLocked(amount uint16) bool {
 	if amount == 0 || !p.alive() || p.protectionTicks > 0 {
-		return
+		return false
 	}
 
 	// A landed hit restarts both clocks. After the guards above rather than before them:
@@ -99,9 +99,10 @@ func (p *Player) damageLocked(amount uint16) {
 	if amount >= p.health {
 		p.health = 0
 		p.dieLocked()
-		return
+		return true
 	}
 	p.health -= amount
+	return true
 }
 
 // dieLocked performs the transition to Dead, exactly once.

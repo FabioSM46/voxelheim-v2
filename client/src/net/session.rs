@@ -53,7 +53,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::codec::{
-    self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress,
+    self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress, MobHit,
     PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject, SessionParams,
     SessionTicket, Snapshot, WorldUpdate,
 };
@@ -233,6 +233,8 @@ pub(super) enum SessionEvent {
     LootState(codec::LootState),
     /// The authoritative end of one corpse-container view.
     LootClosed(codec::LootClosed),
+    /// One authoritative monster blow that reduced this player's health.
+    MobHit(MobHit),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1407,6 +1409,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::LootClosed(closed)) => {
                     events.send(SessionEvent::LootClosed(closed)).ok()?;
+                }
+                Ok(Transition::MobHit(hit)) => {
+                    events.send(SessionEvent::MobHit(hit)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;

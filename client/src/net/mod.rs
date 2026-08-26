@@ -60,8 +60,8 @@ pub use codec::{
     ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest, DropItemRequest,
     EditAction, EntityState, Facing, HairModel, InventoryMoveRequest, InventoryStack,
     InventoryState, ItemDropState, LifeState, LootClosed, LootEntry, LootOpenRequest, LootState,
-    LootTakeRequest, MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction, MobKind, MobState,
-    PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
+    LootTakeRequest, MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction, MobHit, MobKind,
+    MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
     PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
     RecipeId, RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest,
     SessionParams, Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate,
@@ -493,6 +493,37 @@ impl LootInbox {
     }
 }
 
+/// Hit events awaiting presentation, bounded so a stalled frame cannot grow without limit.
+#[derive(Resource, Debug, Default)]
+pub struct MobHitInbox(Vec<MobHit>);
+
+/// Enough room for a burst while still making overload discard stale presentation data.
+const MOB_HIT_INBOX_CAPACITY: usize = 64;
+
+impl MobHitInbox {
+    fn push_bounded(&mut self, hit: MobHit) {
+        if self.0.len() == MOB_HIT_INBOX_CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push(hit);
+    }
+
+    /// Takes every queued hit in wire order, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<MobHit> {
+        std::mem::take(&mut self.0)
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, hit: MobHit) {
+        self.push_bounded(hit);
+    }
+
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// Authoritative mining progress not yet consumed by the player presentation.
 ///
 /// Ordered like the wire. The player may keep only the newest entry in one frame,
@@ -888,6 +919,7 @@ impl Plugin for NetPlugin {
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
             .init_resource::<LootInbox>()
+            .init_resource::<MobHitInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
@@ -1367,6 +1399,8 @@ struct Inboxes<'w> {
     inventories: ResMut<'w, InventoryInbox>,
     // Optional only for focused boundary tests that install the drain directly.
     loot: Option<ResMut<'w, LootInbox>>,
+    // Optional only for focused boundary tests that install the drain directly.
+    mob_hits: Option<ResMut<'w, MobHitInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
     refusals: ResMut<'w, RefusalInbox>,
@@ -1507,6 +1541,11 @@ fn drain_session_events(
             Ok(SessionEvent::LootClosed(closed)) => {
                 if let Some(loot) = inboxes.loot.as_deref_mut() {
                     loot.0.push(LootEvent::Closed(closed));
+                }
+            }
+            Ok(SessionEvent::MobHit(hit)) => {
+                if let Some(mob_hits) = inboxes.mob_hits.as_deref_mut() {
+                    mob_hits.push_bounded(hit);
                 }
             }
 
@@ -4820,6 +4859,25 @@ mod server_list_tests {
         assert!(
             !app.world().contains_resource::<ServerListLink>(),
             "a finished read left its link behind, so no retry could start another"
+        );
+    }
+
+    #[test]
+    fn the_mob_hit_inbox_is_bounded_and_discards_the_oldest_presentation_event() {
+        let mut inbox = MobHitInbox::default();
+        for index in 0..MOB_HIT_INBOX_CAPACITY + 2 {
+            inbox.push(MobHit {
+                attacker_entity_id: index as u64 + 1,
+                attacker_pos: [index as f32, 0.0, -1.0],
+            });
+        }
+
+        assert_eq!(inbox.pending(), MOB_HIT_INBOX_CAPACITY);
+        let queued = inbox.take();
+        assert_eq!(queued.first().map(|hit| hit.attacker_entity_id), Some(3));
+        assert_eq!(
+            queued.last().map(|hit| hit.attacker_entity_id),
+            Some((MOB_HIT_INBOX_CAPACITY + 2) as u64)
         );
     }
 }

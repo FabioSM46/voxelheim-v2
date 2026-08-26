@@ -1547,6 +1547,13 @@ pub struct LootClosed {
     pub corpse_id: u64,
 }
 
+/// One authoritative monster blow that reduced this player's health.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobHit {
+    pub attacker_entity_id: u64,
+    pub attacker_pos: [f32; 3],
+}
+
 /// A decoded `ServerReject`.
 ///
 /// [`Self::describe`] is the one place the code and the detail become a single
@@ -1664,6 +1671,8 @@ pub enum Message {
     LootState(LootState),
     /// The named corpse container is no longer openable.
     LootClosed(LootClosed),
+    /// One monster blow that actually reduced this player's authoritative health.
+    MobHit(MobHit),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -1850,6 +1859,16 @@ pub enum DecodeError {
     RespawnWhileAlive { respawn_ticks: u32 },
     /// A mob carries the reserved identity 0.
     MobWithoutIdentity,
+    /// A hit notification carries the reserved attacker identity 0.
+    MobHitWithoutIdentity,
+    /// A hit notification carries no attacker position.
+    MissingMobHitPosition,
+    /// A hit notification carries a NaN or infinite attacker position component.
+    NonFiniteMobHit {
+        attacker_entity_id: u64,
+        axis: usize,
+        value: f32,
+    },
     /// One id names a mob and a player, a mob and a drop, or two mobs, in one snapshot.
     MobEntityConflict(u64),
     /// A mob's `pos` or `vel` struct is absent. Refused rather than read as the origin,
@@ -2163,6 +2182,18 @@ impl fmt::Display for DecodeError {
                 "vitals count {respawn_ticks} ticks to a respawn for a player who is not dead"
             ),
             Self::MobWithoutIdentity => write!(f, "a mob carries the reserved entity id 0"),
+            Self::MobHitWithoutIdentity => {
+                write!(f, "a mob hit carries the reserved attacker entity id 0")
+            }
+            Self::MissingMobHitPosition => write!(f, "a mob hit carries no attacker position"),
+            Self::NonFiniteMobHit {
+                attacker_entity_id,
+                axis,
+                value,
+            } => write!(
+                f,
+                "mob hit from {attacker_entity_id} has a non-finite position component {axis}: {value}"
+            ),
             Self::MobEntityConflict(entity_id) => write!(
                 f,
                 "entity id {entity_id} names a mob and something else in one snapshot"
@@ -2593,6 +2624,32 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 return Err(DecodeError::LootWithoutCorpse("LootClosed"));
             }
             Ok(Message::LootClosed(LootClosed { corpse_id }))
+        }
+        fb::Payload::MobHit => {
+            let payload = envelope
+                .payload_as_mob_hit()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let attacker_entity_id = payload.attacker_entity_id();
+            if attacker_entity_id == 0 {
+                return Err(DecodeError::MobHitWithoutIdentity);
+            }
+            let pos = payload
+                .attacker_pos()
+                .ok_or(DecodeError::MissingMobHitPosition)?;
+            let attacker_pos = [pos.x(), pos.y(), pos.z()];
+            for (axis, value) in attacker_pos.into_iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(DecodeError::NonFiniteMobHit {
+                        attacker_entity_id,
+                        axis,
+                        value,
+                    });
+                }
+            }
+            Ok(Message::MobHit(MobHit {
+                attacker_entity_id,
+                attacker_pos,
+            }))
         }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
@@ -5183,6 +5240,19 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::PartyInvite, payload.as_union_value())
     }
 
+    pub fn encode_mob_hit(attacker_entity_id: u64, pos: Option<[f32; 3]>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let pos = pos.map(|pos| fb::Vec3::new(pos[0], pos[1], pos[2]));
+        let payload = fb::MobHit::create(
+            &mut builder,
+            &fb::MobHitArgs {
+                attacker_entity_id,
+                attacker_pos: pos.as_ref(),
+            },
+        );
+        finish_envelope(builder, fb::Payload::MobHit, payload.as_union_value())
+    }
+
     pub fn encode_loot_state(
         corpse_id: u64,
         revision: u32,
@@ -5329,9 +5399,10 @@ mod tests {
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_roster,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
         encode_inventory_state_with_durability, encode_leave_started, encode_loot_closed,
-        encode_loot_state, encode_mine_progress, encode_party_invite, encode_player_appearance,
-        encode_player_appearance_with_worn, encode_player_appearance_without_level,
-        encode_server_character_list, encode_server_reject, encode_server_welcome,
+        encode_loot_state, encode_mine_progress, encode_mob_hit, encode_party_invite,
+        encode_player_appearance, encode_player_appearance_with_worn,
+        encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
+        encode_server_welcome,
     };
     use super::*;
 
@@ -5493,6 +5564,7 @@ mod tests {
             (fb::Payload::LootTakeRequest, 34),
             (fb::Payload::LootState, 35),
             (fb::Payload::LootClosed, 36),
+            (fb::Payload::MobHit, 37),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -5508,7 +5580,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            37,
+            38,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -5538,7 +5610,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 37] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 38] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -5576,6 +5648,7 @@ mod tests {
         (fb::Payload::LootTakeRequest, Handling::ClientOnly),
         (fb::Payload::LootState, Handling::Consumed),
         (fb::Payload::LootClosed, Handling::Consumed),
+        (fb::Payload::MobHit, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -8698,6 +8771,37 @@ mod tests {
         assert!(matches!(
             decode(&encode_loot_state(400, 2, Some(&[invalid]))),
             Err(DecodeError::InvalidLootEntry { entry_id: 9, .. })
+        ));
+    }
+
+    #[test]
+    fn mob_hit_requires_identity_and_a_finite_present_position() {
+        let hit = MobHit {
+            attacker_entity_id: 41,
+            attacker_pos: [1.5, 64.0, -2.5],
+        };
+        assert_eq!(
+            decode(&encode_mob_hit(
+                hit.attacker_entity_id,
+                Some(hit.attacker_pos)
+            )),
+            Ok(Message::MobHit(hit))
+        );
+        assert_eq!(
+            decode(&encode_mob_hit(0, Some([0.0; 3]))),
+            Err(DecodeError::MobHitWithoutIdentity)
+        );
+        assert_eq!(
+            decode(&encode_mob_hit(41, None)),
+            Err(DecodeError::MissingMobHitPosition)
+        );
+        assert!(matches!(
+            decode(&encode_mob_hit(41, Some([0.0, f32::NAN, 0.0]))),
+            Err(DecodeError::NonFiniteMobHit {
+                attacker_entity_id: 41,
+                axis: 1,
+                value,
+            }) if value.is_nan()
         ));
     }
 

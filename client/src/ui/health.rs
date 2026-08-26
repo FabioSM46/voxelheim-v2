@@ -24,10 +24,11 @@
 //! camera `player/camera.rs` owns. No second camera, no asset, no font file.
 
 use bevy::prelude::*;
+use std::time::Duration;
 
 use super::{CELL_EDGE, CELL_SIZE};
-use crate::net::{LifeState, PlayerVitals, Session};
-use crate::player::{ApplySnapshots, InputMode, SelfVitals};
+use crate::net::{DrainNetwork, LifeState, MobHit, MobHitInbox, PlayerVitals, Session};
+use crate::player::{AimCamera, ApplySnapshots, InputMode, SelfVitals, WorldCamera};
 
 /// Width of the bar, in logical pixels.
 pub(super) const BAR_WIDTH: f32 = 260.0;
@@ -75,6 +76,11 @@ const DEATH_VEIL: Color = Color::srgba(0.10, 0.008, 0.012, 0.62);
 /// disconnecting must never be buried under a death screen.
 const DEATH_LAYER: i32 = 20;
 
+/// A brief peripheral warning: visible enough to register, faint enough not to hide play.
+const HIT_PULSE_DURATION: Duration = Duration::from_millis(300);
+const HIT_PULSE_ALPHA: f32 = 0.14;
+const HIT_PULSE_LAYER: i32 = 19;
+
 /// What the countdown says before the server has named a number.
 const NO_RESPAWN_YET: &str = "RESPAWNING";
 
@@ -86,7 +92,12 @@ impl Plugin for HealthUiPlugin {
         // module drivable on its own, which is what its tests do.
         app.init_resource::<InputMode>()
             .init_resource::<SelfVitals>()
-            .add_systems(Startup, (spawn_health_bar, spawn_death_overlay))
+            .init_resource::<MobHitInbox>()
+            .init_resource::<HitPulse>()
+            .add_systems(
+                Startup,
+                (spawn_health_bar, spawn_death_overlay, spawn_hit_pulse),
+            )
             .add_systems(
                 Update,
                 (
@@ -94,13 +105,16 @@ impl Plugin for HealthUiPlugin {
                     show_health_bar,
                     refresh_death_overlay,
                     show_death_overlay,
+                    drive_hit_pulse,
                 )
                     // After the snapshot that carried the vitals has been applied, so a
                     // death and a respawn both reach the screen on the frame the server's
                     // answer arrives rather than the one after it. Ordering against an
                     // empty set is a no-op, which keeps this module testable with no
                     // player plugin built at all.
-                    .after(ApplySnapshots),
+                    .after(ApplySnapshots)
+                    .after(DrainNetwork)
+                    .after(AimCamera),
             );
     }
 }
@@ -128,6 +142,14 @@ struct DeathRoot;
 /// The line that counts the server's remaining `respawn_ticks` down.
 #[derive(Component)]
 struct RespawnText;
+
+#[derive(Component)]
+struct HitPulseRoot;
+
+#[derive(Resource, Default)]
+struct HitPulse {
+    remaining: Duration,
+}
 
 fn spawn_health_bar(mut commands: Commands) {
     commands
@@ -225,6 +247,70 @@ fn spawn_death_overlay(mut commands: Commands) {
                 TextShadow::default(),
             ));
         });
+}
+
+fn spawn_hit_pulse(mut commands: Commands) {
+    commands.spawn((
+        HitPulseRoot,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 0.0, 0.0, 0.0)),
+        Visibility::Hidden,
+        GlobalZIndex(HIT_PULSE_LAYER),
+    ));
+}
+
+/// Drains every hit once. Any attacker outside the active camera frustum restarts one
+/// shared fade; inside attackers and vitals changes cannot touch it.
+fn drive_hit_pulse(
+    time: Res<Time>,
+    mut inbox: ResMut<MobHitInbox>,
+    // WorldCamera is spawned as a root and is never parented. Transform is intentional:
+    // AimCamera mutates it earlier in this Update, before GlobalTransform propagation.
+    cameras: Query<(&Camera, &Projection, &Transform), With<WorldCamera>>,
+    mut pulse: ResMut<HitPulse>,
+    mut roots: Query<(&mut BackgroundColor, &mut Visibility), With<HitPulseRoot>>,
+) {
+    pulse.remaining = pulse.remaining.saturating_sub(time.delta());
+
+    let active_camera = cameras.iter().find(|(camera, _, _)| camera.is_active);
+    let outside = active_camera.is_some_and(|(_, projection, transform)| {
+        inbox
+            .take()
+            .into_iter()
+            .any(|hit| !inside_frustum(hit, projection, transform))
+    });
+    if active_camera.is_none() {
+        inbox.take();
+    }
+    if outside {
+        pulse.remaining = HIT_PULSE_DURATION;
+    }
+
+    let alpha = HIT_PULSE_ALPHA * pulse.remaining.as_secs_f32() / HIT_PULSE_DURATION.as_secs_f32();
+    let visibility = if !pulse.remaining.is_zero() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    for (mut colour, mut shown) in &mut roots {
+        *colour = BackgroundColor(Color::srgba(1.0, 0.0, 0.0, alpha));
+        *shown = visibility;
+    }
+}
+
+fn inside_frustum(hit: MobHit, projection: &Projection, camera: &Transform) -> bool {
+    let world = Vec3::from_array(hit.attacker_pos);
+    let view = camera.compute_affine().inverse().transform_point3(world);
+    if view.z >= 0.0 {
+        return false;
+    }
+    let ndc = projection.get_clip_from_view().project_point3(view);
+    ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && (0.0..=1.0).contains(&ndc.z)
 }
 
 /// Draws the newest authoritative health.
@@ -396,8 +482,6 @@ mod tests {
     //! bar looks right" is a screenshot and "the fill is exactly the server's ratio" is a
     //! test.
 
-    use std::time::Duration;
-
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
@@ -502,6 +586,34 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Text, With<RespawnText>>();
         query.single(world).expect("one respawn line").0.clone()
+    }
+
+    fn add_camera(app: &mut App, transform: Transform) {
+        app.world_mut().spawn((
+            WorldCamera,
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            Projection::Perspective(PerspectiveProjection {
+                aspect_ratio: 1.0,
+                ..default()
+            }),
+            transform,
+        ));
+    }
+
+    fn hit(pos: [f32; 3]) -> MobHit {
+        MobHit {
+            attacker_entity_id: 41,
+            attacker_pos: pos,
+        }
+    }
+
+    fn pulse_visibility(app: &mut App) -> Visibility {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Visibility, With<HitPulseRoot>>();
+        *query.single(world).expect("one hit pulse")
     }
 
     // ---------------------------------------------------------------------------
@@ -699,5 +811,107 @@ mod tests {
                 "the death overlay answers to the server, not to a UI mode ({mode:?})"
             );
         }
+    }
+
+    #[test]
+    fn first_and_third_person_camera_transforms_classify_the_same_world_point() {
+        let projection = Projection::Perspective(PerspectiveProjection {
+            aspect_ratio: 1.0,
+            ..default()
+        });
+        let first_person = Transform::default();
+        assert!(inside_frustum(
+            hit([0.0, 0.0, -5.0]),
+            &projection,
+            &first_person
+        ));
+        assert!(!inside_frustum(
+            hit([10.0, 0.0, -5.0]),
+            &projection,
+            &first_person
+        ));
+        assert!(!inside_frustum(
+            hit([0.0, 0.0, 5.0]),
+            &projection,
+            &first_person
+        ));
+
+        // A third-person camera displaced behind the player still judges against its
+        // own current transform, rather than the avatar or a hard-coded view mode.
+        let third_person = Transform::from_xyz(0.0, 0.0, 5.0);
+        assert!(inside_frustum(
+            hit([0.0, 0.0, 0.0]),
+            &projection,
+            &third_person
+        ));
+    }
+
+    #[test]
+    fn any_outside_hit_in_one_frame_starts_one_fade_and_a_later_hit_restarts_it() {
+        let mut app = hud(vitals(100, 100));
+        add_camera(&mut app, Transform::default());
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+
+        {
+            let mut inbox = app.world_mut().resource_mut::<MobHitInbox>();
+            inbox.push(hit([0.0, 0.0, -5.0]));
+            inbox.push(hit([10.0, 0.0, -5.0]));
+            assert_eq!(inbox.pending(), 2);
+        }
+        app.update();
+        assert_eq!(pulse_visibility(&mut app), Visibility::Visible);
+        assert_eq!(app.world().resource::<MobHitInbox>().pending(), 0);
+        assert_eq!(
+            app.world().resource::<HitPulse>().remaining,
+            HIT_PULSE_DURATION
+        );
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<HitPulse>().remaining,
+            Duration::from_millis(200)
+        );
+        app.world_mut()
+            .resource_mut::<MobHitInbox>()
+            .push(hit([0.0, 0.0, 5.0]));
+        app.update();
+        assert_eq!(
+            app.world().resource::<HitPulse>().remaining,
+            HIT_PULSE_DURATION,
+            "a qualifying hit later in the fade restarts it"
+        );
+    }
+
+    #[test]
+    fn an_inside_hit_and_a_vitals_decrease_do_not_start_a_pulse() {
+        let mut app = hud(vitals(100, 100));
+        add_camera(&mut app, Transform::default());
+        app.world_mut()
+            .resource_mut::<MobHitInbox>()
+            .push(hit([0.0, 0.0, -5.0]));
+        deliver(&mut app, vitals(80, 100));
+
+        assert_eq!(pulse_visibility(&mut app), Visibility::Hidden);
+        assert_eq!(app.world().resource::<HitPulse>().remaining, Duration::ZERO);
+    }
+
+    #[test]
+    fn the_pulse_fades_out_in_about_three_tenths_of_a_second() {
+        let mut app = hud(vitals(100, 100));
+        add_camera(&mut app, Transform::default());
+        app.world_mut()
+            .resource_mut::<MobHitInbox>()
+            .push(hit([0.0, 0.0, 5.0]));
+        app.update();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(pulse_visibility(&mut app), Visibility::Hidden);
+        assert_eq!(app.world().resource::<HitPulse>().remaining, Duration::ZERO);
     }
 }

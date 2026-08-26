@@ -50,6 +50,10 @@ const (
 	// until this wider boundary is crossed. Twelve blocks starts a deer's flight and
 	// twenty-four ends it, so small movements at the edge cannot flap the state.
 	passiveFleeReleaseRange = 24.0
+
+	// Monster-hit feedback is presentation-only. Bound its retry backlog so a session
+	// whose outbound queue stays full cannot retain one allocation per landed blow.
+	maxPendingMobHits = 64
 )
 
 // mob is one live creature.
@@ -411,11 +415,47 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		// boundary. Production combinations stay below it by the registry sweep.
 		damage = 1
 	}
-	target.damageLocked(damage)
+	if target.damageLocked(damage) {
+		target.recordMobHitLocked(protocol.MobHit{
+			AttackerEntityID: m.entityID,
+			AttackerPos:      toWire(m.pos),
+		})
+	}
 	// Every attack pays recovery, landed or not, which is what stops a low tick rate or
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery
 	m.actionTicks = s.mobTimings[m.kind].recovery
+}
+
+// recordMobHitLocked retains the newest presentation events up to a fixed bound. Dropping
+// the oldest event under prolonged congestion cannot change authoritative health; keeping
+// the newest gives the client the most relevant direction once delivery resumes.
+//
+// The caller holds Sim.mu.
+func (p *Player) recordMobHitLocked(hit protocol.MobHit) {
+	if len(p.pendingMobHits) == maxPendingMobHits {
+		copy(p.pendingMobHits, p.pendingMobHits[1:])
+		p.pendingMobHits[len(p.pendingMobHits)-1] = hit
+		return
+	}
+	p.pendingMobHits = append(p.pendingMobHits, hit)
+}
+
+// offerMobHitsLocked delivers landed monster-hit events in impact order and keeps the
+// first rejected frame (and everything behind it) pending for a later tick.
+//
+// The call is made before this recipient's superseding snapshot. deliver is the
+// non-blocking session seam, so a full queue delays presentation without ever delaying
+// the simulation tick or turning a rejected enqueue into success.
+func (p *Player) offerMobHitsLocked() {
+	for len(p.pendingMobHits) > 0 {
+		if !p.deliver(protocol.EncodeMobHit(p.pendingMobHits[0])) {
+			p.sim.log.Debug("monster-hit feedback deferred: the session's outbound queue is full",
+				"entity_id", p.entityID)
+			return
+		}
+		p.pendingMobHits = p.pendingMobHits[1:]
+	}
 }
 
 // dying reports whether this creature has been killed and is on its way out of the world.

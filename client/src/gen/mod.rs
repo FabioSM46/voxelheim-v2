@@ -120,6 +120,8 @@ pub mod voxelheim {
         pub use self::player_vitals_generated::*;
         mod mob_state_generated;
         pub use self::mob_state_generated::*;
+        mod mob_hit_generated;
+        pub use self::mob_hit_generated::*;
         mod structure_state_generated;
         pub use self::structure_state_generated::*;
         mod party_member_state_generated;
