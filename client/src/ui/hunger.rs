@@ -14,7 +14,8 @@ use bevy::time::Real;
 
 use super::CELL_EDGE;
 use super::health::{
-    BAR_LABEL_SIZE, HUNGER_BAR_BOTTOM, vital_bar_label, vital_bar_root, vital_bar_track,
+    BAR_LABEL_SIZE, HUNGER_BAR_BOTTOM, vital_bar_label, vital_bar_label_transform, vital_bar_root,
+    vital_bar_track,
 };
 use crate::net::{PlayerVitals, Session};
 use crate::player::{ApplySnapshots, InputMode, SelfVitals};
@@ -123,29 +124,31 @@ fn spawn_hunger_bar(mut commands: Commands) {
                 BackgroundColor(BAR_TRACK),
                 BorderColor::all(CELL_EDGE),
             ))
-            .with_child((
-                HungerFill,
-                Node {
-                    // Zero until a server snapshot supplies a ratio.
-                    width: Val::Percent(0.0),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-                BackgroundColor(BAR_FILL),
-            ));
-
-            root.spawn((
-                HungerLabel,
-                vital_bar_label(),
-                Text::new(String::new()),
-                TextFont {
-                    font_size: FontSize::Px(BAR_LABEL_SIZE),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-                TextLayout::no_wrap(),
-                TextShadow::default(),
-            ));
+            .with_children(|track| {
+                track.spawn((
+                    HungerFill,
+                    Node {
+                        // Zero until a server snapshot supplies a ratio.
+                        width: Val::Percent(0.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(BAR_FILL),
+                ));
+                track.spawn((
+                    HungerLabel,
+                    vital_bar_label(),
+                    vital_bar_label_transform(),
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(BAR_LABEL_SIZE),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                    TextLayout::no_wrap(),
+                    TextShadow::default(),
+                ));
+            });
         });
 }
 
