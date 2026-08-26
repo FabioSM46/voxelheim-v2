@@ -5,6 +5,7 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 // A repair is an authoritative decision made from state no client supplied: what the two
@@ -240,6 +241,30 @@ func TestArmourUsesTheExistingRepairRule(t *testing.T) {
 	}
 	if after := h.pack(player); after != before {
 		t.Error("the refused full-durability armour repair changed the pack")
+	}
+}
+
+func TestAnOffHandItemUsesTheExistingRepairRule(t *testing.T) {
+	const testOffHand ItemID = 64_970
+	itemRegistry[testOffHand] = itemDefinition{
+		places: world.Air, maxStack: 1, maxDurability: 120, wornAt: wornOffHand, armour: 7, threat: 3,
+	}
+	t.Cleanup(func() { delete(itemRegistry, testOffHand) })
+
+	h := newStructureHarness(t)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.stockPack(player, ingredient{ItemSharpeningStone, 1})
+	h.equipWorn(player, uint8(equipmentOffHand), testOffHand, 20)
+
+	state, err := h.repair(player, 0, uint8(equipmentOffHand))
+	if err != nil {
+		t.Fatalf("repairing the off-hand item: %v", err)
+	}
+	if got := state.Stacks[equipmentOffHand]; got.ItemID != uint16(testOffHand) || got.Durability != 70 || got.MaxDurability != 120 {
+		t.Errorf("mended off-hand item is %+v, want item %d at 70/120", got, testOffHand)
+	}
+	if player.worn.armour != 7 || player.worn.threat != 3 {
+		t.Errorf("the four-slot summary is armour=%d threat=%d, want 7/3 from the off-hand", player.worn.armour, player.worn.threat)
 	}
 }
 

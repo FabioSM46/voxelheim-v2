@@ -23,6 +23,8 @@ use crate::wire::voxelheim::net as fb;
 /// `protocol.MaxChunkSize`: a single RLE run length is a `u16`, and 40³ (64000)
 /// is the last cube that fits.
 pub const MAX_CHUNK_SIZE: u16 = 40;
+/// Largest equipment tail this client will allocate from an untrusted welcome.
+pub const MAX_EQUIPMENT_SLOTS: u8 = 8;
 
 /// Bounds the streamed volume, which grows as `(2r + 1)³` chunks. Mirrors
 /// `protocol.MaxViewDistance`.
@@ -185,7 +187,8 @@ pub struct SessionParams {
     /// Leading inventory slots selectable as the hotbar. Guaranteed non-zero
     /// and no greater than `inventory_slots`.
     pub hotbar_slots: u8,
-    /// Trailing inventory slots reserved for worn equipment. Guaranteed non-zero,
+    /// Trailing inventory slots reserved for worn equipment. Guaranteed
+    /// `1..=MAX_EQUIPMENT_SLOTS`,
     /// with hotbar and equipment together no larger than `inventory_slots`.
     pub equipment_slots: u8,
     /// This session's identity token. Guaranteed to have been present and exactly
@@ -773,6 +776,7 @@ pub struct PlayerAppearance {
     pub worn_head: u16,
     pub worn_chest: u16,
     pub worn_legs: u16,
+    pub worn_offhand: u16,
 }
 
 /// One character a client asks the server to create. **Intent only.**
@@ -1718,7 +1722,7 @@ pub enum DecodeError {
     InventorySlots(u8),
     /// `hotbar_slots` must be non-zero.
     HotbarSlots(u8),
-    /// `equipment_slots` must be non-zero.
+    /// `equipment_slots` violates `1..=MAX_EQUIPMENT_SLOTS`.
     EquipmentSlots(u8),
     /// The leading hotbar and trailing equipment subsets must fit in the inventory.
     ReservedSlotsExceedInventory {
@@ -2060,7 +2064,10 @@ impl fmt::Display for DecodeError {
                 write!(f, "hotbar slot count must be non-zero, got {got}")
             }
             Self::EquipmentSlots(got) => {
-                write!(f, "equipment slot count must be non-zero, got {got}")
+                write!(
+                    f,
+                    "equipment slot count must be in 1..={MAX_EQUIPMENT_SLOTS}, got {got}"
+                )
             }
             Self::ReservedSlotsExceedInventory {
                 hotbar,
@@ -2556,6 +2563,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 worn_head: payload.worn_head(),
                 worn_chest: payload.worn_chest(),
                 worn_legs: payload.worn_legs(),
+                worn_offhand: payload.worn_offhand(),
             }))
         }
         fb::Payload::LeaveStarted => {
@@ -3550,7 +3558,7 @@ fn session_params(welcome: &fb::ServerWelcome) -> Result<SessionParams, DecodeEr
         return Err(DecodeError::HotbarSlots(hotbar_slots));
     }
     let equipment_slots = welcome.equipment_slots();
-    if equipment_slots == 0 {
+    if !(1..=MAX_EQUIPMENT_SLOTS).contains(&equipment_slots) {
         return Err(DecodeError::EquipmentSlots(equipment_slots));
     }
     if u16::from(hotbar_slots) + u16::from(equipment_slots) > u16::from(inventory_slots) {
@@ -4181,9 +4189,9 @@ pub(super) mod server_side {
                 tick_rate: 20,
                 chunk_size: 32,
                 view_distance: 8,
-                inventory_slots: 39,
+                inventory_slots: 40,
                 hotbar_slots: 9,
-                equipment_slots: 3,
+                equipment_slots: 4,
                 player_token: Some(DEFAULT_TOKEN.to_vec()),
                 // No clock by default, which is what every server in this repository
                 // announces today and therefore the shape most fixtures should carry.
@@ -5140,7 +5148,7 @@ pub(super) mod server_side {
         name: Option<&str>,
         level: u16,
     ) -> Vec<u8> {
-        encode_player_appearance_with_worn(entity_id, appearance, name, level, [0; 3])
+        encode_player_appearance_with_worn(entity_id, appearance, name, level, [0; 4])
     }
 
     /// A `PlayerAppearance` with explicit worn item ids, including zero for an empty
@@ -5150,7 +5158,7 @@ pub(super) mod server_side {
         appearance: Option<AppearanceWire>,
         name: Option<&str>,
         level: u16,
-        worn: [u16; 3],
+        worn: [u16; 4],
     ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
@@ -5165,7 +5173,7 @@ pub(super) mod server_side {
                 worn_head: worn[0],
                 worn_chest: worn[1],
                 worn_legs: worn[2],
-                worn_offhand: 0,
+                worn_offhand: worn[3],
             },
         );
         finish_envelope(
@@ -6624,7 +6632,7 @@ mod tests {
             Some(AppearanceWire::default()),
             Some("Brynhildr"),
             12,
-            [101, 102, 103],
+            [101, 102, 103, 104],
         ));
 
         assert_eq!(
@@ -6637,6 +6645,7 @@ mod tests {
                 worn_head: 101,
                 worn_chest: 102,
                 worn_legs: 103,
+                worn_offhand: 104,
             }))
         );
     }
@@ -6863,6 +6872,7 @@ mod tests {
                 worn_head: 0,
                 worn_chest: 0,
                 worn_legs: 0,
+                worn_offhand: 0,
             }))
         );
     }
@@ -6971,9 +6981,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: 32,
             view_distance: 8,
-            inventory_slots: 36,
+            inventory_slots: 37,
             hotbar_slots: 9,
-            equipment_slots: 3,
+            equipment_slots: 4,
             player_token: Some(vec![7; PLAYER_TOKEN_LEN]),
             clock: WorldClock {
                 day_length_ticks: 24_000,
@@ -6991,9 +7001,9 @@ mod tests {
                 tick_rate: 20,
                 chunk_size: 32,
                 view_distance: 8,
-                inventory_slots: 36,
+                inventory_slots: 37,
                 hotbar_slots: 9,
-                equipment_slots: 3,
+                equipment_slots: 4,
                 player_token: PlayerToken::from_bytes([7; PLAYER_TOKEN_LEN]),
                 clock: WorldClock {
                     day_length_ticks: 24_000,
@@ -7172,18 +7182,29 @@ mod tests {
     }
 
     #[test]
+    fn more_than_eight_equipment_slots_is_a_protocol_error() {
+        assert_eq!(
+            decode_welcome(&WelcomeWire {
+                equipment_slots: MAX_EQUIPMENT_SLOTS + 1,
+                ..WelcomeWire::default()
+            }),
+            Err(DecodeError::EquipmentSlots(MAX_EQUIPMENT_SLOTS + 1))
+        );
+    }
+
+    #[test]
     fn hotbar_and_equipment_larger_than_the_inventory_is_a_protocol_error() {
         assert_eq!(
             decode_welcome(&WelcomeWire {
-                inventory_slots: 11,
+                inventory_slots: 12,
                 hotbar_slots: 9,
-                equipment_slots: 3,
+                equipment_slots: 4,
                 ..WelcomeWire::default()
             }),
             Err(DecodeError::ReservedSlotsExceedInventory {
                 hotbar: 9,
-                equipment: 3,
-                inventory: 11,
+                equipment: 4,
+                inventory: 12,
             })
         );
     }

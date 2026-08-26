@@ -3016,6 +3016,7 @@ func TestPlayerAppearanceCarriesTheEntityFaceNameLevelAndWornItems(t *testing.T)
 		WornHead:      101,
 		WornChest:     102,
 		WornLegs:      103,
+		WornOffHand:   104,
 		HasAppearance: true,
 		HasName:       true,
 	}
@@ -3053,6 +3054,9 @@ func TestPlayerAppearanceCarriesTheEntityFaceNameLevelAndWornItems(t *testing.T)
 	}
 	if got := payload.WornLegs(); got != want.WornLegs {
 		t.Errorf("WornLegs = %d, want %d", got, want.WornLegs)
+	}
+	if got := payload.WornOffhand(); got != want.WornOffHand {
+		t.Errorf("WornOffhand = %d, want %d", got, want.WornOffHand)
 	}
 }
 

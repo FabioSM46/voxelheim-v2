@@ -2186,6 +2186,7 @@ mod tests {
                 worn_head: 0,
                 worn_chest: 0,
                 worn_legs: 0,
+                worn_offhand: 0,
                 level: 1,
             });
         app.update();

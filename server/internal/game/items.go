@@ -162,7 +162,7 @@ type itemDefinition struct {
 	places   world.Block
 	maxStack uint16
 
-	// wornAt names the one equipment slot this item may enter: head, chest or legs.
+	// wornAt names the one equipment slot this item may enter: head, chest, legs or off-hand.
 	// Zero means it cannot be worn, which is every existing registry row. The move
 	// rule reads this column in both directions before changing either slot.
 	wornAt wornAt
@@ -231,6 +231,7 @@ const (
 	wornHead
 	wornChest
 	wornLegs
+	wornOffHand
 )
 
 // itemRegistry is intentionally not sent to clients. They receive authoritative

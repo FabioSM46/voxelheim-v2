@@ -448,7 +448,7 @@ type Player struct {
 	lifeState    vnet.LifeState
 	respawnTicks uint32
 
-	// worn is the combat summary derived from the three equipment slots. It is not
+	// worn is the combat summary derived from the four equipment slots. It is not
 	// persisted: the slots are, and Join rebuilds this value from them. Guarded by
 	// sim.mu and written only by refreshWornLocked while inventory.mu is held too.
 	// That lets the tick read armour and threat without taking the inventory lock — a
@@ -1079,7 +1079,7 @@ func (s *Sim) stepWorld(tick uint64) {
 				if !p.inventory.mu.TryLock() {
 					continue
 				}
-				wornHead, wornChest, wornLegs := p.inventory.wornItemsLocked()
+				wornHead, wornChest, wornLegs, wornOffHand := p.inventory.wornItemsLocked()
 				p.inventory.mu.Unlock()
 				faces[i] = protocol.EncodePlayerAppearance(protocol.PlayerAppearance{
 					EntityID:      p.entityID,
@@ -1089,6 +1089,7 @@ func (s *Sim) stepWorld(tick uint64) {
 					WornHead:      wornHead,
 					WornChest:     wornChest,
 					WornLegs:      wornLegs,
+					WornOffHand:   wornOffHand,
 					HasAppearance: true,
 					HasName:       true,
 				})

@@ -59,14 +59,14 @@ func awaitSignal(t *testing.T, name string, signal <-chan struct{}) {
 	}
 }
 
-func TestInventoryStatePreservesAllThirtyNineRealSlots(t *testing.T) {
+func TestInventoryStatePreservesAllFortyRealSlots(t *testing.T) {
 	t.Parallel()
 
 	inventory := newInventory()
 	inventory.slots[0] = inventoryStack{item: ItemDirt, count: 7}
 	inventory.slots[9] = inventoryStack{item: ItemStone, count: 3}
 	inventory.slots[35] = inventoryStack{item: ItemRawIron, count: 1}
-	inventory.slots[38] = inventoryStack{item: ItemSnow, count: 2}
+	inventory.slots[39] = inventoryStack{item: ItemSnow, count: 2}
 
 	state := inventory.state()
 	if got := len(state.Stacks); got != int(protocol.InventorySlots) {
@@ -76,7 +76,7 @@ func TestInventoryStatePreservesAllThirtyNineRealSlots(t *testing.T) {
 		0:  {ItemID: uint16(ItemDirt), Count: 7},
 		9:  {ItemID: uint16(ItemStone), Count: 3},
 		35: {ItemID: uint16(ItemRawIron), Count: 1},
-		38: {ItemID: uint16(ItemSnow), Count: 2},
+		39: {ItemID: uint16(ItemSnow), Count: 2},
 	}
 	for slot, stack := range state.Stacks {
 		if got := want[slot]; stack != got {
@@ -250,18 +250,21 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		testOtherHead
 		testChest
 		testLegs
+		testOffHand
 		testStackableHead
 	)
 	itemRegistry[testHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
 	itemRegistry[testOtherHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
 	itemRegistry[testChest] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornChest}
 	itemRegistry[testLegs] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornLegs}
+	itemRegistry[testOffHand] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornOffHand}
 	itemRegistry[testStackableHead] = itemDefinition{places: world.Air, maxStack: 4, wornAt: wornHead}
 	t.Cleanup(func() {
 		delete(itemRegistry, testHead)
 		delete(itemRegistry, testOtherHead)
 		delete(itemRegistry, testChest)
 		delete(itemRegistry, testLegs)
+		delete(itemRegistry, testOffHand)
 		delete(itemRegistry, testStackableHead)
 	})
 
@@ -286,6 +289,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		{name: "head", slot: equipmentHead, matching: testHead, mismatched: testChest},
 		{name: "chest", slot: equipmentChest, matching: testChest, mismatched: testLegs},
 		{name: "legs", slot: equipmentLegs, matching: testLegs, mismatched: testHead},
+		{name: "off-hand", slot: equipmentOffHand, matching: testOffHand, mismatched: testLegs},
 	}
 	for _, location := range locations {
 		t.Run(location.name, func(t *testing.T) {
@@ -353,18 +357,18 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 	})
 }
 
-func TestAnEquipmentMoveResendsTheAppearanceWithTheWornItem(t *testing.T) {
-	const testHead ItemID = 64_980
-	itemRegistry[testHead] = itemDefinition{
-		places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead,
+func TestAnOffHandMoveResendsTheAppearanceWithTheSyntheticItem(t *testing.T) {
+	const testOffHand ItemID = 64_980
+	itemRegistry[testOffHand] = itemDefinition{
+		places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornOffHand,
 	}
-	t.Cleanup(func() { delete(itemRegistry, testHead) })
+	t.Cleanup(func() { delete(itemRegistry, testOffHand) })
 
 	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
 	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
 	subject.inventory.mu.Lock()
-	subject.inventory.slots[4] = stackOf(testHead, 1)
+	subject.inventory.slots[4] = stackOf(testOffHand, 1)
 	subject.inventory.mu.Unlock()
 	h.step()
 
@@ -372,14 +376,14 @@ func TestAnEquipmentMoveResendsTheAppearanceWithTheWornItem(t *testing.T) {
 	if len(initial) != 1 {
 		t.Fatalf("the watcher began with %d subject appearances, want one", len(initial))
 	}
-	if got := playerAppearanceWornHead(t, initial[0]); got != 0 {
+	if got := playerAppearanceWornOffHand(t, initial[0]); got != 0 {
 		t.Fatalf("the initial appearance wears item %d, want nothing", got)
 	}
 
 	if _, err := subject.MoveInventory(protocol.InventoryMoveRequest{
-		From: 4, To: uint8(equipmentHead), Count: 1,
+		From: 4, To: uint8(equipmentOffHand), Count: 1,
 	}); err != nil {
-		t.Fatalf("moving the matching item onto the head: %v", err)
+		t.Fatalf("moving the matching item into the off-hand: %v", err)
 	}
 	h.step()
 
@@ -387,12 +391,12 @@ func TestAnEquipmentMoveResendsTheAppearanceWithTheWornItem(t *testing.T) {
 	if len(resent) != 2 {
 		t.Fatalf("the equipment move produced %d subject appearances, want two total", len(resent))
 	}
-	if got := playerAppearanceWornHead(t, resent[1]); got != uint16(testHead) {
-		t.Errorf("resent appearance wears item %d, want %d", got, testHead)
+	if got := playerAppearanceWornOffHand(t, resent[1]); got != uint16(testOffHand) {
+		t.Errorf("resent appearance carries off-hand item %d, want %d", got, testOffHand)
 	}
 }
 
-func playerAppearanceWornHead(t *testing.T, frame []byte) uint16 {
+func playerAppearanceWornOffHand(t *testing.T, frame []byte) uint16 {
 	t.Helper()
 	envelope := vnet.GetRootAsEnvelope(frame, 0)
 	var table flatbuffers.Table
@@ -401,7 +405,7 @@ func playerAppearanceWornHead(t *testing.T, frame []byte) uint16 {
 	}
 	var appearance vnet.PlayerAppearance
 	appearance.Init(table.Bytes, table.Pos)
-	return appearance.WornHead()
+	return appearance.WornOffhand()
 }
 
 // starterSword is the slot every player joins with, as InventoryState carries it. A

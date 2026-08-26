@@ -33,9 +33,9 @@ fn session() -> Session {
         tick_rate: TICK_RATE,
         chunk_size: 32,
         view_distance: 8,
-        inventory_slots: 36,
+        inventory_slots: 37,
         hotbar_slots: 9,
-        equipment_slots: 3,
+        equipment_slots: 4,
         player_token: crate::net::ANY_TOKEN,
     })
 }
@@ -162,11 +162,12 @@ fn describe_as_level(
             worn_head: 0,
             worn_chest: 0,
             worn_legs: 0,
+            worn_offhand: 0,
             level,
         });
 }
 
-fn describe_wearing(app: &mut App, entity_id: u64, appearance: Appearance, worn: [u16; 3]) {
+fn describe_wearing(app: &mut App, entity_id: u64, appearance: Appearance, worn: [u16; 4]) {
     app.world_mut()
         .resource_mut::<AppearanceInbox>()
         .push(PlayerAppearance {
@@ -176,6 +177,7 @@ fn describe_wearing(app: &mut App, entity_id: u64, appearance: Appearance, worn:
             worn_head: worn[0],
             worn_chest: worn[1],
             worn_legs: worn[2],
+            worn_offhand: worn[3],
             level: 1,
         });
 }
@@ -1013,6 +1015,7 @@ fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
         crafting::ITEM_IRON_HELM,
         crafting::ITEM_IRON_CUIRASS,
         crafting::ITEM_IRON_GREAVES,
+        0,
     ];
     describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
     describe_wearing(&mut app, 99, appearance, full_iron);
@@ -1056,7 +1059,7 @@ fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
         BodyPiece::ALL.len() + ArmourSegment::ALL.len(),
     );
 
-    describe_wearing(&mut app, 99, appearance, [0, 0, 0]);
+    describe_wearing(&mut app, 99, appearance, [0, 0, 0, 0]);
     app.update();
 
     assert_eq!(body_of(&mut app, 99), Some(body), "the body was respawned");
@@ -1073,7 +1076,7 @@ fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
         "re-dressing appended stale overlays to Children",
     );
 
-    describe_wearing(&mut app, 99, appearance, [0, 0, 0]);
+    describe_wearing(&mut app, 99, appearance, [0, 0, 0, 0]);
     app.update();
     assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
 }
@@ -1089,6 +1092,7 @@ fn leather_keeps_the_existing_rough_non_metallic_finish() {
             crafting::ITEM_LEATHER_CAP,
             crafting::ITEM_LEATHER_JERKIN,
             crafting::ITEM_LEATHER_LEGGINGS,
+            0,
         ],
     );
     deliver(
@@ -1122,6 +1126,7 @@ fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
         crafting::ITEM_IRON_HELM,
         crafting::ITEM_IRON_CUIRASS,
         crafting::ITEM_IRON_GREAVES,
+        0,
     ];
     describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
     describe_wearing(&mut app, 99, appearance, full_iron);
@@ -1933,6 +1938,7 @@ fn an_entity_that_leaves_the_snapshot_loses_its_body() {
             crafting::ITEM_LEATHER_CAP,
             crafting::ITEM_LEATHER_JERKIN,
             crafting::ITEM_LEATHER_LEGGINGS,
+            0,
         ],
     );
     deliver(
@@ -1971,6 +1977,35 @@ fn an_entity_that_leaves_the_snapshot_loses_its_body() {
             "an overlay outlived the body it dressed"
         );
     }
+}
+
+#[test]
+fn a_synthetic_off_hand_id_reaches_the_rig_without_adding_geometry() {
+    let mut app = headless_player();
+    describe_wearing(
+        &mut app,
+        99,
+        an_appearance(HairModel::Braided),
+        [0, 0, 0, u16::MAX],
+    );
+    deliver(
+        &mut app,
+        1,
+        vec![state(99, [4.0, 64.0, 0.0], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+
+    let body = body_of(&mut app, 99).expect("the described body is drawn");
+    assert_eq!(
+        app.world()
+            .get::<Worn>(body)
+            .expect("the rig is dressed")
+            .off_hand,
+        u16::MAX
+    );
+    assert!(armour_of(&mut app, 99).is_empty());
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
 }
 
 #[test]

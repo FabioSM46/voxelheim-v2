@@ -52,7 +52,7 @@ That is why a stored life is declared twice: `game.Life` and the life fields of 
 carry the same five values, and `session` is the one place that maps between them. The duplication
 is five field names; what it buys is that the store never decides what a life may say and the
 simulation never decides how one is written down. Both use `protocol.InventoryStack` for the slots,
-so the 39-slot shape has exactly one declaration.
+so the 40-slot shape has exactly one declaration.
 
 `session` and `game` both name a few enums from `gen/` — `Payload`, `EditAction` — and that is
 deliberate rather than a leak. `protocol` owns *reading and writing* FlatBuffers; the wire's
@@ -441,9 +441,10 @@ package can avoid the import would create two truths to keep in step for no bene
   session never sends a delta and never drops one on a full outbound queue: unlike a tick
   snapshot, no later frame is guaranteed to supersede it. A pickup is decided on the tick and
   therefore uses the tick's non-blocking seam, which is why it keeps a durable flag and retries
-  until one is accepted rather than dropping the frame. The current protocol sends 39 real,
+  until one is accepted rather than dropping the frame. The current protocol sends 40 real,
   stable slot-indexed pairs; `(0, 0)` is empty, the first nine are the hotbar, slots 9–35 are
-  the pack and slots 36–38 are head, chest and legs equipment. Automatic insertions fill partial
+  the pack and slots 36–39 are head, chest, legs and off-hand equipment. Automatic insertions
+  fill partial
   same-item stacks before the lowest empty pack slot and never enter equipment; moves split,
   merge or swap under the same per-player lock, and only an explicit compatible move may enter an
   equipment slot. `BlockEditRequest.slot` spends exactly the slot the client named for a placement
@@ -2107,7 +2108,7 @@ Recorded here so the next reader does not mistake them for oversights:
   Raising `JumpImpulse` to cover 5 Hz would change how every jump feels at 20; the honest fix is a
   sub-stepped integrator, and that is its own issue.
 - **A life survives a disconnect; the session around it deliberately does not.** What is written is
-  position, yaw, health and all 39 slots with their durability — `game.Life`, captured by
+  position, yaw, health and all 40 slots with their durability — `game.Life`, captured by
   `Player.Record` and stored by `persist`. What is **not** written is everything that only means
   something inside one connection: the death countdown, the respawn protection window, mining
   progress, a pending swing, the three client-tick ordering guards, and the drops and mobs in the
