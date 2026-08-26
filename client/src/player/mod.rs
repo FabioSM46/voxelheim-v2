@@ -69,8 +69,9 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 pub(crate) use appearance::{
-    ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
-    held_item_anchor as body_held_item_anchor, piece_boxes, placed as placed_box, placed_armour,
+    ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, NOTCH_XZ, PlacedBox,
+    envelope as body_envelope, held_item_anchor as body_held_item_anchor,
+    held_item_box as body_held_item_box, piece_boxes, placed as placed_box, placed_armour,
 };
 
 pub(crate) use camera::{AimCamera, DeathFall};
@@ -1025,31 +1026,41 @@ fn stack_item_id(stack: Option<crate::net::InventoryStack>) -> Option<u16> {
 /// The local attachment of one world-scale item to the right fist.
 ///
 /// Ordinary shapes retain the centre placement they already had. A sword's own Y axis is its
-/// length, so leaving its rotation at identity lays it up the arm. Turn that axis horizontal and
-/// diagonally outwards/forwards: both a rear and a side view then see a projection of the blade.
-/// Translation compensates for the rotation around the mesh origin, keeping the actual grip
-/// centre inside the rig-derived fist rather than putting the sword's midpoint there.
+/// length with the tip at `+Y`, so a half turn about X points that tip at the ground and the
+/// weapon hangs from the fist the way gravity leaves it. The yaw that follows presents the
+/// cross guard and the blade's flat to the rear and the side reference view alike, rather than
+/// edge-on to one of them — which is the occlusion the diagonal this replaces was reaching for,
+/// obtained here without carrying a resting sword horizontally.
+///
+/// **Seated by the cross guard, not by the grip.** The fist is 0.20 blocks tall and the grip
+/// only 0.082, so a grip-centred hang buries the guard inside it. Putting the guard's uppermost
+/// face against the fist's lower face instead leaves exactly the grip and the pommel closed
+/// inside the fist, the guard immediately below it, and the whole blade hanging clear beneath
+/// that.
 fn body_held_item_transform(shape: ItemShape) -> Transform {
     let anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
     if shape != ItemShape::Blade {
         return Transform::from_translation(anchor);
     }
+    let fist = body_held_item_box();
 
-    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+    use std::f32::consts::{FRAC_PI_4, PI};
 
-    let rotation = Quat::from_rotation_y(FRAC_PI_4) * Quat::from_rotation_z(-FRAC_PI_2);
-    // The fist is 0.2 blocks across both projected axes. Moving the grip 0.11 blocks
-    // along this 45-degree axis shifts each coordinate by about 0.078: still inside the
-    // fist, while the blade root clears its silhouette and the readable length no longer
-    // consists of one protruding tip.
-    const BLADE_GRIP_OUTSET: f32 = 0.11;
+    let rotation = Quat::from_rotation_y(FRAC_PI_4) * Quat::from_rotation_x(PI);
     // The shared drop mesh is deliberately small on the ground. A modest body-only scale
     // makes its furniture readable beside the 1.8-block rig without changing that asset.
     const BODY_BLADE_SCALE: f32 = 1.25;
-    let grip_anchor = anchor + rotation * Vec3::Y * BLADE_GRIP_OUTSET;
+    // One notch outboard of the fist's centre. The tunic torso reaches x = 0.25 at the hip
+    // and the yawed guard sweeps about 0.076 blocks either side of the hang axis, so a sword
+    // hung on the fist's centre at x = 0.30 would bury its inboard guard tip in the hem. A
+    // notch clears it while the grip and the pommel both stay wholly inside the 0.20-block
+    // fist — the hand grips towards its outer face, which is where a hand holds a sword.
+    const BLADE_HANG_OUTSET: f32 = NOTCH_XZ;
     let scale = Vec3::splat(BODY_BLADE_SCALE);
+    // Where the guard's uppermost face has to land: on the fist's lower face, on that axis.
+    let guard_seat = anchor + Vec3::new(BLADE_HANG_OUTSET, -fist.size.y / 2.0, 0.0);
     Transform {
-        translation: grip_anchor - rotation * (drops::blade_grip_centre() * scale),
+        translation: guard_seat - rotation * (drops::blade_guard_base() * scale),
         rotation,
         scale,
     }

@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_grip_centre, sword_mesh};
+use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_guard_base, sword_mesh};
 #[cfg(test)]
-use super::hands::{sword_blade_span, sword_guard_span};
+use super::hands::{sword_blade_span, sword_grip_centre, sword_guard_span};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::merge_all;
@@ -41,12 +41,21 @@ const BOB_RADIANS_PER_SECOND: f32 = TAU / 2.0;
 /// weapon.
 const BLADE_DROP_LENGTH: f32 = 1.25;
 
-/// The point the body-held attachment closes its fist around.
+/// The point a fist closes around, in the shared world-scale mesh.
 ///
-/// The body and ground share this world-scale mesh. The attachment asks the mesh recipe for its
-/// grip rather than copying the furniture proportions into a second renderer.
+/// The body attachment is seated by [`blade_guard_base`]; this is the point its tests check
+/// has landed inside the rig's fist, asked of the mesh recipe rather than copied out of it.
+#[cfg(test)]
 pub(super) fn blade_grip_centre() -> Vec3 {
     sword_grip_centre(DROP_EDGE * BLADE_DROP_LENGTH)
+}
+
+/// The guard face a body-held sword is seated against, hanging point-down from the fist.
+///
+/// The body and ground share this world-scale mesh, so the attachment asks the mesh recipe
+/// where its guard is instead of holding a second copy of the furniture proportions.
+pub(super) fn blade_guard_base() -> Vec3 {
+    sword_guard_base(DROP_EDGE * BLADE_DROP_LENGTH)
 }
 
 /// The blade centreline used to measure how much of a carried sword projects clear.
