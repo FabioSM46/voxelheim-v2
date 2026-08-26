@@ -425,8 +425,12 @@ const (
 	OrbHeal             = 10
 	ArrowSpeed          = 30.0
 	OrbSpeed            = 16.0
-	ArrowLifetime       = 5 * time.Second
-	OrbLifetime         = 1500 * time.Millisecond
+	// ProjectileMaxLaunchSpeed bounds accepted spawn inputs independently of the
+	// caller. Gravity may make an arrow faster later; that acceleration remains
+	// bounded by TerminalFallSpeed and the finite flight lifetime.
+	ProjectileMaxLaunchSpeed = ArrowSpeed
+	ArrowLifetime            = 5 * time.Second
+	OrbLifetime              = 1500 * time.Millisecond
 	// ArrowStuckTicks is converted to the configured server's ticks by NewSim.
 	// The name records what the projectile stores; the constant remains a duration
 	// so three seconds means the same thing at every tick rate.

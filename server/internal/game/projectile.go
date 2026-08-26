@@ -37,7 +37,7 @@ type projectile struct {
 // projectile is nudged along that direction until its small body is outside the
 // shooter's body, so the first sweep can never intersect the body it started inside.
 func (s *Sim) spawnProjectileLocked(kind vnet.ProjectileKind, owner *Player, origin, direction [3]float64, speed float64) (uint64, bool) {
-	if owner == nil || !s.onlineLocked(owner) || !owner.alive() || speed <= 0 ||
+	if owner == nil || !s.onlineLocked(owner) || !owner.alive() || speed <= 0 || speed > ProjectileMaxLaunchSpeed ||
 		math.IsNaN(speed) || math.IsInf(speed, 0) ||
 		!finiteVec(origin) || !finiteVec(direction) || !isKnownProjectileKind(kind) {
 		return 0, false
@@ -47,13 +47,13 @@ func (s *Sim) spawnProjectileLocked(kind vnet.ProjectileKind, owner *Player, ori
 	if length == 0 || math.IsInf(length, 0) || math.IsNaN(length) {
 		return 0, false
 	}
-	velocity := [3]float64{direction[0] * speed, direction[1] * speed, direction[2] * speed}
+	unit := [3]float64{direction[0] / length, direction[1] / length, direction[2] / length}
+	velocity := [3]float64{unit[0] * speed, unit[1] * speed, unit[2] * speed}
 	if !finiteVec(velocity) {
 		return 0, false
 	}
 
 	pos := origin
-	unit := [3]float64{direction[0] / length, direction[1] / length, direction[2] / length}
 	// The longest route out is straight down from eye height. This bounded walk covers
 	// twice a player height and advances by half the projectile edge, so it cannot leave
 	// a valid finite origin inside the owner after the loop.
@@ -130,6 +130,7 @@ func (s *Sim) sortedProjectilesLocked() []*projectile {
 // returned slice contains the survivors in entity-id order. The caller holds Sim.mu.
 func (s *Sim) advanceProjectilesLocked(players []*Player) []*projectile {
 	projectiles := s.sortedProjectilesLocked()
+	mobs := s.sortedMobsLocked()
 	kept := projectiles[:0]
 	for _, proj := range projectiles {
 		if proj.stuck {
@@ -146,21 +147,18 @@ func (s *Sim) advanceProjectilesLocked(players []*Player) []*projectile {
 
 		// Expiry is counted by authoritative ticks. The last tick may complete its move,
 		// but an expired id is absent from the snapshot that tick produces.
+		expiresThisTick := proj.ticksLeft <= 1
 		if proj.ticksLeft > 0 {
 			proj.ticksLeft--
 		}
 
-		// A non-resident chunk is a hold, never air. Unlike an arrow's gravitational
-		// acceleration, its existing velocity is retained; an orb's velocity therefore
-		// remains unchanged over the whole flight as the contract promises.
-		voxel := voxelAt(proj.pos)
-		if _, resident := s.terrain.Block(voxel[0], voxel[1], voxel[2]); resident {
-			if s.stepProjectileLocked(proj, players) {
-				continue
-			}
+		if s.stepProjectileLocked(proj, players, mobs) {
+			continue
 		}
 
-		if proj.ticksLeft == 0 {
+		// A terrain hit on the final flight tick may turn an arrow into a stuck arrow,
+		// but expiry still wins: that id must be absent from this tick's snapshot.
+		if expiresThisTick {
 			s.removeProjectileLocked(proj)
 			continue
 		}
@@ -170,7 +168,7 @@ func (s *Sim) advanceProjectilesLocked(players []*Player) []*projectile {
 }
 
 // stepProjectileLocked returns true when the projectile ended during this tick.
-func (s *Sim) stepProjectileLocked(proj *projectile, players []*Player) bool {
+func (s *Sim) stepProjectileLocked(proj *projectile, players []*Player, mobs []*mob) bool {
 	endVelocity := proj.vel
 	if proj.kind == vnet.ProjectileKindArrow {
 		endVelocity[1] = max(endVelocity[1]-Gravity*s.dt, -TerminalFallSpeed)
@@ -184,17 +182,26 @@ func (s *Sim) stepProjectileLocked(proj *projectile, players []*Player) bool {
 	subDT := s.dt / float64(steps)
 
 	for range steps {
+		velocityBeforeStep := proj.vel
 		if proj.kind == vnet.ProjectileKindArrow {
 			proj.vel[1] = max(proj.vel[1]-Gravity*subDT, -TerminalFallSpeed)
 		}
 		delta := [3]float64{proj.vel[0] * subDT, proj.vel[1] * subDT, proj.vel[2] * subDT}
 		from := proj.pos
+		to := [3]float64{from[0] + delta[0], from[1] + delta[1], from[2] + delta[2]}
+		// A non-resident chunk is a hold, never terrain and never air. Preflight the
+		// whole swept body before collision so crossing a chunk boundary cannot make an
+		// arrow stick or an orb disappear. Gravity for the untravelled sub-step is undone.
+		if !projectilePathResident(s.terrain, from, to) {
+			proj.vel = velocityBeforeStep
+			return false
+		}
 		moved, blocked := moveAndCollide(s.terrain, projectileBody, from, delta)
 		if blocked != [3]bool{} {
 			moved = firstTerrainContact(from, delta, moved, blocked)
 		}
 
-		if target := s.firstProjectileTargetLocked(proj, players, from, moved); target != nil {
+		if target := s.firstProjectileTargetLocked(proj, players, mobs, from, moved); target != nil {
 			if hit, ok := segmentBoxIntersection(from, moved, projectileTargetBox(target)); ok {
 				proj.pos = pointOnSegment(from, moved, hit)
 			} else {
@@ -220,6 +227,39 @@ func (s *Sim) stepProjectileLocked(proj *projectile, players []*Player) bool {
 	return false
 }
 
+// projectilePathResident reports whether every voxel the moving projectile body can
+// touch is available to this tick. Expanding each candidate voxel by the projectile
+// body turns the swept-body question into the same segment/box slab test used for hits.
+func projectilePathResident(t Terrain, from, to [3]float64) bool {
+	fromBox, toBox := projectileBody.boxAt(from), projectileBody.boxAt(to)
+	swept := box{}
+	for axis := range 3 {
+		swept.min[axis] = min(fromBox.min[axis], toBox.min[axis])
+		swept.max[axis] = max(fromBox.max[axis], toBox.max[axis])
+	}
+	x0, x1 := voxelSpan(swept.min[0], swept.max[0])
+	y0, y1 := voxelSpan(swept.min[1], swept.max[1])
+	z0, z1 := voxelSpan(swept.min[2], swept.max[2])
+	half := ProjectileBodySize / 2
+	for y := y0; y <= y1; y++ {
+		for z := z0; z <= z1; z++ {
+			for x := x0; x <= x1; x++ {
+				referencePoints := box{
+					min: [3]float64{float64(x) - half, float64(y) - ProjectileBodySize, float64(z) - half},
+					max: [3]float64{float64(x+1) + half, float64(y + 1), float64(z+1) + half},
+				}
+				if _, touches := segmentBoxIntersection(from, to, referencePoints); !touches {
+					continue
+				}
+				if _, resident := t.Block(x, y, z); !resident {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 // firstTerrainContact turns moveAndCollide's axis-resolved result into the first point
 // on a projectile's straight sub-step. Players slide along a free axis; a projectile
 // ends its flight at the first blocked face instead.
@@ -238,7 +278,7 @@ func firstTerrainContact(from, delta, resolved [3]float64, blocked [3]bool) [3]f
 
 // firstProjectileTargetLocked finds the earliest body crossing on one actually
 // travelled sub-step. Entity identity breaks exact-distance ties deterministically.
-func (s *Sim) firstProjectileTargetLocked(proj *projectile, players []*Player, from, to [3]float64) any {
+func (s *Sim) firstProjectileTargetLocked(proj *projectile, players []*Player, mobs []*mob, from, to [3]float64) any {
 	var best any
 	bestAt := math.Inf(1)
 	bestID := ^uint64(0)
@@ -251,7 +291,7 @@ func (s *Sim) firstProjectileTargetLocked(proj *projectile, players []*Player, f
 		best, bestAt, bestID = target, at, entityID
 	}
 
-	for _, m := range s.sortedMobsLocked() {
+	for _, m := range mobs {
 		if m.dying() || m.health == 0 {
 			continue
 		}

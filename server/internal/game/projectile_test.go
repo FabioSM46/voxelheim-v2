@@ -16,6 +16,20 @@ type projectileTerrain struct {
 	absent bool
 }
 
+type projectileBoundaryTerrain struct{}
+
+func (projectileBoundaryTerrain) Block(x, _, _ int64) (world.Block, bool) {
+	if x >= 1 {
+		return world.Air, false
+	}
+	return world.Air, true
+}
+
+func (w projectileBoundaryTerrain) Solid(x, y, z int64) bool {
+	block, resident := w.Block(x, y, z)
+	return !resident || block != world.Air
+}
+
 func (w projectileTerrain) Block(_, y, z int64) (world.Block, bool) {
 	if w.absent {
 		return world.Air, false
@@ -76,6 +90,25 @@ func TestProjectileSpawnUsesTheSharedIdentityAndStartsOutsideItsOwner(t *testing
 	}
 	if boxesIntersect(projectileBody.boxAt(proj.pos), playerBox(owner.pos)) {
 		t.Fatalf("projectile at %v still intersects its owner's box", proj.pos)
+	}
+}
+
+func TestProjectileSpawnNormalizesDirectionAndBoundsLaunchSpeed(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
+	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{0, 0, -10}, OrbSpeed)
+	proj, _ := projectileState(h, id)
+	if proj.vel != [3]float64{0, 0, -OrbSpeed} {
+		t.Errorf("normalized velocity = %v, want [0 0 %v]", proj.vel, -OrbSpeed)
+	}
+
+	h.sim.mu.Lock()
+	_, ok := h.sim.spawnProjectileLocked(vnet.ProjectileKindArrow, owner, projectileOriginLocked(owner), [3]float64{1, 0, 0}, ProjectileMaxLaunchSpeed+1)
+	h.sim.mu.Unlock()
+	if ok {
+		t.Fatal("spawn accepted a launch speed above ProjectileMaxLaunchSpeed")
 	}
 }
 
@@ -228,6 +261,21 @@ func TestTerrainAndLifetimeEndEachProjectileAtItsOwnRule(t *testing.T) {
 	}
 }
 
+func TestArrowExpiryWinsOverStickingOnItsFinalTick(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
+	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowSpeed)
+	h.sim.mu.Lock()
+	h.sim.projectiles[id].ticksLeft = 1
+	h.sim.mu.Unlock()
+
+	advanceTestProjectiles(h)
+	if _, live := projectileState(h, id); live {
+		t.Fatal("arrow became stuck instead of expiring on its final flight tick")
+	}
+}
+
 func TestAProjectileHoldsOverANonResidentChunk(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{absent: true})
@@ -238,6 +286,20 @@ func TestAProjectileHoldsOverANonResidentChunk(t *testing.T) {
 	after, ok := projectileState(h, id)
 	if !ok || after.pos != before.pos || after.vel != before.vel {
 		t.Fatalf("held projectile changed from pos=%v vel=%v to pos=%v vel=%v", before.pos, before.vel, after.pos, after.vel)
+	}
+}
+
+func TestAProjectileHoldsBeforeEnteringANonResidentChunk(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, projectileBoundaryTerrain{})
+	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{1, 0, 0}, OrbSpeed)
+	before, _ := projectileState(h, id)
+
+	advanceTestProjectiles(h)
+	after, ok := projectileState(h, id)
+	if !ok || after.pos != before.pos || after.vel != before.vel {
+		t.Fatalf("boundary hold changed pos=%v vel=%v to pos=%v vel=%v", before.pos, before.vel, after.pos, after.vel)
 	}
 }
 
