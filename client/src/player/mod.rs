@@ -304,8 +304,10 @@ impl Plugin for PlayerPlugin {
             .add_plugins(camera::PlayerCameraPlugin)
             .add_systems(
                 Update,
-                (sync_name_plates, position_name_plates)
-                    .chain()
+                (
+                    (sync_name_plates, position_name_plates).chain(),
+                    mobs::face_aggro_markers,
+                )
                     .after(camera::AimCamera),
             )
             .add_plugins(inventory::InventoryPlugin)

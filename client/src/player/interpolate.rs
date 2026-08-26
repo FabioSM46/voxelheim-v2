@@ -75,7 +75,7 @@ pub struct InterpolatedProjectile {
 /// Where one mob should be drawn now, and what it is doing.
 ///
 /// Position and yaw interpolate; everything else is the newest snapshot's value and
-/// nothing else. Kind, health and action are discrete facts about a creature rather than
+/// nothing else. Kind, health, action and target are discrete facts about a creature rather than
 /// points on a segment — blending two actions would draw a pose the server never chose,
 /// and blending two healths would invent a moment the draugr was never at.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,6 +86,7 @@ pub struct InterpolatedMob {
     pub health: u16,
     pub max_health: u16,
     pub action: MobAction,
+    pub target_entity_id: u64,
 }
 
 /// One snapshot, with the moment it reached this process.
@@ -170,6 +171,22 @@ impl SnapshotBuffer {
         self.latest
             .as_ref()
             .map_or(&[], |latest| &latest.snapshot.accessible_loot_corpses)
+    }
+
+    /// Whether any mob in the newest accepted snapshot is hunting this entity.
+    ///
+    /// The answer is presentation only and deliberately does not require the target to
+    /// appear in the snapshot's entity list: party members may be outside this viewer's
+    /// visibility while a visible mob continues hunting them.
+    pub fn mob_hunts(&self, entity_id: u64) -> bool {
+        entity_id != 0
+            && self.latest.as_ref().is_some_and(|latest| {
+                latest
+                    .snapshot
+                    .mobs
+                    .iter()
+                    .any(|mob| mob.target_entity_id == entity_id)
+            })
     }
 
     /// Takes a snapshot, keeping it and the one before it.
@@ -537,6 +554,7 @@ fn mob_at_rest(state: &MobState) -> InterpolatedMob {
         health: state.health,
         max_health: state.max_health,
         action: state.action,
+        target_entity_id: state.target_entity_id,
     }
 }
 
@@ -1071,6 +1089,7 @@ mod mob_tests {
             health,
             max_health: 60,
             action,
+            target_entity_id: 0,
         }
     }
 
@@ -1115,6 +1134,12 @@ mod mob_tests {
         assert_eq!(state.health, 35);
         assert_eq!(state.action, MobAction::Windup);
         assert_eq!(state.kind, MobKind::Draugr);
+
+        let mut targeted = mob(900, 2.0, 1.0, 35, MobAction::Windup);
+        targeted.target_entity_id = 77;
+        buffer.accept(with_mobs(3, vec![targeted]), start + INTERVAL * 2);
+        assert!(buffer.mob_hunts(77));
+        assert!(!buffer.mob_hunts(0));
     }
 
     /// A body that has just come into view has no earlier position to come from.

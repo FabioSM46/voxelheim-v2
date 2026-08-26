@@ -27,8 +27,11 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
 use std::time::{Duration, Instant};
 
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use super::camera::WorldCamera;
 use super::interpolate::{InterpolatedMob, SnapshotBuffer};
 use super::{InputMode, merge_all};
 use crate::net::{MobAction, MobKind, Session};
@@ -150,6 +153,12 @@ const VARGR_LEG_SPLAY: f32 = 1.9;
 /// Modes whose UI owns the view instead of the 3D world. The same rule drops obey.
 const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
 
+/// A small planar arrowhead above a mob the server says is hunting this player.
+const AGGRO_MARKER_WIDTH: f32 = 0.30;
+const AGGRO_MARKER_HEIGHT: f32 = 0.34;
+const AGGRO_MARKER_GAP: f32 = 0.20;
+const AGGRO_MARKER_COLOUR: Color = Color::srgb(0.92, 0.08, 0.06);
+
 /// A restrained amber wash for a corpse the server says this recipient may open.
 const LOOTABLE_COLOUR: Color = Color::srgb(0.58, 0.47, 0.24);
 
@@ -211,6 +220,8 @@ pub(super) struct MobVisuals {
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
     lootable_material: Handle<StandardMaterial>,
+    aggro_marker: Handle<Mesh>,
+    aggro_marker_material: Handle<StandardMaterial>,
 }
 
 impl MobVisuals {
@@ -296,6 +307,12 @@ pub(super) struct MobVisual {
     part: MobPart,
 }
 
+/// The billboard child attached only while its owner hunts this session's entity.
+#[derive(Component, Debug)]
+pub(super) struct AggroMarker {
+    owner: Entity,
+}
+
 pub(super) fn create_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -325,6 +342,14 @@ pub(super) fn create_visuals(
         },
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
+        aggro_marker: meshes.add(aggro_marker_mesh()),
+        aggro_marker_material: materials.add(StandardMaterial {
+            base_color: AGGRO_MARKER_COLOUR,
+            unlit: true,
+            // A billboard can be viewed from either face while the camera crosses it.
+            cull_mode: None,
+            ..default()
+        }),
     });
 }
 
@@ -446,6 +471,33 @@ fn deer_head_mesh() -> Mesh {
     head
 }
 
+/// A downward arrowhead quad on one camera-facing plane.
+///
+/// This is world geometry rather than `bevy_ui`, so it inherits the body's visibility
+/// and cannot remain on screen while the body is hidden. Its bottom edge is deliberately
+/// narrow, so the four-vertex quad reads as a triangle without a texture or another asset.
+fn aggro_marker_mesh() -> Mesh {
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            [-AGGRO_MARKER_WIDTH / 2.0, AGGRO_MARKER_HEIGHT / 2.0, 0.0],
+            [AGGRO_MARKER_WIDTH / 2.0, AGGRO_MARKER_HEIGHT / 2.0, 0.0],
+            [AGGRO_MARKER_WIDTH / 30.0, -AGGRO_MARKER_HEIGHT / 2.0, 0.0],
+            [-AGGRO_MARKER_WIDTH / 30.0, -AGGRO_MARKER_HEIGHT / 2.0, 0.0],
+        ],
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 4])
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0, 0.0], [1.0, 0.0], [0.53, 1.0], [0.47, 1.0]],
+    )
+    .with_inserted_indices(Indices::U32(vec![0, 3, 2, 0, 2, 1]))
+}
+
 /// Spawns, places and despawns bodies from the latest authoritative snapshot.
 ///
 /// The newest snapshot is the existence set, exactly as it is for drops. Nothing here
@@ -456,6 +508,7 @@ pub(super) fn apply_snapshots(
     mode: Res<InputMode>,
     visuals: Option<Res<MobVisuals>>,
     mut existing: Query<(Entity, &mut Mob, &mut Transform, &mut Visibility)>,
+    markers: Query<(Entity, &AggroMarker)>,
     mut commands: Commands,
 ) {
     let (Some(session), Some(visuals)) = (session, visuals) else {
@@ -468,6 +521,10 @@ pub(super) fn apply_snapshots(
     let by_id: HashMap<u64, InterpolatedMob> = drawn.iter().copied().collect();
     let mut placed = HashSet::with_capacity(drawn.len());
     let visibility = mob_visibility(*mode);
+    let mut markers_by_owner: HashMap<Entity, Entity> = markers
+        .iter()
+        .map(|(entity, marker)| (marker.owner, entity))
+        .collect();
 
     for (entity, mut mob, mut transform, mut current_visibility) in &mut existing {
         let Some(state) = by_id.get(&mob.entity_id) else {
@@ -503,6 +560,13 @@ pub(super) fn apply_snapshots(
             _ => None,
         };
 
+        let hunts_local = state.target_entity_id == session.0.entity_id;
+        match (markers_by_owner.remove(&entity), hunts_local) {
+            (None, true) => spawn_aggro_marker(&mut commands, &visuals, entity, state.kind),
+            (Some(marker), false) => commands.entity(marker).despawn(),
+            _ => {}
+        }
+
         placed.insert(mob.entity_id);
     }
 
@@ -517,6 +581,7 @@ pub(super) fn apply_snapshots(
             state,
             lootable.contains(entity_id),
             visibility,
+            state.target_entity_id == session.0.entity_id,
         );
     }
 }
@@ -528,6 +593,7 @@ fn spawn_mob(
     state: &InterpolatedMob,
     lootable: bool,
     visibility: Visibility,
+    hunts_local: bool,
 ) {
     let owner = commands
         .spawn((
@@ -592,7 +658,64 @@ fn spawn_mob(
                 Transform::default(),
             ));
         }
+        if hunts_local {
+            parent.spawn(aggro_marker_bundle(visuals, owner, state.kind));
+        }
     });
+}
+
+fn aggro_marker_bundle(visuals: &MobVisuals, owner: Entity, kind: MobKind) -> impl Bundle + use<> {
+    (
+        AggroMarker { owner },
+        Mesh3d(visuals.aggro_marker.clone()),
+        MeshMaterial3d(visuals.aggro_marker_material.clone()),
+        Transform::from_translation(Vec3::Y * (body(kind).height + AGGRO_MARKER_GAP)),
+        Visibility::Inherited,
+    )
+}
+
+fn spawn_aggro_marker(commands: &mut Commands, visuals: &MobVisuals, owner: Entity, kind: MobKind) {
+    commands
+        .entity(owner)
+        .with_child(aggro_marker_bundle(visuals, owner, kind));
+}
+
+type MobTransforms<'w, 's> =
+    Query<'w, 's, &'static Transform, (With<Mob>, Without<AggroMarker>, Without<WorldCamera>)>;
+type AggroMarkerTransforms<'w, 's> = Query<
+    'w,
+    's,
+    (&'static AggroMarker, &'static mut Transform),
+    (Without<Mob>, Without<WorldCamera>),
+>;
+
+/// Rotates every marker into the camera plane without moving it off its owner's head.
+///
+/// The desired world rotation is converted back through the mob root because the marker
+/// is a child and its owner may be turning, leaning or falling. This is presentation only:
+/// neither target ids nor camera positions leave the renderer.
+pub(super) fn face_aggro_markers(
+    cameras: Query<&Transform, (With<WorldCamera>, Without<AggroMarker>)>,
+    owners: MobTransforms<'_, '_>,
+    mut markers: AggroMarkerTransforms<'_, '_>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+
+    for (marker, mut transform) in &mut markers {
+        let Ok(owner) = owners.get(marker.owner) else {
+            continue;
+        };
+        let world_position = owner.transform_point(transform.translation);
+        if camera.translation.distance_squared(world_position) <= f32::EPSILON {
+            continue;
+        }
+        let world_rotation = Transform::from_translation(world_position)
+            .looking_at(camera.translation, Vec3::Y)
+            .rotation;
+        transform.rotation = owner.rotation.inverse() * world_rotation;
+    }
 }
 
 fn mob_visibility(mode: InputMode) -> Visibility {
@@ -819,6 +942,7 @@ mod tests {
             health,
             max_health: 60,
             action,
+            target_entity_id: 0,
         }
     }
 
@@ -889,6 +1013,28 @@ mod tests {
         query.iter(world).filter(|mob| mob.flash.is_some()).count()
     }
 
+    fn targeting(mut mob: MobState, entity_id: u64) -> MobState {
+        mob.target_entity_id = entity_id;
+        mob
+    }
+
+    fn marker_owners(app: &mut App) -> Vec<(u64, Visibility)> {
+        let world = app.world_mut();
+        let mut markers = world.query::<(&AggroMarker, &Visibility, &Mesh3d)>();
+        let mut mobs = world.query::<&Mob>();
+        let mut found: Vec<_> = markers
+            .iter(world)
+            .map(|(marker, visibility, _)| {
+                let owner = mobs
+                    .get(world, marker.owner)
+                    .expect("marker owner is a mob");
+                (owner.entity_id, *visibility)
+            })
+            .collect();
+        found.sort_by_key(|(entity_id, _)| *entity_id);
+        found
+    }
+
     /// Every kind the newest snapshot put a body on screen for.
     fn kinds(app: &mut App) -> Vec<(u64, MobKind)> {
         let world = app.world_mut();
@@ -945,6 +1091,72 @@ mod tests {
         assert_eq!(
             bodies(&mut app),
             vec![(900, 60, MobAction::Idle), (901, 60, MobAction::Chase)]
+        );
+    }
+
+    #[test]
+    fn the_newest_target_moves_the_local_aggro_marker_in_one_frame() {
+        let mut app = headless();
+        deliver(
+            &mut app,
+            1,
+            vec![
+                targeting(draugr(900, 3.0, 60, MobAction::Chase), 7),
+                targeting(draugr(901, 6.0, 60, MobAction::Chase), 11),
+            ],
+        );
+        app.update();
+        assert_eq!(marker_owners(&mut app), vec![(900, Visibility::Inherited)]);
+
+        deliver(
+            &mut app,
+            2,
+            vec![
+                draugr(900, 3.0, 60, MobAction::Chase),
+                targeting(draugr(901, 6.0, 60, MobAction::Chase), 7),
+            ],
+        );
+        app.update();
+        assert_eq!(marker_owners(&mut app), vec![(901, Visibility::Inherited)]);
+
+        deliver(
+            &mut app,
+            3,
+            vec![
+                draugr(900, 3.0, 60, MobAction::Chase),
+                draugr(901, 6.0, 60, MobAction::Chase),
+            ],
+        );
+        app.update();
+        assert!(
+            marker_owners(&mut app).is_empty(),
+            "a targetless snapshot left a marker"
+        );
+    }
+
+    #[test]
+    fn the_aggro_marker_faces_the_world_camera() {
+        let mut app = headless();
+        deliver(
+            &mut app,
+            1,
+            vec![targeting(draugr(900, 3.0, 60, MobAction::Chase), 7)],
+        );
+        app.update();
+
+        let world = app.world_mut();
+        let mut cameras = world.query_filtered::<&Transform, With<WorldCamera>>();
+        let camera = *cameras.single(world).expect("one world camera");
+        let mut mobs = world.query_filtered::<&Transform, With<Mob>>();
+        let owner = *mobs.single(world).expect("one mob");
+        let mut markers = world.query::<(&AggroMarker, &Transform)>();
+        let (_, marker) = markers.single(world).expect("one marker");
+        let world_position = owner.transform_point(marker.translation);
+        let towards_camera = (camera.translation - world_position).normalize();
+        let drawn_forward = owner.rotation * marker.rotation * -Vec3::Z;
+        assert!(
+            drawn_forward.dot(towards_camera) > 0.999,
+            "marker forward {drawn_forward:?}, camera direction {towards_camera:?}"
         );
     }
 
@@ -1138,7 +1350,7 @@ mod tests {
             &mut app,
             1,
             vec![
-                draugr(900, 3.0, 60, MobAction::Idle),
+                targeting(draugr(900, 3.0, 60, MobAction::Idle), 7),
                 vargr(901, 6.0, 35, MobAction::Chase),
             ],
         );
@@ -1168,6 +1380,11 @@ mod tests {
             "an open pack left a body drawn"
         );
         assert_eq!(bodies(&mut app).len(), 2, "hiding despawned a body");
+        assert_eq!(
+            marker_owners(&mut app),
+            vec![(900, Visibility::Inherited)],
+            "the marker must inherit the hidden body rather than draw independently"
+        );
     }
 
     // ---------------------------------------------------------------------------

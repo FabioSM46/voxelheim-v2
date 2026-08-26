@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 use crate::net::{LifeState, Session};
-use crate::player::{Appearances, InputMode, Party, SelfVitals};
+use crate::player::{Appearances, ApplySnapshots, InputMode, Party, SelfVitals, SnapshotBuffer};
 
 const ROW_COUNT: usize = 4;
 const TOP: f32 = 48.0;
@@ -17,6 +17,7 @@ const DEAD: Color = Color::srgb(0.46, 0.48, 0.52);
 const OFFLINE: Color = Color::srgb(0.42, 0.44, 0.48);
 const ALIVE: Color = Color::WHITE;
 const PLACEHOLDER_NAME: &str = "Unknown";
+const HUNTED_MARK: &str = "⚔ ";
 
 #[derive(Component)]
 struct PartyRow(usize);
@@ -35,8 +36,11 @@ impl Plugin for PartyUiPlugin {
             .init_resource::<Appearances>()
             .init_resource::<SelfVitals>()
             .init_resource::<InputMode>()
+            .init_resource::<SnapshotBuffer>()
             .add_systems(Startup, spawn_party)
-            .add_systems(Update, refresh_party);
+            // The mark reads mob targets from the newest snapshot accepted this frame.
+            // Without the order, a switch from A to B may spend one drawn frame on A.
+            .add_systems(Update, refresh_party.after(ApplySnapshots));
     }
 }
 
@@ -116,6 +120,7 @@ struct PartyView<'w> {
     vitals: Res<'w, SelfVitals>,
     session: Option<Res<'w, Session>>,
     mode: Res<'w, InputMode>,
+    snapshots: Res<'w, SnapshotBuffer>,
 }
 
 fn refresh_party(
@@ -130,6 +135,7 @@ fn refresh_party(
         vitals,
         session,
         mode,
+        snapshots,
     } = view;
     let shown = session.is_some() && matches!(*mode, InputMode::Playing | InputMode::Chat);
     for (row, mut visibility) in &mut rows {
@@ -144,9 +150,14 @@ fn refresh_party(
             text.0.clear();
             continue;
         };
+        let hunted = if snapshots.mob_hunts(member.entity_id) {
+            HUNTED_MARK
+        } else {
+            ""
+        };
         let crown = if slot.0 == 0 { "♛ " } else { "" };
         if !member.online {
-            text.0 = format!("{crown}{} · offline", member.name);
+            text.0 = format!("{hunted}{crown}{} · offline", member.name);
             colour.0 = OFFLINE;
             continue;
         }
@@ -165,7 +176,7 @@ fn refresh_party(
         } else {
             &member.name
         };
-        text.0 = format!("{crown}{name} · Lv {level}");
+        text.0 = format!("{hunted}{crown}{name} · Lv {level}");
         let alive = if session
             .as_deref()
             .is_some_and(|session| session.0.entity_id == member.entity_id)
@@ -215,8 +226,13 @@ fn refresh_party(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
-    use crate::net::{ANY_TOKEN, PartyMemberState, PartyRosterMember, SessionParams};
+    use crate::net::{
+        ANY_TOKEN, MobAction, MobKind, MobState, PartyMemberState, PartyRosterMember,
+        SessionParams, Snapshot,
+    };
 
     fn session() -> Session {
         Session(SessionParams {
@@ -242,6 +258,42 @@ mod tests {
             max_health,
             alive,
         }
+    }
+
+    fn hunter(target_entity_id: u64) -> MobState {
+        MobState {
+            entity_id: 900,
+            kind: MobKind::Draugr,
+            pos: [2.0, 64.0, 0.0],
+            vel: [0.0; 3],
+            yaw: 0.0,
+            health: 60,
+            max_health: 60,
+            action: MobAction::Chase,
+            target_entity_id,
+        }
+    }
+
+    fn accept(app: &mut App, tick: u32, target_entity_id: u64) {
+        app.world_mut().resource_mut::<SnapshotBuffer>().accept(
+            Snapshot {
+                server_tick: tick,
+                mobs: vec![hunter(target_entity_id)],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+    }
+
+    fn labels(app: &mut App) -> Vec<String> {
+        let world = app.world_mut();
+        let mut labels = world.query::<(&PartyLabel, &Text)>();
+        let mut labels: Vec<_> = labels
+            .iter(world)
+            .map(|(slot, text)| (slot.0, text.0.clone()))
+            .collect();
+        labels.sort_by_key(|(slot, _)| *slot);
+        labels.into_iter().map(|(_, text)| text).collect()
     }
 
     #[test]
@@ -298,5 +350,52 @@ mod tests {
         let mut fills = world.query::<(&PartyFill, &Node, &BackgroundColor)>();
         let (_, fill, _) = fills.iter(world).find(|(slot, _, _)| slot.0 == 0).unwrap();
         assert_eq!(fill.width, Val::Percent(0.0));
+    }
+
+    #[test]
+    fn the_newest_mob_targets_move_the_mark_between_party_rows_in_one_frame() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session())
+            .insert_resource(InputMode::Playing)
+            .insert_resource(Party {
+                roster: vec![
+                    PartyRosterMember {
+                        character_id: 70,
+                        entity_id: 7,
+                        name: "Local".to_owned(),
+                        online: true,
+                    },
+                    PartyRosterMember {
+                        character_id: 110,
+                        entity_id: 11,
+                        name: "Tank".to_owned(),
+                        online: true,
+                    },
+                ],
+                members: vec![member(11, 80, 80, true)],
+            })
+            .add_plugins(PartyUiPlugin);
+
+        accept(&mut app, 1, 7);
+        app.update();
+        let first = labels(&mut app);
+        assert!(first[0].starts_with(HUNTED_MARK), "local row: {}", first[0]);
+        assert!(!first[1].starts_with(HUNTED_MARK), "tank row: {}", first[1]);
+
+        accept(&mut app, 2, 11);
+        app.update();
+        let switched = labels(&mut app);
+        assert!(!switched[0].starts_with(HUNTED_MARK));
+        assert!(switched[1].starts_with(HUNTED_MARK));
+
+        accept(&mut app, 3, 0);
+        app.update();
+        assert!(
+            labels(&mut app)
+                .iter()
+                .all(|label| !label.starts_with(HUNTED_MARK)),
+            "a targetless snapshot left a party mark"
+        );
     }
 }

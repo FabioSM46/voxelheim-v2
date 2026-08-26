@@ -953,6 +953,11 @@ pub struct MobState {
     /// Guaranteed non-zero.
     pub max_health: u16,
     pub action: MobAction,
+    /// The player this mob is hunting, or zero when it has no target.
+    ///
+    /// A non-zero id is deliberately not required to name an entity in this snapshot:
+    /// the target may be outside this recipient's visibility while the mob remains in it.
+    pub target_entity_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3442,6 +3447,7 @@ fn mob_state(state: &fb::MobState) -> Result<MobState, DecodeError> {
         health,
         max_health,
         action,
+        target_entity_id: state.target_entity_id(),
     })
 }
 
@@ -4612,6 +4618,7 @@ pub(super) mod server_side {
         pub health: u16,
         pub max_health: u16,
         pub action: fb::MobAction,
+        pub target_entity_id: u64,
     }
 
     impl MobStateWire {
@@ -4626,6 +4633,7 @@ pub(super) mod server_side {
                 health: 60,
                 max_health: 60,
                 action: fb::MobAction::Idle,
+                target_entity_id: 0,
             }
         }
     }
@@ -5000,6 +5008,7 @@ pub(super) mod server_side {
                 table.add_health(mob.health);
                 table.add_max_health(mob.max_health);
                 table.add_action(mob.action);
+                table.add_target_entity_id(mob.target_entity_id);
                 table.finish()
             })
             .collect();
@@ -9199,6 +9208,9 @@ mod tests {
                 yaw: 1.25,
                 health: 35,
                 action: fb::MobAction::Chase,
+                // No entity with this id is present in the snapshot. That is valid:
+                // the hunted player can be outside this recipient's visibility.
+                target_entity_id: 777,
                 ..MobStateWire::draugr(900, 8.5)
             },
             MobStateWire {
@@ -9225,6 +9237,7 @@ mod tests {
                     health: 35,
                     max_health: 60,
                     action: MobAction::Chase,
+                    target_entity_id: 777,
                 },
                 MobState {
                     entity_id: 901,
@@ -9235,6 +9248,7 @@ mod tests {
                     health: 1,
                     max_health: 60,
                     action: MobAction::Windup,
+                    target_entity_id: 0,
                 },
             ]
         );
