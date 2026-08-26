@@ -40,9 +40,10 @@ const BASE_TRANSLATION: Vec3 = Vec3::new(0.10, -0.075, -0.18);
 
 /// The whole of the closed fist: the box the palm and the knuckles fit inside.
 ///
-/// Unchanged from when the hand *was* this box, so nothing about where the hand sits or how
-/// far it swings moves — #175 replaces what fills it, not what it occupies.
-const HAND_SIZE: Vec3 = Vec3::new(0.045, 0.085, 0.045);
+/// Eighty-five percent of the box #175 introduced, uniformly on all three axes. The base
+/// transform and every animation still move the same one-mesh composition; only the fist inside
+/// it is smaller, so the hilt it closes around keeps a silhouette of its own.
+const HAND_SIZE: Vec3 = Vec3::new(0.03825, 0.07225, 0.03825);
 
 /// How far a carried object sinks into the top of the fist holding it.
 ///
@@ -50,6 +51,12 @@ const HAND_SIZE: Vec3 = Vec3::new(0.045, 0.085, 0.045);
 /// plane. Six millimetres is enough to hide the join without swallowing the object's
 /// silhouette; [`the_item_stays_recognisable_outside_the_fist`] holds the other side.
 const HOLD_OVERLAP: f32 = 0.006;
+
+/// How much of a blade's grip remains visible below the fist.
+///
+/// One quarter of the grip: the other three quarters still cross the palm, while the pommel below
+/// it and the guard above it can no longer both disappear into the same tall box.
+const VISIBLE_GRIP: f32 = GRIP_SIZE.y * 0.25;
 
 /// How far each knuckle stands proud of the palm, as a fraction of the fist's depth.
 ///
@@ -774,8 +781,8 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
 
 /// Where an item sits relative to the fist at the origin.
 ///
-/// Blocks, materials and bundles rest on the knuckles. A sword is lifted until the centre
-/// of its grip crosses the palm, and a tool until the palm closes around the lower haft.
+/// Blocks, materials and bundles rest on the knuckles. A sword leaves one quarter of its grip
+/// below the fist while the rest crosses the palm, and a tool puts the lower haft through it.
 /// These are translations of the approved geometry, not new shapes.
 fn item_translation(shape: ItemShape) -> Vec3 {
     let hand_top = HAND_SIZE.y / 2.0;
@@ -783,8 +790,8 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Block => hand_top + BLOCK_EDGE / 2.0 - HOLD_OVERLAP,
         ItemShape::Material => hand_top + MATERIAL_LENGTH / 2.0 + MATERIAL_RADIUS - HOLD_OVERLAP,
         ItemShape::Blade => {
-            let grip_centre = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y / 2.0;
-            -grip_centre
+            let grip_bottom = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y;
+            -HAND_SIZE.y / 2.0 - VISIBLE_GRIP - grip_bottom
         }
         ItemShape::Bundle => hand_top + BUNDLE_SIZE.y / 2.0 - HOLD_OVERLAP,
         // The head stays above the hand and most of the haft remains visible below it.
@@ -2067,30 +2074,36 @@ mod tests {
         }
     }
 
-    /// **The empty hand is a fist**, which is more than one box and still fits the same one.
+    /// **The empty hand is a fist**, uniformly smaller than the old box and still made from one
+    /// palm plus four separate knuckles.
     ///
-    /// The count is what says it is not the single cuboid it was — a cube is 24 vertices —
-    /// and the extent is what says nothing about where the hand sits or how far it swings
-    /// moved, which is the half of this that could have broken the swing tests silently.
+    /// The count pins the five boxes and the separated front-face edges pin four knuckles rather
+    /// than one ridge. The extent is the declared outer bound, measured rather than inferred from
+    /// the constant that built it.
     #[test]
-    fn the_empty_hand_is_a_fist_inside_the_box_the_cuboid_filled() {
-        let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
+    fn the_empty_hand_is_a_smaller_palm_with_four_knuckles() {
+        const PREVIOUS_HAND_SIZE: Vec3 = Vec3::new(0.045, 0.085, 0.045);
+        const UNIFORM_SCALE: f32 = 0.85;
 
-        assert!(
-            mesh.count_vertices() > 24,
-            "the hand is {} vertices, which is one box — a fist is a palm and knuckles",
-            mesh.count_vertices()
+        let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
+        let one_box = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
+
+        assert_eq!(
+            mesh.count_vertices(),
+            one_box * 5,
+            "the fist is not exactly one palm and four knuckle boxes"
         );
 
-        let Some(VertexAttributeValues::Float32x3(positions)) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        else {
-            panic!("the hand must carry Float32x3 positions");
-        };
-        for (axis, size) in [HAND_SIZE.x, HAND_SIZE.y, HAND_SIZE.z]
-            .into_iter()
-            .enumerate()
-        {
+        let positions = positions(&mesh);
+        for axis in 0..3 {
+            let size = HAND_SIZE[axis];
+            let previous = PREVIOUS_HAND_SIZE[axis];
+            assert!(size < previous, "axis {axis} did not get smaller");
+            assert!(
+                (size / previous - UNIFORM_SCALE).abs() < 1e-6,
+                "axis {axis} was scaled by {} rather than {UNIFORM_SCALE}",
+                size / previous
+            );
             let min = positions
                 .iter()
                 .map(|p| p[axis])
@@ -2103,6 +2116,33 @@ mod tests {
                 (max - min - size).abs() < 1e-5,
                 "the fist spans {} on axis {axis}, and HAND_SIZE says {size}",
                 max - min
+            );
+        }
+
+        let front = -HAND_SIZE.z / 2.0;
+        let knuckle_bottom = HAND_SIZE.y / 2.0 - HAND_SIZE.y * KNUCKLE_BAND;
+        let mut edges: Vec<f32> = positions
+            .iter()
+            .filter(|p| (p[2] - front).abs() < 1e-6 && p[1] >= knuckle_bottom - 1e-6)
+            .map(|p| p[0])
+            .collect();
+        edges.sort_by(f32::total_cmp);
+        edges.dedup_by(|left, right| (*left - *right).abs() < 1e-6);
+        assert_eq!(
+            edges.len(),
+            8,
+            "four separate knuckles need eight front-face side edges, found {edges:?}"
+        );
+        for pair in edges.chunks_exact(2) {
+            assert!(
+                (pair[1] - pair[0] - HAND_SIZE.x * 0.20).abs() < 1e-6,
+                "knuckle edges {pair:?} do not bound one knuckle"
+            );
+        }
+        for knuckle in 0..3 {
+            assert!(
+                edges[knuckle * 2 + 1] < edges[(knuckle + 1) * 2],
+                "two knuckles meet as one ridge"
             );
         }
     }
@@ -2137,16 +2177,20 @@ mod tests {
         }
     }
 
-    /// Holding is overlap, not concealment: at least a quarter of every item's vertices
-    /// remain outside the fist's box after the arrangement is applied. A sword spends many
-    /// vertices on its grip, guard and pommel inside the palm; its blade is the third that
-    /// remains outside, which is the silhouette the arrangement must preserve.
+    /// Holding is overlap, not concealment: every item's bounds cross the fist and at least a
+    /// quarter of its vertices remain outside after the arrangement is applied. The blade-specific
+    /// test below names the stronger hilt properties the generic ratio cannot express.
     #[test]
     fn the_item_stays_recognisable_outside_the_fist() {
         let half = HAND_SIZE / 2.0;
         for (shape, item_id) in shape_examples() {
             let item = item_mesh(item_id, shape).translated_by(item_translation(shape));
             let item_positions = positions(&item);
+            let overlaps = (0..3).all(|axis| {
+                let (low, high) = extent(&item_positions, axis);
+                low < half[axis] && high > -half[axis]
+            });
+            assert!(overlaps, "{shape:?} floats clear of the fist");
             let outside = item_positions
                 .iter()
                 .filter(|position| {
@@ -2159,6 +2203,63 @@ mod tests {
                 outside * 4 >= item_positions.len(),
                 "only {outside}/{} vertices of {shape:?} remain outside the fist",
                 item_positions.len()
+            );
+        }
+    }
+
+    /// A blade is held by its grip, never by concealing the furniture around it.
+    ///
+    /// Read from the real merged vertices for both sword variants: part constants alone would
+    /// still pass if [`item_translation`] moved the complete hilt back inside the fist.
+    #[test]
+    fn both_blades_show_their_guard_grip_and_pommel_around_the_fist() {
+        const EPSILON: f32 = 1e-6;
+        let half = HAND_SIZE / 2.0;
+        let inside = |position: &[f32; 3]| {
+            position[0].abs() <= half.x + EPSILON
+                && position[1].abs() <= half.y + EPSILON
+                && position[2].abs() <= half.z + EPSILON
+        };
+
+        for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
+            let translation = item_translation(ItemShape::Blade).y;
+            let blade = item_mesh(item_id, ItemShape::Blade).translated_by(Vec3::Y * translation);
+            let positions = positions(&blade);
+            let part_at_depth = |half_depth: f32, low: f32, high: f32| -> Vec<[f32; 3]> {
+                positions
+                    .iter()
+                    .copied()
+                    .filter(|position| {
+                        (position[2].abs() - half_depth).abs() < EPSILON
+                            && position[1] >= low - EPSILON
+                            && position[1] <= high + EPSILON
+                    })
+                    .collect()
+            };
+
+            let guard_high = blade_base() + translation;
+            let guard_low = guard_high - GUARD_SIZE.y;
+            let grip_high = guard_low;
+            let grip_low = grip_high - GRIP_SIZE.y;
+            let pommel_high = grip_low;
+            let pommel_low = pommel_high - POMMEL_SIZE.y;
+
+            let guard = part_at_depth(GUARD_SIZE.z / 2.0, guard_low, guard_high);
+            let grip = part_at_depth(GRIP_SIZE.z / 2.0, grip_low, grip_high);
+            let pommel = part_at_depth(POMMEL_SIZE.z / 2.0, pommel_low, pommel_high);
+            assert!(!guard.is_empty() && !grip.is_empty() && !pommel.is_empty());
+
+            assert!(
+                guard.iter().all(|position| !inside(position)),
+                "sword {item_id}'s guard disappeared inside the fist: {guard:?}"
+            );
+            assert!(
+                grip.iter().any(inside) && grip.iter().any(|position| !inside(position)),
+                "sword {item_id}'s grip does not cross the fist: {grip:?}"
+            );
+            assert!(
+                pommel.iter().all(|position| !inside(position)),
+                "sword {item_id}'s pommel disappeared inside the fist: {pommel:?}"
             );
         }
     }
