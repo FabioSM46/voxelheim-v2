@@ -395,10 +395,10 @@ struct AimBody {
     height: f32,
 }
 
-/// Returns true exactly when the nearest intersected body is another player.
-fn first_body_is_player(origin: Vec3, direction: Vec3, bodies: &[AimBody]) -> bool {
+/// The nearest body intersected by the ray, with its entry distance.
+fn first_body_hit(origin: Vec3, direction: Vec3, bodies: &[AimBody]) -> Option<(f32, AimBodyKind)> {
     if !origin.is_finite() || !direction.is_finite() || direction.length_squared() == 0.0 {
-        return false;
+        return None;
     }
     let direction = direction.normalize();
     bodies
@@ -410,7 +410,33 @@ fn first_body_is_player(origin: Vec3, direction: Vec3, bodies: &[AimBody]) -> bo
             ray_box_distance(origin, direction, min, max).map(|distance| (distance, body.kind))
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
-        .is_some_and(|(_, kind)| kind == AimBodyKind::OtherPlayer)
+}
+
+/// Returns true exactly when another player is the first thing the ray can reach.
+fn first_body_is_unoccluded_player(
+    origin: Vec3,
+    direction: Vec3,
+    bodies: &[AimBody],
+    solid: impl FnMut(IVec3) -> bool,
+) -> bool {
+    let Some((distance, AimBodyKind::OtherPlayer)) = first_body_hit(origin, direction, bodies)
+    else {
+        return false;
+    };
+
+    // The projectile collides with terrain server-side. Reusing the exact voxel traversal
+    // that drives the block outline keeps this courtesy hint from promising a heal through
+    // a wall; the body entry distance is the reach, so terrain behind the player is ignored.
+    raycast(origin, direction, distance, solid).is_none()
+}
+
+/// Whether the selected authoritative stack can present a sceptre cast.
+fn usable_sceptre_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> bool {
+    inventory.slot(selected.0).is_some_and(|stack| {
+        stack.item_id == super::crafting::ITEM_WOODEN_SCEPTRE
+            && stack.count > 0
+            && stack.durability > 0
+    })
 }
 
 /// Slab intersection distance for an already-normalised ray.
@@ -442,6 +468,7 @@ fn ray_box_distance(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Opti
 fn aim_at_a_healing_target(
     session: Option<Res<Session>>,
     buffer: Option<Res<SnapshotBuffer>>,
+    store: Option<Res<ChunkStore>>,
     inventory: Res<Inventory>,
     selected: Res<SelectedSlot>,
     cameras: Query<&Transform, With<WorldCamera>>,
@@ -449,12 +476,11 @@ fn aim_at_a_healing_target(
 ) {
     let next = (|| {
         let session = session.as_deref()?;
-        if combat::attack_item_in_hand(&inventory, &selected)
-            != Some(super::crafting::ITEM_WOODEN_SCEPTRE)
-        {
+        if !usable_sceptre_in_hand(&inventory, &selected) {
             return None;
         }
         let buffer = buffer.as_deref()?;
+        let store = store.as_deref()?;
         let eye = cameras.iter().next()?;
         let interval = tick_interval(session.0.tick_rate);
         let now = Instant::now();
@@ -485,10 +511,21 @@ fn aim_at_a_healing_target(
                     }
                 }),
         );
-        Some(first_body_is_player(
+        let size = usize::from(session.0.chunk_size);
+        Some(first_body_is_unoccluded_player(
             eye.translation,
             *eye.forward(),
             &bodies,
+            |voxel| {
+                store.solid_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            },
         ))
     })()
     .unwrap_or(false);
@@ -948,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn healing_aim_is_green_only_when_the_first_body_is_another_player() {
+    fn healing_aim_is_green_only_when_an_unoccluded_player_is_first() {
         let eye = Vec3::new(0.0, 1.0, 0.0);
         let player = AimBody {
             kind: AimBodyKind::OtherPlayer,
@@ -963,12 +1000,60 @@ mod tests {
             height: 1.4,
         };
 
-        assert!(first_body_is_player(eye, Vec3::NEG_Z, &[player]));
+        assert!(first_body_is_unoccluded_player(
+            eye,
+            Vec3::NEG_Z,
+            &[player],
+            only(&[])
+        ));
         assert!(
-            !first_body_is_player(eye, Vec3::NEG_Z, &[player, mob]),
+            !first_body_is_unoccluded_player(eye, Vec3::NEG_Z, &[player, mob], only(&[])),
             "a nearer mob must keep the default crosshair"
         );
-        assert!(!first_body_is_player(eye, Vec3::NEG_Z, &[]));
+        assert!(!first_body_is_unoccluded_player(
+            eye,
+            Vec3::NEG_Z,
+            &[],
+            only(&[])
+        ));
+        assert!(
+            !first_body_is_unoccluded_player(
+                eye,
+                Vec3::NEG_Z,
+                &[player],
+                only(&[IVec3::new(0, 1, -3)])
+            ),
+            "a wall before the player must suppress a heal the orb cannot deliver"
+        );
+        assert!(
+            first_body_is_unoccluded_player(
+                eye,
+                Vec3::NEG_Z,
+                &[player],
+                only(&[IVec3::new(0, 1, -6)])
+            ),
+            "terrain behind the player does not occlude the target"
+        );
+    }
+
+    #[test]
+    fn healing_aim_requires_durability_in_the_selected_sceptre() {
+        let sceptre = |durability| InventoryStack {
+            item_id: crate::player::crafting::ITEM_WOODEN_SCEPTRE,
+            count: 1,
+            durability,
+            max_durability: 50,
+        };
+        let selected = SelectedSlot(0);
+
+        assert!(usable_sceptre_in_hand(
+            &Inventory::from_stacks(vec![sceptre(1)]),
+            &selected
+        ));
+        assert!(
+            !usable_sceptre_in_hand(&Inventory::from_stacks(vec![sceptre(0)]), &selected),
+            "a worn-through sceptre must keep the default crosshair"
+        );
     }
 
     #[test]
