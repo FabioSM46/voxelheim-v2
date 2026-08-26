@@ -412,4 +412,23 @@ const (
 	// from probing every tick for a target it cannot see: asking costs the same as
 	// connecting.
 	SwordCooldown = 600 * time.Millisecond
+
+	// --- Projectiles ---------------------------------------------------------
+	//
+	// These are authoritative simulation numbers. The ranged-item registry only
+	// decides which kind to spawn; flight, collision and effects are all resolved here.
+	ProjectileMaxStep   = 0.5
+	ProjectileBodySize  = 0.1
+	ProjectileEyeHeight = PlayerHeight * 0.9
+	ArrowDamage         = 15
+	OrbDamage           = 8
+	OrbHeal             = 10
+	ArrowSpeed          = 30.0
+	OrbSpeed            = 16.0
+	ArrowLifetime       = 5 * time.Second
+	OrbLifetime         = 1500 * time.Millisecond
+	// ArrowStuckTicks is converted to the configured server's ticks by NewSim.
+	// The name records what the projectile stores; the constant remains a duration
+	// so three seconds means the same thing at every tick rate.
+	ArrowStuckTicks = 3 * time.Second
 )
