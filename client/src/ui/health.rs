@@ -68,7 +68,13 @@ const LONGEST_READING_CHARS: f32 = 34.0;
 /// glyph is exactly this wide and the fit below is an exact bound rather than an estimate.
 const DEFAULT_FONT_ADVANCE_EM: f32 = 0.6;
 
-/// Line height as a multiple of the font size, matching `cosmic-text`'s default metrics.
+/// Line height as a multiple of the font size: the scale in Bevy's `LineHeight` default,
+/// which every reading here inherits rather than setting. `parley` resolves that scale as
+/// `scale * font_size` exactly — the face's ascent, descent and line gap do not enter it —
+/// so one line is this tall whatever font ends up loaded.
+///
+/// It is still a number copied out of another crate, so the layout test reads `LineHeight`
+/// back off each spawned reading and fails if this stops being what Bevy will use.
 const LINE_HEIGHT_RATIO: f32 = 1.2;
 
 /// The track's interior: what an absolutely positioned child inset to zero on both sides
@@ -847,6 +853,7 @@ mod tests {
     //! bar looks right" is a screenshot and "the fill is exactly the server's ratio" is a
     //! test.
 
+    use bevy::text::LineHeight;
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
@@ -972,6 +979,62 @@ mod tests {
             track_left + BAR_BORDER + left_inset,
             track_right - BAR_BORDER - right_inset,
         )
+    }
+
+    /// The height the text pipeline will give a reading's single line.
+    ///
+    /// `LineHeight` and `TextFont` are components Bevy's `Text` requires, so both are read
+    /// off the spawned entity rather than restated from the constants above. `parley`
+    /// resolves `LineHeight::RelativeToFont(s)` as `s * font_size` and consults no font
+    /// metric doing it, so the answer is exact and — the point of reading it at all — a
+    /// Bevy release that changed the default scale, or a reading that set its own, lands
+    /// here instead of in the compile-time bound that assumes neither.
+    ///
+    /// The headless app runs no text pipeline, so there is no `ComputedNode` to ask; this
+    /// is the same arithmetic the pipeline would do, from the same two components, and it
+    /// is never zero.
+    fn reading_line_height<T: Component>(app: &mut App) -> f32 {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&LineHeight, &TextFont), With<T>>();
+        let (line_height, text_font) = query.single(world).expect("one matching reading");
+        let FontSize::Px(size) = text_font.font_size else {
+            panic!("a vital reading's font size is not fixed in pixels");
+        };
+        assert_eq!(size, BAR_LABEL_SIZE);
+        match *line_height {
+            LineHeight::RelativeToFont(scale) => {
+                assert_eq!(
+                    scale, LINE_HEIGHT_RATIO,
+                    "LINE_HEIGHT_RATIO is no longer the line height Bevy will use"
+                );
+                scale * size
+            }
+            LineHeight::Px(px) => px,
+        }
+    }
+
+    /// The reading's box down its track, in track-interior coordinates: `0.0` is the inside
+    /// of the top border and [`TRACK_INNER_HEIGHT`] the inside of the bottom one.
+    ///
+    /// `top: 50%` resolves against the containing block — the track's padding box — and puts
+    /// the reading's top edge on the track's vertical axis; the transform pulls it back up by
+    /// half of its own height. So both edges follow from the height the line is laid out at,
+    /// which is the one thing the compile-time bound has to assume.
+    fn label_vertical_edges(label: &Node, transform: &UiTransform, height: f32) -> (f32, f32) {
+        assert_eq!(label.position_type, PositionType::Absolute);
+        assert_eq!(
+            label.height,
+            Val::Auto,
+            "a vital reading with a height of its own would not be its line's height"
+        );
+        let Val::Percent(top) = label.top else {
+            panic!("a vital reading is not positioned down its track as a percentage");
+        };
+        let Val::Percent(shift) = transform.translation.y else {
+            panic!("a vital reading is not centred by a percentage of its own height");
+        };
+        let top = TRACK_INNER_HEIGHT * top / 100.0 + height * shift / 100.0;
+        (top, top + height)
     }
 
     fn ui_transform<T: Component>(app: &mut App) -> UiTransform {
@@ -1166,6 +1229,26 @@ mod tests {
         );
         assert_eq!(health_bottom - hunger_bottom, BAR_HEIGHT + VITAL_BAR_GAP);
 
+        // Each reading's line, at the height the text pipeline will lay it out at rather
+        // than the one the compile-time bound assumes.
+        let readings = [
+            (
+                &health_label,
+                ui_transform::<HealthLabel>(&mut app),
+                reading_line_height::<HealthLabel>(&mut app),
+            ),
+            (
+                &hunger_label,
+                ui_transform::<HungerLabel>(&mut app),
+                reading_line_height::<HungerLabel>(&mut app),
+            ),
+            (
+                &experience_label,
+                ui_transform::<ExperienceLabel>(&mut app),
+                reading_line_height::<ExperienceLabel>(&mut app),
+            ),
+        ];
+
         for viewport_width in [800.0, 1024.0, 1920.0] {
             let expected = track_edges(viewport_width, &health_root, &health_track);
             assert_eq!(
@@ -1183,7 +1266,7 @@ mod tests {
             );
             // The reading is centred on the same axis, and its whole box lies inside
             // the track rather than hanging off the right edge of it.
-            for label in [&health_label, &hunger_label, &experience_label] {
+            for (label, transform, line_height) in &readings {
                 let (label_left, label_right) = label_edges(expected.0, expected.1, label);
                 assert!(label_left >= expected.0 && label_right <= expected.1);
                 assert_eq!((label_left + label_right) / 2.0, viewport_width / 2.0);
@@ -1195,6 +1278,25 @@ mod tests {
                         <= label_right - label_left
                 );
                 assert_eq!(label_right - label_left, TRACK_INNER_WIDTH);
+
+                // And the other axis, which the width above says nothing about. The
+                // compile-time bound is `BAR_LABEL_SIZE * LINE_HEIGHT_RATIO`, a formula
+                // over two constants; these are the same two values read back off the
+                // spawned reading, turned into the box the node tree gives it.
+                assert!(
+                    *line_height > 0.0,
+                    "a reading with no line height would make every bound below vacuous"
+                );
+                assert!(
+                    *line_height <= TRACK_INNER_HEIGHT,
+                    "the reading's line must fit down the track — raise BAR_HEIGHT"
+                );
+                let (label_top, label_bottom) =
+                    label_vertical_edges(label, transform, *line_height);
+                assert!(
+                    label_top >= 0.0 && label_bottom <= TRACK_INNER_HEIGHT,
+                    "the reading's whole box must lie inside the track, not merely fit across it"
+                );
             }
         }
 
