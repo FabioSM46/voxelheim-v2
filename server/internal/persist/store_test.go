@@ -470,14 +470,14 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	}
 }
 
-// V7 keeps experience immediately after hunger and widens the fixed slot table. Pin
+// V8 keeps experience immediately after hunger and widens the fixed slot table. Pin
 // every relationship and the bytes themselves: changing only the struct field would
 // otherwise round trip through an equally wrong encoder and decoder.
-func TestV7StoresThirtyNineSlotsAfterExperience(t *testing.T) {
+func TestV8StoresFortySlotsAfterExperience(t *testing.T) {
 	t.Parallel()
 
-	if StoreVersion != 7 {
-		t.Fatalf("StoreVersion = %d, want 7", StoreVersion)
+	if StoreVersion != 8 {
+		t.Fatalf("StoreVersion = %d, want 8", StoreVersion)
 	}
 	if offHunger != offHealth+2 {
 		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
@@ -488,8 +488,8 @@ func TestV7StoresThirtyNineSlotsAfterExperience(t *testing.T) {
 	if offSlots != offExperience+4 {
 		t.Fatalf("offSlots = %d, want offExperience+4 = %d", offSlots, offExperience+4)
 	}
-	if slotsSize != 39*slotSize {
-		t.Fatalf("slotsSize = %d, want 39 slots × %d bytes", slotsSize, slotSize)
+	if slotsSize != 40*slotSize {
+		t.Fatalf("slotsSize = %d, want 40 slots × %d bytes", slotsSize, slotSize)
 	}
 
 	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0}
@@ -512,7 +512,7 @@ func TestV7StoresThirtyNineSlotsAfterExperience(t *testing.T) {
 // There is deliberately no v6 migration. Even bytes that otherwise have the current
 // layout are refused when the header says v6, rather than being parsed as a shorter slot
 // table and assigned empty worn equipment the old record never stored.
-func TestV7RefusesAV6RecordRatherThanMigratingIt(t *testing.T) {
+func TestV8RefusesAV6RecordRatherThanMigratingIt(t *testing.T) {
 	t.Parallel()
 
 	old := encodeRecord(Record{Health: 100, Hunger: 100, Experience: 200})

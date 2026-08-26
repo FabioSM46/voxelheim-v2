@@ -29,9 +29,12 @@ use super::{
     refresh_cell_contents, spawn_cell_contents, stack_style,
 };
 use crate::net::{InventoryStack, Session, StructureKind};
+#[cfg(test)]
+use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
-    ARMOUR_SLOTS, ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
-    InventoryClickKind, PickedStack, RECIPES, Recipe, RecipeCategory, item_label,
+    ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
+    InventoryClickKind, PickedStack, RECIPES, Recipe, RecipeCategory, equipment_item_fits,
+    item_label,
 };
 
 pub(super) struct InventoryUiPlugin;
@@ -259,7 +262,7 @@ const EQUIPMENT_COLUMN_WIDTH: f32 = 126.0;
 
 /// The current wire order, as `schemas/handshake.fbs` states it. A newer server may announce
 /// more equipment cells; those still get drawn and use the neutral fallback below.
-const EQUIPMENT_CAPTIONS: [&str; 3] = ["HEAD", "CHEST", "LEGS"];
+const EQUIPMENT_CAPTIONS: [&str; 4] = ["HEAD", "CHEST", "LEGS", "OFF-HAND"];
 
 /// Space between the frame edge and the grab bar. The clamp accounts for it rather than
 /// mistaking visible frame padding for visible grab area.
@@ -882,9 +885,7 @@ fn equipment_target_is_refused(
         return false;
     };
 
-    !ARMOUR_SLOTS
-        .iter()
-        .any(|&(item_id, slot)| item_id == stack.item_id && slot == offset)
+    !equipment_item_fits(stack.item_id, offset)
 }
 
 fn inventory_cell_edge(
@@ -1649,9 +1650,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: 32,
             view_distance: 3,
-            inventory_slots: 6,
+            inventory_slots: 7,
             hotbar_slots: 2,
-            equipment_slots: 3,
+            equipment_slots: 4,
             player_token: crate::net::ANY_TOKEN,
         })
     }
@@ -1671,6 +1672,11 @@ mod tests {
             InventoryStack {
                 item_id: u16::MAX,
                 count: 2,
+                ..Default::default()
+            },
+            InventoryStack {
+                item_id: 0,
+                count: 0,
                 ..Default::default()
             },
             InventoryStack {
@@ -2154,7 +2160,7 @@ mod tests {
         let mut query = world.query::<&InventoryCell>();
         let mut cells: Vec<InventoryCell> = query.iter(world).copied().collect();
         cells.sort_by_key(|cell| cell.slot);
-        assert_eq!(cells.len(), 6);
+        assert_eq!(cells.len(), 7);
         assert_eq!(
             cells
                 .iter()
@@ -2177,7 +2183,7 @@ mod tests {
                 .filter(|cell| cell.grid == InventoryGrid::Equipment)
                 .map(|cell| cell.slot)
                 .collect::<Vec<_>>(),
-            vec![3, 4, 5]
+            vec![3, 4, 5, 6]
         );
     }
 
@@ -2236,15 +2242,28 @@ mod tests {
                     Visibility::Inherited,
                     Some(FocusPolicy::Pass)
                 ),
+                (
+                    6,
+                    "OFF-HAND".to_owned(),
+                    Visibility::Inherited,
+                    Some(FocusPolicy::Pass)
+                ),
             ]
         );
 
-        let head = ARMOUR_SLOTS
-            .iter()
-            .find(|(_, offset)| *offset == 0)
-            .map(|(item_id, _)| *item_id)
-            .expect("the routing table names head armour");
-        deliver(&mut app, &[(STONE, 5), (0, 0), (0, 0), (head, 1)]);
+        let head = EQUIPMENT_ROUTES[0][0];
+        deliver(
+            &mut app,
+            &[
+                (STONE, 5),
+                (0, 0),
+                (0, 0),
+                (head, 1),
+                (0, 0),
+                (0, 0),
+                (0, 0),
+            ],
+        );
         assert_eq!(captions(&mut app)[0].2, Visibility::Hidden);
         assert_eq!(drawn(&mut app, 3).count, "1");
         assert!(!drawn(&mut app, 3).rectangles.is_empty());
@@ -2263,7 +2282,7 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query::<&InventoryCell>();
         let cells: Vec<InventoryCell> = query.iter(world).copied().collect();
-        assert_eq!(cells.len(), 6);
+        assert_eq!(cells.len(), 7);
         assert_eq!(
             cells
                 .iter()
@@ -2283,7 +2302,7 @@ mod tests {
                 .iter()
                 .filter(|cell| cell.grid == InventoryGrid::Equipment)
                 .count(),
-            3
+            4
         );
     }
 
@@ -2328,16 +2347,8 @@ mod tests {
     #[test]
     fn a_refused_equipment_tint_never_changes_the_full_move_intent() {
         let equipment_first = session().0.inventory_slots - session().0.equipment_slots;
-        let head = ARMOUR_SLOTS
-            .iter()
-            .find(|(_, offset)| *offset == 0)
-            .map(|(item_id, _)| *item_id)
-            .expect("the routing table names head armour");
-        let chest = ARMOUR_SLOTS
-            .iter()
-            .find(|(_, offset)| *offset == 1)
-            .map(|(item_id, _)| *item_id)
-            .expect("the routing table names chest armour");
+        let head = EQUIPMENT_ROUTES[0][0];
+        let chest = EQUIPMENT_ROUTES[1][0];
         let picked_head = Some(InventoryStack {
             item_id: head,
             count: 1,

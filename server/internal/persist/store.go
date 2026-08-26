@@ -112,7 +112,16 @@ import (
 // are the character's worn head, chest and legs equipment, so they must persist and pay
 // the same death penalty as the rest of the life. There is no migration: a v6 record
 // cannot say what was worn, and inventing those slots would make persistence decide it.
-const StoreVersion uint32 = 7
+//
+// **8 widens that table to 40 entries for the trailing off-hand slot.** V7 is migrated:
+// its 39 slots retain their indexes and the new tail is empty, while the complete v7
+// directory is kept beside the replacement as evidence of the pre-migration state.
+const StoreVersion uint32 = 8
+
+const (
+	previousStoreVersion   uint32 = 7
+	previousInventorySlots        = 39
+)
 
 // On-disk layout, little-endian throughout, one file per character.
 //
@@ -155,7 +164,7 @@ const (
 
 	// supersededSuffix marks a players directory written in a format this build does
 	// not speak, and it names the format this build *does* speak: a directory set aside
-	// by this version becomes players.pre-v7.<timestamp>.
+	// by this version becomes players.pre-v8.<timestamp>.
 	//
 	// It said `.pre-accounts` while there had been exactly one such move, which was
 	// true of the format that introduced characters and stopped being true the moment a
@@ -184,8 +193,9 @@ const (
 	offSlots      = offExperience + 4
 	offNameLen    = offSlots + slotsSize
 
-	recordHeaderSize = offNameLen + 2
-	maxRecordSize    = recordHeaderSize + MaxNameBytes + world.ChecksumSize
+	recordHeaderSize      = offNameLen + 2
+	maxRecordSize         = recordHeaderSize + MaxNameBytes + world.ChecksumSize
+	previousMaxRecordSize = offSlots + previousInventorySlots*slotSize + 2 + MaxNameBytes + world.ChecksumSize
 )
 
 var playerMagic = [4]byte{'V', 'X', 'H', 'P'}
@@ -351,15 +361,11 @@ func OpenStore(worldDir string) (*Store, error) {
 	// Before the sweep and before the scan: whatever is in a superseded directory moves
 	// whole, temporaries and all, so that "nothing was deleted" is true of every byte in
 	// it rather than of the records alone.
-	moved, err := s.setAsideSuperseded()
+	_, err := s.setAsideSuperseded()
 
 	if err != nil {
 		return nil, err
 	}
-	if moved {
-		return s, nil
-	}
-
 	// Whatever a crash left mid-rename. Inert, because a reader only ever opens an
 	// exact <character-id>.bin path, so this is housekeeping rather than correctness.
 	//
@@ -413,8 +419,8 @@ func (s *Store) Unreadable() []string {
 // of their account and cannot say which character it was; a v3 record cannot say what
 // its character looks like; a v4 record says nothing about hunger; a v5 record says
 // nothing about experience; a v6 record has no worn-equipment slots — so there is no
-// migration to run and deliberately none written. What there is, is a directory an
-// operator can copy somewhere and open at their leisure.
+// migration for those formats. V7 is the one lossless exception: its 39 positions map
+// directly to this format's first 39 and the new off-hand tail is empty.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
 // a fixed name would be destroyed by the second run that found something to move, which
@@ -436,6 +442,11 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 	}
 
 	older := false
+	type migration struct {
+		name   string
+		record Record
+	}
+	var migrations []migration
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != recordFileExt {
 			continue
@@ -449,20 +460,55 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 				world.ErrCorruptStore, s.dir, version, StoreVersion)
 		default:
 			older = true
+			if version == previousStoreVersion {
+				info, infoErr := entry.Info()
+				if infoErr != nil || info.Size() > int64(previousMaxRecordSize) {
+					continue
+				}
+				path := filepath.Join(s.dir, entry.Name())
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					continue
+				}
+				record, decodeErr := decodeV7Record(data)
+				if decodeErr == nil {
+					migrations = append(migrations, migration{name: entry.Name(), record: record})
+				}
+			}
 		}
 	}
 	if !older {
 		return false, nil
 	}
 
-	aside := fmt.Sprintf("%s%s%d.%d", s.dir, supersededSuffix, StoreVersion, time.Now().UTC().UnixNano())
+	timestamp := time.Now().UTC().UnixNano()
+	aside := fmt.Sprintf("%s%s%d.%d", s.dir, supersededSuffix, StoreVersion, timestamp)
+	migratedDir := fmt.Sprintf("%s.migrate-v%d.%d", s.dir, StoreVersion, timestamp)
+	if err := os.Mkdir(migratedDir, 0o755); err != nil {
+		return false, fmt.Errorf("persist: preparing migrated player records: %w", err)
+	}
+	prepared := false
+	defer func() {
+		if !prepared {
+			_ = os.RemoveAll(migratedDir)
+		}
+	}()
+	for _, migration := range migrations {
+		if err := world.WriteAtomic(filepath.Join(migratedDir, migration.name), encodeRecord(migration.record)); err != nil {
+			return false, fmt.Errorf("persist: migrating %s to format %d: %w", migration.name, StoreVersion, err)
+		}
+	}
 
 	if err := os.Rename(s.dir, aside); err != nil {
 		return false, fmt.Errorf("persist: setting %s aside: %w", s.dir, err)
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return false, fmt.Errorf("persist: creating %s after setting the previous one aside: %w", s.dir, err)
+	if err := os.Rename(migratedDir, s.dir); err != nil {
+		if rollbackErr := os.Rename(aside, s.dir); rollbackErr != nil {
+			return false, fmt.Errorf("persist: installing migrated records: %w (rollback also failed: %v)", err, rollbackErr)
+		}
+		return false, fmt.Errorf("persist: installing migrated records: %w", err)
 	}
+	prepared = true
 	s.setAside = aside
 	return true, nil
 }
@@ -747,9 +793,15 @@ func (s *Store) recordPath(id CharacterID) string {
 }
 
 func encodeRecord(rec Record) []byte {
-	name := rec.Name
+	return encodeRecordLayout(rec, StoreVersion, int(protocol.InventorySlots))
+}
 
-	buf := world.NewRecord(recordHeaderSize, len(name), playerMagic, StoreVersion)
+func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
+	name := rec.Name
+	nameOffset := offSlots + inventorySlots*slotSize
+	headerSize := nameOffset + 2
+
+	buf := world.NewRecord(headerSize, len(name), playerMagic, version)
 	// Seconds, in UTC, because a record is compared by a person reading a log rather
 	// than by anything that needs sub-second resolution — and because a zero time
 	// round-trips through Unix seconds unambiguously.
@@ -768,7 +820,7 @@ func encodeRecord(rec Record) []byte {
 	binary.LittleEndian.PutUint16(buf[offHunger:offHunger+2], rec.Hunger)
 	binary.LittleEndian.PutUint32(buf[offExperience:offExperience+4], rec.Experience)
 
-	for slot, stack := range rec.Slots {
+	for slot, stack := range rec.Slots[:inventorySlots] {
 		at := offSlots + slot*slotSize
 		binary.LittleEndian.PutUint16(buf[at:at+2], stack.ItemID)
 		binary.LittleEndian.PutUint16(buf[at+2:at+4], stack.Count)
@@ -776,8 +828,8 @@ func encodeRecord(rec Record) []byte {
 		binary.LittleEndian.PutUint16(buf[at+6:at+8], stack.MaxDurability)
 	}
 
-	binary.LittleEndian.PutUint16(buf[offNameLen:offNameLen+2], uint16(len(name)))
-	copy(buf[recordHeaderSize:], name)
+	binary.LittleEndian.PutUint16(buf[nameOffset:nameOffset+2], uint16(len(name)))
+	copy(buf[headerSize:], name)
 
 	world.PutChecksum(buf)
 	return buf
@@ -791,11 +843,21 @@ func encodeRecord(rec Record) []byte {
 // own values are judged one layer up, and readIndexed for the checks that are about the
 // index rather than about either.
 func decodeRecord(data []byte) (Record, error) {
-	if len(data) < recordHeaderSize+world.ChecksumSize {
+	return decodeRecordLayout(data, StoreVersion, int(protocol.InventorySlots))
+}
+
+func decodeV7Record(data []byte) (Record, error) {
+	return decodeRecordLayout(data, previousStoreVersion, previousInventorySlots)
+}
+
+func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record, error) {
+	nameOffset := offSlots + inventorySlots*slotSize
+	headerSize := nameOffset + 2
+	if len(data) < headerSize+world.ChecksumSize {
 		return Record{}, fmt.Errorf("%w: %d bytes is shorter than an empty player record",
 			world.ErrCorruptStore, len(data))
 	}
-	if err := world.CheckHeader(data, playerMagic, StoreVersion); err != nil {
+	if err := world.CheckHeader(data, playerMagic, version); err != nil {
 		return Record{}, err
 	}
 	if err := world.CheckChecksum(data); err != nil {
@@ -805,14 +867,14 @@ func decodeRecord(data []byte) (Record, error) {
 	// The declared length is checked against the length the file actually has before
 	// it indexes anything. A truncated record fails here, which is the case this check
 	// exists for: a shorter name is a perfectly plausible one.
-	nameLen := uint64(binary.LittleEndian.Uint16(data[offNameLen : offNameLen+2]))
-	if want := uint64(recordHeaderSize) + nameLen + world.ChecksumSize; want != uint64(len(data)) {
+	nameLen := uint64(binary.LittleEndian.Uint16(data[nameOffset : nameOffset+2]))
+	if want := uint64(headerSize) + nameLen + world.ChecksumSize; want != uint64(len(data)) {
 		return Record{}, fmt.Errorf("%w: the record claims a %d-byte name, which needs %d bytes, but the file is %d",
 			world.ErrCorruptStore, nameLen, want, len(data))
 	}
 
 	rec := Record{
-		Name:       string(data[recordHeaderSize : uint64(recordHeaderSize)+nameLen]),
+		Name:       string(data[headerSize : uint64(headerSize)+nameLen]),
 		Character:  CharacterID(binary.LittleEndian.Uint64(data[offCharacter : offCharacter+8])),
 		LastSeen:   time.Unix(int64(binary.LittleEndian.Uint64(data[offLastSeen:offLastSeen+8])), 0).UTC(),
 		Appearance: appearanceAt(data),
@@ -827,7 +889,7 @@ func decodeRecord(data []byte) (Record, error) {
 		at := offPos + axis*8
 		rec.Pos[axis] = math.Float64frombits(binary.LittleEndian.Uint64(data[at : at+8]))
 	}
-	for slot := range rec.Slots {
+	for slot := range inventorySlots {
 		at := offSlots + slot*slotSize
 		rec.Slots[slot] = protocol.InventoryStack{
 			ItemID:        binary.LittleEndian.Uint16(data[at : at+2]),

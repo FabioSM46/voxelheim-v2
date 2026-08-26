@@ -78,7 +78,9 @@ pub use camera::{Orbit, ViewMode, WorldCamera};
 // is dressed out of the same wardrobe rather than from a second copy of the tables.
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe, RecipeCategory};
 pub use interpolate::SnapshotBuffer;
-pub(crate) use inventory::ARMOUR_SLOTS;
+#[cfg(test)]
+pub(crate) use inventory::EQUIPMENT_ROUTES;
+pub(crate) use inventory::equipment_item_fits;
 pub use inventory::{
     ApplyInventory, Inventory, InventoryClick, InventoryClickKind, PickedStack, SelectedSlot,
 };
@@ -699,6 +701,7 @@ struct Described {
     worn_head: u16,
     worn_chest: u16,
     worn_legs: u16,
+    worn_offhand: u16,
     /// When this entry was written. Read only while `drawn` is false — once a body
     /// exists, that body's presence in the newest snapshot is what keeps the entry.
     at: Instant,
@@ -883,6 +886,7 @@ struct Worn {
     head: u16,
     chest: u16,
     legs: u16,
+    off_hand: u16,
 }
 
 impl Worn {
@@ -892,6 +896,7 @@ impl Worn {
             head: 0,
             chest: 0,
             legs: 0,
+            off_hand: 0,
         }
     }
 
@@ -901,6 +906,7 @@ impl Worn {
             head: description.worn_head,
             chest: description.worn_chest,
             legs: description.worn_legs,
+            off_hand: description.worn_offhand,
         }
     }
 
@@ -1493,6 +1499,7 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
                 described.worn_head = message.worn_head;
                 described.worn_chest = message.worn_chest;
                 described.worn_legs = message.worn_legs;
+                described.worn_offhand = message.worn_offhand;
             }
             None => {
                 appearances.0.insert(
@@ -1504,6 +1511,7 @@ fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMu
                         worn_head: message.worn_head,
                         worn_chest: message.worn_chest,
                         worn_legs: message.worn_legs,
+                        worn_offhand: message.worn_offhand,
                         at: now,
                         drawn: false,
                     },
