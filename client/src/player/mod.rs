@@ -173,7 +173,8 @@ pub enum InputMode {
     Playing,
     /// Pointer captured and text entry owns the keyboard; gameplay input is closed.
     Chat,
-    /// Pointer released and the authoritative inventory visible.
+    /// Pointer released and the authoritative inventory visible; horizontal movement
+    /// remains live.
     Inventory,
     /// Pointer released over one authoritative corpse container.
     Loot,
@@ -795,20 +796,22 @@ impl SelfVitals {
 ///
 /// One `SystemParam` rather than the same pair of resources threaded through six
 /// signatures, so that *may this frame's input act on the world?* has one answer and one
-/// place to change it. Two questions live here because they are genuinely different, and
+/// place to change it. Three questions live here because they are genuinely different, and
 /// each system asks the one it means:
 ///
+/// - [`Self::may_move`] — may the horizontal movement axes reach the server. Continuous
+///   intent, and deliberately still live while the inventory is open.
 /// - [`Self::may_aim`] — may the crosshair resolve a voxel. A continuous query, so the
 ///   frame a mode changes on is allowed to produce an outline.
 /// - [`Self::may_act`] — may a request leave this client. Edge-triggered, so the frame a
 ///   mode changes on belongs to the UI and produces nothing.
 ///
-/// **Neither is authority.** The server owns every outcome an input could ask for and
+/// **None is authority.** The server owns every outcome an input could ask for and
 /// refuses a forged one whatever this answers. What the gate buys is usability and
 /// bandwidth: a dead player's controls go quiet instead of firing requests into a
 /// refusal, and the client never has to guess which of them the server would have taken.
 ///
-/// The two fields stay private, so `ui/` reads the gate through these methods and only
+/// The fields stay private, so `ui/` reads the gate through these methods and only
 /// this module and its children — where the bespoke conditions live — reach past them.
 #[derive(SystemParam)]
 pub struct InputGate<'w> {
@@ -831,6 +834,15 @@ impl InputGate<'_> {
     /// Which view the world is being drawn in. See [`ViewMode`].
     pub fn view(&self) -> ViewMode {
         *self.view
+    }
+
+    /// Whether the horizontal movement axes may reach the server.
+    ///
+    /// Inventory keeps walking live so opening the pack does not root the character. The
+    /// pointer, jump, targeting and world actions remain closed through their own gates;
+    /// chat, loot and the pause menu still own movement as well as their other input.
+    pub fn may_move(&self) -> bool {
+        matches!(*self.mode, InputMode::Playing | InputMode::Inventory) && !self.vitals.dead()
     }
 
     /// Whether aiming, targeting and the outline are live.
@@ -1163,20 +1175,6 @@ fn sample_input(
     mut look: ResMut<LookState>,
     mut orbit: ResMut<Orbit>,
 ) {
-    // A mode transition and its key or pointer event share a frame. Treat that frame as
-    // UI-owned too, so clicking Resume cannot also swing at the block behind the button.
-    if *gate.mode != InputMode::Playing || gate.mode.is_changed() {
-        set_if_changed(&mut intent, MoveIntent::default());
-        // Released rather than left as it was: a player who opened the pause menu with the
-        // orbit key down is not holding it any more as far as this client is concerned,
-        // and an orbit that never settles would leave the camera off to one side for the
-        // rest of the session.
-        if orbit.held {
-            orbit.held = false;
-        }
-        return;
-    }
-
     // What the player asked for, or what this client ships with. Optional for the reason
     // the two input resources above are: every one of this module's own tests builds an
     // app without the settings plugin, and a `Res<T>` on a missing resource takes the
@@ -1185,6 +1183,42 @@ fn sample_input(
         Some(settings) => (settings.look_sensitivity(), *settings.bindings()),
         None => (DEFAULT_LOOK_SENSITIVITY, Bindings::default()),
     };
+
+    // Held, not pressed: PlayerInput describes the state of the controls each tick, so what
+    // matters is whether the key is down when the frame is sampled.
+    let horizontal_axes = |keys: &ButtonInput<KeyCode>| {
+        let axis = |negative: KeyCode, positive: KeyCode| {
+            f32::from(keys.pressed(positive)) - f32::from(keys.pressed(negative))
+        };
+        (
+            axis(bindings.key(Control::Left), bindings.key(Control::Right)),
+            axis(bindings.key(Control::Back), bindings.key(Control::Forward)),
+        )
+    };
+
+    // A mode transition and its key or pointer event share a frame. Treat world-facing
+    // input as UI-owned, so clicking Resume cannot also swing at the block behind the
+    // button. Inventory is the one deliberate split: its horizontal movement is continuous
+    // intent, while jump, pointer input and actions remain closed.
+    if *gate.mode != InputMode::Playing || gate.mode.is_changed() {
+        let next = if gate.may_move() {
+            keys.as_deref().map_or_else(MoveIntent::default, |keys| {
+                let (x, z) = horizontal_axes(keys);
+                MoveIntent { x, z, jump: false }
+            })
+        } else {
+            MoveIntent::default()
+        };
+        set_if_changed(&mut intent, next);
+        // Released rather than left as it was: a player who opened UI with the orbit key
+        // down is not holding it any more as far as this client is concerned, and an orbit
+        // that never settles would leave the camera off to one side for the rest of the
+        // session.
+        if orbit.held {
+            orbit.held = false;
+        }
+        return;
+    }
 
     // **Which angle the mouse moves, and the only place that is decided.** Third person
     // with the orbit key held moves a camera-only offset; everything else moves the
@@ -1245,15 +1279,10 @@ fn sample_input(
         return;
     };
 
-    // Held, not pressed: PlayerInput describes the state of the controls each tick, so what
-    // matters is whether the key is down when the frame is sampled.
-    let axis = |negative: KeyCode, positive: KeyCode| {
-        f32::from(keys.pressed(positive)) - f32::from(keys.pressed(negative))
-    };
-
+    let (x, z) = horizontal_axes(&keys);
     let next = MoveIntent {
-        x: axis(bindings.key(Control::Left), bindings.key(Control::Right)),
-        z: axis(bindings.key(Control::Back), bindings.key(Control::Forward)),
+        x,
+        z,
         jump: keys.pressed(bindings.key(Control::Jump)),
     };
     // Opposite keys cancel, and both axes are left un-normalised on purpose: the diagonal
