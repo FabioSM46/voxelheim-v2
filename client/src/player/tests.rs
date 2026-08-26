@@ -527,6 +527,47 @@ fn transformed_mesh_bounds(mesh: &Mesh, transform: Transform, parent: Vec3) -> (
         })
 }
 
+/// One axis-aligned bound per triangle of a transformed mesh.
+///
+/// A single bound around the whole sword is no longer a sound proxy for it. The grip and
+/// the pommel are closed *inside* the fist while the guard and the blade are forward of it,
+/// and those two halves are separated from the rig on different axes — so one box drawn
+/// around both reports an overlap that neither half has. A bound per triangle keeps the
+/// halves apart, and it is sound in general: a triangle whose bound is disjoint from a box
+/// is disjoint from that box. It is exact here as well, because the attachment turns the
+/// model sheet by a quarter turn and nothing else, which maps every axis-aligned face of it
+/// to another axis-aligned face.
+fn transformed_triangle_bounds(
+    mesh: &Mesh,
+    transform: Transform,
+    parent: Vec3,
+) -> Vec<(Vec3, Vec3)> {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        panic!("the body-held mesh must carry Float32x3 positions");
+    };
+    let points: Vec<Vec3> = positions
+        .iter()
+        .map(|position| transform.transform_point(Vec3::from_array(*position)) + parent)
+        .collect();
+    let indices: Vec<usize> = mesh
+        .indices()
+        .expect("the body-held mesh must be indexed")
+        .iter()
+        .collect();
+    indices
+        .chunks_exact(3)
+        .map(|triangle| {
+            triangle
+                .iter()
+                .fold((Vec3::MAX, Vec3::MIN), |(low, high), index| {
+                    (low.min(points[*index]), high.max(points[*index]))
+                })
+        })
+        .collect()
+}
+
 fn body_piece_bounds(pieces: &[BodyPiece]) -> (Vec3, Vec3) {
     pieces
         .iter()
@@ -611,13 +652,28 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     };
     assert!(
         inside_fist(grip),
-        "the hanging sword grip {grip:?} left the fist {fist_low:?}..{fist_high:?}"
+        "the carried sword's grip {grip:?} left the fist {fist_low:?}..{fist_high:?}"
     );
-    // The sword's own +Y is its length, tip end. Hanging at rest maps it to world -Y.
-    let hang = drawn.transform.rotation * Vec3::Y;
+    // Both axis mappings of the one rotation, pinned separately, because the pose they
+    // produce would look plausible with either of them wrong.
+    //
+    // The sword's own +Y is its length, tip end, and **forward is -Z**: `placed_in_layer`
+    // says so where the model sheet is read — the sheet measures forwards as +z and a body
+    // faces -Z, one negation in one place — and the body entity's own rotation is
+    // `Quat::from_rotation_y(state.yaw)`, so the rig's local -Z is the direction the
+    // character faces at every yaw. The opposite sign is a sword coming out of its back.
+    let forward = drawn.transform.rotation * Vec3::Y;
     assert!(
-        hang.distance(Vec3::NEG_Y) < 1e-6,
-        "the sword's length axis {hang:?} does not point at the ground"
+        forward.distance(Vec3::NEG_Z) < 1e-6,
+        "the sword's length axis {forward:?} does not point where the character faces"
+    );
+    // The sword's own +Z spans the cross guard, which is also the blade's width axis. Up,
+    // so the guard stands upright and the blade's flat is vertical — an ordinary forward
+    // grip, and a crossbar rather than a point from a camera behind the character.
+    let guard_axis = drawn.transform.rotation * Vec3::Z;
+    assert!(
+        guard_axis.distance(Vec3::Y) < 1e-6,
+        "the cross guard's span {guard_axis:?} is not upright"
     );
     assert_eq!(drawn.visibility, Visibility::Inherited);
 
@@ -635,6 +691,7 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         .get(&drawn.mesh)
         .expect("the body-held blade mesh");
     let (blade_low, blade_high) = transformed_mesh_bounds(mesh, drawn.transform, parent);
+    let triangles = transformed_triangle_bounds(mesh, drawn.transform, parent);
     let (arm_low, arm_high) = body_piece_bounds(&[BodyPiece::RightSleeve, BodyPiece::RightFist]);
 
     let transform_segment =
@@ -642,15 +699,17 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     let blade = transform_segment(drops::blade_span());
     let guard = transform_segment(drops::blade_guard_span());
 
-    // The guard is seated on the fist's lower face, so everything of the sword above that
-    // plane is grip and pommel and has to be closed inside the fist. The plane itself is
-    // shared by the guard's top face, whose ends reach past the fist by design, so the
-    // filter is strict.
+    // The guard's rearward face is seated on the fist's forward face — forward is -Z, so
+    // that is the fist's *lowest* z — and everything of the sword behind that plane is grip
+    // and pommel and has to be closed inside the fist. Seating it by the grip instead would
+    // bury the guard: the fist is 0.20 blocks through and the grip only 0.082. The plane
+    // itself is shared by the guard's rearward face, whose ends reach outside the fist
+    // vertically by design, so the filter below is strict.
     let guard_seat = drawn.transform.transform_point(drops::blade_guard_base()) + parent;
     assert!(
-        guard_seat.y <= fist_low.y + 1e-6,
-        "the cross guard's upper face {guard_seat:?} is above the fist's lower face {:?}",
-        fist_low.y
+        guard_seat.z <= fist_low.z + 1e-6,
+        "the cross guard's rearward face {guard_seat:?} is behind the fist's forward face {:?}",
+        fist_low.z
     );
     let Some(VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -660,7 +719,7 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     let held: Vec<Vec3> = positions
         .iter()
         .map(|position| drawn.transform.transform_point(Vec3::from_array(*position)) + parent)
-        .filter(|point| point.y > fist_low.y + 1e-4)
+        .filter(|point| point.z > fist_low.z + 1e-4)
         .collect();
     assert!(
         !held.is_empty(),
@@ -673,24 +732,57 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         held.iter().copied().fold(Vec3::MAX, Vec3::min),
         held.iter().copied().fold(Vec3::MIN, Vec3::max)
     );
+    // The rearmost point of the whole sword is the pommel end, because the sword points
+    // along -Z. Named separately from the sweep above so the far end of what the fist is
+    // meant to close on is a bound in its own right rather than one member of a filtered
+    // set.
+    let pommel_end = held.iter().copied().fold(Vec3::NEG_INFINITY, |far, point| {
+        if point.z > far.z { point } else { far }
+    });
     assert!(
-        blade.iter().all(|point| point.y < fist_low.y),
-        "the blade {blade:?} does not hang clear below the fist's lower face {:?}",
-        fist_low.y
+        inside_fist(pommel_end),
+        "the pommel end {pommel_end:?} left the fist {fist_low:?}..{fist_high:?}"
+    );
+    assert!(
+        blade.iter().all(|point| point.z < fist_low.z),
+        "the blade {blade:?} does not reach clear in front of the fist's forward face {:?}",
+        fist_low.z
+    );
+    // And clear in front of the *body*, not merely of the hand that holds it: the envelope
+    // is the whole rig including hair, and the tip is beyond its forward face.
+    let envelope = body_envelope();
+    let body_front = envelope.centre.z - envelope.size.z / 2.0;
+    assert!(
+        blade[1].z < body_front,
+        "the blade tip {:?} does not reach in front of the body's forward face {body_front}",
+        blade[1]
     );
 
-    // Half the guard's length on each of the body's horizontal axes, so it reads from
-    // directly behind the character and from the side alike.
+    // Upright, which is the whole of what makes the guard read as a crossbar: it spends its
+    // entire length on Y and has no horizontal extent at all.
     let guard_span = guard[1] - guard[0];
-    let half = guard_span.length() / 2.0;
     assert!(
-        guard_span.x.abs() >= half && guard_span.z.abs() >= half,
-        "the cross guard {guard_span:?} is edge-on to one of the two reference views"
+        (guard_span.y.abs() - guard_span.length()).abs() < 1e-6,
+        "the cross guard {guard_span:?} is not upright"
+    );
+    // What `BLADE_HANG_OUTSET` used to buy, and why the forward pose needs no offset at all.
+    // A yawed, hanging guard swept about 0.076 blocks either side of the hang axis and would
+    // have buried its inboard tip in the tunic hem; an upright one is only `GUARD_SIZE.x`
+    // thick across the body, so the sword seated on the fist's centre clears that hem with
+    // nothing pushing it outboard.
+    let (_, torso_high) = body_piece_bounds(&[BodyPiece::Torso]);
+    assert!(
+        blade_low.x > torso_high.x,
+        "the sword's inboard face {:?} reaches inside the tunic hem {:?}",
+        blade_low.x,
+        torso_high.x
     );
 
     // Every rig box but the right fist, which holds the grip and pommel on purpose. Two
     // boxes are disjoint exactly when one axis separates them, which is what the three
-    // axis-aligned projections answer between them.
+    // axis-aligned projections answer between them — asked of each triangle of the sword
+    // rather than of one box around all of them, for the reason
+    // [`transformed_triangle_bounds`] gives.
     for piece in [
         BodyPiece::RightTrouser,
         BodyPiece::RightShoe,
@@ -703,26 +795,32 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         BodyPiece::HeadAndNeck,
     ] {
         let (low, high) = body_piece_bounds(&[piece]);
+        let hit = triangles.iter().find(|(triangle_low, triangle_high)| {
+            (0..3).all(|axis| triangle_high[axis] > low[axis] && triangle_low[axis] < high[axis])
+        });
         assert!(
-            (0..3).any(|axis| blade_high[axis] <= low[axis] || blade_low[axis] >= high[axis]),
-            "the hanging sword {blade_low:?}..{blade_high:?} intersects {piece:?} \
-             {low:?}..{high:?}"
+            hit.is_none(),
+            "the carried sword {blade_low:?}..{blade_high:?} intersects {piece:?} \
+             {low:?}..{high:?} with the triangle {hit:?}"
         );
     }
-    for (view, horizontal_axis) in [("front", 0), ("side", 2)] {
-        let visible_blade = projected_outside_fraction(blade, (arm_low, arm_high), horizontal_axis);
-        assert!(
-            visible_blade >= 0.70,
-            "only {:.1}% of the blade projects outside the arm in the {view} view",
-            visible_blade * 100.0
-        );
-        let visible_guard = projected_outside_fraction(guard, (arm_low, arm_high), horizontal_axis);
-        assert!(
-            visible_guard >= 0.20,
-            "only {:.1}% of the guard projects outside the arm in the {view} view",
-            visible_guard * 100.0
-        );
-    }
+    // The side view is the one this pose is readable from, and there the whole blade
+    // projects clear of the arm: every point of it is forward of the fist's forward face,
+    // which is the arm silhouette's forward face too.
+    //
+    // **There is deliberately no equivalent claim for the front view, and its absence is a
+    // measurement rather than an omission.** A sword pointing along -Z is end-on to a camera
+    // looking along Z, so from *directly* behind the character the fist covers it and any
+    // projected-visibility threshold there would be asserting something false. What makes
+    // the pose read from behind is the upright guard pinned above; what makes it read at all
+    // is that the third-person camera sits `BOOM_LENGTH` back and an eye height up rather
+    // than on the facing axis.
+    let visible_blade = projected_outside_fraction(blade, (arm_low, arm_high), 2);
+    assert!(
+        visible_blade >= 0.99,
+        "only {:.1}% of the blade projects outside the arm in the side view",
+        visible_blade * 100.0
+    );
     let expected = item_linear_rgba(combat::ITEM_RUSTY_SWORD);
     let actual = app
         .world()

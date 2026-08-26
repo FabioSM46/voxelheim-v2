@@ -50,7 +50,11 @@ pub(super) fn blade_grip_centre() -> Vec3 {
     sword_grip_centre(DROP_EDGE * BLADE_DROP_LENGTH)
 }
 
-/// The guard face a body-held sword is seated against, hanging point-down from the fist.
+/// The guard face a body-held sword is seated against, carried point-forward from the fist.
+///
+/// The rearward face of the cross guard, the one the grip enters. The body attachment puts it
+/// on the fist's forward face, which is what closes the grip and the pommel inside the fist
+/// and leaves the guard immediately in front of it.
 ///
 /// The body and ground share this world-scale mesh, so the attachment asks the mesh recipe
 /// where its guard is instead of holding a second copy of the furniture proportions.

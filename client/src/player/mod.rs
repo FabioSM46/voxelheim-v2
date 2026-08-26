@@ -69,9 +69,9 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 pub(crate) use appearance::{
-    ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, NOTCH_XZ, PlacedBox,
-    envelope as body_envelope, held_item_anchor as body_held_item_anchor,
-    held_item_box as body_held_item_box, piece_boxes, placed as placed_box, placed_armour,
+    ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
+    held_item_anchor as body_held_item_anchor, held_item_box as body_held_item_box, piece_boxes,
+    placed as placed_box, placed_armour,
 };
 
 pub(crate) use camera::{AimCamera, DeathFall};
@@ -1025,18 +1025,45 @@ fn stack_item_id(stack: Option<crate::net::InventoryStack>) -> Option<u16> {
 
 /// The local attachment of one world-scale item to the right fist.
 ///
-/// Ordinary shapes retain the centre placement they already had. A sword's own Y axis is its
-/// length with the tip at `+Y`, so a half turn about X points that tip at the ground and the
-/// weapon hangs from the fist the way gravity leaves it. The yaw that follows presents the
-/// cross guard and the blade's flat to the rear and the side reference view alike, rather than
-/// edge-on to one of them — which is the occlusion the diagonal this replaces was reaching for,
-/// obtained here without carrying a resting sword horizontally.
+/// Ordinary shapes retain the centre placement they already had. A blade is carried
+/// **pointing where the character looks**, standing, walking and turning alike: a drawn
+/// weapon reaches forward, and nothing here is conditional on movement, aim or combat.
 ///
-/// **Seated by the cross guard, not by the grip.** The fist is 0.20 blocks tall and the grip
-/// only 0.082, so a grip-centred hang buries the guard inside it. Putting the guard's uppermost
-/// face against the fist's lower face instead leaves exactly the grip and the pommel closed
-/// inside the fist, the guard immediately below it, and the whole blade hanging clear beneath
-/// that.
+/// **Forward is `-Z`, and that is the one sign this whole placement rests on.**
+/// `appearance::placed_in_layer` states it where the model sheet is read — the sheet
+/// measures forwards as `+z` and a body faces `-Z`, one negation in one place — and the body
+/// entity's own rotation is `Quat::from_rotation_y(state.yaw)`, so the rig's local `-Z` is the
+/// facing direction at every yaw. Get it backwards and the sword points out of the
+/// character's back, which is why
+/// [`the_local_body_holds_the_authoritative_selected_item_at_world_scale`] pins both axes of
+/// the rotation rather than the pose it produces.
+///
+/// **One quarter turn about X does it, and both of its axis mappings are load-bearing.** The
+/// sword mesh is built tip-up: local `+Y` is the tip and local `+Z` spans the cross guard,
+/// which is also the blade's width axis. `from_rotation_x(-FRAC_PI_2)` sends local `+Y` to
+/// `-Z` (the tip reaches forward) and local `+Z` to `+Y` (the guard stands upright). An
+/// upright guard is what an ordinary forward grip looks like — the blade's flat is vertical
+/// and its two edges face up and down — and from a camera behind the character it reads as a
+/// crossbar instead of as a point.
+///
+/// **Seated by the cross guard, not by the grip.** The fist is 0.20 blocks through and the
+/// grip only 0.082, so a grip-centred seating leaves the guard inside the box. Putting the
+/// guard's rearward face — [`drops::blade_guard_base`], the face the grip enters — on the
+/// fist's forward face instead closes exactly the grip and the pommel inside the fist, sits
+/// the guard immediately in front of it, and sends the whole blade forward clear of the body.
+///
+/// **No outboard offset, and its absence is the measurement rather than an omission.** The
+/// hanging pose this replaces needed one: a yawed, hanging guard swept about 0.076 blocks
+/// either side of the hang axis and would have buried its inboard tip in the tunic hem, which
+/// reaches `x = 0.25`. An upright guard spends its length on `Y` and is only `GUARD_SIZE.x`
+/// thick across the body, so seated on the fist's centre at `x = 0.30` the sword's widest
+/// point still clears that hem. The test measures the clearance; nothing here tunes it.
+///
+/// **The honest cost of this pose**: the rig's right arm hangs at the side and swings with
+/// the walk cycle, and there is no arm pose that raises it, so a sword reaching forward out of
+/// a hanging fist reads as a wrist bent ninety degrees. Pointing forward is the requested
+/// behaviour and this is what it costs; raising the arm is a separate change that would have
+/// to fight the walk animation.
 fn body_held_item_transform(shape: ItemShape) -> Transform {
     let anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
     if shape != ItemShape::Blade {
@@ -1044,21 +1071,20 @@ fn body_held_item_transform(shape: ItemShape) -> Transform {
     }
     let fist = body_held_item_box();
 
-    use std::f32::consts::{FRAC_PI_4, PI};
+    use std::f32::consts::FRAC_PI_2;
 
-    let rotation = Quat::from_rotation_y(FRAC_PI_4) * Quat::from_rotation_x(PI);
+    // Tip to -Z, guard span to +Y. A quarter turn is an exact signed permutation of the
+    // axes, so every axis-aligned part of the model sheet keeps an axis-aligned box here
+    // rather than acquiring an inflated one — which is what lets the test separate the
+    // sword from the rig one axis at a time.
+    let rotation = Quat::from_rotation_x(-FRAC_PI_2);
     // The shared drop mesh is deliberately small on the ground. A modest body-only scale
     // makes its furniture readable beside the 1.8-block rig without changing that asset.
     const BODY_BLADE_SCALE: f32 = 1.25;
-    // One notch outboard of the fist's centre. The tunic torso reaches x = 0.25 at the hip
-    // and the yawed guard sweeps about 0.076 blocks either side of the hang axis, so a sword
-    // hung on the fist's centre at x = 0.30 would bury its inboard guard tip in the hem. A
-    // notch clears it while the grip and the pommel both stay wholly inside the 0.20-block
-    // fist — the hand grips towards its outer face, which is where a hand holds a sword.
-    const BLADE_HANG_OUTSET: f32 = NOTCH_XZ;
     let scale = Vec3::splat(BODY_BLADE_SCALE);
-    // Where the guard's uppermost face has to land: on the fist's lower face, on that axis.
-    let guard_seat = anchor + Vec3::new(BLADE_HANG_OUTSET, -fist.size.y / 2.0, 0.0);
+    // Where the guard's rearward face has to land: on the fist's forward face, which is its
+    // *lowest* z, because the body faces -Z.
+    let guard_seat = anchor - Vec3::Z * (fist.size.z / 2.0);
     Transform {
         translation: guard_seat - rotation * (drops::blade_guard_base() * scale),
         rotation,
