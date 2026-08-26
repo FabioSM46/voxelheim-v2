@@ -1110,9 +1110,9 @@ projection clients receive. Passive species stay on `stepPassive` and never allo
 - **Damage, healing and blocking have one seam each.** `creditDamageThreatLocked` adds the actual
   mob health removed multiplied by `1 + worn.threat / ThreatScale`;
   `creditHealThreatLocked` gives a healer half the health actually restored on every mob hunting
-  the healed player; `creditBlockThreatLocked` adds `ShieldTauntThreat` to the attacker whose blow
-  was absorbed. The future projectile, sceptre and shield paths reuse those seams rather than
-  restating ledger arithmetic.
+  the healed player; `creditBlockThreatLocked` adds `ShieldTauntThreat` for the blocker whose
+  shield absorbed the mob's blow. The future projectile, sceptre and shield paths reuse those
+  seams rather than restating ledger arithmetic.
 - **Worn armour multiplies generated threat; it does not extend awareness.** A creature still
   considers only living, unprotected players inside its species' `aggroRange`. Once somebody in
   that set has positive threat, the highest ledger value is the primary choice. The old
