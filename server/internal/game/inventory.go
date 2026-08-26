@@ -32,11 +32,12 @@ type slotTable [protocol.InventorySlots]inventoryStack
 
 const (
 	// equipmentFirst is the first slot automatic insertion must never reach. The
-	// inventory is laid out as hotbar, pack, then the three worn slots.
-	equipmentFirst = int(protocol.InventorySlots - protocol.EquipmentSlots)
-	equipmentHead  = equipmentFirst
-	equipmentChest = equipmentFirst + 1
-	equipmentLegs  = equipmentFirst + 2
+	// inventory is laid out as hotbar, pack, then the four worn slots.
+	equipmentFirst   = int(protocol.InventorySlots - protocol.EquipmentSlots)
+	equipmentHead    = equipmentFirst
+	equipmentChest   = equipmentFirst + 1
+	equipmentLegs    = equipmentFirst + 2
+	equipmentOffHand = equipmentFirst + 3
 )
 
 // inventoryStack is one slot's authoritative contents. The zero value is an empty slot.
@@ -388,6 +389,8 @@ func wornAtForSlot(slot uint8) (wornAt, bool) {
 		return wornChest, true
 	case equipmentLegs:
 		return wornLegs, true
+	case equipmentOffHand:
+		return wornOffHand, true
 	default:
 		return wornNowhere, false
 	}
@@ -399,14 +402,15 @@ func equipmentSlot(slot uint8) bool {
 }
 
 // wornItemsLocked returns the item ids announced with this player's appearance.
-// The caller holds inventory.mu, so all three ids describe one authoritative instant.
-func (i *inventory) wornItemsLocked() (head, chest, legs uint16) {
+// The caller holds inventory.mu, so all four ids describe one authoritative instant.
+func (i *inventory) wornItemsLocked() (head, chest, legs, offHand uint16) {
 	return uint16(i.slots[equipmentHead].item),
 		uint16(i.slots[equipmentChest].item),
-		uint16(i.slots[equipmentLegs].item)
+		uint16(i.slots[equipmentLegs].item),
+		uint16(i.slots[equipmentOffHand].item)
 }
 
-// refreshWornLocked rebuilds the combat summary from the three authoritative
+// refreshWornLocked rebuilds the combat summary from the four authoritative
 // equipment slots. The caller holds sim.mu and inventory.mu; assigning the complete
 // local value at the end means the tick can never observe half of one refresh.
 //

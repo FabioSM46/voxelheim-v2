@@ -393,6 +393,18 @@ fn request_inventory_action(
             continue;
         }
 
+        let off_hand = slots
+            .checked_sub(session.0.equipment_slots)
+            .and_then(|first| (session.0.equipment_slots >= 4).then_some(first + 3));
+        if off_hand == Some(click.slot)
+            && inventory
+                .slot(source.slot)
+                .is_some_and(|stack| !equipment_item_fits(stack.item_id, 3))
+        {
+            set_if_changed(&mut picked, PickedStack::default());
+            continue;
+        }
+
         let count = inventory
             .slot(source.slot)
             .filter(|stack| stack.count > 0)
@@ -508,20 +520,24 @@ fn consume_request(
 /// honoured and this list omitted, which is what the leather patch silently was.
 const KITS: &[u16] = &[ITEM_SHARPENING_STONE, ITEM_LEATHER_PATCH];
 
-/// Display-side routing from an armour item id to its equipment-slot offset:
-/// head `0`, chest `1`, legs `2`.
+/// Display-side routing from an equipment-slot offset to the item ids it accepts:
+/// head `0`, chest `1`, legs `2`, off-hand `3`.
 ///
 /// This is deliberately only a routing table for the cells that draw or grey a drop
 /// target. The server re-reads `itemRegistry.wornAt` before every move, so an entry here
 /// can grant nothing and an omitted entry can only make the client less helpful.
-pub(crate) const ARMOUR_SLOTS: &[(u16, u8)] = &[
-    (ITEM_LEATHER_CAP, 0),
-    (ITEM_LEATHER_JERKIN, 1),
-    (ITEM_LEATHER_LEGGINGS, 2),
-    (ITEM_IRON_HELM, 0),
-    (ITEM_IRON_CUIRASS, 1),
-    (ITEM_IRON_GREAVES, 2),
+pub(crate) const EQUIPMENT_ROUTES: [&[u16]; 4] = [
+    &[ITEM_LEATHER_CAP, ITEM_IRON_HELM],
+    &[ITEM_LEATHER_JERKIN, ITEM_IRON_CUIRASS],
+    &[ITEM_LEATHER_LEGGINGS, ITEM_IRON_GREAVES],
+    &[],
 ];
+
+pub(crate) fn equipment_item_fits(item_id: u16, offset: u8) -> bool {
+    EQUIPMENT_ROUTES
+        .get(usize::from(offset))
+        .is_some_and(|allowed| allowed.contains(&item_id))
+}
 
 /// Whether this client routes a click with one item id onto a worn item to a mend.
 ///
@@ -872,6 +888,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_non_off_hand_item_sends_nothing_to_the_off_hand_slot() {
+        let mut app = app(false);
+        let mut params = app.world().resource::<Session>().0;
+        params.inventory_slots = 8;
+        params.hotbar_slots = 4;
+        params.equipment_slots = 4;
+        app.insert_resource(Session(params));
+        let (outbound, sent) = Outbound::to_a_test(16);
+        app.insert_resource(outbound);
+        deliver(
+            &mut app,
+            vec![
+                stack(ITEM_STONE, 1),
+                InventoryStack::default(),
+                InventoryStack::default(),
+                InventoryStack::default(),
+                InventoryStack::default(),
+                InventoryStack::default(),
+                InventoryStack::default(),
+                InventoryStack::default(),
+            ],
+        );
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+
+        inventory_click(&mut app, 0, InventoryClickKind::Full);
+        inventory_click(&mut app, 7, InventoryClickKind::Full);
+
+        assert!(sent.try_recv().is_err());
+        assert_eq!(app.world().resource::<PickedStack>().slot(), None);
+    }
+
     /// Replaces the vitals exactly as an accepted snapshot does.
     fn say_dead(app: &mut App, dead: bool) {
         app.insert_resource(SelfVitals::from_server(crate::net::PlayerVitals {
@@ -1136,32 +1186,30 @@ mod tests {
     }
 
     #[test]
-    fn every_armour_route_names_one_registry_item_once() {
-        assert_eq!(
-            crate::player::ARMOUR_SLOTS,
-            &[
-                (ITEM_LEATHER_CAP, 0),
-                (ITEM_LEATHER_JERKIN, 1),
-                (ITEM_LEATHER_LEGGINGS, 2),
-                (ITEM_IRON_HELM, 0),
-                (ITEM_IRON_CUIRASS, 1),
-                (ITEM_IRON_GREAVES, 2),
-            ]
+    fn every_equipment_route_names_one_registry_item_once() {
+        assert_eq!(EQUIPMENT_ROUTES.len(), 4);
+        assert!(
+            EQUIPMENT_ROUTES[3].is_empty(),
+            "no off-hand item exists yet"
         );
-        for &(item_id, slot) in ARMOUR_SLOTS {
-            assert_ne!(item_label(item_id), "unknown item", "armour item {item_id}");
-            assert!(
-                slot < 3,
-                "armour item {item_id} names equipment offset {slot}"
-            );
-            assert_eq!(
-                ARMOUR_SLOTS
-                    .iter()
-                    .filter(|(other, _)| *other == item_id)
-                    .count(),
-                1,
-                "armour item {item_id} appears more than once"
-            );
+        for (slot, items) in EQUIPMENT_ROUTES.iter().enumerate() {
+            for &item_id in *items {
+                assert_ne!(
+                    item_label(item_id),
+                    "unknown item",
+                    "equipment item {item_id}"
+                );
+                assert!(equipment_item_fits(item_id, slot as u8));
+                assert_eq!(
+                    EQUIPMENT_ROUTES
+                        .iter()
+                        .flat_map(|items| items.iter().copied())
+                        .filter(|&other| other == item_id)
+                        .count(),
+                    1,
+                    "equipment item {item_id} appears more than once"
+                );
+            }
         }
     }
 

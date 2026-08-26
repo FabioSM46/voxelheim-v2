@@ -555,9 +555,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: SIZE,
             view_distance: 8,
-            inventory_slots: 36,
+            inventory_slots: 37,
             hotbar_slots: 9,
-            equipment_slots: 3,
+            equipment_slots: 4,
             player_token: crate::net::ANY_TOKEN,
         })
     }

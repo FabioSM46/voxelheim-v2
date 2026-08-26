@@ -146,7 +146,7 @@ pub enum ArmourPiece {
 ///
 /// Chest and leg equipment each cover more than one animated limb. Keeping those
 /// segments explicit lets the renderer put every mesh at the same pivot as the body
-/// piece underneath it while the server still describes only three equipment slots.
+/// piece underneath it while the server describes three armour slots and one off-hand slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArmourSegment {
     Helmet,

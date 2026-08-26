@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -396,6 +398,113 @@ func TestAV6DirectoryIsSetAsideAndNotMigrated(t *testing.T) {
 	}
 	if again.SetAside() != "" {
 		t.Errorf("a second open set %q aside; there was nothing there to move", again.SetAside())
+	}
+}
+
+func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
+	t.Parallel()
+
+	worldDir := t.TempDir()
+	players := filepath.Join(worldDir, playersDirName)
+	if err := os.MkdirAll(players, 0o755); err != nil {
+		t.Fatalf("creating the v7 players directory: %v", err)
+	}
+
+	id := CharacterID(7)
+	want := Record{
+		Character:  id,
+		Owner:      testID(7),
+		Name:       "Sigrun",
+		Appearance: testAppearance(),
+		LastSeen:   time.Unix(1_700_000_000, 0).UTC(),
+		Health:     73,
+		Hunger:     42,
+		Experience: 900,
+	}
+	want.Slots[0] = protocol.InventoryStack{ItemID: 7, Count: 1, Durability: 80, MaxDurability: 100}
+	want.Slots[previousInventorySlots-1] = protocol.InventoryStack{ItemID: 23, Count: 1, Durability: 40, MaxDurability: 100}
+	old := encodeRecordLayout(want, previousStoreVersion, previousInventorySlots)
+	name := id.String() + recordFileExt
+	if err := os.WriteFile(filepath.Join(players, name), old, 0o600); err != nil {
+		t.Fatalf("writing the v7 record: %v", err)
+	}
+	currentID := CharacterID(8)
+	current := Record{
+		Character:  currentID,
+		Owner:      testID(8),
+		Name:       "Astrid",
+		Appearance: testAppearance(),
+		LastSeen:   time.Unix(1_700_000_001, 0).UTC(),
+		Health:     88,
+		Hunger:     55,
+		Experience: 901,
+	}
+	current.Slots[protocol.InventorySlots-1] = protocol.InventoryStack{ItemID: 29, Count: 1, Durability: 60, MaxDurability: 100}
+	currentBytes := encodeRecord(current)
+	currentName := currentID.String() + recordFileExt
+	if err := os.WriteFile(filepath.Join(players, currentName), currentBytes, 0o600); err != nil {
+		t.Fatalf("writing the current record beside v7: %v", err)
+	}
+
+	store, err := OpenStore(worldDir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if store.Count() != 2 {
+		t.Fatalf("the migrated mixed-version store holds %d characters, want 2", store.Count())
+	}
+	got, found, err := store.Load(id)
+	if err != nil || !found {
+		t.Fatalf("loading the migrated character: found %v, err %v", found, err)
+	}
+	if got.Slots[previousInventorySlots-1] != want.Slots[previousInventorySlots-1] {
+		t.Errorf("the old tail is %+v, want %+v", got.Slots[previousInventorySlots-1], want.Slots[previousInventorySlots-1])
+	}
+	if got.Slots[protocol.InventorySlots-1] != (protocol.InventoryStack{}) {
+		t.Errorf("the inserted off-hand tail is %+v, want empty", got.Slots[protocol.InventorySlots-1])
+	}
+	gotCurrent, found, err := store.Load(currentID)
+	if err != nil || !found {
+		t.Fatalf("loading the preserved current character: found %v, err %v", found, err)
+	}
+	if gotCurrent.Slots[protocol.InventorySlots-1] != current.Slots[protocol.InventorySlots-1] {
+		t.Errorf("the current off-hand is %+v, want %+v", gotCurrent.Slots[protocol.InventorySlots-1], current.Slots[protocol.InventorySlots-1])
+	}
+
+	migrated, err := os.ReadFile(filepath.Join(players, name))
+	if err != nil {
+		t.Fatalf("reading the migrated record: %v", err)
+	}
+	if version, ours := recordVersion(filepath.Join(players, name)); !ours || version != StoreVersion {
+		t.Errorf("the replacement record reports version %d (ours %v), want %d", version, ours, StoreVersion)
+	}
+	if len(migrated) != len(old)+slotSize {
+		t.Errorf("the migrated record is %d bytes, want v7's %d plus one slot", len(migrated), len(old))
+	}
+	preservedCurrent, err := os.ReadFile(filepath.Join(players, currentName))
+	if err != nil {
+		t.Fatalf("reading the preserved current record: %v", err)
+	}
+	if !bytes.Equal(preservedCurrent, currentBytes) {
+		t.Error("the current record changed while it was copied into the replacement")
+	}
+	aside := store.SetAside()
+	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+supersededSuffix+"8.") {
+		t.Errorf("the v7 directory was kept as %q, want players.pre-v8.<timestamp>", base)
+	}
+	kept, err := os.ReadFile(filepath.Join(aside, name))
+	if err != nil {
+		t.Fatalf("reading the v7 record kept aside: %v", err)
+	}
+	if !bytes.Equal(kept, old) {
+		t.Error("the v7 record changed while it was kept aside")
+	}
+	keptCurrent, err := os.ReadFile(filepath.Join(aside, currentName))
+	if err != nil {
+		t.Fatalf("reading the original current record kept aside: %v", err)
+	}
+	if !bytes.Equal(keptCurrent, currentBytes) {
+		t.Error("the original current record changed while it was kept aside")
 	}
 }
 

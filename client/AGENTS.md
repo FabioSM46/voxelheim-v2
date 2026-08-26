@@ -442,10 +442,11 @@ The client samples the controls, sends what the player is *trying* to do at the 
   complete state is the only thing that changes the displayed contents. The welcome also
   announces a non-empty trailing equipment subset; the pack grid draws only the slots between
   the hotbar and that subset. The inventory screen draws the trailing subset as a labelled
-  head/chest/legs column beside the pack and routes every press through the same slot-index
-  message as an ordinary cell. `ARMOUR_SLOTS` may tint a mismatched destination as a courtesy,
-  but the press still leaves and the server still decides. The three worn ids in a described
-  appearance also select optional head, chest and legs overlays on world bodies. That renderer
+  head/chest/legs/off-hand column beside the pack and routes every press through the same slot-index
+  message as an ordinary cell. `EQUIPMENT_ROUTES` may tint a mismatched destination as a courtesy;
+  because no off-hand item exists yet, a non-off-hand drop onto that fourth cell sends nothing.
+  The four worn ids in a described appearance select optional head, chest and legs overlays on
+  world bodies while preserving the off-hand id without adding geometry. That renderer
   reads only the server's latest description; it never infers equipment from the local pack.
 - **Item drops are snapshot entities, not pickup candidates.** `player/drops.rs` uses the
   newest `drops` vector as the complete existence set and interpolates positions through the
@@ -661,8 +662,9 @@ colour cover", and the first thing two answers do is disagree.
 
 **Twenty-two meshes for a whole settlement.** Every player is the same geometry and only the colours
 and server-described equipment differ, so each independently moving piece is merged into one mesh
-at startup — eleven fixed body pieces, one per hair model and six armour segments grouped under the
-three equipment slots — and nothing is ever rebuilt. Splitting the arms and legs creates pivots, not
+at startup — eleven fixed body pieces, one per hair model and six armour segments grouped under
+three of the four equipment slots; off-hand carries no geometry — and nothing is ever rebuilt.
+Splitting the arms and legs creates pivots, not
 per-player geometry: every body still shares those handles. Armour is up to six optional overlay
 children; sleeves and greaves reuse the matching limb pivots, and changing worn ids adds, removes or
 re-materialises them without replacing the body. The helmet and cuirass occupy a second
