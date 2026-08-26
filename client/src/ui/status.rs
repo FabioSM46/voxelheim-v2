@@ -60,6 +60,13 @@ const READOUT_LINE: f32 = MARGIN + 96.0;
 /// faster than an eye can follow it.
 const FRAME_RATE_SMOOTHING: f32 = 0.1;
 
+/// How often the measured values are published to the visible text.
+///
+/// Four readings per second keep the label recent without presenting every rounded frame-rate
+/// change and every millisecond of snapshot age as a new string. Sampling remains per-frame, so
+/// the smoothing still sees every measurement; this interval bounds presentation only.
+const READOUT_PUBLICATION_INTERVAL: Duration = Duration::from_millis(250);
+
 /// How long a notice stays on screen.
 ///
 /// Long enough to read a short sentence and short enough that it is gone before the next
@@ -83,6 +90,7 @@ impl Plugin for StatusUiPlugin {
         // as by `SettingsScreenPlugin`, for the reason `Notice` is beside it: this plugin has
         // to stand on its own, and its own tests build it that way.
         app.init_resource::<Notice>()
+            .init_resource::<ReadoutMeasurements>()
             .init_resource::<Settings>()
             .add_systems(Startup, spawn_status_text)
             .add_systems(
@@ -92,7 +100,7 @@ impl Plugin for StatusUiPlugin {
                     refresh_world_text,
                     refresh_player_text,
                     refresh_notice_text,
-                    refresh_readout,
+                    (sample_readout, refresh_readout).chain(),
                 ),
             );
     }
@@ -118,6 +126,31 @@ struct NoticeText;
 /// Marks the frame-rate readout.
 #[derive(Component)]
 struct ReadoutText;
+
+/// The newest values the readout may publish.
+///
+/// Measurement stays separate from presentation so every frame contributes to smoothing while
+/// the text itself changes only on the bounded cadence below.
+#[derive(Resource, Debug, Default)]
+struct ReadoutMeasurements {
+    smoothed_frame_rate: f32,
+    newest_snapshot: Option<(u32, Duration)>,
+}
+
+/// Presentation-only cadence and the edge that makes enabling immediate.
+struct ReadoutPublication {
+    cadence: Timer,
+    was_visible: bool,
+}
+
+impl Default for ReadoutPublication {
+    fn default() -> Self {
+        Self {
+            cadence: Timer::new(READOUT_PUBLICATION_INTERVAL, TimerMode::Repeating),
+            was_visible: false,
+        }
+    }
+}
 
 /// The transient sentence on screen, and when it goes away.
 ///
@@ -287,19 +320,15 @@ fn describe_readout(frame_rate: f32, snapshot_age: Option<Duration>) -> String {
     format!("{frame_rate:.0} fps · snapshot {age}")
 }
 
-/// Keeps the readout current, and out of the way when it is switched off.
+/// Samples the two values the readout presents on every frame.
 ///
 /// Both counters are measured here rather than read from a resource somebody else keeps: the
-/// frame rate is this schedule's own `Time`, and the snapshot age is the moment
-/// `PlayerStats.server_tick` last moved. Neither is a decision and neither is on the wire —
-/// this is a line of text about the client's own clock.
-fn refresh_readout(
+/// frame rate is this schedule's own `Time`, and the snapshot age anchor is the moment
+/// `PlayerStats.server_tick` last moved. Neither is a decision and neither is on the wire.
+fn sample_readout(
     time: Option<Res<Time>>,
-    settings: Res<Settings>,
     stats: Option<Res<PlayerStats>>,
-    mut nodes: Query<(&mut Text, &mut Node, &mut Visibility), With<ReadoutText>>,
-    mut smoothed: Local<f32>,
-    mut newest: Local<Option<(u32, Duration)>>,
+    mut measurements: ResMut<ReadoutMeasurements>,
 ) {
     let Some(time) = time else {
         return;
@@ -309,8 +338,9 @@ fn refresh_readout(
     let delta = time.delta_secs();
     if delta > 0.0 {
         let instant = 1.0 / delta;
-        *smoothed = if *smoothed > 0.0 {
-            *smoothed + (instant - *smoothed) * FRAME_RATE_SMOOTHING
+        measurements.smoothed_frame_rate = if measurements.smoothed_frame_rate > 0.0 {
+            measurements.smoothed_frame_rate
+                + (instant - measurements.smoothed_frame_rate) * FRAME_RATE_SMOOTHING
         } else {
             instant
         };
@@ -319,11 +349,27 @@ fn refresh_readout(
     // The tick, not the resource's change flag: `PlayerStats` is rewritten on frames when
     // nothing about it moved, and an age measured from that would read zero for ever.
     if let Some(tick) = stats.as_ref().and_then(|stats| stats.server_tick)
-        && newest.map(|(held, _)| held) != Some(tick)
+        && measurements.newest_snapshot.map(|(held, _)| held) != Some(tick)
     {
-        *newest = Some((tick, now));
+        measurements.newest_snapshot = Some((tick, now));
     }
-    let age = newest.map(|(_, at)| now.saturating_sub(at));
+}
+
+/// Keeps the readout current, and out of the way when it is switched off.
+///
+/// Visibility and placement follow their settings immediately. The string is published only
+/// once per [`READOUT_PUBLICATION_INTERVAL`], except that switching the readout on publishes the
+/// first readable value in that same frame.
+fn refresh_readout(
+    time: Option<Res<Time>>,
+    settings: Res<Settings>,
+    measurements: Res<ReadoutMeasurements>,
+    mut nodes: Query<(&mut Text, &mut Node, &mut Visibility), With<ReadoutText>>,
+    mut publication: Local<ReadoutPublication>,
+) {
+    let Some(time) = time else {
+        return;
+    };
 
     let shown = if settings.readout_shown() {
         Visibility::Visible
@@ -331,7 +377,25 @@ fn refresh_readout(
         Visibility::Hidden
     };
     let placement = corner_node(settings.readout_corner());
-    let line = describe_readout(*smoothed, age);
+    let visible = shown == Visibility::Visible;
+    let became_visible = visible && !publication.was_visible;
+    let publish = if !visible {
+        publication.cadence.reset();
+        false
+    } else if became_visible {
+        publication.cadence.reset();
+        true
+    } else {
+        publication.cadence.tick(time.delta()).just_finished()
+    };
+    publication.was_visible = visible;
+
+    let line = publish.then(|| {
+        let age = measurements
+            .newest_snapshot
+            .map(|(_, at)| time.elapsed().saturating_sub(at));
+        describe_readout(measurements.smoothed_frame_rate, age)
+    });
 
     for (mut text, mut node, mut visibility) in &mut nodes {
         if *visibility != shown {
@@ -340,10 +404,10 @@ fn refresh_readout(
         if *node != placement {
             *node = placement.clone();
         }
-        // Only while it is on screen: a hidden readout that rewrote its `String` every frame
-        // would be the allocation the three lines above it are careful to avoid.
-        if shown == Visibility::Visible && text.0 != line {
-            text.0.clone_from(&line);
+        if let Some(line) = &line
+            && text.0 != *line
+        {
+            text.0.clone_from(line);
         }
     }
 }
@@ -1687,11 +1751,12 @@ mod tests {
         }
     }
 
-    /// The age is measured from the moment the tick moved, not from the frame the resource
-    /// was written: `PlayerStats` is rewritten on frames when nothing in it changed, and an
-    /// age read from that would be zero for ever.
+    /// Sub-interval frames keep the string byte-for-byte stable, then one publication tick
+    /// refreshes both measurements together.
     #[test]
-    fn the_snapshot_age_grows_while_the_server_tick_stands_still() {
+    fn the_readout_publishes_once_per_bounded_interval() {
+        assert_eq!(READOUT_PUBLICATION_INTERVAL, Duration::from_millis(250));
+
         let mut app = headless_ui(ConnectionState::Connected);
         app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
             .insert_resource(player_stats());
@@ -1700,18 +1765,56 @@ mod tests {
         let (_, _, first) = readout(&mut app);
         assert!(first.contains("snapshot 0 ms"), "{first}");
 
-        // Touched but not moved: the same tick, several frames later.
-        for _ in 0..3 {
+        // Touched but not moved: the same tick and two advancing render frames do not
+        // republish either counter before the presentation interval.
+        for _ in 0..2 {
             app.world_mut().resource_mut::<PlayerStats>().entities += 1;
             steps(&mut app, 1);
+            assert_eq!(readout(&mut app).2, first);
         }
+
+        // The third 100 ms frame crosses the 250 ms interval. Repeating cadence keeps the
+        // remainder, but one frame still produces at most one current publication.
+        app.world_mut().resource_mut::<PlayerStats>().entities += 1;
+        steps(&mut app, 1);
         let (_, _, later) = readout(&mut app);
         assert!(later.contains("snapshot 300 ms"), "{later}");
+        assert_ne!(later, first);
 
-        // And a new tick puts it back to nothing.
+        // The age anchor is still the moment the server tick moved, not the frame
+        // `PlayerStats` was otherwise rewritten. A fresh tick waits for the same cadence
+        // and honestly includes the time spent waiting to publish.
         app.world_mut().resource_mut::<PlayerStats>().server_tick = Some(1235);
         steps(&mut app, 1);
+        assert_eq!(
+            readout(&mut app).2,
+            later,
+            "published between cadence ticks"
+        );
+        steps(&mut app, 1);
         let (_, _, fresh) = readout(&mut app);
-        assert!(fresh.contains("snapshot 0 ms"), "{fresh}");
+        assert!(fresh.contains("snapshot 100 ms"), "{fresh}");
+    }
+
+    /// Sampling continues on every render frame even though presentation does not. A sustained
+    /// change therefore reaches the smoothed value well inside one second rather than waiting on
+    /// a second measurement cadence.
+    #[test]
+    fn smoothed_fps_responds_to_a_sustained_change_within_one_second() {
+        let mut app = headless_ui(ConnectionState::Connected);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )));
+        steps(&mut app, 1);
+        app.world_mut().resource_mut::<Settings>().toggle_readout();
+        steps(&mut app, 1);
+        assert!(readout(&mut app).2.starts_with("10 fps"));
+
+        *app.world_mut().resource_mut::<TimeUpdateStrategy>() =
+            TimeUpdateStrategy::ManualDuration(Duration::from_millis(16));
+        steps(&mut app, 62); // 992 ms of sustained ~62 fps frames.
+
+        let (_, _, line) = readout(&mut app);
+        assert!(line.starts_with("62 fps"), "{line}");
     }
 }
