@@ -1,0 +1,2 @@
+# Snapshots are a 20 Hz hot path; keep their boundary enums allocation-free.
+enum-variant-size-threshold = 224
