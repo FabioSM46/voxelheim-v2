@@ -2215,17 +2215,15 @@ mod tests {
     fn both_blades_show_their_guard_grip_and_pommel_around_the_fist() {
         const EPSILON: f32 = 1e-6;
         let half = HAND_SIZE / 2.0;
-        let inside = |position: &[f32; 3]| {
-            position[0].abs() <= half.x + EPSILON
-                && position[1].abs() <= half.y + EPSILON
-                && position[2].abs() <= half.z + EPSILON
-        };
 
         for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
             let translation = item_translation(ItemShape::Blade).y;
             let blade = item_mesh(item_id, ItemShape::Blade).translated_by(Vec3::Y * translation);
             let positions = positions(&blade);
-            let part_at_depth = |half_depth: f32, low: f32, high: f32| -> Vec<[f32; 3]> {
+            // Each furniture box has a unique depth, so its corners identify it after the
+            // parts have been merged. A Y-only selection would also collect the neighbouring
+            // boxes on their shared planes and blur the very bounds this test is measuring.
+            let part_corners = |half_depth: f32, low: f32, high: f32| -> Vec<[f32; 3]> {
                 positions
                     .iter()
                     .copied()
@@ -2244,22 +2242,37 @@ mod tests {
             let pommel_high = grip_low;
             let pommel_low = pommel_high - POMMEL_SIZE.y;
 
-            let guard = part_at_depth(GUARD_SIZE.z / 2.0, guard_low, guard_high);
-            let grip = part_at_depth(GRIP_SIZE.z / 2.0, grip_low, grip_high);
-            let pommel = part_at_depth(POMMEL_SIZE.z / 2.0, pommel_low, pommel_high);
+            let guard = part_corners(GUARD_SIZE.z / 2.0, guard_low, guard_high);
+            let grip = part_corners(GRIP_SIZE.z / 2.0, grip_low, grip_high);
+            let pommel = part_corners(POMMEL_SIZE.z / 2.0, pommel_low, pommel_high);
             assert!(!guard.is_empty() && !grip.is_empty() && !pommel.is_empty());
 
+            let (guard_near, guard_far) = extent(&guard, 2);
             assert!(
-                guard.iter().all(|position| !inside(position)),
-                "sword {item_id}'s guard disappeared inside the fist: {guard:?}"
+                guard_near < -half.z - EPSILON && guard_far > half.z + EPSILON,
+                "sword {item_id}'s guard does not protrude past both sides of the fist: \
+                 guard z={guard_near}..{guard_far}, fist z={}..{}",
+                -half.z,
+                half.z
             );
+
+            let (grip_low, grip_high) = extent(&grip, 1);
+            let (grip_near, grip_far) = extent(&grip, 2);
             assert!(
-                grip.iter().any(inside) && grip.iter().any(|position| !inside(position)),
-                "sword {item_id}'s grip does not cross the fist: {grip:?}"
+                grip_low < -half.y - EPSILON
+                    && grip_high > -half.y + EPSILON
+                    && grip_near > -half.z
+                    && grip_far < half.z,
+                "sword {item_id}'s grip does not cross the lower face of the fist: \
+                 grip y={grip_low}..{grip_high}, z={grip_near}..{grip_far}"
             );
+
+            let (pommel_low, pommel_high) = extent(&pommel, 1);
             assert!(
-                pommel.iter().all(|position| !inside(position)),
-                "sword {item_id}'s pommel disappeared inside the fist: {pommel:?}"
+                pommel_high < -half.y - EPSILON,
+                "sword {item_id}'s pommel is not wholly below the fist: \
+                 pommel y={pommel_low}..{pommel_high}, fist bottom={}",
+                -half.y
             );
         }
     }
