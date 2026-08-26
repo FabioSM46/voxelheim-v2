@@ -122,7 +122,12 @@ union Payload {
   LootOpenRequest,        // 33
   LootTakeRequest,        // 34
   LootState,              // 35
-  LootClosed              // 36
+  LootClosed,             // 36
+
+  // -- Optional server-to-client presentation feedback. An older client drops
+  //    the whole tag safely; a newer client against an older server receives no
+  //    pulse. Existing tags remain untouched, so no protocol-version bump is owed.
+  MobHit                   // 37
 }
 
 table Envelope {

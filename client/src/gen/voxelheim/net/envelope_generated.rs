@@ -608,6 +608,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_mob_hit(&self) -> Option<MobHit<'a>> {
+        if self.payload_type() == Payload::MobHit {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MobHit::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -655,6 +670,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::LootTakeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootTakeRequest>>("Payload::LootTakeRequest", pos),
           Payload::LootState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootState>>("Payload::LootState", pos),
           Payload::LootClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootClosed>>("Payload::LootClosed", pos),
+          Payload::MobHit => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MobHit>>("Payload::MobHit", pos),
           _ => Ok(()),
         }
      })?
@@ -1068,6 +1084,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::LootClosed => {
                 if let Some(x) = self.payload_as_loot_closed() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MobHit => {
+                if let Some(x) = self.payload_as_mob_hit() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

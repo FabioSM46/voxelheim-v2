@@ -411,11 +411,33 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		// boundary. Production combinations stay below it by the registry sweep.
 		damage = 1
 	}
-	target.damageLocked(damage)
+	if target.damageLocked(damage) {
+		target.pendingMobHits = append(target.pendingMobHits, protocol.MobHit{
+			AttackerEntityID: m.entityID,
+			AttackerPos:      toWire(m.pos),
+		})
+	}
 	// Every attack pays recovery, landed or not, which is what stops a low tick rate or
 	// a target dancing on the edge of reach from raising the authoritative cadence.
 	m.action = vnet.MobActionRecovery
 	m.actionTicks = s.mobTimings[m.kind].recovery
+}
+
+// offerMobHitsLocked delivers landed monster-hit events in impact order and keeps the
+// first rejected frame (and everything behind it) pending for a later tick.
+//
+// The call is made before this recipient's superseding snapshot. deliver is the
+// non-blocking session seam, so a full queue delays presentation without ever delaying
+// the simulation tick or turning a rejected enqueue into success.
+func (p *Player) offerMobHitsLocked() {
+	for len(p.pendingMobHits) > 0 {
+		if !p.deliver(protocol.EncodeMobHit(p.pendingMobHits[0])) {
+			p.sim.log.Debug("monster-hit feedback deferred: the session's outbound queue is full",
+				"entity_id", p.entityID)
+			return
+		}
+		p.pendingMobHits = p.pendingMobHits[1:]
+	}
 }
 
 // dying reports whether this creature has been killed and is on its way out of the world.

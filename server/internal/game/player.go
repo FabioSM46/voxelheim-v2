@@ -485,6 +485,11 @@ type Player struct {
 	lootDirty    bool
 	lootClosures []uint64
 
+	// Every landed monster blow this session has not been told about yet. Unlike a
+	// snapshot, an event is not superseded by the next tick, so a full outbound queue
+	// leaves these pending until offerMobHitsLocked gets one through. Guarded by sim.mu.
+	pendingMobHits []protocol.MobHit
+
 	// Open and take have independent client ordering for the same reason attack and
 	// mining do: activity on one message must not silence a different intent stream.
 	haveLootOpenTick bool
@@ -991,6 +996,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	for _, p := range players {
 		p.offerInventoryLocked()
 		p.offerLootLocked()
+		p.offerMobHitsLocked()
 	}
 
 	// One snapshot per session, carrying only the entities that session can see.
