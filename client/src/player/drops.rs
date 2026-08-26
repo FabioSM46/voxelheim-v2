@@ -13,6 +13,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_grip_centre, sword_mesh};
+#[cfg(test)]
+use super::hands::{sword_blade_span, sword_guard_span};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::merge_all;
@@ -45,6 +47,18 @@ const BLADE_DROP_LENGTH: f32 = 1.25;
 /// grip rather than copying the furniture proportions into a second renderer.
 pub(super) fn blade_grip_centre() -> Vec3 {
     sword_grip_centre(DROP_EDGE * BLADE_DROP_LENGTH)
+}
+
+/// The blade centreline used to measure how much of a carried sword projects clear.
+#[cfg(test)]
+pub(super) fn blade_span() -> [Vec3; 2] {
+    sword_blade_span(DROP_EDGE * BLADE_DROP_LENGTH)
+}
+
+/// The cross-guard span used to prove it is visible from both body reference views.
+#[cfg(test)]
+pub(super) fn blade_guard_span() -> [Vec3; 2] {
+    sword_guard_span(DROP_EDGE * BLADE_DROP_LENGTH)
 }
 
 /// The volume the packed-gear silhouette is allowed to occupy.

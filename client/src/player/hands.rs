@@ -47,6 +47,22 @@ const BASE_TRANSLATION: Vec3 = Vec3::new(0.10, -0.075, -0.18);
 /// it is smaller, so the hilt it closes around keeps a silhouette of its own.
 const HAND_SIZE: Vec3 = Vec3::new(0.03825, 0.07225, 0.03825);
 
+/// How far a blade's centre plane sits toward the camera from the fist's centre.
+///
+/// The camera looks down -Z, so positive Z is the near side. Keeping the centre one
+/// millimetre inside the fist's front face leaves the grip anchored while every blade
+/// section still puts a near-facing surface in front of the fist. This is blade-only:
+/// the other held shapes already read clearly at their existing depth.
+const BLADE_CAMERA_OFFSET: f32 = HAND_SIZE.z / 2.0 - 0.001;
+
+/// Extra camera-space clearance for the blade composition during its reachable swings.
+///
+/// Moving the blade forward *inside* the merged mesh is what lets it win the fist's depth
+/// test. The same local offset rotates toward the camera during an overhead cut, so the
+/// complete blade composition sits four millimetres farther from the near plane. The
+/// blade-to-fist relationship is unchanged; other held shapes do not move.
+const BLADE_NEAR_PLANE_CLEARANCE: f32 = 0.004;
+
 /// How far a carried object sinks into the top of the fist holding it.
 ///
 /// A gap would leave the item floating and no overlap would put two faces on the same
@@ -559,6 +575,32 @@ pub(super) fn sword_grip_centre(length: f32) -> Vec3 {
     Vec3::Y * grip * (length / SWORD_LENGTH)
 }
 
+/// The blade's root and tip in a sword mesh built at `length`.
+///
+/// The body attachment tests project this actual model-sheet segment against the arm. A
+/// bounding-box extreme can be one protruding point and says nothing about how much blade
+/// is readable, while these two points let that test measure the complete blade length.
+#[cfg(test)]
+pub(super) fn sword_blade_span(length: f32) -> [Vec3; 2] {
+    let scale = length / SWORD_LENGTH;
+    [
+        Vec3::Y * blade_base() * scale,
+        Vec3::Y * (blade_base() + BLADE_LENGTH) * scale,
+    ]
+}
+
+/// The two ends of the cross guard in a sword mesh built at `length`.
+#[cfg(test)]
+pub(super) fn sword_guard_span(length: f32) -> [Vec3; 2] {
+    let scale = length / SWORD_LENGTH;
+    let y = (blade_base() - GUARD_SIZE.y / 2.0) * scale;
+    let half_width = GUARD_SIZE.z / 2.0 * scale;
+    [
+        Vec3::new(0.0, y, -half_width),
+        Vec3::new(0.0, y, half_width),
+    ]
+}
+
 /// The three sections the blade is lofted from: at the guard, at the shoulder where the
 /// point begins, and at the tip.
 fn blade_sections() -> [BladeSection; 3] {
@@ -873,8 +915,9 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
 /// Where an item sits relative to the fist at the origin.
 ///
 /// Blocks, materials and bundles rest on the knuckles. A sword leaves one quarter of its grip
-/// below the fist while the rest crosses the palm, and a tool puts the lower haft through it.
-/// These are translations of the approved geometry, not new shapes.
+/// below the fist while the rest crosses the palm, and sits at the fist's near face so the fist
+/// cannot depth-occlude its guard or blade. A tool puts the lower haft through the fist. These
+/// are translations of the approved geometry, not new shapes.
 fn item_translation(shape: ItemShape) -> Vec3 {
     let hand_top = HAND_SIZE.y / 2.0;
     let y = match shape {
@@ -893,7 +936,15 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Bow => HAND_SIZE.y * 0.20,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
     };
-    Vec3::Y * y
+    Vec3::new(
+        0.0,
+        y,
+        if shape == ItemShape::Blade {
+            BLADE_CAMERA_OFFSET
+        } else {
+            0.0
+        },
+    )
 }
 
 /// A wooden board and iron boss shared by hands, bodies and drops.
@@ -1548,7 +1599,7 @@ fn animate_view_model(
     time: Res<Time>,
     mut intent: HandIntent<'_, '_>,
     mut animation: ResMut<HandAnimation>,
-    mut held: Query<&mut Transform, With<HeldItem>>,
+    mut held: Query<(&HeldItem, &mut Transform)>,
 ) {
     let mut next_animation = *animation;
     // The loop runs exactly while the server's answer says it should, and resets the
@@ -1607,12 +1658,20 @@ fn animate_view_model(
         *animation = next_animation;
     }
 
-    let next = animated_transform(&next_animation);
-    for mut transform in &mut held {
+    for (item, mut transform) in &mut held {
+        let next = presented_transform(&next_animation, item.shape);
         if *transform != next {
             *transform = next;
         }
     }
+}
+
+fn presented_transform(animation: &HandAnimation, shape: Option<ItemShape>) -> Transform {
+    let mut transform = animated_transform(animation);
+    if shape == Some(ItemShape::Blade) {
+        transform.translation.z -= BLADE_NEAR_PLANE_CLEARANCE;
+    }
+    transform
 }
 
 fn animated_transform(animation: &HandAnimation) -> Transform {
@@ -2285,7 +2344,7 @@ mod tests {
                             bump_elapsed: Some(PLACE_BUMP_TIME.mul_f32(f32::from(bump) / 16.0)),
                             ..Default::default()
                         };
-                        let transform = animated_transform(&animation);
+                        let transform = presented_transform(&animation, appearance.shape);
                         for corner in &corners {
                             let point = transform.transform_point(Vec3::from_array(*corner));
                             assert!(
@@ -2470,8 +2529,8 @@ mod tests {
         let half = HAND_SIZE / 2.0;
 
         for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
-            let translation = item_translation(ItemShape::Blade).y;
-            let blade = item_mesh(item_id, ItemShape::Blade).translated_by(Vec3::Y * translation);
+            let translation = item_translation(ItemShape::Blade);
+            let blade = item_mesh(item_id, ItemShape::Blade).translated_by(translation);
             let positions = positions(&blade);
             // Each furniture box has a unique depth, so its corners identify it after the
             // parts have been merged. A Y-only selection would also collect the neighbouring
@@ -2481,14 +2540,14 @@ mod tests {
                     .iter()
                     .copied()
                     .filter(|position| {
-                        (position[2].abs() - half_depth).abs() < EPSILON
+                        ((position[2] - translation.z).abs() - half_depth).abs() < EPSILON
                             && position[1] >= low - EPSILON
                             && position[1] <= high + EPSILON
                     })
                     .collect()
             };
 
-            let guard_high = blade_base() + translation;
+            let guard_high = blade_base() + translation.y;
             let guard_low = guard_high - GUARD_SIZE.y;
             let grip_high = guard_low;
             let grip_low = grip_high - GRIP_SIZE.y;
@@ -2500,11 +2559,11 @@ mod tests {
             let pommel = part_corners(POMMEL_SIZE.z / 2.0, pommel_low, pommel_high);
             assert!(!guard.is_empty() && !grip.is_empty() && !pommel.is_empty());
 
-            let (guard_near, guard_far) = extent(&guard, 2);
+            let (guard_back, guard_front) = extent(&guard, 2);
             assert!(
-                guard_near < -half.z - EPSILON && guard_far > half.z + EPSILON,
-                "sword {item_id}'s guard does not protrude past both sides of the fist: \
-                 guard z={guard_near}..{guard_far}, fist z={}..{}",
+                guard_back < half.z - EPSILON && guard_front > half.z + EPSILON,
+                "sword {item_id}'s guard does not cross the camera-facing side of the fist: \
+                 guard z={guard_back}..{guard_front}, fist z={}..{}",
                 -half.z,
                 half.z
             );
@@ -2514,8 +2573,8 @@ mod tests {
             assert!(
                 grip_low < -half.y - EPSILON
                     && grip_high > -half.y + EPSILON
-                    && grip_near > -half.z
-                    && grip_far < half.z,
+                    && grip_near < half.z
+                    && grip_far > -half.z,
                 "sword {item_id}'s grip does not cross the lower face of the fist: \
                  grip y={grip_low}..{grip_high}, z={grip_near}..{grip_far}"
             );
@@ -2526,6 +2585,47 @@ mod tests {
                 "sword {item_id}'s pommel is not wholly below the fist: \
                  pommel y={pommel_low}..{pommel_high}, fist bottom={}",
                 -half.y
+            );
+
+            let grip_centre = sword_grip_centre(SWORD_LENGTH) + translation;
+            assert!(
+                (0..3).all(|axis| grip_centre[axis].abs() <= half[axis] + EPSILON),
+                "sword {item_id}'s grip centre {grip_centre:?} left the fist {half:?}"
+            );
+
+            // Camera-space depth in the transform the renderer actually uses, sampled
+            // over the complete blade rather than inferred from its tip. `held_mesh`
+            // merges fist and item before `presented_transform` moves the one entity, so
+            // the near-plane clearance belongs on both points in this comparison. Using
+            // the presented transform here records that fact and prevents a later split
+            // into separately transformed geometry from silently invalidating it.
+            //
+            // The camera looks down -Z, so the larger camera-space Z must belong to the
+            // blade's near surface at the same model-space height as the fist's front
+            // plane. This lets the blade win the depth test where their projections
+            // overlap; the separate all-poses test below proves the complete merged mesh
+            // still remains behind the camera near plane.
+            const SAMPLES: usize = 101;
+            let presentation =
+                presented_transform(&HandAnimation::default(), Some(ItemShape::Blade));
+            let visible = (0..SAMPLES)
+                .filter(|sample| {
+                    let fraction = *sample as f32 / (SAMPLES - 1) as f32;
+                    let y = blade_base() + BLADE_LENGTH * fraction;
+                    let blade_front = presentation.transform_point(Vec3::new(
+                        0.0,
+                        translation.y + y,
+                        translation.z + blade_at(y).half_width,
+                    ));
+                    let fist_front =
+                        presentation.transform_point(Vec3::new(0.0, translation.y + y, half.z));
+                    blade_front.z > fist_front.z + EPSILON
+                })
+                .count();
+            assert!(
+                visible * 100 >= SAMPLES * 95,
+                "only {visible}/{SAMPLES} sampled blade sections of sword {item_id} put a \
+                 camera-facing surface in front of the fist"
             );
         }
     }

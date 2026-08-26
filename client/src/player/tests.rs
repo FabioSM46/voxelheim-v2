@@ -543,6 +543,31 @@ fn body_piece_bounds(pieces: &[BodyPiece]) -> (Vec3, Vec3) {
         })
 }
 
+/// Fraction of a real model-sheet segment that falls outside one rectangular body
+/// silhouette. `horizontal_axis` is X for the front view and Z for the side view; Y is
+/// vertical in both. Sampling the whole segment prevents one protruding endpoint from
+/// standing in for a readable carried item.
+fn projected_outside_fraction(
+    segment: [Vec3; 2],
+    silhouette: (Vec3, Vec3),
+    horizontal_axis: usize,
+) -> f32 {
+    const SAMPLES: usize = 201;
+    let [start, end] = segment;
+    let (low, high) = silhouette;
+    let outside = (0..SAMPLES)
+        .filter(|sample| {
+            let fraction = *sample as f32 / (SAMPLES - 1) as f32;
+            let point = start.lerp(end, fraction);
+            point[horizontal_axis] < low[horizontal_axis]
+                || point[horizontal_axis] > high[horizontal_axis]
+                || point.y < low.y
+                || point.y > high.y
+        })
+        .count();
+    outside as f32 / SAMPLES as f32
+}
+
 #[test]
 fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
     let mut app = headless_player();
@@ -578,14 +603,12 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         .get::<BodyVisual>(drawn.parent)
         .expect("the item is attached to a body piece");
     assert_eq!(parent_visual.0, BodyPiece::RightFist);
-    let fist_anchor = body_held_item_anchor() - BodyPiece::RightFist.pivot();
+    let parent = BodyPiece::RightFist.pivot();
+    let grip = drawn.transform.transform_point(drops::blade_grip_centre()) + parent;
+    let (fist_low, fist_high) = body_piece_bounds(&[BodyPiece::RightFist]);
     assert!(
-        drawn
-            .transform
-            .transform_point(drops::blade_grip_centre())
-            .abs_diff_eq(fist_anchor, 1e-6),
-        "the rotated sword grips at {:?}, not the fist anchor {fist_anchor:?}",
-        drawn.transform.transform_point(drops::blade_grip_centre())
+        (0..3).all(|axis| grip[axis] >= fist_low[axis] && grip[axis] <= fist_high[axis]),
+        "the rotated sword grip {grip:?} left the fist {fist_low:?}..{fist_high:?}"
     );
     let blade_axis = drawn.transform.rotation * Vec3::Y;
     assert!(
@@ -607,14 +630,32 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         .resource::<Assets<Mesh>>()
         .get(&drawn.mesh)
         .expect("the body-held blade mesh");
-    let (blade_low, blade_high) =
-        transformed_mesh_bounds(mesh, drawn.transform, BodyPiece::RightFist.pivot());
+    let (blade_low, blade_high) = transformed_mesh_bounds(mesh, drawn.transform, parent);
     let (arm_low, arm_high) = body_piece_bounds(&[BodyPiece::RightSleeve, BodyPiece::RightFist]);
     assert!(
         blade_high.x > arm_high.x && blade_low.z < arm_low.z,
         "the sword remains inside the right arm/fist: blade={blade_low:?}..{blade_high:?}, \
          arm={arm_low:?}..{arm_high:?}"
     );
+
+    let transform_segment =
+        |segment: [Vec3; 2]| segment.map(|point| drawn.transform.transform_point(point) + parent);
+    let blade = transform_segment(drops::blade_span());
+    let guard = transform_segment(drops::blade_guard_span());
+    for (view, horizontal_axis) in [("front", 0), ("side", 2)] {
+        let visible_blade = projected_outside_fraction(blade, (arm_low, arm_high), horizontal_axis);
+        assert!(
+            visible_blade >= 0.70,
+            "only {:.1}% of the blade projects outside the arm in the {view} view",
+            visible_blade * 100.0
+        );
+        let visible_guard = projected_outside_fraction(guard, (arm_low, arm_high), horizontal_axis);
+        assert!(
+            visible_guard >= 0.20,
+            "only {:.1}% of the guard projects outside the arm in the {view} view",
+            visible_guard * 100.0
+        );
+    }
     let expected = item_linear_rgba(combat::ITEM_RUSTY_SWORD);
     let actual = app
         .world()
