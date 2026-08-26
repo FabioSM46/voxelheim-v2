@@ -471,6 +471,16 @@ fn blade_base() -> f32 {
     -SWORD_LENGTH / 2.0 + POMMEL_SIZE.y + GRIP_SIZE.y + GUARD_SIZE.y
 }
 
+/// The centre of the grip in a sword mesh built at `length`.
+///
+/// The world-space renderer attaches the drop-scale sword by this point. Keeping the answer
+/// beside the furniture dimensions means an edit to the shared sword cannot leave its body
+/// attachment holding the old model sheet.
+pub(super) fn sword_grip_centre(length: f32) -> Vec3 {
+    let grip = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y / 2.0;
+    Vec3::Y * grip * (length / SWORD_LENGTH)
+}
+
 /// The three sections the blade is lofted from: at the guard, at the shoulder where the
 /// point begins, and at the tip.
 fn blade_sections() -> [BladeSection; 3] {
