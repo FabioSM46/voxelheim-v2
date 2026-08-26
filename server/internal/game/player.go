@@ -107,6 +107,12 @@ type Sim struct {
 	// only countdown loot waits on.
 	mobDeathTicks uint32
 
+	// threatDecayTicks is one second and threatForgetTicks is
+	// ThreatForgetSeconds in authoritative ticks. Threat is stepped by the same clock
+	// as the creature that owns it, never by a goroutine or wall time.
+	threatDecayTicks  uint32
+	threatForgetTicks uint32
+
 	// corpseLifetimeTicks is CorpseLifetime in authoritative ticks. A corpse records
 	// its absolute expiry tick when Dying completes; opening it never changes this.
 	corpseLifetimeTicks uint64
@@ -301,6 +307,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		spawnEvery:          ticksFor(SpawnDirectorInterval, tickRate),
 		mobDespawnTicks:     ticksFor(MobDespawnGrace, tickRate),
 		mobDeathTicks:       ticksFor(MobDeathDuration, tickRate),
+		threatDecayTicks:    uint32(tickRate),
+		threatForgetTicks:   uint32(ThreatForgetSeconds) * uint32(tickRate),
 		corpseLifetimeTicks: uint64(ticksFor(CorpseLifetime, tickRate)),
 		spawns:              newSpawnRNG(worldSeed),
 		loot:                newLootRNG(worldSeed),
@@ -709,6 +717,7 @@ func (s *Sim) Leave(p *Player) {
 	// rejoin that already replaced it must not be evicted by the old session's
 	// cleanup. Same reasoning as world.Cache.forget.
 	if held, ok := s.players[p.entityID]; ok && held == p {
+		s.removeAllThreatFor(p.entityID)
 		// A mob tap is keyed independently of this session object, but its offline
 		// baseline must include everything this session earned before it left.
 		s.rememberTapExperienceLocked(characterKeyOf(p.playerID, p.name), p.experience)

@@ -875,7 +875,7 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		{
 			EntityID: 900, Kind: vnet.MobKindDraugr,
 			Pos: [3]float32{8.5, 64, -12.25}, Vel: [3]float32{0.5, 0, -0.5},
-			Yaw: 1.5, Health: 60, MaxHealth: 60, Action: vnet.MobActionChase,
+			Yaw: 1.5, Health: 60, MaxHealth: 60, Action: vnet.MobActionChase, TargetEntityID: 41,
 		},
 		{
 			EntityID: 901, Kind: vnet.MobKindDraugr,
@@ -1003,14 +1003,15 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 			t.Fatalf("mob %d has no position or no velocity", i)
 		}
 		got := MobState{
-			EntityID:  mob.EntityId(),
-			Kind:      mob.Kind(),
-			Pos:       [3]float32{pos.X(), pos.Y(), pos.Z()},
-			Vel:       [3]float32{vel.X(), vel.Y(), vel.Z()},
-			Yaw:       mob.Yaw(),
-			Health:    mob.Health(),
-			MaxHealth: mob.MaxHealth(),
-			Action:    mob.Action(),
+			EntityID:       mob.EntityId(),
+			Kind:           mob.Kind(),
+			Pos:            [3]float32{pos.X(), pos.Y(), pos.Z()},
+			Vel:            [3]float32{vel.X(), vel.Y(), vel.Z()},
+			Yaw:            mob.Yaw(),
+			Health:         mob.Health(),
+			MaxHealth:      mob.MaxHealth(),
+			Action:         mob.Action(),
+			TargetEntityID: mob.TargetEntityId(),
 		}
 		if got != expected {
 			t.Errorf("mob %d decoded as %+v, want %+v", i, got, expected)

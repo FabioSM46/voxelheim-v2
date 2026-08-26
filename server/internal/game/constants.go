@@ -111,12 +111,29 @@ const (
 	ArmourScale uint16 = 100
 
 	// ThreatScale is the denominator for the tenths of hostile attention a worn
-	// item records. Full iron contributes fifteen, so its weight is 2.5: on the
-	// comparison scale a tank ten blocks away scores four, the same as a naked
-	// player at four, and the existing identity tie can put the tank first. That
-	// is the point — heavy armour creates the tank by what the player wears rather
-	// than by a class the server was told they chose.
+	// item records. Full iron contributes fifteen, so its weight is 2.5: ten damage
+	// generates twenty-five threat. The distance / weight comparison uses the same
+	// number only when no player in range has positive ledger threat, preserving how
+	// an untouched creature acquires its first target.
 	ThreatScale = 10
+
+	// ThreatSwitchRatio is the lead another player must exceed before a hostile
+	// creature abandons a valid current target. The comparison is strict: against
+	// forty threat, forty-four is not enough and anything greater is.
+	ThreatSwitchRatio = 1.1
+
+	// ThreatDecayPerSecond is what every remembered player loses after a full second
+	// in which the creature is outside Chase, Windup and Recovery.
+	ThreatDecayPerSecond = 1.0
+
+	// ThreatForgetSeconds is how long a hostile creature may have no target before
+	// forgetting the ledger whole. It is converted to ticks once by NewSim.
+	ThreatForgetSeconds = 10
+
+	// ShieldTauntThreat is the attention earned when a raised shield absorbs a landed
+	// mob blow. The shield issue owns deciding that a block landed; this package owns
+	// what that authoritative outcome means to the attacker.
+	ShieldTauntThreat = 10.0
 
 	// HealthPerLevel is how much maximum health each level after the first adds.
 	//

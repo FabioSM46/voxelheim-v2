@@ -1101,6 +1101,33 @@ numbers from that table rather than from constants of their own.
   vargr is the separate issue that owns it — the server half is finished first because the
   contract was reserved first.
 
+## The hostile ledger, and why armour earns attention at the blow
+
+Every hostile `mob` owns a transient threat ledger keyed by player entity id. It is guarded by
+`Sim.mu`, is never persisted, and never crosses the wire; `MobState.target_entity_id` is the one
+projection clients receive. Passive species stay on `stepPassive` and never allocate a ledger.
+
+- **Damage, healing and blocking have one seam each.** `creditDamageThreatLocked` adds the actual
+  mob health removed multiplied by `1 + worn.threat / ThreatScale`;
+  `creditHealThreatLocked` gives a healer half the health actually restored on every mob hunting
+  the healed player; `creditBlockThreatLocked` adds `ShieldTauntThreat` for the blocker whose
+  shield absorbed the mob's blow. The future projectile, sceptre and shield paths reuse those
+  seams rather than restating ledger arithmetic.
+- **Worn armour multiplies generated threat; it does not extend awareness.** A creature still
+  considers only living, unprotected players inside its species' `aggroRange`. Once somebody in
+  that set has positive threat, the highest ledger value is the primary choice. The old
+  `distance / weight` comparison remains only the zero-ledger fallback, so an untouched creature
+  can still acquire its first target without inventing threat.
+- **A valid target is tenacious, not permanent.** Another candidate must be strictly above the
+  current entry multiplied by `ThreatSwitchRatio` (1.1) to take the hunt; equality never switches.
+  Death, protection, disconnection and leaving `aggroRange` invalidate the current target at once,
+  independently of the ratio. `startBossEncounterLocked` sees the first player actually committed
+  to, so the frozen boss roster does not move with later threat.
+- **Memory spends simulation time.** Outside Chase, Windup and Recovery, every entry loses
+  `ThreatDecayPerSecond` after a complete second of authoritative ticks. Ten consecutive seconds
+  without a target (`ThreatForgetSeconds`) clear the ledger whole. Player death and `Sim.Leave`
+  remove that entity from every ledger immediately; mob death clears its own ledger.
+
 ## What the dead leave behind, and the lock the drop had to get past
 
 `internal/game/loot.go` owns the roll and the spawn; the table itself is a `loot` column of
