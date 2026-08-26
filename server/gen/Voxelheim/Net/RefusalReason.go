@@ -90,6 +90,9 @@ const (
 	RefusalReasonStaleRevision RefusalReason = 20
 	/// The inventory has no slot able to receive the authoritative loot entry.
 	RefusalReasonInventoryFull RefusalReason = 21
+	/// The selected launcher is usable, but no matching ammunition exists in the
+	/// player's authoritative hotbar or pack.
+	RefusalReasonNoAmmunition RefusalReason = 22
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -127,6 +130,7 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonLootNotOwned:       "LootNotOwned",
 	RefusalReasonStaleRevision:      "StaleRevision",
 	RefusalReasonInventoryFull:      "InventoryFull",
+	RefusalReasonNoAmmunition:       "NoAmmunition",
 	RefusalReasonMalformedNoAnchor:  "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:    "MalformedFacing",
 	RefusalReasonMalformedSlot:      "MalformedSlot",
@@ -156,6 +160,7 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"LootNotOwned":       RefusalReasonLootNotOwned,
 	"StaleRevision":      RefusalReasonStaleRevision,
 	"InventoryFull":      RefusalReasonInventoryFull,
+	"NoAmmunition":       RefusalReasonNoAmmunition,
 	"MalformedNoAnchor":  RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":    RefusalReasonMalformedFacing,
 	"MalformedSlot":      RefusalReasonMalformedSlot,

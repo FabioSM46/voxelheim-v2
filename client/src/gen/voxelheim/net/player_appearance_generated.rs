@@ -45,8 +45,8 @@ pub enum PlayerAppearanceOffset {}
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
 ///   - `level` is never zero
-///   - `worn_head`, `worn_chest` and `worn_legs` are item ids, with zero meaning that
-///     the corresponding equipment slot is empty
+///   - `worn_head`, `worn_chest`, `worn_legs` and `worn_offhand` are item ids, with zero
+///     meaning that the corresponding equipment slot is empty
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 pub struct PlayerAppearance<'a> {
@@ -71,6 +71,7 @@ impl<'a> PlayerAppearance<'a> {
     pub const VT_WORN_HEAD: ::flatbuffers::VOffsetT = 12;
     pub const VT_WORN_CHEST: ::flatbuffers::VOffsetT = 14;
     pub const VT_WORN_LEGS: ::flatbuffers::VOffsetT = 16;
+    pub const VT_WORN_OFFHAND: ::flatbuffers::VOffsetT = 18;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -94,6 +95,7 @@ impl<'a> PlayerAppearance<'a> {
         if let Some(x) = args.appearance {
             builder.add_appearance(x);
         }
+        builder.add_worn_offhand(args.worn_offhand);
         builder.add_worn_legs(args.worn_legs);
         builder.add_worn_chest(args.worn_chest);
         builder.add_worn_head(args.worn_head);
@@ -192,6 +194,18 @@ impl<'a> PlayerAppearance<'a> {
                 .unwrap()
         }
     }
+    /// Item id in the trailing off-hand equipment slot, or zero when nothing is held.
+    #[inline]
+    pub fn worn_offhand(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerAppearance::VT_WORN_OFFHAND, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
@@ -212,6 +226,7 @@ impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
             .visit_field::<u16>("worn_head", Self::VT_WORN_HEAD, false)?
             .visit_field::<u16>("worn_chest", Self::VT_WORN_CHEST, false)?
             .visit_field::<u16>("worn_legs", Self::VT_WORN_LEGS, false)?
+            .visit_field::<u16>("worn_offhand", Self::VT_WORN_OFFHAND, false)?
             .finish();
         Ok(())
     }
@@ -224,6 +239,7 @@ pub struct PlayerAppearanceArgs<'a> {
     pub worn_head: u16,
     pub worn_chest: u16,
     pub worn_legs: u16,
+    pub worn_offhand: u16,
 }
 impl<'a> Default for PlayerAppearanceArgs<'a> {
     #[inline]
@@ -236,6 +252,7 @@ impl<'a> Default for PlayerAppearanceArgs<'a> {
             worn_head: 0,
             worn_chest: 0,
             worn_legs: 0,
+            worn_offhand: 0,
         }
     }
 }
@@ -284,6 +301,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerAppearanceBuilder<'a, '
             .push_slot::<u16>(PlayerAppearance::VT_WORN_LEGS, worn_legs, 0);
     }
     #[inline]
+    pub fn add_worn_offhand(&mut self, worn_offhand: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerAppearance::VT_WORN_OFFHAND, worn_offhand, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerAppearanceBuilder<'a, 'b, A> {
@@ -310,6 +332,7 @@ impl ::core::fmt::Debug for PlayerAppearance<'_> {
         ds.field("worn_head", &self.worn_head());
         ds.field("worn_chest", &self.worn_chest());
         ds.field("worn_legs", &self.worn_legs());
+        ds.field("worn_offhand", &self.worn_offhand());
         ds.finish()
     }
 }

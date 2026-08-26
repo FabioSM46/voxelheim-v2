@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 37;
+pub const ENUM_MAX_PAYLOAD: u8 = 38;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 38] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 39] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -56,6 +56,7 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 38] = [
     Payload::LootState,
     Payload::LootClosed,
     Payload::MobHit,
+    Payload::BlockRequest,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -120,9 +121,10 @@ impl Payload {
     pub const LootState: Self = Self(35);
     pub const LootClosed: Self = Self(36);
     pub const MobHit: Self = Self(37);
+    pub const BlockRequest: Self = Self(38);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 37;
+    pub const ENUM_MAX: u8 = 38;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -162,6 +164,7 @@ impl Payload {
         Self::LootState,
         Self::LootClosed,
         Self::MobHit,
+        Self::BlockRequest,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -204,6 +207,7 @@ impl Payload {
             Self::LootState => Some("LootState"),
             Self::LootClosed => Some("LootClosed"),
             Self::MobHit => Some("MobHit"),
+            Self::BlockRequest => Some("BlockRequest"),
             _ => None,
         }
     }

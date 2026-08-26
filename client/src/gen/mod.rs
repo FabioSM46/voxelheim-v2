@@ -22,6 +22,8 @@ pub mod voxelheim {
         pub use self::refused_action_generated::*;
         mod refusal_reason_generated;
         pub use self::refusal_reason_generated::*;
+        mod projectile_kind_generated;
+        pub use self::projectile_kind_generated::*;
         mod life_state_generated;
         pub use self::life_state_generated::*;
         mod mob_kind_generated;
@@ -74,6 +76,8 @@ pub mod voxelheim {
         pub use self::inventory_move_request_generated::*;
         mod attack_request_generated;
         pub use self::attack_request_generated::*;
+        mod block_request_generated;
+        pub use self::block_request_generated::*;
         mod craft_request_generated;
         pub use self::craft_request_generated::*;
         mod repair_request_generated;
@@ -112,6 +116,8 @@ pub mod voxelheim {
         pub use self::action_refused_generated::*;
         mod entity_state_generated;
         pub use self::entity_state_generated::*;
+        mod projectile_state_generated;
+        pub use self::projectile_state_generated::*;
         mod item_drop_state_generated;
         pub use self::item_drop_state_generated::*;
         mod item_drop_durability_generated;

@@ -1315,6 +1315,9 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonLootNotOwned,
 		vnet.RefusalReasonStaleRevision,
 		vnet.RefusalReasonInventoryFull,
+		// V22 reserves this authoritative launcher refusal for the dependent bow
+		// issue. It is still the player's own inventory state, never a client defect.
+		vnet.RefusalReasonNoAmmunition,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1333,10 +1336,11 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 
 	// Membership, in the shape the Payload union is checked in over in protocol: a reason
 	// added without a decision fails here. V21's four loot members have their client
-	// vocabulary now and receive producers in the dependent authoritative loot issue.
+	// vocabulary now and receive producers in the dependent authoritative loot issue;
+	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 26 {
-		t.Errorf("RefusalReason has %d members, want 26 — a new one needs a producer and client handling, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 27 {
+		t.Errorf("RefusalReason has %d members, want 27 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

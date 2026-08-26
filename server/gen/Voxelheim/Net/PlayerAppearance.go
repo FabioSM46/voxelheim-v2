@@ -46,8 +46,8 @@ import (
 // /     stored display text verbatim, and a renderer must bound its layout rather than
 // /     changing what names the server accepts. It is never parsed or used as identity
 // /   - `level` is never zero
-// /   - `worn_head`, `worn_chest` and `worn_legs` are item ids, with zero meaning that
-// /     the corresponding equipment slot is empty
+// /   - `worn_head`, `worn_chest`, `worn_legs` and `worn_offhand` are item ids, with zero
+// /     meaning that the corresponding equipment slot is empty
 // /   - nothing here is required to name an entity in any snapshot, in either
 // /     direction; see above
 type PlayerAppearance struct {
@@ -194,8 +194,22 @@ func (rcv *PlayerAppearance) MutateWornLegs(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(16, n)
 }
 
+// / Item id in the trailing off-hand equipment slot, or zero when nothing is held.
+func (rcv *PlayerAppearance) WornOffhand() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Item id in the trailing off-hand equipment slot, or zero when nothing is held.
+func (rcv *PlayerAppearance) MutateWornOffhand(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(18, n)
+}
+
 func PlayerAppearanceStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(8)
 }
 func PlayerAppearanceAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -217,6 +231,9 @@ func PlayerAppearanceAddWornChest(builder *flatbuffers.Builder, wornChest uint16
 }
 func PlayerAppearanceAddWornLegs(builder *flatbuffers.Builder, wornLegs uint16) {
 	builder.PrependUint16Slot(6, wornLegs, 0)
+}
+func PlayerAppearanceAddWornOffhand(builder *flatbuffers.Builder, wornOffhand uint16) {
+	builder.PrependUint16Slot(7, wornOffhand, 0)
 }
 func PlayerAppearanceEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
