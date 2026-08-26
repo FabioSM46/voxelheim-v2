@@ -785,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn the_inventory_transition_neutralises_the_next_outbound_input() {
+    fn the_inventory_transition_keeps_horizontal_movement_and_closes_the_rest() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin))
             .init_asset::<Mesh>()
@@ -823,33 +823,47 @@ mod tests {
 
         let look_before = *app.world().resource::<LookState>();
         keyboard_edge(&mut app, KeyCode::KeyE, ButtonState::Pressed);
-        // The same frame also carries world-facing input. The inventory transition owns
-        // all of it: movement and jump must become neutral and mouse motion must not turn.
+        // The same frame also carries world-facing input. The pack deliberately leaves
+        // horizontal movement live, while jump and mouse motion still belong to gameplay.
         app.world_mut().write_message(MouseMotion {
             delta: Vec2::new(80.0, -40.0),
         });
         app.update();
 
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Inventory);
-        assert_eq!(*app.world().resource::<MoveIntent>(), MoveIntent::default());
+        assert_eq!(
+            *app.world().resource::<MoveIntent>(),
+            MoveIntent {
+                x: 0.0,
+                z: 1.0,
+                jump: false,
+            }
+        );
         assert_eq!(*app.world().resource::<LookState>(), look_before);
         assert_eq!(
             outbound_movement(
                 &frames
                     .try_recv()
-                    .expect("the inventory-opening tick sends a neutral frame")
+                    .expect("the inventory-opening tick keeps walking")
             ),
-            (0.0, 0.0, false),
-            "the server observed stale held input after E opened the inventory"
+            (0.0, 1.0, false),
+            "E stopped held movement or leaked jump into the inventory"
         );
 
-        // Held and newly pressed movement remain closed while the pack owns the input.
+        // Held and newly pressed movement both remain live while the pack owns the input.
         keyboard_edge(&mut app, KeyCode::KeyD, ButtonState::Pressed);
         app.update();
-        assert_eq!(*app.world().resource::<MoveIntent>(), MoveIntent::default());
+        assert_eq!(
+            *app.world().resource::<MoveIntent>(),
+            MoveIntent {
+                x: 1.0,
+                z: 1.0,
+                jump: false,
+            }
+        );
         assert_eq!(
             outbound_movement(&frames.try_recv().expect("the next input tick is sent")),
-            (0.0, 0.0, false)
+            (1.0, 1.0, false)
         );
 
         // Releasing the stale controls before closing proves the transition samples no
