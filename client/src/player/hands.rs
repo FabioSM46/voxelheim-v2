@@ -2593,17 +2593,33 @@ mod tests {
                 "sword {item_id}'s grip centre {grip_centre:?} left the fist {half:?}"
             );
 
-            // Camera-space depth, sampled over the complete blade rather than inferred
-            // from its tip. The camera looks down -Z, so the positive-Z edge of each
-            // section must cross the fist's front plane. This allows the guard and the
-            // blade silhouette to win the depth test even where their Y projection still
-            // overlaps the hand.
+            // Camera-space depth in the transform the renderer actually uses, sampled
+            // over the complete blade rather than inferred from its tip. `held_mesh`
+            // merges fist and item before `presented_transform` moves the one entity, so
+            // the near-plane clearance belongs on both points in this comparison. Using
+            // the presented transform here records that fact and prevents a later split
+            // into separately transformed geometry from silently invalidating it.
+            //
+            // The camera looks down -Z, so the larger camera-space Z must belong to the
+            // blade's near surface at the same model-space height as the fist's front
+            // plane. This lets the blade win the depth test where their projections
+            // overlap; the separate all-poses test below proves the complete merged mesh
+            // still remains behind the camera near plane.
             const SAMPLES: usize = 101;
+            let presentation =
+                presented_transform(&HandAnimation::default(), Some(ItemShape::Blade));
             let visible = (0..SAMPLES)
                 .filter(|sample| {
                     let fraction = *sample as f32 / (SAMPLES - 1) as f32;
                     let y = blade_base() + BLADE_LENGTH * fraction;
-                    translation.z + blade_at(y).half_width > half.z + EPSILON
+                    let blade_front = presentation.transform_point(Vec3::new(
+                        0.0,
+                        translation.y + y,
+                        translation.z + blade_at(y).half_width,
+                    ));
+                    let fist_front =
+                        presentation.transform_point(Vec3::new(0.0, translation.y + y, half.z));
+                    blade_front.z > fist_front.z + EPSILON
                 })
                 .count();
             assert!(
