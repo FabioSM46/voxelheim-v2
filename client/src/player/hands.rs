@@ -26,7 +26,7 @@ use bevy::prelude::*;
 use super::SelfVitals;
 use super::camera::{ViewMode, WorldCamera};
 use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
-use super::crafting::ITEM_BOW;
+use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
 use super::items::{self, ItemShape};
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
@@ -273,6 +273,10 @@ const ARMOUR_SHOULDER_SIZE: Vec3 = Vec3::new(0.026, 0.018, 0.022);
 const BOW_LENGTH: f32 = 0.120;
 const BOW_STAVE: f32 = 0.009;
 const BOW_DEPTH: f32 = 0.008;
+const SCEPTRE_LENGTH: f32 = 0.130;
+const SCEPTRE_SHAFT: f32 = 0.013;
+const SCEPTRE_ORB_RADIUS: f32 = 0.018;
+const SCEPTRE_GREEN: [f32; 4] = [0.16, 0.82, 0.28, 1.0];
 
 /// A haft with a head across the top of it: one mesh, two boxes.
 ///
@@ -356,6 +360,23 @@ pub(super) fn bow_mesh(length: f32) -> Mesh {
     )));
     merge_all(&mut bow, [upper, string], "bow stave and string");
     bow.scaled_by(Vec3::splat(length / BOW_LENGTH))
+}
+
+/// A wooden shaft and its small green focus, shared by held and dropped presentations.
+pub(super) fn sceptre_mesh(length: f32) -> Mesh {
+    let scale = length / SCEPTRE_LENGTH;
+    let mut shaft = tinted(
+        Mesh::from(Cuboid::from_size(Vec3::new(
+            SCEPTRE_SHAFT,
+            SCEPTRE_LENGTH,
+            SCEPTRE_SHAFT,
+        ))),
+        items::item_linear_rgba(ITEM_WOODEN_SCEPTRE),
+    );
+    let focus = tinted(Mesh::from(Sphere::new(SCEPTRE_ORB_RADIUS)), SCEPTRE_GREEN)
+        .translated_by(Vec3::Y * (SCEPTRE_LENGTH / 2.0 + SCEPTRE_ORB_RADIUS * 0.55));
+    merge_all(&mut shaft, [focus], "wooden sceptre");
+    shaft.scaled_by(Vec3::splat(scale))
 }
 
 /// A closed fist: a palm with four knuckles standing proud of it.
@@ -845,6 +866,7 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Armour => armour_mesh(),
         ItemShape::Shield => shield_mesh(0.065),
         ItemShape::Bow => bow_mesh(BOW_LENGTH),
+        ItemShape::Sceptre => sceptre_mesh(SCEPTRE_LENGTH),
     }
 }
 
@@ -869,6 +891,7 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         // Cross the knuckles so the carried shield is gripped, not floating.
         ItemShape::Shield => hand_top + 0.024,
         ItemShape::Bow => HAND_SIZE.y * 0.20,
+        ItemShape::Sceptre => HAND_SIZE.y * 0.22,
     };
     Vec3::Y * y
 }
@@ -905,7 +928,7 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
 
     let item = if shape == ItemShape::Bundle {
         coloured_bundle_mesh(item_colour)
-    } else if shape == ItemShape::Shield {
+    } else if matches!(shape, ItemShape::Shield | ItemShape::Sceptre) {
         item_mesh(item_id, shape)
     } else {
         coloured(item_mesh(item_id, shape), item_colour)
@@ -1020,6 +1043,8 @@ enum SwingShape {
     Thrust,
     /// The string hand drawing back. Chosen only for a bow request.
     Draw,
+    /// A short forward presentation thrust, never a blade arc.
+    Cast,
 }
 
 impl SwingShape {
@@ -1037,7 +1062,13 @@ impl SwingShape {
     /// `ItemShape::ALL` also sat until a runtime reader turned up for it, and the day one
     /// turns up here the attribute comes off rather than the list changing.
     #[cfg(test)]
-    const ALL: [Self; 4] = [Self::Overhead, Self::Lateral, Self::Thrust, Self::Draw];
+    const ALL: [Self; 5] = [
+        Self::Overhead,
+        Self::Lateral,
+        Self::Thrust,
+        Self::Draw,
+        Self::Cast,
+    ];
 
     /// The three blade arcs, excluding the bow's one-shot draw pose.
     #[cfg(test)]
@@ -1059,6 +1090,7 @@ impl SwingShape {
             Self::Lateral => Self::Thrust,
             Self::Thrust => Self::Overhead,
             Self::Draw => Self::Overhead,
+            Self::Cast => Self::Overhead,
         }
     }
 }
@@ -1131,6 +1163,11 @@ fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
             // Back toward the string, while retaining enough near-plane clearance when a
             // placement bump and the draw begin in the same frame.
             reach: arc * 0.03,
+            ..default()
+        },
+        SwingShape::Cast => SwingPose {
+            pitch: -arc * 0.12,
+            reach: -arc * THRUST_REACH,
             ..default()
         },
     }
@@ -1538,6 +1575,8 @@ fn animate_view_model(
     if let Some(item_id) = intent.swing_sent() {
         let shape = if item_id == ITEM_BOW {
             SwingShape::Draw
+        } else if item_id == ITEM_WOODEN_SCEPTRE {
+            SwingShape::Cast
         } else {
             next_animation.next_swing
         };
@@ -1545,7 +1584,7 @@ fn animate_view_model(
             shape,
             elapsed: Duration::ZERO,
         });
-        if item_id != ITEM_BOW {
+        if item_id != ITEM_BOW && item_id != ITEM_WOODEN_SCEPTRE {
             next_animation.next_swing = next_animation.next_swing.after();
         }
     }
@@ -1655,6 +1694,7 @@ mod tests {
             (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
             (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
             (ItemShape::Bow, crafting::ITEM_BOW),
+            (ItemShape::Sceptre, crafting::ITEM_WOODEN_SCEPTRE),
         ]
     }
 
@@ -2230,6 +2270,7 @@ mod tests {
             let mut arcs: Vec<Option<SwingShape>> = match appearance.shape {
                 Some(ItemShape::Blade) => SwingShape::BLADE_ARCS.map(Some).to_vec(),
                 Some(ItemShape::Bow) => vec![Some(SwingShape::Draw)],
+                Some(ItemShape::Sceptre) => vec![Some(SwingShape::Cast)],
                 _ => Vec::new(),
             };
             arcs.push(None);
@@ -3397,6 +3438,32 @@ mod tests {
             pose.reach > 0.0,
             "the draw did not pull back toward the camera"
         );
+    }
+
+    #[test]
+    fn a_sceptre_request_casts_forward_without_advancing_the_blade_rotation() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        let before = app.world().resource::<HandAnimation>().next_swing;
+        app.world_mut().write_message(SwingSent {
+            item_id: crafting::ITEM_WOODEN_SCEPTRE,
+        });
+        app.update();
+
+        let animation = *app.world().resource::<HandAnimation>();
+        assert_eq!(
+            animation.attack.expect("the sceptre played nothing").shape,
+            SwingShape::Cast
+        );
+        assert_eq!(animation.next_swing, before);
+        let pose = swing_pose(SwingShape::Cast, ATTACK_SWING_TIME / 2);
+        assert!(
+            pose.reach < 0.0,
+            "the cast did not thrust toward the target"
+        );
+        assert_eq!(pose.yaw, 0.0, "the cast became a blade arc");
     }
 
     /// A second press inside a running arc restarts the swing *and* takes the next shape.

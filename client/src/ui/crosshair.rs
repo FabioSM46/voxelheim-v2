@@ -5,7 +5,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use bevy::prelude::*;
 
 use crate::net::Session;
-use crate::player::{ApplyMiningFeedback, InputMode, MiningFeedback, ViewMode};
+use crate::player::{ApplyMiningFeedback, HealTargetHint, InputMode, MiningFeedback, ViewMode};
 use crate::world::palette;
 
 const FRAME_EDGE: f32 = 48.0;
@@ -13,12 +13,14 @@ const CROSSHAIR_OFFSET: f32 = 12.0;
 const RING_SEGMENTS: u8 = 16;
 const RING_RADIUS: f32 = 20.0;
 const RING_DOT: f32 = 3.0;
+const HEAL_GREEN: Color = Color::linear_rgb(0.16, 0.82, 0.28);
 
 pub(super) struct CrosshairPlugin;
 
 impl Plugin for CrosshairPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MiningFeedback>()
+            .init_resource::<HealTargetHint>()
             // `PlayerCameraPlugin` owns it in the game. Initialising it here keeps this
             // module's headless contract complete when it is built on its own.
             .init_resource::<ViewMode>()
@@ -27,9 +29,29 @@ impl Plugin for CrosshairPlugin {
                 Update,
                 (
                     show_crosshair,
+                    tint_healing_aim,
                     show_mining_progress.after(ApplyMiningFeedback),
                 ),
             );
+    }
+}
+
+fn tint_healing_aim(
+    hint: Res<HealTargetHint>,
+    mut parts: Query<(&CrosshairPart, &mut BackgroundColor)>,
+) {
+    if !hint.is_changed() {
+        return;
+    }
+    let next = if hint.0 { HEAL_GREEN } else { Color::WHITE };
+    for (part, mut colour) in &mut parts {
+        if matches!(
+            part,
+            CrosshairPart::LightHorizontal | CrosshairPart::LightVertical
+        ) && colour.0 != next
+        {
+            colour.0 = next;
+        }
     }
 }
 
@@ -235,6 +257,32 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_healable_target_tints_only_the_light_crosshair_bars_green() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<InputMode>()
+            .insert_resource(session())
+            .add_plugins(CrosshairPlugin);
+        app.update();
+
+        *app.world_mut().resource_mut::<HealTargetHint>() = HealTargetHint(true);
+        app.update();
+        let world = app.world_mut();
+        let mut parts = world.query::<(&CrosshairPart, &BackgroundColor)>();
+        for (part, colour) in parts.iter(world) {
+            let expected = if matches!(
+                part,
+                CrosshairPart::LightHorizontal | CrosshairPart::LightVertical
+            ) {
+                HEAL_GREEN
+            } else {
+                Color::BLACK
+            };
+            assert_eq!(colour.0, expected, "{part:?}");
+        }
     }
 
     #[test]

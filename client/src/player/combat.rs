@@ -56,6 +56,7 @@ const LEFT_BUTTON_USES: &[u16] = &[
     ITEM_RUSTY_SWORD,
     crafting::ITEM_IRON_SWORD,
     crafting::ITEM_BOW,
+    crafting::ITEM_WOODEN_SCEPTRE,
 ];
 
 /// Whether this client presents one item as a blade.
@@ -540,6 +541,17 @@ mod tests {
         assert_eq!(attacks(&sent).len(), 1);
         let messages = app.world().resource::<Messages<SwingSent>>();
         assert_eq!(messages.len(), 1, "the sent bow attack did not animate");
+    }
+
+    #[test]
+    fn one_click_with_a_sceptre_sends_an_attack() {
+        let (mut app, sent) = clicking_app(blade_of(crafting::ITEM_WOODEN_SCEPTRE));
+        click(&mut app);
+        app.update();
+
+        assert_eq!(attacks(&sent).len(), 1);
+        let messages = app.world().resource::<Messages<SwingSent>>();
+        assert_eq!(messages.len(), 1, "the sent sceptre cast did not animate");
     }
 
     /// The swing carries the counter `PlayerInput` uses, so the server can order the aim

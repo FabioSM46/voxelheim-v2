@@ -31,7 +31,7 @@
 //! this module's only edge into the world module, and it is a read: the store is asked
 //! what is solid, and told nothing.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -39,9 +39,9 @@ use bevy::prelude::*;
 use super::camera::{AimCamera, WorldCamera};
 use super::combat;
 use super::constants::MAX_REACH;
-use super::inventory::ApplyInventory;
-#[cfg(test)]
-use super::inventory::SelectedSlot;
+use super::interpolate::SnapshotBuffer;
+use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
+use super::mobs;
 use super::{InputCadence, InputGate, SelfVitals, ViewMode, set_if_changed, tick_interval};
 use crate::net::{
     BlockCoord, BlockEditRequest, EditAction, MineProgress, MineProgressInbox, MineRequest,
@@ -123,6 +123,7 @@ pub(super) struct AimBlocks;
 impl Plugin for BlockTargetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BlockTarget>()
+            .init_resource::<HealTargetHint>()
             .init_resource::<MiningInput>()
             // `PlayerPlugin` owns this in the game. Initialising it here too keeps this
             // module's headless contract complete when it is built on its own.
@@ -140,6 +141,7 @@ impl Plugin for BlockTargetPlugin {
                 // which is a highlight that lags the crosshair.
                 (
                     aim_at_a_block.in_set(AimBlocks),
+                    aim_at_a_healing_target,
                     update_mining_feedback.in_set(ApplyMiningFeedback),
                     (
                         move_the_highlight.in_set(DrawTargetHighlight),
@@ -162,6 +164,13 @@ impl Plugin for BlockTargetPlugin {
             );
     }
 }
+
+/// Whether the sceptre's presentation ray meets another player before any mob.
+///
+/// This is a drawing hint only. It is derived from interpolated snapshots and never
+/// gates or alters the attack request the server judges.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HealTargetHint(pub bool);
 
 /// One voxel the ray hit, and the face it entered through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,6 +379,157 @@ pub fn raycast(
     }
 
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AimBodyKind {
+    OtherPlayer,
+    Mob,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AimBody {
+    kind: AimBodyKind,
+    feet: Vec3,
+    width: f32,
+    height: f32,
+}
+
+/// The nearest body intersected by the ray, with its entry distance.
+fn first_body_hit(origin: Vec3, direction: Vec3, bodies: &[AimBody]) -> Option<(f32, AimBodyKind)> {
+    if !origin.is_finite() || !direction.is_finite() || direction.length_squared() == 0.0 {
+        return None;
+    }
+    let direction = direction.normalize();
+    bodies
+        .iter()
+        .filter_map(|body| {
+            let half = body.width / 2.0;
+            let min = body.feet + Vec3::new(-half, 0.0, -half);
+            let max = body.feet + Vec3::new(half, body.height, half);
+            ray_box_distance(origin, direction, min, max).map(|distance| (distance, body.kind))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+}
+
+/// Returns true exactly when another player is the first thing the ray can reach.
+fn first_body_is_unoccluded_player(
+    origin: Vec3,
+    direction: Vec3,
+    bodies: &[AimBody],
+    solid: impl FnMut(IVec3) -> bool,
+) -> bool {
+    let Some((distance, AimBodyKind::OtherPlayer)) = first_body_hit(origin, direction, bodies)
+    else {
+        return false;
+    };
+
+    // The projectile collides with terrain server-side. Reusing the exact voxel traversal
+    // that drives the block outline keeps this courtesy hint from promising a heal through
+    // a wall; the body entry distance is the reach, so terrain behind the player is ignored.
+    raycast(origin, direction, distance, solid).is_none()
+}
+
+/// Whether the selected authoritative stack can present a sceptre cast.
+fn usable_sceptre_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> bool {
+    inventory.slot(selected.0).is_some_and(|stack| {
+        stack.item_id == super::crafting::ITEM_WOODEN_SCEPTRE
+            && stack.count > 0
+            && stack.durability > 0
+    })
+}
+
+/// Slab intersection distance for an already-normalised ray.
+fn ray_box_distance(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let mut near: f32 = 0.0;
+    let mut far = f32::INFINITY;
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            if origin[axis] < min[axis] || origin[axis] > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let mut a = (min[axis] - origin[axis]) / direction[axis];
+        let mut b = (max[axis] - origin[axis]) / direction[axis];
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        near = near.max(a);
+        far = far.min(b);
+        if near > far {
+            return None;
+        }
+    }
+    (far >= 0.0).then_some(near.max(0.0))
+}
+
+/// Recomputes the sceptre crosshair hint from the same interpolated snapshot drawn now.
+fn aim_at_a_healing_target(
+    session: Option<Res<Session>>,
+    buffer: Option<Res<SnapshotBuffer>>,
+    store: Option<Res<ChunkStore>>,
+    inventory: Res<Inventory>,
+    selected: Res<SelectedSlot>,
+    cameras: Query<&Transform, With<WorldCamera>>,
+    mut hint: ResMut<HealTargetHint>,
+) {
+    let next = (|| {
+        let session = session.as_deref()?;
+        if !usable_sceptre_in_hand(&inventory, &selected) {
+            return None;
+        }
+        let buffer = buffer.as_deref()?;
+        let store = store.as_deref()?;
+        let eye = cameras.iter().next()?;
+        let interval = tick_interval(session.0.tick_rate);
+        let now = Instant::now();
+        let mut bodies = Vec::new();
+        bodies.extend(
+            buffer
+                .sample(now, interval)
+                .into_iter()
+                .filter(|(id, _)| *id != session.0.entity_id)
+                .map(|(_, player)| AimBody {
+                    kind: AimBodyKind::OtherPlayer,
+                    feet: player.pos,
+                    width: super::constants::PLAYER_WIDTH,
+                    height: super::constants::PLAYER_HEIGHT,
+                }),
+        );
+        bodies.extend(
+            buffer
+                .sample_mobs(now, interval)
+                .into_iter()
+                .map(|(_, mob)| {
+                    let body = mobs::body(mob.kind);
+                    AimBody {
+                        kind: AimBodyKind::Mob,
+                        feet: mob.pos,
+                        width: body.width,
+                        height: body.height,
+                    }
+                }),
+        );
+        let size = usize::from(session.0.chunk_size);
+        Some(first_body_is_unoccluded_player(
+            eye.translation,
+            *eye.forward(),
+            &bodies,
+            |voxel| {
+                store.solid_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            },
+        ))
+    })()
+    .unwrap_or(false);
+    set_if_changed(&mut hint, HealTargetHint(next));
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +982,78 @@ mod tests {
     /// arithmetic in the way.
     fn middle_of(voxel: IVec3) -> Vec3 {
         voxel.as_vec3() + Vec3::splat(0.5)
+    }
+
+    #[test]
+    fn healing_aim_is_green_only_when_an_unoccluded_player_is_first() {
+        let eye = Vec3::new(0.0, 1.0, 0.0);
+        let player = AimBody {
+            kind: AimBodyKind::OtherPlayer,
+            feet: Vec3::new(0.0, 0.0, -5.0),
+            width: super::super::constants::PLAYER_WIDTH,
+            height: super::super::constants::PLAYER_HEIGHT,
+        };
+        let mob = AimBody {
+            kind: AimBodyKind::Mob,
+            feet: Vec3::new(0.0, 0.0, -3.0),
+            width: 0.9,
+            height: 1.4,
+        };
+
+        assert!(first_body_is_unoccluded_player(
+            eye,
+            Vec3::NEG_Z,
+            &[player],
+            only(&[])
+        ));
+        assert!(
+            !first_body_is_unoccluded_player(eye, Vec3::NEG_Z, &[player, mob], only(&[])),
+            "a nearer mob must keep the default crosshair"
+        );
+        assert!(!first_body_is_unoccluded_player(
+            eye,
+            Vec3::NEG_Z,
+            &[],
+            only(&[])
+        ));
+        assert!(
+            !first_body_is_unoccluded_player(
+                eye,
+                Vec3::NEG_Z,
+                &[player],
+                only(&[IVec3::new(0, 1, -3)])
+            ),
+            "a wall before the player must suppress a heal the orb cannot deliver"
+        );
+        assert!(
+            first_body_is_unoccluded_player(
+                eye,
+                Vec3::NEG_Z,
+                &[player],
+                only(&[IVec3::new(0, 1, -6)])
+            ),
+            "terrain behind the player does not occlude the target"
+        );
+    }
+
+    #[test]
+    fn healing_aim_requires_durability_in_the_selected_sceptre() {
+        let sceptre = |durability| InventoryStack {
+            item_id: crate::player::crafting::ITEM_WOODEN_SCEPTRE,
+            count: 1,
+            durability,
+            max_durability: 50,
+        };
+        let selected = SelectedSlot(0);
+
+        assert!(usable_sceptre_in_hand(
+            &Inventory::from_stacks(vec![sceptre(1)]),
+            &selected
+        ));
+        assert!(
+            !usable_sceptre_in_hand(&Inventory::from_stacks(vec![sceptre(0)]), &selected),
+            "a worn-through sceptre must keep the default crosshair"
+        );
     }
 
     #[test]

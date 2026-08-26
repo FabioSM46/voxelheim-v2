@@ -39,9 +39,9 @@ use crate::net::{MobAction, MobKind, Session};
 /// The box one species occupies, in blocks: square in plan, `height` tall, standing on
 /// the point the snapshot puts it at.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Body {
-    width: f32,
-    height: f32,
+pub(super) struct Body {
+    pub(super) width: f32,
+    pub(super) height: f32,
 }
 
 /// A corpse on two legs, and a beast on four.
@@ -65,7 +65,7 @@ const DEER_BODY: Body = Body {
 
 /// The box the server collides for one kind. Total over [`MobKind`], with no wildcard
 /// arm, so a new species does not compile until it has been given a body.
-const fn body(kind: MobKind) -> Body {
+pub(super) const fn body(kind: MobKind) -> Body {
     match kind {
         MobKind::Draugr => DRAUGR_BODY,
         MobKind::Vargr => VARGR_BODY,

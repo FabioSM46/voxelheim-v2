@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::hands::{bow_mesh, shield_mesh, sword_grip_centre, sword_mesh};
+use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_grip_centre, sword_mesh};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::merge_all;
@@ -109,7 +109,10 @@ impl DropVisuals {
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
         // White preserves the shield mesh's separate bark and iron vertex colours.
-        let colour = if item_id == super::crafting::ITEM_WOODEN_SHIELD {
+        let colour = if matches!(
+            item_id,
+            super::crafting::ITEM_WOODEN_SHIELD | super::crafting::ITEM_WOODEN_SCEPTRE
+        ) {
             [1.0; 4]
         } else {
             item_linear_rgba(item_id)
@@ -237,6 +240,7 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
         ItemShape::Armour => armour_mesh(),
         ItemShape::Shield => shield_mesh(DROP_EDGE * 2.0),
         ItemShape::Bow => bow_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
+        ItemShape::Sceptre => sceptre_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
     }
 }
 

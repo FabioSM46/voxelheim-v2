@@ -24,7 +24,7 @@ use super::crafting::ITEM_WOODEN_SHIELD;
 use super::crafting::{
     ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES,
     ITEM_IRON_HELM, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
-    ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
+    ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL, ITEM_WOODEN_SCEPTRE,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
 use crate::world::{BlockId, palette};
@@ -109,6 +109,8 @@ pub(crate) enum ItemShape {
     Shield,
     /// A bent stave and string, distinct from a blade in every held and flat renderer.
     Bow,
+    /// A wooden shaft capped by a green healing focus.
+    Sceptre,
 }
 
 impl ItemShape {
@@ -140,7 +142,7 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Block,
         Self::Material,
         Self::Blade,
@@ -149,6 +151,7 @@ impl ItemShape {
         Self::Armour,
         Self::Shield,
         Self::Bow,
+        Self::Sceptre,
     ];
 }
 
@@ -256,7 +259,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 29] = [
+pub(super) const ITEMS: [ItemDisplay; 30] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -459,6 +462,12 @@ pub(super) const ITEMS: [ItemDisplay; 29] = [
         shape: ItemShape::Material,
         colour: ItemColour::Arrow,
     },
+    ItemDisplay {
+        item_id: ITEM_WOODEN_SCEPTRE,
+        name: "wooden sceptre",
+        shape: ItemShape::Sceptre,
+        colour: ItemColour::Block(palette::LOG),
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -605,6 +614,7 @@ mod tests {
             ITEM_WOODEN_SHIELD,
             ITEM_BOW,
             ITEM_ARROW,
+            ITEM_WOODEN_SCEPTRE,
         ];
         for item_id in declared {
             assert!(

@@ -55,6 +55,8 @@ pub(crate) struct IconPart {
     rotation: f32,
     /// Uses iron instead of the item's base colour.
     iron: bool,
+    /// Uses the sceptre focus green instead of the item's base colour.
+    green: bool,
 }
 
 impl IconPart {
@@ -69,6 +71,7 @@ impl IconPart {
         shade: 0.0,
         rotation: 0.0,
         iron: false,
+        green: false,
     };
 }
 
@@ -182,6 +185,7 @@ const BLADE: [IconPart; 3] = [
         shade: -0.55,
         rotation: QUARTER_TURN,
         iron: false,
+        green: false,
     },
 ];
 
@@ -352,6 +356,30 @@ const BOW: [IconPart; 3] = [
     },
 ];
 
+/// A wooden shaft with a small green focus at its tip.
+const SCEPTRE: [IconPart; 2] = [
+    IconPart {
+        left: 45.0,
+        top: 24.0,
+        width: 10.0,
+        height: 62.0,
+        radius: 20.0,
+        rotation: QUARTER_TURN,
+        shade: -0.18,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 58.0,
+        top: 12.0,
+        width: 24.0,
+        height: 24.0,
+        radius: 50.0,
+        green: true,
+        shade: 0.18,
+        ..IconPart::PLAIN
+    },
+];
+
 /// The rectangles one shape is drawn from, in the order they are stacked.
 ///
 /// **Exhaustive, with no wildcard arm.** A fifth [`ItemShape`] does not compile until it
@@ -369,6 +397,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Armour => &ARMOUR,
         ItemShape::Shield => &SHIELD,
         ItemShape::Bow => &BOW,
+        ItemShape::Sceptre => &SCEPTRE,
     }
 }
 
@@ -469,6 +498,8 @@ pub(crate) fn redraw(
 fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
     let base = if part.iron {
         LinearRgba::new(0.30, 0.35, 0.42, 1.0)
+    } else if part.green {
+        LinearRgba::new(0.16, 0.82, 0.28, 1.0)
     } else {
         base
     };

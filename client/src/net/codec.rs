@@ -844,6 +844,7 @@ pub enum RecipeId {
     WoodenShield,
     Bow,
     Arrows,
+    WoodenSceptre,
 }
 
 impl RecipeId {
@@ -876,6 +877,7 @@ impl RecipeId {
             Self::WoodenShield => fb::RecipeID::WoodenShield,
             Self::Bow => fb::RecipeID::Bow,
             Self::Arrows => fb::RecipeID::Arrows,
+            Self::WoodenSceptre => fb::RecipeID::WoodenSceptre,
         }
     }
 }
@@ -8806,6 +8808,7 @@ mod tests {
             (RecipeId::WoodenShield, fb::RecipeID::WoodenShield),
             (RecipeId::Bow, fb::RecipeID::Bow),
             (RecipeId::Arrows, fb::RecipeID::Arrows),
+            (RecipeId::WoodenSceptre, fb::RecipeID::WoodenSceptre),
         ];
 
         for (recipe, wire) in named {
