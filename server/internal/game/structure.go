@@ -442,7 +442,7 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 // id nobody has, one this player does not own and one too far away — a client that could
 // tell those apart could map somebody else's camp by asking.
 func (p *Player) RemoveStructure(req protocol.RemoveStructureRequest) error {
-	removed, err := p.removeOwnStructure(req.StructureID)
+	removed, spawn, err := p.removeOwnStructure(req.StructureID)
 	if err != nil {
 		return err
 	}
@@ -451,10 +451,6 @@ func (p *Player) RemoveStructure(req protocol.RemoveStructureRequest) error {
 	// the registry, so the worst a failure here could cost is the item — and spawnDrop
 	// only refuses an unregistered one, which structureItem has already ruled out.
 	if item, known := structureItem(removed.kind); known {
-		// Manual removal leaves the supporting anchor intact, so the free voxel above
-		// it is where the item can begin falling without intersecting terrain.
-		spawn := removed.anchorVoxel()
-		spawn[1]++
 		p.sim.spawnDrop(item, 1, spawn)
 	}
 
@@ -465,36 +461,62 @@ func (p *Player) RemoveStructure(req protocol.RemoveStructureRequest) error {
 }
 
 // removeOwnStructure takes one structure out of the registry if this player may, and
-// returns what it was.
+// returns what it was and the first resident air voxel above its intact anchor.
 //
-// Split from RemoveStructure so the whole authoritative decision is one critical section
-// and the drop that follows is outside it.
-func (p *Player) removeOwnStructure(structureID uint64) (structure, error) {
+// Split from RemoveStructure so the whole authoritative decision, including where its
+// drop can exist, is one critical section and the drop that follows is outside it.
+func (p *Player) removeOwnStructure(structureID uint64) (structure, [3]int64, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
 	if err := p.cannotActLocked(); err != nil {
-		return structure{}, err
+		return structure{}, [3]int64{}, err
 	}
 
 	held, standing := p.sim.structures[structureID]
 	if !standing {
-		return structure{}, fmt.Errorf("no structure %d stands in this world", structureID)
+		return structure{}, [3]int64{}, fmt.Errorf("no structure %d stands in this world", structureID)
 	}
 	if held.owner != p.playerID {
 		// The owner is named by its short id and not by the identity itself, for the
 		// reason this refusal reaches nobody but the log: a client is told nothing at
 		// all (see RemoveStructure), and an operator reading a log line needs to tell
 		// two players apart rather than to hold either one's key.
-		return structure{}, fmt.Errorf("structure %d belongs to player %s", structureID, held.owner.Short())
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d belongs to player %s", structureID, held.owner.Short())
 	}
 	if distance := distanceToVoxel(p.pos, held.anchorVoxel()); distance > EditReach {
-		return structure{}, fmt.Errorf("structure %d is %.2f blocks away, past the reach of %.1f", structureID, distance, EditReach)
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d is %.2f blocks away, past the reach of %.1f", structureID, distance, EditReach)
+	}
+
+	spawn, clear := p.sim.firstFreeVoxelAboveLocked(held.anchorVoxel())
+	if !clear {
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d has no resident free space above its anchor", structureID)
 	}
 
 	delete(p.sim.structures, structureID)
 	p.sim.structuresDirty = true
-	return *held, nil
+	return *held, spawn, nil
+}
+
+// firstFreeVoxelAboveLocked finds where a manually removed structure's drop can begin
+// without intersecting its intact support or terrain added over it since placement.
+// Unknown terrain is not free, and the upper bound keeps the drop's whole box inside the
+// arithmetic world. The caller holds Sim.mu, as every non-generating terrain decision does.
+func (s *Sim) firstFreeVoxelAboveLocked(anchor [3]int64) ([3]int64, bool) {
+	if anchor[0] < -worldLimit || anchor[0] >= worldLimit || anchor[2] < -worldLimit || anchor[2] >= worldLimit {
+		return [3]int64{}, false
+	}
+	for y := anchor[1] + 1; y < worldLimit; y++ {
+		candidate := [3]int64{anchor[0], y, anchor[2]}
+		block, resident := s.terrain.Block(candidate[0], candidate[1], candidate[2])
+		if !resident {
+			return [3]int64{}, false
+		}
+		if block == world.Air {
+			return candidate, true
+		}
+	}
+	return [3]int64{}, false
 }
 
 // collapseStructuresAt removes every structure the broken voxel was holding up and

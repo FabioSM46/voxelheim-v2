@@ -729,12 +729,16 @@ func TestRemovingYourOwnStructureLeavesItsItemOnTheGround(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name string
-		item ItemID
+		name         string
+		item         ItemID
+		blockAbove   bool
+		spawnVoxelY  int64
+		restingFloor float64
 	}{
-		{"tent", ItemTent},
-		{"forge", ItemForge},
-		{"campfire", ItemCampfire},
+		{"tent", ItemTent, false, 64, 64},
+		{"forge", ItemForge, false, 64, 64},
+		{"campfire", ItemCampfire, false, 64, 64},
+		{"tent under an overhang", ItemTent, true, 65, 65},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -746,6 +750,14 @@ func TestRemovingYourOwnStructureLeavesItsItemOnTheGround(t *testing.T) {
 				t.Fatalf("planting the %s: %v", tc.name, err)
 			}
 			planted := h.only()
+			if tc.blockAbove {
+				// Terrain may change after placement. Stand within removal reach but out
+				// of the edited cell, then put an overhang immediately above the anchor.
+				h.sim.mu.Lock()
+				player.pos = [3]float64{4, 64, 0.5}
+				h.sim.mu.Unlock()
+				h.world.set([3]int64{0, 64, 0}, world.Stone)
+			}
 
 			if err := player.RemoveStructure(protocol.RemoveStructureRequest{StructureID: planted.structureID}); err != nil {
 				t.Fatalf("RemoveStructure: %v", err)
@@ -761,7 +773,7 @@ func TestRemovingYourOwnStructureLeavesItsItemOnTheGround(t *testing.T) {
 			if dropped[0].item != tc.item || dropped[0].count != 1 {
 				t.Errorf("the drop is %d of item %d, want 1 %s", dropped[0].count, dropped[0].item, tc.name)
 			}
-			if want := dropSpawnPos([3]int64{0, 64, 0}); dropped[0].pos != want {
+			if want := dropSpawnPos([3]int64{0, tc.spawnVoxelY, 0}); dropped[0].pos != want {
 				t.Errorf("the %s dropped at %v, want free space above its support at %v", tc.name, dropped[0].pos, want)
 			}
 			if overlaps(h.world, dropped[0].box()) {
@@ -771,14 +783,29 @@ func TestRemovingYourOwnStructureLeavesItsItemOnTheGround(t *testing.T) {
 			// The existing ten-tick delay is long enough for the drop to settle and be
 			// streamed before the nearby owner may collect it.
 			h.advance(dropPickupDelayTicks)
-			if got := dropped[0].pos[1]; math.Abs(got-64) > dropTolerance {
-				t.Errorf("the %s drop came to rest at y=%v, want the terrain surface at y=64", tc.name, got)
+			if got := dropped[0].pos[1]; math.Abs(got-tc.restingFloor) > dropTolerance {
+				t.Errorf("the %s drop came to rest at y=%v, want the terrain surface at y=%v", tc.name, got, tc.restingFloor)
 			}
 			seen := out.snapshotDrops(t)
 			if len(seen) != 1 || seen[0].ItemID != uint16(tc.item) || seen[0].Pos != dropped[0].wirePos() {
 				t.Errorf("the settled %s drop snapshot is %+v, want item %d at %v", tc.name, seen, tc.item, dropped[0].wirePos())
 			}
 		})
+	}
+}
+
+// The voxel whose top would cross worldLimit is not free space, even when a terrain
+// double reports air there. Manual removal must fail closed instead of minting a drop
+// the collision and snapshot arithmetic cannot represent inside the world.
+func TestAStructureDropDoesNotSearchPastTheWorldEdge(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	h.sim.mu.Lock()
+	_, found := h.sim.firstFreeVoxelAboveLocked([3]int64{0, worldLimit - 1, 0})
+	h.sim.mu.Unlock()
+	if found {
+		t.Error("a structure drop found free space past the upper world edge")
 	}
 }
 
