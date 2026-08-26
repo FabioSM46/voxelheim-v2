@@ -38,14 +38,55 @@ use crate::world::palette;
 
 /// Close to the near plane and small enough to remain inside the camera's free
 /// view-space pocket even when terrain touches the player capsule.
-const BASE_TRANSLATION: Vec3 = Vec3::new(0.10, -0.075, -0.18);
-
-/// The whole of the closed fist: the box the palm and the knuckles fit inside.
 ///
-/// Eighty-five percent of the box #175 introduced, uniformly on all three axes. The base
-/// transform and every animation still move the same one-mesh composition; only the fist inside
-/// it is smaller, so the hilt it closes around keeps a silhouette of its own.
-const HAND_SIZE: Vec3 = Vec3::new(0.03825, 0.07225, 0.03825);
+/// **The height is derived, not tuned.** With the fist [`HAND_SIZE`] now is, this is the
+/// placement that puts the *complete* box inside a 16:9 frame at the default field of view
+/// while keeping every corner of it in the lower-right quadrant, clear of the vertical
+/// centre line and so of the crosshair — which the old `-0.075` did not: the fist's centre
+/// sat past the bottom edge of the frustum and half the box was hard-clipped off screen
+/// (#384). [`the_whole_fist_sits_in_the_lower_right_of_a_16_by_9_frame`] projects the real
+/// vertices through the real rest pose rather than trusting this comment.
+///
+/// **The depth may not shrink.** Moving the hand toward the camera is the one way to
+/// re-inflate it on screen without touching [`HAND_SIZE`], so the assertion below pins it.
+const BASE_TRANSLATION: Vec3 = Vec3::new(0.10, -0.050, -0.18);
+
+/// The fist may not be brought nearer the camera than #384 left it.
+const _: () = assert!(
+    BASE_TRANSLATION.z <= -0.18,
+    "the fist was re-inflated by moving it toward the camera"
+);
+
+/// The whole of the closed fist: the box the palm, the fingers and the thumb fit inside.
+///
+/// **A hand, and the two ratios that make it one are asserted rather than described.** The
+/// box this replaces was `(0.03825, 0.07225, 0.03825)` — 1.89 times taller than it was wide,
+/// which is a forearm's proportion, and 48% of the viewport height at the default field of
+/// view, which is why it read as an arm entering the frame from below (#384). #369 had
+/// already scaled that box by 0.85 for the same complaint, which tuned the wrong proportion
+/// instead of correcting it.
+///
+/// The height is now exactly [`GRIP_SIZE`]'s: a fist as tall as the grip it closes on holds
+/// that grip along its whole length, which puts the cross guard's lower face on the fist's
+/// top face and leaves the pommel entirely below the bottom one. That is where
+/// [`item_translation`] gets a blade's placement from, and it is why 64% of the blade span
+/// no longer lands inside the fist's silhouette.
+const HAND_SIZE: Vec3 = Vec3::new(0.028, 0.024, 0.030);
+
+/// A fist is no taller than the grip it closes on.
+///
+/// The two constants live four hundred lines apart, so the relationship between them is
+/// stated where the compiler can hold it rather than where a reader has to remember it.
+const _: () = assert!(
+    HAND_SIZE.y <= GRIP_SIZE.y,
+    "the fist is taller than the grip it closes on"
+);
+
+/// A fist, not a forearm: about as wide as it is tall.
+const _: () = assert!(
+    HAND_SIZE.x >= HAND_SIZE.y * 0.9 && HAND_SIZE.x <= HAND_SIZE.y * 1.4,
+    "the fist's width-to-height ratio left the range a hand occupies"
+);
 
 /// How far a blade's centre plane sits toward the camera from the fist's centre.
 ///
@@ -70,20 +111,39 @@ const BLADE_NEAR_PLANE_CLEARANCE: f32 = 0.004;
 /// silhouette; [`the_item_stays_recognisable_outside_the_fist`] holds the other side.
 const HOLD_OVERLAP: f32 = 0.006;
 
-/// How much of a blade's grip remains visible below the fist.
+/// How far the digits stand proud of the palm, as a fraction of the fist's depth.
 ///
-/// One quarter of the grip: the other three quarters still cross the palm, while the pommel below
-/// it and the guard above it can no longer both disappear into the same tall box.
-const VISIBLE_GRIP: f32 = GRIP_SIZE.y * 0.25;
-
-/// How far each knuckle stands proud of the palm, as a fraction of the fist's depth.
+/// **They take that depth out of the palm rather than adding to it**, exactly as the four
+/// knuckles this replaces did, so the whole composition still fills exactly [`HAND_SIZE`]
+/// and nothing about where the hand sits or how far it swings moves.
 ///
-/// Small: a fist read from the inside of a wrist is mostly one mass, and knuckles that
-/// carried a third of the depth would be four separate fingers pointing at the camera.
-const KNUCKLE_PROUD: f32 = 0.22;
+/// A quarter rather than the old fifth: four fingers and a thumb have to be separable at a
+/// box a fraction of the size of the one #175 drew knuckles on, and the shadow between a
+/// digit and the palm is the only thing separating them.
+const DIGIT_PROUD: f32 = 0.26;
 
-/// How much of the fist's height the knuckle row occupies, measured from the top.
-const KNUCKLE_BAND: f32 = 0.30;
+/// How much of the fist's height the four fingers occupy, measured from the top.
+///
+/// Most of it, which is the difference between a finger and a knuckle: the old `0.30` band
+/// left the remaining 70% of the box one flat quad, and that quad was the largest single
+/// thing on the screen. The rest of the height belongs to the thumb below them.
+const FINGER_BAND: f32 = 0.58;
+
+/// How wide one finger is, as a fraction of the fist's width.
+///
+/// A little under a quarter, so the four sit on a quarter-width pitch with a gap between
+/// each pair. The gap is what makes them read as four digits rather than as one ridge, and
+/// [`the_empty_hand_is_a_palm_with_four_fingers_and_a_thumb`] measures it.
+const FINGER_WIDTH: f32 = 0.20;
+
+/// How much of the fist's width the thumb crosses, measured from the inboard (`-X`) edge.
+///
+/// Over half, because a thumb on a closed fist lies *across* the front of it — a box that
+/// stopped at the inboard quarter would read as a fifth finger. It never reaches the
+/// outboard edge, which is what keeps the hand's chirality legible: the thumb is on the
+/// side nearer the centre of the screen, where a right hand held out in front of the eye
+/// puts it.
+const THUMB_SPAN: f32 = 0.55;
 
 /// How much darker a rust mark is than the iron it sits on.
 ///
@@ -395,44 +455,68 @@ pub(super) fn sceptre_mesh(length: f32) -> Mesh {
     shaft.scaled_by(Vec3::splat(scale))
 }
 
-/// A closed fist: a palm with four knuckles standing proud of it.
+/// A closed fist: a palm, four fingers across the front of it, and a thumb across them.
 ///
 /// **It was a single box**, which is the crudest shape in the game sharing the screen with
 /// the other crudest shape — and it is on screen more than anything else, because an empty
-/// hand is what a player holds most of the time (#175).
+/// hand is what a player holds most of the time (#175). #175 answered that with a knuckle
+/// row over the top 30% of the box, which left the other 70% — most of what was on screen —
+/// one flat untextured quad with no thumb anywhere on it (#384).
 ///
-/// Five boxes merged into one mesh, for the reason [`tool_mesh`] merges two: the view model
-/// is one entity with one transform that `animate_view_model` drives, and a knuckle parented
+/// Six boxes merged into one mesh, for the reason [`tool_mesh`] merges two: the view model
+/// is one entity with one transform that `animate_view_model` drives, and a digit parented
 /// separately would be a second thing to keep in step with a swing.
 ///
 /// It fills exactly [`HAND_SIZE`], so nothing about where the hand sits or how far it swings
-/// moves. The knuckles take their depth out of the palm rather than adding to it.
+/// moves. The digits take their depth out of the palm rather than adding to it, and the
+/// thumb takes its height out of the fingers' band rather than out of the box.
+///
+/// **The digit band is the `-Z` face**, which is the face the fist punches with and the one
+/// turned away from the eye: the camera looks down `-Z`, so what a player sees over the top
+/// of the palm is the back of their own hand, with the fingers curled beyond it.
 fn fist_mesh() -> Mesh {
-    let palm_depth = HAND_SIZE.z * (1.0 - KNUCKLE_PROUD);
+    let palm_depth = HAND_SIZE.z * (1.0 - DIGIT_PROUD);
+    let digit_depth = HAND_SIZE.z * DIGIT_PROUD;
     let mut merged = Mesh::from(Cuboid::from_size(Vec3::new(
         HAND_SIZE.x,
         HAND_SIZE.y,
         palm_depth,
     )))
-    // Pushed back, so the knuckles below occupy the front of the box rather than growing it.
+    // Pushed back, so the digits below occupy the front of the box rather than growing it.
     .translated_by(Vec3::new(0.0, 0.0, (HAND_SIZE.z - palm_depth) / 2.0));
 
-    // Four knuckles across the top of the palm, front-facing. A gap between them is what
-    // makes them read as four rather than as one ridge, so each is a little under a quarter
-    // of the width.
-    let knuckle = Vec3::new(
-        HAND_SIZE.x * 0.20,
-        HAND_SIZE.y * KNUCKLE_BAND,
-        HAND_SIZE.z * KNUCKLE_PROUD,
+    // Every digit sits in the same band across the front of the palm, so each stands proud
+    // of it by exactly [`DIGIT_PROUD`] and none of them reaches past the box.
+    let front = -(HAND_SIZE.z / 2.0) + digit_depth / 2.0;
+
+    // Four fingers over the upper band, each a little under a quarter of the width so a gap
+    // is left between every neighbouring pair.
+    let finger = Vec3::new(
+        HAND_SIZE.x * FINGER_WIDTH,
+        HAND_SIZE.y * FINGER_BAND,
+        digit_depth,
     );
-    let top = HAND_SIZE.y / 2.0 - knuckle.y / 2.0;
-    let front = -(HAND_SIZE.z / 2.0) + knuckle.z / 2.0;
-    let knuckles = (0..4).map(|index| {
+    let finger_top = HAND_SIZE.y / 2.0 - finger.y / 2.0;
+    let fingers = (0..4).map(|index| {
         // Spread across the palm's width: four centres at 1/8, 3/8, 5/8, 7/8 of it.
         let across = HAND_SIZE.x * ((index as f32 * 2.0 + 1.0) / 8.0 - 0.5);
-        Mesh::from(Cuboid::from_size(knuckle)).translated_by(Vec3::new(across, top, front))
+        Mesh::from(Cuboid::from_size(finger)).translated_by(Vec3::new(across, finger_top, front))
     });
-    merge_all(&mut merged, knuckles, "fist");
+
+    // And the thumb under them, lying across the front from the inboard edge inward: wider
+    // than it is tall, which is the whole of what tells it from a fifth finger.
+    let thumb = Vec3::new(
+        HAND_SIZE.x * THUMB_SPAN,
+        HAND_SIZE.y * (1.0 - FINGER_BAND),
+        digit_depth,
+    );
+    let thumb = Mesh::from(Cuboid::from_size(thumb)).translated_by(Vec3::new(
+        -HAND_SIZE.x / 2.0 + thumb.x / 2.0,
+        -HAND_SIZE.y / 2.0 + thumb.y / 2.0,
+        front,
+    ));
+
+    merge_all(&mut merged, fingers.chain([thumb]), "fist");
     merged
 }
 
@@ -914,19 +998,26 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
 
 /// Where an item sits relative to the fist at the origin.
 ///
-/// Blocks, materials and bundles rest on the knuckles. A sword leaves one quarter of its grip
-/// below the fist while the rest crosses the palm, and sits at the fist's near face so the fist
-/// cannot depth-occlude its guard or blade. A tool puts the lower haft through the fist. These
-/// are translations of the approved geometry, not new shapes.
+/// Blocks, materials and bundles rest on the fingers. A sword is closed on by the middle of
+/// its grip, and sits at the fist's near face so the fist cannot depth-occlude its guard or
+/// blade. A tool puts the lower haft through the fist. These are translations of the approved
+/// geometry, not new shapes.
 fn item_translation(shape: ItemShape) -> Vec3 {
     let hand_top = HAND_SIZE.y / 2.0;
     let y = match shape {
         ItemShape::Block => hand_top + BLOCK_EDGE / 2.0 - HOLD_OVERLAP,
         ItemShape::Material => hand_top + MATERIAL_LENGTH / 2.0 + MATERIAL_RADIUS - HOLD_OVERLAP,
-        ItemShape::Blade => {
-            let grip_bottom = blade_base() - GUARD_SIZE.y - GRIP_SIZE.y;
-            -HAND_SIZE.y / 2.0 - VISIBLE_GRIP - grip_bottom
-        }
+        // **The fist closes on the middle of the grip**, and the rest of the hilt's
+        // arrangement falls out of that one statement rather than being placed by hand:
+        // `HAND_SIZE.y == GRIP_SIZE.y` — pinned by the assertion beside the two constants —
+        // so a centred grip is held along its whole length, the guard's lower face lands on
+        // the fist's top face and the pommel is left entirely below the bottom one.
+        //
+        // It replaces `VISIBLE_GRIP`, which pushed a quarter of the grip out from under a
+        // fist three times taller than the grip. There is nothing left for it to push
+        // against: the pommel below is what says the hand is closed on a hilt rather than
+        // being where the hilt begins (#384).
+        ItemShape::Blade => -sword_grip_centre(SWORD_LENGTH).y,
         ItemShape::Bundle => hand_top + BUNDLE_SIZE.y / 2.0 - HOLD_OVERLAP,
         // The head stays above the hand and most of the haft remains visible below it.
         ItemShape::Tool => HAND_SIZE.y * 0.35,
@@ -2386,35 +2477,47 @@ mod tests {
         }
     }
 
-    /// **The empty hand is a fist**, uniformly smaller than the old box and still made from one
-    /// palm plus four separate knuckles.
+    /// **The empty hand is a hand**: a palm, four separated fingers and a thumb across them,
+    /// inside a box a hand's proportions rather than a forearm's.
     ///
-    /// The count pins the five boxes and the separated front-face edges pin four knuckles rather
-    /// than one ridge. The extent is the declared outer bound, measured rather than inferred from
-    /// the constant that built it.
+    /// The count pins the six boxes; the separated front-face edges pin four fingers rather than
+    /// one ridge; the thumb is pinned by its own band, on the inboard side and reaching neither
+    /// the outboard edge nor the finger band. The extent is the declared outer bound, measured
+    /// rather than inferred from the constant that built it.
+    ///
+    /// The proportion half is what #384 turned on, and it is asserted here as well as in the
+    /// `const` beside the constants because the box may not simply get smaller again: #369
+    /// scaled the forearm by 0.85 on every axis and left it a forearm. `PREVIOUS_HAND_SIZE` is
+    /// the box that shipped, so re-inflating any axis back toward it fails here.
     #[test]
-    fn the_empty_hand_is_a_smaller_palm_with_four_knuckles() {
-        const PREVIOUS_HAND_SIZE: Vec3 = Vec3::new(0.045, 0.085, 0.045);
-        const UNIFORM_SCALE: f32 = 0.85;
+    fn the_empty_hand_is_a_palm_with_four_fingers_and_a_thumb() {
+        const PREVIOUS_HAND_SIZE: Vec3 = Vec3::new(0.03825, 0.07225, 0.03825);
 
         let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
         let one_box = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
 
         assert_eq!(
             mesh.count_vertices(),
-            one_box * 5,
-            "the fist is not exactly one palm and four knuckle boxes"
+            one_box * 6,
+            "the fist is not exactly one palm, four fingers and a thumb"
+        );
+
+        // The other half of the proportion — no taller than the grip it closes on — is the
+        // `const` assertion beside the two constants, and stays there: it is a statement about
+        // two numbers rather than about a mesh, and the compiler is a better place to keep it
+        // than a test somebody has to run.
+        let ratio = HAND_SIZE.x / HAND_SIZE.y;
+        assert!(
+            (0.9..=1.4).contains(&ratio),
+            "the fist is {ratio} times as wide as it is tall, which is not a hand's proportion"
         );
 
         let positions = positions(&mesh);
         for axis in 0..3 {
             let size = HAND_SIZE[axis];
-            let previous = PREVIOUS_HAND_SIZE[axis];
-            assert!(size < previous, "axis {axis} did not get smaller");
             assert!(
-                (size / previous - UNIFORM_SCALE).abs() < 1e-6,
-                "axis {axis} was scaled by {} rather than {UNIFORM_SCALE}",
-                size / previous
+                size < PREVIOUS_HAND_SIZE[axis],
+                "axis {axis} grew back toward the box #384 replaced"
             );
             let min = positions
                 .iter()
@@ -2431,11 +2534,26 @@ mod tests {
             );
         }
 
+        // Every digit stands proud of the palm: they reach the box's own front plane and the
+        // palm stops DIGIT_PROUD short of it, so there is a step between them for the light
+        // to break on rather than one flat quad.
         let front = -HAND_SIZE.z / 2.0;
-        let knuckle_bottom = HAND_SIZE.y / 2.0 - HAND_SIZE.y * KNUCKLE_BAND;
+        let palm_front = front + HAND_SIZE.z * DIGIT_PROUD;
+        let finger_bottom = HAND_SIZE.y / 2.0 - HAND_SIZE.y * FINGER_BAND;
+        assert!(
+            positions.iter().any(|p| (p[2] - palm_front).abs() < 1e-6),
+            "nothing sits at the palm's front plane at {palm_front}, so no digit is proud of it"
+        );
+        assert!(
+            positions.iter().all(|p| p[2] >= front - 1e-6),
+            "a digit reaches past the front of the box instead of taking its depth out of it"
+        );
+
         let mut edges: Vec<f32> = positions
             .iter()
-            .filter(|p| (p[2] - front).abs() < 1e-6 && p[1] >= knuckle_bottom - 1e-6)
+            // Above the fingers' own lower plane, so the thumb — which reaches the same front
+            // plane and meets that lower plane from beneath — cannot be read as a fifth finger.
+            .filter(|p| (p[2] - front).abs() < 1e-6 && p[1] > finger_bottom + 1e-6)
             .map(|p| p[0])
             .collect();
         edges.sort_by(f32::total_cmp);
@@ -2443,18 +2561,128 @@ mod tests {
         assert_eq!(
             edges.len(),
             8,
-            "four separate knuckles need eight front-face side edges, found {edges:?}"
+            "four separate fingers need eight front-face side edges, found {edges:?}"
         );
         for pair in edges.chunks_exact(2) {
             assert!(
-                (pair[1] - pair[0] - HAND_SIZE.x * 0.20).abs() < 1e-6,
-                "knuckle edges {pair:?} do not bound one knuckle"
+                (pair[1] - pair[0] - HAND_SIZE.x * FINGER_WIDTH).abs() < 1e-6,
+                "finger edges {pair:?} do not bound one finger"
             );
         }
-        for knuckle in 0..3 {
+        for finger in 0..3 {
             assert!(
-                edges[knuckle * 2 + 1] < edges[(knuckle + 1) * 2],
-                "two knuckles meet as one ridge"
+                edges[finger * 2 + 1] < edges[(finger + 1) * 2],
+                "two fingers meet as one ridge"
+            );
+        }
+
+        // The thumb is read out of the same buffers by the two things only it does: it is the
+        // one digit that reaches the inboard edge of the box — the leftmost finger stops
+        // FINGER_WIDTH/2 short of it — and the one that reaches the bottom of it.
+        let in_front = |p: &&[f32; 3]| p[2] < palm_front - 1e-6;
+        let inboard_edge: Vec<[f32; 3]> = positions
+            .iter()
+            .filter(|p| in_front(p) && (p[0] + HAND_SIZE.x / 2.0).abs() < 1e-6)
+            .copied()
+            .collect();
+        let bottom_face: Vec<[f32; 3]> = positions
+            .iter()
+            .filter(|p| in_front(p) && (p[1] + HAND_SIZE.y / 2.0).abs() < 1e-6)
+            .copied()
+            .collect();
+        assert!(
+            !inboard_edge.is_empty() && !bottom_face.is_empty(),
+            "no digit reaches the inboard edge or the bottom of the fist"
+        );
+
+        let (thumb_low, thumb_high) = extent(&inboard_edge, 1);
+        let (thumb_front, _) = extent(&inboard_edge, 2);
+        let (thumb_inboard, thumb_outboard) = extent(&bottom_face, 0);
+
+        assert!(
+            (thumb_low + HAND_SIZE.y / 2.0).abs() < 1e-6
+                && (thumb_high - finger_bottom).abs() < 1e-6,
+            "the thumb spans {thumb_low}..{thumb_high} rather than the band under the fingers"
+        );
+        assert!(
+            (thumb_front - front).abs() < 1e-6,
+            "the thumb's front face is at {thumb_front} rather than proud of the palm at {front}"
+        );
+        assert!(
+            thumb_outboard < HAND_SIZE.x / 2.0 - 1e-6,
+            "the thumb reaches the outboard edge at {thumb_outboard}, so the hand has no side \
+             to it and no chirality either"
+        );
+        assert!(
+            thumb_outboard - thumb_inboard > HAND_SIZE.x / 2.0,
+            "the thumb crosses only {} of the palm's front",
+            thumb_outboard - thumb_inboard
+        );
+        assert!(
+            thumb_outboard - thumb_inboard > thumb_high - thumb_low,
+            "the thumb is taller than it is wide, so it reads as a fifth finger"
+        );
+    }
+
+    /// **The fist takes at most a fifth of the viewport, and the arithmetic says so.**
+    ///
+    /// The box this replaced was 48% of it at the default field of view — half the screen, from
+    /// the bottom edge up — and every previous attempt to answer that complaint scaled the box by
+    /// eye. The three numbers the projection actually depends on are named here, and the default
+    /// field of view is read out of `settings` rather than copied, so a change to the default
+    /// this hand was sized against fails here instead of silently re-inflating it.
+    #[test]
+    fn the_fist_covers_at_most_a_fifth_of_the_viewport_at_the_default_field_of_view() {
+        let field_of_view = crate::settings::Settings::default().field_of_view();
+        let viewport_height =
+            2.0 * BASE_TRANSLATION.z.abs() * (field_of_view.to_radians() / 2.0).tan();
+        let covered = HAND_SIZE.y / viewport_height;
+        assert!(
+            covered <= 0.20,
+            "the fist is {:.1}% of the viewport height at {field_of_view}°, and 20% is the ceiling",
+            covered * 100.0
+        );
+    }
+
+    /// **The whole fist is on screen, and all of it is in the lower-right quadrant.**
+    ///
+    /// The real vertices through the real rest pose and a real perspective divide, because the
+    /// failure this replaces was exactly the one a bounding box in model space cannot see: the
+    /// old centre sat 0.3 mm past the bottom of the frustum, so half the box was hard-clipped and
+    /// what remained read as something entering the frame from below.
+    ///
+    /// 16:9 is the narrowest common frame and therefore the binding one for the horizontal half
+    /// of this. The crosshair is at the origin of this projection, so *right of the vertical
+    /// centre line* is the whole of "never touching the crosshair".
+    #[test]
+    fn the_whole_fist_sits_in_the_lower_right_of_a_16_by_9_frame() {
+        const ASPECT: f32 = 16.0 / 9.0;
+
+        let field_of_view = crate::settings::Settings::default().field_of_view();
+        let half_height = (field_of_view.to_radians() / 2.0).tan();
+        let half_width = half_height * ASPECT;
+        let rest = presented_transform(&HandAnimation::default(), None);
+
+        for corner in positions(&fist_mesh()) {
+            let point = rest.transform_point(Vec3::from_array(corner));
+            let depth = -point.z;
+            assert!(depth > 0.0, "{corner:?} landed behind the camera");
+            let (x, y) = (point.x / depth, point.y / depth);
+            assert!(
+                x > 0.0,
+                "{corner:?} projects to x {x}, on or across the vertical centre line"
+            );
+            assert!(
+                x <= half_width,
+                "{corner:?} projects to x {x}, off the right edge"
+            );
+            assert!(
+                y < 0.0,
+                "{corner:?} projects to y {y}, out of the lower half of the frame"
+            );
+            assert!(
+                y >= -half_height,
+                "{corner:?} projects to y {y}, clipped by the bottom edge"
             );
         }
     }
@@ -2568,23 +2796,47 @@ mod tests {
                 half.z
             );
 
+            // **The fist is closed on the whole grip, not on part of it.** `HAND_SIZE.y ==
+            // GRIP_SIZE.y`, so a grip centred on the fist reaches both of its faces — which
+            // is a stronger statement than the crossing this replaces, where a grip a third
+            // of the fist's height could satisfy "crosses the lower face" while the guard
+            // and most of the blade disappeared into the box above it (#384).
             let (grip_low, grip_high) = extent(&grip, 1);
             let (grip_near, grip_far) = extent(&grip, 2);
             assert!(
-                grip_low < -half.y - EPSILON
-                    && grip_high > -half.y + EPSILON
+                grip_low <= -half.y + EPSILON
+                    && grip_high >= half.y - EPSILON
                     && grip_near < half.z
                     && grip_far > -half.z,
-                "sword {item_id}'s grip does not cross the lower face of the fist: \
-                 grip y={grip_low}..{grip_high}, z={grip_near}..{grip_far}"
+                "sword {item_id}'s grip is not held along the fist's whole height: \
+                 grip y={grip_low}..{grip_high}, fist y={}..{}, grip z={grip_near}..{grip_far}",
+                -half.y,
+                half.y
+            );
+
+            let (guard_low, _) = extent(&guard, 1);
+            assert!(
+                guard_low >= half.y - EPSILON,
+                "sword {item_id}'s cross guard reaches down to {guard_low}, below the fist's \
+                 top face at {}",
+                half.y
             );
 
             let (pommel_low, pommel_high) = extent(&pommel, 1);
             assert!(
-                pommel_high < -half.y - EPSILON,
+                pommel_high <= -half.y + EPSILON,
                 "sword {item_id}'s pommel is not wholly below the fist: \
                  pommel y={pommel_low}..{pommel_high}, fist bottom={}",
                 -half.y
+            );
+            // And the whole of it is below, so something of the hilt is always showing under
+            // the hand: that is what says the fist is closed on a sword rather than being
+            // where the sword begins.
+            assert!(
+                -half.y - pommel_low >= POMMEL_SIZE.y - EPSILON,
+                "only {} of sword {item_id}'s {} pommel shows below the fist",
+                -half.y - pommel_low,
+                POMMEL_SIZE.y
             );
 
             let grip_centre = sword_grip_centre(SWORD_LENGTH) + translation;
@@ -2628,6 +2880,54 @@ mod tests {
                  camera-facing surface in front of the fist"
             );
         }
+    }
+
+    /// **The blade rises clear of the fist rather than growing out of it.**
+    ///
+    /// The complaint #384 was filed about is not depth order — #369 and #382 already put the
+    /// hilt *in front of* the fist rather than through it — it is that in front of a slab is
+    /// still on top of a slab. What matters is the **screen** overlap, so this projects both
+    /// through the rest pose the renderer uses and measures how much of the blade's span lands
+    /// inside the fist's silhouette. 64% of it did.
+    ///
+    /// The silhouette is taken as the projected bounding box of the fist's real vertices, which
+    /// is a superset of the fist's actual outline — so every count this makes is at least the
+    /// true one, and passing it is the stronger statement.
+    #[test]
+    fn a_blade_rises_clear_of_the_fists_silhouette_instead_of_growing_out_of_it() {
+        const SAMPLES: usize = 101;
+
+        let rest = presented_transform(&HandAnimation::default(), Some(ItemShape::Blade));
+        let project = |point: Vec3| {
+            let point = rest.transform_point(point);
+            let depth = -point.z;
+            assert!(depth > 0.0, "the held arrangement crossed the camera plane");
+            Vec2::new(point.x / depth, point.y / depth)
+        };
+
+        let fist: Vec<Vec2> = positions(&fist_mesh())
+            .into_iter()
+            .map(|corner| project(Vec3::from_array(corner)))
+            .collect();
+        let left = fist.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let right = fist.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+        let bottom = fist.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let top = fist.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+
+        let translation = item_translation(ItemShape::Blade);
+        let hidden = (0..SAMPLES)
+            .filter(|sample| {
+                let fraction = *sample as f32 / (SAMPLES - 1) as f32;
+                let y = blade_base() + BLADE_LENGTH * fraction;
+                let point = project(Vec3::new(0.0, translation.y + y, translation.z));
+                (left..=right).contains(&point.x) && (bottom..=top).contains(&point.y)
+            })
+            .count();
+        assert!(
+            hidden * 5 <= SAMPLES,
+            "{hidden}/{SAMPLES} sampled points along the blade land inside the fist's \
+             projected silhouette, and a fifth is the ceiling"
+        );
     }
 
     /// Skin comes from the local player's authoritative appearance, item colour from the
