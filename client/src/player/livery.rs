@@ -479,6 +479,72 @@ mod tests {
         );
     }
 
+    /// **The cell samples exactly the rows a mesh does**, which is the one place the two
+    /// consumers of this image could disagree.
+    ///
+    /// A mesh points its vertices at [`blade_uv`] and a cell hands `bevy_ui` a rectangle, so
+    /// they arrive at the field by different arithmetic: one squeezes `along` past the
+    /// neutral band, the other names the band's rows. Asserted against the *image* rather
+    /// than against either of them, so a rectangle that cropped the field or overran the
+    /// image fails here rather than in somebody's eye.
+    ///
+    /// **[`LIVERY_HEIGHT`] is the whole image, the neutral band included** — its own doc says
+    /// so — which is what makes `y_max` the image's height rather than the field's. This
+    /// exists because that is easy to read the other way round, and the review on the pull
+    /// request that added `field_rect` read it that way.
+    #[test]
+    fn the_cell_and_the_mesh_sample_the_same_rows() {
+        let rect = field_rect();
+        assert_eq!(rect.min.x, 0.0);
+        assert_eq!(rect.max.x, LIVERY_WIDTH as f32);
+        assert_eq!(
+            rect.min.y, NEUTRAL_ROWS as f32,
+            "the cell's rectangle starts inside the neutral band or below the field"
+        );
+        assert_eq!(
+            rect.max.y, LIVERY_HEIGHT as f32,
+            "the cell's rectangle does not reach the last row of the field"
+        );
+        assert!(
+            rect.max.y <= LIVERY_HEIGHT as f32,
+            "the cell's rectangle runs off the bottom of a {LIVERY_HEIGHT}-row image"
+        );
+
+        // The rows a mesh reaches, read off `blade_uv` at both ends, must be the rows the
+        // rectangle covers — first and last.
+        let row = |along: f32| (blade_uv(0.5, along)[1] * LIVERY_HEIGHT as f32).floor();
+        assert_eq!(
+            row(0.0),
+            rect.min.y,
+            "a blade's root samples a row the cell's rectangle does not cover"
+        );
+        assert_eq!(
+            row(1.0).min(LIVERY_HEIGHT as f32 - 1.0),
+            rect.max.y - 1.0,
+            "a blade's tip samples a row the cell's rectangle does not cover"
+        );
+
+        // **Every row the rectangle leaves out is white, and the field is inside it.** Not
+        // "every row inside carries rust" — the field deliberately leaves both ends of the
+        // blade clear, so rows near the guard and the point are white and belong in the
+        // rectangle anyway. What the rectangle owes is that it excludes the neutral band and
+        // nothing else.
+        let image = image_for(Livery::Rust);
+        let white = |row: u32| {
+            (0..LIVERY_WIDTH).all(|column| texel(&image, column, row) == [255, 255, 255, 255])
+        };
+        for row in 0..rect.min.y as u32 {
+            assert!(
+                white(row),
+                "row {row} is outside the rectangle and is not neutral"
+            );
+        }
+        assert!(
+            (rect.min.y as u32..rect.max.y as u32).any(|row| !white(row)),
+            "the cell's rectangle covers no field at all"
+        );
+    }
+
     /// **A blade's coordinates never reach the neutral band** — the same property from the
     /// other side: a freckle at the root must not be squeezed onto the white row.
     #[test]
