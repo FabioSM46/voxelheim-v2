@@ -184,11 +184,17 @@ pub enum Control {
     Chat,
     Interact,
     Inventory,
+    Consume,
     Menu,
 }
 
 /// Every control, in the order the settings screen lists them.
-pub const CONTROLS: [Control; 9] = [
+///
+/// **The order is the enum's order, and that is a requirement rather than a tidiness.**
+/// [`Bindings`] indexes its keys by `control as usize` while [`Bindings::default`] builds
+/// that array with `CONTROLS.map`, so a control listed here out of its declaration order
+/// would silently hand every control below it somebody else's key.
+pub const CONTROLS: [Control; 10] = [
     Control::Forward,
     Control::Back,
     Control::Left,
@@ -197,6 +203,7 @@ pub const CONTROLS: [Control; 9] = [
     Control::Chat,
     Control::Interact,
     Control::Inventory,
+    Control::Consume,
     Control::Menu,
 ];
 
@@ -212,6 +219,7 @@ impl Control {
             Self::Chat => "chat",
             Self::Interact => "interact",
             Self::Inventory => "inventory",
+            Self::Consume => "consume",
             Self::Menu => "menu",
         }
     }
@@ -227,6 +235,7 @@ impl Control {
             Self::Chat => "Chat",
             Self::Interact => "Interact",
             Self::Inventory => "Inventory",
+            Self::Consume => "Consume item",
             Self::Menu => "Pause menu",
         }
     }
@@ -247,6 +256,7 @@ impl Control {
             Self::Chat => KeyCode::KeyT,
             Self::Interact => KeyCode::KeyF,
             Self::Inventory => KeyCode::KeyE,
+            Self::Consume => KeyCode::KeyC,
             Self::Menu => KeyCode::Escape,
         }
     }
@@ -1197,6 +1207,68 @@ mod tests {
             );
         }
         assert_eq!(settings.bindings().key(Control::Jump), KeyCode::Space);
+    }
+
+    /// The consume control starts on `C`, trades keys under the same invariants as any
+    /// other, and comes back with a Controls reset.
+    ///
+    /// It is the newest member of the closed set, so it is also the one whose default is
+    /// most likely to collide with a key something else already reads. `key_name` is the
+    /// other half of that claim: a control that started on a key the screen will not bind
+    /// could never be rebound off it.
+    #[test]
+    fn consuming_starts_on_c_and_a_reset_puts_it_back() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyC);
+        assert!(key_name(KeyCode::KeyC).is_some(), "consume starts hidden");
+        assert_eq!(Control::Consume.label(), "Consume item");
+
+        // A key another control holds is refused, and refusing changes nothing.
+        assert_eq!(
+            settings.rebind(Control::Consume, KeyCode::KeyE),
+            Err(RebindRefusal::WouldUnbind(Control::Inventory))
+        );
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyC);
+
+        // A free one is taken, and the key it left becomes free for somebody else.
+        settings
+            .rebind(Control::Consume, KeyCode::KeyV)
+            .expect("v is free");
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyV);
+        settings
+            .rebind(Control::Chat, KeyCode::KeyC)
+            .expect("c is free once consume has left it");
+
+        settings.reset(Tab::Controls);
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyC);
+        assert_eq!(settings.bindings().key(Control::Chat), KeyCode::KeyT);
+    }
+
+    /// [`CONTROLS`] lists the controls in their declaration order, because [`Bindings`]
+    /// indexes by `control as usize` while [`Bindings::default`] fills that array with
+    /// `CONTROLS.map`. A control listed out of order hands every control below it the
+    /// wrong default, and nothing else in this module would say so.
+    #[test]
+    fn the_control_list_is_in_the_same_order_as_the_enum() {
+        for (index, control) in CONTROLS.into_iter().enumerate() {
+            assert_eq!(
+                control as usize, index,
+                "{control:?} is listed at {index} and declared at {}",
+                control as usize
+            );
+        }
+        for control in CONTROLS {
+            assert_eq!(
+                Bindings::default().key(control),
+                control.default_key(),
+                "{control:?} does not start on its own default"
+            );
+            assert_eq!(
+                Control::from_name(control.name()),
+                Some(control),
+                "{control:?} does not read back from its own file name"
+            );
+        }
     }
 
     #[test]

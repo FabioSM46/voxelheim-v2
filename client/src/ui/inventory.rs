@@ -36,6 +36,7 @@ use crate::player::{
     InventoryClickKind, PickedStack, RECIPES, Recipe, RecipeCategory, equipment_item_fits,
     item_label,
 };
+use crate::settings::{Bindings, Control, Settings};
 
 pub(super) struct InventoryUiPlugin;
 
@@ -1550,17 +1551,33 @@ fn hover_tooltip(
 ///
 /// **Nothing is decided here.** A reported press becomes an `InventoryMoveRequest`, a
 /// `RepairRequest`, a `DropItemRequest` or a `ConsumeRequest` in `player::inventory`, which
-/// is the only module that pairs cells, checks its routing lists and builds a frame.
+/// is the only module that pairs cells, checks its routing lists and builds a frame. That
+/// is what keeps the keyboard route below from being a second opinion about food: whether
+/// the hovered cell holds something edible is `consume_request`'s question, and this system
+/// does not ask it for either gesture.
 ///
 /// **Shift is read against the full-stack button and not the split one**, because what the
 /// modifier changes is *where the stack goes* rather than *how much of it moves*: a drop is
 /// the whole cell, exactly as a plain left press picks the whole cell. Right-clicking keeps
-/// meaning half with shift held or without. Middle-click is the independent consume
-/// gesture and therefore never becomes a source or destination for either one.
+/// meaning half with shift held or without. Consume is the independent gesture and
+/// therefore never becomes a source or destination for either one.
+///
+/// **Consume has two spellings and one meaning.** [`Control::Consume`] is the rebindable
+/// one, read through the same [`Bindings`] every other control is; middle-click is the
+/// fixed shortcut it grew out of, kept because a player who learned it should not have to
+/// unlearn it. They share one branch rather than one each, so pressing both in the same
+/// frame over the same cell reports the press once — two branches would report it twice and
+/// `player::inventory` would build two frames for one intent. The key is edge-triggered
+/// (`just_pressed`) for the same reason the buttons are: a held key is one press.
+///
+/// An absent [`Settings`] falls back to [`Bindings::default`], the pattern `player/loot.rs`
+/// already follows, so a headless app built without the resource still routes the default
+/// key rather than routing nothing.
 fn inventory_clicks(
     mode: Res<InputMode>,
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
+    settings: Option<Res<Settings>>,
     cells: Query<(&Interaction, &InventoryCell)>,
     mut clicks: MessageWriter<InventoryClick>,
 ) {
@@ -1570,9 +1587,14 @@ fn inventory_clicks(
     let Some(buttons) = buttons else {
         return;
     };
+    let keys = keys.as_deref();
+    let bindings = settings
+        .as_deref()
+        .map_or_else(Bindings::default, |settings| *settings.bindings());
     let dropping = keys
         .is_some_and(|keys| keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight));
-    let kind = if buttons.just_pressed(MouseButton::Middle) {
+    let consuming = keys.is_some_and(|keys| keys.just_pressed(bindings.key(Control::Consume)));
+    let kind = if buttons.just_pressed(MouseButton::Middle) || consuming {
         Some(InventoryClickKind::Consume)
     } else if buttons.just_pressed(MouseButton::Right) {
         Some(InventoryClickKind::Split)
@@ -2533,6 +2555,163 @@ mod tests {
                     "{grid:?}: {shift:?} with {button:?}"
                 );
             }
+        }
+    }
+
+    /// The slot the consume gestures below are aimed at. Any cell will do — whether what
+    /// is in it may be eaten is `player::inventory`'s question and not this system's.
+    const HOVERED_SLOT: u8 = 0;
+
+    /// Runs one frame of the inventory screen and reports the clicks it wrote.
+    ///
+    /// `settings` absent means the resource is never inserted, which is the headless build
+    /// `inventory_clicks` falls back to [`Bindings::default`] for.
+    fn consume_frame(
+        settings: Option<Settings>,
+        key: Option<KeyCode>,
+        button: Option<MouseButton>,
+        mode: InputMode,
+        hovered: bool,
+    ) -> Vec<InventoryClick> {
+        let mut app = app();
+        app.insert_resource(mode);
+        if let Some(settings) = settings {
+            app.insert_resource(settings);
+        }
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.update();
+
+        if hovered {
+            let cell = cell_at(&mut app, HOVERED_SLOT);
+            *app.world_mut()
+                .entity_mut(cell)
+                .get_mut::<Interaction>()
+                .expect("buttons carry Interaction") = Interaction::Hovered;
+        }
+        if let Some(key) = key {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(key);
+        }
+        if let Some(button) = button {
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(button);
+        }
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<Messages<InventoryClick>>()
+            .drain()
+            .collect()
+    }
+
+    /// Settings with the consume control moved off its default.
+    fn consume_bound_to(key: KeyCode) -> Settings {
+        let mut settings = Settings::default();
+        settings
+            .rebind(Control::Consume, key)
+            .expect("the test picked a free key");
+        settings
+    }
+
+    /// **The configured key and middle-click are one gesture, and pressing both is one
+    /// press.** The last row is the whole point of sharing a branch: two branches would
+    /// write two `InventoryClick`s for one intent, and `player::inventory` would build two
+    /// `ConsumeRequest` frames out of them.
+    #[test]
+    fn the_consume_key_and_middle_click_report_one_press_together_or_apart() {
+        for (label, settings, key, button) in [
+            ("the default key alone", None, Some(KeyCode::KeyC), None),
+            ("middle-click alone", None, None, Some(MouseButton::Middle)),
+            (
+                "both in one frame",
+                None,
+                Some(KeyCode::KeyC),
+                Some(MouseButton::Middle),
+            ),
+            (
+                "the default key with the resource present",
+                Some(Settings::default()),
+                Some(KeyCode::KeyC),
+                None,
+            ),
+            (
+                "a rebound key",
+                Some(consume_bound_to(KeyCode::KeyV)),
+                Some(KeyCode::KeyV),
+                None,
+            ),
+            (
+                "a rebound key beside middle-click",
+                Some(consume_bound_to(KeyCode::KeyV)),
+                Some(KeyCode::KeyV),
+                Some(MouseButton::Middle),
+            ),
+        ] {
+            assert_eq!(
+                consume_frame(settings, key, button, InputMode::Inventory, true),
+                vec![InventoryClick {
+                    slot: HOVERED_SLOT,
+                    kind: InventoryClickKind::Consume,
+                }],
+                "{label}"
+            );
+        }
+    }
+
+    /// Everything that must produce no consume press at all.
+    ///
+    /// The mode guard and the hover are this system's own; the key that was rebound away is
+    /// the one a stale reader of the bindings would get wrong. What is deliberately *not*
+    /// here is an inedible cell — that is `player::inventory`'s judgement, and asking it
+    /// twice is what this module's "nothing is decided here" contract forbids.
+    #[test]
+    fn the_consume_key_is_silent_in_every_state_that_is_not_a_press_over_a_cell() {
+        for (label, settings, key, mode, hovered) in [
+            (
+                "gameplay owns the input",
+                None,
+                Some(KeyCode::KeyC),
+                InputMode::Playing,
+                true,
+            ),
+            (
+                "a menu owns the input",
+                None,
+                Some(KeyCode::KeyC),
+                InputMode::Menu,
+                true,
+            ),
+            (
+                "chat owns the keyboard",
+                None,
+                Some(KeyCode::KeyC),
+                InputMode::Chat,
+                true,
+            ),
+            (
+                "no cell is hovered",
+                None,
+                Some(KeyCode::KeyC),
+                InputMode::Inventory,
+                false,
+            ),
+            ("nothing is pressed", None, None, InputMode::Inventory, true),
+            (
+                "the key the control was rebound away from",
+                Some(consume_bound_to(KeyCode::KeyV)),
+                Some(KeyCode::KeyC),
+                InputMode::Inventory,
+                true,
+            ),
+        ] {
+            assert_eq!(
+                consume_frame(settings, key, None, mode, hovered),
+                Vec::new(),
+                "{label}"
+            );
         }
     }
 

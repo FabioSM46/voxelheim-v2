@@ -410,6 +410,7 @@ mod tests {
             (Control::Forward, KeyCode::F6),
             (Control::Menu, KeyCode::KeyG),
             (Control::Jump, KeyCode::Escape),
+            (Control::Consume, KeyCode::KeyV),
         ] {
             settings.rebind(control, key).expect("a free key");
         }
@@ -599,6 +600,82 @@ mod tests {
         assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
         assert_eq!(reloaded.bindings().key(Control::Jump), KeyCode::Escape);
         assert_eq!(reloaded.bindings().key(Control::Menu), KeyCode::KeyG);
+    }
+
+    /// A settings file written before [`Control::Consume`] existed still loads, and the
+    /// new control lands on its own default because nothing in that file is using it.
+    ///
+    /// This is the ordinary half of growing a closed control set: the file names every
+    /// control it knew about, `Bindings::from_pairs` fills in the one it did not, and no
+    /// complaint reaches the log because nothing about the file was wrong.
+    #[test]
+    fn a_pre_consume_settings_file_loads_and_the_new_control_takes_its_default() {
+        let scratch = Scratch::new("settings-before-consume");
+        let path = scratch.join("settings");
+        fs::write(
+            &path,
+            "bind forward w\nbind back s\nbind left a\nbind right d\n\
+             bind jump space\nbind chat t\nbind interact f\nbind inventory e\n\
+             bind menu escape\n",
+        )
+        .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyC);
+        assert_eq!(*settings.bindings(), *Settings::default().bindings());
+    }
+
+    /// **The delicate half: an older file that already spent `C` keeps it.**
+    ///
+    /// A player who moved a control onto `C` before this one existed saved a file that is
+    /// complete and correct for the set it was written against. The named binding wins —
+    /// anything else would silently undo a choice the player made — and the omitted
+    /// control takes the first free key the omitted-control rule in `Bindings::from_pairs`
+    /// offers, which here is the key the named binding vacated. Neither control is left
+    /// unreachable and neither shares a key, which is the invariant the whole set is read
+    /// at once to preserve.
+    #[test]
+    fn an_older_file_that_already_uses_c_keeps_it_and_consume_takes_another_free_key() {
+        let scratch = Scratch::new("settings-c-taken");
+        let path = scratch.join("settings");
+        fs::write(
+            &path,
+            "bind forward c\nbind back s\nbind left a\nbind right d\n\
+             bind jump space\nbind chat t\nbind interact f\nbind inventory e\n\
+             bind menu escape\n",
+        )
+        .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(
+            settings.bindings().key(Control::Forward),
+            KeyCode::KeyC,
+            "the file's own binding lost to a control it had never heard of"
+        );
+        let consume = settings.bindings().key(Control::Consume);
+        assert_ne!(consume, KeyCode::KeyC);
+        assert!(
+            crate::settings::key_name(consume).is_some(),
+            "{consume:?} is not a key this screen offers"
+        );
+
+        // One offered key per control and one control per key, still.
+        let keys: Vec<KeyCode> = crate::settings::CONTROLS
+            .into_iter()
+            .map(|control| settings.bindings().key(control))
+            .collect();
+        let mut distinct = keys.clone();
+        distinct.sort_by_key(|key| crate::settings::key_name(*key).unwrap_or_default());
+        distinct.dedup();
+        assert_eq!(distinct.len(), keys.len(), "two controls share a key");
+
+        // And it survives being written back out and read again.
+        assert_eq!(save(&path, &settings), Ok(()));
+        let (again, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(again, settings);
     }
 
     #[test]
