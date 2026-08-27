@@ -639,6 +639,46 @@ const _: () = assert!(
 /// mark stands proud of the blade rather than sitting on it.
 const BLADE_TANG: f32 = GUARD_SIZE.y / 2.0;
 
+/// How many steps the blade's root span is lofted in.
+///
+/// **The pitting is displacement, so this is what decides how finely the silhouette can be
+/// eaten into.** Twenty-four over roughly 60 mm of blade puts a ring every 2.5 mm, about a
+/// third of the smallest freckle [`livery::field`] draws — enough for a pit to have a floor
+/// and two walls rather than being one facet tilted inward.
+///
+/// It is only paid by a blade that wears a livery. An un-liveried blade lofts at one step
+/// per span, which is the two-span loft this file drew before there was a livery at all.
+const BLADE_STEPS_ROOT: u32 = 24;
+
+/// How many steps the point's span is lofted in.
+///
+/// Fewer, and not for the reason a lower number usually has: [`livery::field`] keeps the
+/// rust off the point entirely, so every extra ring here would be geometry no pit reaches.
+/// Six is what keeps the taper smooth once the rings below it are this dense.
+const BLADE_STEPS_POINT: u32 = 6;
+
+/// How many steps each of the blade's six perimeter faces is divided into.
+///
+/// **Three, and the hexagon is why it is not more.** The section is knife-thin at both
+/// edges and full thickness only along the central flat, so a pit near an edge has almost
+/// no metal to eat; the flats are where the rust reads, and three steps put two interior
+/// rings on each of them. Going finer buys detail on the bevels, where it cannot be seen.
+const BLADE_STEPS_AROUND: u32 = 3;
+
+/// How deep a pit eats, as a fraction of the blade's local half-thickness.
+///
+/// **Through the thickness only, never into the outline.** A vertex is displaced in `x`
+/// alone, so the two corners that sit on the blade's edges — where `x` is zero — do not
+/// move at all and the silhouette is the silhouette it was. That is what makes "no
+/// displaced vertex leaves the blade's envelope" a property of the arithmetic rather than
+/// something to check afterwards, and it is the right shape besides: corrosion eats through
+/// a flat, it does not take bites out of an edge.
+///
+/// Under a half deliberately. At full field this takes 1.8 mm out of a 6 mm half-thickness,
+/// which is a dent a player can see; deeper starts to read as a hole, and a blade with
+/// holes in it is damage again — the exact thing the fourteen boxes were replaced for.
+const PIT_DEPTH: f32 = 0.30;
+
 /// A carried structure's outer bound. [`rolled_bundle_parts`] fills it with the same roll
 /// and two straps used by the world drop, so a tent under the arm does not read as another
 /// stackable cube.
@@ -1143,11 +1183,8 @@ fn blade_sections() -> [BladeSection; 3] {
 
 /// The section the blade has at a given height, interpolated along the loft.
 ///
-/// **Test-only, and it is about to stop being.** It answered where a rust mark sat before
-/// the oxide became a livery; the second half of #417 subdivides the blade and needs the
-/// section at every ring, which is this. Until then the loft walks the three sections
-/// directly and the only readers are the tests that measure it.
-#[cfg(test)]
+/// Read by [`blade_rings`], so a ring anywhere along a subdivided blade is the section the
+/// blade actually has there rather than the one it has at the guard.
 fn blade_at(y: f32) -> BladeSection {
     let [root, shoulder, tip] = blade_sections();
     let (lower, upper) = if y <= shoulder.y {
@@ -1172,8 +1209,8 @@ fn blade_at(y: f32) -> BladeSection {
 /// **Test-only, and deliberately not what the loft is built from.** The loft walks the
 /// hexagon's corners and interpolates along its straight sides, which *is* this function by
 /// another route; keeping the closed form beside it gives
-/// [`every_blade_vertex_sits_on_the_bevel_it_is_specified_by`] a second opinion to measure
-/// the built vertices against rather than re-deriving the arithmetic that placed them.
+/// [`no_pit_leaves_the_blades_envelope`] a second opinion to measure the displaced vertices
+/// against rather than re-deriving the arithmetic that placed them.
 #[cfg(test)]
 fn blade_surface(section: BladeSection, z: f32) -> f32 {
     let ridge = section.half_width * BLADE_RIDGE_FRACTION;
@@ -1202,54 +1239,126 @@ pub(super) fn sword_mesh(length: f32) -> Mesh {
     sword_with(length, None)
 }
 
-/// The blade, lofted through its sections and dressed in whatever livery it wears.
+/// One ring of the lofted blade: where it sits, and how far along the blade that is.
 ///
-/// **A blade with no livery is today's blade, to the vertex.** The loft is unchanged — the
-/// same two spans through the same three sections — and what a livery decides here is where
-/// the surface is read from: the field's own coordinates, or the neutral band. That is what
-/// keeps the iron sword the same sword while it shares [`ItemShape::Blade`] with the rusty
-/// one, and [`the_iron_sword_is_the_blade_it_was_before_the_livery`] measures it.
+/// `along` runs 0 at the root cap to 1 at the tip and is what [`livery::field`] is asked
+/// about, so it is carried beside the section rather than recomputed at each of the six
+/// faces.
+#[derive(Debug, Clone, Copy)]
+struct BladeRing {
+    section: BladeSection,
+    along: f32,
+}
+
+/// The rings the blade is lofted through, at the resolution one livery asks for.
 ///
-/// **The silhouette is the half this does not touch.** Corrosion eats metal rather than
-/// sitting on top of it, so the same field has to displace these vertices as well as tint
-/// them — which needs a blade with vertices to displace, and this one has twelve quads. The
-/// subdivision and the pitting are the second half of #417 and arrive in their own pull
-/// request, against the field this one establishes.
-fn blade_loft(livery: Option<Livery>) -> Mesh {
+/// **The shoulder always lands on a ring**, whatever the step counts are, because the two
+/// spans are stepped separately rather than the whole blade being divided evenly. A ring
+/// that straddled the shoulder would cut the corner off the waist, which is the one crease
+/// in this shape a player can see.
+fn blade_rings(steps_root: u32, steps_point: u32) -> Vec<BladeRing> {
     let sections = blade_sections();
     let (root, tip) = (sections[0].y, sections[2].y);
-    let along = |y: f32| (y - root) / (tip - root);
+    let span = tip - root;
+    let mut rings = Vec::with_capacity((steps_root + steps_point + 1) as usize);
+    let mut push = |y: f32| {
+        rings.push(BladeRing {
+            section: blade_at(y),
+            along: (y - root) / span,
+        });
+    };
+    for step in 0..=steps_root {
+        push(root + (sections[1].y - root) * step as f32 / steps_root as f32);
+    }
+    for step in 1..=steps_point {
+        push(sections[1].y + (tip - sections[1].y) * step as f32 / steps_point as f32);
+    }
+    rings
+}
+
+/// One ring's perimeter, subdivided and eaten into by the livery it wears.
+///
+/// Answers the positions and the coordinate around the perimeter each of them carries. The
+/// coordinate runs to exactly 1.0 at the seam rather than wrapping to 0, so the image is
+/// walked once across the whole blade; the *positions* wrap, which is why the two are
+/// separate arrays rather than one.
+fn ring_perimeter(ring: BladeRing, steps: u32, livery: Option<Livery>) -> (Vec<Vec3>, Vec<f32>) {
+    let corners = ring.section.perimeter();
+    let count = corners.len() as u32 * steps;
+    let mut positions = Vec::with_capacity(count as usize);
+    let mut around = Vec::with_capacity(count as usize + 1);
+    for face in 0..corners.len() {
+        let next = (face + 1) % corners.len();
+        for step in 0..steps {
+            let fraction = step as f32 / steps as f32;
+            let mut point = corners[face].lerp(corners[next], fraction);
+            let at = (face as u32 * steps + step) as f32 / count as f32;
+            if let Some(livery) = livery {
+                // **In `x` alone**, which is what keeps the outline the outline: the two
+                // corners that sit on the blade's edges have no `x` to lose, so a pit can
+                // only ever eat through a flat. See [`PIT_DEPTH`].
+                point.x *= 1.0 - PIT_DEPTH * livery::field(livery, at, ring.along);
+            }
+            positions.push(point);
+            around.push(at);
+        }
+    }
+    around.push(1.0);
+    (positions, around)
+}
+
+/// The blade, lofted through its rings and dressed in whatever livery it wears.
+///
+/// **A blade with no livery is today's blade, to the vertex.** One step per span and one
+/// step per face is the two-span, six-face loft this file drew before liveries existed, and
+/// the coordinates it carries are the neutral band's — so an iron sword sampled through a
+/// material that carries the rust image is the iron sword it always was. That property is
+/// why the subdivision is reached through the livery rather than through an item id, and
+/// [`the_iron_sword_is_the_blade_it_was_before_the_livery`] measures it.
+fn blade_loft(livery: Option<Livery>) -> Mesh {
+    let (steps_root, steps_point, steps_around) = match livery {
+        Some(_) => (BLADE_STEPS_ROOT, BLADE_STEPS_POINT, BLADE_STEPS_AROUND),
+        None => (1, 1, 1),
+    };
+    let rings = blade_rings(steps_root, steps_point);
 
     let mut build = MeshBuild::default();
-    for pair in sections.windows(2) {
-        let [lower, upper] = pair else {
+    let mut lower = ring_perimeter(rings[0], steps_around, livery);
+    for pair in rings.windows(2) {
+        let [low_ring, high_ring] = pair else {
             unreachable!("windows(2) yields pairs")
         };
-        let low = lower.perimeter();
-        let high = upper.perimeter();
-        // The coordinate runs to exactly 1.0 at the seam rather than wrapping to 0, so the
-        // image is walked once across the whole blade; the *positions* wrap, which is why
-        // the corner index and the coordinate are computed separately.
-        let uv = |corner: usize, section: BladeSection| match livery {
-            Some(_) => livery::blade_uv(corner as f32 / low.len() as f32, along(section.y)),
+        let upper = ring_perimeter(*high_ring, steps_around, livery);
+        let uv = |at: f32, along: f32| match livery {
+            Some(_) => livery::blade_uv(at, along),
             None => livery::neutral_uv(),
         };
-        for corner in 0..low.len() {
-            let next = (corner + 1) % low.len();
+        let sides = lower.0.len();
+        for corner in 0..sides {
+            let next = (corner + 1) % sides;
             build.quad(
-                [low[corner], low[next], high[next], high[corner]],
                 [
-                    uv(corner, *lower),
-                    uv(corner + 1, *lower),
-                    uv(corner + 1, *upper),
-                    uv(corner, *upper),
+                    lower.0[corner],
+                    lower.0[next],
+                    upper.0[next],
+                    upper.0[corner],
+                ],
+                [
+                    uv(lower.1[corner], low_ring.along),
+                    uv(lower.1[corner + 1], low_ring.along),
+                    uv(upper.1[corner + 1], high_ring.along),
+                    uv(upper.1[corner], high_ring.along),
                 ],
             );
         }
+        lower = upper;
     }
 
     // The two ends. The root's winding is reversed because its face looks the other way,
     // and a cap wound like the tip's would be culled from outside and visible from within.
+    // They stay the section's own six corners whatever the loft is subdivided to: a cap
+    // nobody sees has nothing to gain from being a fan of forty.
+    let sections = blade_sections();
     let mut root_cap = sections[0].perimeter();
     root_cap.reverse();
     build.fan(root_cap, Vec3::NEG_Y);
@@ -2466,14 +2575,9 @@ mod tests {
              somewhere the blade is not"
         );
 
-        // **The same vertices, deliberately.** This half of #417 moves the oxide off the
-        // geometry entirely: fourteen boxes of mark geometry are gone and nothing has
-        // replaced them yet, so a rusty blade and a plain one are one shape that reads two
-        // surfaces. The second half is what gives the liveried blade vertices to pit with.
-        assert_eq!(
-            rusted.count_vertices(),
-            plain.count_vertices(),
-            "the two blades are different meshes, which this half does not do"
+        assert!(
+            rusted.count_vertices() > plain.count_vertices(),
+            "the rusty blade is not subdivided, so it has nowhere to pit"
         );
     }
 
@@ -2835,34 +2939,68 @@ mod tests {
         }
     }
 
-    /// **Every vertex of the lofted blade sits exactly on the bevel the blade is specified
-    /// by**, read from [`blade_surface`]'s closed form rather than from the arithmetic that
-    /// placed it — the same shape by two routes, which is what makes this a measurement.
+    /// **No pit leaves the blade the blade already was.**
     ///
-    /// **It is here because it is about to be load-bearing.** The second half of #417
-    /// displaces these vertices inward where the livery's field is strongest, and what has
-    /// to hold then is that no displaced vertex leaves this envelope — a blade whose rust
-    /// stands *proud* of it is the fourteen boxes again with more triangles.
+    /// This is what `every_blade_vertex_sits_on_the_bevel_it_is_specified_by` was pinning
+    /// the un-displaced case of, and before that what
+    /// `every_rust_mark_is_bedded_into_the_blade_it_freckles` measured about fourteen boxes.
+    /// A box laid on a surface that tilts away from it can float clear at one end or come
+    /// through the other face; displacement can do neither, but it can eat *outward*, and a
+    /// blade whose rust stands proud of it is the fourteen boxes again with more triangles.
+    ///
+    /// So: every vertex inside the envelope the un-pitted blade has, measured against
+    /// [`blade_surface`]'s closed form rather than against the arithmetic that placed it,
+    /// and no pit deeper than [`PIT_DEPTH`] of the local half-thickness. The outline is
+    /// checked too, because "eats through the flats, never into the edges" is the claim that
+    /// makes the first property arithmetic rather than a hope.
     #[test]
-    fn every_blade_vertex_sits_on_the_bevel_it_is_specified_by() {
+    fn no_pit_leaves_the_blades_envelope() {
+        let pitted = blade_loft(Some(Livery::Rust));
+        let smooth = blade_loft(None);
+
         let sections = blade_sections();
         let (root, tip) = (sections[0].y, sections[2].y);
-        for [x, y, z] in positions(&blade_loft(Some(Livery::Rust))) {
+        let mut deepest = 0.0_f32;
+        for [x, y, z] in positions(&pitted) {
             let section = blade_at(y.clamp(root, tip));
             let surface = blade_surface(section, z);
             assert!(
-                (x.abs() - surface).abs() < 1e-6,
-                "a vertex stands {} from the mid-plane where the blade's own surface is at \
-                 {surface}",
+                x.abs() <= surface + 1e-6,
+                "a vertex reaches {} from the mid-plane where the blade's own surface is at \
+                 {surface}, so a pit stands proud of the steel it is meant to eat into",
                 x.abs()
             );
             assert!(
                 z.abs() <= section.half_width + 1e-6,
-                "a vertex reaches {} across a blade half {} wide",
+                "a vertex reaches {} across a blade half {} wide, so a pit has bitten into \
+                 the outline",
                 z.abs(),
                 section.half_width
             );
+            deepest = deepest.max(surface - x.abs());
         }
+
+        let half_thickness = BLADE_THICKNESS / 2.0;
+        assert!(
+            deepest <= half_thickness * PIT_DEPTH + 1e-6,
+            "the deepest pit takes {deepest} out of a {half_thickness} half-thickness, past \
+             the {PIT_DEPTH} this blade is allowed to lose"
+        );
+        assert!(
+            deepest > half_thickness * PIT_DEPTH * 0.5,
+            "the deepest pit is {deepest}, which is barely a dent — the field and the \
+             subdivision have stopped meeting"
+        );
+
+        // And the pitting is what the extra vertices are *for*. A subdivided blade that
+        // displaced nothing would satisfy every clause above.
+        assert!(
+            pitted.count_vertices() > smooth.count_vertices() * 4,
+            "the pitted blade is {} vertices against the smooth blade's {}, which is not a \
+             subdivision",
+            pitted.count_vertices(),
+            smooth.count_vertices()
+        );
     }
 
     /// **The iron sword is the sword it was**, which is the property that keeps one shared
@@ -2897,22 +3035,14 @@ mod tests {
             "the iron sword samples the livery image outside its white row"
         );
 
-        // The rusty sword is the same shape and the same geometry — for now. This half of
-        // #417 moves the oxide into an image and touches no positions at all, so what tells
-        // the two blades apart here is where they read their surface from and nothing else.
-        // The second half subdivides and pits the liveried one, and this is the assertion
-        // that has to change when it does.
+        // The rusty sword is the same shape and a different blade, which is what makes the
+        // clause above a measurement rather than a tautology about `sword_mesh`.
         let rusty = item_mesh(ITEM_RUSTY_SWORD, ItemShape::Blade);
         assert_eq!(items::item_shape(ITEM_RUSTY_SWORD), ItemShape::Blade);
-        assert_eq!(
+        assert_ne!(
             positions(&rusty),
             positions(&iron),
-            "the two blades have stopped being one shape, which this half does not do"
-        );
-        assert_ne!(
-            uvs(&rusty),
-            uvs(&iron),
-            "both blades read the same texels, so the livery decides nothing"
+            "both blades are the same mesh, so the livery decides nothing about the shape"
         );
         // Its own steel, too. The livery is a multiplier over whatever `player/items.rs`
         // says an item presents as, so a change that resolved both blades to one colour
