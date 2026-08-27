@@ -416,6 +416,7 @@ jobs:
           bash scripts/test/auth-dir-docs.test.sh
           bash scripts/test/helpers-selector-docs.test.sh
           bash scripts/test/gate-tables.test.sh
+          bash scripts/test/integration-verify.test.sh
           bash scripts/test/schema-bindings-drift.test.sh
           bash scripts/test/actions-hardening.test.sh
           # The reviewer script's own tests. They stub `github`/`openai`, so there
