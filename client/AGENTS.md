@@ -796,7 +796,11 @@ nowhere else to add half of one.
 
 **The held view model is a hand-and-item composition, not an exclusive choice between them.**
 `hands.rs` puts the same fist at the origin for an empty hand and every `ItemShape`, then places a
-block, material or bundle on its knuckles and a blade or tool through its grip. The two are merged
+block, material or bundle on top of it and a blade or tool through its grip. That fist is **one
+cube** since #396: the view model's material is `unlit`, so relief on a box 24 millimetres across
+is invisible by construction, and three iterations of modelled digits were deleted for costing
+geometry and buying nothing. What reads as a hand is the silhouette — a block at the end of a
+narrower wrist. The two are merged
 into one mesh and carry absolute vertex colours — skin from the local player's `Appearance`, item
 from this table — under one white material. One stable mesh asset is rebuilt in place only when
 the selected item or skin colour changes, so arbitrary server colours cannot grow a cache and all
