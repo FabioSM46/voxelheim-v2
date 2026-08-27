@@ -685,6 +685,37 @@ fn the_local_body_holds_the_authoritative_selected_item_at_world_scale() {
         drawn.mesh, drop_mesh,
         "the body item is exactly the drop-scale world asset, not the camera-space view model"
     );
+
+    // **And the same material, which is what puts the third-person fist on the same livery
+    // as the ground.** The two surfaces are one call — `BodyHeldAssets::presentation` reaches
+    // `DropVisuals::material_for` — and "it follows automatically" is a claim, not a
+    // measurement, so #418 measures it. The texture is asserted present because a shared
+    // material carrying no image would satisfy the equality above and draw clean steel.
+    let drop_material = {
+        let world = app.world_mut();
+        let mut materials = world
+            .remove_resource::<Assets<StandardMaterial>>()
+            .expect("the material store");
+        let handle = world
+            .resource_mut::<drops::DropVisuals>()
+            .material_for(combat::ITEM_RUSTY_SWORD, &mut materials);
+        let livery = materials
+            .get(&handle)
+            .expect("the drop's material")
+            .base_color_texture
+            .clone();
+        world.insert_resource(materials);
+        (handle, livery)
+    };
+    assert_eq!(
+        drawn.material, drop_material.0,
+        "the body item mints its own material, so the fist and the ground can disagree"
+    );
+    assert!(
+        drop_material.1.is_some(),
+        "the rusty sword's world material carries no livery image, so the body and the \
+         ground both draw clean steel"
+    );
     let mesh = app
         .world()
         .resource::<Assets<Mesh>>()

@@ -2020,6 +2020,32 @@ Recorded here so the next reader does not mistake them for oversights:
   The general rule this is the second instance of: **a claim about somebody else's API is a claim
   about the world, and the ones that cost most are the ones a green suite cannot contradict.**
   Read the function before writing "idempotent" in a doc comment.
+
+  **Four surfaces draw one item, and since #418 they cannot disagree.** The rust used to be
+  reached by `if item_id == ITEM_RUSTY_SWORD` inside `hands::item_mesh` and nowhere else, so the
+  hand had oxide while the ground drop, the third-person fist and the inventory cell drew clean
+  steel — a divergence that had always existed and that nothing measured. Agreement is *handle
+  identity* now: `all_four_surfaces_that_draw_a_sword_sample_one_image` reads the handle off the
+  running view model's material, off `DropVisuals::material_for`, and off a real `ImageNode`
+  component, and requires all three to be the one the `Liveries` resource minted.
+
+  **`DropVisuals` is keyed on `(ItemShape, Option<Livery>)`, both halves of it.** The material
+  half needed the livery because a livery arrives as `base_color_texture`; the **mesh** half
+  needed it too, because a livery decides geometry — the rusty blade is pitted and the iron one
+  is not, so the two stopped being one mesh. That is a widening of the existing key rather than
+  an item-id exception smuggled into a shape-keyed cache: two items sharing a shape *and* a
+  livery still share one mesh, which is asserted, because sharing is what the cache is for. The
+  liveried entries are built from the pairs `items::liveried_shapes` reports rather than from the
+  cross product, so the cache holds exactly what can be drawn.
+
+  **The cell is the surface that could never have joined a geometric answer.** It has no vertices
+  to tint — a picture there is `bevy_ui` rectangles — but `ImageNode` carries a handle, a `color`
+  that multiplies it and a `rect` selecting a region, which is the three things a livery needs.
+  One `IconPart` flag says which rectangles sample it, so a blade's edge wears the rust while its
+  guard and grip do not, and the drawing stays keyed on `ItemShape` exactly as it was. The `rect`
+  is `livery::field_rect`, which takes the neutral row off: a mesh points its vertices past that
+  row and never sees it, while an `ImageNode` with no rectangle would draw the whole image and
+  put a white line across every blade.
 - **The list is a list and not a browser.** No favourites, no sorting, no player counts and no
   ping column; "online" is the account service saying it heard from that server recently, not a
   probe, and the screen says as much rather than implying reachability it did not measure. The
