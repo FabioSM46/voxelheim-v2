@@ -33,8 +33,8 @@ use crate::net::{InventoryStack, Session, StructureKind};
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
     ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
-    InventoryClickKind, PickedStack, RECIPES, Recipe, RecipeCategory, equipment_item_fits,
-    item_label,
+    InventoryClickKind, Liveries, PickedStack, RECIPES, Recipe, RecipeCategory,
+    equipment_item_fits, item_label,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -928,6 +928,8 @@ fn refresh_inventory_cells(
     mut counts: Query<(&mut Text, &mut BackgroundColor), With<SlotCount>>,
     mut icons: Query<&mut DrawnIcon>,
     mut captions: Query<(&EquipmentCaption, &mut Visibility)>,
+    // Optional, because the UI stands up headlessly without the player plugin that owns it.
+    liveries: Option<Res<Liveries>>,
 ) {
     let (Some(session), Some(inventory), Some(picked)) =
         (state.session, state.inventory, state.picked)
@@ -953,7 +955,14 @@ fn refresh_inventory_cells(
         if *border != next {
             *border = next;
         }
-        refresh_cell_contents(&mut commands, children, &style, &mut counts, &mut icons);
+        refresh_cell_contents(
+            &mut commands,
+            children,
+            &style,
+            &mut counts,
+            &mut icons,
+            liveries.as_deref(),
+        );
         for child in children {
             if let Ok((caption, mut visibility)) = captions.get_mut(*child) {
                 debug_assert!(!caption.0.is_empty());

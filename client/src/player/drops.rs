@@ -12,11 +12,13 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_guard_base, sword_mesh};
+use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_guard_base, sword_mesh_with};
 #[cfg(test)]
 use super::hands::{sword_blade_span, sword_grip_centre, sword_guard_span};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
+use super::items::{Livery, item_livery, liveried_shapes};
+use super::livery::Liveries;
 use super::merge_all;
 use super::{InputMode, bundle_strap_linear_rgba, rolled_bundle_parts};
 use crate::net::Session;
@@ -37,7 +39,7 @@ const BOB_RADIANS_PER_SECOND: f32 = TAU / 2.0;
 /// How long a dropped sword is, in [`DROP_EDGE`]s, tip to pommel.
 ///
 /// Unchanged from when the drop *was* one box, so nothing about how far a sword on the
-/// ground reaches or how it tumbles moves — [`sword_mesh`] fills the same length with a
+/// ground reaches or how it tumbles moves — [`sword_mesh_with`] fills the same length with a
 /// weapon.
 const BLADE_DROP_LENGTH: f32 = 1.25;
 
@@ -87,6 +89,22 @@ const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 /// Modes whose UI owns the view instead of the 3D world.
 const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
 
+/// What decides which mesh a drop is drawn from.
+///
+/// **A shape *and* a livery**, because a livery decides geometry as well as colour: the rusty
+/// blade is pitted and the iron one is not, so they stopped being one mesh in #417. Named
+/// rather than spelled out at each of its four uses, and the pair is deliberately not an item
+/// id — two items sharing both halves still share one mesh, which is what the cache is for.
+type MeshKey = (ItemShape, Option<Livery>);
+
+/// What decides which material a drop is drawn with.
+///
+/// The resolved colour, as it always was, plus the livery — which is a material fact, since it
+/// arrives as `base_color_texture`. Keyed on the colour rather than on the item so that every
+/// unknown id shares one placeholder material instead of letting a peer grow this resource by
+/// walking 65,535 ids over time.
+type MaterialKey = ([f32; 4], Option<Livery>);
+
 /// The shared world-space meshes and the small set of item colours created so far.
 ///
 /// Materials are keyed by their actual colour rather than by item id. Every
@@ -94,13 +112,26 @@ const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loo
 /// grow this resource by walking through all 65,535 unknown ids over time.
 #[derive(Resource, Debug)]
 pub(super) struct DropVisuals {
-    /// One mesh per [`ItemShape`], shared by every drop and local body presenting as that
-    /// shape — the reason a hundred dropped stones and one carried stone still cost one
+    /// One mesh per shape **and livery**, shared by every drop and local body presenting as
+    /// that pair — the reason a hundred dropped stones and one carried stone still cost one
     /// mesh rather than a hundred and one.
-    shapes: Vec<(ItemShape, Handle<Mesh>)>,
+    ///
+    /// **The livery is in the key because it decides geometry, not only colour.** A liveried
+    /// blade is lofted through 31 rings and pitted where the field is strongest; an
+    /// un-liveried one is the smooth three-section loft. They are two meshes, and a cache
+    /// that could not tell them apart would hand one sword the other's silhouette. This is a
+    /// widening of the existing key rather than an item-id exception smuggled into it: two
+    /// items sharing a shape and a livery still share one mesh, which is what the cache is
+    /// for.
+    shapes: Vec<(MeshKey, Handle<Mesh>)>,
     /// The second shared mesh every bundle draws over its item-coloured roll.
     bundle_straps: Handle<Mesh>,
-    materials: Vec<([f32; 4], Handle<StandardMaterial>)>,
+    /// One material per colour **and livery**. The livery is a material fact — it arrives as
+    /// `base_color_texture` — so this key needed the same widening for the same reason.
+    materials: Vec<(MaterialKey, Handle<StandardMaterial>)>,
+    /// The one image every liveried surface samples, held here so `material_for` needs no
+    /// second argument and cannot be handed a different one.
+    livery_image: Handle<Image>,
 }
 
 impl DropVisuals {
@@ -111,17 +142,18 @@ impl DropVisuals {
     /// row answers [`ItemShape::Material`], which that function documents as the least
     /// wrong guess.
     pub(super) fn mesh_for(&self, item_id: u16) -> Handle<Mesh> {
-        let shape = item_shape(item_id);
+        let key = (item_shape(item_id), item_livery(item_id));
         self.shapes
             .iter()
-            .find(|(candidate, _)| *candidate == shape)
+            .find(|(candidate, _)| *candidate == key)
             .map(|(_, mesh)| mesh.clone())
             .unwrap_or_else(|| {
-                // Unreachable: `create_visuals` builds one entry per `ItemShape::ALL`, and
-                // both matches on that enum are wildcard-free. Answered rather than
+                // Unreachable: `create_visuals` builds one entry per `ItemShape::ALL` with no
+                // livery, and one more for every pair `items::liveried_shapes` reports — so
+                // every pair an item can present as has an entry. Answered rather than
                 // unwrapped, because a drop is the last thing that should take the window
-                // down — and an invisible pelt is a smaller bug than a crash.
-                error!("no drop mesh for {shape:?}");
+                // down, and an invisible pelt is a smaller bug than a crash.
+                error!("no drop mesh for {key:?}");
                 Handle::default()
             })
     }
@@ -144,18 +176,20 @@ impl DropVisuals {
         } else {
             item_linear_rgba(item_id)
         };
-        self.material_for_colour(colour, materials)
+        self.material_for_colour(colour, item_livery(item_id), materials)
     }
 
     fn material_for_colour(
         &mut self,
         colour: [f32; 4],
+        livery: Option<Livery>,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
+        let key = (colour, livery);
         if let Some((_, material)) = self
             .materials
             .iter()
-            .find(|(candidate, _)| *candidate == colour)
+            .find(|(candidate, _)| *candidate == key)
         {
             return material.clone();
         }
@@ -163,10 +197,16 @@ impl DropVisuals {
         let [r, g, b, a] = colour;
         let material = materials.add(StandardMaterial {
             base_color: Color::linear_rgba(r, g, b, a),
+            // **The same image the hand and the cell sample**, so agreement between the
+            // surfaces is handle identity rather than a convention. An item with no livery
+            // gets no texture at all and is the material it always was — the neutral band
+            // exists for the meshes that share a material with a liveried one, and nothing
+            // shares this one.
+            base_color_texture: livery.map(|_| self.livery_image.clone()),
             perceptual_roughness: 0.85,
             ..default()
         });
-        self.materials.push((colour, material.clone()));
+        self.materials.push((key, material.clone()));
         material
     }
 }
@@ -195,23 +235,40 @@ pub(super) struct DropAssets<'w> {
     materials: ResMut<'w, Assets<StandardMaterial>>,
 }
 
-pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+pub(super) fn create_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    liveries: Res<Liveries>,
+) {
     let (_, bundle_straps) = rolled_bundle_parts(BUNDLE_DROP_SIZE);
+    let build = |shape: ItemShape, livery: Option<Livery>| {
+        if shape == ItemShape::Bundle {
+            rolled_bundle_parts(BUNDLE_DROP_SIZE).0
+        } else {
+            drop_mesh(shape, livery)
+        }
+    };
+    // Built from `ItemShape::ALL`, so a fifth shape gets a drop mesh by existing — and then
+    // from the table, so every shape-and-livery pair an item actually presents as gets one
+    // too. **Not the cross product**: a mesh for a combination no item is would be minted,
+    // never drawn, and would make the count of entries say nothing about the count of things
+    // that can be drawn.
+    let mut shapes: Vec<(MeshKey, Handle<Mesh>)> = ItemShape::ALL
+        .into_iter()
+        .map(|shape| ((shape, None), meshes.add(build(shape, None))))
+        .collect();
+    for (shape, livery) in liveried_shapes() {
+        shapes.push((
+            (shape, Some(livery)),
+            meshes.add(build(shape, Some(livery))),
+        ));
+    }
+
     commands.insert_resource(DropVisuals {
-        // Built from `ItemShape::ALL`, so a fifth shape gets a drop mesh by existing.
-        shapes: ItemShape::ALL
-            .into_iter()
-            .map(|shape| {
-                let mesh = if shape == ItemShape::Bundle {
-                    rolled_bundle_parts(BUNDLE_DROP_SIZE).0
-                } else {
-                    drop_mesh(shape)
-                };
-                (shape, meshes.add(mesh))
-            })
-            .collect(),
+        shapes,
         bundle_straps: meshes.add(bundle_straps),
         materials: Vec::new(),
+        livery_image: liveries.material_image(),
     });
 }
 
@@ -226,14 +283,19 @@ pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<M
 /// **[`ItemShape::Blade`] is the one exception, and it proves the rule rather than breaking
 /// it** (#204). A sword is a gladius — a bevelled blade tapering to a point, a cross guard,
 /// a grip and a pommel — and *which weapon it is* is not a per-surface retuning any more
-/// than which colour it is. So the arm calls [`sword_mesh`] with a drop-scale length
+/// than which colour it is. So the arm calls [`sword_mesh_with`] with a drop-scale length
 /// and gets the same weapon at a different size. Nothing is shared but the shape: this
 /// module still mints its own asset, at its own scale, with its own materials, and the four
 /// other arms below still author their own geometry.
 ///
 /// Wildcard-free, so a fifth [`ItemShape`] does not compile until it can be dropped — the
 /// same guarantee `ui::icon::parts` and `hands::item_mesh` already give.
-fn drop_mesh(shape: ItemShape) -> Mesh {
+///
+/// **The livery reaches the blade and nothing else**, which is not an exception so much as
+/// where the only liveried geometry is: a livery is a surface an item's *material* wears, and
+/// only [`sword_mesh_with`] changes shape because of one. Every other arm ignores it, which
+/// is why they take no argument and why a second liveried shape would have to say so here.
+fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
     match shape {
         // A voxel on the ground is a small voxel.
         ItemShape::Block => Mesh::from(Cuboid::from_size(Vec3::splat(DROP_EDGE))),
@@ -242,7 +304,7 @@ fn drop_mesh(shape: ItemShape) -> Mesh {
         // Long, thin, and lying at an angle — see `spin_and_bob`, which is what turns it.
         // The length is what it was when this was one box, so nothing about how far a
         // dropped sword reaches or how it tumbles moves.
-        ItemShape::Blade => sword_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
+        ItemShape::Blade => sword_mesh_with(DROP_EDGE * BLADE_DROP_LENGTH, livery),
         // A carried structure is packed gear: one horizontal canvas roll with two raised
         // collars. The three structures share this silhouette and their item-table colour
         // tells them apart. `bundle_mesh` fills the old box's exact bounds.
@@ -396,7 +458,10 @@ fn spawn_drop(
             Transform::default(),
         ));
         if item_shape(state.item_id) == ItemShape::Bundle {
-            let strap_material = visuals.material_for_colour(bundle_strap_linear_rgba(), materials);
+            // A strap wears no livery of its own — it is the one part of a bundle whose
+            // colour is not the item's.
+            let strap_material =
+                visuals.material_for_colour(bundle_strap_linear_rgba(), None, materials);
             parent.spawn((
                 DropVisual {
                     owner,
@@ -532,6 +597,215 @@ mod tests {
         *query.single(world).expect("one drop anchor")
     }
 
+    /// **The four surfaces that draw one sword resolve the same `Handle<Image>`.**
+    ///
+    /// This is the criterion the whole of #418 exists for. Before it, the rust was reached by
+    /// `if item_id == ITEM_RUSTY_SWORD` inside `hands::item_mesh` and nowhere else: the
+    /// ground drop, the third-person fist and the inventory cell each drew clean steel, the
+    /// four surfaces already disagreed, and **nothing measured it**. Choosing an asset over a
+    /// per-vertex patina is what makes agreement assertable in one line — handle identity
+    /// rather than a convention somebody maintains.
+    ///
+    /// **Read off the running app**, not from a generator called four times: the hand's
+    /// handle comes off the real view-model entity's material, the cell's off a real
+    /// `ImageNode` component, and the ground and the body share `DropVisuals::material_for`
+    /// because they are literally the same call — `refresh_body_held_item` reaches it through
+    /// `BodyHeldAssets::presentation`, which
+    /// `the_local_body_holds_the_authoritative_selected_item_at_world_scale`
+    /// pins.
+    #[test]
+    fn all_four_surfaces_that_draw_a_sword_sample_one_image() {
+        let mut app = headless_player();
+        app.update();
+
+        // 1. The first-person hand. Its material is shared by the fist, the arm and whatever
+        //    is held, which is why the neutral band exists at all.
+        let world = app.world_mut();
+        let mut view_models =
+            world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<crate::player::hands::HeldItem>>();
+        let hand_material = view_models
+            .iter(world)
+            .next()
+            .expect("the view model has a material")
+            .0
+            .clone();
+        let hand = world
+            .resource::<Assets<StandardMaterial>>()
+            .get(&hand_material)
+            .expect("the hand's material")
+            .base_color_texture
+            .clone()
+            .expect("the hand's material carries the livery image");
+
+        // 2 and 3. The ground drop and the third-person body, which are one call.
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let drop_material = world
+            .resource_mut::<DropVisuals>()
+            .material_for(crate::player::combat::ITEM_RUSTY_SWORD, &mut materials);
+        let drop = materials
+            .get(&drop_material)
+            .expect("the drop's material")
+            .base_color_texture
+            .clone()
+            .expect("a liveried drop's material carries the livery image");
+        world.insert_resource(materials);
+
+        // 4. The inventory cell, read off a real `ImageNode` rather than off the resource.
+        let liveries = world.resource::<Liveries>().clone();
+        let icon = crate::ui::icon::StackIcon {
+            shape: item_shape(crate::player::combat::ITEM_RUSTY_SWORD),
+            colour: Color::WHITE,
+            livery: item_livery(crate::player::combat::ITEM_RUSTY_SWORD),
+        };
+        let host = world.spawn_empty().id();
+        world.commands().entity(host).with_children(|host| {
+            crate::ui::icon::spawn(host, icon, Some(&liveries));
+        });
+        world.flush();
+        let mut images = world.query::<&ImageNode>();
+        let cell: Vec<Handle<Image>> = images.iter(world).map(|node| node.image.clone()).collect();
+        assert_eq!(
+            cell.len(),
+            1,
+            "the cell drew {} image nodes, and a blade has one liveried rectangle",
+            cell.len()
+        );
+
+        assert_eq!(hand, drop, "the hand and the drop sample different images");
+        assert_eq!(
+            drop, cell[0],
+            "the drop and the cell sample different images"
+        );
+    }
+
+    /// **An item with no livery draws exactly as it did**, in every surface — which is the
+    /// regression this change could most easily cause, because it is a whole inventory drawn
+    /// wrong rather than one sword.
+    ///
+    /// Swept over every item the client knows rather than over the sword, and the `None` case
+    /// is the one that matters here: no texture on its material, no image node in its cell,
+    /// and the same mesh it would have had before the key was widened.
+    #[test]
+    fn an_item_with_no_livery_is_untouched_on_every_surface() {
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let liveries = world.resource::<Liveries>().clone();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+
+        let mut plain = 0;
+        for item_id in crate::player::known_item_ids() {
+            let livery = item_livery(item_id);
+            let material = world
+                .resource_mut::<DropVisuals>()
+                .material_for(item_id, &mut materials);
+            let texture = materials
+                .get(&material)
+                .expect("every item resolves a material")
+                .base_color_texture
+                .is_some();
+            assert_eq!(
+                texture,
+                livery.is_some(),
+                "item {item_id} has a livery = {}, and its drop material carries a texture = \
+                 {texture}",
+                livery.is_some()
+            );
+
+            let icon = crate::ui::icon::StackIcon {
+                shape: item_shape(item_id),
+                colour: Color::WHITE,
+                livery,
+            };
+            let host = world.spawn_empty().id();
+            world.commands().entity(host).with_children(|host| {
+                crate::ui::icon::spawn(host, icon, Some(&liveries));
+            });
+            world.flush();
+            let mut images = world.query::<&ImageNode>();
+            let drawn = images.iter(world).count();
+            assert_eq!(
+                drawn > 0,
+                livery.is_some(),
+                "item {item_id} has a livery = {} and its cell drew {drawn} image nodes",
+                livery.is_some()
+            );
+            world.entity_mut(host).despawn();
+            world.flush();
+
+            if livery.is_none() {
+                plain += 1;
+            }
+        }
+        world.insert_resource(materials);
+        assert!(
+            plain > 20,
+            "only {plain} items with no livery, so this sweeps nothing"
+        );
+    }
+
+    /// **The iron sword on the ground is the smooth blade and the rusty one is pitted**, which
+    /// is the pair the widened mesh key exists for.
+    ///
+    /// They share `ItemShape::Blade`, so a cache that could not tell them apart would hand one
+    /// of them the other's silhouette — and it would be the *shared* asset, so the body's fist
+    /// would be wrong in the same breath.
+    #[test]
+    fn the_two_blades_are_two_meshes_and_every_other_shape_is_still_one() {
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let visuals = world.resource::<DropVisuals>();
+        let rusty = visuals.mesh_for(crate::player::combat::ITEM_RUSTY_SWORD);
+        let iron = visuals.mesh_for(crate::player::crafting::ITEM_IRON_SWORD);
+        assert_ne!(
+            rusty, iron,
+            "both blades resolve one mesh, so the pitted and the smooth blade are the same drop"
+        );
+
+        let meshes = world.resource::<Assets<Mesh>>();
+        let count = |handle: &Handle<Mesh>| {
+            meshes
+                .get(handle)
+                .expect("a blade's drop mesh")
+                .count_vertices()
+        };
+        assert!(
+            count(&rusty) > count(&iron) * 4,
+            "the rusty blade is {} vertices against the iron blade's {}, which is not a \
+             subdivision",
+            count(&rusty),
+            count(&iron)
+        );
+
+        // And the widening did not turn the cache into one entry per item: every pair of
+        // items that shares a shape *and* a livery still shares one mesh, which is what a
+        // shape-keyed cache was for.
+        let visuals = world.resource::<DropVisuals>();
+        let mut shared = 0;
+        for left in crate::player::known_item_ids() {
+            for right in crate::player::known_item_ids() {
+                if left >= right {
+                    continue;
+                }
+                if (item_shape(left), item_livery(left)) != (item_shape(right), item_livery(right))
+                {
+                    continue;
+                }
+                shared += 1;
+                assert_eq!(
+                    visuals.mesh_for(left),
+                    visuals.mesh_for(right),
+                    "items {left} and {right} share a shape and a livery and not a mesh"
+                );
+            }
+        }
+        assert!(
+            shared > 10,
+            "only {shared} sharing pairs, so this sweeps nothing"
+        );
+    }
+
     #[test]
     fn two_drops_of_one_shape_spawn_at_quarter_block_scale_and_share_one_mesh() {
         // **Renamed from `..._two_quarter_block_cubes`, because they are not cubes any
@@ -618,7 +892,7 @@ mod tests {
                 .resource::<DropVisuals>()
                 .shapes
                 .iter()
-                .find(|(candidate, _)| *candidate == shape)
+                .find(|(candidate, _)| *candidate == (shape, None))
                 .map(|(_, mesh)| mesh.clone())
                 .unwrap_or_else(|| panic!("{shape:?} has no drop mesh"));
             let meshes = world.resource::<Assets<Mesh>>();
@@ -671,7 +945,7 @@ mod tests {
     /// list.
     #[test]
     fn a_bundle_is_a_strapped_roll_inside_the_old_bounds() {
-        let mesh = drop_mesh(ItemShape::Bundle);
+        let mesh = drop_mesh(ItemShape::Bundle, None);
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
@@ -826,7 +1100,7 @@ mod tests {
             .resource::<DropVisuals>()
             .shapes
             .iter()
-            .find(|(shape, _)| *shape == ItemShape::Blade)
+            .find(|(key, _)| *key == (ItemShape::Blade, None))
             .map(|(_, mesh)| mesh.clone())
             .expect("the blade has a drop mesh");
         let meshes = world.resource::<Assets<Mesh>>();

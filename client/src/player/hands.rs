@@ -1277,8 +1277,24 @@ fn wood_over(item_colour: [f32; 4]) -> Option<[f32; 4]> {
 /// asset, at its own size, with its own materials — it is the shape being one answer instead
 /// of two that somebody has to keep in step, which is exactly the relationship
 /// `player/items.rs` already has with its readers.
-pub(super) fn sword_mesh(length: f32) -> Mesh {
-    sword_with(length, None, None)
+/// **Test-only since #418**, and the reason is the point rather than an accident of
+/// visibility: every surface that draws a sword in the world now asks for it *by livery*,
+/// through [`sword_mesh_with`]. A caller that wanted "the sword" without saying which one
+/// would be the shape-keyed answer the four surfaces used to disagree through.
+#[cfg(test)]
+fn sword_mesh(length: f32) -> Mesh {
+    sword_mesh_with(length, None)
+}
+
+/// The same weapon at a drop's scale, wearing whatever livery its item does.
+///
+/// **The world's entry point, and it takes no item colour on purpose.** `drops.rs` caches one
+/// mesh per shape *and livery*, shared by every item that presents as that pair — so a tint
+/// divided out of one blade's steel would be right for that sword and quietly wrong for the
+/// next one to share the pair. See [`sword_with`], whose doc carries the whole of that
+/// reasoning, and `the_dropped_sword_gets_the_turned_grip_and_not_the_wood`.
+pub(super) fn sword_mesh_with(length: f32, livery: Option<Livery>) -> Mesh {
+    sword_with(length, livery, None)
 }
 
 /// One ring of the lofted blade: where it sits, and how far along the blade that is.

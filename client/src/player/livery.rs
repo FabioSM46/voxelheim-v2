@@ -149,6 +149,21 @@ fn rust_field(around: f32, along: f32) -> f32 {
     strongest.clamp(0.0, 1.0)
 }
 
+/// The region of the image one livery's field occupies, in texels.
+///
+/// **For `bevy_ui`, which samples a rectangle rather than a coordinate.** A mesh points its
+/// vertices at [`blade_uv`] and never sees the neutral band; an `ImageNode` draws the whole
+/// image unless told otherwise, so the cell would put the white row across the top of every
+/// blade it draws. This is that row taken off.
+pub(crate) fn field_rect() -> Rect {
+    Rect::new(
+        0.0,
+        NEUTRAL_ROWS as f32,
+        LIVERY_WIDTH as f32,
+        LIVERY_HEIGHT as f32,
+    )
+}
+
 /// The texture coordinate every vertex that wears no livery carries.
 ///
 /// The centre of a texel in the neutral band, so the nearest-neighbour sampler lands on
@@ -243,7 +258,7 @@ fn image_for(livery: Livery) -> Image {
 /// choosing an image over a patina: the surfaces that draw an item agree because they hold
 /// the same handle, not because somebody kept two generators in step.
 #[derive(Resource, Debug, Clone)]
-pub(super) struct Liveries {
+pub(crate) struct Liveries {
     rust: Handle<Image>,
 }
 
@@ -255,7 +270,7 @@ impl Liveries {
     /// holding a rusty one are one draw with one material, exactly as they were before.
     /// With more than one livery this becomes the choice `player/items.rs` names; today
     /// there is one image and every caller wants it.
-    pub(super) fn material_image(&self) -> Handle<Image> {
+    pub(crate) fn material_image(&self) -> Handle<Image> {
         self.rust.clone()
     }
 }

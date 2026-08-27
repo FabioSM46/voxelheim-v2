@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use super::{BUTTON, CELL_SIZE, FILLED_CELL, button_colour, icon, stack_style};
 use crate::net::{InventoryStack, Session};
-use crate::player::{InputMode, LootTakeClick, LootWindow, item_label};
+use crate::player::{InputMode, Liveries, LootTakeClick, LootWindow, item_label};
 
 const WIDTH: f32 = 430.0;
 
@@ -53,6 +53,8 @@ fn rebuild_window(
     window: Res<LootWindow>,
     roots: Query<Entity, With<LootRoot>>,
     mut commands: Commands,
+    // Optional, because the UI stands up headlessly without the player plugin that owns it.
+    liveries: Option<Res<Liveries>>,
 ) {
     if !window.is_changed() {
         return;
@@ -112,7 +114,7 @@ fn rebuild_window(
                     ))
                     .with_children(|host| {
                         if let Some(icon) = style.icon {
-                            icon::spawn(host, icon);
+                            icon::spawn(host, icon, liveries.as_deref());
                         }
                     });
                     row.spawn((

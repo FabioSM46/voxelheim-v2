@@ -9,7 +9,12 @@ mod health;
 mod hunger;
 
 mod hotbar;
-mod icon;
+/// **`pub(crate)` since #418, and only so one test can reach it.** The four surfaces that
+/// draw an item now agree by sharing a `Handle<Image>`, and the test that asserts that has to
+/// read a real `ImageNode` off a real cell in the same app as the hand and the drop — which
+/// puts it in `player`, on the other side of this boundary. Nothing outside the tests calls
+/// into here; the drawing is still reached through `stack_style` and `refresh_cell_contents`.
+pub(crate) mod icon;
 mod inventory;
 mod login;
 mod loot;
@@ -34,8 +39,8 @@ use crate::net::{
 };
 
 use crate::player::{
-    ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, SelfVitals, ViewMode,
-    item_linear_rgba, item_shape,
+    ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, Liveries, SelfVitals,
+    ViewMode, item_linear_rgba, item_livery, item_shape,
 };
 use crate::settings::{Control, Settings};
 
@@ -425,6 +430,7 @@ pub(super) fn stack_style(stack: Option<InventoryStack>) -> StackStyle {
         icon: Some(StackIcon {
             shape: item_shape(stack.item_id),
             colour: Color::linear_rgba(r, g, b, a),
+            livery: item_livery(stack.item_id),
         }),
         count: stack.count.to_string(),
     }
@@ -499,6 +505,7 @@ pub(super) fn refresh_cell_contents(
     style: &StackStyle,
     counts: &mut Query<(&mut Text, &mut BackgroundColor), With<SlotCount>>,
     icons: &mut Query<&mut icon::DrawnIcon>,
+    liveries: Option<&Liveries>,
 ) {
     for child in children {
         if let Ok((mut text, mut plate)) = counts.get_mut(*child) {
@@ -515,7 +522,7 @@ pub(super) fn refresh_cell_contents(
             }
         }
         if let Ok(drawn) = icons.get_mut(*child) {
-            icon::redraw(commands, *child, drawn, style.icon);
+            icon::redraw(commands, *child, drawn, style.icon, liveries);
         }
     }
 }
