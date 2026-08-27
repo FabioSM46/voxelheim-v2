@@ -330,10 +330,18 @@ mod tests {
     /// startup and a window that closed itself; what is checkable without a GPU is the reset
     /// underneath it.
     ///
-    /// **Asserted on a foreign image rather than on the livery's own**, because the livery is
-    /// re-created by `FromWorld` on the second call and would be present either way. The
-    /// image that must survive is one *somebody else* put in the store — which is exactly
-    /// what the renderer's fallbacks are.
+    /// **Two readings, and the foreign image is the one that stands for what broke.**
+    /// `App::init_resource` *is* idempotent, so a second `register` does not re-run
+    /// `Liveries::from_world`: the handle it already holds is left pointing into the store
+    /// that was thrown away, and asserting it still resolves catches the reset too. Both
+    /// clauses below therefore fail against the bug — verified by removing the guard and
+    /// running each on its own.
+    ///
+    /// The foreign image is kept first because it is the closer analogue of the failure: what
+    /// actually took the client down was not this module's image going missing but
+    /// *somebody else's* — `FallbackImage`, put in the store by the renderer, which this
+    /// module has no handle to and no test here can name. An image added from outside is the
+    /// nearest thing a headless test has to one.
     #[test]
     fn registering_twice_keeps_the_images_already_loaded() {
         let mut app = App::new();
