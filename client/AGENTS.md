@@ -872,14 +872,22 @@ hard-coded multiplier would give them two different woods, silently, because `Fo
 brighter than `WornSteel`. A blade too dark to reach `LOG` in any channel gets steel and a log
 line rather than a colour nobody chose — unreached today, and swept.
 
-**The dropped sword gets the turned grip and not the wood, and that gap is deliberate.**
-`drops::drop_mesh` calls `sword_mesh`, so the geometry costs nothing and there is no second
-cylinder anywhere. The colour cannot follow it: `DropVisuals` caches **one mesh per `ItemShape`**,
-shared by both blades and coloured by a per-item material, and `wood_over` is a division by *that
-item's* steel — so a tint baked into the shared mesh would be right for one sword and quietly
-wrong for the other. `sword_mesh` therefore carries no vertex colours at all and the dropped grip
-stays the steel it has always been. That is an unclosed divergence rather than a new wrong one,
-and it is the same divergence the drop already has about rust.
+**The world draws a sword in two pieces, because its grip is not steel.** `hands.rs` reaches its
+wood by dividing `palette::LOG` out of *that* blade's own colour, which the world cannot do:
+`DropVisuals` caches **one mesh per shape and livery**, shared by both blades and coloured by a
+per-item material, so a tint divided out of one steel and baked into that mesh is right for one
+sword and quietly wrong for the other. #419 therefore shipped the turned grip without the wood and
+pinned the gap.
+
+#435 closed it without touching a cache key. `sword_mesh_with` answers the sword **without** its
+grip, `sword_grip_mesh` answers the grip alone, and the world draws the second as a child with an
+absolute `palette::LOG` material shared by every blade — the arrangement a bundle's straps have
+always used. An absolute colour needs no division, so a third blade in a third steel costs
+nothing. `DropVisuals::second_piece_for` is the one place that pairing lives, read by the ground
+drop *and* by the body's fist, so the two cannot disagree about what a grip is made of.
+
+**The first-person hand is unchanged**: still one mesh, one material, and still the division. Two
+surfaces, two arrangements, one shape.
 
 **Two independent readings guard a new solid, and signed volume is the general one.** A ring
 walked the wrong way round builds a part inside out; back-face culling then discards its front
