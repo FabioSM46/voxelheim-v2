@@ -2038,6 +2038,42 @@ Recorded here so the next reader does not mistake them for oversights:
   liveried entries are built from the pairs `items::liveried_shapes` reports rather than from the
   cross product, so the cache holds exactly what can be drawn.
 
+  **A livery belongs to a material, not to an item**, which is what keeps the second one a row
+  rather than a generator. Roughly thirty item ids and about six materials among them: a haft, a
+  bow stave, a shield plate and a sceptre shaft are the same wood; a helm, a cuirass, greaves and
+  the iron sword are the same forged iron. `Livery` names materials, every row in the item table
+  names one or names `None`, and `livery.rs` contains no item id in any match arm.
+
+  **The column is explicit per row and is never derived from `ItemColour`**, which is the finding
+  that decided the shape of it. `ItemColour::Block(palette::LOG)` is worn by the log, the campfire,
+  the wooden shield, the bow and the sceptre — and also by the **axe**, whose swatch is the ground
+  it works rather than what it is made of, and by the **leather patch**, which is bark-coloured
+  worked hide. Two of those seven are not wood, so a livery inferred from the colour would grain
+  them both.
+
+  **A livery has to earn its place, and the default answer is no.** Which materials have one, and
+  why the rest do not:
+
+  | Material | Livery | Why |
+  | --- | --- | --- |
+  | worn steel | oxide | The starter blade is meant to look old, and a flat tint said "grey sword". It displaces as well as tints, because corrosion eats metal. |
+  | forged steel | forge marks | Colour only: an unground flat over the ridge, hammer banding, grinding streaks, a sparse scale. It darkens toward **blue-grey** where the rust goes warm, which is what tells the two blades apart at a distance. |
+  | wood | **not yet** | The named next candidate, deliberately out of #420. It is the material the `LOG`-colour ambiguity above hides, and deciding it is cheap only once the explicit column exists — which is what that issue built. |
+  | worked hide | none | Three pieces share one `Armour` silhouette, and a warm dark brown already reads as hide. Grain would be detail neither the mesh nor the cell's plate-and-shoulders picture has anywhere else. |
+  | bone, meat, arrow | none | One `Material` stub each. A texture nobody will look at. |
+  | stone, earth, snow, ore | none | Block-like items take the terrain swatch they represent, whole. **Terrain is not in this**: `world/palette.rs` plus vertex colours is that material system, greedy meshing merges quads across blocks, and a texture there is a different problem with different costs. An item that represents a block may take a livery in the hand and in the cell; the world does not change. |
+
+  **The image holds one band per livery**, `FIELD_ROWS` tall, under the neutral row. One image is
+  the point: the count of images is the count of materials the renderer has to bind, and a second
+  would need its reasoning written down. A mesh points its vertices at its own material's band, a
+  cell hands `bevy_ui` that band as a `rect`, and `livery::band_holds` is what lets a test say a
+  blade never reads the rows another metal was written into.
+
+  **Subdivision follows displacement, not the presence of a livery.** `livery::pit_depth` answers
+  zero for forged steel, so its blade is the two-span six-face loft an un-liveried one is — which
+  is what keeps the iron sword `sword_mesh` in both states, to the vertex, while it wears a
+  surface. Forge marks are the record of work done to metal that is still whole; corrosion is not.
+
   **The cell is the surface that could never have joined a geometric answer.** It has no vertices
   to tint — a picture there is `bevy_ui` rectangles — but `ImageNode` carries a handle, a `color`
   that multiplies it and a `rect` selecting a region, which is the three things a livery needs.

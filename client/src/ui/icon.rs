@@ -407,6 +407,21 @@ const SCEPTRE: [IconPart; 2] = [
 /// three mandatory fields: there is no branch for a new shape to fall through into a
 /// square. The sweep in the tests below covers what the compiler cannot see — an arm
 /// answered with an empty drawing, or with a copy of another shape's.
+/// Whether one shape's picture has a rectangle that samples a livery.
+///
+/// **Not every shape does, and that is a drawing decision rather than an omission.** A blade
+/// has an edge, and an edge is what a livery is about; a cell drawn as armour is a plate and
+/// two shoulders, and putting forge marks on it would be inventing detail the mesh does not
+/// have either — the armour meshes carry the neutral coordinate for the same reason. So an
+/// iron helm names `ForgedSteel` honestly and draws exactly as it did, on both surfaces.
+///
+/// Test-only: [`part_bundle`] already answers it per rectangle, and this is the same fact one
+/// level up, for the sweep that has to know which items can reach a livery in a cell at all.
+#[cfg(test)]
+pub(crate) fn draws_a_livery(shape: ItemShape) -> bool {
+    parts(shape).iter().any(|part| part.livery)
+}
+
 pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
     match shape {
         ItemShape::Block => &BLOCK,
@@ -473,7 +488,7 @@ pub(crate) fn spawn(
     let image = livery_image(icon, liveries);
     for part in parts(icon.shape) {
         let mut rect = host.spawn(part_bundle(part, base));
-        if let Some(node) = livery_node(part, base, image.as_ref()) {
+        if let Some(node) = livery_node(part, base, image.as_ref(), icon.livery) {
             rect.insert(node);
         }
     }
@@ -531,7 +546,7 @@ pub(crate) fn redraw(
     host.with_children(|host| {
         for part in parts(icon.shape) {
             let mut rect = host.spawn(part_bundle(part, base));
-            if let Some(node) = livery_node(part, base, image.as_ref()) {
+            if let Some(node) = livery_node(part, base, image.as_ref(), icon.livery) {
                 rect.insert(node);
             }
         }
@@ -568,13 +583,14 @@ fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
 ///
 /// **The livery multiplies the rectangle's own colour**, exactly as it multiplies an item's
 /// colour on a mesh: `ImageNode::color` is a tint over the sampled texel, so
-/// `player/items.rs` stays the one answer to what the steel is here too. `rect` takes the
-/// neutral row off — see [`field_rect`] — because an `ImageNode` with no rectangle draws the
-/// whole image, white row included.
+/// `player/items.rs` stays the one answer to what the steel is here too. `rect` selects this
+/// material's own band — see [`field_rect`] — because an `ImageNode` with no rectangle draws
+/// the whole image, the neutral row and every other material's band included.
 fn livery_node(
     part: &IconPart,
     base: LinearRgba,
     image: Option<&Handle<Image>>,
+    livery: Option<Livery>,
 ) -> Option<ImageNode> {
     if !part.livery {
         return None;
@@ -582,7 +598,7 @@ fn livery_node(
     Some(ImageNode {
         image: image?.clone(),
         color: shaded(base, part.shade),
-        rect: Some(field_rect()),
+        rect: Some(field_rect(livery?)),
         ..default()
     })
 }
