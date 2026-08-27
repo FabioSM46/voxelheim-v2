@@ -99,6 +99,55 @@ const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loo
 /// id — two items sharing both halves still share one mesh, which is what the cache is for.
 type MeshKey = (ItemShape, Option<Livery>);
 
+/// Whether one shape's drop mesh depends on the livery it wears.
+///
+/// **Wildcard-free, so a shape whose geometry starts reading a livery has to say so here.**
+/// That is not decoration: a shape that varied and answered `false` would share a mesh with
+/// the un-liveried one and render with somebody else's texture coordinates, silently.
+///
+/// Only the blade does today. Its loft is built *against* the field — the coordinates name
+/// the livery's own band, and a livery that displaces pits the sections besides — while every
+/// other arm of [`drop_mesh`] ignores the argument and lets the livery reach the mesh through
+/// the material alone.
+fn mesh_varies_with_livery(shape: ItemShape) -> bool {
+    match shape {
+        ItemShape::Blade => true,
+        ItemShape::Block
+        | ItemShape::Material
+        | ItemShape::Bundle
+        | ItemShape::Tool
+        | ItemShape::Armour
+        | ItemShape::Shield
+        | ItemShape::Bow
+        | ItemShape::Sceptre => false,
+    }
+}
+
+/// The mesh key one shape and livery resolve to.
+///
+/// **Keyed on whether the mesh differs, which is a question about the shape rather than about
+/// the livery.** #436 first answered it with `pit_depth` — a livery that displaces nothing
+/// leaves the geometry alone, so surely the mesh is identical — and that was **wrong**, which
+/// the review on that pull request caught: `blade_loft` writes the livery's own band into the
+/// coordinates whether it displaces or not, so a blade wearing forged steel and a blade
+/// wearing none are different meshes with identical positions. Collapsing them would have
+/// dropped the forge marks off every dropped iron sword, silently, and the wood grain with
+/// them.
+///
+/// What is true is narrower and belongs to the shape: only the blade's mesh is built against
+/// a livery at all — see [`mesh_varies_with_livery`]. That still fixes what the collapse was
+/// for. Giving the campfire a wood livery split the bundle roll the forge and the tent share
+/// — three structures, one silhouette, two byte-identical meshes — because `create_visuals`
+/// builds a bundle from `rolled_bundle_parts` and never looks at the livery.
+///
+/// The one place this rule is applied, so `create_visuals` and `mesh_for` cannot disagree
+/// about which entry an item lands in, and
+/// [`the_mesh_cache_separates_exactly_the_meshes_that_differ`] checks it against the builder
+/// rather than against itself.
+fn mesh_key(shape: ItemShape, livery: Option<Livery>) -> MeshKey {
+    (shape, livery.filter(|_| mesh_varies_with_livery(shape)))
+}
+
 /// What decides which material a drop is drawn with.
 ///
 /// The resolved colour, as it always was, plus the livery — which is a material fact, since it
@@ -152,7 +201,7 @@ impl DropVisuals {
     /// row answers [`ItemShape::Material`], which that function documents as the least
     /// wrong guess.
     pub(super) fn mesh_for(&self, item_id: u16) -> Handle<Mesh> {
-        let key = (item_shape(item_id), item_livery(item_id));
+        let key = mesh_key(item_shape(item_id), item_livery(item_id));
         self.shapes
             .iter()
             .find(|(candidate, _)| *candidate == key)
@@ -179,12 +228,20 @@ impl DropVisuals {
         shape: ItemShape,
         materials: &mut Assets<StandardMaterial>,
     ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
-        let (mesh, colour) = match shape {
-            ItemShape::Bundle => (self.bundle_straps.clone(), bundle_strap_linear_rgba()),
-            ItemShape::Blade => (self.blade_grip.clone(), palette::linear_rgba(palette::LOG)),
+        // **A grip wears a livery of its own, and a strap does not.** The livery belongs to
+        // the *material*, so the part whose material is wood carries wood's — which is what
+        // makes the grain on a dropped grip the same field the hand's grip reads. A strap is
+        // worked leather, and worked leather has none.
+        let (mesh, colour, livery) = match shape {
+            ItemShape::Bundle => (self.bundle_straps.clone(), bundle_strap_linear_rgba(), None),
+            ItemShape::Blade => (
+                self.blade_grip.clone(),
+                palette::linear_rgba(palette::LOG),
+                Some(Livery::Wood),
+            ),
             _ => return None,
         };
-        Some((mesh, self.material_for_colour(colour, None, materials)))
+        Some((mesh, self.material_for_colour(colour, livery, materials)))
     }
 
     pub(super) fn material_for(
@@ -287,10 +344,13 @@ pub(super) fn create_visuals(
         .map(|shape| ((shape, None), meshes.add(build(shape, None))))
         .collect();
     for (shape, livery) in liveried_shapes() {
-        shapes.push((
-            (shape, Some(livery)),
-            meshes.add(build(shape, Some(livery))),
-        ));
+        let key = mesh_key(shape, Some(livery));
+        // A livery that displaces nothing resolves to the entry the un-liveried shape already
+        // holds — see [`mesh_key`] — so there is nothing to mint.
+        if shapes.iter().any(|(seen, _)| *seen == key) {
+            continue;
+        }
+        shapes.push((key, meshes.add(build(shape, Some(livery)))));
     }
 
     commands.insert_resource(DropVisuals {
@@ -712,6 +772,205 @@ mod tests {
         }
     }
 
+    /// **A dropped blade's mesh reads its own material's band**, which is the consequence the
+    /// key exists to protect and the one a collapsed pair loses.
+    ///
+    /// The rule and the builder agreeing is one thing;
+    /// [`the_mesh_cache_separates_exactly_the_meshes_that_differ`] checks that. What a player
+    /// would actually have seen is this: a dropped iron sword resolving the un-liveried mesh
+    /// and rendering with neutral coordinates, so its forge marks are simply absent — no error,
+    /// no red test, a blade that looks a little plain.
+    #[test]
+    fn a_dropped_blade_reads_its_own_bands() {
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let visuals = world.resource::<DropVisuals>();
+        let neutral = super::super::livery::neutral_uv();
+
+        for item_id in [
+            crate::player::combat::ITEM_RUSTY_SWORD,
+            crate::player::crafting::ITEM_IRON_SWORD,
+        ] {
+            let livery = item_livery(item_id).expect("both blades wear one");
+            let handle = visuals.mesh_for(item_id);
+            let mesh = world
+                .resource::<Assets<Mesh>>()
+                .get(&handle)
+                .expect("the blade's drop mesh");
+            let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+                mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+            else {
+                panic!("item {item_id}'s drop mesh must carry Float32x2 coordinates");
+            };
+
+            let sampled: Vec<[f32; 2]> = uvs.iter().copied().filter(|uv| *uv != neutral).collect();
+            assert!(
+                !sampled.is_empty(),
+                "item {item_id}'s dropped blade samples nothing, so its livery is invisible \
+                 on the ground"
+            );
+            for uv in &sampled {
+                assert!(
+                    super::super::livery::band_holds(livery, *uv),
+                    "item {item_id}'s dropped blade samples {uv:?}, outside {livery:?}'s band"
+                );
+            }
+        }
+    }
+
+    /// **The mesh cache distinguishes exactly the meshes that differ**, no more and no fewer.
+    ///
+    /// [`mesh_key`] collapses entries deliberately — a livery that changes nothing about a
+    /// mesh should not mint a byte-identical duplicate of it — and the danger in that is
+    /// collapsing two that are *not* identical, which loses one of them silently: the drop
+    /// resolves the wrong entry and renders with somebody else's coordinates.
+    ///
+    /// So this asks the **builder**, not the rule. For every shape and every livery it builds
+    /// both meshes and compares them, then requires the key to separate them exactly when
+    /// they differ. A rule that is right by accident and a rule that is right fail this test
+    /// differently.
+    #[test]
+    fn the_mesh_cache_separates_exactly_the_meshes_that_differ() {
+        let build = |shape: ItemShape, livery: Option<Livery>| {
+            if shape == ItemShape::Bundle {
+                rolled_bundle_parts(BUNDLE_DROP_SIZE).0
+            } else {
+                drop_mesh(shape, livery)
+            }
+        };
+        let readable = |mesh: &Mesh| {
+            let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+                Some(bevy::mesh::VertexAttributeValues::Float32x3(values)) => values.clone(),
+                _ => Vec::new(),
+            };
+            let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+                Some(bevy::mesh::VertexAttributeValues::Float32x2(values)) => values.clone(),
+                _ => Vec::new(),
+            };
+            (positions, uvs)
+        };
+
+        let mut wrong: Vec<String> = Vec::new();
+        for shape in ItemShape::ALL {
+            let plain = readable(&build(shape, None));
+            for livery in Livery::ALL {
+                let worn = readable(&build(shape, Some(livery)));
+                let differ = worn != plain;
+                let separated = mesh_key(shape, Some(livery)) != mesh_key(shape, None);
+                if separated != differ {
+                    wrong.push(format!(
+                        "{shape:?}+{livery:?}: builds {} / cache {}",
+                        if differ { "different" } else { "identical" },
+                        if separated { "separates" } else { "collapses" }
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// **A grip is grained on both surfaces, and it is the same grain.**
+    ///
+    /// The hand reaches `palette::LOG` by dividing it out of the blade's own steel and the
+    /// world by an absolute material — two arrangements, deliberately, because a shared mesh
+    /// cannot carry a per-item division. What #436 adds is that the *grain* is the same field
+    /// read from the same band either way, so a grip cannot be wood in one place and grained
+    /// in the other.
+    ///
+    /// Asserted through the image the running app holds, not through the generator, which is
+    /// what makes it agreement rather than two copies of one formula.
+    #[test]
+    fn a_grip_is_grained_wherever_it_is_drawn() {
+        let mut app = headless_player();
+        deliver(
+            &mut app,
+            snapshot(
+                1,
+                vec![],
+                vec![drop(
+                    12,
+                    [1.0, 64.0, 2.0],
+                    crate::player::combat::ITEM_RUSTY_SWORD,
+                )],
+            ),
+            Instant::now(),
+        );
+        app.update();
+
+        let world = app.world_mut();
+        let image = world.resource::<Liveries>().material_image();
+
+        // The world's grip: its material carries the image, and its mesh reads the wood band.
+        let mut anchors = world.query::<(&DroppedItem, &Children)>();
+        let children: Vec<Entity> = anchors
+            .iter(world)
+            .next()
+            .expect("the dropped sword")
+            .1
+            .iter()
+            .collect();
+        let log = palette::linear_rgba(palette::LOG);
+        let grip = children
+            .into_iter()
+            .find(|child| {
+                let handle = world
+                    .get::<MeshMaterial3d<StandardMaterial>>(*child)
+                    .expect("every piece draws a material")
+                    .0
+                    .clone();
+                let colour = world
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(&handle)
+                    .expect("the piece's material")
+                    .base_color
+                    .to_linear()
+                    .to_f32_array();
+                (0..3).all(|channel| (colour[channel] - log[channel]).abs() < 1e-5)
+            })
+            .expect("the dropped sword has a grip");
+
+        let material = world
+            .get::<MeshMaterial3d<StandardMaterial>>(grip)
+            .expect("the grip draws a material")
+            .0
+            .clone();
+        assert_eq!(
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material)
+                .expect("the grip's material")
+                .base_color_texture
+                .clone(),
+            Some(image),
+            "the dropped grip's material carries no livery image, so its wood has no grain"
+        );
+
+        // And the mesh it draws reads the wood band rather than any other. The held grip is
+        // the same `grip_mesh` at another scale, and `a_held_grip_reads_the_wood_band` asserts
+        // it off the hand's own composition — the two together are what make the grain one
+        // fact rather than two that agree.
+        let mesh_handle = world
+            .get::<Mesh3d>(grip)
+            .expect("the grip draws a mesh")
+            .0
+            .clone();
+        let meshes = world.resource::<Assets<Mesh>>();
+        let dropped = meshes.get(&mesh_handle).expect("the grip's mesh");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+            dropped.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("the dropped grip must carry Float32x2 texture coordinates");
+        };
+        assert!(!uvs.is_empty(), "the dropped grip carries no coordinates");
+        for uv in uvs {
+            assert!(
+                super::super::livery::band_holds(Livery::Wood, *uv),
+                "the dropped grip samples {uv:?}, outside wood's own band"
+            );
+        }
+    }
+
     /// **Every other shape is drawn in the pieces it always was**, which is the regression a
     /// second child invites: one extra entity per drop, everywhere.
     #[test]
@@ -917,8 +1176,11 @@ mod tests {
             }
         }
         world.insert_resource(materials);
+        // Most of the table, which is the shape the "a livery has to earn its place" rule
+        // gives it — and the reason this sweep is worth running at all. A count would have to
+        // move every time a material earns one, which is exactly what it should not do.
         assert!(
-            plain > 20,
+            plain * 2 > crate::player::known_item_ids().count(),
             "only {plain} items with no livery, so this sweeps nothing"
         );
     }

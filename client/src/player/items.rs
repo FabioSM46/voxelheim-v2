@@ -251,6 +251,10 @@ pub(crate) enum Livery {
     /// banding, grinding streaks and a sparse forge scale. Colour only; it takes nothing
     /// out of the geometry.
     ForgedSteel,
+    /// Wood: grain, running the length of the piece. Colour only — grain is a surface, not
+    /// erosion — and the strongest case in the set, because a bare cube carried in the hand
+    /// is the flattest thing in the game.
+    Wood,
 }
 
 impl Livery {
@@ -260,7 +264,7 @@ impl Livery {
     /// variants. What makes a livery *drawn* is still the compiler — `super::livery`
     /// matches with no wildcard arm — and this list is what lets the image layout and the
     /// tests be written once for however many there are.
-    pub(crate) const ALL: [Self; 2] = [Self::WornSteel, Self::ForgedSteel];
+    pub(crate) const ALL: [Self; 3] = [Self::WornSteel, Self::ForgedSteel, Self::Wood];
 
     /// Which band of the generated image this livery occupies.
     pub(crate) fn band(self) -> usize {
@@ -345,7 +349,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "log",
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::LOG),
-        livery: None,
+        livery: Some(Livery::Wood),
     },
     ItemDisplay {
         item_id: ITEM_RAW_COAL,
@@ -412,7 +416,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "campfire",
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::LOG),
-        livery: None,
+        livery: Some(Livery::Wood),
     },
     // What a hunt leaves, and what it is worked into. All three are `Material`, because
     // that is what the shape vocabulary has for a thing you carry and spend — and because
@@ -439,6 +443,8 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         livery: None,
     },
     ItemDisplay {
+        // **The other `Block(palette::LOG)` that is not wood**: bark is what a worked hide
+        // looks like, which is why it borrows that swatch, and grain on it would be wood.
         item_id: ITEM_LEATHER_PATCH,
         name: "leather patch",
         shape: ItemShape::Material,
@@ -465,6 +471,11 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         livery: None,
     },
     ItemDisplay {
+        // **`Block(palette::LOG)` and no livery, deliberately.** Every implement's swatch is
+        // *the ground its tool is for* rather than what it is made of — earth for the shovel,
+        // stone for the pickaxe, wood for the axe — so an axe is bark-coloured because it
+        // fells trees. Graining it would be reading the colour as a material, which is the
+        // exact mistake the livery column is explicit per row to avoid.
         item_id: ITEM_AXE,
         name: "axe",
         shape: ItemShape::Tool,
@@ -534,14 +545,14 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "wooden shield",
         shape: ItemShape::Shield,
         colour: ItemColour::Block(palette::LOG),
-        livery: None,
+        livery: Some(Livery::Wood),
     },
     ItemDisplay {
         item_id: ITEM_BOW,
         name: "bow",
         shape: ItemShape::Bow,
         colour: ItemColour::Block(palette::LOG),
-        livery: None,
+        livery: Some(Livery::Wood),
     },
     ItemDisplay {
         item_id: ITEM_ARROW,
@@ -555,7 +566,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "wooden sceptre",
         shape: ItemShape::Sceptre,
         colour: ItemColour::Block(palette::LOG),
-        livery: None,
+        livery: Some(Livery::Wood),
     },
 ];
 
@@ -696,6 +707,27 @@ mod tests {
             ITEMS.iter().any(|row| row.livery.is_some()),
             "no item wears a livery, so the generator is drawing something nobody samples"
         );
+
+        // **The two items whose colour is wood and whose material is not**, asserted by name
+        // so the omission is a decision on the record rather than something nobody noticed.
+        // `ItemColour::Block(palette::LOG)` is worn by seven rows; the axe borrows it because
+        // its swatch is *the ground its tool is for*, and the leather patch because bark is
+        // what a worked hide looks like. A livery inferred from the colour would grain both,
+        // which is why the column is explicit per row.
+        for item_id in [ITEM_AXE, ITEM_LEATHER_PATCH] {
+            assert_eq!(
+                display(item_id).and_then(|row| row.livery),
+                None,
+                "item {item_id} has been given a livery from its colour rather than its \
+                 material"
+            );
+            assert_eq!(
+                display(item_id).map(|row| row.colour),
+                Some(ItemColour::Block(palette::LOG)),
+                "item {item_id} no longer borrows the log swatch, so the clause above pins \
+                 nothing"
+            );
+        }
 
         // The server's registry appends and never renumbers, so the ids it has issued are
         // 1..N with no holes. Checking that catches a duplicated row and a row given an
