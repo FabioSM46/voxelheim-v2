@@ -211,7 +211,11 @@ fn send_loot_intents(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::Receiver;
     use std::time::Instant;
+
+    use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+    use bevy::input::{ButtonState, InputPlugin};
 
     use super::*;
     use crate::net::{
@@ -346,6 +350,113 @@ mod tests {
             .push(LootEvent::State(state(3, 30)));
         app.update();
         assert!(app.world().resource::<LootWindow>().state().is_none());
+    }
+
+    /// One keyboard event in the shape winit delivers it.
+    ///
+    /// Written as a message rather than poked into [`ButtonInput`] because that resource is
+    /// `keyboard_input_system`'s to maintain: it clears `just_pressed` at the top of every
+    /// frame, so a press set directly reaches `Update` already forgotten.
+    fn key_event(key: KeyCode, state: ButtonState, repeat: bool) -> KeyboardInput {
+        KeyboardInput {
+            key_code: key,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat,
+            window: Entity::PLACEHOLDER,
+        }
+    }
+
+    /// The loot module with the real keyboard pipeline behind it and somewhere to send.
+    fn held_key_app() -> (App, Receiver<Vec<u8>>) {
+        let mut app = app();
+        app.add_plugins(InputPlugin);
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound);
+        app.update();
+        (app, frames)
+    }
+
+    /// Runs one frame after delivering the events winit would have delivered for it, and
+    /// reports the open requests it originated.
+    fn keyboard_frame(
+        app: &mut App,
+        frames: &Receiver<Vec<u8>>,
+        events: impl IntoIterator<Item = KeyboardInput>,
+    ) -> Vec<Vec<u8>> {
+        for event in events {
+            app.world_mut().write_message(event);
+        }
+        app.update();
+        frames.try_iter().collect()
+    }
+
+    /// **The same property as `ui::inventory`'s
+    /// `holding_the_consume_key_reports_one_press_and_a_later_press_reports_again`, on the
+    /// other request this client originates from a bound key** — so "a held key is one
+    /// press" is pinned as a rule rather than as a one-off for consume.
+    ///
+    /// It answers the same review finding on PR #403: `keyboard_input_system` does not
+    /// filter `KeyboardInput { repeat: true }`, and what keeps a repeat from re-arming
+    /// `just_pressed` is `bevy_input`'s `press()`, a **dependency's** guarantee that no
+    /// test in this tree used to touch. Holding interact next to a corpse must ask to open
+    /// it once, not once per repeat frame.
+    #[test]
+    fn holding_interact_asks_to_open_a_corpse_once_and_a_later_press_asks_again() {
+        const KEY: KeyCode = KeyCode::KeyF;
+        let open = encode_loot_open_request(&LootOpenRequest {
+            corpse_id: CORPSE,
+            client_tick: 0,
+        });
+        let (mut app, frames) = held_key_app();
+        let mut sent = Vec::new();
+
+        sent.extend(keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KEY, ButtonState::Pressed, false)],
+        ));
+        // The repeats winit sends while the key is down, then a frame with no event at all,
+        // which is the same held key on a machine with key repeat switched off.
+        for _ in 0..3 {
+            sent.extend(keyboard_frame(
+                &mut app,
+                &frames,
+                [key_event(KEY, ButtonState::Pressed, true)],
+            ));
+            assert!(
+                app.world().resource::<ButtonInput<KeyCode>>().pressed(KEY),
+                "a repeat is not a release"
+            );
+        }
+        sent.extend(keyboard_frame(&mut app, &frames, []));
+        assert!(
+            app.world().resource::<ButtonInput<KeyCode>>().pressed(KEY),
+            "a silent frame is not a release either"
+        );
+        assert_eq!(sent, vec![open.clone()], "a held key is one press");
+
+        // Release and press again, so this cannot pass by the key having stopped working.
+        sent.extend(keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KEY, ButtonState::Released, false)],
+        ));
+        assert!(
+            !app.world().resource::<ButtonInput<KeyCode>>().pressed(KEY),
+            "the key was let go"
+        );
+        sent.extend(keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KEY, ButtonState::Pressed, false)],
+        ));
+        assert_eq!(
+            sent,
+            vec![open.clone(), open],
+            "a press after a release is a second press"
+        );
     }
 
     #[test]
