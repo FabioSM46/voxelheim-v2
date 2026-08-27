@@ -719,6 +719,17 @@ Four rules hold the numbers together:
    `no_two_colours_share_a_plane` checks it rather than hoping — over a *positive* area, because
    two boxes that share only an edge cover none of it and reporting that as a flicker would be a
    finding somebody had to silence.
+
+   **The rule is the body rig's and the first-person hand broke it, which is how we learned it
+   was only ever checked on one of them.** `player/hands.rs` builds one merged mesh carrying
+   colour per vertex rather than a table of boxes, so the check there reads *faces*:
+   `no_two_colours_share_a_plane_in_the_hand`. It cost a player seeing the sword drawn through
+   the arm — the pommel's side faces and the wrist's were the same two planes to the bit
+   (#415). Two things about it are worth carrying to the next rig that needs one. It is
+   **colour-aware**, because parts of the same colour are flush on purpose here and a
+   colour-blind version fires on them by design. And it reads **axis-aligned faces only**: the
+   blade is lofted and its bevels are not, so it can miss a plane and cannot invent one, which
+   is the direction to be weak in.
 3. **Detail sits half a notch proud of what it wraps** — the hair on every face, the eyes on the
    face they look out of. The hat-layer trick every blocky model has used since Minecraft, and what
    lets a cap wrap a head without sharing a plane with it.
