@@ -660,6 +660,20 @@ mod tests {
             world.insert_resource(materials);
 
             // 4. The inventory cell, read off a real `ImageNode` rather than the resource.
+            //
+            // **The world holds no image node before this iteration spawns one**, asserted
+            // rather than assumed, because the count below is what tells the cell apart from
+            // whatever the previous iteration left behind. `EntityWorldMut::despawn` takes
+            // its `Children` with it in Bevy 0.19 — its own doc says "this will recursively
+            // despawn `Children`", and `despawn_recursive` no longer exists — so the cleanup
+            // at the end of the loop is enough. This is the line that says so.
+            let mut existing = world.query::<&ImageNode>();
+            assert_eq!(
+                existing.iter(world).count(),
+                0,
+                "an earlier iteration left image nodes behind, so item {item_id}'s count is \
+                 not its own"
+            );
             let icon = crate::ui::icon::StackIcon {
                 shape: item_shape(item_id),
                 colour: Color::WHITE,
