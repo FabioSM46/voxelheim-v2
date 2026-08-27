@@ -20,7 +20,7 @@ use std::time::Duration;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
-use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::mesh::{CylinderMeshBuilder, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use super::SelfVitals;
@@ -34,7 +34,6 @@ use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFe
 use super::{HeldItemSurface, InputMode, held_item_surface, stack_item_id};
 use super::{bundle_strap_linear_rgba, merge_all, rolled_bundle_parts};
 use crate::net::{PLACEHOLDER_APPEARANCE, Session};
-#[cfg(test)]
 use crate::world::palette;
 
 /// How far the view model sits to the right of the eye.
@@ -576,8 +575,23 @@ const POINT_TIP_FRACTION: f32 = 0.10;
 /// length, and wide enough across to read as a guard rather than a collar.
 const GUARD_SIZE: Vec3 = Vec3::new(0.019, 0.006, 0.044);
 
-/// The grip the hand closes on: leather, narrower than everything around it.
+/// The box the grip is turned inside: narrower than everything around it.
+///
+/// **Still a box, and it has to stay one.** The cylinder below is *inscribed* in it — same
+/// height, radius `GRIP_SIZE.x / 2` — which is what lets the three `const _: () = assert!`
+/// blocks around this constant and [`HAND_SIZE`] keep holding with nothing restated. They
+/// compare extents component by component, and a turned grip that stayed inside the extents
+/// it replaced changes none of them. If one of them ever has to move, the cylinder is not
+/// inscribed and the fix is the cylinder.
 const GRIP_SIZE: Vec3 = Vec3::new(0.014, 0.024, 0.014);
+
+/// How many sides the turned grip is drawn with.
+///
+/// **Eighteen, because the grip is held at arm's length and the mesh is built once.** A
+/// cylinder costs two triangles per side plus a fan at each cap — tens of triangles on an
+/// asset that is cached, against a silhouette that is the first thing saying *this is held
+/// here*. A grip is the one part of a sword that is never square.
+const GRIP_SIDES: u32 = 18;
 
 /// The pommel: brass, wider than the grip, which is what stops the sword ending in a stub.
 const POMMEL_SIZE: Vec3 = Vec3::new(0.018, 0.010, 0.017);
@@ -1222,6 +1236,34 @@ fn blade_surface(section: BladeSection, z: f32) -> f32 {
     }
 }
 
+/// The tint that lands a grip on [`palette::LOG`] over one blade's own steel.
+///
+/// **Computed rather than written down, and that is the whole of why it is correct for more
+/// than one blade.** A vertex colour *multiplies* the item colour, so a mesh can only reach
+/// what is darker than its item in every channel; a single hard-coded multiplier would give
+/// the iron sword a different wood from the rusty one, because its steel is brighter. The
+/// division lands every blade's grip on exactly `palette::LOG`.
+///
+/// `#59636D` and `#593D28` happen to share a red channel to the sixth decimal, so worn
+/// steel divides to `1.000 / 0.374 / 0.139`. That is a coincidence; the other two channels
+/// are what make this work at all.
+///
+/// **`None` is the case that cannot be reached by multiplying**: a blade darker than
+/// [`palette::LOG`] in any channel has no tint that would get there. The caller draws steel
+/// and says so in the log rather than drawing a colour that is quietly not wood —
+/// [`no_known_blade_needs_a_wood_it_cannot_reach`] is what keeps that path unreached today.
+fn wood_over(item_colour: [f32; 4]) -> Option<[f32; 4]> {
+    let log = palette::linear_rgba(palette::LOG);
+    let mut tint = [1.0; 4];
+    for channel in 0..3 {
+        if item_colour[channel] <= 0.0 || log[channel] > item_colour[channel] {
+            return None;
+        }
+        tint[channel] = log[channel] / item_colour[channel];
+    }
+    Some(tint)
+}
+
 /// A gladius: a bevelled blade that tapers to a point, a cross guard, a grip and a pommel,
 /// merged into one mesh at whatever length the caller draws it.
 ///
@@ -1236,7 +1278,7 @@ fn blade_surface(section: BladeSection, z: f32) -> f32 {
 /// of two that somebody has to keep in step, which is exactly the relationship
 /// `player/items.rs` already has with its readers.
 pub(super) fn sword_mesh(length: f32) -> Mesh {
-    sword_with(length, None)
+    sword_with(length, None, None)
 }
 
 /// One ring of the lofted blade: where it sits, and how far along the blade that is.
@@ -1367,29 +1409,70 @@ fn blade_loft(livery: Option<Livery>) -> Mesh {
 }
 
 /// A gladius wearing one livery, or none.
-fn sword_with(length: f32, livery: Option<Livery>) -> Mesh {
+/// A gladius wearing one livery, or none, with its grip turned in the wood one blade's own
+/// steel can reach.
+///
+/// **`item_colour` is `Some` only where the caller knows which blade this is.** The held
+/// view model mints an asset per selected item and does; `drops.rs` caches **one mesh per
+/// [`ItemShape`]**, shared by every blade and coloured by a per-item material, so a
+/// per-item tint baked into it would be right for one sword and silently wrong for the
+/// other. That is why the drop gets the turned grip and not yet the wood — see
+/// [`the_dropped_sword_gets_the_turned_grip_and_not_the_wood`], which pins the gap rather
+/// than letting it be discovered.
+fn sword_with(length: f32, livery: Option<Livery>, item_colour: Option<[f32; 4]>) -> Mesh {
     let base = blade_base();
-    let mut sword = blade_loft(livery);
+    let blade = blade_loft(livery);
 
-    // The furniture, in boxes, down from the base. Each sits directly under the last: two
-    // solid boxes meeting on a plane present that plane's two quads back to back, and a
-    // back-facing quad is culled — which is why *these* joins need no overlap and the
-    // blade's root, whose cap would face the same way as the guard's, does.
-    // **The furniture maps into the neutral band of the same image**, which is what keeps
-    // the whole sword one material. A second material for the guard, the grip and the
-    // pommel would be a second draw for a weapon that is one entity with one transform.
+    // The furniture, down from the base. Each sits directly under the last: two solid parts
+    // meeting on a plane present that plane's two faces back to back, and a back-facing face
+    // is culled — which is why *these* joins need no overlap and the blade's root, whose cap
+    // would face the same way as the guard's, does.
+    //
+    // **The furniture maps into the neutral band of the livery image**, which is what keeps
+    // the whole sword one material. A second material for the guard, the grip and the pommel
+    // would be a second draw for a weapon that is one entity with one transform.
     let guard = neutral(
         Mesh::from(Cuboid::from_size(GUARD_SIZE))
             .translated_by(Vec3::Y * (base - GUARD_SIZE.y / 2.0)),
     );
+    // **Turned, not planed** — inscribed in the box it replaces, so the assertions that box
+    // takes part in are unchanged. See [`GRIP_SIZE`] and [`GRIP_SIDES`].
     let grip = neutral(
-        Mesh::from(Cuboid::from_size(GRIP_SIZE))
-            .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y / 2.0)),
+        Mesh::from(CylinderMeshBuilder::new(
+            GRIP_SIZE.x / 2.0,
+            GRIP_SIZE.y,
+            GRIP_SIDES,
+        ))
+        .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y / 2.0)),
     );
     let pommel = neutral(
         Mesh::from(Cuboid::from_size(POMMEL_SIZE))
             .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y - POMMEL_SIZE.y / 2.0)),
     );
+
+    // **The wood is a tint on the grip alone, so the whole sword needs the attribute.**
+    // `Mesh::merge` refuses to join a mesh carrying an attribute to one that does not, and
+    // white is identity — the steel that comes through everywhere else is whatever
+    // `player/items.rs` says this blade presents as.
+    let identity = [1.0; 4];
+    let wood = item_colour.map(|colour| {
+        wood_over(colour).unwrap_or_else(|| {
+            // Unreached for every blade this build has a row for, and the log is the point:
+            // a grip left in steel is visibly not wood, where a clamped tint would be a
+            // colour nobody chose. See [`wood_over`].
+            error!("no tint reaches palette::LOG over a blade colour of {colour:?}");
+            identity
+        })
+    });
+    let (mut sword, guard, grip, pommel) = match wood {
+        Some(tint) => (
+            tinted(blade, identity),
+            tinted(guard, identity),
+            tinted(grip, tint),
+            tinted(pommel, identity),
+        ),
+        None => (blade, guard, grip, pommel),
+    };
     merge_all(&mut sword, [guard, grip, pommel], "sword");
 
     // Uniform, so the normals computed above stay unit vectors — `Mesh::scale_by` leaves
@@ -1463,7 +1546,11 @@ fn coloured_bundle_mesh(base: [f32; 4]) -> Mesh {
 /// [`neutral`].
 fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
     match shape {
-        ItemShape::Blade => sword_with(SWORD_LENGTH, items::item_livery(item_id)),
+        ItemShape::Blade => sword_with(
+            SWORD_LENGTH,
+            items::item_livery(item_id),
+            Some(items::item_linear_rgba(item_id)),
+        ),
         ItemShape::Block => neutral(Mesh::from(Cuboid::from_size(Vec3::splat(BLOCK_EDGE)))),
         ItemShape::Material => {
             neutral(Mesh::from(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)))
@@ -2498,7 +2585,7 @@ mod tests {
     /// full of rust nothing samples.
     #[test]
     fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
-        let rusted = sword_with(SWORD_LENGTH, Some(Livery::Rust));
+        let rusted = sword_with(SWORD_LENGTH, Some(Livery::Rust), None);
         let plain = sword_mesh(SWORD_LENGTH);
 
         // One tint, not two: the item's own colour arrives whole and the oxide is a shade
@@ -3178,8 +3265,8 @@ mod tests {
             positions.clone()
         };
         assert_eq!(
-            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust))),
-            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust))),
+            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust), None)),
+            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust), None)),
             "two builds of one sword pit the blade in different places"
         );
     }
@@ -3563,11 +3650,15 @@ mod tests {
         /// only where the other face is exactly the grip's section, so a *different* part
         /// arriving on either plane is still a failure.
         fn the_grip_inside_the_fist(one: &Face, two: &Face) -> bool {
+            // **Inside the radius rather than equal to the box**, since #419 turned the grip.
+            // A box cap was one quad spanning the full `GRIP_SIZE` in both axes; a turned cap
+            // is a fan of [`GRIP_SIDES`] triangles, each covering a wedge of it. What every
+            // one of them still satisfies — and what no face of the fist, the guard or the
+            // pommel does — is sitting wholly within `GRIP_SIZE.x / 2` of the sword's axis.
             let is_grip = |face: &Face| {
-                let half = [GRIP_SIZE.x / 2.0, GRIP_SIZE.z / 2.0];
+                let radius = GRIP_SIZE.x / 2.0;
                 (0..2).all(|axis| {
-                    (face.across[axis].0 + half[axis]).abs() < 1e-6
-                        && (face.across[axis].1 - half[axis]).abs() < 1e-6
+                    face.across[axis].0 >= -radius - 1e-6 && face.across[axis].1 <= radius + 1e-6
                 })
             };
             one.axis == 1
@@ -4690,8 +4781,11 @@ mod tests {
             let pommel_low = pommel_high - POMMEL_SIZE.y;
 
             let guard = part_corners(GUARD_SIZE.z / 2.0, guard_low, guard_high);
-            let grip = part_corners(GRIP_SIZE.z / 2.0, grip_low, grip_high);
+            // The grip is turned and no longer has corners at a fixed depth — see
+            // [`grip_ring`], which selects it by the radius it has because it is a cylinder.
+            let grip = grip_ring(&positions, translation);
             let pommel = part_corners(POMMEL_SIZE.z / 2.0, pommel_low, pommel_high);
+            let _ = (grip_low, grip_high);
             assert!(!guard.is_empty() && !grip.is_empty() && !pommel.is_empty());
 
             let (guard_back, guard_front) = extent(&guard, 2);
@@ -4793,6 +4887,385 @@ mod tests {
         }
     }
 
+    /// How many vertices the turned grip puts on its own radius.
+    ///
+    /// Two rings of [`GRIP_SIDES`], each appearing twice — once wound into the side wall and
+    /// once into its own cap, because the two carry different normals — **plus two**, which
+    /// is the seam: the side wall repeats its first vertex at the end so the wrap-around quad
+    /// can carry a texture coordinate of 1.0 rather than 0.0. It is the same seam the blade's
+    /// own loft has, one primitive down, and it is worth writing here because `4 × sides` is
+    /// what anybody would predict and it is wrong by exactly two.
+    const GRIP_RING_VERTICES: usize = GRIP_SIDES as usize * 4 + 2;
+
+    /// **The grip is a cylinder inscribed in the box it replaced**, which is what lets the
+    /// three `const _: () = assert!` blocks around [`GRIP_SIZE`] and [`HAND_SIZE`] stand
+    /// unchanged: they compare extents component by component, and nothing here leaves them.
+    ///
+    /// Measured off the real merged sword rather than off the builder call, so a radius or a
+    /// height typed against the wrong component of `GRIP_SIZE` fails here.
+    #[test]
+    fn the_grip_is_turned_inside_the_box_it_replaced() {
+        let sword = item_mesh(ITEM_RUSTY_SWORD, ItemShape::Blade);
+        let ring = grip_ring(&positions(&sword), Vec3::ZERO);
+        assert_eq!(
+            ring.len(),
+            GRIP_RING_VERTICES,
+            "the grip is {} ring vertices, which is not two capped rings of {GRIP_SIDES}",
+            ring.len()
+        );
+
+        let (low, high) = extent(&ring, 1);
+        assert!(
+            (high - low - GRIP_SIZE.y).abs() < 1e-6,
+            "the grip stands {} tall and the box it replaced is {}",
+            high - low,
+            GRIP_SIZE.y
+        );
+        for point in &ring {
+            let across = point[0].hypot(point[2]);
+            assert!(
+                (across - GRIP_SIZE.x / 2.0).abs() < 1e-6,
+                "a grip vertex sits {across} from the axis, not on the inscribed radius {}",
+                GRIP_SIZE.x / 2.0
+            );
+        }
+
+        // And it is round rather than a box the selector happened to accept: a square would
+        // put every vertex at one of four positions.
+        let mut distinct: Vec<[i32; 2]> = ring
+            .iter()
+            .map(|point| [(point[0] * 1e6) as i32, (point[2] * 1e6) as i32])
+            .collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            GRIP_SIDES as usize,
+            "the grip's cross-section has {} distinct points, not {GRIP_SIDES}",
+            distinct.len()
+        );
+    }
+
+    /// **The grip draws as `palette::LOG` for the rusty sword and for the iron sword**, with
+    /// the tint divided out of each blade's own steel rather than hard-coded.
+    ///
+    /// This is the whole point of [`wood_over`]. A single written-down multiplier would land
+    /// the two grips on two different woods, because `ForgedSteel` is brighter than
+    /// `WornSteel` — and it would do it silently, since either one looks like *a* colour.
+    /// Both blades are asserted, because one of them alone cannot tell a division from a
+    /// constant.
+    #[test]
+    fn the_grip_is_the_same_wood_over_every_blade() {
+        let log = palette::linear_rgba(palette::LOG);
+        for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
+            let colour = items::item_linear_rgba(item_id);
+            let sword = coloured(item_mesh(item_id, ItemShape::Blade), colour);
+            let points = positions(&sword);
+            let Some(VertexAttributeValues::Float32x4(tints)) =
+                sword.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("a blade carrying a wooden grip must carry per-vertex colour");
+            };
+
+            let radius = GRIP_SIZE.x / 2.0;
+            let high = blade_base() - GUARD_SIZE.y;
+            let low = high - GRIP_SIZE.y;
+            let mut wooden = 0;
+            for (point, tint) in points.iter().zip(tints) {
+                let on_the_grip = (point[0].hypot(point[2]) - radius).abs() < 1e-6
+                    && point[1] >= low - 1e-6
+                    && point[1] <= high + 1e-6;
+                if !on_the_grip {
+                    // Everything else resolves to the blade's own steel, which is what keeps
+                    // `player/items.rs` the one answer to what that is.
+                    for channel in 0..3 {
+                        assert!(
+                            (tint[channel] - colour[channel]).abs() < 1e-6,
+                            "item {item_id} draws {tint:?} off the grip, not its own {colour:?}"
+                        );
+                    }
+                    continue;
+                }
+                wooden += 1;
+                for channel in 0..3 {
+                    assert!(
+                        (tint[channel] - log[channel]).abs() < 1e-6,
+                        "item {item_id}'s grip resolves to {tint:?}, not palette::LOG {log:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                wooden, GRIP_RING_VERTICES,
+                "item {item_id} has {wooden} wooden vertices, which is not the grip"
+            );
+        }
+    }
+
+    /// **No blade this build knows needs a wood it cannot reach**, so [`wood_over`]'s `None`
+    /// arm is unreached rather than merely handled.
+    ///
+    /// A vertex colour multiplies, so a mesh can only reach what is darker than its item in
+    /// every channel. The arm exists because a future blade darker than `palette::LOG`
+    /// somewhere would have no tint that gets there; this is what says today's do.
+    #[test]
+    fn no_known_blade_needs_a_wood_it_cannot_reach() {
+        let mut blades = 0;
+        for item_id in items::known_item_ids() {
+            if items::item_shape(item_id) != ItemShape::Blade {
+                continue;
+            }
+            blades += 1;
+            let colour = items::item_linear_rgba(item_id);
+            assert!(
+                wood_over(colour).is_some(),
+                "item {item_id} is {colour:?}, which cannot reach palette::LOG by multiplying"
+            );
+        }
+        assert!(blades >= 2, "only {blades} blades, so this sweeps nothing");
+
+        // The teeth, on a fixture rather than on the rows that already pass: a blade darker
+        // than the wood in one channel is exactly the case the arm is for.
+        let too_dark = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(
+            wood_over(too_dark),
+            None,
+            "a blade darker than the wood was given a tint that cannot reach it"
+        );
+    }
+
+    /// **Every solid in the sword is wound outward**, which is the one failure in a new part
+    /// that costs the most to diagnose.
+    ///
+    /// A ring walked the wrong way round builds the part inside out; back-face culling then
+    /// discards its front faces and keeps its back ones, so the result is a solid that
+    /// renders transparent — the exact failure [`BladeSection::perimeter`] documents as "a
+    /// sword that vanishes when you look at it". It happened in the interactive model #419
+    /// was designed against, and nothing there was checking.
+    ///
+    /// **Per solid, and the whole-mesh version of this was not a test.** The first cut summed
+    /// the divergence theorem over the merged sword and required the total to be positive.
+    /// That is exactly what a small inverted part survives: the grip encloses about
+    /// 3.7 × 10⁻⁶ against the blade's 1.4 × 10⁻⁵, so a grip turned inside out takes the
+    /// total from roughly 2.6 × 10⁻⁵ to 1.8 × 10⁻⁵ — still positive, still passing, and the
+    /// transparent grip ships. The review on this pull request caught it.
+    ///
+    /// So the mesh is split into connected solids first. **Welded by position, not by index**:
+    /// `merge` duplicates a vertex per face for flat shading, so a cuboid's six faces share no
+    /// index at all and index adjacency says nothing about which solid a triangle belongs to.
+    /// The reversed reading is asserted beside each one, because a test that only ever sees a
+    /// correct mesh proves the mesh and not the test.
+    #[test]
+    fn every_solid_in_the_sword_is_wound_outward() {
+        /// The signed volume of each connected solid in one mesh, largest first.
+        fn solid_volumes(mesh: &Mesh, reversed: bool) -> Vec<f32> {
+            use std::collections::HashMap;
+
+            let points = positions(mesh);
+            let indices: Vec<usize> = mesh
+                .indices()
+                .expect("a merged mesh carries indices")
+                .iter()
+                .collect();
+
+            // Quantised, because two parts that touch must weld and two that merely round
+            // to the same micrometre must not. The furniture's planes are metres apart in
+            // `x` and `z` where they share a `y`, so this separates them.
+            let mut welded: HashMap<[i64; 3], usize> = HashMap::new();
+            let mut of: Vec<usize> = Vec::with_capacity(points.len());
+            for point in &points {
+                let key = point.map(|channel| (f64::from(channel) * 1e7).round() as i64);
+                let next = welded.len();
+                of.push(*welded.entry(key).or_insert(next));
+            }
+
+            let mut parent: Vec<usize> = (0..welded.len()).collect();
+            fn root(parent: &mut [usize], mut node: usize) -> usize {
+                while parent[node] != node {
+                    parent[node] = parent[parent[node]];
+                    node = parent[node];
+                }
+                node
+            }
+            for corner in indices.chunks_exact(3) {
+                let [a, b, c] = [of[corner[0]], of[corner[1]], of[corner[2]]];
+                for other in [b, c] {
+                    let (left, right) = (root(&mut parent, a), root(&mut parent, other));
+                    parent[left] = right;
+                }
+            }
+
+            let mut volumes: HashMap<usize, f32> = HashMap::new();
+            for corner in indices.chunks_exact(3) {
+                let [a, b, c] = if reversed {
+                    [corner[0], corner[2], corner[1]]
+                } else {
+                    [corner[0], corner[1], corner[2]]
+                }
+                .map(|index| Vec3::from_array(points[index]));
+                let solid = root(&mut parent, of[corner[0]]);
+                *volumes.entry(solid).or_insert(0.0) += a.dot(b.cross(c)) / 6.0;
+            }
+
+            let mut answer: Vec<f32> = volumes.into_values().collect();
+            answer.sort_unstable_by(|left, right| right.abs().total_cmp(&left.abs()));
+            answer
+        }
+
+        for (name, mesh) in [
+            (
+                "the rusty sword",
+                item_mesh(ITEM_RUSTY_SWORD, ItemShape::Blade),
+            ),
+            (
+                "the iron sword",
+                item_mesh(ITEM_IRON_SWORD, ItemShape::Blade),
+            ),
+            ("a dropped sword", sword_mesh(0.05)),
+        ] {
+            let solids = solid_volumes(&mesh, false);
+            // The blade, the guard, the grip and the pommel. A part that welded into its
+            // neighbour, or one that went missing, changes this before any volume does.
+            assert_eq!(
+                solids.len(),
+                4,
+                "{name} is {} connected solids, not the blade and its three furniture parts",
+                solids.len()
+            );
+            for (index, volume) in solids.iter().enumerate() {
+                assert!(
+                    *volume > 0.0,
+                    "solid {index} of {name} encloses {volume}, so it is wound inside out \
+                     and renders transparent"
+                );
+            }
+
+            let reversed = solid_volumes(&mesh, true);
+            assert_eq!(reversed.len(), 4, "{name} splits differently when reversed");
+            for (index, volume) in reversed.iter().enumerate() {
+                assert!(
+                    *volume < 0.0,
+                    "solid {index} of {name} reads {volume} with its winding reversed, so \
+                     this measures nothing"
+                );
+            }
+        }
+    }
+
+    /// **A solid wound inside out is caught**, on a fixture rather than on a sword that
+    /// already passes.
+    ///
+    /// This is the teeth of the test above, and it is the assertion the first cut of it did
+    /// not have: reversing *one small part* of the merged sword must fail, where reversing
+    /// the whole mesh trivially does. The grip is the part chosen because it is the smallest,
+    /// which is exactly the case a whole-mesh sum cannot see.
+    #[test]
+    fn a_grip_wound_inside_out_does_not_pass_for_a_solid() {
+        let sword = item_mesh(ITEM_RUSTY_SWORD, ItemShape::Blade);
+        let points = positions(&sword);
+        let indices: Vec<usize> = sword
+            .indices()
+            .expect("a merged mesh carries indices")
+            .iter()
+            .collect();
+
+        let radius = GRIP_SIZE.x / 2.0;
+        let high = blade_base() - GUARD_SIZE.y;
+        let low = high - GRIP_SIZE.y;
+        let on_the_grip = |index: usize| {
+            let point = points[index];
+            (point[0].hypot(point[2]) - radius).abs() < 1e-6
+                && point[1] >= low - 1e-6
+                && point[1] <= high + 1e-6
+        };
+
+        let mut total = 0.0_f32;
+        let mut grip = 0.0_f32;
+        for corner in indices.chunks_exact(3) {
+            let flip = corner.iter().all(|index| on_the_grip(*index));
+            let [a, b, c] = if flip {
+                [corner[0], corner[2], corner[1]]
+            } else {
+                [corner[0], corner[1], corner[2]]
+            }
+            .map(|index| Vec3::from_array(points[index]));
+            let volume = a.dot(b.cross(c)) / 6.0;
+            total += volume;
+            if flip {
+                grip += volume;
+            }
+        }
+
+        assert!(
+            grip < 0.0,
+            "the grip's triangles were not the ones reversed"
+        );
+        assert!(
+            total > 0.0,
+            "the whole-mesh sum went negative with only the grip reversed, so the weakness \
+             this pins does not exist and the test above is measuring more than it claims"
+        );
+    }
+
+    /// **The dropped sword and the third-person body get the turned grip, and not yet the
+    /// wood.** Both halves are asserted, because the second is a gap and a gap nobody wrote
+    /// down is a gap somebody rediscovers.
+    ///
+    /// The geometry comes free: `drops::drop_mesh` calls [`sword_mesh`], so one shape answer
+    /// serves the hand, the ground and the body's fist, and there is no second implementation
+    /// of a cylinder anywhere.
+    ///
+    /// **The colour cannot come free, and the reason is structural rather than an oversight.**
+    /// `DropVisuals` caches **one mesh per [`ItemShape`]**, shared by both blades, and colours
+    /// it with a per-item material. [`wood_over`] is a division by *that item's* steel, so a
+    /// tint baked into the shared mesh would land the grip on `palette::LOG` for one sword
+    /// and somewhere else for the other — silently. So [`sword_mesh`] carries no colours at
+    /// all and the dropped grip stays the steel it has always been: an unclosed divergence
+    /// rather than a new wrong one, and #418 is where the drop stops sharing that mesh.
+    #[test]
+    fn the_dropped_sword_gets_the_turned_grip_and_not_the_wood() {
+        let dropped = sword_mesh(SWORD_LENGTH);
+        assert_eq!(
+            grip_ring(&positions(&dropped), Vec3::ZERO).len(),
+            GRIP_RING_VERTICES,
+            "the dropped sword's grip is not the turned one the hand holds"
+        );
+        assert!(
+            dropped.attribute(Mesh::ATTRIBUTE_COLOR).is_none(),
+            "the shared blade mesh carries vertex colours, so one of the two swords is drawn \
+             with the other's grip colour"
+        );
+    }
+
+    /// The turned grip's ring vertices, picked out of the merged sword.
+    ///
+    /// **The half-depth trick the boxes are selected by does not survive a turned grip**, and
+    /// that is the one thing #419 costs the tests around it. A box grip put four corners on
+    /// each of `|z| == GRIP_SIZE.z / 2`; a cylinder of [`GRIP_SIDES`] puts a vertex there only
+    /// where `sin θ` is exactly ±1, which for eighteen even sides is nowhere. A selector
+    /// written against the box therefore finds *nothing* — and it says so rather than
+    /// silently making its caller's assertions vacuous, which is how this was noticed.
+    ///
+    /// What identifies the grip now is its **radius**: every ring vertex is exactly
+    /// `GRIP_SIZE.x / 2` from the sword's axis, and no corner of the guard (0.0240) or the
+    /// pommel (0.0124) is. That is a stronger selector than the depth was, because it is the
+    /// property the grip has *because* it is turned.
+    fn grip_ring(positions: &[[f32; 3]], translation: Vec3) -> Vec<[f32; 3]> {
+        const EPSILON: f32 = 1e-6;
+        let radius = GRIP_SIZE.x / 2.0;
+        let high = blade_base() + translation.y - GUARD_SIZE.y;
+        let low = high - GRIP_SIZE.y;
+        positions
+            .iter()
+            .copied()
+            .filter(|point| {
+                let across = (point[0] - translation.x).hypot(point[2] - translation.z);
+                (across - radius).abs() < EPSILON
+                    && point[1] >= low - EPSILON
+                    && point[1] <= high + EPSILON
+            })
+            .collect()
+    }
+
     /// The two parts of one sword that the hand is closed over: everything between the
     /// pommel's far end and the guard's rearward face.
     struct Hilt {
@@ -4829,20 +5302,45 @@ mod tests {
                 })
                 .collect()
         };
-        let grip = part(GRIP_SIZE.z / 2.0, grip_low, guard_low);
+        let _ = guard_low;
+        let grip = grip_ring(&corners, translation);
         let pommel = part(POMMEL_SIZE.z / 2.0, pommel_low, grip_low);
 
-        for (name, part, size) in [("grip", &grip, GRIP_SIZE), ("pommel", &pommel, POMMEL_SIZE)] {
-            assert!(!part.is_empty(), "no {name} corners were selected");
-            for axis in 0..3 {
-                let (low, high) = extent(part, axis);
-                assert!(
-                    (high - low - size[axis]).abs() < EPSILON,
-                    "the {name} selection spans {} on axis {axis} and the part is {}",
-                    high - low,
-                    size[axis]
-                );
-            }
+        // The pommel is still a box and is still checked as one.
+        assert!(!pommel.is_empty(), "no pommel corners were selected");
+        for axis in 0..3 {
+            let (low, high) = extent(&pommel, axis);
+            assert!(
+                (high - low - POMMEL_SIZE[axis]).abs() < EPSILON,
+                "the pommel selection spans {} on axis {axis} and the part is {}",
+                high - low,
+                POMMEL_SIZE[axis]
+            );
+        }
+
+        // **The grip is checked as inscribed rather than as equal**, which is what a turned
+        // grip is: full height, and never outside the box's width or depth. Eighteen even
+        // sides put a vertex at each end of `x` and none at either end of `z`, so the depth
+        // it spans is one chord short of the box's — that is the cylinder being inside the
+        // box, not the selector losing vertices, and [`grip_ring`] would have found nothing
+        // at all in that case.
+        assert!(!grip.is_empty(), "no grip corners were selected");
+        let (grip_low_y, grip_high_y) = extent(&grip, 1);
+        assert!(
+            (grip_high_y - grip_low_y - GRIP_SIZE.y).abs() < EPSILON,
+            "the grip selection spans {} in height and the part is {}",
+            grip_high_y - grip_low_y,
+            GRIP_SIZE.y
+        );
+        for axis in [0, 2] {
+            let (low, high) = extent(&grip, axis);
+            assert!(
+                high - low <= GRIP_SIZE[axis] + EPSILON,
+                "the grip selection spans {} on axis {axis}, outside the {} box it is turned \
+                 inside",
+                high - low,
+                GRIP_SIZE[axis]
+            );
         }
         Hilt {
             item_id,
