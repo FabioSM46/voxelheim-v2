@@ -1999,6 +1999,27 @@ Recorded here so the next reader does not mistake them for oversights:
 
   No file asset, no image codec, no new dependency and no new Bevy feature — the image is
   generated, and it is committed to nothing.
+
+  **`App::init_asset` is not idempotent, and believing it was took the client down on startup.**
+  `livery::register` opened with `app.init_asset::<Image>().init_resource::<Liveries>()` and a doc
+  comment saying both calls were no-ops if the asset already existed. `init_resource` is;
+  `init_asset` ends in an unconditional `self.insert_resource(assets)` on a freshly defaulted
+  store, so calling it after `ImagePlugin` **throws away every image the renderer has loaded**.
+  `FallbackImage` is among them, its D3 entry is what the mesh view bind group binds when there is
+  no irradiance volume, and the game died with `Texture binding 18 expects dimension = D3, but
+  given a view with dimension = D2` before it drew a frame.
+
+  **Nothing in this suite could have seen it, and that is the part to remember.** Every test here
+  is headless: no render app, no `FallbackImage`, no bind group to validate — and each test
+  *builds* `Assets<Image>` itself, so the reset lands on an empty store and changes nothing. All
+  four gates were green, the review was clean, and it was found by running the game. The
+  headless half is now pinned by `registering_twice_keeps_the_images_already_loaded`, which
+  asserts that a **foreign** image survives a second registration — the livery's own would be
+  re-created by `FromWorld` either way, and asserting on it would have passed against the bug.
+
+  The general rule this is the second instance of: **a claim about somebody else's API is a claim
+  about the world, and the ones that cost most are the ones a green suite cannot contradict.**
+  Read the function before writing "idempotent" in a doc comment.
 - **The list is a list and not a browser.** No favourites, no sorting, no player counts and no
   ping column; "online" is the account service saying it heard from that server recently, not a
   probe, and the screen says as much rather than implying reachability it did not measure. The
