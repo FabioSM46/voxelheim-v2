@@ -955,8 +955,7 @@ renderer only** — `hands::item_mesh` reached it through `if item_id == ITEM_RU
 `ui/icon.rs` drew flat rectangles — and a patina has to be regenerated in every mesh at every
 scale, with no vertices in the cell to tint at all. An asset is consumed from several places
 without anybody copying it, so agreement between those surfaces becomes handle identity. Pointing
-the other three at it is its own issue, and so is eating the field into the steel — see the
-texture rule below for what has landed and what has not.
+the other three at it is its own issue.
 
 **Keying the drawing on the shape rather than on item ids is the whole design.** The alternative
 that keeps the two surfaces honest by construction is rendering the held meshes to a texture — and
@@ -1949,10 +1948,16 @@ Recorded here so the next reader does not mistake them for oversights:
   What changed is **items**. `player/livery.rs` generates one `Image` at startup from a fixed seed
   and hands out one handle; an item's row names the livery it wears, or `None`, which is what
   almost every row says. `MeshBuild` now emits real coordinates — `u` around the blade's six-corner
-  perimeter, `v` along it — and `livery::field` is the one function both the texels and, once the
-  blade is subdivided, the vertices are read from. **The displacement is the second half of #417
-  and is not here yet**: corrosion eats metal rather than sitting on top of it, so a livery that
-  only tinted would be paint, and the blade currently has twelve quads and nowhere to pit.
+  perimeter, `v` along it — and `livery::field` is the one function both the texels **and** the
+  blade's own vertices are read from: a liveried blade is lofted through 31 rings instead of 3 and
+  each vertex is displaced inward where the field is strongest. Corrosion eats metal rather than
+  sitting on top of it, so a livery that only tinted would be paint.
+
+  The displacement is in `x` alone, which is what keeps the outline the outline: the two corners
+  of the hexagonal section that sit on the blade's edges have no `x` to lose, so a pit can only
+  ever eat through a flat. That makes "no displaced vertex leaves the blade's envelope" a property
+  of the arithmetic rather than something to check afterwards, and `no_pit_leaves_the_blades_envelope`
+  measures it against `blade_surface`'s closed form anyway.
 
   **Row 0 of that image is pure white and everything else points at it.** The first-person hand is
   one mesh and one material — fist, wrist, arm and held item — so a material carrying an image
