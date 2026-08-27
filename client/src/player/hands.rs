@@ -548,8 +548,14 @@ const BLADE_THICKNESS: f32 = 0.012;
 /// How much of the blade's half-width the central flat occupies, the rest being bevel.
 ///
 /// **This is what makes the section a hexagon rather than a rectangle**, and it is the whole
-/// of why the blade reads as bevelled: six side faces per span instead of four, so the light
-/// catches a different pair as the hand turns.
+/// of why the blade reads as bevelled: six side faces per span instead of four, each drawn at
+/// its own shade.
+///
+/// **That sentence used to say "so the light catches a different pair as the hand turns", and
+/// there was no light to catch.** The first-person material is `unlit`, so every face of this
+/// section rendered exactly one colour and the hexagon might as well have been a rectangle —
+/// for as long as the blade existed. [`SHADE_LIGHT`] is what makes the claim true, by baking
+/// the light the material does not have into the vertices.
 const BLADE_RIDGE_FRACTION: f32 = 0.34;
 
 /// How wide the blade is where the point begins, as a fraction of its width at the guard.
@@ -695,6 +701,39 @@ const BLADE_STEPS_AROUND: u32 = 3;
 fn pit_depth(livery: Option<Livery>) -> f32 {
     livery.map_or(0.0, livery::pit_depth)
 }
+
+/// Where the light the view model is shaded from comes from.
+///
+/// **A baked, model-space light, because the first-person material has no other kind.** That
+/// material is `unlit`, so `StandardMaterial` ignores vertex normals outright and every face
+/// of a mesh renders one colour. [`BLADE_RIDGE_FRACTION`]'s doc claimed that six faces per
+/// span meant "the light catches a different pair as the hand turns"; there was no light to
+/// catch, and the same was true of #426's pits — the displacement preserves the outline by
+/// construction, so under a flat colour a pit changed nothing anybody could see.
+///
+/// This is the third instance of one family. `client/AGENTS.md` records the first: the fist
+/// is one cube since #396 because relief on a 24 mm box was invisible for exactly this
+/// reason, and three iterations of modelled digits were deleted for costing geometry and
+/// buying nothing.
+///
+/// **Above, to the left, and slightly toward the eye.** The view model is a child of the
+/// camera, so its `+Z` points at the viewer and this is the three-quarter key light every
+/// hand-painted asset is lit from.
+///
+/// **It turns with the sword, and that is the honest cost.** A model-space light does not
+/// stay fixed in the world, so a swing carries the highlight with it. Under an `unlit`
+/// material there is no correct answer available — the alternative is no relief at all —
+/// and a baked light is what a low-poly asset does. It reads as form, which is the whole of
+/// what is being bought here.
+const SHADE_LIGHT: Vec3 = Vec3::new(-0.40, 0.80, 0.45);
+
+/// How dark a face turned fully away from [`SHADE_LIGHT`] is left.
+///
+/// **A floor rather than a clamp at zero**, so the far side of a blade is a shade of its own
+/// steel instead of a silhouette. Nothing rises above identity: a fully lit face is `1.0`, so
+/// the shading only ever takes light away and `player/items.rs` stays the one answer to what
+/// an item's colour *is*.
+const SHADE_FLOOR: f32 = 0.45;
 
 /// A carried structure's outer bound. [`rolled_bundle_parts`] fills it with the same roll
 /// and two straps used by the world drop, so a tent under the arm does not read as another
@@ -1032,9 +1071,11 @@ struct MeshBuild {
 impl MeshBuild {
     /// One flat-shaded quad, wound around its perimeter.
     ///
-    /// Flat rather than smooth, deliberately: six faces per span that each catch the light
+    /// Flat rather than smooth, deliberately: six faces per span that are each shaded
     /// separately is the whole reason the section is a hexagon, and averaging the normals at
-    /// the ridge would put a soft gradient exactly where the highlight should break.
+    /// the ridge would put a soft gradient exactly where the highlight should break. The
+    /// normal written here is what [`shaded`] reads, so flat shading is load-bearing rather
+    /// than a preference.
     fn quad(&mut self, corners: [Vec3; 4], uvs: [[f32; 2]; 4]) {
         let [a, b, c, d] = corners;
         // From the diagonals rather than from one triangle's two edges: a quad lofted
@@ -1504,6 +1545,47 @@ fn sword_with(length: f32, livery: Option<Livery>, item_colour: Option<[f32; 4]>
     sword.scaled_by(Vec3::splat(length / SWORD_LENGTH))
 }
 
+/// One mesh with a baked directional shade folded into its vertex colours.
+///
+/// **The first-person composition only.** `drops.rs` mints a *lit* material, so the same
+/// meshes already show their facets on the ground and baking a second light into them would
+/// add to the real one. Applying this where the arrangement is composed rather than where
+/// the geometry is built is what keeps the two surfaces apart with no flag to thread and no
+/// way to get it wrong — see [`the_dropped_sword_is_not_shaded_twice`].
+///
+/// It multiplies, so it composes with everything already in the buffer: the item's own
+/// colour, a grip's wood, a bundle's straps. Hemispheric rather than clamped at zero, so the
+/// value moves continuously across every angle instead of flattening out the moment a face
+/// turns past ninety degrees — a blade rolling in the hand should not have its bevels snap.
+fn shaded(mut mesh: Mesh) -> Mesh {
+    let Some(VertexAttributeValues::Float32x3(normals)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+    else {
+        // Every mesh this module composes carries Float32x3 normals — `MeshBuild` writes
+        // them and every Bevy primitive generates them. Leaving the mesh alone is the
+        // cosmetic, non-fatal direction to fail in, which is what `coloured` does too.
+        return mesh;
+    };
+    let light = SHADE_LIGHT.normalize();
+    let shades: Vec<f32> = normals
+        .iter()
+        .map(|normal| {
+            let facing = Vec3::from_array(*normal).normalize_or_zero().dot(light);
+            SHADE_FLOOR + (1.0 - SHADE_FLOOR) * facing.mul_add(0.5, 0.5)
+        })
+        .collect();
+
+    let colours: Vec<[f32; 4]> = match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+        Some(VertexAttributeValues::Float32x4(tints)) => tints
+            .iter()
+            .zip(&shades)
+            .map(|(tint, shade)| [tint[0] * shade, tint[1] * shade, tint[2] * shade, tint[3]])
+            .collect(),
+        _ => shades.iter().map(|s| [*s, *s, *s, 1.0]).collect(),
+    };
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
+    mesh
+}
+
 fn tinted(mesh: Mesh, colour: [f32; 4]) -> Mesh {
     let vertices = mesh.count_vertices();
     mesh.with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![colour; vertices])
@@ -1680,7 +1762,7 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
     let (Some(item_id), Some(shape), Some(item_colour)) =
         (appearance.item_id, appearance.shape, appearance.item_colour)
     else {
-        return held;
+        return shaded(held);
     };
 
     let item = if shape == ItemShape::Bundle {
@@ -1692,7 +1774,10 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
     }
     .translated_by(item_translation(shape));
     merge_all(&mut held, [item], "hand and held item");
-    held
+    // **Last, over the whole composition.** The fist, the wrist and the item are one mesh
+    // under one `unlit` material, so one pass gives all three their relief — and applying it
+    // after the merge rather than to each part is what stops a part being missed.
+    shaded(held)
 }
 
 /// The forearm bar in the player's own skin.
@@ -1702,9 +1787,10 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
 /// transform each entity carries. A second asset would be a second answer to the same
 /// authoritative skin colour.
 fn skinned_forearm_mesh(skin_colour: u32) -> Mesh {
-    // Its own entity, and the *same* material as the hand — so the neutral band is as
-    // load-bearing here as it is on the fist.
-    tinted(neutral(forearm_mesh()), linear_rgb(skin_colour))
+    // Its own entity, and the *same* material as the hand — so the neutral band and the
+    // baked shade are both as load-bearing here as they are on the fist. An unshaded arm
+    // under a shaded hand is the one seam this pass could leave.
+    shaded(tinted(neutral(forearm_mesh()), linear_rgb(skin_colour)))
 }
 
 pub(super) struct HandsPlugin;
@@ -2702,6 +2788,253 @@ mod tests {
             panic!("the mesh must carry Float32x2 texture coordinates");
         };
         uvs.clone()
+    }
+
+    /// **The blade's flat and its two bevels are three different shades**, which is the
+    /// property [`BLADE_RIDGE_FRACTION`]'s doc has always claimed and never had.
+    ///
+    /// > six side faces per span instead of four, so the light catches a different pair as
+    /// > the hand turns
+    ///
+    /// There was no light to catch: the first-person material is `unlit`, so every face of
+    /// the hexagon rendered one colour and the section might as well have been a rectangle.
+    /// Measured off the real merged mesh rather than from the constants that built it,
+    /// because the claim is about what reaches the screen.
+    #[test]
+    fn the_held_blade_shows_its_bevel() {
+        let held = held_mesh(TEST_SKIN, blade_appearance(ITEM_IRON_SWORD));
+        let steel = items::item_linear_rgba(ITEM_IRON_SWORD);
+        let skin = linear_rgb(TEST_SKIN);
+
+        // **The isolation is asserted rather than assumed.** This counts the levels the
+        // *steel* is drawn at inside a composition that also holds a hand, and the hand has
+        // six face shades of its own — so a filter that merely bounded the ratio could have
+        // been measuring the hand's relief and reading it as the blade's.
+        // [`levels_of`] separates them by colour *direction*, which is sound exactly as long
+        // as the two colours are not parallel, and that is checkable.
+        assert!(
+            shade_of(steel, &skin).is_none(),
+            "the test skin is a shade of the blade's steel, so the hand's own relief would \
+             count as the blade's"
+        );
+        let levels = levels_of(&held, steel);
+        assert!(
+            levels.len() >= 3,
+            "the blade is drawn at {} shading levels, so its flat and its bevels are one \
+             face: {levels:?}",
+            levels.len()
+        );
+
+        // And nothing is brighter than the colour `player/items.rs` gives it: a shade only
+        // ever takes light away, which is what keeps that table the one authority.
+        let brightest = levels.iter().copied().max().expect("some steel");
+        assert!(
+            brightest <= 10_010,
+            "a face is drawn at {brightest} of the item's own colour, so shading has started \
+             inventing light"
+        );
+        assert!(
+            levels.iter().copied().min().expect("some steel") >= (SHADE_FLOOR * 1e4) as i32 - 10,
+            "a face is darker than the floor, so a shade became a hole"
+        );
+    }
+
+    /// **A pitted blade shows its pits**, which is the half of #426 that has been invisible
+    /// since the day it merged.
+    ///
+    /// The displacement is in `x` alone and deliberately preserves the outline, so under a
+    /// flat colour a pit changed nothing anybody could see — what showed in the hand was the
+    /// livery's texture and only that. A displaced face has a normal of its own, so a baked
+    /// shade is what turns the geometry back into something visible.
+    #[test]
+    fn a_pitted_blade_shows_the_pits_it_has() {
+        // The blade's own vertices, split off the hand by colour direction — see
+        // [`levels_of`], and the assertion in `the_held_blade_shows_its_bevel` that the two
+        // colours are not parallel.
+        let levels = |item_id: u16| {
+            levels_of(
+                &held_mesh(TEST_SKIN, blade_appearance(item_id)),
+                items::item_linear_rgba(item_id),
+            )
+            .len()
+        };
+        let pitted = levels(ITEM_RUSTY_SWORD);
+        let smooth = levels(ITEM_IRON_SWORD);
+        assert!(
+            pitted > smooth,
+            "the pitted blade is drawn at {pitted} shading levels and the smooth one at \
+             {smooth}, so the pits still reach nothing"
+        );
+    }
+
+    /// **The dropped sword is not shaded twice.**
+    ///
+    /// `drops.rs` mints a *lit* material, so the same meshes already show their facets on the
+    /// ground — baking a second light into them would add to the real one. The pass is
+    /// applied where the first-person arrangement is composed rather than where the geometry
+    /// is built, which keeps the two surfaces apart by construction; this is the assertion
+    /// that says so, because "it is applied somewhere else" is a claim about a call site and
+    /// call sites move.
+    #[test]
+    fn the_dropped_sword_is_not_shaded_twice() {
+        for length in [SWORD_LENGTH, 0.05] {
+            for livery in [None, Some(Livery::WornSteel), Some(Livery::ForgedSteel)] {
+                let mesh = sword_mesh_with(length, livery);
+                assert!(
+                    mesh.attribute(Mesh::ATTRIBUTE_COLOR).is_none(),
+                    "the world's sword mesh carries vertex colours, so a lit material would \
+                     draw it shaded twice"
+                );
+            }
+        }
+    }
+
+    /// **Every held arrangement is shaded**, swept over every item the client knows plus the
+    /// empty hand and the arm.
+    ///
+    /// The pass is applied to a *composition* rather than to each part, and the failure that
+    /// shape invites is one part missed — an unshaded arm under a shaded hand is the seam.
+    ///
+    /// **Read out of the colour buffer, never recomputed from the normals.** The first cut of
+    /// this test derived each vertex's level from its normal and `SHADE_LIGHT`, which is
+    /// `shaded`'s own arithmetic written twice: it passed with the whole pass stubbed out, and
+    /// proved the formula with the formula. What it measures now is what the buffer holds —
+    /// vertices grouped by the colour they are a shade *of*, and every group required to carry
+    /// more than one magnitude.
+    #[test]
+    fn every_held_arrangement_carries_relief() {
+        /// The distinct magnitudes each colour in a mesh is drawn at, one entry per colour.
+        fn magnitudes(mesh: &Mesh) -> Vec<Vec<i32>> {
+            let mut groups: Vec<([i32; 3], Vec<i32>)> = Vec::new();
+            for tint in raw_tints(mesh) {
+                let peak = tint[0].max(tint[1]).max(tint[2]);
+                if peak <= f32::EPSILON {
+                    continue;
+                }
+                // The colour's own direction, which a multiply leaves alone, and its
+                // magnitude, which is the only thing a shade moves.
+                let chroma = std::array::from_fn(|c| (tint[c] / peak * 1e3) as i32);
+                let level = (peak * 1e4) as i32;
+                match groups.iter_mut().find(|(seen, _)| *seen == chroma) {
+                    Some((_, levels)) => levels.push(level),
+                    None => groups.push((chroma, vec![level])),
+                }
+            }
+            groups
+                .into_iter()
+                .map(|(_, mut levels)| {
+                    levels.sort_unstable();
+                    levels.dedup();
+                    levels
+                })
+                .collect()
+        }
+
+        let arrangements = items::known_item_ids()
+            .map(|item_id| {
+                (
+                    format!("item {item_id}"),
+                    held_mesh(TEST_SKIN, blade_appearance(item_id)),
+                )
+            })
+            .chain([
+                (
+                    "the empty hand".to_owned(),
+                    held_mesh(TEST_SKIN, selected_appearance(None)),
+                ),
+                ("the forearm".to_owned(), skinned_forearm_mesh(TEST_SKIN)),
+            ]);
+
+        for (name, mesh) in arrangements {
+            let groups = magnitudes(&mesh);
+            assert!(!groups.is_empty(), "{name} carries no colour at all");
+            for levels in groups {
+                assert!(
+                    levels.len() > 1,
+                    "{name} draws one of its colours at a single level, so that part is flat"
+                );
+                let (dimmest, brightest) = (
+                    *levels.first().expect("a level"),
+                    *levels.last().expect("a level"),
+                );
+                // Nothing spreads further than the floor allows. A shade only ever takes
+                // light away, so the dimmest is at worst `SHADE_FLOOR` of the brightest —
+                // and that holds without this test knowing what the base colour was.
+                assert!(
+                    f64::from(dimmest) / f64::from(brightest) >= f64::from(SHADE_FLOOR) - 1e-3,
+                    "{name} draws a colour from {dimmest} to {brightest}, past the \
+                     {SHADE_FLOOR} floor"
+                );
+            }
+        }
+    }
+
+    /// The appearance one blade is held in, for the shading measurements above.
+    fn blade_appearance(item_id: u16) -> HeldAppearance {
+        selected_appearance(Some(InventoryStack {
+            item_id,
+            count: 1,
+            ..Default::default()
+        }))
+    }
+
+    /// The scale one vertex colour is of a base colour, when it is a shade of it at all.
+    ///
+    /// **Read off the peak channel rather than off red**, which is what the first cut did. A
+    /// base colour with no red divides to zero and would never be recognised as a shade of
+    /// itself — latent for every colour in the tables today, and a false negative waiting for
+    /// the first item that is blue or green. The peak channel is the one a multiply cannot
+    /// lose.
+    ///
+    /// `None` when the direction does not match, which is what makes this a *filter*: two
+    /// colours that are not parallel cannot be mistaken for shades of each other, so a
+    /// composition carrying skin and steel can be split by asking this twice.
+    fn shade_of(colour: [f32; 4], tint: &[f32; 4]) -> Option<f32> {
+        let peak = (0..3).fold(0, |best, channel| {
+            if colour[channel] > colour[best] {
+                channel
+            } else {
+                best
+            }
+        });
+        if colour[peak] <= f32::EPSILON {
+            return None;
+        }
+        let scale = tint[peak] / colour[peak];
+        (0..3)
+            .all(|channel| (tint[channel] - colour[channel] * scale).abs() < 1e-3)
+            .then_some(scale)
+    }
+
+    /// The distinct shading levels one base colour is drawn at within a composition.
+    ///
+    /// **Isolated by colour direction, not by a ratio range.** The first cut filtered on
+    /// `tint[0] / steel[0]` landing between the floor and one, which the hand's own six face
+    /// shades could satisfy — so the measurement could have been the *hand's* relief and read
+    /// as the blade's. [`shade_of`] answers `None` for a colour that is not parallel, which is
+    /// what makes this the blade's vertices and nothing else.
+    fn levels_of(mesh: &Mesh, colour: [f32; 4]) -> Vec<i32> {
+        let mut seen: Vec<i32> = raw_tints(mesh)
+            .iter()
+            .filter_map(|tint| shade_of(colour, tint))
+            .map(|scale| (scale * 1e4) as i32)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
+    }
+
+    /// Every vertex colour one mesh carries, unquantised and in buffer order.
+    ///
+    /// [`tints`] quantises and deduplicates, which is right when colours are compared for
+    /// identity. A baked shade makes them a continuum instead, so the tests that ask "is this
+    /// a shade of that" need the values as they are.
+    fn raw_tints(mesh: &Mesh) -> Vec<[f32; 4]> {
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            return Vec::new();
+        };
+        colours.clone()
     }
 
     /// Every vertex position one mesh carries.
@@ -5832,14 +6165,52 @@ mod tests {
         assert_eq!(held.skin_colour, TEST_SKIN);
 
         let meshes = world.resource::<Assets<Mesh>>();
-        let colours = tints(meshes.get(&mesh.0).expect("the held mesh"));
-        let skin = linear_rgb(TEST_SKIN).map(|channel| (channel * 255.0).round() as u8);
-        let stone =
-            items::item_linear_rgba(ITEM_STONE).map(|channel| (channel * 255.0).round() as u8);
-        assert!(colours.contains(&skin), "the mesh has no local skin colour");
+        let mesh = meshes.get(&mesh.0).expect("the held mesh");
+        let skin = linear_rgb(TEST_SKIN);
+        let stone = items::item_linear_rgba(ITEM_STONE);
+
+        // **A shade of one of the two, rather than one of the two exactly.** The composition
+        // carries a baked directional shade since #434 — the material is `unlit`, so a face's
+        // relief has to be in its colour — and a shade *multiplies*, so what every vertex now
+        // carries is one of these two authoritative colours scaled by a number in
+        // `SHADE_FLOOR..=1.0`. The claim this test makes is unchanged: two authorities, no
+        // third opinion, and nothing brighter than what the tables say.
+        // The shared predicate, bounded to the range a shade may take. See [`shade_of`],
+        // which reads the peak channel rather than red.
+        let within = |colour: [f32; 4], tint: &[f32; 4]| {
+            shade_of(colour, tint)
+                .is_some_and(|scale| (SHADE_FLOOR - 1e-3..=1.0 + 1e-3).contains(&scale))
+        };
+        let vertices = raw_tints(mesh);
         assert!(
-            colours.contains(&stone),
-            "the mesh has no item-table colour"
+            !vertices.is_empty(),
+            "the held mesh carries no colour at all"
+        );
+        let (mut skinned, mut stony) = (0, 0);
+        for tint in &vertices {
+            if within(skin, tint) {
+                skinned += 1;
+            } else if within(stone, tint) {
+                stony += 1;
+            } else {
+                panic!("a vertex carries {tint:?}, which is a shade of neither authority");
+            }
+        }
+        assert!(skinned > 0, "the mesh has no local skin colour");
+        assert!(stony > 0, "the mesh has no item-table colour");
+
+        // And it is genuinely shaded rather than uniformly scaled: a mesh with one shading
+        // value everywhere would satisfy every clause above and be as flat as before.
+        let mut levels: Vec<i32> = vertices
+            .iter()
+            .map(|tint| (tint[0] / skin[0].max(f32::EPSILON) * 1e4) as i32)
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
+        assert!(
+            levels.len() > 3,
+            "the held arrangement carries {} shading levels, so it is still flat",
+            levels.len()
         );
 
         let materials = world.resource::<Assets<StandardMaterial>>();
@@ -6202,15 +6573,37 @@ mod tests {
             count: 1,
             ..Default::default()
         }));
-        let colours = tints(&held_mesh(TEST_SKIN, appearance));
+        // **Shades of the two, since #434 bakes a directional shade into the composition.**
+        // The claim is the one it always was — the roll is the tent's canvas and the straps
+        // are their own brown — and a shade multiplies, so what has to hold is that each
+        // vertex is one of the two scaled by a number in `SHADE_FLOOR..=1.0`.
+        let vertices = raw_tints(&held_mesh(TEST_SKIN, appearance));
         let canvas = appearance
             .item_colour
-            .expect("the tent has a canvas colour")
-            .map(|channel| (channel * 255.0).round() as u8);
-        let straps = bundle_strap_linear_rgba().map(|channel| (channel * 255.0).round() as u8);
-        assert!(colours.contains(&canvas), "the roll lost the tent colour");
-        assert!(colours.contains(&straps), "the two straps are not brown");
+            .expect("the tent has a canvas colour");
+        let straps = bundle_strap_linear_rgba();
+        let skin = linear_rgb(TEST_SKIN);
+        // The shared predicate, bounded to the range a shade may take. See [`shade_of`],
+        // which reads the peak channel rather than red.
+        let within = |colour: [f32; 4], tint: &[f32; 4]| {
+            shade_of(colour, tint)
+                .is_some_and(|scale| (SHADE_FLOOR - 1e-3..=1.0 + 1e-3).contains(&scale))
+        };
+        assert!(
+            vertices.iter().any(|tint| within(canvas, tint)),
+            "the roll lost the tent colour"
+        );
+        assert!(
+            vertices.iter().any(|tint| within(straps, tint)),
+            "the two straps are not brown"
+        );
         assert_ne!(canvas, straps, "the straps disappeared into the canvas");
+        // The hand is in the same buffer and is neither, which is what stops the two clauses
+        // above from being satisfied by skin that happens to scale onto one of them.
+        assert!(
+            vertices.iter().any(|tint| within(skin, tint)),
+            "the hand is not in the composition at all"
+        );
     }
 
     /// The forge's two products, once a player has made one.
