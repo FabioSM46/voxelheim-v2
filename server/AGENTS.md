@@ -432,6 +432,9 @@ package can avoid the import would create two truths to keep in step for no bene
   item is refused through the ordinary edit path and produces no `BlockUpdate`. **A break holds
   no inventory lock at all** since its yield became a drop — see the drops section below, where
   that and the tick's `TryLock` are one decision.
+- **The end-to-end path a new item takes is `docs/ADDING_AN_ITEM.md`**, which starts here
+  because an item that is not in this registry does not exist. It names the rule behind each
+  step rather than restating it.
 - **Items and blocks are different id spaces.** The server-only registry in `game/items.go`
   owns each item's placed block (or none) and its per-item stack limit, currently 64. The
   drop table independently decides what each mined block yields, and what it names is spawned

@@ -72,6 +72,13 @@ When a change touches multiple workspaces:
 4. Implement the client half against the server's actual behavior
 5. Gate every touched workspace before opening the PR
 
+**A new item is the cross-cutting change this repository makes most often, and it has its own
+path**: `docs/ADDING_AN_ITEM.md` walks it server first, names the rule behind each step and
+points at the copy that enforces it. Two things it settles before you start: item ids are
+appended and never inserted, and adding an item is **not** a schema change — the registry and
+the recipe table are never sent, so no `.fbs` is touched unless the item needs a genuinely new
+message.
+
 ## Shared Conventions
 
 These apply across all workspaces:
