@@ -811,6 +811,9 @@ is set either way: how far the world is streamed is not a time of day.
 
 ## One display registry per item
 
+**The end-to-end path a new item takes — server registry first, this table second — is
+`docs/ADDING_AN_ITEM.md`.** What follows is why this half is shaped the way it is.
+
 **`player/items.rs` holds every display fact this client has about an item, one row per id,
 and every reader goes through it.** A row is a `name`, an `ItemShape` and an `ItemColour`; the
 held view model in `hands.rs` is built from the shape and the colour, `ui/mod.rs`'s

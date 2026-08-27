@@ -419,6 +419,7 @@ jobs:
           bash scripts/test/integration-verify.test.sh
           bash scripts/test/schema-bindings-drift.test.sh
           bash scripts/test/actions-hardening.test.sh
+          bash scripts/test/adding-an-item-doc.test.sh
           # The reviewer script's own tests. They stub `github`/`openai`, so there
           # is no network call and no API key involved.
           python3 .github/scripts/test_deepseek_review.py
