@@ -2104,14 +2104,32 @@ Recorded here so the next reader does not mistake them for oversights:
   cell hands `bevy_ui` that band as a `rect`, and `livery::band_holds` is what lets a test say a
   blade never reads the rows another metal was written into.
 
-  **The drop's mesh cache is keyed on displacement too, and #436 is where that stopped being
-  theoretical.** `MeshKey` was `(ItemShape, Option<Livery>)`, which mints a byte-identical
-  duplicate whenever a livery changes only colour — and giving the campfire a wood livery split
-  the bundle roll the forge and the tent share: three structures, one silhouette, suddenly two
-  meshes for no geometric reason. `drops::mesh_key` drops a livery that displaces nothing, so the
-  key is *the reason a mesh differs* rather than the fact a livery exists. That strengthens what
-  #418 asked for rather than weakening it: two items sharing a shape and a livery still share one
-  mesh, and now so do two whose liveries change nothing about it.
+  **The drop's mesh cache is keyed on whether the *shape's* mesh is built against a livery, and
+  the wrong answer to that was caught in review.** `MeshKey` was `(ItemShape, Option<Livery>)`,
+  which mints a byte-identical duplicate whenever a livery changes only colour — and giving the
+  campfire a wood livery split the bundle roll the forge and the tent share: three structures, one
+  silhouette, suddenly two meshes for no geometric reason.
+
+  The first fix was to drop a livery whose `pit_depth` is zero, on the reasoning that a livery
+  which displaces nothing leaves the mesh alone. **That is false.** `blade_loft` writes the
+  livery's own *band* into the texture coordinates whether it displaces or not, so a blade wearing
+  forged steel and a blade wearing none have identical positions and different coordinates.
+  Collapsing them would have dropped the forge marks off every dropped iron sword — silently, with
+  no error and no red test, a blade that merely looks a little plain.
+
+  What is true is narrower and belongs to the shape: **only the blade's mesh is built against a
+  livery at all**. `drops::mesh_varies_with_livery` is wildcard-free, so a shape whose geometry
+  starts reading a livery has to say so, and `mesh_key` keeps the livery for exactly those. That
+  still fixes the campfire, because `create_visuals` builds a bundle from `rolled_bundle_parts`
+  and never looks at the livery — and it strengthens what #418 asked for rather than weakening it:
+  two items sharing a shape and a livery still share one mesh, and now so do two whose shape
+  ignores the livery entirely.
+
+  **The rule is checked against the builder, not against itself.**
+  `the_mesh_cache_separates_exactly_the_meshes_that_differ` builds both meshes for every shape and
+  every livery and requires the key to separate them exactly when they differ; a rule that is right
+  by accident and a rule that is right fail it differently. `a_dropped_blade_reads_its_own_bands`
+  pins the consequence a player would have seen.
 
   **Subdivision follows displacement, not the presence of a livery.** `livery::pit_depth` answers
   zero for forged steel, so its blade is the two-span six-face loft an un-liveried one is — which
