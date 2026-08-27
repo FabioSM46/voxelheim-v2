@@ -4022,7 +4022,7 @@ mod tests {
         // needlessly short* — and it was the right statement while this bound was the only
         // thing deciding the limb's length. Two changes took that away. #415 made the
         // placement a fraction of the frame and the length a framing decision, and #421
-        // replaced the overhead cut's `0.9` of pitch with this arc's `0.62`, which alone
+        // replaced the overhead cut's `0.9` of pitch with this arc's `0.68`, which alone
         // opens about a centimetre of headroom the arm has no reason to spend: a longer limb
         // is *more* forearm on screen, which is the thing #415 was filed to reduce.
         //
@@ -4160,12 +4160,14 @@ mod tests {
         // **And at the peak of a cast**, which is the frame #394 was filed about and the one
         // where the limb is longest. It was the thrust's frame until #421 removed that arc; a
         // cast carries the model the same distance away — it spends the same [`CAST_REACH`] the
-        // thrust spent — so the pose this walk needs is unchanged and only its name moved. A join that opens when the arm stretches would be the new
-        // way to reintroduce exactly the defect #389 closed, and it is invisible to the
-        // end-cap measurements below: those ask where the arm *ends*, not whether it is
-        // continuous on the way there. The hand is walked empty in both passes and the blade's
-        // pose is used for the second, which is the strict pairing: a held item can only add
-        // cover, and the offset it brings is the one a thrust is really drawn with.
+        // thrust spent — so the pose this walk needs is unchanged and only its name moved.
+        //
+        // A join that opens when the arm stretches would be the new way to reintroduce exactly
+        // the defect #389 closed, and it is invisible to the end-cap measurements below: those
+        // ask where the arm *ends*, not whether it is continuous on the way there. The hand is
+        // walked empty in both passes and the sceptre's pose is used for the second, which is
+        // the strict pairing: a held item can only add cover, and the offset it brings is the
+        // one a cast is really drawn with.
         walk(
             "at the peak of a cast",
             &HandAnimation {
@@ -4379,7 +4381,7 @@ mod tests {
         }
 
         // And the same measurement with the rule taken out, which is what the defect was: a
-        // constant length loses a quarter of its reach at the peak of a thrust.
+        // constant length loses a quarter of its reach at the peak of a cast.
         let peak = HandAnimation {
             attack: Some(Swing {
                 shape: SwingShape::Cast,
