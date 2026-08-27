@@ -1280,6 +1280,32 @@ fn blade_surface(section: BladeSection, z: f32) -> f32 {
     }
 }
 
+/// The turned grip alone, at model scale and in the sword's own space.
+///
+/// **Turned, not planed** — inscribed in the box it replaces, so the assertions that box takes
+/// part in are unchanged. See [`GRIP_SIZE`] and [`GRIP_SIDES`].
+///
+/// **It is a function rather than three lines inside [`sword_with`] because the world draws it
+/// separately.** The first-person hand is one mesh under one material and reaches its wood by
+/// dividing [`palette::LOG`] out of the blade's own steel; a drop cannot, because `drops.rs`
+/// caches one mesh per shape and livery and shares it between blades. So the world takes this
+/// mesh on its own and gives it an absolute wood material — see [`sword_grip_mesh`].
+fn grip_mesh() -> Mesh {
+    neutral(
+        Mesh::from(CylinderMeshBuilder::new(
+            GRIP_SIZE.x / 2.0,
+            GRIP_SIZE.y,
+            GRIP_SIDES,
+        ))
+        .translated_by(Vec3::Y * (base_below_the_guard())),
+    )
+}
+
+/// Where the grip's centre sits along the sword, in its own space.
+fn base_below_the_guard() -> f32 {
+    blade_base() - GUARD_SIZE.y - GRIP_SIZE.y / 2.0
+}
+
 /// The tint that lands a grip on [`palette::LOG`] over one blade's own steel.
 ///
 /// **Computed rather than written down, and that is the whole of why it is correct for more
@@ -1321,24 +1347,46 @@ fn wood_over(item_colour: [f32; 4]) -> Option<[f32; 4]> {
 /// asset, at its own size, with its own materials — it is the shape being one answer instead
 /// of two that somebody has to keep in step, which is exactly the relationship
 /// `player/items.rs` already has with its readers.
-/// **Test-only since #418**, and the reason is the point rather than an accident of
-/// visibility: every surface that draws a sword in the world now asks for it *by livery*,
-/// through [`sword_mesh_with`]. A caller that wanted "the sword" without saying which one
-/// would be the shape-keyed answer the four surfaces used to disagree through.
+/// The sword the **world** builds: no livery, and **no grip**, which the drop draws as a
+/// child of its own since #435.
+///
+/// **Test-only, and the name says which surface it is.** It was `sword_mesh` and that had
+/// stopped meaning anything: every surface asks for a sword *by livery* since #418, and by
+/// which half of it since #435. Four tests were reaching for "the sword" and getting the
+/// world's, which is not the one the hand holds.
 #[cfg(test)]
-fn sword_mesh(length: f32) -> Mesh {
+fn world_sword(length: f32) -> Mesh {
     sword_mesh_with(length, None)
 }
 
-/// The same weapon at a drop's scale, wearing whatever livery its item does.
+/// The sword the **hand** builds for one item: its livery, its grip, and its wood.
+#[cfg(test)]
+fn held_sword(item_id: u16) -> Mesh {
+    item_mesh(item_id, ItemShape::Blade)
+}
+
+/// The same weapon at a drop's scale, wearing whatever livery its item does — **and without
+/// its grip**.
 ///
-/// **The world's entry point, and it takes no item colour on purpose.** `drops.rs` caches one
-/// mesh per shape *and livery*, shared by every item that presents as that pair — so a tint
-/// divided out of one blade's steel would be right for that sword and quietly wrong for the
-/// next one to share the pair. See [`sword_with`], whose doc carries the whole of that
-/// reasoning, and `the_dropped_sword_gets_the_turned_grip_and_not_the_wood`.
+/// **The world draws a sword as two meshes, because its grip is not steel.** `drops.rs` caches
+/// one mesh per shape *and livery*, shared by every item presenting as that pair, so a wood
+/// tint divided out of one blade's steel would be right for that sword and quietly wrong for
+/// the next one to share the pair — which is why #419 shipped the turned grip without the
+/// wood. Handing the grip out separately, for the world to draw with an absolute
+/// `palette::LOG` material, answers it without touching a cache key: the grip's colour stops
+/// being a function of the blade's.
+///
+/// The first-person hand still gets one mesh with one material and still reaches its wood by
+/// division — see [`sword_with`]. Two surfaces, two arrangements, one shape.
 pub(super) fn sword_mesh_with(length: f32, livery: Option<Livery>) -> Mesh {
     sword_with(length, livery, None)
+}
+
+/// The turned grip on its own, at a drop's scale.
+///
+/// The second half of what [`sword_mesh_with`] leaves out, for the world to draw in wood.
+pub(super) fn sword_grip_mesh(length: f32) -> Mesh {
+    grip_mesh().scaled_by(Vec3::splat(length / SWORD_LENGTH))
 }
 
 /// One ring of the lofted blade: where it sits, and how far along the blade that is.
@@ -1474,16 +1522,21 @@ fn blade_loft(livery: Option<Livery>) -> Mesh {
 }
 
 /// A gladius wearing one livery, or none.
-/// A gladius wearing one livery, or none, with its grip turned in the wood one blade's own
-/// steel can reach.
+/// A gladius wearing one livery, or none.
 ///
-/// **`item_colour` is `Some` only where the caller knows which blade this is.** The held
-/// view model mints an asset per selected item and does; `drops.rs` caches **one mesh per
-/// [`ItemShape`]**, shared by every blade and coloured by a per-item material, so a
-/// per-item tint baked into it would be right for one sword and silently wrong for the
-/// other. That is why the drop gets the turned grip and not yet the wood — see
-/// [`the_dropped_sword_gets_the_turned_grip_and_not_the_wood`], which pins the gap rather
-/// than letting it be discovered.
+/// **`item_colour` decides which surface is asking, and therefore whether the grip is in
+/// here at all.**
+///
+/// `Some` is the first-person hand: it mints an asset per selected item, so it knows which
+/// blade this is, the grip is merged in, and its wood is reached by dividing
+/// [`palette::LOG`] out of that blade's own steel.
+///
+/// `None` is the world. `drops.rs` caches **one mesh per shape and livery**, shared by every
+/// blade and coloured by a per-item material, so a tint divided out of one steel would be
+/// right for that sword and silently wrong for the next one to share the pair. The grip is
+/// therefore **left out** and handed over separately by [`sword_grip_mesh`], for the world to
+/// draw with an absolute wood material — which needs no cache key to change and no division
+/// at all.
 fn sword_with(length: f32, livery: Option<Livery>, item_colour: Option<[f32; 4]>) -> Mesh {
     let base = blade_base();
     let blade = blade_loft(livery);
@@ -1500,16 +1553,7 @@ fn sword_with(length: f32, livery: Option<Livery>, item_colour: Option<[f32; 4]>
         Mesh::from(Cuboid::from_size(GUARD_SIZE))
             .translated_by(Vec3::Y * (base - GUARD_SIZE.y / 2.0)),
     );
-    // **Turned, not planed** — inscribed in the box it replaces, so the assertions that box
-    // takes part in are unchanged. See [`GRIP_SIZE`] and [`GRIP_SIDES`].
-    let grip = neutral(
-        Mesh::from(CylinderMeshBuilder::new(
-            GRIP_SIZE.x / 2.0,
-            GRIP_SIZE.y,
-            GRIP_SIDES,
-        ))
-        .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y / 2.0)),
-    );
+    let grip = grip_mesh();
     let pommel = neutral(
         Mesh::from(Cuboid::from_size(POMMEL_SIZE))
             .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y - POMMEL_SIZE.y / 2.0)),
@@ -1529,16 +1573,28 @@ fn sword_with(length: f32, livery: Option<Livery>, item_colour: Option<[f32; 4]>
             identity
         })
     });
-    let (mut sword, guard, grip, pommel) = match wood {
-        Some(tint) => (
-            tinted(blade, identity),
-            tinted(guard, identity),
-            tinted(grip, tint),
-            tinted(pommel, identity),
-        ),
-        None => (blade, guard, grip, pommel),
+    let sword = match wood {
+        // The hand: the grip is in the mesh, and its wood is a tint over this blade's steel.
+        Some(tint) => {
+            let mut sword = tinted(blade, identity);
+            merge_all(
+                &mut sword,
+                [
+                    tinted(guard, identity),
+                    tinted(grip, tint),
+                    tinted(pommel, identity),
+                ],
+                "sword",
+            );
+            sword
+        }
+        // The world: the grip is drawn as its own mesh, in its own material.
+        None => {
+            let mut sword = blade;
+            merge_all(&mut sword, [guard, pommel], "sword");
+            sword
+        }
     };
-    merge_all(&mut sword, [guard, grip, pommel], "sword");
 
     // Uniform, so the normals computed above stay unit vectors — `Mesh::scale_by` leaves
     // them alone for exactly that case and rebuilds them for every other.
@@ -2696,34 +2752,74 @@ mod tests {
     #[test]
     fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
         let rusted = sword_with(SWORD_LENGTH, Some(Livery::WornSteel), None);
-        let plain = sword_mesh(SWORD_LENGTH);
+        let plain = held_sword(ITEM_IRON_SWORD);
 
-        // One tint, not two: the item's own colour arrives whole and the oxide is a shade
-        // *of* it applied by the image, which is what keeps `player/items.rs` the one
-        // answer to what the steel is.
+        // **The oxide is not among the vertex colours**, which is the claim, and it is no
+        // longer the same thing as "there are no vertex colours". Since #419 a held blade
+        // carries two: identity everywhere, and the tint that lands its grip on
+        // `palette::LOG`. What must never appear is a third that is the rust.
+        let rust_tinted = |mesh: &Mesh, item_id: u16| {
+            let colour = items::item_linear_rgba(item_id);
+            let wood = wood_over(colour).expect("both blades can reach the wood");
+            tints(mesh)
+                .into_iter()
+                .filter(|tint| {
+                    *tint != [255, 255, 255, 255]
+                        && *tint != wood.map(|c| (c * 255.0).round() as u8)
+                })
+                .count()
+        };
         assert_eq!(
-            tints(&rusted),
-            Vec::<[u8; 4]>::new(),
-            "the rusty blade carries vertex colours again, so the rust has two authorities"
-        );
-        assert_eq!(
-            tints(&plain),
-            Vec::<[u8; 4]>::new(),
-            "the plain blade carries vertex colours, so it is no longer simply its material"
-        );
-
-        // The rust reaches the mesh through the coordinates, and only the rusty blade's.
-        let neutral = livery::neutral_uv();
-        let liveried = |mesh: &Mesh| uvs(mesh).into_iter().filter(|uv| *uv != neutral).count();
-        assert!(
-            liveried(&rusted) > 0,
-            "no vertex of the rusty blade samples the livery, so the image is unread"
-        );
-        assert_eq!(
-            liveried(&plain),
+            rust_tinted(&rusted, ITEM_RUSTY_SWORD),
             0,
-            "the plain blade samples the livery, so an iron sword wears another blade's rust"
+            "the rusty blade carries a tint that is neither identity nor its grip's wood, so \
+             the rust has two authorities"
         );
+        assert_eq!(
+            rust_tinted(&plain, ITEM_IRON_SWORD),
+            0,
+            "the iron blade carries a tint that is neither identity nor its grip's wood"
+        );
+
+        // **The rust reaches the mesh through the coordinates, and only the rusty blade's.**
+        // "Only" is a band question rather than a neutrality one since #420: the iron sword
+        // wears `ForgedSteel` and samples the image too, so what must never happen is either
+        // blade reading the rows the *other* metal was written into.
+        let neutral = livery::neutral_uv();
+        let sampled = |mesh: &Mesh| -> Vec<[f32; 2]> {
+            uvs(mesh).into_iter().filter(|uv| *uv != neutral).collect()
+        };
+        for (name, mesh, own, other) in [
+            (
+                "the rusty blade",
+                &rusted,
+                Livery::WornSteel,
+                Livery::ForgedSteel,
+            ),
+            (
+                "the iron blade",
+                &plain,
+                Livery::ForgedSteel,
+                Livery::WornSteel,
+            ),
+        ] {
+            let seen = sampled(mesh);
+            assert!(
+                !seen.is_empty(),
+                "no vertex of {name} samples the livery, so the image is unread"
+            );
+            for uv in &seen {
+                assert!(
+                    livery::band_holds(own, *uv),
+                    "{name} samples {uv:?}, outside {own:?}'s own band"
+                );
+                assert!(
+                    !livery::band_holds(other, *uv),
+                    "{name} samples {uv:?}, which is {other:?}'s band — it wears another \
+                     blade's surface"
+                );
+            }
+        }
 
         // And the coordinates cover the field rather than a corner of it. **Read as a span
         // and not per vertex**, because the blade has twelve quads and the shader samples
@@ -3173,7 +3269,7 @@ mod tests {
              {SWORD_LENGTH}"
         );
 
-        let sword = positions(&sword_mesh(SWORD_LENGTH));
+        let sword = positions(&held_sword(ITEM_IRON_SWORD));
 
         let (low, high) = extent(&sword, 1);
         assert!(
@@ -3198,7 +3294,7 @@ mod tests {
     /// which a rectangular section fails in both directions.
     #[test]
     fn the_held_sword_is_a_gladius_and_not_one_box() {
-        let sword = positions(&sword_mesh(SWORD_LENGTH));
+        let sword = positions(&held_sword(ITEM_IRON_SWORD));
 
         let one_box = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
         assert!(
@@ -3462,7 +3558,11 @@ mod tests {
     #[test]
     fn the_iron_sword_is_the_blade_it_was_before_the_livery() {
         let iron = item_mesh(ITEM_IRON_SWORD, ItemShape::Blade);
-        let unliveried = sword_mesh(SWORD_LENGTH);
+        let unliveried = sword_with(
+            SWORD_LENGTH,
+            None,
+            Some(items::item_linear_rgba(ITEM_IRON_SWORD)),
+        );
 
         // **It wears a livery now and it is the same blade**, which is the whole of what
         // #420 claims for a colour-only material: `sword_mesh` in both states, to the vertex.
@@ -3615,7 +3715,7 @@ mod tests {
     /// what reversing a section produces.
     #[test]
     fn every_face_of_the_sword_looks_outward() {
-        let mesh = sword_mesh(SWORD_LENGTH);
+        let mesh = held_sword(ITEM_IRON_SWORD);
 
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -5531,15 +5631,25 @@ mod tests {
                 "the iron sword",
                 item_mesh(ITEM_IRON_SWORD, ItemShape::Blade),
             ),
-            ("a dropped sword", sword_mesh(0.05)),
+            ("a dropped sword", world_sword(0.05)),
+            ("a dropped grip", sword_grip_mesh(0.05)),
         ] {
             let solids = solid_volumes(&mesh, false);
-            // The blade, the guard, the grip and the pommel. A part that welded into its
-            // neighbour, or one that went missing, changes this before any volume does.
+            // **The count says which surface this is**, which is the property #435 added and
+            // the reason it is a `match` rather than a constant: the hand holds one mesh of
+            // four solids — blade, guard, grip, pommel — while the world takes the same
+            // weapon in two pieces, three solids and one, because its grip is wood and is
+            // drawn in a material of its own. A part that welded into its neighbour, or one
+            // that went missing, changes this before any volume does.
+            let want = match name {
+                "a dropped sword" => 3,
+                "a dropped grip" => 1,
+                _ => 4,
+            };
             assert_eq!(
                 solids.len(),
-                4,
-                "{name} is {} connected solids, not the blade and its three furniture parts",
+                want,
+                "{name} is {} connected solids, want {want}",
                 solids.len()
             );
             for (index, volume) in solids.iter().enumerate() {
@@ -5551,7 +5661,11 @@ mod tests {
             }
 
             let reversed = solid_volumes(&mesh, true);
-            assert_eq!(reversed.len(), 4, "{name} splits differently when reversed");
+            assert_eq!(
+                reversed.len(),
+                want,
+                "{name} splits differently when reversed"
+            );
             for (index, volume) in reversed.iter().enumerate() {
                 assert!(
                     *volume < 0.0,
@@ -5633,17 +5747,41 @@ mod tests {
     /// all and the dropped grip stays the steel it has always been: an unclosed divergence
     /// rather than a new wrong one, and #418 is where the drop stops sharing that mesh.
     #[test]
-    fn the_dropped_sword_gets_the_turned_grip_and_not_the_wood() {
-        let dropped = sword_mesh(SWORD_LENGTH);
-        assert_eq!(
-            grip_ring(&positions(&dropped), Vec3::ZERO).len(),
-            GRIP_RING_VERTICES,
-            "the dropped sword's grip is not the turned one the hand holds"
-        );
+    fn the_world_takes_the_sword_in_two_pieces_so_its_grip_can_be_wood() {
+        let dropped = world_sword(SWORD_LENGTH);
+        let grip = sword_grip_mesh(SWORD_LENGTH);
+
+        // The grip is out of the blade's mesh and whole in its own.
         assert!(
-            dropped.attribute(Mesh::ATTRIBUTE_COLOR).is_none(),
-            "the shared blade mesh carries vertex colours, so one of the two swords is drawn \
-             with the other's grip colour"
+            grip_ring(&positions(&dropped), Vec3::ZERO).is_empty(),
+            "the world's blade still carries its grip, so the grip cannot have a material of \
+             its own"
+        );
+        assert_eq!(
+            grip_ring(&positions(&grip), Vec3::ZERO).len(),
+            GRIP_RING_VERTICES,
+            "the world's grip is not the turned one the hand holds"
+        );
+
+        // **Neither piece carries a colour**, which is what makes the split worth making.
+        // `hands.rs` reaches its wood by dividing `palette::LOG` out of *that* blade's own
+        // steel; `drops.rs` shares one mesh per shape and livery between blades, so a tint
+        // divided out of one steel and baked in would be right for one sword and silently
+        // wrong for the other. An absolute colour on a mesh of its own needs no division.
+        for (name, mesh) in [("the world's blade", &dropped), ("the world's grip", &grip)] {
+            assert!(
+                mesh.attribute(Mesh::ATTRIBUTE_COLOR).is_none(),
+                "{name} carries vertex colours, so a shared mesh has a per-item opinion again"
+            );
+        }
+
+        // And the two pieces still meet: the grip's top sits where the blade's guard ends.
+        let (_, grip_top) = extent(&positions(&grip), 1);
+        let guard_bottom = blade_base() - GUARD_SIZE.y;
+        assert!(
+            (grip_top - guard_bottom).abs() < 1e-6,
+            "the grip's top is at {grip_top} and the guard ends at {guard_bottom}, so the \
+             world's sword has a gap in it"
         );
     }
 
