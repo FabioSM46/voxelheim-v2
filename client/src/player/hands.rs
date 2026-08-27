@@ -1291,13 +1291,18 @@ fn blade_surface(section: BladeSection, z: f32) -> f32 {
 /// caches one mesh per shape and livery and shares it between blades. So the world takes this
 /// mesh on its own and gives it an absolute wood material — see [`sword_grip_mesh`].
 fn grip_mesh() -> Mesh {
-    neutral(
+    // **It wears the wood, on both surfaces.** The hand reaches `palette::LOG` by division and
+    // the world by an absolute material, but the *grain* is the same field read from the same
+    // band either way — which is what stops a grip being wood in one place and grained in the
+    // other. See [`livery::wear`].
+    livery::wear(
         Mesh::from(CylinderMeshBuilder::new(
             GRIP_SIZE.x / 2.0,
             GRIP_SIZE.y,
             GRIP_SIDES,
         ))
         .translated_by(Vec3::Y * (base_below_the_guard())),
+        Livery::Wood,
     )
 }
 
@@ -2809,9 +2814,11 @@ mod tests {
                 "no vertex of {name} samples the livery, so the image is unread"
             );
             for uv in &seen {
+                // Its steel or its grip's wood — a sword is two materials since #436 — and
+                // never the other blade's metal, which is the claim this test exists for.
                 assert!(
-                    livery::band_holds(own, *uv),
-                    "{name} samples {uv:?}, outside {own:?}'s own band"
+                    livery::band_holds(own, *uv) || livery::band_holds(Livery::Wood, *uv),
+                    "{name} samples {uv:?}, outside its own steel and its grip's wood"
                 );
                 assert!(
                     !livery::band_holds(other, *uv),
@@ -3118,6 +3125,61 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         seen
+    }
+
+    /// **The held grip reads the wood band**, off the hand's own composition rather than off
+    /// the mesh the world takes.
+    ///
+    /// The two grips are the same `grip_mesh` at two scales, and scaling leaves texture
+    /// coordinates alone — but "they must be the same because they come from one function" is
+    /// a claim about a call graph. This reads the merged held sword and picks the grip out of
+    /// it by radius, which is what the drop's own test cannot do.
+    #[test]
+    fn a_held_grip_reads_the_wood_band() {
+        for item_id in [ITEM_RUSTY_SWORD, ITEM_IRON_SWORD] {
+            let sword = item_mesh(item_id, ItemShape::Blade);
+            let points = positions(&sword);
+            let coordinates = uvs(&sword);
+            let radius = GRIP_SIZE.x / 2.0;
+            let high = blade_base() - GUARD_SIZE.y;
+            let low = high - GRIP_SIZE.y;
+
+            let mut grained = 0;
+            for (point, uv) in points.iter().zip(&coordinates) {
+                let on_the_grip = (point[0].hypot(point[2]) - radius).abs() < 1e-6
+                    && point[1] >= low - 1e-6
+                    && point[1] <= high + 1e-6;
+                if !on_the_grip {
+                    continue;
+                }
+                grained += 1;
+                assert!(
+                    livery::band_holds(Livery::Wood, *uv),
+                    "item {item_id}'s held grip samples {uv:?}, outside wood's own band"
+                );
+            }
+            assert_eq!(
+                grained, GRIP_RING_VERTICES,
+                "item {item_id}'s held grip is {grained} vertices, which is not the turned one"
+            );
+        }
+    }
+
+    /// The bands one held item may legitimately sample.
+    ///
+    /// **Its own material's, and wood** — because a blade is honestly two materials: the steel
+    /// and the grip that is not steel. #420 anticipated exactly this shape ("or two, where a
+    /// shape is honestly two materials") and #436 is where a sword became the first item to
+    /// need it.
+    ///
+    /// What the sweeps using this actually catch is unchanged and is the thing that matters: a
+    /// blade must never read the band the *other metal* was written into.
+    fn bands_worn(item_id: u16) -> Vec<Livery> {
+        let mut worn: Vec<Livery> = items::item_livery(item_id).into_iter().collect();
+        if items::item_shape(item_id) == ItemShape::Blade && !worn.contains(&Livery::Wood) {
+            worn.push(Livery::Wood);
+        }
+        worn
     }
 
     /// Every vertex colour one mesh carries, unquantised and in buffer order.
@@ -3595,10 +3657,17 @@ mod tests {
             !sampled.is_empty(),
             "the iron sword samples nothing, so its forge marks reach no surface"
         );
+        // **Two bands, because a sword is two materials.** Its steel, and the wood its grip
+        // is turned from — what must never appear is worn steel, which is the *other* blade's.
         for uv in &sampled {
             assert!(
-                livery::band_holds(Livery::ForgedSteel, *uv),
-                "the iron sword samples {uv:?}, outside forged steel's own band"
+                livery::band_holds(Livery::ForgedSteel, *uv)
+                    || livery::band_holds(Livery::Wood, *uv),
+                "the iron sword samples {uv:?}, outside its steel's band and its grip's wood"
+            );
+            assert!(
+                !livery::band_holds(Livery::WornSteel, *uv),
+                "the iron sword samples {uv:?}, which is the rusty blade's band"
             );
         }
 
@@ -3651,13 +3720,21 @@ mod tests {
                 // real coordinates — armour, today — samples nothing at all and is
                 // unchanged; what must never happen is a blade reading the rows some other
                 // metal was written into.
-                Some(livery) => {
+                Some(_) => {
+                    let worn = bands_worn(item_id);
                     for uv in &sampled {
                         assert!(
-                            livery::band_holds(livery, *uv),
-                            "item {item_id} samples {uv:?}, outside the band {livery:?} was \
-                             written into"
+                            worn.iter().any(|livery| livery::band_holds(*livery, *uv)),
+                            "item {item_id} samples {uv:?}, outside the bands it wears: \
+                             {worn:?}"
                         );
+                        for other in Livery::ALL {
+                            assert!(
+                                worn.contains(&other) || !livery::band_holds(other, *uv),
+                                "item {item_id} samples {uv:?}, which is {other:?}'s band — \
+                                 it wears another material's surface"
+                            );
+                        }
                     }
                 }
             }

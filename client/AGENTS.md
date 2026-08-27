@@ -2093,7 +2093,7 @@ Recorded here so the next reader does not mistake them for oversights:
   | --- | --- | --- |
   | worn steel | oxide | The starter blade is meant to look old, and a flat tint said "grey sword". It displaces as well as tints, because corrosion eats metal. |
   | forged steel | forge marks | Colour only: an unground flat over the ridge, hammer banding, grinding streaks, a sparse scale. It darkens toward **blue-grey** where the rust goes warm, which is what tells the two blades apart at a distance. |
-  | wood | **not yet** | The named next candidate, deliberately out of #420. It is the material the `LOG`-colour ambiguity above hides, and deciding it is cheap only once the explicit column exists — which is what that issue built. |
+  | wood | grain | Lines along the piece, wandering slowly across it, sharpened to narrow dark bands. The strongest case in the set: a bare cube carried in the hand is the flattest thing in the game. Colour only — grain is what a tree grew, not what took its surface away. Worn by the log, the campfire, the wooden shield, the bow and the sceptre; **not** by the axe or the leather patch, which borrow the `LOG` swatch for reasons that are not their material. |
   | worked hide | none | Three pieces share one `Armour` silhouette, and a warm dark brown already reads as hide. Grain would be detail neither the mesh nor the cell's plate-and-shoulders picture has anywhere else. |
   | bone, meat, arrow | none | One `Material` stub each. A texture nobody will look at. |
   | stone, earth, snow, ore | none | Block-like items take the terrain swatch they represent, whole. **Terrain is not in this**: `world/palette.rs` plus vertex colours is that material system, greedy meshing merges quads across blocks, and a texture there is a different problem with different costs. An item that represents a block may take a livery in the hand and in the cell; the world does not change. |
@@ -2103,6 +2103,15 @@ Recorded here so the next reader does not mistake them for oversights:
   would need its reasoning written down. A mesh points its vertices at its own material's band, a
   cell hands `bevy_ui` that band as a `rect`, and `livery::band_holds` is what lets a test say a
   blade never reads the rows another metal was written into.
+
+  **The drop's mesh cache is keyed on displacement too, and #436 is where that stopped being
+  theoretical.** `MeshKey` was `(ItemShape, Option<Livery>)`, which mints a byte-identical
+  duplicate whenever a livery changes only colour — and giving the campfire a wood livery split
+  the bundle roll the forge and the tent share: three structures, one silhouette, suddenly two
+  meshes for no geometric reason. `drops::mesh_key` drops a livery that displaces nothing, so the
+  key is *the reason a mesh differs* rather than the fact a livery exists. That strengthens what
+  #418 asked for rather than weakening it: two items sharing a shape and a livery still share one
+  mesh, and now so do two whose liveries change nothing about it.
 
   **Subdivision follows displacement, not the presence of a livery.** `livery::pit_depth` answers
   zero for forged steel, so its blade is the two-span six-face loft an un-liveried one is — which
