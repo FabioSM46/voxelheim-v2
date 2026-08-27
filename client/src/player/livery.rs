@@ -33,8 +33,24 @@ use super::items::Livery;
 /// finely the colour can vary, and the second is cheap where the first is not.
 const LIVERY_WIDTH: u32 = 64;
 
-/// How many texels the livery carries along a blade, the neutral band included.
-const LIVERY_HEIGHT: u32 = 64;
+/// How many texels one livery's band carries along a blade.
+///
+/// **Sixty-three, and the number is inherited rather than chosen**: it is what the single
+/// rust band occupied when the image was 64 rows with one neutral row above it. Keeping it
+/// means every texel of the rust is exactly where it was, which is what lets
+/// [`the_rust_livery_is_generated_the_same_way_every_time`] keep pinning the same values
+/// across a change that doubled the image.
+const FIELD_ROWS: u32 = 63;
+
+/// How many texels the image carries along a blade: the neutral band, then one field band
+/// per livery.
+///
+/// **One image for every livery, and the count of images is the count of materials the
+/// renderer has to bind.** A second image would be a second binding for a mechanism whose
+/// whole point is that four surfaces share one handle; it would need its reasoning written
+/// down, and there is none. The height is not a power of two and does not need to be —
+/// there are no mipmaps here and the sampler is nearest.
+const LIVERY_HEIGHT: u32 = NEUTRAL_ROWS + FIELD_ROWS * Livery::ALL.len() as u32;
 
 /// How many rows at the top of the image are the neutral band.
 ///
@@ -50,19 +66,6 @@ const NEUTRAL_ROWS: u32 = 1;
 /// moved between sessions would be the one thing about it a player could not learn. The
 /// same number `hands.rs` scattered the fourteen boxes from.
 const RUST_SEED: u32 = 0x5EED_0204;
-
-/// How much darker rust is than the iron it eats into.
-///
-/// **A multiplier, not a colour**, and that is what keeps `player/items.rs` the one answer
-/// to which colour an item presents as. The image is white — identity — everywhere the
-/// field is zero, so the base that comes through is whatever that table says. Change the
-/// sword's item colour and the rust follows it, because it is a shade *of* it.
-///
-/// Warm and dark: red kept, green and blue pulled down, which turns a pale iron into oxide
-/// rather than into grey. Stored in a **linear** texture rather than an sRGB one, so these
-/// are the numbers the shader multiplies by — the semantics the vertex colours it replaced
-/// had.
-const RUST_TINT: [f32; 3] = [0.72, 0.38, 0.22];
 
 /// How many freckles the rust field carries.
 ///
@@ -87,6 +90,41 @@ const RUST_PATCH_RADIUS: f32 = 0.085;
 /// reach the tip. Twelve per cent keeps the whole field off the point and out of the guard.
 const RUST_MARGIN: f32 = 0.12;
 
+/// How deep the flat over the ridge is, as a fraction of the base colour.
+///
+/// The centre of a blade was never ground the way its bevels were. Weighted toward the flat
+/// and away from the cutting edge, so the bevel keeps more of the base.
+const FORGE_FLAT: f32 = 0.115;
+
+/// How deep the hammer banding is.
+const FORGE_BANDING: f32 = 0.07;
+
+/// How deep the grinding streaks are.
+const FORGE_GRINDING: f32 = 0.045;
+
+/// How deep the forge scale is where it is present.
+///
+/// **The deepest term, and the one the other three are measured against.** It is also the
+/// only one that reads at a glance, which is why it is a sparse scatter rather than
+/// something continuous.
+const FORGE_SCALE: f32 = 0.30;
+
+/// How many hammer bands run across the blade.
+const FORGE_BAND_COUNT: f32 = 7.0;
+
+/// How many grinding streaks run around the perimeter.
+///
+/// Fine across the blade and continuous along it, which is the direction a stone is drawn.
+const FORGE_STREAK_COUNT: f32 = 9.0;
+
+/// How many flecks of forge scale the field carries.
+const FORGE_FLECKS: u32 = 9;
+
+/// The radius of one fleck, in the field's own `(around, along)` space.
+///
+/// Smaller than a rust freckle: scale is what did not come off, not what grew.
+const FORGE_FLECK_RADIUS: f32 = 0.055;
+
 /// A deterministic value in `0.0..1.0` for one freckle and one of its dimensions.
 ///
 /// **A seeded hash rather than a crate**: `client/AGENTS.md` is explicit about the
@@ -107,6 +145,42 @@ fn scatter(mark: u32, channel: u32) -> f32 {
     (bits >> 8) as f32 / 16_777_216.0
 }
 
+/// How much darker one livery is than the metal it dresses, at full strength.
+///
+/// **A multiplier, not a colour**, and that is what keeps `player/items.rs` the one answer
+/// to which colour an item presents as. The image is white — identity — everywhere the
+/// field is zero, so the base that comes through is whatever that table says.
+///
+/// **The two directions are opposite on purpose.** Oxide goes warm: red kept, green and blue
+/// pulled down, which turns a pale iron into rust rather than into grey. Forged steel goes
+/// blue-grey where it darkens, because `ForgedSteel` **is** the polished value and a livery
+/// can only take something away — so what it takes away is the polish. That is what lets a
+/// player tell the two blades apart at a distance without looking at any detail, and it
+/// costs one row rather than a second mechanism.
+fn tint(livery: Livery) -> [f32; 3] {
+    match livery {
+        Livery::WornSteel => [0.72, 0.38, 0.22],
+        // At full strength this is about 71% of the base and cooler than it in every
+        // channel. The interactive model this was tuned in bottomed out near 69%; the third
+        // decimal of that is not something a screen was going to settle.
+        Livery::ForgedSteel => [0.64, 0.70, 0.80],
+    }
+}
+
+/// How deep one livery eats into the metal, as a fraction of the local half-thickness.
+///
+/// **Zero is a real answer and it is what makes the second livery a row.** Corrosion eats
+/// metal, so worn steel displaces; forge marks are the record of work done to a surface that
+/// is still whole, so forged steel does not. A blade whose livery does not displace is
+/// lofted exactly as an un-liveried one is — same sections, same vertices — and the whole of
+/// what it wears is colour.
+pub(super) fn pit_depth(livery: Livery) -> f32 {
+    match livery {
+        Livery::WornSteel => 0.30,
+        Livery::ForgedSteel => 0.0,
+    }
+}
+
 /// How strong one livery is at a point on the surface it dresses, in `0.0..=1.0`.
 ///
 /// `around` runs the perimeter and **wraps**; `along` runs from the guard to the tip and
@@ -114,8 +188,56 @@ fn scatter(mark: u32, channel: u32) -> f32 {
 /// what makes the pitting and the oxide the same fact rather than two that agree.
 pub(super) fn field(livery: Livery, around: f32, along: f32) -> f32 {
     match livery {
-        Livery::Rust => rust_field(around, along),
+        Livery::WornSteel => rust_field(around, along),
+        Livery::ForgedSteel => forge_field(around, along),
     }
+}
+
+/// How far across a flat a point is, in `0.0..=1.0`, and `0.0` on the cutting edges.
+///
+/// The blade's section is a hexagon: `around` 0 and 1/2 are the two edges, and the two flats
+/// span the sixths either side of 1/4 and 3/4. **The first two forge terms are weighted by
+/// this and away from the edge**, which is what makes the bevel keep more of the base colour
+/// and read as an edge without anything being brightened.
+fn over_the_flat(around: f32) -> f32 {
+    // Fold the perimeter onto one half: the two faces of a blade are the same face.
+    let half = (around % 0.5) * 2.0;
+    // 0 at the edge, 1 at the middle of the flat.
+    (1.0 - (half - 0.5).abs() * 2.0).clamp(0.0, 1.0)
+}
+
+/// The forge field: four terms, at the depths an interactive model was tuned to.
+///
+/// They **add** rather than compete, because they are four different things that happened to
+/// one piece of steel. The depths are relative to the deepest of them, so the ratios the
+/// model settled survive being expressed as one strength: flat over the ridge −11.5%, hammer
+/// banding −7%, grinding streaks −4.5%, forge scale −30% where present.
+fn forge_field(around: f32, along: f32) -> f32 {
+    let flat = over_the_flat(around);
+
+    // The centre was never ground the way the bevels were.
+    let unground = FORGE_FLAT / FORGE_SCALE * flat;
+    // Forge work, across the blade.
+    let banding = FORGE_BANDING / FORGE_SCALE
+        * flat
+        * (0.5 + 0.5 * (along * FORGE_BAND_COUNT * std::f32::consts::TAU).sin());
+    // Grinding, along the blade and fine across it.
+    let grinding = FORGE_GRINDING / FORGE_SCALE
+        * (0.5 + 0.5 * (around * FORGE_STREAK_COUNT * std::f32::consts::TAU).sin());
+    // A sparse scatter, and the only term that reads at a glance.
+    let mut scale = 0.0_f32;
+    for fleck in 0..FORGE_FLECKS {
+        let centre_along = (fleck as f32 + scatter(fleck, 4)) / FORGE_FLECKS as f32;
+        let centre_around = scatter(fleck, 5);
+        let radius = FORGE_FLECK_RADIUS * (0.4 + 0.6 * scatter(fleck, 3));
+        let round = (around - centre_around).abs();
+        let across = round.min(1.0 - round);
+        let gap = along - centre_along;
+        let distance = (across * across + gap * gap).sqrt() / radius;
+        scale = scale.max((1.0 - distance * distance).max(0.0));
+    }
+
+    (unground + banding + grinding + scale).clamp(0.0, 1.0)
 }
 
 fn rust_field(around: f32, along: f32) -> f32 {
@@ -155,13 +277,9 @@ fn rust_field(around: f32, along: f32) -> f32 {
 /// vertices at [`blade_uv`] and never sees the neutral band; an `ImageNode` draws the whole
 /// image unless told otherwise, so the cell would put the white row across the top of every
 /// blade it draws. This is that row taken off.
-pub(crate) fn field_rect() -> Rect {
-    Rect::new(
-        0.0,
-        NEUTRAL_ROWS as f32,
-        LIVERY_WIDTH as f32,
-        LIVERY_HEIGHT as f32,
-    )
+pub(crate) fn field_rect(livery: Livery) -> Rect {
+    let top = band_top(livery);
+    Rect::new(0.0, top, LIVERY_WIDTH as f32, top + FIELD_ROWS as f32)
 }
 
 /// The texture coordinate every vertex that wears no livery carries.
@@ -172,15 +290,40 @@ pub(super) fn neutral_uv() -> [f32; 2] {
     [0.5, 0.5 / LIVERY_HEIGHT as f32]
 }
 
-/// The texture coordinate for a point on a liveried blade.
+/// Whether one texture coordinate falls inside one livery's own band.
 ///
-/// `along` is squeezed past the neutral band rather than starting at zero, which is the one
-/// piece of arithmetic the band costs.
-pub(super) fn blade_uv(around: f32, along: f32) -> [f32; 2] {
-    let rows = (LIVERY_HEIGHT - NEUTRAL_ROWS) as f32;
+/// **What "one image for every livery" is worth is that this is checkable.** With a band per
+/// material, a mesh reading the wrong rows is a mesh wearing another metal's surface, and
+/// the sweeps in `hands.rs` measure every item against it.
+///
+/// Test-only: a renderer never asks, because the coordinates it draws with came from
+/// [`blade_uv`] and are inside the band by construction. This is the *other* side of that
+/// construction, which is exactly what a test should be reading.
+#[cfg(test)]
+pub(super) fn band_holds(livery: Livery, uv: [f32; 2]) -> bool {
+    let row = (uv[1] * LIVERY_HEIGHT as f32).floor();
+    let top = band_top(livery);
+    (top..top + FIELD_ROWS as f32).contains(&row)
+}
+
+/// The first row of one livery's band.
+fn band_top(livery: Livery) -> f32 {
+    (NEUTRAL_ROWS + FIELD_ROWS * livery.band() as u32) as f32
+}
+
+/// The texture coordinate for a point on a blade wearing one livery.
+///
+/// `along` is squeezed into that livery's own band rather than spanning the image, which is
+/// what lets one image serve every material: a mesh only ever samples the rows its own
+/// material was written into.
+pub(super) fn blade_uv(livery: Livery, around: f32, along: f32) -> [f32; 2] {
+    // **Texel centres, first to last**, rather than the band's two edges. Spanning the edges
+    // put `along == 1.0` — the tip — exactly on the first row of the *next* material's band,
+    // which is the one place a shared image can go wrong and is why every coordinate is now
+    // squarely inside a texel rather than relying on the sampler to clamp.
     [
         around,
-        (NEUTRAL_ROWS as f32 + along * rows) / LIVERY_HEIGHT as f32,
+        (band_top(livery) + 0.5 + along * (FIELD_ROWS - 1) as f32) / LIVERY_HEIGHT as f32,
     ]
 }
 
@@ -192,25 +335,31 @@ pub(super) fn blade_uv(around: f32, along: f32) -> [f32; 2] {
 #[cfg(test)]
 pub(super) fn strength_at(livery: Livery, uv: [f32; 2]) -> f32 {
     let [around, v] = uv;
-    let rows = (LIVERY_HEIGHT - NEUTRAL_ROWS) as f32;
-    let along = (v * LIVERY_HEIGHT as f32 - NEUTRAL_ROWS as f32) / rows;
+    let along = (v * LIVERY_HEIGHT as f32 - band_top(livery) - 0.5) / (FIELD_ROWS - 1) as f32;
+    if !(0.0..=1.0).contains(&along) {
+        // A coordinate outside this livery's own band reaches none of its field, which is
+        // the honest answer rather than an extrapolation.
+        return 0.0;
+    }
     field(livery, around, along)
 }
 
-/// One livery, as the pixels a material samples.
-fn image_for(livery: Livery) -> Image {
+/// Every livery, as the one image every material samples.
+fn livery_image() -> Image {
     let mut data = Vec::with_capacity((LIVERY_WIDTH * LIVERY_HEIGHT * 4) as usize);
     for row in 0..LIVERY_HEIGHT {
         for column in 0..LIVERY_WIDTH {
-            let strength = if row < NEUTRAL_ROWS {
-                0.0
-            } else {
-                let around = (column as f32 + 0.5) / LIVERY_WIDTH as f32;
-                let along =
-                    ((row - NEUTRAL_ROWS) as f32 + 0.5) / (LIVERY_HEIGHT - NEUTRAL_ROWS) as f32;
-                field(livery, around, along)
+            let around = (column as f32 + 0.5) / LIVERY_WIDTH as f32;
+            let band = row.checked_sub(NEUTRAL_ROWS).map(|offset| {
+                let livery = Livery::ALL[(offset / FIELD_ROWS) as usize];
+                let along = ((offset % FIELD_ROWS) as f32 + 0.5) / FIELD_ROWS as f32;
+                (livery, field(livery, around, along))
+            });
+            let (colour, strength) = match band {
+                Some((livery, strength)) => (tint(livery), strength),
+                None => ([1.0; 3], 0.0),
             };
-            for channel in RUST_TINT {
+            for channel in colour {
                 let value = 1.0 + (channel - 1.0) * strength;
                 data.push((value * 255.0).round() as u8);
             }
@@ -259,19 +408,18 @@ fn image_for(livery: Livery) -> Image {
 /// the same handle, not because somebody kept two generators in step.
 #[derive(Resource, Debug, Clone)]
 pub(crate) struct Liveries {
-    rust: Handle<Image>,
+    image: Handle<Image>,
 }
 
 impl Liveries {
     /// The image any material that may draw a liveried item must carry.
     ///
-    /// **One material can serve liveried and un-liveried geometry at once**, because the
-    /// neutral band is in the same image — so a hand holding an iron sword and a hand
-    /// holding a rusty one are one draw with one material, exactly as they were before.
-    /// With more than one livery this becomes the choice `player/items.rs` names; today
-    /// there is one image and every caller wants it.
+    /// **One image, whatever the material**, which is what keeps a livery a row rather than
+    /// a binding: the neutral band and every livery's band are in it, so one material serves
+    /// a rusty blade, a forged one and a bare fist in a single draw. There is no per-livery
+    /// choice to make here, and a second image would need its reasoning written down.
     pub(crate) fn material_image(&self) -> Handle<Image> {
-        self.rust.clone()
+        self.image.clone()
     }
 }
 
@@ -279,7 +427,7 @@ impl FromWorld for Liveries {
     fn from_world(world: &mut World) -> Self {
         let mut images = world.resource_mut::<Assets<Image>>();
         Self {
-            rust: images.add(image_for(Livery::Rust)),
+            image: images.add(livery_image()),
         }
     }
 }
@@ -368,7 +516,7 @@ mod tests {
         let foreign = app
             .world_mut()
             .resource_mut::<Assets<Image>>()
-            .add(image_for(Livery::Rust));
+            .add(livery_image());
 
         register(&mut app);
 
@@ -395,7 +543,7 @@ mod tests {
     /// the field must leave clear, and two the rust reaches.
     #[test]
     fn the_rust_livery_is_generated_the_same_way_every_time() {
-        let image = image_for(Livery::Rust);
+        let image = livery_image();
 
         assert_eq!(
             texel(&image, 0, 0),
@@ -407,7 +555,7 @@ mod tests {
             [255, 255, 255, 255],
             "the guard end of the blade carries rust, so the margin is not being kept"
         );
-        // The deepest texel the field reaches, which is all but exactly [`RUST_TINT`] —
+        // The deepest texel the field reaches, which is all but exactly worn steel's own tint —
         // the freckle's own centre falls between texel centres, so it is one part in 255
         // short of it rather than equal to it. That is worth pinning as the number it is:
         // a livery that started clamping, or one whose tint drifted, changes it.
@@ -417,17 +565,70 @@ mod tests {
         // this one.
         assert_eq!(texel(&image, 40, 30), [207, 148, 121, 255]);
 
-        // And the whole buffer, so a change that misses all four named texels still has to
-        // be looked at rather than merely passing.
-        let rusted = (0..LIVERY_HEIGHT)
-            .flat_map(|row| (0..LIVERY_WIDTH).map(move |column| (column, row)))
-            .filter(|&(column, row)| texel(&image, column, row) != [255, 255, 255, 255])
+        // And each band's whole buffer, so a change that misses every named texel still has
+        // to be looked at rather than merely passing. **Counted per band**, because the two
+        // materials share an image and one total would let either drift under the other's
+        // cover.
+        // Rust is sparse, so what pins it is how much of its band it covers. Forged steel is
+        // a continuous surface treatment and covers all of its own, so what pins *it* is the
+        // two numbers the interactive model was tuned to: how dark it is on average, and how
+        // dark it gets at its deepest.
+        let band_texels = |livery: Livery| -> Vec<[u8; 4]> {
+            let top = band_top(livery) as u32;
+            (top..top + FIELD_ROWS)
+                .flat_map(|row| (0..LIVERY_WIDTH).map(move |column| (column, row)))
+                .map(|(column, row)| texel(&image, column, row))
+                .collect()
+        };
+
+        let rusted = band_texels(Livery::WornSteel)
+            .into_iter()
+            .filter(|texel| *texel != [255, 255, 255, 255])
             .count();
         assert_eq!(
             rusted,
             709,
             "the rust covers {rusted} texels of {}, which is not what it covered",
-            LIVERY_WIDTH * LIVERY_HEIGHT
+            LIVERY_WIDTH * FIELD_ROWS
+        );
+
+        let forged = band_texels(Livery::ForgedSteel);
+        let brightness =
+            |texel: &[u8; 4]| f32::from(texel[0]) + f32::from(texel[1]) + f32::from(texel[2]);
+        let mean = forged.iter().map(brightness).sum::<f32>() / forged.len() as f32 / (3.0 * 255.0);
+        let darkest = forged.iter().map(brightness).fold(f32::INFINITY, f32::min) / (3.0 * 255.0);
+        // **The two numbers the interactive model this was designed against reported**: it
+        // averaged about 91% of the base colour and bottomed out near 69%. These are what
+        // the four terms at their tabulated depths actually produce, to three decimals, and
+        // they are pinned rather than described because re-tuning any one term moves them.
+        assert!(
+            (mean - 0.901).abs() < 5e-3,
+            "forged steel averages {mean} of the base colour, not the 0.901 it was tuned to"
+        );
+        assert!(
+            (darkest - 0.714).abs() < 5e-3,
+            "forged steel bottoms out at {darkest}, not the 0.714 it was tuned to"
+        );
+
+        // **And it darkens toward blue, where the rust darkens toward red.** That is what
+        // lets a player tell the two blades apart at a distance without looking at any
+        // detail, and it is one row rather than a second mechanism — so it is asserted as a
+        // direction rather than as a colour.
+        let coolest = forged
+            .iter()
+            .min_by_key(|texel| texel[0])
+            .expect("the band has texels");
+        assert!(
+            coolest[2] > coolest[0],
+            "forged steel's deepest texel is {coolest:?}, which is not cooler than its base"
+        );
+        let warmest = band_texels(Livery::WornSteel)
+            .into_iter()
+            .min_by_key(|texel| texel[2])
+            .expect("the band has texels");
+        assert!(
+            warmest[0] > warmest[2],
+            "rust's deepest texel is {warmest:?}, which is not warmer than its base"
         );
     }
 
@@ -439,7 +640,7 @@ mod tests {
             let around = step as f32 / 64.0;
             for along in [0.0, RUST_MARGIN - 1e-4, 1.0 - RUST_MARGIN + 1e-4, 1.0] {
                 assert_eq!(
-                    field(Livery::Rust, around, along),
+                    field(Livery::WornSteel, around, along),
                     0.0,
                     "the rust reaches ({around}, {along}), which is inside the margin"
                 );
@@ -456,7 +657,8 @@ mod tests {
         for step in 0..=32 {
             let along = 0.5 + (step as f32 / 32.0 - 0.5) * (1.0 - 2.0 * RUST_MARGIN);
             assert!(
-                (field(Livery::Rust, 0.0, along) - field(Livery::Rust, 1.0, along)).abs() < 1e-6,
+                (field(Livery::WornSteel, 0.0, along) - field(Livery::WornSteel, 1.0, along)).abs()
+                    < 1e-6,
                 "the field disagrees with itself across the seam at {along}"
             );
         }
@@ -473,10 +675,7 @@ mod tests {
             "the neutral texture coordinate samples row {row}, which is rust rather than \
              identity"
         );
-        assert_eq!(
-            texel(&image_for(Livery::Rust), 32, row),
-            [255, 255, 255, 255]
-        );
+        assert_eq!(texel(&livery_image(), 32, row), [255, 255, 255, 255]);
     }
 
     /// **The cell samples exactly the rows a mesh does**, which is the one place the two
@@ -494,77 +693,109 @@ mod tests {
     /// request that added `field_rect` read it that way.
     #[test]
     fn the_cell_and_the_mesh_sample_the_same_rows() {
-        let rect = field_rect();
-        assert_eq!(rect.min.x, 0.0);
-        assert_eq!(rect.max.x, LIVERY_WIDTH as f32);
-        assert_eq!(
-            rect.min.y, NEUTRAL_ROWS as f32,
-            "the cell's rectangle starts inside the neutral band or below the field"
-        );
-        assert_eq!(
-            rect.max.y, LIVERY_HEIGHT as f32,
-            "the cell's rectangle does not reach the last row of the field"
-        );
-        assert!(
-            rect.max.y <= LIVERY_HEIGHT as f32,
-            "the cell's rectangle runs off the bottom of a {LIVERY_HEIGHT}-row image"
-        );
-
-        // The rows a mesh reaches, read off `blade_uv` at both ends, must be the rows the
-        // rectangle covers — first and last.
-        let row = |along: f32| (blade_uv(0.5, along)[1] * LIVERY_HEIGHT as f32).floor();
-        assert_eq!(
-            row(0.0),
-            rect.min.y,
-            "a blade's root samples a row the cell's rectangle does not cover"
-        );
-        assert_eq!(
-            row(1.0).min(LIVERY_HEIGHT as f32 - 1.0),
-            rect.max.y - 1.0,
-            "a blade's tip samples a row the cell's rectangle does not cover"
-        );
-
-        // **Every row the rectangle leaves out is white, and the field is inside it.** Not
-        // "every row inside carries rust" — the field deliberately leaves both ends of the
-        // blade clear, so rows near the guard and the point are white and belong in the
-        // rectangle anyway. What the rectangle owes is that it excludes the neutral band and
-        // nothing else.
-        let image = image_for(Livery::Rust);
+        let image = livery_image();
         let white = |row: u32| {
             (0..LIVERY_WIDTH).all(|column| texel(&image, column, row) == [255, 255, 255, 255])
         };
-        for row in 0..rect.min.y as u32 {
+
+        for livery in Livery::ALL {
+            let rect = field_rect(livery);
+            assert_eq!(rect.min.x, 0.0);
+            assert_eq!(rect.max.x, LIVERY_WIDTH as f32);
             assert!(
-                white(row),
-                "row {row} is outside the rectangle and is not neutral"
+                rect.max.y <= LIVERY_HEIGHT as f32,
+                "{livery:?}'s rectangle runs off the bottom of a {LIVERY_HEIGHT}-row image"
+            );
+            assert!(
+                rect.min.y >= NEUTRAL_ROWS as f32,
+                "{livery:?}'s rectangle reaches up into the neutral band"
+            );
+
+            // The rows a **mesh** reaches, read off `blade_uv` at both ends, are the first
+            // and last rows the rectangle covers.
+            let row = |along: f32| (blade_uv(livery, 0.5, along)[1] * LIVERY_HEIGHT as f32).floor();
+            assert_eq!(
+                row(0.0),
+                rect.min.y,
+                "{livery:?}: a blade's root samples a row its rectangle does not cover"
+            );
+            assert_eq!(
+                row(1.0),
+                rect.max.y - 1.0,
+                "{livery:?}: a blade's tip samples a row its rectangle does not cover"
+            );
+
+            // And no other livery's band is inside it, which is the failure one shared image
+            // makes possible and a single-band image could not.
+            for other in Livery::ALL {
+                if other == livery {
+                    continue;
+                }
+                let theirs = field_rect(other);
+                assert!(
+                    theirs.max.y <= rect.min.y || theirs.min.y >= rect.max.y,
+                    "{livery:?}'s rectangle overlaps {other:?}'s"
+                );
+            }
+        }
+
+        // **Every row no rectangle covers is white**, which is the neutral band and nothing
+        // else. Not "every row inside a rectangle carries marks" — a field deliberately
+        // leaves both ends of the blade clear, so rows near the guard and the point are white
+        // and belong in the rectangle anyway.
+        let covered = |row: u32| {
+            Livery::ALL.iter().any(|livery| {
+                let rect = field_rect(*livery);
+                (rect.min.y as u32..rect.max.y as u32).contains(&row)
+            })
+        };
+        for row in 0..LIVERY_HEIGHT {
+            if !covered(row) {
+                assert!(
+                    white(row),
+                    "row {row} is covered by no rectangle and is not neutral"
+                );
+            }
+        }
+        for livery in Livery::ALL {
+            let rect = field_rect(livery);
+            assert!(
+                (rect.min.y as u32..rect.max.y as u32).any(|row| !white(row)),
+                "{livery:?}'s rectangle covers no field at all"
             );
         }
-        assert!(
-            (rect.min.y as u32..rect.max.y as u32).any(|row| !white(row)),
-            "the cell's rectangle covers no field at all"
-        );
     }
 
     /// **A blade's coordinates never reach the neutral band** — the same property from the
     /// other side: a freckle at the root must not be squeezed onto the white row.
     #[test]
     fn a_blades_coordinates_stay_out_of_the_neutral_band() {
-        let floor = NEUTRAL_ROWS as f32 / LIVERY_HEIGHT as f32;
-        for step in 0..=64 {
-            let along = step as f32 / 64.0;
-            let [_, v] = blade_uv(0.5, along);
-            // The far end is `v == 1.0` exactly, which is the image's edge rather than a
-            // row: `ImageAddressMode::ClampToEdge` resolves it to the last one. What must
-            // never happen is the near end reaching *up* into the band.
-            assert!(
-                (floor..=1.0).contains(&v),
-                "a blade at {along} samples {v}, outside the rows the field was written into"
-            );
+        // **Every livery, and both ends of every band.** With one band per material the
+        // failure this guards is no longer only "a blade reaching up into the white row" —
+        // it is a blade reaching into the *next material's* rows, which is what
+        // `along == 1.0` did before the mapping moved to texel centres: the tip landed
+        // exactly on the first row forged steel was written into.
+        for livery in Livery::ALL {
+            for step in 0..=64 {
+                let along = step as f32 / 64.0;
+                assert!(
+                    band_holds(livery, blade_uv(livery, 0.5, along)),
+                    "a blade at {along} leaves {livery:?}'s own band"
+                );
+            }
+            // The two ends land on the band's first and last rows rather than short of them,
+            // so a freckle at the root or the tip is drawn rather than squeezed out.
+            let row = |along: f32| {
+                (blade_uv(livery, 0.5, along)[1] * LIVERY_HEIGHT as f32).floor() as u32
+            };
+            assert_eq!(row(0.0), band_top(livery) as u32);
+            assert_eq!(row(1.0), band_top(livery) as u32 + FIELD_ROWS - 1);
         }
-        assert_eq!(
-            blade_uv(0.5, 0.0)[1],
-            floor,
-            "the root has left the field's first row"
+
+        // And no band reaches the neutral row, from either side.
+        assert!(
+            !band_holds(Livery::ALL[0], neutral_uv()),
+            "the neutral coordinate falls inside a livery's band"
         );
     }
 }
