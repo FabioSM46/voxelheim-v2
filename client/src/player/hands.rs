@@ -5033,41 +5033,82 @@ mod tests {
         );
     }
 
-    /// **The cylinder's faces point outward**, which is the one failure in a new solid that
-    /// costs the most to diagnose.
+    /// **Every solid in the sword is wound outward**, which is the one failure in a new part
+    /// that costs the most to diagnose.
     ///
-    /// A ring walked the wrong way round builds the grip inside out; back-face culling then
-    /// discards its front faces, and the result is a solid grip that renders transparent —
-    /// the exact failure [`BladeSection::perimeter`] documents as "a sword that vanishes when
-    /// you look at it". It happened in the interactive model #419 was designed against, and
-    /// nothing there was checking.
+    /// A ring walked the wrong way round builds the part inside out; back-face culling then
+    /// discards its front faces and keeps its back ones, so the result is a solid that
+    /// renders transparent — the exact failure [`BladeSection::perimeter`] documents as "a
+    /// sword that vanishes when you look at it". It happened in the interactive model #419
+    /// was designed against, and nothing there was checking.
     ///
-    /// **Signed volume, so it covers every solid added later** rather than the cylinder
-    /// alone: the divergence theorem gives a positive volume for an outward-wound closed
-    /// mesh and a negative one for the same mesh turned inside out. The reversed reading is
-    /// asserted beside it, because a test that only ever sees a correct mesh proves the mesh
-    /// and not the test.
+    /// **Per solid, and the whole-mesh version of this was not a test.** The first cut summed
+    /// the divergence theorem over the merged sword and required the total to be positive.
+    /// That is exactly what a small inverted part survives: the grip encloses about
+    /// 3.7 × 10⁻⁶ against the blade's 1.4 × 10⁻⁵, so a grip turned inside out takes the
+    /// total from roughly 2.6 × 10⁻⁵ to 1.8 × 10⁻⁵ — still positive, still passing, and the
+    /// transparent grip ships. The review on this pull request caught it.
+    ///
+    /// So the mesh is split into connected solids first. **Welded by position, not by index**:
+    /// `merge` duplicates a vertex per face for flat shading, so a cuboid's six faces share no
+    /// index at all and index adjacency says nothing about which solid a triangle belongs to.
+    /// The reversed reading is asserted beside each one, because a test that only ever sees a
+    /// correct mesh proves the mesh and not the test.
     #[test]
     fn every_solid_in_the_sword_is_wound_outward() {
-        fn signed_volume(mesh: &Mesh, reversed: bool) -> f32 {
+        /// The signed volume of each connected solid in one mesh, largest first.
+        fn solid_volumes(mesh: &Mesh, reversed: bool) -> Vec<f32> {
+            use std::collections::HashMap;
+
             let points = positions(mesh);
             let indices: Vec<usize> = mesh
                 .indices()
                 .expect("a merged mesh carries indices")
                 .iter()
                 .collect();
-            indices
-                .chunks_exact(3)
-                .map(|corner| {
-                    let [a, b, c] = if reversed {
-                        [corner[0], corner[2], corner[1]]
-                    } else {
-                        [corner[0], corner[1], corner[2]]
-                    }
-                    .map(|index| Vec3::from_array(points[index]));
-                    a.dot(b.cross(c)) / 6.0
-                })
-                .sum()
+
+            // Quantised, because two parts that touch must weld and two that merely round
+            // to the same micrometre must not. The furniture's planes are metres apart in
+            // `x` and `z` where they share a `y`, so this separates them.
+            let mut welded: HashMap<[i64; 3], usize> = HashMap::new();
+            let mut of: Vec<usize> = Vec::with_capacity(points.len());
+            for point in &points {
+                let key = point.map(|channel| (f64::from(channel) * 1e7).round() as i64);
+                let next = welded.len();
+                of.push(*welded.entry(key).or_insert(next));
+            }
+
+            let mut parent: Vec<usize> = (0..welded.len()).collect();
+            fn root(parent: &mut [usize], mut node: usize) -> usize {
+                while parent[node] != node {
+                    parent[node] = parent[parent[node]];
+                    node = parent[node];
+                }
+                node
+            }
+            for corner in indices.chunks_exact(3) {
+                let [a, b, c] = [of[corner[0]], of[corner[1]], of[corner[2]]];
+                for other in [b, c] {
+                    let (left, right) = (root(&mut parent, a), root(&mut parent, other));
+                    parent[left] = right;
+                }
+            }
+
+            let mut volumes: HashMap<usize, f32> = HashMap::new();
+            for corner in indices.chunks_exact(3) {
+                let [a, b, c] = if reversed {
+                    [corner[0], corner[2], corner[1]]
+                } else {
+                    [corner[0], corner[1], corner[2]]
+                }
+                .map(|index| Vec3::from_array(points[index]));
+                let solid = root(&mut parent, of[corner[0]]);
+                *volumes.entry(solid).or_insert(0.0) += a.dot(b.cross(c)) / 6.0;
+            }
+
+            let mut answer: Vec<f32> = volumes.into_values().collect();
+            answer.sort_unstable_by(|left, right| right.abs().total_cmp(&left.abs()));
+            answer
         }
 
         for (name, mesh) in [
@@ -5081,17 +5122,88 @@ mod tests {
             ),
             ("a dropped sword", sword_mesh(0.05)),
         ] {
-            let volume = signed_volume(&mesh, false);
-            assert!(
-                volume > 0.0,
-                "{name} encloses a signed volume of {volume}, so some solid in it is wound \
-                 inside out and renders transparent"
+            let solids = solid_volumes(&mesh, false);
+            // The blade, the guard, the grip and the pommel. A part that welded into its
+            // neighbour, or one that went missing, changes this before any volume does.
+            assert_eq!(
+                solids.len(),
+                4,
+                "{name} is {} connected solids, not the blade and its three furniture parts",
+                solids.len()
             );
-            assert!(
-                signed_volume(&mesh, true) < 0.0,
-                "{name} reads positive with its winding reversed, so this measures nothing"
-            );
+            for (index, volume) in solids.iter().enumerate() {
+                assert!(
+                    *volume > 0.0,
+                    "solid {index} of {name} encloses {volume}, so it is wound inside out \
+                     and renders transparent"
+                );
+            }
+
+            let reversed = solid_volumes(&mesh, true);
+            assert_eq!(reversed.len(), 4, "{name} splits differently when reversed");
+            for (index, volume) in reversed.iter().enumerate() {
+                assert!(
+                    *volume < 0.0,
+                    "solid {index} of {name} reads {volume} with its winding reversed, so \
+                     this measures nothing"
+                );
+            }
         }
+    }
+
+    /// **A solid wound inside out is caught**, on a fixture rather than on a sword that
+    /// already passes.
+    ///
+    /// This is the teeth of the test above, and it is the assertion the first cut of it did
+    /// not have: reversing *one small part* of the merged sword must fail, where reversing
+    /// the whole mesh trivially does. The grip is the part chosen because it is the smallest,
+    /// which is exactly the case a whole-mesh sum cannot see.
+    #[test]
+    fn a_grip_wound_inside_out_does_not_pass_for_a_solid() {
+        let sword = item_mesh(ITEM_RUSTY_SWORD, ItemShape::Blade);
+        let points = positions(&sword);
+        let indices: Vec<usize> = sword
+            .indices()
+            .expect("a merged mesh carries indices")
+            .iter()
+            .collect();
+
+        let radius = GRIP_SIZE.x / 2.0;
+        let high = blade_base() - GUARD_SIZE.y;
+        let low = high - GRIP_SIZE.y;
+        let on_the_grip = |index: usize| {
+            let point = points[index];
+            (point[0].hypot(point[2]) - radius).abs() < 1e-6
+                && point[1] >= low - 1e-6
+                && point[1] <= high + 1e-6
+        };
+
+        let mut total = 0.0_f32;
+        let mut grip = 0.0_f32;
+        for corner in indices.chunks_exact(3) {
+            let flip = corner.iter().all(|index| on_the_grip(*index));
+            let [a, b, c] = if flip {
+                [corner[0], corner[2], corner[1]]
+            } else {
+                [corner[0], corner[1], corner[2]]
+            }
+            .map(|index| Vec3::from_array(points[index]));
+            let volume = a.dot(b.cross(c)) / 6.0;
+            total += volume;
+            if flip {
+                grip += volume;
+            }
+        }
+
+        assert!(
+            grip < 0.0,
+            "the grip's triangles were not the ones reversed"
+        );
+        assert!(
+            total > 0.0,
+            "the whole-mesh sum went negative with only the grip reversed, so the weakness \
+             this pins does not exist and the test above is measuring more than it claims"
+        );
     }
 
     /// **The dropped sword and the third-person body get the turned grip, and not yet the
