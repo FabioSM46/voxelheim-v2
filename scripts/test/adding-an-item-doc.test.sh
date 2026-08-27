@@ -33,6 +33,23 @@ doc_path = root / "docs/ADDING_AN_ITEM.md"
 doc = doc_path.read_text()
 failures = []
 
+
+def present(where, failures):
+    """The file at `where`, or None once the absence has been judged.
+
+    "An absent workspace is nothing to verify" is this repository's rule, and it is a rule
+    about a *workspace* — `server/`, `client/`, `schemas/` — which may legitimately not be
+    scaffolded yet. Applying it to an individual file turns a rename into a silent pass,
+    which is the rot this script exists to catch happening inside the catcher. So the skip
+    is decided by the workspace root and the file's own absence is a failure.
+    """
+    target = root / where
+    if target.exists():
+        return target
+    if (root / Path(where).parts[0]).exists():
+        failures.append(f"{where} is cited by this pin but no longer exists")
+    return None
+
 # 1 — cited paths resolve.
 cited = sorted(set(re.findall(r"`([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+\.(?:go|rs|md|yml|fbs|sh|toml))`", doc)))
 if not cited:
@@ -54,9 +71,7 @@ for name, where in TESTS.items():
     if name not in doc:
         failures.append(f"the document no longer names the test {name}; update this pin with it")
         continue
-    target = root / where
-    # An absent workspace is "nothing to verify" everywhere else in this repository.
-    if not target.exists():
+    if not (target := present(where, failures)):
         continue
     if name not in target.read_text():
         failures.append(f"{name} is named by the document but not found in {where}")
@@ -74,8 +89,7 @@ SYMBOLS = {
     "client/src/player/combat.rs": ["LEFT_BUTTON_USES"],
 }
 for where, symbols in SYMBOLS.items():
-    target = root / where
-    if not target.exists():
+    if not (target := present(where, failures)):
         continue
     text = target.read_text()
     for symbol in symbols:
