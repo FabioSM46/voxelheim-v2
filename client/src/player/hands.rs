@@ -207,7 +207,8 @@ const BLADE_NEAR_PLANE_CLEARANCE: f32 = 0.004;
 /// silhouette; [`the_item_stays_recognisable_outside_the_fist`] holds the other side.
 const HOLD_OVERLAP: f32 = 0.006;
 
-/// How far the forearm reaches below the view model's origin.
+/// How far the forearm reaches below the view model's origin **at the model's resting
+/// depth**.
 ///
 /// **The near plane sets this number, and nothing about how an arm looks does.** The model
 /// sits at [`BASE_TRANSLATION`]`.z` and the camera's near plane is at `0.1`, which leaves
@@ -215,18 +216,25 @@ const HOLD_OVERLAP: f32 = 0.006;
 /// everything below that origin swings toward the eye during an overhead cut. At the tightest
 /// reachable pose — [`OVERHEAD_PITCH_RADIANS`] on top of the rest pitch, with the placement
 /// bump already carrying the model [`PLACE_BUMP_DISTANCE`] forward — a point `L` below the
-/// origin gives up about `0.84·L` of that headroom, and the arm's own half-width and
-/// half-depth spend a little more. This value leaves 3.3 mm of camera-space clearance;
-/// [`the_forearm_is_as_long_as_the_near_plane_permits`] re-derives the bound from the
-/// constants rather than trusting this paragraph, and
+/// origin gives up about `0.88·L` of that headroom, and the arm's own half-width and
+/// half-depth spend a little more. The bound that leaves is **`0.0599`**, re-derived against
+/// the cube's section rather than inherited from #391's `0.0620`: #396 gave the limb the
+/// fist's own depth on the fist's own centre plane, which brought the end cap's far face
+/// toward the eye and cost 2.1 mm of the ceiling. This value leaves 1.6 mm of camera-space
+/// clearance; [`the_forearm_is_as_long_as_the_near_plane_permits`] re-derives the bound from
+/// the constants rather than trusting this paragraph, and
 /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] sweeps the real
 /// vertices through every reachable pose.
 ///
-/// **It may not simply grow to cover a wider field of view.** That is the trade #389 turned
-/// on: the arm is clipped by the bottom edge at every field of view the settings offer up to
-/// 60°, and past that its end comes into frame. Lengthening it to chase the 110° ceiling puts
-/// it through the camera on the first overhead cut, which is a worse failure than a visible
-/// end at a field of view almost nobody selects.
+/// **It may not simply grow, and that constraint is the whole reason [`drawn_arm_reach`]
+/// exists.** #389 read the ceiling above as a cap on the arm outright, and #391 shipped a
+/// partial on the strength of it: a *fixed* length that stays clipped through a thrust needs
+/// `0.0705`, the near plane permits `0.0599`, and no number satisfies both. What #394 found is
+/// that the two bounds are never imposed by the same frame — the cut that threatens the near
+/// plane carries the model *toward* the eye and the thrust that needs the reach carries it
+/// away — so the length that is over-constrained is only the *constant* one. Read this as the
+/// arm's length at `along_view == 0` and [`drawn_arm_reach`] for what it is at every other
+/// frame.
 const ARM_REACH: f32 = 0.058;
 
 /// How far the wrist is buried in the fist.
@@ -241,6 +249,20 @@ const WRIST_LENGTH: f32 = 0.012;
 
 /// How far the wrist is buried in the forearm below it, for the reason above.
 const ARM_JOIN: f32 = 0.002;
+
+/// Where the forearm's top face sits: inside the wrist, which is itself inside the fist.
+///
+/// Named because [`forearm_transform`] is the pivot the limb's length is measured from now
+/// that the length is a number in a transform rather than a span in the buffers. It is the
+/// one end of the arm that never moves, which is what makes it the right thing to hang the
+/// rest off: the join with the wrist cannot open up, whatever [`drawn_arm_reach`] answers.
+const FOREARM_TOP: f32 = -HAND_SIZE.y / 2.0 + ARM_OVERLAP - WRIST_LENGTH + ARM_JOIN;
+
+/// The forearm's top is above its own end, and buried in the limb above it.
+const _: () = assert!(
+    FOREARM_TOP < 0.0 && FOREARM_TOP + ARM_REACH > 0.0,
+    "the forearm does not hang from inside the wrist down past the model's origin"
+);
 
 /// How wide the wrist is, as a fraction of the fist's width.
 ///
@@ -628,16 +650,16 @@ fn fist_mesh() -> Mesh {
     Mesh::from(Cuboid::from_size(HAND_SIZE))
 }
 
-/// The forearm the fist is on the end of: a wrist and the limb below it, in the same skin
-/// the fist takes from the authoritative appearance.
+/// The wrist: the short section under the fist, in the same skin the fist takes from the
+/// authoritative appearance.
 ///
-/// **Why this exists at all.** #384 was right to forbid it — the defect there was the fist's
-/// proportion and geometry below it would have hidden that instead of fixing it — but the
-/// oversized box was also the only thing reaching the bottom of the viewport, so correcting
-/// the proportion left the hand hanging in mid air with the world visible underneath it
-/// (#389). This is that boundary being lifted now that the fist above it is right, and it
-/// still decides nothing about the fist: [`HAND_SIZE`] and [`item_translation`] are read here
-/// and written elsewhere.
+/// **Why the limb exists at all.** #384 was right to forbid it — the defect there was the
+/// fist's proportion and geometry below it would have hidden that instead of fixing it — but
+/// the oversized box was also the only thing reaching the bottom of the viewport, so
+/// correcting the proportion left the hand hanging in mid air with the world visible
+/// underneath it (#389). This is that boundary being lifted now that the fist above it is
+/// right, and it still decides nothing about the fist: [`HAND_SIZE`] and [`item_translation`]
+/// are read here and written elsewhere.
 ///
 /// **Its section is the fist's own, and that is #396 simplifying it rather than changing
 /// it.** It was the *palm's* — `PALM_DEPTH` deep and pushed back to `PALM_CENTRE_Z` — so the
@@ -648,41 +670,98 @@ fn fist_mesh() -> Mesh {
 /// old placement was buying on the far face alone and it matters more than it sounds: the
 /// whole composition is at positive `X`, so a *shallower* box projects further outboard, and
 /// an arm shallower than the fist leaves a sliver of world along the fist's inboard edge —
-/// the same defect #389 was fixing, one scale down. Its **length** is untouched, which is
-/// #394's subject and not this one's.
+/// the same defect #389 was fixing, one scale down.
+///
+/// **The wrist stayed here and the forearm did not**, which is #394 splitting the limb at the
+/// one joint that never moves. This box is the join: it is buried [`ARM_OVERLAP`] in the fist
+/// and it is the whole of the silhouette step [`WRIST_WIDTH`] exists for, so it belongs beside
+/// the hand it steps in from. What hangs below it has a *length* now rather than a size — see
+/// [`forearm_mesh`] and [`drawn_arm_reach`].
+fn wrist_mesh() -> Mesh {
+    let wrist_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
+    let wrist_bottom = wrist_top - WRIST_LENGTH;
+    Mesh::from(Cuboid::from_size(Vec3::new(
+        HAND_SIZE.x * WRIST_WIDTH,
+        WRIST_LENGTH,
+        HAND_SIZE.z,
+    )))
+    .translated_by(Vec3::Y * (wrist_top + wrist_bottom) / 2.0)
+}
+
+/// The forearm proper: **one bar, one unit long, hanging from its own origin.**
+///
+/// It is drawn at no particular length here because it no longer has one. [`ARM_REACH`] is
+/// what it reaches at the model's resting depth and [`drawn_arm_reach`] is what it reaches in
+/// any other frame; [`forearm_transform`] turns that into the `Y` scale this bar is drawn
+/// with. A unit bar is what makes the length a number the animation can carry rather than a
+/// span in a vertex buffer, and a vertex buffer is the one place it must not be — the limb is
+/// merged into a shared mesh asset, so a per-frame length there would be an asset write per
+/// frame.
 ///
 /// **It runs straight down the model's own axis.** Angling it outboard toward the nearer
 /// right edge was the alternative #389 named, and it was measured: at 16:9 the bottom edge is
 /// reached first from every corner of the limb, so the lean buys no field of view, and it
 /// pulls the arm off the fist's inboard edge. See [`REST_PITCH_RADIANS`].
-///
-/// One mesh merged into [`held_mesh`] rather than a second entity, for the reason every other
-/// part of this composition is merged: `animate_view_model` drives one transform, and a
-/// second entity would be a second thing to keep in step with a swing.
 fn forearm_mesh() -> Mesh {
-    let wrist_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
-    let wrist_bottom = wrist_top - WRIST_LENGTH;
-    let mut arm = Mesh::from(Cuboid::from_size(Vec3::new(
-        HAND_SIZE.x * WRIST_WIDTH,
-        WRIST_LENGTH,
-        HAND_SIZE.z,
-    )))
-    .translated_by(Vec3::Y * (wrist_top + wrist_bottom) / 2.0);
-
-    // The forearm runs from inside the wrist to exactly [`ARM_REACH`] below the origin, so
-    // the near-plane bound is stated once, on the constant, rather than being the sum of
-    // three lengths a reader has to add up.
-    let forearm_top = wrist_bottom + ARM_JOIN;
-    let forearm_length = forearm_top + ARM_REACH;
-    let forearm = Mesh::from(Cuboid::from_size(Vec3::new(
+    Mesh::from(Cuboid::from_size(Vec3::new(
         HAND_SIZE.x * FOREARM_WIDTH,
-        forearm_length,
+        1.0,
         HAND_SIZE.z,
     )))
-    .translated_by(Vec3::Y * (forearm_top - forearm_length / 2.0));
+    .translated_by(Vec3::NEG_Y * 0.5)
+}
 
-    merge_all(&mut arm, [forearm], "forearm");
-    arm
+/// How far the forearm reaches below the view model's origin, for a composition the
+/// animations have carried `along_view` from its resting depth.
+///
+/// **The arm keeps the length it is drawn at, not the length it is modelled at.** The whole
+/// composition translates along the view — a thrust and a cast carry it [`THRUST_REACH`]
+/// away, a punch [`MINE_PUNCH_DISTANCE`], a placement bump back toward the eye — and the
+/// frustum widens with distance while a constant [`ARM_REACH`] does not. That is the whole of
+/// #394: at `0.11` further out the arm subtends a third less of the frame, so its end cap
+/// stops short of the bottom edge and a player sees where their arm ends. Scaling the reach
+/// by the depth ratio cancels exactly that term, and the limb covers the same band of screen
+/// in every frame of every animation.
+///
+/// **It only ever grows, and the clamp is the near plane's half of the bargain.** The two
+/// bounds on this number are imposed by *different* animations — the frame's bottom edge
+/// binds when the model is pushed away, the near plane when an overhead cut swings it toward
+/// the eye — which is why a length derived from `along_view` is satisfiable where a constant
+/// is not. Coming toward the eye there is nothing to win: [`ARM_REACH`] already spends 97% of
+/// the near plane's ceiling at the resting depth, and shrinking the arm on a placement bump
+/// would buy near-plane headroom nothing needs at the cost of 2° of the bottom edge on a
+/// lateral slash. So the ratio is floored at one, and the arm the near plane has to survive
+/// is the same arm it survives today.
+fn drawn_arm_reach(along_view: f32) -> f32 {
+    // `along_view` is added to the model's `Z` and [`BASE_TRANSLATION`]`.z` is negative, so
+    // reaching *away* from the eye is a negative offset over a negative base: the ratio is
+    // the model's depth over its resting depth, and it is above one exactly when the
+    // animation has pushed the composition out.
+    ARM_REACH * (1.0 + along_view / BASE_TRANSLATION.z).max(1.0)
+}
+
+/// The forearm's own transform, under the hand it hangs from.
+///
+/// The translation is [`FOREARM_TOP`] — fixed, so the join with the wrist cannot open — and
+/// the `Y` scale is the length [`forearm_mesh`]'s unit bar is drawn at, chosen so the bar's
+/// far end lands exactly [`drawn_arm_reach`] below the composition's origin.
+///
+/// **The `Y` scale is why the forearm is a child entity, and this file's preference is against
+/// that.** `every_held_shape_is_one_mesh_one_material_and_one_transform` says why: a part
+/// parented separately is a second thing to keep in step with a swing, and it can look right
+/// while animating wrong. A *child* of the view model is the one shape of second entity that
+/// does not have that failure mode — Bevy composes the parent's transform into it, so the
+/// swing, the bump, the punch and the blade's near-plane offset all reach it by construction,
+/// and the only thing this transform carries of its own is the one scalar the parent's
+/// transform has no room for. The alternatives were measured and are recorded on
+/// [`drawn_arm_reach`] and [`ARM_REACH`]: a constant length cannot satisfy both bounds, and
+/// rewriting the merged mesh every frame is an asset write per frame.
+fn forearm_transform(animation: &HandAnimation) -> Transform {
+    Transform::from_translation(Vec3::Y * FOREARM_TOP).with_scale(Vec3::new(
+        1.0,
+        FOREARM_TOP + drawn_arm_reach(along_view(animation)),
+        1.0,
+    ))
 }
 
 /// One cross-section of the blade: where it sits along the sword, how far it reaches to
@@ -1235,25 +1314,27 @@ pub(super) fn shield_mesh(size: f32) -> Mesh {
     board
 }
 
-/// The complete first-person arrangement: the player's fist, the forearm it is on the end
-/// of and, when selected, the item it holds, merged into one coloured mesh.
+/// The first-person hand: the player's fist, the wrist it steps into and, when selected, the
+/// item it holds, merged into one coloured mesh.
 ///
 /// The fist is always first in the buffers. Besides making the mesh deterministic, that
 /// gives the tests a structural way to assert that every shape still contains the exact
 /// hand #175 approved instead of merely containing skin-coloured vertices somewhere. The
-/// forearm follows it and the item comes last, so that guarantee is unchanged.
+/// wrist follows it and the item comes last, so that guarantee is unchanged.
+///
+/// **The forearm is not in here since #394**, and [`forearm_transform`] carries the reason: it
+/// is the one part of the composition whose *length* changes with the animation, and a length
+/// that changes belongs in a transform rather than in a mesh asset that would then have to be
+/// rewritten every frame. Everything it needs to stay in step with the hand — the swing, the
+/// bump, the punch, the blade's near-plane offset — reaches it as the parent's transform.
 ///
 /// **The arm takes the same skin colour from the same one source.** It is the same limb, so
 /// a second lookup would be a second answer to a question the authoritative appearance has
-/// already settled.
+/// already settled. [`skinned_forearm_mesh`] reads that same colour for the bar below.
 fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
     let skin = linear_rgb(skin_colour);
     let mut held = tinted(fist_mesh(), skin);
-    merge_all(
-        &mut held,
-        [tinted(forearm_mesh(), skin)],
-        "hand and forearm",
-    );
+    merge_all(&mut held, [tinted(wrist_mesh(), skin)], "hand and wrist");
     let (Some(item_id), Some(shape), Some(item_colour)) =
         (appearance.item_id, appearance.shape, appearance.item_colour)
     else {
@@ -1270,6 +1351,16 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
     .translated_by(item_translation(shape));
     merge_all(&mut held, [item], "hand and held item");
     held
+}
+
+/// The forearm bar in the player's own skin.
+///
+/// One asset for both hands: the section, the colour and the unit length are identical, and
+/// the only thing that differs between the right hand's arm and the off-hand shield's is the
+/// transform each entity carries. A second asset would be a second answer to the same
+/// authoritative skin colour.
+fn skinned_forearm_mesh(skin_colour: u32) -> Mesh {
+    tinted(forearm_mesh(), linear_rgb(skin_colour))
 }
 
 pub(super) struct HandsPlugin;
@@ -1335,6 +1426,14 @@ pub(super) struct HeldItem {
 #[derive(Component)]
 struct ViewModel;
 
+/// The forearm hanging under one hand, as its own child entity.
+///
+/// It exists because its **length** is animated and its geometry is not — see
+/// [`forearm_transform`] for why that puts it on a transform of its own, and why a child is
+/// the one shape of second entity this composition can afford.
+#[derive(Component)]
+struct Forearm;
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct OffHandShield {
     skin_colour: u32,
@@ -1353,6 +1452,9 @@ struct HandVisuals {
     /// item or the local player's skin colour changes; the handle and entity stay put.
     mesh: Handle<Mesh>,
     shield_mesh: Handle<Mesh>,
+    /// The forearm bar both hands draw. Its contents change only with the player's skin
+    /// colour; its *length* is a scale on each arm's own transform, never a rewrite of this.
+    forearm_mesh: Handle<Mesh>,
 }
 
 /// Which of the three arcs an attack draws.
@@ -1564,34 +1666,56 @@ fn spawn_view_model(
         depth_bias: 1_000.0,
         ..default()
     });
+    let forearm_mesh_handle = meshes.add(skinned_forearm_mesh(skin_colour));
     let visuals = HandVisuals {
         mesh: mesh.clone(),
         shield_mesh: shield_mesh_handle.clone(),
+        forearm_mesh: forearm_mesh_handle.clone(),
     };
 
-    commands.spawn((
-        HeldItem {
-            item_id: appearance.item_id,
-            shape: appearance.shape,
-            skin_colour,
-        },
-        ViewModel,
-        Mesh3d(mesh),
-        MeshMaterial3d(material.clone()),
-        Transform::from_translation(BASE_TRANSLATION),
-        Visibility::Hidden,
-        NotShadowCaster,
-    ));
-    commands.spawn((
-        OffHandShield { skin_colour },
-        ViewModel,
-        Mesh3d(shield_mesh_handle),
-        MeshMaterial3d(material),
-        Transform::from_translation(Vec3::new(-BASE_TRANSLATION.x, -0.035, -0.16))
-            .with_rotation(Quat::from_rotation_z(-0.48)),
-        Visibility::Hidden,
-        NotShadowCaster,
-    ));
+    // The arm each hand hangs. `Visibility` is left at its default `Inherited`, so a hand
+    // hidden by the view toggle takes its own limb with it and there is no second thing to
+    // gate — the same reasoning `refresh_held_item` gives for hiding rather than despawning.
+    let arm = |mesh: Handle<Mesh>, material: Handle<StandardMaterial>| {
+        (
+            Forearm,
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            forearm_transform(&HandAnimation::default()),
+            NotShadowCaster,
+        )
+    };
+
+    commands
+        .spawn((
+            HeldItem {
+                item_id: appearance.item_id,
+                shape: appearance.shape,
+                skin_colour,
+            },
+            ViewModel,
+            Mesh3d(mesh),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(BASE_TRANSLATION),
+            Visibility::Hidden,
+            NotShadowCaster,
+        ))
+        .with_child(arm(forearm_mesh_handle.clone(), material.clone()));
+    commands
+        .spawn((
+            OffHandShield { skin_colour },
+            ViewModel,
+            Mesh3d(shield_mesh_handle),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(Vec3::new(-BASE_TRANSLATION.x, -0.035, -0.16))
+                .with_rotation(Quat::from_rotation_z(-0.48)),
+            Visibility::Hidden,
+            NotShadowCaster,
+        ))
+        // The off-hand entity carries no animation of its own, so its arm never leaves the
+        // resting length. It is still the same bar under the same transform, which is what
+        // keeps the two hands one limb rather than two.
+        .with_child(arm(forearm_mesh_handle, material));
     commands.insert_resource(visuals);
 }
 
@@ -1714,6 +1838,16 @@ fn refresh_held_item(
                 *mesh = held_mesh(skin_colour, appearance);
             } else {
                 error!("the held view-model mesh asset is missing");
+            }
+            // The arm is one asset shared by both hands and it carries the same one skin
+            // colour, so it is rewritten here rather than a second time under the shield.
+            // Its *length* is never written here — that is a scale on each arm's transform,
+            // which is the whole point of it being a child entity.
+            let forearm = assets.visuals.forearm_mesh.clone();
+            if let Some(mut mesh) = assets.meshes.get_mut(&forearm) {
+                *mesh = skinned_forearm_mesh(skin_colour);
+            } else {
+                error!("the forearm mesh asset is missing");
             }
         }
         if *visibility != visible {
@@ -1882,7 +2016,8 @@ fn animate_view_model(
     time: Res<Time>,
     mut intent: HandIntent<'_, '_>,
     mut animation: ResMut<HandAnimation>,
-    mut held: Query<(&HeldItem, &mut Transform)>,
+    mut held: Query<(Entity, &HeldItem, &mut Transform), Without<Forearm>>,
+    mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
 ) {
     let mut next_animation = *animation;
     // The loop runs exactly while the server's answer says it should, and resets the
@@ -1941,10 +2076,21 @@ fn animate_view_model(
         *animation = next_animation;
     }
 
-    for (item, mut transform) in &mut held {
+    // The one transform the hand's own arm carries. It is read once and written into the
+    // child below rather than being a second reading of the animation.
+    let arm = forearm_transform(&next_animation);
+    for (entity, item, mut transform) in &mut held {
         let next = presented_transform(&next_animation, item.shape);
         if *transform != next {
             *transform = next;
+        }
+        // Only the hand that is animated lengthens its arm. The off-hand shield's entity
+        // never moves along the view, so its limb is already at the resting length and
+        // driving it from this animation would stretch an arm nothing had pushed away.
+        for (child_of, mut limb) in &mut forearms {
+            if child_of.parent() == entity && *limb != arm {
+                *limb = arm;
+            }
         }
     }
 }
@@ -1957,6 +2103,34 @@ fn presented_transform(animation: &HandAnimation, shape: Option<ItemShape>) -> T
     transform
 }
 
+/// How far through the placement bump's out-and-back the hand is.
+fn bump_arc(bump_elapsed: Option<Duration>) -> f32 {
+    bump_elapsed.map_or(0.0, |elapsed| {
+        let fraction = (elapsed.as_secs_f32() / PLACE_BUMP_TIME.as_secs_f32()).clamp(0.0, 1.0);
+        (fraction * PI).sin()
+    })
+}
+
+/// How far the animations in flight have carried the whole composition along the view.
+///
+/// Three animations on one axis, and the signs are the convention rather than an accident: a
+/// placement draws back from the block it just set down, a punch reaches for the one it is
+/// breaking, and a thrust reaches the same way a punch does.
+///
+/// **It is a function rather than a local because two things spend it now.**
+/// [`animated_transform`] translates the composition by it, and [`drawn_arm_reach`] turns it
+/// into the length the forearm is drawn at — and those two have to be the same number, since
+/// the arm's length exists precisely to cancel what this translation does to the arm's size on
+/// screen. Recomputing the three terms here is a handful of trigonometry once a frame; two
+/// copies of the sum would be two things to keep in step.
+fn along_view(animation: &HandAnimation) -> f32 {
+    let punch = mine_punch(animation.mine_elapsed);
+    let reach = animation
+        .attack
+        .map_or(0.0, |attack| swing_pose(attack.shape, attack.elapsed).reach);
+    bump_arc(animation.bump_elapsed) * PLACE_BUMP_DISTANCE - punch * MINE_PUNCH_DISTANCE + reach
+}
+
 fn animated_transform(animation: &HandAnimation) -> Transform {
     let punch = mine_punch(animation.mine_elapsed);
     // Whichever arc is in flight, out and back, added to whatever the mining loop is doing.
@@ -1966,18 +2140,10 @@ fn animated_transform(animation: &HandAnimation) -> Transform {
     let swing = animation.attack.map_or_else(SwingPose::default, |attack| {
         swing_pose(attack.shape, attack.elapsed)
     });
-    let bump = animation.bump_elapsed.map_or(0.0, |elapsed| {
-        let fraction = (elapsed.as_secs_f32() / PLACE_BUMP_TIME.as_secs_f32()).clamp(0.0, 1.0);
-        (fraction * PI).sin()
-    });
-
-    // Three animations on one axis, and the signs are the convention rather than an
-    // accident: a placement draws back from the block it just set down, a punch reaches for
-    // the one it is breaking, and a thrust reaches the same way a punch does.
-    let along_view = bump * PLACE_BUMP_DISTANCE - punch * MINE_PUNCH_DISTANCE + swing.reach;
+    let bump = bump_arc(animation.bump_elapsed);
 
     Transform {
-        translation: BASE_TRANSLATION + Vec3::Z * along_view,
+        translation: BASE_TRANSLATION + Vec3::Z * along_view(animation),
         // The mining punch is negative here for the reason `SwingPose::pitch` is negative
         // for a cut: one convention for *over toward what is being hit*, kept by every
         // animation in this file.
@@ -2124,6 +2290,25 @@ mod tests {
             panic!("the mesh must carry Float32x3 positions");
         };
         positions.clone()
+    }
+
+    /// **The forearm as the renderer places it, in the composition's own space.**
+    ///
+    /// [`forearm_mesh`] is a unit bar with no length of its own — the length lives in
+    /// [`forearm_transform`], because it changes with the animation and a mesh asset must not
+    /// — so a test that reads the bar without this is measuring a box one metre long rather
+    /// than an arm. Everything below therefore composes the two the same way `spawn_view_model`
+    /// parents them, which is what keeps these measurements statements about what is drawn.
+    fn placed_forearm(animation: &HandAnimation) -> Mesh {
+        forearm_mesh().transformed_by(forearm_transform(animation))
+    }
+
+    /// The whole limb-and-item arrangement as one set of model-space vertices: the hand's own
+    /// mesh and the arm hanging under it, for one frame of one animation.
+    fn drawn_positions(appearance: HeldAppearance, animation: &HandAnimation) -> Vec<[f32; 3]> {
+        let mut all = positions(&held_mesh(TEST_SKIN, appearance));
+        all.extend(positions(&placed_forearm(animation)));
+        all
     }
 
     /// The lowest and highest value a set of vertices reaches on one axis.
@@ -2359,16 +2544,32 @@ mod tests {
         );
     }
 
-    /// **One mesh and one material for every hand-and-item arrangement.**
+    /// **One mesh and one material for every hand-and-item arrangement, and one child under
+    /// it: the arm.**
     ///
     /// The cost rule the body rig set and #175 kept, and the one a sword assembled from a
     /// extra entities would break quietly: they could look right and animate wrong, because
     /// `animate_view_model` drives one transform and a guard parented separately would be a
     /// second thing to keep in step with a swing.
+    ///
+    /// **#394 spent exactly one entity of that budget, and this is where the spending is
+    /// recorded.** The forearm's *length* is animated — see [`drawn_arm_reach`] for why a
+    /// constant one cannot satisfy both the near plane and the bottom edge — and a length that
+    /// changes every frame can live in a transform or in a mesh asset, of which the second is
+    /// an asset write per frame. What makes a child affordable where a sibling would not be is
+    /// that the failure mode above is not available to it: Bevy composes the parent's transform
+    /// into the child's, so the swing, the bump, the punch and the blade's near-plane offset
+    /// all reach the arm whether anybody remembered them or not, and the only thing the child
+    /// carries of its own is the one scalar the parent's transform has no room for.
+    ///
+    /// So the rule is not relaxed, it is made exact: **the hand and everything it holds are one
+    /// mesh on one transform, and the arm is one child on one scale.** A second child, or a
+    /// child that is not the arm, fails here.
     #[test]
     fn every_held_shape_is_one_mesh_one_material_and_one_transform() {
         let mut app = app();
         let view_mesh = app.world().resource::<HandVisuals>().mesh.clone();
+        let arm_mesh = app.world().resource::<HandVisuals>().forearm_mesh.clone();
 
         for (shape, item_id) in shape_examples() {
             *app.world_mut().resource_mut::<Inventory>() =
@@ -2402,14 +2603,30 @@ mod tests {
             );
 
             let mut children = world.query::<(&ChildOf, Entity)>();
-            let under = children
+            let under: Vec<Entity> = children
                 .iter(world)
                 .filter(|(parent, _)| parent.parent() == drawn[0].0)
-                .count();
+                .map(|(_, entity)| entity)
+                .collect();
             assert_eq!(
-                under, 0,
-                "{shape:?} has {under} child entities, so part of it is not on the transform \
-                 `animate_view_model` drives"
+                under.len(),
+                1,
+                "{shape:?} has {} child entities, and the arm is the only one this \
+                 composition spends",
+                under.len()
+            );
+            assert!(
+                world.get::<Forearm>(under[0]).is_some(),
+                "{shape:?} has a child that is not the forearm, so part of it is off the \
+                 transform `animate_view_model` drives"
+            );
+            assert_eq!(
+                world
+                    .get::<Mesh3d>(under[0])
+                    .expect("the arm draws a mesh")
+                    .0,
+                arm_mesh,
+                "{shape:?} gave the arm a mesh of its own instead of the shared bar"
             );
         }
     }
@@ -2692,13 +2909,14 @@ mod tests {
             .chain([selected_appearance(None)]);
 
         for appearance in appearances {
-            let corners = positions(&held_mesh(TEST_SKIN, appearance));
             // **The arm is in this sweep, and that is asserted rather than assumed.** It is the
             // lowest thing in the composition and therefore the part an overhead cut carries
-            // nearest the eye, so a merge that dropped it would leave this test measuring the
-            // one arrangement that was never at risk. `held_mesh` is what the renderer draws,
-            // so reading it is what makes the claim about the real mesh (#389).
-            let lowest = extent(&corners, 1).0;
+            // nearest the eye, so a composition that dropped it would leave this test measuring
+            // the one arrangement that was never at risk (#389). Since #394 the arm is a child
+            // entity whose length follows the animation, so the corners are read **inside** the
+            // pose loop below rather than once — reading them once is exactly how a sweep would
+            // come to measure the resting arm through a thrust that had lengthened it.
+            let lowest = extent(&drawn_positions(appearance, &HandAnimation::default()), 1).0;
             assert!(
                 lowest <= -ARM_REACH + 1e-5,
                 "{:?} reaches only {lowest} below the origin, so the forearm at {} is not in \
@@ -2725,7 +2943,7 @@ mod tests {
                             ..Default::default()
                         };
                         let transform = presented_transform(&animation, appearance.shape);
-                        for corner in &corners {
+                        for corner in &drawn_positions(appearance, &animation) {
                             let point = transform.transform_point(Vec3::from_array(*corner));
                             assert!(
                                 -point.z > near,
@@ -2802,8 +3020,17 @@ mod tests {
         );
         assert_eq!(
             held_mesh(TEST_SKIN, selected_appearance(None)).count_vertices(),
-            one_box * 3,
-            "the empty hand is not exactly that cube plus a wrist and a forearm"
+            one_box * 2,
+            "the empty hand is not exactly that cube plus the wrist under it"
+        );
+        // The forearm is the third box and it is drawn from an entity of its own since #394,
+        // so it is counted where it lives rather than in the hand's mesh. One box there too:
+        // a limb assembled from several would be relief an unlit material cannot show, which
+        // is the direction #396 exists to close.
+        assert_eq!(
+            forearm_mesh().count_vertices(),
+            one_box,
+            "the forearm is not exactly one bar"
         );
 
         // That the constant is cubic is a `const` assertion beside it, with the two
@@ -2881,22 +3108,16 @@ mod tests {
                 })
         };
 
-        // The limb's two boxes are separated by the one thing that tells them apart at every
-        // pose: their width. The wrist is `WRIST_WIDTH` of the fist and the forearm swells
-        // back to `FOREARM_WIDTH`, so the midpoint between the two is a clean cut, and the
-        // count and the extent below are what stop a silently empty selection making the
-        // measurement vacuous.
-        let arm = positions(&forearm_mesh());
-        let cut = HAND_SIZE.x * (WRIST_WIDTH + FOREARM_WIDTH) / 4.0;
-        let wrist: Vec<[f32; 3]> = arm
-            .iter()
-            .copied()
-            .filter(|corner| corner[0].abs() < cut)
-            .collect();
+        // The limb's two boxes live in two places since #394 — the wrist is merged into the
+        // hand and the forearm hangs from an entity of its own — so each is read where it is
+        // rather than picked out of one buffer by width. The extent below is what stops the
+        // selection being vacuous, and the width relationship the split used to prove
+        // incidentally is asserted directly underneath.
+        let wrist = positions(&wrist_mesh());
         assert_eq!(
             wrist.len(),
             Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices(),
-            "the wrist is not one box of the limb's two"
+            "the wrist is not one box"
         );
         let (wrist_low, wrist_high) = extent(&wrist, 1);
         let expected_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
@@ -2904,6 +3125,17 @@ mod tests {
             (wrist_high - expected_top).abs() < 1e-6
                 && (wrist_low - (expected_top - WRIST_LENGTH)).abs() < 1e-6,
             "the box picked out spans {wrist_low}..{wrist_high} rather than the wrist"
+        );
+        // The forearm at rest swells back out below it, so the step is the wrist's alone.
+        let arm = positions(&placed_forearm(&HandAnimation::default()));
+        let (arm_low, arm_high) = extent(&arm, 0);
+        let (limb_low, limb_high) = extent(&wrist, 0);
+        assert!(
+            arm_high - arm_low > limb_high - limb_low,
+            "the forearm spans {} across against a wrist of {}, so the limb below the fist \
+             does not swell back out",
+            arm_high - arm_low,
+            limb_high - limb_low
         );
 
         let (fist_left, fist_right) = span(&positions(&fist_mesh()));
@@ -3064,19 +3296,26 @@ mod tests {
         }
     }
 
-    /// The eight corners of the forearm's end cap: the one face of the limb that must never
-    /// be seen, because seeing it is seeing where the player's arm stops.
+    /// The four corners of the forearm's end cap **in the frame this animation reaches**: the
+    /// one face of the limb that must never be seen, because seeing it is seeing where the
+    /// player's arm stops.
     ///
     /// Its section is the fist's since #396 — the limb carried the *palm's* depth and centre
     /// plane while there was a digit band for it to stand out of, and there is not one now.
-    fn forearm_cap() -> [Vec3; 4] {
+    ///
+    /// **It takes an animation since #394**, and that is the whole change to this file stated
+    /// in one signature: the cap is no longer at a constant [`ARM_REACH`], it is wherever
+    /// [`drawn_arm_reach`] has put it for the frame being measured. A version of this that
+    /// kept the constant would report the numbers of an arm the renderer no longer draws.
+    fn forearm_cap(animation: &HandAnimation) -> [Vec3; 4] {
         let half_width = HAND_SIZE.x * FOREARM_WIDTH / 2.0;
         let half_depth = HAND_SIZE.z / 2.0;
+        let reach = drawn_arm_reach(along_view(animation));
         [
-            Vec3::new(-half_width, -ARM_REACH, -half_depth),
-            Vec3::new(-half_width, -ARM_REACH, half_depth),
-            Vec3::new(half_width, -ARM_REACH, -half_depth),
-            Vec3::new(half_width, -ARM_REACH, half_depth),
+            Vec3::new(-half_width, -reach, -half_depth),
+            Vec3::new(-half_width, -reach, half_depth),
+            Vec3::new(half_width, -reach, -half_depth),
+            Vec3::new(half_width, -reach, half_depth),
         ]
     }
 
@@ -3103,13 +3342,18 @@ mod tests {
             .fold(f32::INFINITY, f32::min)
     }
 
-    /// Every pose one animation reaches, as the transform the renderer would use.
+    /// Every frame one animation reaches, as the state the renderer would hold and the
+    /// transform it would build from it.
+    ///
+    /// **Both halves, since #394.** The transform alone used to be everything a caller needed;
+    /// now the limb's length is read off the animation too, so handing back only the pose would
+    /// leave the caller measuring a resting arm in a frame that has stretched it.
     fn animation_poses(
         shape: Option<SwingShape>,
         held: Option<ItemShape>,
         bump: bool,
         mining: bool,
-    ) -> Vec<Transform> {
+    ) -> Vec<(HandAnimation, Transform)> {
         let mut poses = Vec::new();
         let bumps = if bump { 0..=16u8 } else { 0..=0u8 };
         for step in 0..=32u8 {
@@ -3128,7 +3372,8 @@ mod tests {
                     },
                     ..Default::default()
                 };
-                poses.push(presented_transform(&animation, held));
+                let pose = presented_transform(&animation, held);
+                poses.push((animation, pose));
             }
         }
         poses
@@ -3145,6 +3390,19 @@ mod tests {
     /// re-derives the permitted reach from the constants the pose is built from, so a change
     /// to the swing, to the bump or to the base placement fails here with the new bound
     /// printed instead of failing as a hand that vanishes when you swing it.
+    ///
+    /// **The bound is `0.0599` and it was `0.0620` before #396**, which is worth stating
+    /// because #394 was drafted against the older number and would have been over-optimistic
+    /// by two millimetres if it had reused it. Nothing about the near plane, the camera or the
+    /// swing moved: the limb took the fist's own section when the fist became a cube, which is
+    /// 24 mm of depth on the model's own centre plane where the palm's was 22.2 mm pushed
+    /// 3.9 mm back, and `section` below is where that shows up.
+    ///
+    /// **What this test bounds is [`ARM_REACH`] — the length at the model's resting depth —
+    /// and since #394 that is not the only length the arm is drawn at.** The reason it is
+    /// still the right thing to bound here is the clamp asserted at the end: the limb only
+    /// ever grows, and it only grows when the animation has carried the model *away* from the
+    /// eye, which is the direction this pose is not.
     #[test]
     fn the_forearm_is_as_long_as_the_near_plane_permits() {
         let mut app = app();
@@ -3190,6 +3448,25 @@ mod tests {
             "the forearm reaches {ARM_REACH} where {permitted} was available, so it is short \
              of the frame for no stated reason"
         );
+
+        // **And the bound survives [`drawn_arm_reach`], because the arm only ever grows away
+        // from the eye.** The pose above is the tightest one there is and its `along_view` is
+        // a placement bump — positive, toward the camera — so what must be true is that no
+        // non-negative offset lengthens the limb at all. That is the clamp, asserted here
+        // rather than read off the expression, and it is the half of the length rule the near
+        // plane depends on. The other half, that a *negative* offset never costs more
+        // headroom than the depth it buys, is not an argument this test can make from one
+        // pose: `every_held_arrangement_clears_the_near_plane_through_every_swing` sweeps the
+        // real vertices of the stretched arm through every reachable frame, and that is where
+        // it is measured.
+        for approach in [0.0, PLACE_BUMP_DISTANCE / 2.0, PLACE_BUMP_DISTANCE, 1.0] {
+            assert!(
+                (drawn_arm_reach(approach) - ARM_REACH).abs() < f32::EPSILON,
+                "an animation carrying the model {approach} toward the eye draws the arm at \
+                 {}, past the {permitted} the near plane permits there",
+                drawn_arm_reach(approach)
+            );
+        }
     }
 
     /// **The forearm joins the fist to the bottom of the frame with nothing showing through.**
@@ -3214,92 +3491,125 @@ mod tests {
 
         let field_of_view = crate::settings::Settings::default().field_of_view();
         let half_height = (field_of_view.to_radians() / 2.0).tan();
-        let rest = presented_transform(&HandAnimation::default(), None);
-        let mesh = held_mesh(TEST_SKIN, selected_appearance(None));
-        let triangles = projected_triangles(&mesh, &rest);
 
-        let project = |point: Vec3| {
-            let point = rest.transform_point(point);
-            Vec2::new(point.x / -point.z, point.y / -point.z)
-        };
-        // The wrist's own band, inset off its two silhouette edges: a convex outline is a
-        // single point at its extreme abscissa, which no sampled column can be inside.
-        let half_width = HAND_SIZE.x * WRIST_WIDTH / 2.0;
-        let wrist_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
-        let mut edges: Vec<f32> = [-half_width, half_width]
-            .into_iter()
-            .flat_map(|x| {
-                [-HAND_SIZE.z / 2.0, HAND_SIZE.z / 2.0].map(move |z| {
-                    [wrist_top - WRIST_LENGTH, wrist_top].map(|y| project(Vec3::new(x, y, z)).x)
+        let walk = |name: &str, animation: &HandAnimation, held: Option<ItemShape>| {
+            let pose = presented_transform(animation, held);
+            // **Both entities, composed the way the renderer parents them.** The limb is a
+            // child of the hand since #394, so a version of this walk that read `held_mesh`
+            // alone would be asking whether the *wrist* reaches the bottom edge — which it
+            // does not, and never did.
+            let mut triangles =
+                projected_triangles(&held_mesh(TEST_SKIN, selected_appearance(None)), &pose);
+            triangles.extend(projected_triangles(&placed_forearm(animation), &pose));
+
+            let project = |point: Vec3| {
+                let point = pose.transform_point(point);
+                Vec2::new(point.x / -point.z, point.y / -point.z)
+            };
+            // The wrist's own band, inset off its two silhouette edges: a convex outline is a
+            // single point at its extreme abscissa, which no sampled column can be inside.
+            let half_width = HAND_SIZE.x * WRIST_WIDTH / 2.0;
+            let wrist_top = -HAND_SIZE.y / 2.0 + ARM_OVERLAP;
+            let mut edges: Vec<f32> = [-half_width, half_width]
+                .into_iter()
+                .flat_map(|x| {
+                    [-HAND_SIZE.z / 2.0, HAND_SIZE.z / 2.0].map(move |z| {
+                        [wrist_top - WRIST_LENGTH, wrist_top].map(|y| project(Vec3::new(x, y, z)).x)
+                    })
                 })
-            })
-            .flatten()
-            .collect();
-        edges.sort_by(f32::total_cmp);
-        let (left, right) = (edges[0], edges[edges.len() - 1]);
-        let inset = (right - left) * 0.02;
+                .flatten()
+                .collect();
+            edges.sort_by(f32::total_cmp);
+            let (left, right) = (edges[0], edges[edges.len() - 1]);
+            let inset = (right - left) * 0.02;
 
-        // Start inside the fist, which every column of the wrist's band is under.
-        let start = project(Vec3::ZERO).y;
-        for column in 0..COLUMNS {
-            let fraction = column as f32 / (COLUMNS - 1) as f32;
-            let x = left + inset + (right - left - 2.0 * inset) * fraction;
-            let mut y = start;
-            while y > -half_height {
-                assert!(
-                    triangles
-                        .iter()
-                        .any(|triangle| contains(*triangle, Vec2::new(x, y))),
-                    "at {field_of_view}° and {ASPECT:.4}:1 the world shows through at ({x}, \
-                     {y}), between the fist and the bottom edge at {}",
-                    -half_height
-                );
-                y -= STEP;
+            // Start inside the fist, which every column of the wrist's band is under.
+            let start = project(Vec3::ZERO).y;
+            for column in 0..COLUMNS {
+                let fraction = column as f32 / (COLUMNS - 1) as f32;
+                let x = left + inset + (right - left - 2.0 * inset) * fraction;
+                let mut y = start;
+                while y > -half_height {
+                    assert!(
+                        triangles
+                            .iter()
+                            .any(|triangle| contains(*triangle, Vec2::new(x, y))),
+                        "{name}: at {field_of_view}° and {ASPECT:.4}:1 the world shows through \
+                         at ({x}, {y}), between the fist and the bottom edge at {}",
+                        -half_height
+                    );
+                    y -= STEP;
+                }
             }
-        }
+        };
+
+        walk("at rest", &HandAnimation::default(), None);
+        // **And at the peak of a thrust**, which is the frame #394 was filed about and the one
+        // where the limb is longest. A join that opens when the arm stretches would be the new
+        // way to reintroduce exactly the defect #389 closed, and it is invisible to the
+        // end-cap measurements below: those ask where the arm *ends*, not whether it is
+        // continuous on the way there. The hand is walked empty in both passes and the blade's
+        // pose is used for the second, which is the strict pairing: a held item can only add
+        // cover, and the offset it brings is the one a thrust is really drawn with.
+        walk(
+            "at the peak of a thrust",
+            &HandAnimation {
+                attack: Some(Swing {
+                    shape: SwingShape::Thrust,
+                    elapsed: ATTACK_SWING_TIME / 2,
+                }),
+                ..Default::default()
+            },
+            Some(ItemShape::Blade),
+        );
     }
 
     /// **Where the end of the arm arrives, stated as a number for every animation there is.**
     ///
     /// #389 asked for exactly this and was explicit that the answer must not be left to be
-    /// discovered: the near plane caps [`ARM_REACH`], so above some field of view the limb's
-    /// end cap comes into frame, and the only unacceptable outcome is not knowing where.
+    /// discovered: above some field of view the limb's end cap comes into frame, and the only
+    /// unacceptable outcome is not knowing where.
     ///
-    /// The two reach-away animations are the ones that arrive first, and the reason is
-    /// arithmetic rather than a defect in the arm. A thrust carries the whole model
-    /// [`THRUST_REACH`] further from the eye and a cast carries it the same distance, which is
-    /// more than half the base depth again — everything shrinks by that factor, the arm
-    /// included, while the frame does not. No arm short enough to survive an overhead cut is
-    /// long enough to stay clipped there, so both are clipped at or near the narrowest field
-    /// of view the settings offer and show their end above it.
+    /// **#394 is the change that moved the two numbers this table existed to apologise for.**
+    /// The paragraph that used to sit here said no arm short enough to survive an overhead cut
+    /// is long enough to stay clipped through a thrust, and the arithmetic was right: the near
+    /// plane permits `0.0599` and a *fixed* arm needs `0.0705` to reach the bottom edge at the
+    /// default field of view through a thrust. What was wrong was the word *arm*. The cut that
+    /// threatens the near plane carries the model **toward** the eye and the thrust that needs
+    /// the reach carries it **away**, so the two bounds are never imposed on the same frame,
+    /// and only a *constant* length has to satisfy both at once. [`drawn_arm_reach`] scales the
+    /// limb with the model's own depth, which cancels the term that was shrinking it — and the
+    /// two arcs that were below the narrowest selectable field of view now clear the default
+    /// one by nine degrees.
     ///
-    /// **Every number below was re-measured for #396 and two of them moved, both because the
-    /// limb's *section* is the fist's.** The cube is 24 mm deep on the model's own centre
-    /// plane where the palm was 22.2 mm pushed 3.9 mm away from the eye, so both faces of the
-    /// end cap came toward the camera; the arm also narrowed with [`HAND_SIZE`]`.x`, which
-    /// pulls its inboard corner away from the centre line and pays part of that back. The
-    /// arm's **length** is untouched — that is #394's — and so is [`ARM_REACH`].
+    /// | animation | before #396 | after #396 | **now** |
+    /// |---|---|---|---|
+    /// | at rest / placement bump / bow draw | 60.5° | 61.2° | **61.2°** |
+    /// | overhead cut | 56.2° | 54.2° | **54.2°** |
+    /// | lateral slash | 52.8° | 53.8° | **53.8°** |
+    /// | mining punch | 52.4° | 52.1° | **60.2°** |
+    /// | sceptre cast | 41.1° | 41.3° | **53.7°** |
+    /// | thrust | 40.1° | 39.8° | **53.9°** |
     ///
-    /// - An overhead cut went from **56.2° to 54.2°**. Still nine degrees above the default,
-    ///   and the floor below keeps one under it.
-    /// - A thrust went from **40.1° to 39.8°**, and 40° is the narrowest field of view the
-    ///   settings offer, so a thrust now shows the arm's end at *every* selectable field of
-    ///   view rather than at every one but the narrowest. It had a tenth of a degree of
-    ///   margin before this change and it has none now. That is recorded here rather than
-    ///   absorbed: its floor is the measured number instead of `narrowest`, and the
-    ///   assertions after the table pin the direction so a later edit cannot walk it further
-    ///   without saying so.
+    /// **Nothing regressed and nothing was traded.** The four animations that do not move the
+    /// model away are unchanged to the tenth of a degree, because the length rule is floored at
+    /// the resting length and those frames are all at or below it — see [`drawn_arm_reach`] for
+    /// why the floor is there and what shrinking on approach would have cost. The three that do
+    /// reach away improve by the depth they spend.
     ///
-    /// Rest, the placement bump and a bow draw all improved (60.5° to 61.2°), as did a lateral
-    /// slash (52.8° to 53.8°) and a sceptre cast (41.1° to 41.3°); a mining punch is within a
-    /// third of a degree of where it was (52.4° to 52.1°).
+    /// **The thrust's floor is `53.0` now, and it is no longer an exception.** It was `39.0` —
+    /// a hand-written number below [`crate::settings`]'s narrowest field of view, put there
+    /// because the defect this test measures had not been fixed yet. Every floor in the table
+    /// below is the measured value rounded down, every one of them is above the **default**
+    /// field of view, and the loop under the table asserts that last clause rather than leaving
+    /// it to be checked by eye — so a floor that drifts under the default is a failure with a
+    /// name, not a number somebody re-records.
     #[test]
     fn the_forearms_end_stays_out_of_frame_through_every_animation() {
-        let cap = forearm_cap();
         let widest = |shape, held, bump, mining| {
             animation_poses(shape, held, bump, mining)
                 .iter()
-                .map(|pose| widest_clipped_fov(&cap, pose))
+                .map(|(animation, pose)| widest_clipped_fov(&forearm_cap(animation), pose))
                 .fold(f32::INFINITY, f32::min)
         };
 
@@ -3320,7 +3630,7 @@ mod tests {
             (
                 "through a mining punch",
                 widest(None, None, false, true),
-                52.0,
+                60.0,
             ),
             (
                 "through an overhead cut",
@@ -3340,7 +3650,7 @@ mod tests {
                     true,
                     false,
                 ),
-                52.0,
+                53.0,
             ),
             (
                 "through a bow draw",
@@ -3355,10 +3665,7 @@ mod tests {
                     true,
                     false,
                 ),
-                // **The one floor that is not `narrowest`, and the doc above says why.** It
-                // was, with a tenth of a degree in hand; the cube's section spent that and
-                // two tenths more.
-                39.0,
+                53.0,
             ),
             (
                 "through a sceptre cast",
@@ -3368,7 +3675,7 @@ mod tests {
                     true,
                     false,
                 ),
-                narrowest,
+                53.0,
             ),
         ] {
             assert!(
@@ -3376,22 +3683,35 @@ mod tests {
                 "the forearm's end shows {name} above {measured:.1}°, and {floor:.1}° is the \
                  floor this change was accepted against"
             );
+            // **The acceptance criterion, applied to every row rather than to the two that
+            // used to fail it.** A floor under the default is how the thrust's `39.0`
+            // survived three iterations of this file: it read as a measurement when it was an
+            // exemption. There is no longer a row this may be written for.
+            assert!(
+                floor >= default,
+                "{name} is accepted down to {floor:.1}°, under the default {default}°, so a \
+                 field of view players actually use is exempt again"
+            );
         }
 
         // The statements the acceptance criterion turns on, kept where they cannot drift
         // apart from the sweep above: the resting arm is clipped at the default field of view
-        // with room to spare, and the reach-away arcs are the ones that show their end inside
-        // it.
+        // with room to spare, and — since #394 — so are the two arcs that reach away.
         assert!(widest(None, None, true, false) > default);
+        // **This assertion was inverted by #394, not deleted.** It read `< default` and it
+        // passed, which is what a test looks like when it has been written around a defect
+        // instead of against one: the property it pinned was *the arm's end is visible during a
+        // thrust*. Turning it over leaves the same statement pinned from the side that is worth
+        // pinning, and a change that reintroduces the defect fails here by name.
         assert!(
             widest(
                 Some(SwingShape::Thrust),
                 Some(ItemShape::Blade),
                 true,
                 false
-            ) < default,
-            "a thrust no longer shows the arm's end at the default field of view, so this \
-             test is describing geometry that has moved"
+            ) > default,
+            "a thrust shows the arm's end at the default field of view again, which is the \
+             defect #394 was filed about"
         );
         // **And a cast is still clipped at the narrowest, which is what stops the thrust's
         // new floor from reading as a licence.** The two arcs carry the model the same
@@ -3410,24 +3730,135 @@ mod tests {
         );
     }
 
+    /// **The arm keeps the length it is drawn at, and the renderer is what is asked.**
+    ///
+    /// The table above says *where the end cap arrives*; this says *why it stopped moving*. The
+    /// composition translates along the view and the frustum widens with distance, so a limb of
+    /// constant length covers less of the screen the further out an animation carries it —
+    /// which is the whole of #394, and 39.8° was what it cost. [`drawn_arm_reach`] multiplies
+    /// the length by the same depth ratio, so the two cancel and the limb's *projected* reach
+    /// below the hand is one number in every frame of every animation.
+    ///
+    /// **Measured through the transform the renderer uses, not through the ratio.** Asserting
+    /// the ratio would restate the expression; what has to hold is a fact about the picture, and
+    /// the picture is where the rest pitch, the swing's own rotations and the perspective divide
+    /// all land. The invariance is not exact — [`BASE_TRANSLATION`]`.y` puts the whole
+    /// composition below the crosshair and that offset does not scale with depth — so this
+    /// bounds the residual rather than claiming zero, and the bound is small enough that the
+    /// end cap's own tolerance would have to be argued for before it mattered.
+    ///
+    /// The frames the model is carried *toward* the eye are checked from the other side, on the
+    /// clamp: the arm may not lengthen there at all, which is the near plane's half of the
+    /// bargain and is asserted in [`the_forearm_is_as_long_as_the_near_plane_permits`].
+    #[test]
+    fn the_arm_covers_the_same_reach_of_screen_however_far_the_animation_carries_it() {
+        // How far below the hand's own origin the arm's end projects, in the plane the frame
+        // is measured in. One number per frame, and it is the one that used to shrink.
+        let projected_reach = |animation: &HandAnimation, held| {
+            let pose = presented_transform(animation, held);
+            let origin = pose.transform_point(Vec3::ZERO);
+            let cap =
+                pose.transform_point(Vec3::new(0.0, -drawn_arm_reach(along_view(animation)), 0.0));
+            origin.y / -origin.z - cap.y / -cap.z
+        };
+
+        let rest = projected_reach(&HandAnimation::default(), None);
+        assert!(rest > 0.0, "the arm does not reach below the hand at rest");
+
+        for (name, shape, held) in [
+            ("a thrust", SwingShape::Thrust, Some(ItemShape::Blade)),
+            ("a sceptre cast", SwingShape::Cast, Some(ItemShape::Sceptre)),
+        ] {
+            for step in 0..=32u8 {
+                let animation = HandAnimation {
+                    attack: Some(Swing {
+                        shape,
+                        elapsed: ATTACK_SWING_TIME.mul_f32(f32::from(step) / 32.0),
+                    }),
+                    ..Default::default()
+                };
+                let reach = projected_reach(&animation, held);
+                assert!(
+                    (reach - rest).abs() < rest * 0.06,
+                    "{step}/32 of the way through {name} the arm reaches {reach} of the frame \
+                     below the hand against {rest} at rest, so the length is not following the \
+                     depth"
+                );
+            }
+        }
+
+        // And the same measurement with the rule taken out, which is what the defect was: a
+        // constant length loses a quarter of its reach at the peak of a thrust.
+        let peak = HandAnimation {
+            attack: Some(Swing {
+                shape: SwingShape::Thrust,
+                elapsed: ATTACK_SWING_TIME / 2,
+            }),
+            ..Default::default()
+        };
+        let pose = presented_transform(&peak, Some(ItemShape::Blade));
+        let origin = pose.transform_point(Vec3::ZERO);
+        let fixed = pose.transform_point(Vec3::new(0.0, -ARM_REACH, 0.0));
+        let unscaled = origin.y / -origin.z - fixed.y / -fixed.z;
+        assert!(
+            unscaled < rest * 0.75,
+            "a constant-length arm reaches {unscaled} of the frame at the peak of a thrust \
+             against {rest} at rest, so this test is no longer measuring the mechanism #394 \
+             was filed about"
+        );
+    }
+
     /// **The off-hand shield hand gets the same arm, and the shield's own roll mirrors it.**
     ///
-    /// `spawn_view_model` builds that entity from the same [`held_mesh`], so an arm added
-    /// there arrives on the left hand whether anybody decided it should or not — which is why
-    /// #389 asked for the decision to be made rather than discovered. It is kept: the left
-    /// hand needs a limb for the same reason the right one does, and the entity's own
-    /// `Rz(-0.48)` is larger than anything the arm carries, so the limb leans *outboard for a
-    /// left hand* — down and to the left — instead of being a right arm mirrored the wrong
-    /// way. That is measured here rather than assumed, because it is true by arithmetic on two
-    /// numbers that live in different functions.
+    /// `spawn_view_model` builds that entity from the same [`held_mesh`] and hangs the same
+    /// arm under it, so an arm added there arrives on the left hand whether anybody decided it
+    /// should or not — which is why #389 asked for the decision to be made rather than
+    /// discovered. It is kept: the left hand needs a limb for the same reason the right one
+    /// does, and the entity's own `Rz(-0.48)` is larger than anything the arm carries, so the
+    /// limb leans *outboard for a left hand* — down and to the left — instead of being a right
+    /// arm mirrored the wrong way. That is measured here rather than assumed, because it is
+    /// true by arithmetic on two numbers that live in different functions.
+    ///
+    /// **The arm is now an entity, so the first thing checked is that it is there.** #394 moved
+    /// the limb out of the hand's mesh and onto a child; the off-hand's copy is spawned by the
+    /// same closure and never animated, which is correct — that entity carries no `along_view`
+    /// of its own, so a limb driven from the *held* hand's animation would stretch an arm
+    /// nothing had pushed away. What must be asserted is that it exists and rests at the
+    /// resting length, because both of those are now spawn-time decisions rather than
+    /// properties of a merged mesh.
     #[test]
     fn the_off_hand_shield_carries_a_left_arm_of_its_own() {
         let mut app = app();
         app.update();
         let (_, shield) = off_hand_shield(&mut app);
 
+        let world = app.world_mut();
+        let mut arms = world.query_filtered::<(&ChildOf, &Transform), With<Forearm>>();
+        let mut shields = world.query_filtered::<Entity, With<OffHandShield>>();
+        let shield_entity = shields.single(world).expect("one off-hand shield");
+        let arm = arms
+            .iter(world)
+            .find(|(parent, _)| parent.parent() == shield_entity)
+            .map(|(_, transform)| *transform)
+            .expect("the off-hand shield hangs an arm of its own");
+        assert_eq!(
+            arm,
+            forearm_transform(&HandAnimation::default()),
+            "the off-hand shield's arm is not at the resting length, so something is driving \
+             a limb whose hand never moves along the view"
+        );
+
+        // The unit bar's far end, through the arm's own transform: this is the composition
+        // [`forearm_transform`] promises, read rather than recomputed.
+        let far_end = arm.transform_point(Vec3::NEG_Y);
+        assert!(
+            (far_end.y + ARM_REACH).abs() < 1e-6 && far_end.x.abs() < 1e-6,
+            "the off-hand arm's far end is at {far_end:?} rather than {ARM_REACH} straight \
+             below the hand"
+        );
+
         let wrist = shield.transform_point(Vec3::new(0.0, -HAND_SIZE.y / 2.0, 0.0));
-        let end = shield.transform_point(Vec3::new(0.0, -ARM_REACH, 0.0));
+        let end = shield.transform_point(far_end);
         assert!(
             end.x < wrist.x,
             "the shield hand's arm runs from x {} to x {}, which is inboard rather than out",
@@ -3435,7 +3866,7 @@ mod tests {
             end.x
         );
 
-        let cap = forearm_cap();
+        let cap = forearm_cap(&HandAnimation::default());
         for corner in cap {
             let point = shield.transform_point(corner);
             assert!(
