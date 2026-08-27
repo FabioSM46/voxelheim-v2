@@ -225,6 +225,18 @@ impl ItemColour {
     }
 }
 
+/// The generated surface an item's material wears, when it wears one.
+///
+/// **A vocabulary of *kinds* with no wildcard arm in the generator**, exactly as
+/// [`ItemShape`] is one in either renderer: a second variant does not compile until
+/// `super::livery` has been told how to draw it. Nothing there matches on an item id, so
+/// what an item looks like stays in this table with the other three facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Livery {
+    /// Oxide: warm, dark, and eaten *into* the steel rather than laid over it.
+    Rust,
+}
+
 /// Everything this client has an opinion about for one item id.
 ///
 /// Three facts, all mandatory, which is the compiler's half of *every item has a complete
@@ -252,6 +264,12 @@ pub(super) struct ItemDisplay {
     /// block counterpart names an item-only swatch. Item ids and block ids remain two
     /// registries: a log is item 4 and draws as [`ItemColour::Block`]`(`[`palette::LOG`]`)`.
     colour: ItemColour,
+    /// The generated surface this item's material wears, when it wears one.
+    ///
+    /// **The fourth field the doc above anticipated**, and a presentation fact like the
+    /// other three: what an item *does* is still the server's answer. `None` means "draws
+    /// as a flat colour", which is every item but one today.
+    livery: Option<Livery>,
 }
 
 /// Every item id this client knows, in the order the server's registry appends them.
@@ -265,36 +283,42 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "stone",
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::STONE),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_DIRT,
         name: "dirt",
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::DIRT),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_SNOW,
         name: "snow",
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::SNOW),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_LOG,
         name: "log",
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_RAW_COAL,
         name: "coal",
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::COAL_ORE),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_RAW_IRON,
         name: "raw iron",
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::IRON_ORE),
+        livery: None,
     },
     // The starter blade. `super::combat` reads the same id to decide what a click asks
     // for; the row here is only what it looks like and what it is called.
@@ -303,6 +327,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "rusty sword",
         shape: ItemShape::Blade,
         colour: ItemColour::WornSteel,
+        livery: Some(Livery::Rust),
     },
     // The two items that plant an entity rather than a voxel. Iron for the forge, canvas
     // for the tent, so a player can see which of the two they are carrying.
@@ -311,12 +336,14 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "forge",
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::IRON_ORE),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_TENT,
         name: "tent",
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::SNOW),
+        livery: None,
     },
     // The forge's two products. The iron blade is a `Blade` beside the rusty one, in clean
     // forged steel rather than worn steel so the two are told apart in the hand as well as
@@ -326,12 +353,14 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "iron sword",
         shape: ItemShape::Blade,
         colour: ItemColour::ForgedSteel,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_SHARPENING_STONE,
         name: "sharpening stone",
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::STONE),
+        livery: None,
     },
     // The third bundle, and the first whose point is the ground *around* it. A `Bundle`
     // beside the tent and the forge because the place press means the same thing while
@@ -342,6 +371,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "campfire",
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
     // What a hunt leaves, and what it is worked into. All three are `Material`, because
     // that is what the shape vocabulary has for a thing you carry and spend — and because
@@ -358,18 +388,21 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "bone",
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::SNOW),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_VARGR_PELT,
         name: "vargr pelt",
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::DIRT),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_PATCH,
         name: "leather patch",
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
     // The three implements, one shape and three swatches — which is what stops them being
     // three identical cells, exactly as it does for the bone, the pelt and the patch above.
@@ -381,18 +414,21 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "shovel",
         shape: ItemShape::Tool,
         colour: ItemColour::Block(palette::DIRT),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_PICKAXE,
         name: "pickaxe",
         shape: ItemShape::Tool,
         colour: ItemColour::Block(palette::STONE),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_AXE,
         name: "axe",
         shape: ItemShape::Tool,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
     // The hunted ingredient and its cooked product. Both are `Material`, while distinct
     // item-only swatches keep the raw and cooked forms legible in the same pack.
@@ -401,72 +437,84 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "raw meat",
         shape: ItemShape::Material,
         colour: ItemColour::RawMeat,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_COOKED_MEAT,
         name: "cooked meat",
         shape: ItemShape::Material,
         colour: ItemColour::CookedMeat,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_CAP,
         name: "leather cap",
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_JERKIN,
         name: "leather jerkin",
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_LEGGINGS,
         name: "leather leggings",
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_IRON_HELM,
         name: "iron helm",
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_IRON_CUIRASS,
         name: "iron cuirass",
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_IRON_GREAVES,
         name: "iron greaves",
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_WOODEN_SHIELD,
         name: "wooden shield",
         shape: ItemShape::Shield,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_BOW,
         name: "bow",
         shape: ItemShape::Bow,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_ARROW,
         name: "arrow",
         shape: ItemShape::Material,
         colour: ItemColour::Arrow,
+        livery: None,
     },
     ItemDisplay {
         item_id: ITEM_WOODEN_SCEPTRE,
         name: "wooden sceptre",
         shape: ItemShape::Sceptre,
         colour: ItemColour::Block(palette::LOG),
+        livery: None,
     },
 ];
 
@@ -507,6 +555,18 @@ pub(crate) fn item_linear_rgba(item_id: u16) -> [f32; 4] {
 /// need a second placeholder to mean the same thing.
 pub(crate) fn item_shape(item_id: u16) -> ItemShape {
     display(item_id).map_or(ItemShape::Material, |row| row.shape)
+}
+
+/// The livery one item id wears, when it wears one.
+///
+/// `None` for an unknown id, which is the same answer as "wears none" and is the right one:
+/// a build that has never heard of an item cannot know what its surface looks like.
+///
+/// **This is what the renderers ask instead of naming an item.** `super::hands` reached its
+/// one liveried blade through `if item_id == ITEM_RUSTY_SWORD`, which is the shape that
+/// does not survive a second liveried item.
+pub(crate) fn item_livery(item_id: u16) -> Option<Livery> {
+    display(item_id).and_then(|row| row.livery)
 }
 
 /// Every item id this build has a row for.
@@ -561,7 +621,17 @@ mod tests {
                 row.item_id
             );
             assert_eq!(item_shape(row.item_id), row.shape, "item {}", row.item_id);
+            assert_eq!(item_livery(row.item_id), row.livery, "item {}", row.item_id);
         }
+
+        // **Deliberately not part of `row_is_complete`.** The other three facts have no
+        // honest empty value; `None` is what almost every item's livery legitimately is. So
+        // the sweep insists on what it can: the accessor answers what the row says, and at
+        // least one item wears one, so the generator cannot be left drawing for nobody.
+        assert!(
+            ITEMS.iter().any(|row| row.livery.is_some()),
+            "no item wears a livery, so the generator is drawing something nobody samples"
+        );
 
         // The server's registry appends and never renumbers, so the ids it has issued are
         // 1..N with no holes. Checking that catches a duplicated row and a row given an
@@ -820,6 +890,12 @@ mod tests {
             palette::linear_rgba(BlockId::MAX),
             "an unknown item drew a plausible colour instead of the placeholder"
         );
+        assert_eq!(
+            item_livery(NO_SUCH_ITEM),
+            None,
+            "an unknown item claimed a livery, so a version skew would draw somebody \
+             else's surface"
+        );
     }
 
     /// The sweep's teeth, on fixtures rather than on the table that already passes.
@@ -835,6 +911,7 @@ mod tests {
             name: "unknown item",
             shape: ItemShape::Material,
             colour: ItemColour::Block(palette::STONE),
+            livery: None,
         };
         assert!(
             !row_is_complete(&nameless),

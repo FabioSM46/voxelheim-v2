@@ -944,6 +944,20 @@ surface's existing bound. The roll keeps the item-table colour; the straps use t
 brown. World drops keep those as two visual children so one material can stay item-coloured and
 the other brown, while the first-person white material reads both as vertex colours.
 
+**The rusty sword's oxide was fourteen small boxes merged into the blade, and it is a livery now.**
+The colour was always right — a multiplier, so `player/items.rs` stayed the one answer to what the
+steel is — and the silhouette never was: a box has six faces, three visible at once, and a hard
+edge against the steel at every angle, so at any distance fourteen of them read as *damage*, which
+is the exact thing the constant's own comment said they were made small to avoid. A per-vertex
+patina would have fixed that and kept the other half of the defect. **The rust lived in one
+renderer only** — `hands::item_mesh` reached it through `if item_id == ITEM_RUSTY_SWORD`, while
+`drops::drop_mesh` served the ground drop *and* the third-person fist from plain `sword_mesh`, and
+`ui/icon.rs` drew flat rectangles — and a patina has to be regenerated in every mesh at every
+scale, with no vertices in the cell to tint at all. An asset is consumed from several places
+without anybody copying it, so agreement between those surfaces becomes handle identity. Pointing
+the other three at it is its own issue, and so is eating the field into the steel — see the
+texture rule below for what has landed and what has not.
+
 **Keying the drawing on the shape rather than on item ids is the whole design.** The alternative
 that keeps the two surfaces honest by construction is rendering the held meshes to a texture — and
 it costs a camera, a render layer, an image handle per item, framing and lighting decisions, and it
@@ -1924,10 +1938,33 @@ Recorded here so the next reader does not mistake them for oversights:
   border culling put them in the mesher's hands. What to *do* with them is still a rendering
   decision rather than a plumbing one, and greedy merging works against per-vertex occlusion —
   which is exactly the design that issue owes.
-- **No texture atlas, no UVs.** `palette.rs` is the whole terrain material system: a colour per
-  block id, carried as vertex colours. Item-only swatches live in `player/items.rs` beside the
-  rows that name them and resolve to the same linear RGBA shape every renderer consumes. Art
-  assets are a later issue.
+- **No texture atlas, and no art assets — but there is one generated image, and the meshes that
+  sample it carry real UVs.** `palette.rs` is still the whole *terrain* material system: a colour
+  per block id, carried as vertex colours, on chunk meshes whose texture coordinates nothing reads.
+  Greedy meshing merges quads across blocks, so a texture there is a different problem with
+  different costs — seams across merged quads, an atlas, a per-chunk material decision — and none
+  of it is on the table. Item-only swatches live in `player/items.rs` beside the rows that name
+  them and resolve to the same linear RGBA shape every renderer consumes.
+
+  What changed is **items**. `player/livery.rs` generates one `Image` at startup from a fixed seed
+  and hands out one handle; an item's row names the livery it wears, or `None`, which is what
+  almost every row says. `MeshBuild` now emits real coordinates — `u` around the blade's six-corner
+  perimeter, `v` along it — and `livery::field` is the one function both the texels and, once the
+  blade is subdivided, the vertices are read from. **The displacement is the second half of #417
+  and is not here yet**: corrosion eats metal rather than sitting on top of it, so a livery that
+  only tinted would be paint, and the blade currently has twelve quads and nowhere to pit.
+
+  **Row 0 of that image is pure white and everything else points at it.** The first-person hand is
+  one mesh and one material — fist, wrist, arm and held item — so a material carrying an image
+  means every cuboid in the composition has a coordinate that now matters; Bevy's primitives
+  generate coordinates spanning the whole image, which would wrap the rusty sword's oxide around
+  the player's knuckles. `hands::neutral` points all of it at that white texel, identity for a
+  multiplier, so an un-liveried item draws exactly what it drew before the image existed. That is
+  what lets one material serve a liveried blade and an un-liveried one in the same draw, and
+  `every_held_arrangement_samples_only_the_livery_it_owns` is the sweep that holds it.
+
+  No file asset, no image codec, no new dependency and no new Bevy feature — the image is
+  generated, and it is committed to nothing.
 - **The list is a list and not a browser.** No favourites, no sorting, no player counts and no
   ping column; "online" is the account service saying it heard from that server recently, not a
   probe, and the screen says as much rather than implying reachability it did not measure. The
