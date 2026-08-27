@@ -66,6 +66,13 @@ enum CrosshairPart {
     LightVertical,
 }
 
+/// One dot of the mining ring, drawn under [`CrosshairRoot`].
+///
+/// **Never [`Visibility::Visible`]**: an unconditionally-visible child ignores a hidden
+/// parent, so a child that is meaningless without its parent must never be `Visible`. A
+/// filled segment is [`Visibility::Inherited`] and an empty one is [`Visibility::Hidden`],
+/// which leaves the root's own visibility as the only thing deciding whether any of the
+/// ring is on screen. `ui/compass.rs` states the same rule as the reason for its design.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct MiningRingSegment(u8);
 
@@ -137,6 +144,12 @@ fn spawn_crosshair(mut commands: Commands) {
         });
 }
 
+/// Fills the ring to the server's progress, and decides nothing else.
+///
+/// Which segments are filled is the whole of it — whether the crosshair is on screen at
+/// all belongs to [`show_crosshair`]. That is why a filled segment is
+/// [`Visibility::Inherited`] rather than [`Visibility::Visible`]; see
+/// [`MiningRingSegment`].
 fn show_mining_progress(
     feedback: Res<MiningFeedback>,
     mut segments: Query<(&MiningRingSegment, &mut Visibility)>,
@@ -147,7 +160,7 @@ fn show_mining_progress(
     let filled = filled_segments(feedback.progress());
     for (segment, mut visibility) in &mut segments {
         let next = if segment.0 < filled {
-            Visibility::Visible
+            Visibility::Inherited
         } else {
             Visibility::Hidden
         };
@@ -203,6 +216,10 @@ fn show_crosshair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::asset::AssetPlugin;
+    use bevy::camera::visibility::VisibilityPlugin;
+    use bevy::mesh::MeshPlugin;
+
     use crate::net::SessionParams;
 
     fn session() -> Session {
@@ -295,19 +312,72 @@ mod tests {
             .add_plugins(CrosshairPlugin);
         app.update();
 
-        let visible = |app: &mut App| {
+        // `Inherited`, not `Visible`: a filled segment defers to the root. See
+        // `MiningRingSegment`.
+        let filled = |app: &mut App| {
             let world = app.world_mut();
             let mut query = world.query_filtered::<&Visibility, With<MiningRingSegment>>();
             query
                 .iter(world)
-                .filter(|visibility| **visibility == Visibility::Visible)
+                .filter(|visibility| **visibility == Visibility::Inherited)
                 .count()
         };
-        assert_eq!(visible(&mut app), usize::from(filled_segments(128)));
+        assert_eq!(filled(&mut app), usize::from(filled_segments(128)));
 
         app.insert_resource(MiningFeedback::default());
         app.update();
-        assert_eq!(visible(&mut app), 0);
+        assert_eq!(filled(&mut app), 0);
+    }
+
+    /// The ring as the renderer sees it.
+    ///
+    /// `bevy_ui_render` extracts a node only when its propagated [`InheritedVisibility`]
+    /// is true, so this counts what would actually be drawn rather than what a segment
+    /// asked for.
+    fn drawn_segments(app: &mut App) -> usize {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&InheritedVisibility, With<MiningRingSegment>>();
+        query.iter(world).filter(|drawn| drawn.get()).count()
+    }
+
+    #[test]
+    fn a_hidden_crosshair_draws_none_of_its_ring() {
+        // The reproduction, and it did reproduce: while a filled segment carried
+        // `Visibility::Visible`, nine of the sixteen dots were still drawn after
+        // `show_crosshair` hid the root, because a `Visible` child ignores a hidden
+        // parent. Assembled with `BlockTargetPlugin` nothing reached the screen — closing
+        // `InputGate::may_aim` drops `BlockTarget` and `update_mining_feedback` clears the
+        // feedback in the same frame, before `show_mining_progress` reads it — so this
+        // module was being saved by an ordering in another one. It no longer is.
+        //
+        // The real visibility propagation is what answers here: `VisibilityPlugin` runs
+        // Bevy's own `visibility_propagate_system`, so nothing in this test restates the
+        // rule under test.
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .add_plugins((MeshPlugin, VisibilityPlugin))
+            .init_resource::<InputMode>()
+            .insert_resource(session())
+            .insert_resource(MiningFeedback::for_test(128))
+            .add_plugins(CrosshairPlugin);
+        app.update();
+
+        assert_eq!(root_visibility(&mut app), Visibility::Visible);
+        assert_eq!(
+            drawn_segments(&mut app),
+            usize::from(filled_segments(128)),
+            "a shown crosshair draws the segments the server's progress filled"
+        );
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
+        assert_eq!(
+            drawn_segments(&mut app),
+            0,
+            "a filled segment outlived the crosshair it belongs to"
+        );
     }
 
     #[test]
