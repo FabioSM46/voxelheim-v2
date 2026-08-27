@@ -53,6 +53,7 @@ mod hands;
 mod interpolate;
 mod inventory;
 mod items;
+mod livery;
 mod loot;
 mod mobs;
 mod projectiles;
