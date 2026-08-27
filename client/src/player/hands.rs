@@ -2804,16 +2804,20 @@ mod tests {
     fn the_held_blade_shows_its_bevel() {
         let held = held_mesh(TEST_SKIN, blade_appearance(ITEM_IRON_SWORD));
         let steel = items::item_linear_rgba(ITEM_IRON_SWORD);
+        let skin = linear_rgb(TEST_SKIN);
 
-        // The shading levels the steel is drawn at, quantised so two f32 that print the same
-        // do not sort apart.
-        let mut levels: Vec<i32> = raw_tints(&held)
-            .into_iter()
-            .map(|tint| (tint[0] / steel[0].max(f32::EPSILON) * 1e4) as i32)
-            .filter(|level| (SHADE_FLOOR * 1e4) as i32 - 10 <= *level && *level <= 10_010)
-            .collect();
-        levels.sort_unstable();
-        levels.dedup();
+        // **The isolation is asserted rather than assumed.** This counts the levels the
+        // *steel* is drawn at inside a composition that also holds a hand, and the hand has
+        // six face shades of its own — so a filter that merely bounded the ratio could have
+        // been measuring the hand's relief and reading it as the blade's.
+        // [`levels_of`] separates them by colour *direction*, which is sound exactly as long
+        // as the two colours are not parallel, and that is checkable.
+        assert!(
+            shade_of(steel, &skin).is_none(),
+            "the test skin is a shade of the blade's steel, so the hand's own relief would \
+             count as the blade's"
+        );
+        let levels = levels_of(&held, steel);
         assert!(
             levels.len() >= 3,
             "the blade is drawn at {} shading levels, so its flat and its bevels are one \
@@ -2829,6 +2833,10 @@ mod tests {
             "a face is drawn at {brightest} of the item's own colour, so shading has started \
              inventing light"
         );
+        assert!(
+            levels.iter().copied().min().expect("some steel") >= (SHADE_FLOOR * 1e4) as i32 - 10,
+            "a face is darker than the floor, so a shade became a hole"
+        );
     }
 
     /// **A pitted blade shows its pits**, which is the half of #426 that has been invisible
@@ -2840,16 +2848,15 @@ mod tests {
     /// shade is what turns the geometry back into something visible.
     #[test]
     fn a_pitted_blade_shows_the_pits_it_has() {
+        // The blade's own vertices, split off the hand by colour direction — see
+        // [`levels_of`], and the assertion in `the_held_blade_shows_its_bevel` that the two
+        // colours are not parallel.
         let levels = |item_id: u16| {
-            let colour = items::item_linear_rgba(item_id);
-            let mut seen: Vec<i32> = raw_tints(&held_mesh(TEST_SKIN, blade_appearance(item_id)))
-                .into_iter()
-                .map(|tint| (tint[0] / colour[0].max(f32::EPSILON) * 1e4) as i32)
-                .filter(|level| (SHADE_FLOOR * 1e4) as i32 - 10 <= *level && *level <= 10_010)
-                .collect();
-            seen.sort_unstable();
-            seen.dedup();
-            seen.len()
+            levels_of(
+                &held_mesh(TEST_SKIN, blade_appearance(item_id)),
+                items::item_linear_rgba(item_id),
+            )
+            .len()
         };
         let pitted = levels(ITEM_RUSTY_SWORD);
         let smooth = levels(ITEM_IRON_SWORD);
@@ -2969,6 +2976,52 @@ mod tests {
             count: 1,
             ..Default::default()
         }))
+    }
+
+    /// The scale one vertex colour is of a base colour, when it is a shade of it at all.
+    ///
+    /// **Read off the peak channel rather than off red**, which is what the first cut did. A
+    /// base colour with no red divides to zero and would never be recognised as a shade of
+    /// itself — latent for every colour in the tables today, and a false negative waiting for
+    /// the first item that is blue or green. The peak channel is the one a multiply cannot
+    /// lose.
+    ///
+    /// `None` when the direction does not match, which is what makes this a *filter*: two
+    /// colours that are not parallel cannot be mistaken for shades of each other, so a
+    /// composition carrying skin and steel can be split by asking this twice.
+    fn shade_of(colour: [f32; 4], tint: &[f32; 4]) -> Option<f32> {
+        let peak = (0..3).fold(0, |best, channel| {
+            if colour[channel] > colour[best] {
+                channel
+            } else {
+                best
+            }
+        });
+        if colour[peak] <= f32::EPSILON {
+            return None;
+        }
+        let scale = tint[peak] / colour[peak];
+        (0..3)
+            .all(|channel| (tint[channel] - colour[channel] * scale).abs() < 1e-3)
+            .then_some(scale)
+    }
+
+    /// The distinct shading levels one base colour is drawn at within a composition.
+    ///
+    /// **Isolated by colour direction, not by a ratio range.** The first cut filtered on
+    /// `tint[0] / steel[0]` landing between the floor and one, which the hand's own six face
+    /// shades could satisfy — so the measurement could have been the *hand's* relief and read
+    /// as the blade's. [`shade_of`] answers `None` for a colour that is not parallel, which is
+    /// what makes this the blade's vertices and nothing else.
+    fn levels_of(mesh: &Mesh, colour: [f32; 4]) -> Vec<i32> {
+        let mut seen: Vec<i32> = raw_tints(mesh)
+            .iter()
+            .filter_map(|tint| shade_of(colour, tint))
+            .map(|scale| (scale * 1e4) as i32)
+            .collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen
     }
 
     /// Every vertex colour one mesh carries, unquantised and in buffer order.
@@ -6122,10 +6175,11 @@ mod tests {
         // carries is one of these two authoritative colours scaled by a number in
         // `SHADE_FLOOR..=1.0`. The claim this test makes is unchanged: two authorities, no
         // third opinion, and nothing brighter than what the tables say.
-        let shade_of = |colour: [f32; 4], tint: &[f32; 4]| {
-            let scale = tint[0] / colour[0].max(f32::EPSILON);
-            (SHADE_FLOOR - 1e-3..=1.0 + 1e-3).contains(&scale)
-                && (0..3).all(|channel| (tint[channel] - colour[channel] * scale).abs() < 1e-3)
+        // The shared predicate, bounded to the range a shade may take. See [`shade_of`],
+        // which reads the peak channel rather than red.
+        let within = |colour: [f32; 4], tint: &[f32; 4]| {
+            shade_of(colour, tint)
+                .is_some_and(|scale| (SHADE_FLOOR - 1e-3..=1.0 + 1e-3).contains(&scale))
         };
         let vertices = raw_tints(mesh);
         assert!(
@@ -6134,9 +6188,9 @@ mod tests {
         );
         let (mut skinned, mut stony) = (0, 0);
         for tint in &vertices {
-            if shade_of(skin, tint) {
+            if within(skin, tint) {
                 skinned += 1;
-            } else if shade_of(stone, tint) {
+            } else if within(stone, tint) {
                 stony += 1;
             } else {
                 panic!("a vertex carries {tint:?}, which is a shade of neither authority");
@@ -6529,24 +6583,25 @@ mod tests {
             .expect("the tent has a canvas colour");
         let straps = bundle_strap_linear_rgba();
         let skin = linear_rgb(TEST_SKIN);
-        let shade_of = |colour: [f32; 4], tint: &[f32; 4]| {
-            let scale = tint[0] / colour[0].max(f32::EPSILON);
-            (SHADE_FLOOR - 1e-3..=1.0 + 1e-3).contains(&scale)
-                && (0..3).all(|channel| (tint[channel] - colour[channel] * scale).abs() < 1e-3)
+        // The shared predicate, bounded to the range a shade may take. See [`shade_of`],
+        // which reads the peak channel rather than red.
+        let within = |colour: [f32; 4], tint: &[f32; 4]| {
+            shade_of(colour, tint)
+                .is_some_and(|scale| (SHADE_FLOOR - 1e-3..=1.0 + 1e-3).contains(&scale))
         };
         assert!(
-            vertices.iter().any(|tint| shade_of(canvas, tint)),
+            vertices.iter().any(|tint| within(canvas, tint)),
             "the roll lost the tent colour"
         );
         assert!(
-            vertices.iter().any(|tint| shade_of(straps, tint)),
+            vertices.iter().any(|tint| within(straps, tint)),
             "the two straps are not brown"
         );
         assert_ne!(canvas, straps, "the straps disappeared into the canvas");
         // The hand is in the same buffer and is neither, which is what stops the two clauses
         // above from being satisfied by skin that happens to scale onto one of them.
         assert!(
-            vertices.iter().any(|tint| shade_of(skin, tint)),
+            vertices.iter().any(|tint| within(skin, tint)),
             "the hand is not in the composition at all"
         );
     }
