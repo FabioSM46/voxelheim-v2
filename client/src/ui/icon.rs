@@ -22,7 +22,7 @@ use bevy::math::Rot2;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
-use crate::player::ItemShape;
+use crate::player::{ItemShape, Liveries, Livery, field_rect};
 
 /// The picture one cell is drawing: a shape, in the item's colour.
 ///
@@ -33,6 +33,15 @@ use crate::player::ItemShape;
 pub(crate) struct StackIcon {
     pub(crate) shape: ItemShape,
     pub(crate) colour: Color,
+    /// The generated surface this item's material wears, when it wears one.
+    ///
+    /// **The cell is the surface that could never have joined a geometric answer**, and this
+    /// field is why it can join an asset. It has no vertices to tint — a picture here is
+    /// `bevy_ui` rectangles — but `ImageNode` carries a `Handle<Image>`, a `color` that
+    /// multiplies it and a `rect` selecting a region, which is exactly the three things a
+    /// livery needs. The drawing stays keyed on [`ItemShape`]; this says which of the
+    /// rectangles in it sample an image.
+    pub(crate) livery: Option<Livery>,
 }
 
 /// One rectangle of a picture.
@@ -57,6 +66,12 @@ pub(crate) struct IconPart {
     iron: bool,
     /// Uses the sceptre focus green instead of the item's base colour.
     green: bool,
+    /// Draws the item's livery over this rectangle, when the item wears one.
+    ///
+    /// **A property of the rectangle, not of the shape.** A blade's guard and grip are not
+    /// steel that rusts in the same way its edge is, and the cell says so with one flag
+    /// rather than with a second picture.
+    livery: bool,
 }
 
 impl IconPart {
@@ -72,6 +87,7 @@ impl IconPart {
         rotation: 0.0,
         iron: false,
         green: false,
+        livery: false,
     };
 }
 
@@ -164,6 +180,9 @@ const BLADE: [IconPart; 3] = [
         height: 60.0,
         shade: 0.34,
         rotation: QUARTER_TURN,
+        // The edge, and the only part of the picture a livery reaches — see
+        // [`IconPart::livery`].
+        livery: true,
         ..IconPart::PLAIN
     },
     IconPart {
@@ -186,6 +205,7 @@ const BLADE: [IconPart; 3] = [
         rotation: QUARTER_TURN,
         iron: false,
         green: false,
+        livery: false,
     },
 ];
 
@@ -444,11 +464,30 @@ pub(crate) fn host_bundle() -> impl Bundle {
 }
 
 /// Draws one immutable icon while a freshly rebuilt UI row is being spawned.
-pub(crate) fn spawn(host: &mut ChildSpawnerCommands<'_>, icon: StackIcon) {
+pub(crate) fn spawn(
+    host: &mut ChildSpawnerCommands<'_>,
+    icon: StackIcon,
+    liveries: Option<&Liveries>,
+) {
     let base = icon.colour.to_linear();
+    let image = livery_image(icon, liveries);
     for part in parts(icon.shape) {
-        host.spawn(part_bundle(part, base));
+        let mut rect = host.spawn(part_bundle(part, base));
+        if let Some(node) = livery_node(part, base, image.as_ref()) {
+            rect.insert(node);
+        }
     }
+}
+
+/// The image one cell samples, or `None` when the item wears no livery.
+///
+/// `Option<&Liveries>` because the resource is the player plugin's and the UI stands up
+/// headlessly without it. An absent resource draws the flat rectangles this module always
+/// drew, which is the honest fallback: a cell that cannot reach the image is a cell with no
+/// livery to draw, not a cell that should refuse to draw.
+fn livery_image(icon: StackIcon, liveries: Option<&Liveries>) -> Option<Handle<Image>> {
+    icon.livery?;
+    Some(liveries?.material_image())
 }
 
 /// The icon host inside one cell.
@@ -472,6 +511,7 @@ pub(crate) fn redraw(
     host: Entity,
     mut drawn: Mut<'_, DrawnIcon>,
     next: Option<StackIcon>,
+    liveries: Option<&Liveries>,
 ) {
     // Read through the shared reference and write only on a real change, so a stack
     // nobody touched neither respawns its rectangles every frame nor reports itself as
@@ -487,9 +527,13 @@ pub(crate) fn redraw(
         return;
     };
     let base = icon.colour.to_linear();
+    let image = livery_image(icon, liveries);
     host.with_children(|host| {
         for part in parts(icon.shape) {
-            host.spawn(part_bundle(part, base));
+            let mut rect = host.spawn(part_bundle(part, base));
+            if let Some(node) = livery_node(part, base, image.as_ref()) {
+                rect.insert(node);
+            }
         }
     });
 }
@@ -518,6 +562,29 @@ fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
         UiTransform::from_rotation(Rot2::radians(part.rotation)),
         FocusPolicy::Pass,
     )
+}
+
+/// The image node one rectangle draws its livery through, when it draws one.
+///
+/// **The livery multiplies the rectangle's own colour**, exactly as it multiplies an item's
+/// colour on a mesh: `ImageNode::color` is a tint over the sampled texel, so
+/// `player/items.rs` stays the one answer to what the steel is here too. `rect` takes the
+/// neutral row off — see [`field_rect`] — because an `ImageNode` with no rectangle draws the
+/// whole image, white row included.
+fn livery_node(
+    part: &IconPart,
+    base: LinearRgba,
+    image: Option<&Handle<Image>>,
+) -> Option<ImageNode> {
+    if !part.livery {
+        return None;
+    }
+    Some(ImageNode {
+        image: image?.clone(),
+        color: shaded(base, part.shade),
+        rect: Some(field_rect()),
+        ..default()
+    })
 }
 
 /// One rectangle of a drawn icon. Carried so a test can count what a cell drew without

@@ -232,7 +232,7 @@ impl ItemColour {
 /// `super::livery` has been told how to draw it. Nothing there matches on an item id, so
 /// what an item looks like stays in this table with the other three facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Livery {
+pub(crate) enum Livery {
     /// Oxide: warm, dark, and eaten *into* the steel rather than laid over it.
     Rust,
 }
@@ -567,6 +567,29 @@ pub(crate) fn item_shape(item_id: u16) -> ItemShape {
 /// does not survive a second liveried item.
 pub(crate) fn item_livery(item_id: u16) -> Option<Livery> {
     display(item_id).and_then(|row| row.livery)
+}
+
+/// Every distinct shape-and-livery pair an item in this build actually presents as, for the
+/// liveried items only.
+///
+/// **What `super::drops` builds its extra meshes from.** That cache is keyed on
+/// `(ItemShape, Option<Livery>)` since #418, because a livery decides geometry as well as
+/// colour — the rusty blade is pitted and the iron one is not — and the cross product of
+/// every shape with every livery would mint meshes for combinations no item is. Deriving the
+/// pairs from the table means the cache holds exactly what can be drawn, and two items
+/// sharing a shape and a livery land on one entry, which is what a shape-keyed cache was for
+/// in the first place.
+pub(super) fn liveried_shapes() -> Vec<(ItemShape, Livery)> {
+    let mut pairs: Vec<(ItemShape, Livery)> = Vec::new();
+    for row in ITEMS {
+        let Some(livery) = row.livery else {
+            continue;
+        };
+        if !pairs.contains(&(row.shape, livery)) {
+            pairs.push((row.shape, livery));
+        }
+    }
+    pairs
 }
 
 /// Every item id this build has a row for.

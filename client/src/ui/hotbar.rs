@@ -12,7 +12,7 @@ use super::{
     stack_style,
 };
 use crate::net::Session;
-use crate::player::{ApplyInventory, InputMode, Inventory, SelectedSlot};
+use crate::player::{ApplyInventory, InputMode, Inventory, Liveries, SelectedSlot};
 
 pub(super) struct HotbarPlugin;
 
@@ -110,6 +110,8 @@ fn refresh_hotbar(
     >,
     mut counts: Query<(&mut Text, &mut BackgroundColor), With<SlotCount>>,
     mut icons: Query<&mut DrawnIcon>,
+    // Optional, because the UI stands up headlessly without the player plugin that owns it.
+    liveries: Option<Res<Liveries>>,
 ) {
     let (Some(inventory), Some(selected)) = (inventory, selected) else {
         return;
@@ -129,7 +131,14 @@ fn refresh_hotbar(
         if *border != next {
             *border = next;
         }
-        refresh_cell_contents(&mut commands, children, &style, &mut counts, &mut icons);
+        refresh_cell_contents(
+            &mut commands,
+            children,
+            &style,
+            &mut counts,
+            &mut icons,
+            liveries.as_deref(),
+        );
     }
 }
 
