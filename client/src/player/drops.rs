@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use super::hands::{bow_mesh, sceptre_mesh, shield_mesh, sword_guard_base, sword_mesh_with};
+use super::hands::{
+    bow_mesh, sceptre_mesh, shield_mesh, sword_grip_mesh, sword_guard_base, sword_mesh_with,
+};
 #[cfg(test)]
 use super::hands::{sword_blade_span, sword_grip_centre, sword_guard_span};
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
@@ -22,7 +24,7 @@ use super::livery::Liveries;
 use super::merge_all;
 use super::{InputMode, bundle_strap_linear_rgba, rolled_bundle_parts};
 use crate::net::Session;
-#[cfg(test)]
+
 use crate::world::palette;
 
 /// The side length of one drop cube, in blocks.
@@ -126,6 +128,14 @@ pub(super) struct DropVisuals {
     shapes: Vec<(MeshKey, Handle<Mesh>)>,
     /// The second shared mesh every bundle draws over its item-coloured roll.
     bundle_straps: Handle<Mesh>,
+    /// The second shared mesh every blade draws under its item-coloured steel.
+    ///
+    /// **One asset for every sword, whatever its steel**, which is the whole reason the grip
+    /// is a child rather than part of the blade's mesh: `hands.rs` reaches its wood by
+    /// dividing `palette::LOG` out of *that* blade's colour, and a tint divided out of one
+    /// steel baked into a mesh shared by two blades is right for one and silently wrong for
+    /// the other. An absolute colour on its own mesh needs no division and no cache key.
+    blade_grip: Handle<Mesh>,
     /// One material per colour **and livery**. The livery is a material fact — it arrives as
     /// `base_color_texture` — so this key needed the same widening for the same reason.
     materials: Vec<(MaterialKey, Handle<StandardMaterial>)>,
@@ -156,6 +166,25 @@ impl DropVisuals {
                 error!("no drop mesh for {key:?}");
                 Handle::default()
             })
+    }
+
+    /// The second mesh and material one shape is drawn from, when it has one.
+    ///
+    /// **The one place that pairing lives**, so a drop and a body's fist cannot disagree
+    /// about what a sword's grip is made of. A strap is the part of a bundle that is not its
+    /// canvas; a grip is the part of a sword that is not its steel — and neither wears the
+    /// item's own livery, because the livery belongs to the part this one is *not*.
+    pub(super) fn second_piece_for(
+        &mut self,
+        shape: ItemShape,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
+        let (mesh, colour) = match shape {
+            ItemShape::Bundle => (self.bundle_straps.clone(), bundle_strap_linear_rgba()),
+            ItemShape::Blade => (self.blade_grip.clone(), palette::linear_rgba(palette::LOG)),
+            _ => return None,
+        };
+        Some((mesh, self.material_for_colour(colour, None, materials)))
     }
 
     pub(super) fn material_for(
@@ -267,6 +296,7 @@ pub(super) fn create_visuals(
     commands.insert_resource(DropVisuals {
         shapes,
         bundle_straps: meshes.add(bundle_straps),
+        blade_grip: meshes.add(sword_grip_mesh(DROP_EDGE * BLADE_DROP_LENGTH)),
         materials: Vec::new(),
         livery_image: liveries.material_image(),
     });
@@ -457,18 +487,18 @@ fn spawn_drop(
             MeshMaterial3d(material),
             Transform::default(),
         ));
-        if item_shape(state.item_id) == ItemShape::Bundle {
-            // A strap wears no livery of its own — it is the one part of a bundle whose
-            // colour is not the item's.
-            let strap_material =
-                visuals.material_for_colour(bundle_strap_linear_rgba(), None, materials);
+        // The second child, for the shapes whose colour is not all the item's — see
+        // [`DropVisuals::second_piece_for`], which the body's fist reads too.
+        if let Some((mesh, material)) =
+            visuals.second_piece_for(item_shape(state.item_id), materials)
+        {
             parent.spawn((
                 DropVisual {
                     owner,
                     item_coloured: false,
                 },
-                Mesh3d(visuals.bundle_straps.clone()),
-                MeshMaterial3d(strap_material),
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
                 Transform::default(),
             ));
         }
@@ -595,6 +625,112 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Visibility, With<DroppedItem>>();
         *query.single(world).expect("one drop anchor")
+    }
+
+    /// **A dropped sword is drawn in two pieces, and the second one is wood.**
+    ///
+    /// This is the divergence #419 pinned and could not close: the grip was turned on the
+    /// ground and still steel, because `hands.rs` reaches its wood by dividing `palette::LOG`
+    /// out of *that* blade's own colour, and `DropVisuals` shares one mesh per shape and
+    /// livery between blades — so a tint divided out of one steel would be right for one
+    /// sword and silently wrong for the other.
+    ///
+    /// A second child with an absolute wood material needs no division and no cache key. Read
+    /// off the entities the running app actually spawns, and asserted for **both** blades,
+    /// because one alone cannot tell a shared absolute colour from a coincidence.
+    #[test]
+    fn a_dropped_sword_carries_its_grip_in_wood() {
+        let mut app = headless_player();
+        deliver(
+            &mut app,
+            snapshot(
+                1,
+                vec![],
+                vec![
+                    drop(
+                        10,
+                        [1.0, 64.0, 2.0],
+                        crate::player::combat::ITEM_RUSTY_SWORD,
+                    ),
+                    drop(
+                        11,
+                        [3.0, 65.0, 4.0],
+                        crate::player::crafting::ITEM_IRON_SWORD,
+                    ),
+                ],
+            ),
+            Instant::now(),
+        );
+        app.update();
+
+        let world = app.world_mut();
+        let log = palette::linear_rgba(palette::LOG);
+        let mut anchors = world.query::<(&DroppedItem, &Children)>();
+        let found: Vec<(u16, Vec<Entity>)> = anchors
+            .iter(world)
+            .map(|(drop, children)| (drop.item_id, children.iter().collect()))
+            .collect();
+        assert_eq!(found.len(), 2, "the two swords did not both spawn");
+
+        for (item_id, children) in found {
+            assert_eq!(
+                children.len(),
+                2,
+                "item {item_id} is drawn in {} pieces, not a blade and a grip",
+                children.len()
+            );
+            let colours: Vec<[f32; 4]> = children
+                .iter()
+                .map(|child| {
+                    let handle = world
+                        .get::<MeshMaterial3d<StandardMaterial>>(*child)
+                        .expect("every piece draws a material")
+                        .0
+                        .clone();
+                    world
+                        .resource::<Assets<StandardMaterial>>()
+                        .get(&handle)
+                        .expect("the piece's material")
+                        .base_color
+                        .to_linear()
+                        .to_f32_array()
+                })
+                .collect();
+            assert!(
+                colours.iter().any(|colour| {
+                    (0..3).all(|channel| (colour[channel] - log[channel]).abs() < 1e-5)
+                }),
+                "item {item_id} has no piece drawn in palette::LOG: {colours:?}"
+            );
+            assert!(
+                colours.iter().any(|colour| {
+                    let steel = item_linear_rgba(item_id);
+                    (0..3).all(|channel| (colour[channel] - steel[channel]).abs() < 1e-5)
+                }),
+                "item {item_id} has no piece drawn in its own steel: {colours:?}"
+            );
+        }
+    }
+
+    /// **Every other shape is drawn in the pieces it always was**, which is the regression a
+    /// second child invites: one extra entity per drop, everywhere.
+    #[test]
+    fn only_a_blade_and_a_bundle_are_drawn_in_two_pieces() {
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let mut visuals = world.remove_resource::<DropVisuals>().unwrap();
+        for shape in ItemShape::ALL {
+            let second = visuals.second_piece_for(shape, &mut materials).is_some();
+            let want = matches!(shape, ItemShape::Blade | ItemShape::Bundle);
+            assert_eq!(
+                second, want,
+                "{shape:?} has a second piece = {second}, want {want}"
+            );
+        }
+        world.insert_resource(visuals);
+        world.insert_resource(materials);
     }
 
     /// **The four surfaces that draw one sword resolve the same `Handle<Image>`.**

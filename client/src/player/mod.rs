@@ -994,6 +994,14 @@ impl From<&interpolate::Interpolated> for WalkPose {
     }
 }
 
+/// The second piece of a held item, when its material is not the item's.
+///
+/// A sword's grip, today. It hangs under the item rather than beside it so the fist's
+/// transform, the arm swing and the visibility all reach it for free — and so a despawn takes
+/// it with the thing it belongs to.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyHeldPiece;
+
 /// The item drawn in this session's body hand.
 ///
 /// It exists only for a non-empty authoritative selected stack. The selected index is
@@ -2228,6 +2236,20 @@ impl BodyHeldAssets<'_> {
             visuals.material_for(item_id, &mut self.materials),
         ))
     }
+
+    /// The second piece a held item is drawn from, when it has one.
+    ///
+    /// **A sword's grip is wood and the blade's material is its steel**, so the world draws
+    /// the two in separate materials — see `drops::sword_grip`. The body's fist takes the
+    /// same world assets a drop does, so it takes both pieces or it holds a sword with a
+    /// steel handle.
+    fn second_piece(
+        &mut self,
+        shape: ItemShape,
+    ) -> Option<(Handle<Mesh>, Handle<StandardMaterial>)> {
+        let visuals = self.visuals.as_deref_mut()?;
+        visuals.second_piece_for(shape, &mut self.materials)
+    }
 }
 
 /// Mirrors the authoritative selected item into the local body's right hand.
@@ -2288,6 +2310,23 @@ fn refresh_body_held_item(
     let Some((shape, mesh, material)) = assets.presentation(item_id) else {
         return;
     };
+    let second = assets.second_piece(shape);
+    // **Rebuilt rather than added to.** A held item may gain or lose its second piece when
+    // the selection changes — a sword has a wooden grip and a stone does not — so the
+    // children are replaced wholesale, exactly as `ui::icon::redraw` replaces a cell's
+    // rectangles. Leaving a stale grip under a block is the failure this shape removes.
+    let dress = move |commands: &mut Commands<'_, '_>, entity: Entity| {
+        commands.entity(entity).despawn_related::<Children>();
+        if let Some((mesh, material)) = second {
+            commands.entity(entity).with_child((
+                BodyHeldPiece,
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::default(),
+            ));
+        }
+    };
+
     if let Some((entity, _)) = current {
         commands.entity(entity).insert((
             BodyHeldItem { item_id, shape },
@@ -2295,6 +2334,7 @@ fn refresh_body_held_item(
             MeshMaterial3d(material),
             body_held_item_transform(shape),
         ));
+        dress(&mut commands, entity);
         if held_visibility
             .get(entity)
             .is_ok_and(|current| *current != visibility)
@@ -2304,13 +2344,17 @@ fn refresh_body_held_item(
         return;
     }
 
-    commands.entity(right_fist).with_child((
-        BodyHeldItem { item_id, shape },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        body_held_item_transform(shape),
-        visibility,
-    ));
+    let held = commands
+        .spawn((
+            BodyHeldItem { item_id, shape },
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            body_held_item_transform(shape),
+            visibility,
+            ChildOf(right_fist),
+        ))
+        .id();
+    dress(&mut commands, held);
 }
 
 /// Republishes what the overlay reports.
