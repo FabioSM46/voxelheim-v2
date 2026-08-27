@@ -6,7 +6,7 @@
 //! next request, while the server decides whether that slot exists and may be spent.
 //!
 //! **One cell, four possible intents, and the choice between them is routing rather than
-//! authority.** A middle-click on known food asks to eat one; a picked sharpening stone
+//! authority.** A consume press on known food asks to eat one; a picked sharpening stone
 //! dropped on a slot that wears out asks for a mend; a shift-click asks for the stack to be
 //! put on the ground; every other pair asks for the move it has always asked for. Which item
 //! is edible or a legal kit, how much hunger or wear comes back, whether a stack may be let
@@ -306,7 +306,7 @@ fn request_inventory_action(
         if click.kind == InventoryClickKind::Consume {
             // Like a drop, eating names one cell and is unrelated to the source cursor.
             // It runs ahead of the pair below and leaves that cursor untouched, so a
-            // middle-click cannot silently cancel a move or repair in progress.
+            // consume press cannot silently cancel a move or repair in progress.
             if let Some(request) =
                 consume_request(&inventory, click.slot, cadence.client_tick, slots)
                 && let Some(outbound) = outbound.as_deref_mut()
@@ -471,7 +471,12 @@ fn drop_request(
     (slot < slots && stack.count > 0).then_some(DropItemRequest { slot, client_tick })
 }
 
-/// Every item id this client routes a middle-click to consumption for.
+/// Every item id this client routes a consume press to consumption for.
+///
+/// Which press that is belongs to `ui/inventory.rs`: the rebindable `Control::Consume`
+/// key and the fixed middle-click both arrive here as one `InventoryClickKind::Consume`,
+/// so this list — and every check below it — is read once per intent rather than once per
+/// spelling.
 ///
 /// A table rather than an `item_id == ITEM_RAW_MEAT` comparison, following [`KITS`]: a
 /// second food is an entry, not another branch. This remains routing, never eligibility

@@ -514,14 +514,22 @@ The client samples the controls, sends what the player is *trying* to do at the 
   fixed inventory frame. Filtering uses `Display::None`, resets the viewport to the top and
   neither creates nor removes a mirrored recipe.
 - **One cell press, four possible intents, and choosing between them is routing rather
-  than authority.** A middle-click on known food sends a `ConsumeRequest` naming one slot;
+  than authority.** A consume press on known food sends a `ConsumeRequest` naming one slot;
   a picked sharpening stone dropped on a slot that wears out sends a `RepairRequest` naming
   the two slots; a shift-click sends a `DropItemRequest` naming one; every other pair sends
   the `InventoryMoveRequest`
   it always sent.
 
+  **Consume has two spellings and one branch.** `Control::Consume` is the rebindable one,
+  read through the same `Bindings` every other control is and defaulting to `C`;
+  middle-click is the fixed shortcut it grew out of, kept so a player who learned it does
+  not have to unlearn it. `inventory_clicks` answers both from one branch, which is what
+  makes pressing the key and the button in the same frame over the same cell one press
+  rather than two — and two `ConsumeRequest` frames for one intent is exactly what a
+  branch each would have produced.
+
   **Food routing follows the kit pattern without copying the server's capability table.**
-  `FOODS` names the ids whose middle-click is worth sending, and `consume_request` is the
+  `FOODS` names the ids whose consume press is worth sending, and `consume_request` is the
   only place a `ConsumeRequest` is built. It deliberately does not ask how much hunger an
   item restores, whether the reserve is full or whether the server will still consider the
   stack edible: all three are authoritative answers. A mistaken extra id grants nothing;
@@ -556,7 +564,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   therefore asked about like anything else; acceptance arrives only through the complete
   inventory and the snapshot's sparse authoritative durability entry. The branch also runs
   ahead of the cursor and leaves it untouched: a picked slot is a source waiting for a
-  destination, and neither a shift-click nor a middle-click elsewhere is that destination.
+  destination, and neither a shift-click nor a consume press elsewhere is that destination.
 
   **Shift is read against the full-stack button and not the split one** (`ui/inventory.rs`),
   because what the modifier changes is *where the stack goes* rather than *how much of it

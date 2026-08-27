@@ -154,12 +154,14 @@ const WIDE_BUTTON: f32 = 40.0;
 
 /// The most rows any one tab may draw.
 ///
-/// **The number the layout is sized from, and the reason the strip does not move.** Both tabs
-/// draw at most ten rows today, and a content area sized to "whatever this tab needs" would be
-/// stable purely by that coincidence — until another row arrived on one of them, which is
-/// how `ui/inventory.rs` ended up with the geometry #251 describes.
-/// `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails rather than the panel jumping.
-const CONTENT_ROWS: usize = 10;
+/// **The number the layout is sized from, and the reason the strip does not move.** Controls
+/// is the taller tab — one knob and every entry in `CONTROLS` — and a content area sized to
+/// "whatever this tab needs" would be stable purely by that coincidence, until another row
+/// arrived on one of them, which is how `ui/inventory.rs` ended up with the geometry #251
+/// describes. `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails rather than the
+/// panel jumping, and #399 is what made it fail: adding `Control::Consume` grew Controls to
+/// eleven rows, so this number moved with it rather than the area silently overflowing.
+const CONTENT_ROWS: usize = 11;
 
 /// The height of the area a tab's contents are drawn in, in logical pixels.
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
@@ -1127,8 +1129,8 @@ mod tests {
         assert_eq!(shown_tabs(&mut app), vec![Tab::Graphics]);
     }
 
-    /// The guard on the constant above: a ninth row on either tab is a failing test here
-    /// rather than a panel that quietly grows and takes the strip with it.
+    /// The guard on the constant above: one row too many on either tab is a failing test
+    /// here rather than a panel that quietly grows and takes the strip with it.
     #[test]
     fn no_tab_needs_more_rows_than_the_area_it_is_drawn_in() {
         for tab in Tab::ALL {
@@ -1139,6 +1141,71 @@ mod tests {
             );
             assert!(rows > 0, "{tab:?} draws nothing at all");
         }
+    }
+
+    /// The consume control has one row on the Controls tab, and the screen rebinds it and
+    /// resets it exactly as it does any other.
+    ///
+    /// `rows_of` is [`CONTROLS`]-driven, so the row costs this module nothing — which is
+    /// precisely why it is worth asserting end to end rather than assuming: the label, the
+    /// reading, the capture and the tab-scoped reset are four separate mechanisms and the
+    /// new control is the first to exercise all four without a line of its own anywhere.
+    #[test]
+    fn the_consume_control_has_one_row_that_captures_and_resets_like_any_other() {
+        let rows = rows_of(Tab::Controls);
+        let drawn: Vec<&Row> = rows
+            .iter()
+            .filter(|row| matches!(row, Row::Binding(Control::Consume)))
+            .collect();
+        assert_eq!(drawn.len(), 1, "{drawn:?}");
+        assert_eq!(drawn[0].label(), "Consume item");
+        assert!(
+            !rows_of(Tab::Graphics)
+                .iter()
+                .any(|row| matches!(row, Row::Binding(Control::Consume))),
+            "a control row landed on the graphics tab"
+        );
+
+        let mut app = screen_app();
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Consume)),
+            "c"
+        );
+
+        press(&mut app, SettingsAction::Capture(Control::Consume));
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Consume)),
+            "...",
+            "the row did not arm a capture"
+        );
+        press_key(&mut app, KeyCode::KeyV);
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .bindings()
+                .key(Control::Consume),
+            KeyCode::KeyV
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Consume)),
+            "v"
+        );
+        assert_eq!(reading_of(&mut app, Reading::Notice), "");
+
+        release_keys(&mut app);
+        press(&mut app, SettingsAction::Reset(Tab::Controls));
+        assert_eq!(
+            app.world()
+                .resource::<Settings>()
+                .bindings()
+                .key(Control::Consume),
+            KeyCode::KeyC,
+            "Reset Controls left the consume binding where it was"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Binding(Control::Consume)),
+            "c"
+        );
     }
 
     /// Every knob has a row on exactly one tab, and every rebindable control has one.
