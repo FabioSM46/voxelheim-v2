@@ -25,10 +25,11 @@ use bevy::prelude::*;
 
 use super::SelfVitals;
 use super::camera::{ViewMode, WorldCamera};
-use super::combat::{ITEM_RUSTY_SWORD, SwingSent};
+use super::combat::SwingSent;
 use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
-use super::items::{self, ItemShape};
+use super::items::{self, ItemShape, Livery};
+use super::livery;
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
 use super::{HeldItemSurface, InputMode, held_item_surface, stack_item_id};
 use super::{bundle_strap_linear_rgba, merge_all, rolled_bundle_parts};
@@ -430,16 +431,6 @@ const LIMB_OUTBOARD_OFFSET: f32 = HAND_SIZE.x * (1.0 - WRIST_WIDTH) / 2.0;
 const REST_PITCH_RADIANS: f32 = -0.18;
 const REST_ROLL_RADIANS: f32 = -0.12;
 
-/// How much darker a rust mark is than the iron it sits on.
-///
-/// **A multiplier, not a colour**, and that is what keeps `player/items.rs` the one answer
-/// to which colour an item presents as. The blade's vertices carry white — identity
-/// — everywhere but the marks, so the base that comes through is whatever that table says.
-/// Change the sword's item colour and the rust follows it, because it is a shade *of* it.
-///
-/// Warm and dark: red kept, green and blue pulled down, which is what turns a pale iron into
-/// oxide rather than into grey.
-const RUST_TINT: [f32; 4] = [0.72, 0.38, 0.22, 1.0];
 const BLOCK_EDGE: f32 = 0.055;
 const MATERIAL_RADIUS: f32 = 0.020;
 const MATERIAL_LENGTH: f32 = 0.050;
@@ -648,46 +639,6 @@ const _: () = assert!(
 /// mark stands proud of the blade rather than sitting on it.
 const BLADE_TANG: f32 = GUARD_SIZE.y / 2.0;
 
-/// How many rust marks the rusty blade carries.
-///
-/// **Several small ones rather than three large ones**, which is the difference between
-/// oxide and damage: rust takes hold in freckles across a blade, and three patches at fixed
-/// heights read as somebody having hit it with something.
-const RUST_MARKS: u32 = 14;
-
-/// The longest side of one mark, before [`scatter`] varies it down.
-const RUST_MARK_SIZE: f32 = 0.010;
-
-/// How much of each end of the blade stays clear of rust.
-///
-/// The whole mark, not its centre: a mark's own length is taken out of the range before it
-/// is placed, so nothing overhangs the tip or disappears into the guard.
-const RUST_MARK_MARGIN: f32 = 0.05;
-
-/// How far a mark stands proud of the blade's surface, as a fraction of
-/// [`BLADE_THICKNESS`].
-///
-/// The same twentieth #175 used, and for the same reason: two surfaces sharing a plane is
-/// where a renderer has to choose, and it chooses per frame.
-const RUST_MARK_PROUD: f32 = 0.05;
-
-/// How deep a mark is bedded into the blade, as a fraction of the surface's own offset from
-/// the mid-plane at that point.
-///
-/// **Both bounds are load-bearing and neither is a taste.** A mark is an axis-aligned box on
-/// a surface that tilts away from it across the bevel, so the surface under one end of the
-/// mark sits lower than under its middle; bedding it shallower than that drop would leave
-/// the far end floating off the blade. Under one, so the mark can never reach through to the
-/// other face and appear on both. The arithmetic that makes the first bound hold is in
-/// [`rusted_blade_mesh`], and [`every_rust_mark_stays_on_the_blade_it_freckles`] measures it.
-const RUST_MARK_SINK: f32 = 0.6;
-
-/// The seed the marks are scattered from.
-///
-/// **Deterministic, so the same sword looks the same every run** — a blade whose freckles
-/// moved between sessions would be the one thing about it a player could not learn.
-const RUST_SEED: u32 = 0x5EED_0204;
-
 /// A carried structure's outer bound. [`rolled_bundle_parts`] fills it with the same roll
 /// and two straps used by the world drop, so a tent under the arm does not read as another
 /// stackable cube.
@@ -779,7 +730,8 @@ fn bow_limb(from: Vec2, to: Vec2, from_width: f32, to_width: f32) -> Mesh {
         [fln, flf, frf, frn],
         [tln, trn, trf, tlf],
     ] {
-        build.quad(face);
+        // The bow wears no livery, so every corner of it points at the neutral band.
+        build.quad(face, [livery::neutral_uv(); 4]);
     }
     build.finish()
 }
@@ -1026,13 +978,13 @@ impl MeshBuild {
     /// Flat rather than smooth, deliberately: six faces per span that each catch the light
     /// separately is the whole reason the section is a hexagon, and averaging the normals at
     /// the ridge would put a soft gradient exactly where the highlight should break.
-    fn quad(&mut self, corners: [Vec3; 4]) {
+    fn quad(&mut self, corners: [Vec3; 4], uvs: [[f32; 2]; 4]) {
         let [a, b, c, d] = corners;
         // From the diagonals rather than from one triangle's two edges: a quad lofted
         // between sections of different widths is not exactly planar, and the diagonals
         // give the normal both of its triangles are nearest to instead of the first one's.
         let normal = (c - a).cross(d - b).normalize_or_zero();
-        let first = self.push(corners.into_iter().zip(UNIT_UVS), normal);
+        let first = self.push(corners.into_iter().zip(uvs), normal);
         self.indices
             .extend([first, first + 1, first + 3, first + 1, first + 2, first + 3]);
     }
@@ -1043,8 +995,9 @@ impl MeshBuild {
     /// reverses them for the end that faces the other way.
     fn fan(&mut self, corners: [Vec3; 6], normal: Vec3) {
         // The cap is never seen — the root is buried in the guard and the tip is a tenth of
-        // a section — so its texture coordinates carry no information and say so.
-        let first = self.push(corners.into_iter().zip([[0.0, 0.0]; 6]), normal);
+        // a section — so it is pointed at the neutral band, where a coordinate that carries
+        // no information cannot pick up a colour it did not ask for.
+        let first = self.push(corners.into_iter().zip([livery::neutral_uv(); 6]), normal);
         for corner in 1..corners.len() as u32 - 1 {
             self.indices
                 .extend([first, first + corner, first + corner + 1]);
@@ -1081,12 +1034,22 @@ impl MeshBuild {
     }
 }
 
-/// One texture coordinate per corner of a quad, in the order [`MeshBuild::quad`] walks them.
+/// One mesh with every vertex pointed at the neutral band of the livery image.
 ///
-/// Nothing samples them — this client has no texture and `client/AGENTS.md` says the palette
-/// is the whole material system — but the attribute has to be *present*, because a merge
-/// drops any attribute one side is missing and leaves the buffers unequal lengths.
-const UNIT_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+/// **Every mesh a liveried material draws needs this, not merely the un-liveried ones.** The
+/// first-person hand is one mesh and one material — fist, wrist, arm and held item — so the
+/// moment that material carries a `base_color_texture`, a texture coordinate stops being
+/// decoration on a cuboid nobody samples. Bevy's primitives generate coordinates spanning
+/// the whole image, which would wrap the rusty sword's oxide around the player's knuckles.
+///
+/// One white texel is identity for a multiplier, so an un-liveried mesh draws exactly what
+/// it drew before the image existed.
+/// [`every_held_arrangement_samples_only_the_livery_it_owns`] is the sweep that holds it.
+fn neutral(mut mesh: Mesh) -> Mesh {
+    let vertices = mesh.count_vertices();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![livery::neutral_uv(); vertices]);
+    mesh
+}
 
 /// Where the blade starts: the top of the guard, in the sword's own space.
 ///
@@ -1180,8 +1143,11 @@ fn blade_sections() -> [BladeSection; 3] {
 
 /// The section the blade has at a given height, interpolated along the loft.
 ///
-/// Read by [`rusted_blade_mesh`] so a mark sits on the surface the blade actually has there
-/// rather than on the one it has at the guard.
+/// **Test-only, and it is about to stop being.** It answered where a rust mark sat before
+/// the oxide became a livery; the second half of #417 subdivides the blade and needs the
+/// section at every ring, which is this. Until then the loft walks the three sections
+/// directly and the only readers are the tests that measure it.
+#[cfg(test)]
 fn blade_at(y: f32) -> BladeSection {
     let [root, shoulder, tip] = blade_sections();
     let (lower, upper) = if y <= shoulder.y {
@@ -1202,6 +1168,13 @@ fn blade_at(y: f32) -> BladeSection {
 ///
 /// Flat at [`BLADE_THICKNESS`] over the ridge, then falling away linearly to nothing at the
 /// edge — the bevel, read as a number.
+///
+/// **Test-only, and deliberately not what the loft is built from.** The loft walks the
+/// hexagon's corners and interpolates along its straight sides, which *is* this function by
+/// another route; keeping the closed form beside it gives
+/// [`every_blade_vertex_sits_on_the_bevel_it_is_specified_by`] a second opinion to measure
+/// the built vertices against rather than re-deriving the arithmetic that placed them.
+#[cfg(test)]
 fn blade_surface(section: BladeSection, z: f32) -> f32 {
     let ridge = section.half_width * BLADE_RIDGE_FRACTION;
     let across = z.abs();
@@ -1226,8 +1199,26 @@ fn blade_surface(section: BladeSection, z: f32) -> f32 {
 /// of two that somebody has to keep in step, which is exactly the relationship
 /// `player/items.rs` already has with its readers.
 pub(super) fn sword_mesh(length: f32) -> Mesh {
-    let base = blade_base();
+    sword_with(length, None)
+}
+
+/// The blade, lofted through its sections and dressed in whatever livery it wears.
+///
+/// **A blade with no livery is today's blade, to the vertex.** The loft is unchanged — the
+/// same two spans through the same three sections — and what a livery decides here is where
+/// the surface is read from: the field's own coordinates, or the neutral band. That is what
+/// keeps the iron sword the same sword while it shares [`ItemShape::Blade`] with the rusty
+/// one, and [`the_iron_sword_is_the_blade_it_was_before_the_livery`] measures it.
+///
+/// **The silhouette is the half this does not touch.** Corrosion eats metal rather than
+/// sitting on top of it, so the same field has to displace these vertices as well as tint
+/// them — which needs a blade with vertices to displace, and this one has twelve quads. The
+/// subdivision and the pitting are the second half of #417 and arrive in their own pull
+/// request, against the field this one establishes.
+fn blade_loft(livery: Option<Livery>) -> Mesh {
     let sections = blade_sections();
+    let (root, tip) = (sections[0].y, sections[2].y);
+    let along = |y: f32| (y - root) / (tip - root);
 
     let mut build = MeshBuild::default();
     for pair in sections.windows(2) {
@@ -1236,151 +1227,65 @@ pub(super) fn sword_mesh(length: f32) -> Mesh {
         };
         let low = lower.perimeter();
         let high = upper.perimeter();
+        // The coordinate runs to exactly 1.0 at the seam rather than wrapping to 0, so the
+        // image is walked once across the whole blade; the *positions* wrap, which is why
+        // the corner index and the coordinate are computed separately.
+        let uv = |corner: usize, section: BladeSection| match livery {
+            Some(_) => livery::blade_uv(corner as f32 / low.len() as f32, along(section.y)),
+            None => livery::neutral_uv(),
+        };
         for corner in 0..low.len() {
             let next = (corner + 1) % low.len();
-            build.quad([low[corner], low[next], high[next], high[corner]]);
+            build.quad(
+                [low[corner], low[next], high[next], high[corner]],
+                [
+                    uv(corner, *lower),
+                    uv(corner + 1, *lower),
+                    uv(corner + 1, *upper),
+                    uv(corner, *upper),
+                ],
+            );
         }
     }
+
     // The two ends. The root's winding is reversed because its face looks the other way,
     // and a cap wound like the tip's would be culled from outside and visible from within.
-    let mut root = sections[0].perimeter();
-    root.reverse();
-    build.fan(root, Vec3::NEG_Y);
+    let mut root_cap = sections[0].perimeter();
+    root_cap.reverse();
+    build.fan(root_cap, Vec3::NEG_Y);
     build.fan(sections[2].perimeter(), Vec3::Y);
-    let mut sword = build.finish();
+    build.finish()
+}
+
+/// A gladius wearing one livery, or none.
+fn sword_with(length: f32, livery: Option<Livery>) -> Mesh {
+    let base = blade_base();
+    let mut sword = blade_loft(livery);
 
     // The furniture, in boxes, down from the base. Each sits directly under the last: two
     // solid boxes meeting on a plane present that plane's two quads back to back, and a
     // back-facing quad is culled — which is why *these* joins need no overlap and the
     // blade's root, whose cap would face the same way as the guard's, does.
-    let guard = Mesh::from(Cuboid::from_size(GUARD_SIZE))
-        .translated_by(Vec3::Y * (base - GUARD_SIZE.y / 2.0));
-    let grip = Mesh::from(Cuboid::from_size(GRIP_SIZE))
-        .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y / 2.0));
-    let pommel = Mesh::from(Cuboid::from_size(POMMEL_SIZE))
-        .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y - POMMEL_SIZE.y / 2.0));
+    // **The furniture maps into the neutral band of the same image**, which is what keeps
+    // the whole sword one material. A second material for the guard, the grip and the
+    // pommel would be a second draw for a weapon that is one entity with one transform.
+    let guard = neutral(
+        Mesh::from(Cuboid::from_size(GUARD_SIZE))
+            .translated_by(Vec3::Y * (base - GUARD_SIZE.y / 2.0)),
+    );
+    let grip = neutral(
+        Mesh::from(Cuboid::from_size(GRIP_SIZE))
+            .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y / 2.0)),
+    );
+    let pommel = neutral(
+        Mesh::from(Cuboid::from_size(POMMEL_SIZE))
+            .translated_by(Vec3::Y * (base - GUARD_SIZE.y - GRIP_SIZE.y - POMMEL_SIZE.y / 2.0)),
+    );
     merge_all(&mut sword, [guard, grip, pommel], "sword");
 
     // Uniform, so the normals computed above stay unit vectors — `Mesh::scale_by` leaves
     // them alone for exactly that case and rebuilds them for every other.
     sword.scaled_by(Vec3::splat(length / SWORD_LENGTH))
-}
-
-/// A deterministic value in `0.0..1.0` for one rust mark and one of its dimensions.
-///
-/// **A seeded hash rather than a crate and rather than a table of hand-placed numbers.**
-/// Fourteen scattered boxes are not worth a fourth dependency (`client/AGENTS.md` is
-/// explicit about the budget), and an integer hash is reproducible on every platform, which
-/// is what [`RUST_SEED`]'s promise of the same sword every run actually requires.
-fn scatter(mark: u32, channel: u32) -> f32 {
-    let mut bits = mark
-        .wrapping_mul(0x9E37_79B1)
-        .wrapping_add(channel.wrapping_mul(0x85EB_CA6B))
-        ^ RUST_SEED;
-    bits ^= bits >> 16;
-    bits = bits.wrapping_mul(0x7FEB_352D);
-    bits ^= bits >> 15;
-    bits = bits.wrapping_mul(0x846C_A68B);
-    bits ^= bits >> 16;
-    // The top 24 bits over their own range: every value of that width is exactly
-    // representable in an f32, so the division is the only rounding anywhere in here.
-    (bits >> 8) as f32 / 16_777_216.0
-}
-
-/// The rusty sword: [`sword_mesh`] with oxide on the blade.
-///
-/// **Two colours on one mesh and one material**, which is what the cost note in
-/// `client/AGENTS.md` asks for — the alternative was a second entity per held item, or a
-/// material per item rather than one cached handle per resolved colour.
-///
-/// The vertices carry `Mesh::ATTRIBUTE_COLOR`, which `StandardMaterial` multiplies into its
-/// `base_color`; `world/render.rs` has drawn the whole terrain that way since it existed, so
-/// this is the established mechanism rather than a new one. White is identity — the iron
-/// that comes through is whatever `player/items.rs` says the sword presents as — and the
-/// marks carry [`RUST_TINT`], so they are a shade *of* that base rather than a second
-/// opinion about it.
-///
-/// **Fourteen small marks scattered from a seed, where there used to be three large ones at
-/// hand-picked heights.** Three patches a seventh of the blade tall read as damage; oxide is
-/// freckles. Each is bedded into the surface it sits on rather than laid over it, which is
-/// what lets a mark straddle the ridge and the bevel without either floating clear of the
-/// blade or reaching through to the far face.
-fn rusted_blade_mesh() -> Mesh {
-    let mut merged = plain(sword_mesh(SWORD_LENGTH));
-    let base = blade_base();
-    let proud = BLADE_THICKNESS * RUST_MARK_PROUD;
-
-    let marks = (0..RUST_MARKS).map(|mark| {
-        // The longest side, half to all of `RUST_MARK_SIZE`. The whole mark is kept out of
-        // the margin at each end rather than merely its centre, so nothing overhangs the
-        // tip or disappears into the guard however large it came out.
-        let length = RUST_MARK_SIZE * (0.5 + 0.5 * scatter(mark, 0));
-        let lowest = base + BLADE_LENGTH * RUST_MARK_MARGIN + length / 2.0;
-        let highest = base + BLADE_LENGTH * (1.0 - RUST_MARK_MARGIN) - length / 2.0;
-        // **One mark per stratum of the blade, jittered inside its own** — rather than
-        // fourteen independent draws over the whole length. Fourteen samples of a hash
-        // clump: the first cut of this left the top third and the bottom tenth bare and put
-        // nine marks in the middle, which reads as a band rather than as weathering.
-        // Stratifying makes *spread over the blade* a property of the placement instead of a
-        // hope about the seed, and the jitter is what keeps it from being a row.
-        let stratum = (mark as f32 + scatter(mark, 1)) / RUST_MARKS as f32;
-        let y = lowest + (highest - lowest) * stratum;
-
-        // **Two bounds, and they are what keep a mark from overhanging the edge it sits
-        // beside.** The mark spans at most a quarter of the local half-width to each side of
-        // its centre, and its centre stays inside half of it — so the blade's surface can
-        // fall away *across* the bevel under the mark by at most `0.38 × half_thickness`.
-        //
-        // They are not what makes the bedding below sufficient, which is what this comment
-        // used to claim: the fall-off across the bevel is only one of the two directions the
-        // surface drops in, and the bedding answers both. See `footing`.
-        let section = blade_at(y);
-        let width = (length * 0.5).min(section.half_width * 0.5);
-        let room = (section.half_width * 0.5 - width / 2.0).max(0.0);
-        let z = room * (scatter(mark, 2) * 2.0 - 1.0);
-
-        // Alternating faces, so a blade turning in the hand shows freckles on whichever one
-        // it presents rather than a stripe down one side of it.
-        let face = if mark % 2 == 0 { 1.0 } else { -1.0 };
-        let surface = blade_surface(section, z);
-        // **Bedded from the shallowest surface under the whole mark, rather than from the one
-        // under its centre.** The blade thins along its length as well as across the bevel,
-        // and on the point it does so fast enough to outrun `RUST_MARK_SINK`: measured on the
-        // fourteenth mark, bedded to 0.00122 from the section at its own centre while the
-        // surface under its upper, outer corner is 0.00088 — so that corner floated 0.00034
-        // clear of the blade it is meant to be sunk into, and a fleck of rust hung off the
-        // point with daylight behind it.
-        //
-        // **Which corner answers is never in doubt**, which is what makes one sample enough:
-        // the surface falls as `y` rises and as `|z|` grows, so the highest and farthest
-        // corner is the shallowest of the four. On the flat this changes nothing — the
-        // section at the mark's top and the section at its centre are the same numbers there,
-        // and `RUST_MARK_SINK` still decides — so the deeper bedding is spent only where the
-        // taper actually takes the surface away.
-        let footing = blade_surface(blade_at(y + length / 2.0), z.abs() + width / 2.0)
-            .min(surface * (1.0 - RUST_MARK_SINK));
-        let sink = surface - footing;
-        rusted(
-            Mesh::from(Cuboid::from_size(Vec3::new(sink + proud, length, width)))
-                .translated_by(Vec3::new(face * (surface + (proud - sink) / 2.0), y, z)),
-        )
-    });
-    merge_all(&mut merged, marks, "rusted blade");
-    merged
-}
-
-/// One mesh with every vertex at identity, so the material's own colour comes through.
-///
-/// The attribute has to be present on *both* sides of a merge: `Mesh::merge` refuses to join
-/// a mesh carrying an attribute to one that does not, and the halves would silently disagree
-/// about what white means if it did not.
-fn plain(mesh: Mesh) -> Mesh {
-    tinted(mesh, [1.0, 1.0, 1.0, 1.0])
-}
-
-/// One mesh with every vertex carrying [`RUST_TINT`].
-fn rusted(mesh: Mesh) -> Mesh {
-    tinted(mesh, RUST_TINT)
 }
 
 fn tinted(mesh: Mesh, colour: [f32; 4]) -> Mesh {
@@ -1406,10 +1311,11 @@ fn linear_rgb(colour: u32) -> [f32; 4] {
 /// Applies an item's resolved colour to a mesh, preserving any relative vertex tint it
 /// already carries.
 ///
-/// Most item meshes have no colour attribute and receive the resolved colour whole. The
-/// rusty blade carries white and [`RUST_TINT`]; multiplying those by the item colour keeps
-/// `player/items.rs` the one answer to what the steel is while retaining the oxide as a
-/// shade of it.
+/// Every item mesh in this module receives the resolved colour whole today — the rusty
+/// blade carried white and a rust tint until its oxide became a texture, and the multiply
+/// below is what that arrangement needed. It is kept because the livery is a multiplier for
+/// exactly the same reason: `player/items.rs` stays the one answer to what the steel is, and
+/// a mesh that ever carries a relative tint again must not lose it here.
 fn coloured(mut mesh: Mesh, base: [f32; 4]) -> Mesh {
     let colours = match mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
         Some(VertexAttributeValues::Float32x4(tints)) => tints
@@ -1436,26 +1342,33 @@ fn coloured_bundle_mesh(base: [f32; 4]) -> Mesh {
 /// The geometry one held item contributes before it is arranged against the fist.
 ///
 /// Exhaustive over [`ItemShape`], so a new shape does not compile until the hand can hold
-/// it. The rusty sword remains the one item-level exception: rust belongs to that blade,
-/// not to every item sharing its shape.
+/// it.
+///
+/// **There is no item-level exception left here.** The oxide was reached by
+/// `if item_id == ITEM_RUSTY_SWORD` at the top of this function — the shape that does not
+/// survive a second liveried item, and the reason three other renderers drew the same sword
+/// clean. The livery is a fact `player/items.rs` answers now.
+///
+/// Everything that is not a liveried blade is pointed at the neutral band on the way out,
+/// because the material this feeds carries the livery image whatever is held. See
+/// [`neutral`].
 fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
-    if item_id == ITEM_RUSTY_SWORD {
-        return rusted_blade_mesh();
-    }
     match shape {
-        ItemShape::Block => Mesh::from(Cuboid::from_size(Vec3::splat(BLOCK_EDGE))),
-        ItemShape::Material => Mesh::from(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)),
-        ItemShape::Blade => sword_mesh(SWORD_LENGTH),
+        ItemShape::Blade => sword_with(SWORD_LENGTH, items::item_livery(item_id)),
+        ItemShape::Block => neutral(Mesh::from(Cuboid::from_size(Vec3::splat(BLOCK_EDGE)))),
+        ItemShape::Material => {
+            neutral(Mesh::from(Capsule3d::new(MATERIAL_RADIUS, MATERIAL_LENGTH)))
+        }
         ItemShape::Bundle => {
             let (mut roll, straps) = rolled_bundle_parts(BUNDLE_SIZE);
             merge_all(&mut roll, [straps], "held packed-gear bundle");
-            roll
+            neutral(roll)
         }
-        ItemShape::Tool => tool_mesh(),
-        ItemShape::Armour => armour_mesh(),
-        ItemShape::Shield => shield_mesh(0.065),
-        ItemShape::Bow => bow_mesh(BOW_LENGTH),
-        ItemShape::Sceptre => sceptre_mesh(SCEPTRE_LENGTH),
+        ItemShape::Tool => neutral(tool_mesh()),
+        ItemShape::Armour => neutral(armour_mesh()),
+        ItemShape::Shield => neutral(shield_mesh(0.065)),
+        ItemShape::Bow => neutral(bow_mesh(BOW_LENGTH)),
+        ItemShape::Sceptre => neutral(sceptre_mesh(SCEPTRE_LENGTH)),
     }
 }
 
@@ -1536,8 +1449,14 @@ pub(super) fn shield_mesh(size: f32) -> Mesh {
 /// already settled. [`skinned_forearm_mesh`] reads that same colour for the bar below.
 fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
     let skin = linear_rgb(skin_colour);
-    let mut held = tinted(fist_mesh(), skin);
-    merge_all(&mut held, [tinted(wrist_mesh(), skin)], "hand and wrist");
+    // Skin is never liveried, and it shares a material with whatever the hand is holding,
+    // so both halves are pointed at the neutral band. See [`neutral`].
+    let mut held = tinted(neutral(fist_mesh()), skin);
+    merge_all(
+        &mut held,
+        [tinted(neutral(wrist_mesh()), skin)],
+        "hand and wrist",
+    );
     let (Some(item_id), Some(shape), Some(item_colour)) =
         (appearance.item_id, appearance.shape, appearance.item_colour)
     else {
@@ -1545,7 +1464,7 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
     };
 
     let item = if shape == ItemShape::Bundle {
-        coloured_bundle_mesh(item_colour)
+        neutral(coloured_bundle_mesh(item_colour))
     } else if matches!(shape, ItemShape::Shield | ItemShape::Sceptre) {
         item_mesh(item_id, shape)
     } else {
@@ -1563,13 +1482,16 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
 /// transform each entity carries. A second asset would be a second answer to the same
 /// authoritative skin colour.
 fn skinned_forearm_mesh(skin_colour: u32) -> Mesh {
-    tinted(forearm_mesh(), linear_rgb(skin_colour))
+    // Its own entity, and the *same* material as the hand — so the neutral band is as
+    // load-bearing here as it is on the fist.
+    tinted(neutral(forearm_mesh()), linear_rgb(skin_colour))
 }
 
 pub(super) struct HandsPlugin;
 
 impl Plugin for HandsPlugin {
     fn build(&self, app: &mut App) {
+        livery::register(app);
         app.init_resource::<HandAnimation>()
             .init_resource::<SelfVitals>()
             // `PlayerPlugin` owns the appearance cache in the game. Initialised here too
@@ -1804,6 +1726,7 @@ fn spawn_view_model(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    liveries: Res<livery::Liveries>,
 ) {
     let appearance = selected_appearance(None);
     let skin_colour = PLACEHOLDER_APPEARANCE.skin_color();
@@ -1816,6 +1739,12 @@ fn spawn_view_model(
     let shield_mesh_handle = meshes.add(held_mesh(skin_colour, shield_appearance));
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
+        // **One material for the hand, the arm and every item it can hold**, exactly as
+        // before — the livery is in the image rather than in the material, and everything
+        // that wears no livery samples the white row of it. `base_color` stays identity so
+        // the three multipliers in play read in one order: the item's own colour on the
+        // vertices, the livery on the texels, and nothing here.
+        base_color_texture: Some(liveries.material_image()),
         unlit: true,
         fog_enabled: false,
         // Positive renders closer. Together with the near-plane placement this prevents
@@ -2360,6 +2289,7 @@ mod tests {
     use bevy::mesh::VertexAttributeValues;
     use bevy::time::TimeUpdateStrategy;
 
+    use super::super::combat::ITEM_RUSTY_SWORD;
     use super::super::crafting::ITEM_IRON_SWORD;
     use super::super::target::BlockHit;
     use super::*;
@@ -2449,44 +2379,111 @@ mod tests {
         seen
     }
 
-    /// **The rusty sword is iron with rust on it**, not one flat colour.
+    /// **The rusty sword is iron with rust eaten into it**, not one flat colour — and the
+    /// rust is now a surface rather than fourteen boxes stuck to it.
     ///
-    /// Asserted as *two* vertex tints on one mesh, and as the marks being a shade of the
-    /// base rather than a colour beside it: white is identity, so the iron that comes
-    /// through is whatever `player/items.rs` says the sword presents as. That is what keeps
-    /// that table the one answer — change the sword's colour and the rust follows it.
+    /// The oxide moved from vertex colours to an image, so what makes the blade rusty is no
+    /// longer a second tint on the mesh: it is where the mesh's texture coordinates point.
+    /// Both halves are asserted here, because either alone would pass while the sword drew
+    /// clean — coordinates that reach the field with an image full of white, or an image
+    /// full of rust nothing samples.
     #[test]
     fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
-        let rusted = rusted_blade_mesh();
+        let rusted = sword_with(SWORD_LENGTH, Some(Livery::Rust));
         let plain = sword_mesh(SWORD_LENGTH);
 
-        let marks = tints(&rusted);
+        // One tint, not two: the item's own colour arrives whole and the oxide is a shade
+        // *of* it applied by the image, which is what keeps `player/items.rs` the one
+        // answer to what the steel is.
         assert_eq!(
-            marks.len(),
-            2,
-            "the rusty blade carries {} tints, want iron and rust: {marks:?}",
-            marks.len()
+            tints(&rusted),
+            Vec::<[u8; 4]>::new(),
+            "the rusty blade carries vertex colours again, so the rust has two authorities"
         );
-        assert!(
-            marks.contains(&[255, 255, 255, 255]),
-            "no vertex carries identity, so the item's own colour never shows through"
-        );
-        let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
-        assert!(marks.contains(&rust), "no vertex carries the rust tint");
-
-        // And the iron sword is not rusty: it is the same `ItemShape::Blade` and must not
-        // inherit one blade's condition. It carries no vertex colours at all — an absent
-        // attribute is how a mesh takes its material's colour whole, which is what every
-        // other held shape does and what the rusted blade opts out of.
         assert_eq!(
             tints(&plain),
             Vec::<[u8; 4]>::new(),
             "the plain blade carries vertex colours, so it is no longer simply its material"
         );
+
+        // The rust reaches the mesh through the coordinates, and only the rusty blade's.
+        let neutral = livery::neutral_uv();
+        let liveried = |mesh: &Mesh| uvs(mesh).into_iter().filter(|uv| *uv != neutral).count();
         assert!(
-            rusted.count_vertices() > plain.count_vertices(),
-            "the rusty sword has no mark geometry of its own"
+            liveried(&rusted) > 0,
+            "no vertex of the rusty blade samples the livery, so the image is unread"
         );
+        assert_eq!(
+            liveried(&plain),
+            0,
+            "the plain blade samples the livery, so an iron sword wears another blade's rust"
+        );
+
+        // And the coordinates cover the field rather than a corner of it. **Read as a span
+        // and not per vertex**, because the blade has twelve quads and the shader samples
+        // everywhere between them: the strongest rust at any *vertex* of this loft is about
+        // 0.28, and a test that asked for more than that would be asking the mesh a
+        // question only the rasteriser can answer. What the mesh is answerable for is that
+        // the whole of the generated field lands on the blade, so nothing the generator
+        // draws is somewhere the steel is not.
+        let sampled: Vec<[f32; 2]> = uvs(&rusted)
+            .into_iter()
+            .filter(|uv| *uv != neutral)
+            .collect();
+        let span = |axis: usize| {
+            sampled
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(low, high), uv| {
+                    (low.min(uv[axis]), high.max(uv[axis]))
+                })
+        };
+        assert_eq!(
+            span(0),
+            (0.0, 1.0),
+            "the blade walks part of the field around its perimeter rather than all of it"
+        );
+        assert_eq!(
+            span(1),
+            (livery::blade_uv(0.0, 0.0)[1], livery::blade_uv(0.0, 1.0)[1]),
+            "the blade walks part of the field along its length rather than all of it"
+        );
+
+        // The strength that span reaches, sampled the way the rasteriser will: a blade
+        // whose coordinates all landed in the margin would satisfy every clause above and
+        // draw clean steel.
+        let strongest = (0..=64)
+            .flat_map(|around| (0..=64).map(move |along| (around, along)))
+            .map(|(around, along)| {
+                livery::strength_at(
+                    Livery::Rust,
+                    livery::blade_uv(around as f32 / 64.0, along as f32 / 64.0),
+                )
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(
+            strongest > 0.9,
+            "the strongest rust anywhere on the blade is {strongest}, so the freckles are \
+             somewhere the blade is not"
+        );
+
+        // **The same vertices, deliberately.** This half of #417 moves the oxide off the
+        // geometry entirely: fourteen boxes of mark geometry are gone and nothing has
+        // replaced them yet, so a rusty blade and a plain one are one shape that reads two
+        // surfaces. The second half is what gives the liveried blade vertices to pit with.
+        assert_eq!(
+            rusted.count_vertices(),
+            plain.count_vertices(),
+            "the two blades are different meshes, which this half does not do"
+        );
+    }
+
+    /// Every texture coordinate one mesh carries.
+    fn uvs(mesh: &Mesh) -> Vec<[f32; 2]> {
+        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("the mesh must carry Float32x2 texture coordinates");
+        };
+        uvs.clone()
     }
 
     /// Every vertex position one mesh carries.
@@ -2838,161 +2835,140 @@ mod tests {
         }
     }
 
-    /// **The rust is many small marks bedded into the blade.**
+    /// **Every vertex of the lofted blade sits exactly on the bevel the blade is specified
+    /// by**, read from [`blade_surface`]'s closed form rather than from the arithmetic that
+    /// placed it — the same shape by two routes, which is what makes this a measurement.
     ///
-    /// It was three patches, each an eighth of the sword tall and more than half the blade
-    /// wide, at hand-picked heights — which reads as damage rather than as oxide. What this
-    /// pins is the shape of the replacement: [`RUST_MARKS`] of them, none longer than
-    /// [`RUST_MARK_SIZE`], spread over the blade rather than banded across a third of it, and
-    /// each *bedded into* the face it sits on rather than laid over it.
-    ///
-    /// That last clause is the one that needs measuring, because it is the only part not
-    /// obvious from reading the constants. A mark is an axis-aligned box on a surface that
-    /// tilts away across the bevel, so there are two ways to get it wrong and they fail in
-    /// opposite directions: bedded too shallow and the far end lifts off the blade, bedded
-    /// too deep and it comes through on the other face. Both are checked against the surface
-    /// the blade actually has under each mark.
+    /// **It is here because it is about to be load-bearing.** The second half of #417
+    /// displaces these vertices inward where the livery's field is strongest, and what has
+    /// to hold then is that no displaced vertex leaves this envelope — a blade whose rust
+    /// stands *proud* of it is the fourteen boxes again with more triangles.
     #[test]
-    fn every_rust_mark_is_bedded_into_the_blade_it_freckles() {
-        // What three marks used to be, so "smaller" is measured against something rather than
-        // asserted about nothing: 13% of the sword's length by 55% of the blade's width.
-        const WAS_LONG: f32 = 0.115 * 0.13;
-        const WAS_WIDE: f32 = 0.030 * 0.55;
-        const {
+    fn every_blade_vertex_sits_on_the_bevel_it_is_specified_by() {
+        let sections = blade_sections();
+        let (root, tip) = (sections[0].y, sections[2].y);
+        for [x, y, z] in positions(&blade_loft(Some(Livery::Rust))) {
+            let section = blade_at(y.clamp(root, tip));
+            let surface = blade_surface(section, z);
             assert!(
-                RUST_MARKS > 3 && RUST_MARK_SIZE < WAS_LONG && RUST_MARK_SIZE < WAS_WIDE,
-                "the rust is not more numerous and smaller than the three patches it replaced"
+                (x.abs() - surface).abs() < 1e-6,
+                "a vertex stands {} from the mid-plane where the blade's own surface is at \
+                 {surface}",
+                x.abs()
+            );
+            assert!(
+                z.abs() <= section.half_width + 1e-6,
+                "a vertex reaches {} across a blade half {} wide",
+                z.abs(),
+                section.half_width
             );
         }
+    }
 
-        let mesh = rusted_blade_mesh();
+    /// **The iron sword is the sword it was**, which is the property that keeps one shared
+    /// [`ItemShape::Blade`] from meaning one shared condition.
+    ///
+    /// The two blades share a shape and that sharing is the point; a test that only looked
+    /// at the rusty one would not see the iron one break. What is asserted is identity
+    /// rather than similarity — the same positions, the same normals, the same count — so
+    /// the answer cannot drift by a subdivision nobody meant to apply.
+    #[test]
+    fn the_iron_sword_is_the_blade_it_was_before_the_livery() {
+        let iron = item_mesh(ITEM_IRON_SWORD, ItemShape::Blade);
+        let unliveried = sword_mesh(SWORD_LENGTH);
 
-        let Some(VertexAttributeValues::Float32x3(all)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        else {
-            panic!("the rusted blade must carry Float32x3 positions");
-        };
-        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
-        else {
-            panic!("the rusted blade must carry Float32x4 colours");
-        };
-        // Quantised for the reason `tints` quantises: this picks vertices out by identity
-        // rather than measuring them.
-        let rust = RUST_TINT.map(|channel| (channel * 255.0).round() as u8);
-        let marked: Vec<[f32; 3]> = all
-            .iter()
-            .zip(colours)
-            .filter(|(_, colour)| colour.map(|channel| (channel * 255.0).round() as u8) == rust)
-            .map(|(position, _)| *position)
-            .collect();
-
-        // One mark is one box and `merge` appends, so the tinted vertices arrive in whole
-        // marks, in the order they were built.
-        let per_mark = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
         assert_eq!(
-            marked.len(),
-            RUST_MARKS as usize * per_mark,
-            "the rust is {} vertices, which is not {RUST_MARKS} boxes of {per_mark}",
-            marked.len()
+            items::item_livery(ITEM_IRON_SWORD),
+            None,
+            "the iron sword has been given a livery, which is not this issue's to give"
+        );
+        assert_eq!(
+            positions(&iron),
+            positions(&unliveried),
+            "the iron sword is no longer the plain loft, so a livery it does not wear has \
+             changed its shape"
         );
 
-        let proud = BLADE_THICKNESS * RUST_MARK_PROUD;
-        let base = blade_base();
-        let mut faces = [false; 2];
-        let mut centres: Vec<f32> = Vec::new();
-        for (index, one) in marked.chunks(per_mark).enumerate() {
-            let (low_x, high_x) = extent(one, 0);
-            let (low_y, high_y) = extent(one, 1);
-            let (low_z, high_z) = extent(one, 2);
-
-            let longest = [high_x - low_x, high_y - low_y, high_z - low_z]
-                .into_iter()
-                .fold(0.0, f32::max);
-            assert!(
-                (RUST_MARK_SIZE * 0.5 - 1e-6..=RUST_MARK_SIZE + 1e-6).contains(&longest),
-                "mark {index} is {longest} on its longest side, outside half to all of \
-                 {RUST_MARK_SIZE}"
-            );
-
-            // Inside the blade lengthwise and off the last few per cent at each end: a mark
-            // overhanging the tip blunts it, one inside the guard is invisible.
-            assert!(
-                low_y > base + BLADE_LENGTH * RUST_MARK_MARGIN - 1e-6
-                    && high_y < base + BLADE_LENGTH * (1.0 - RUST_MARK_MARGIN) + 1e-6,
-                "mark {index} spans y {low_y}..{high_y}, outside the blade's rustable length"
-            );
-
-            // On one face rather than wrapped across both: that is what alternating faces
-            // means, and a mark straddling the mid-plane would satisfy every other clause.
-            assert!(
-                low_x * high_x > 0.0,
-                "mark {index} spans x {low_x}..{high_x}, so it wraps the blade rather than \
-                 sitting on one face of it"
-            );
-            faces[usize::from(high_x > 0.0)] = true;
-
-            let section = blade_at((low_y + high_y) / 2.0);
-            let centre = (low_z + high_z) / 2.0;
-            let surface = blade_surface(section, centre);
-            let outer = low_x.abs().max(high_x.abs());
-            let inner = low_x.abs().min(high_x.abs());
-            assert!(
-                (outer - (surface + proud)).abs() < 1e-6,
-                "mark {index} reaches {outer} from the mid-plane where the blade's surface is \
-                 at {surface}, so it is not bedded into the face it sits on"
-            );
-
-            // **The shallowest corner, not the middle.** The surface falls in two directions
-            // under a mark — across the bevel as `|z|` grows, and along the blade as it
-            // tapers toward the point — so the corner that decides whether the mark is bedded
-            // is the highest and the farthest, and the section under *that* is the one to ask.
-            // Measuring the middle instead is what let the fourteenth mark float 0.00034 clear
-            // of the point while this test passed: at its own centre the blade is 0.00242 deep
-            // and it was bedded to 0.00122, which looks bedded until you look 0.0038 higher up,
-            // where the blade has thinned to 0.00088. Both sections are checked; they are the
-            // same number for every mark on the flat, and differ only where the taper is real.
-            let far = centre.abs() + (high_z - low_z) / 2.0;
-            let top = blade_at(high_y);
-            for (where_, at) in [("its centre", section), ("its upper edge", top)] {
-                assert!(
-                    far < at.half_width,
-                    "mark {index} reaches {far} across a blade half {} wide at {where_}, so it \
-                     overhangs an edge",
-                    at.half_width
-                );
-                assert!(
-                    inner <= blade_surface(at, far) + 1e-9,
-                    "mark {index} is bedded to {inner} where the blade's surface under its far \
-                     edge at {where_} is {}, so it floats clear of the blade",
-                    blade_surface(at, far)
-                );
-            }
-            assert!(
-                inner > 0.0,
-                "mark {index} reaches through the mid-plane, so it shows on the far face too"
-            );
-
-            centres.push((low_y + high_y) / 2.0);
-        }
-
-        assert_eq!(faces, [true; 2], "every mark is on one face of the blade");
-
-        let (lowest, highest) = (
-            centres.iter().copied().fold(f32::INFINITY, f32::min),
-            centres.iter().copied().fold(f32::NEG_INFINITY, f32::max),
-        );
+        // Every coordinate in the neutral band, so the image the material carries cannot
+        // reach it whatever is in the image.
+        let neutral = livery::neutral_uv();
         assert!(
-            highest - lowest > BLADE_LENGTH * 0.6,
-            "the marks span {} of a {BLADE_LENGTH} blade, so they are a band rather than \
-             weathering",
-            highest - lowest
+            uvs(&iron).iter().all(|uv| *uv == neutral),
+            "the iron sword samples the livery image outside its white row"
         );
-        let mut heights: Vec<i32> = centres.iter().map(|y| (y * 1e6) as i32).collect();
-        heights.sort_unstable();
-        heights.dedup();
+
+        // The rusty sword is the same shape and the same geometry — for now. This half of
+        // #417 moves the oxide into an image and touches no positions at all, so what tells
+        // the two blades apart here is where they read their surface from and nothing else.
+        // The second half subdivides and pits the liveried one, and this is the assertion
+        // that has to change when it does.
+        let rusty = item_mesh(ITEM_RUSTY_SWORD, ItemShape::Blade);
+        assert_eq!(items::item_shape(ITEM_RUSTY_SWORD), ItemShape::Blade);
         assert_eq!(
-            heights.len(),
-            RUST_MARKS as usize,
-            "two marks share a height, so the scatter is not scattering"
+            positions(&rusty),
+            positions(&iron),
+            "the two blades have stopped being one shape, which this half does not do"
+        );
+        assert_ne!(
+            uvs(&rusty),
+            uvs(&iron),
+            "both blades read the same texels, so the livery decides nothing"
+        );
+        // Its own steel, too. The livery is a multiplier over whatever `player/items.rs`
+        // says an item presents as, so a change that resolved both blades to one colour
+        // would leave the meshes correct and the swords indistinguishable.
+        assert_ne!(
+            items::item_linear_rgba(ITEM_IRON_SWORD),
+            items::item_linear_rgba(ITEM_RUSTY_SWORD),
+            "the two blades resolve to one colour, so the iron sword is not its own steel"
+        );
+    }
+
+    /// **Every held arrangement samples only the livery it owns.**
+    ///
+    /// The sweep the whole one-material arrangement rests on — see [`neutral`] for what
+    /// goes wrong without it. Every item the client knows, in the arrangement the hand
+    /// actually builds, each vertex either neutral or on a blade that wears a livery. Over
+    /// `known_item_ids` rather than a list written here, so a new item is covered by
+    /// arriving.
+    #[test]
+    fn every_held_arrangement_samples_only_the_livery_it_owns() {
+        let neutral = livery::neutral_uv();
+        for item_id in items::known_item_ids() {
+            let appearance = selected_appearance(Some(InventoryStack {
+                item_id,
+                count: 1,
+                ..Default::default()
+            }));
+            let mesh = held_mesh(TEST_SKIN, appearance);
+            let liveried = uvs(&mesh).into_iter().filter(|uv| *uv != neutral).count();
+            match items::item_livery(item_id) {
+                None => assert_eq!(
+                    liveried, 0,
+                    "item {item_id} wears no livery and yet {liveried} of its vertices \
+                     sample one"
+                ),
+                Some(_) => assert!(
+                    liveried > 0,
+                    "item {item_id} wears a livery that none of its vertices sample"
+                ),
+            }
+        }
+
+        // The empty hand, which has no item to be asked about and is the arrangement a
+        // player spends most of their time looking at.
+        let empty = held_mesh(TEST_SKIN, selected_appearance(None));
+        assert!(
+            uvs(&empty).iter().all(|uv| *uv == neutral),
+            "the empty hand samples the livery, so a bare fist is rusty"
+        );
+
+        // And the arm, which is a second entity sharing the same material.
+        assert!(
+            uvs(&skinned_forearm_mesh(TEST_SKIN))
+                .iter()
+                .all(|uv| *uv == neutral),
+            "the forearm samples the livery, so the player's arm is rusty"
         );
     }
 
@@ -3072,9 +3048,9 @@ mod tests {
             positions.clone()
         };
         assert_eq!(
-            read(&rusted_blade_mesh()),
-            read(&rusted_blade_mesh()),
-            "two builds of one sword put the rust in different places"
+            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust))),
+            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust))),
+            "two builds of one sword pit the blade in different places"
         );
     }
 
@@ -3170,9 +3146,16 @@ mod tests {
     /// The rust reaches the screen only for the sword it belongs to.
     ///
     /// Read through the mesh the hand is actually built from, so it is the routing under
-    /// test rather than the table: holding the iron sword must not produce the rusted mesh.
+    /// test rather than the table: holding the iron sword must not reach the livery.
+    ///
+    /// **What it measures moved with the oxide.** The rust was two vertex tints on one mesh
+    /// and this counted them; it is a surface now, so what says "rusty" is a texture
+    /// coordinate that leaves the neutral band and a field that is not zero where it lands.
+    /// The routing under test is the same routing — and it is a better test of it, because
+    /// the old one would have passed on a blade that carried the tint and sampled nothing.
     #[test]
     fn only_the_rusty_sword_is_drawn_rusted() {
+        let neutral = livery::neutral_uv();
         for (item_id, want_rusted) in [(ITEM_RUSTY_SWORD, true), (ITEM_IRON_SWORD, false)] {
             let appearance = selected_appearance(Some(InventoryStack {
                 item_id,
@@ -3180,14 +3163,16 @@ mod tests {
                 ..Default::default()
             }));
             let mesh = held_mesh(TEST_SKIN, appearance);
-            let item_colour = appearance.item_colour.expect("an item has a colour");
-            let rust = std::array::from_fn(|channel| item_colour[channel] * RUST_TINT[channel]);
-            let rust = rust.map(|channel| (channel * 255.0).round() as u8);
+            let strongest = uvs(&mesh)
+                .into_iter()
+                .filter(|uv| *uv != neutral)
+                .map(|uv| livery::strength_at(Livery::Rust, uv))
+                .fold(0.0_f32, f32::max);
             assert_eq!(
-                tints(&mesh).contains(&rust),
+                strongest > 0.0,
                 want_rusted,
-                "item {item_id} carries a rust tint = {}, want {want_rusted}",
-                tints(&mesh).contains(&rust)
+                "item {item_id} reaches a rust strength of {strongest}, want rusted = \
+                 {want_rusted}"
             );
         }
     }
