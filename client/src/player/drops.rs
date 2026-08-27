@@ -637,45 +637,82 @@ mod tests {
             .clone()
             .expect("the hand's material carries the livery image");
 
-        // 2 and 3. The ground drop and the third-person body, which are one call.
-        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
-        let drop_material = world
-            .resource_mut::<DropVisuals>()
-            .material_for(crate::player::combat::ITEM_RUSTY_SWORD, &mut materials);
-        let drop = materials
-            .get(&drop_material)
-            .expect("the drop's material")
-            .base_color_texture
-            .clone()
-            .expect("a liveried drop's material carries the livery image");
-        world.insert_resource(materials);
-
-        // 4. The inventory cell, read off a real `ImageNode` rather than off the resource.
+        // **Both liveried materials, not only the rusty one.** #420 is the generalisation,
+        // and its whole claim is that the second material costs a row — so the test the
+        // arrangement exists for has to cover the second material, or it measures the first
+        // one twice.
         let liveries = world.resource::<Liveries>().clone();
-        let icon = crate::ui::icon::StackIcon {
-            shape: item_shape(crate::player::combat::ITEM_RUSTY_SWORD),
-            colour: Color::WHITE,
-            livery: item_livery(crate::player::combat::ITEM_RUSTY_SWORD),
-        };
-        let host = world.spawn_empty().id();
-        world.commands().entity(host).with_children(|host| {
-            crate::ui::icon::spawn(host, icon, Some(&liveries));
-        });
-        world.flush();
-        let mut images = world.query::<&ImageNode>();
-        let cell: Vec<Handle<Image>> = images.iter(world).map(|node| node.image.clone()).collect();
-        assert_eq!(
-            cell.len(),
-            1,
-            "the cell drew {} image nodes, and a blade has one liveried rectangle",
-            cell.len()
-        );
+        for item_id in [
+            crate::player::combat::ITEM_RUSTY_SWORD,
+            crate::player::crafting::ITEM_IRON_SWORD,
+        ] {
+            // 2 and 3. The ground drop and the third-person body, which are one call.
+            let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+            let drop_material = world
+                .resource_mut::<DropVisuals>()
+                .material_for(item_id, &mut materials);
+            let drop = materials
+                .get(&drop_material)
+                .expect("the drop's material")
+                .base_color_texture
+                .clone()
+                .expect("a liveried drop's material carries the livery image");
+            world.insert_resource(materials);
 
-        assert_eq!(hand, drop, "the hand and the drop sample different images");
-        assert_eq!(
-            drop, cell[0],
-            "the drop and the cell sample different images"
-        );
+            // 4. The inventory cell, read off a real `ImageNode` rather than the resource.
+            //
+            // **The world holds no image node before this iteration spawns one**, asserted
+            // rather than assumed, because the count below is what tells the cell apart from
+            // whatever the previous iteration left behind. `EntityWorldMut::despawn` takes
+            // its `Children` with it in Bevy 0.19 — its own doc says "this will recursively
+            // despawn `Children`", and `despawn_recursive` no longer exists — so the cleanup
+            // at the end of the loop is enough. This is the line that says so.
+            let mut existing = world.query::<&ImageNode>();
+            assert_eq!(
+                existing.iter(world).count(),
+                0,
+                "an earlier iteration left image nodes behind, so item {item_id}'s count is \
+                 not its own"
+            );
+            let icon = crate::ui::icon::StackIcon {
+                shape: item_shape(item_id),
+                colour: Color::WHITE,
+                livery: item_livery(item_id),
+            };
+            let host = world.spawn_empty().id();
+            world.commands().entity(host).with_children(|host| {
+                crate::ui::icon::spawn(host, icon, Some(&liveries));
+            });
+            world.flush();
+            let mut images = world.query::<&ImageNode>();
+            let cell: Vec<ImageNode> = images.iter(world).cloned().collect();
+            assert_eq!(
+                cell.len(),
+                1,
+                "item {item_id}'s cell drew {} image nodes, and a blade has one liveried \
+                 rectangle",
+                cell.len()
+            );
+
+            assert_eq!(hand, drop, "item {item_id}: the hand and the drop differ");
+            assert_eq!(
+                drop, cell[0].image,
+                "item {item_id}: the drop and the cell differ"
+            );
+
+            // **And the cell reads this material's own band**, which is the half handle
+            // identity stops covering once one image holds two materials: four surfaces
+            // sharing a handle and sampling different rows of it is the same divergence one
+            // level down.
+            let livery = item_livery(item_id).expect("a liveried blade");
+            assert_eq!(
+                cell[0].rect,
+                Some(crate::player::field_rect(livery)),
+                "item {item_id}'s cell samples the wrong band of the shared image"
+            );
+            world.entity_mut(host).despawn();
+            world.flush();
+        }
     }
 
     /// **An item with no livery draws exactly as it did**, in every surface — which is the
@@ -724,11 +761,17 @@ mod tests {
             world.flush();
             let mut images = world.query::<&ImageNode>();
             let drawn = images.iter(world).count();
+            // **A cell draws a livery only where its picture has a rectangle for one.** An
+            // iron helm names `ForgedSteel` and its cell is a plate and two shoulders with
+            // no edge to mark — see `ui::icon::draws_a_livery`, which is the drawing
+            // decision this reads rather than a second opinion about it.
+            let reachable =
+                livery.is_some() && crate::ui::icon::draws_a_livery(item_shape(item_id));
             assert_eq!(
                 drawn > 0,
-                livery.is_some(),
-                "item {item_id} has a livery = {} and its cell drew {drawn} image nodes",
-                livery.is_some()
+                reachable,
+                "item {item_id} can reach a livery in a cell = {reachable} and drew {drawn} \
+                 image nodes"
             );
             world.entity_mut(host).despawn();
             world.flush();

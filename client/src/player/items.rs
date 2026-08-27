@@ -227,14 +227,48 @@ impl ItemColour {
 
 /// The generated surface an item's material wears, when it wears one.
 ///
+/// **A livery belongs to a material, not to an item**, which is the whole reason the second
+/// one costs a row here rather than a generator. There are about thirty item ids below and
+/// roughly five materials among them; a haft, a bow stave, a shield plate and a sceptre
+/// shaft are the same wood, and a helm, a cuirass, greaves and the iron sword are the same
+/// forged iron. So the set of liveries is small and closed, each row names one or names
+/// `None`, and a new item costs a row.
+///
 /// **A vocabulary of *kinds* with no wildcard arm in the generator**, exactly as
-/// [`ItemShape`] is one in either renderer: a second variant does not compile until
-/// `super::livery` has been told how to draw it. Nothing there matches on an item id, so
-/// what an item looks like stays in this table with the other three facts.
+/// [`ItemShape`] is one in either renderer: a third variant does not compile until
+/// `super::livery` has been told how to draw it. Nothing there matches on an item id.
+///
+/// **A livery has to earn its place, and the default answer is no livery.** A material whose
+/// flat colour already reads correctly does not get one: grain on a log carried in the hand
+/// would be worth it because a bare cube is the flattest thing in the game, grain on a
+/// raw-meat stub is a texture nobody will look at. `client/AGENTS.md` lists which materials
+/// have one and why the rest do not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Livery {
-    /// Oxide: warm, dark, and eaten *into* the steel rather than laid over it.
-    Rust,
+    /// Worn steel: oxide, warm and dark, eaten *into* the metal rather than laid over it.
+    WornSteel,
+    /// Forged steel: the marks of the work — an unground flat over the ridge, hammer
+    /// banding, grinding streaks and a sparse forge scale. Colour only; it takes nothing
+    /// out of the geometry.
+    ForgedSteel,
+}
+
+impl Livery {
+    /// Every livery, for the sweeps and for the generator that mints one image per entry.
+    ///
+    /// Hand-written for the reason [`ItemShape::ALL`] is: no stable Rust enumerates
+    /// variants. What makes a livery *drawn* is still the compiler — `super::livery`
+    /// matches with no wildcard arm — and this list is what lets the image layout and the
+    /// tests be written once for however many there are.
+    pub(crate) const ALL: [Self; 2] = [Self::WornSteel, Self::ForgedSteel];
+
+    /// Which band of the generated image this livery occupies.
+    pub(crate) fn band(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .expect("every livery is in ALL")
+    }
 }
 
 /// Everything this client has an opinion about for one item id.
@@ -268,7 +302,14 @@ pub(super) struct ItemDisplay {
     ///
     /// **The fourth field the doc above anticipated**, and a presentation fact like the
     /// other three: what an item *does* is still the server's answer. `None` means "draws
-    /// as a flat colour", which is every item but one today.
+    /// as a flat colour", which is most of this table.
+    ///
+    /// **Explicit per row, and never derived from [`ItemColour`]** — which is the finding
+    /// that decided the shape of #420. `ItemColour::Block(`[`palette::LOG`]`)` is worn by
+    /// the log, the campfire, the wooden shield, the bow and the sceptre, and *also* by the
+    /// **axe**, whose swatch is the ground it works rather than what it is made of, and by
+    /// the **leather patch**, which is bark-coloured worked hide. Two of those seven are not
+    /// wood. A livery inferred from the colour would grain them both.
     livery: Option<Livery>,
 }
 
@@ -327,7 +368,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "rusty sword",
         shape: ItemShape::Blade,
         colour: ItemColour::WornSteel,
-        livery: Some(Livery::Rust),
+        livery: Some(Livery::WornSteel),
     },
     // The two items that plant an entity rather than a voxel. Iron for the forge, canvas
     // for the tent, so a player can see which of the two they are carrying.
@@ -353,7 +394,7 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "iron sword",
         shape: ItemShape::Blade,
         colour: ItemColour::ForgedSteel,
-        livery: None,
+        livery: Some(Livery::ForgedSteel),
     },
     ItemDisplay {
         item_id: ITEM_SHARPENING_STONE,
@@ -472,21 +513,21 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         name: "iron helm",
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
-        livery: None,
+        livery: Some(Livery::ForgedSteel),
     },
     ItemDisplay {
         item_id: ITEM_IRON_CUIRASS,
         name: "iron cuirass",
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
-        livery: None,
+        livery: Some(Livery::ForgedSteel),
     },
     ItemDisplay {
         item_id: ITEM_IRON_GREAVES,
         name: "iron greaves",
         shape: ItemShape::Armour,
         colour: ItemColour::ForgedSteel,
-        livery: None,
+        livery: Some(Livery::ForgedSteel),
     },
     ItemDisplay {
         item_id: ITEM_WOODEN_SHIELD,

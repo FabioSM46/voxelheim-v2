@@ -681,17 +681,20 @@ const BLADE_STEPS_AROUND: u32 = 3;
 
 /// How deep a pit eats, as a fraction of the blade's local half-thickness.
 ///
+/// **A property of the livery since #420, not of the blade.** Corrosion eats metal, so worn
+/// steel displaces; forge marks are the record of work done to a surface that is still
+/// whole, so forged steel answers zero and its blade is lofted exactly as an un-liveried one
+/// is. `livery::pit_depth` carries the numbers and the reasoning.
+///
 /// **Through the thickness only, never into the outline.** A vertex is displaced in `x`
 /// alone, so the two corners that sit on the blade's edges — where `x` is zero — do not
 /// move at all and the silhouette is the silhouette it was. That is what makes "no
 /// displaced vertex leaves the blade's envelope" a property of the arithmetic rather than
 /// something to check afterwards, and it is the right shape besides: corrosion eats through
 /// a flat, it does not take bites out of an edge.
-///
-/// Under a half deliberately. At full field this takes 1.8 mm out of a 6 mm half-thickness,
-/// which is a dent a player can see; deeper starts to read as a hole, and a blade with
-/// holes in it is damage again — the exact thing the fourteen boxes were replaced for.
-const PIT_DEPTH: f32 = 0.30;
+fn pit_depth(livery: Option<Livery>) -> f32 {
+    livery.map_or(0.0, livery::pit_depth)
+}
 
 /// A carried structure's outer bound. [`rolled_bundle_parts`] fills it with the same roll
 /// and two straps used by the world drop, so a tent under the arm does not read as another
@@ -1354,8 +1357,8 @@ fn ring_perimeter(ring: BladeRing, steps: u32, livery: Option<Livery>) -> (Vec<V
             if let Some(livery) = livery {
                 // **In `x` alone**, which is what keeps the outline the outline: the two
                 // corners that sit on the blade's edges have no `x` to lose, so a pit can
-                // only ever eat through a flat. See [`PIT_DEPTH`].
-                point.x *= 1.0 - PIT_DEPTH * livery::field(livery, at, ring.along);
+                // only ever eat through a flat. See [`pit_depth`].
+                point.x *= 1.0 - livery::pit_depth(livery) * livery::field(livery, at, ring.along);
             }
             positions.push(point);
             around.push(at);
@@ -1374,9 +1377,14 @@ fn ring_perimeter(ring: BladeRing, steps: u32, livery: Option<Livery>) -> (Vec<V
 /// why the subdivision is reached through the livery rather than through an item id, and
 /// [`the_iron_sword_is_the_blade_it_was_before_the_livery`] measures it.
 fn blade_loft(livery: Option<Livery>) -> Mesh {
-    let (steps_root, steps_point, steps_around) = match livery {
-        Some(_) => (BLADE_STEPS_ROOT, BLADE_STEPS_POINT, BLADE_STEPS_AROUND),
-        None => (1, 1, 1),
+    // **Subdivided only where something displaces it.** A livery that takes nothing out of
+    // the metal has nothing to pit with, so its blade is the two-span six-face loft an
+    // un-liveried one is — which is what keeps the iron sword `sword_mesh` in both states,
+    // to the third decimal of its volume, while it wears a surface.
+    let (steps_root, steps_point, steps_around) = if pit_depth(livery) > 0.0 {
+        (BLADE_STEPS_ROOT, BLADE_STEPS_POINT, BLADE_STEPS_AROUND)
+    } else {
+        (1, 1, 1)
     };
     let rings = blade_rings(steps_root, steps_point);
 
@@ -1388,7 +1396,7 @@ fn blade_loft(livery: Option<Livery>) -> Mesh {
         };
         let upper = ring_perimeter(*high_ring, steps_around, livery);
         let uv = |at: f32, along: f32| match livery {
-            Some(_) => livery::blade_uv(at, along),
+            Some(livery) => livery::blade_uv(livery, at, along),
             None => livery::neutral_uv(),
         };
         let sides = lower.0.len();
@@ -2601,7 +2609,7 @@ mod tests {
     /// full of rust nothing samples.
     #[test]
     fn the_rusty_sword_carries_iron_and_rust_on_one_mesh() {
-        let rusted = sword_with(SWORD_LENGTH, Some(Livery::Rust), None);
+        let rusted = sword_with(SWORD_LENGTH, Some(Livery::WornSteel), None);
         let plain = sword_mesh(SWORD_LENGTH);
 
         // One tint, not two: the item's own colour arrives whole and the oxide is a shade
@@ -2656,7 +2664,10 @@ mod tests {
         );
         assert_eq!(
             span(1),
-            (livery::blade_uv(0.0, 0.0)[1], livery::blade_uv(0.0, 1.0)[1]),
+            (
+                livery::blade_uv(Livery::WornSteel, 0.0, 0.0)[1],
+                livery::blade_uv(Livery::WornSteel, 0.0, 1.0)[1]
+            ),
             "the blade walks part of the field along its length rather than all of it"
         );
 
@@ -2667,8 +2678,8 @@ mod tests {
             .flat_map(|around| (0..=64).map(move |along| (around, along)))
             .map(|(around, along)| {
                 livery::strength_at(
-                    Livery::Rust,
-                    livery::blade_uv(around as f32 / 64.0, along as f32 / 64.0),
+                    Livery::WornSteel,
+                    livery::blade_uv(Livery::WornSteel, around as f32 / 64.0, along as f32 / 64.0),
                 )
             })
             .fold(0.0_f32, f32::max);
@@ -3053,12 +3064,13 @@ mod tests {
     ///
     /// So: every vertex inside the envelope the un-pitted blade has, measured against
     /// [`blade_surface`]'s closed form rather than against the arithmetic that placed it,
-    /// and no pit deeper than [`PIT_DEPTH`] of the local half-thickness. The outline is
+    /// and no pit deeper than the livery's own [`pit_depth`] of the local half-thickness. The
+    /// outline is
     /// checked too, because "eats through the flats, never into the edges" is the claim that
     /// makes the first property arithmetic rather than a hope.
     #[test]
     fn no_pit_leaves_the_blades_envelope() {
-        let pitted = blade_loft(Some(Livery::Rust));
+        let pitted = blade_loft(Some(Livery::WornSteel));
         let smooth = blade_loft(None);
 
         let sections = blade_sections();
@@ -3084,13 +3096,14 @@ mod tests {
         }
 
         let half_thickness = BLADE_THICKNESS / 2.0;
+        let depth = livery::pit_depth(Livery::WornSteel);
         assert!(
-            deepest <= half_thickness * PIT_DEPTH + 1e-6,
+            deepest <= half_thickness * depth + 1e-6,
             "the deepest pit takes {deepest} out of a {half_thickness} half-thickness, past \
-             the {PIT_DEPTH} this blade is allowed to lose"
+             the {depth} this blade is allowed to lose"
         );
         assert!(
-            deepest > half_thickness * PIT_DEPTH * 0.5,
+            deepest > half_thickness * depth * 0.5,
             "the deepest pit is {deepest}, which is barely a dent — the field and the \
              subdivision have stopped meeting"
         );
@@ -3118,25 +3131,43 @@ mod tests {
         let iron = item_mesh(ITEM_IRON_SWORD, ItemShape::Blade);
         let unliveried = sword_mesh(SWORD_LENGTH);
 
+        // **It wears a livery now and it is the same blade**, which is the whole of what
+        // #420 claims for a colour-only material: `sword_mesh` in both states, to the vertex.
         assert_eq!(
             items::item_livery(ITEM_IRON_SWORD),
-            None,
-            "the iron sword has been given a livery, which is not this issue's to give"
+            Some(Livery::ForgedSteel),
+            "the iron sword no longer names the forged steel every other iron item does"
+        );
+        assert_eq!(
+            livery::pit_depth(Livery::ForgedSteel),
+            0.0,
+            "forged steel displaces, so the iron sword is no longer the blade it was"
         );
         assert_eq!(
             positions(&iron),
             positions(&unliveried),
-            "the iron sword is no longer the plain loft, so a livery it does not wear has \
-             changed its shape"
+            "the iron sword is no longer the plain loft, so its livery has changed its shape"
+        );
+        assert_eq!(
+            iron.count_vertices(),
+            unliveried.count_vertices(),
+            "the iron sword has been subdivided by a livery that displaces nothing"
         );
 
-        // Every coordinate in the neutral band, so the image the material carries cannot
-        // reach it whatever is in the image.
+        // And it does sample — in its own band. A blade whose coordinates stayed neutral
+        // would satisfy every clause above and draw the polished steel it drew before.
         let neutral = livery::neutral_uv();
+        let sampled: Vec<[f32; 2]> = uvs(&iron).into_iter().filter(|uv| *uv != neutral).collect();
         assert!(
-            uvs(&iron).iter().all(|uv| *uv == neutral),
-            "the iron sword samples the livery image outside its white row"
+            !sampled.is_empty(),
+            "the iron sword samples nothing, so its forge marks reach no surface"
         );
+        for uv in &sampled {
+            assert!(
+                livery::band_holds(Livery::ForgedSteel, *uv),
+                "the iron sword samples {uv:?}, outside forged steel's own band"
+            );
+        }
 
         // The rusty sword is the same shape and a different blade, which is what makes the
         // clause above a measurement rather than a tautology about `sword_mesh`.
@@ -3174,19 +3205,50 @@ mod tests {
                 ..Default::default()
             }));
             let mesh = held_mesh(TEST_SKIN, appearance);
-            let liveried = uvs(&mesh).into_iter().filter(|uv| *uv != neutral).count();
+            let sampled: Vec<[f32; 2]> =
+                uvs(&mesh).into_iter().filter(|uv| *uv != neutral).collect();
             match items::item_livery(item_id) {
-                None => assert_eq!(
-                    liveried, 0,
-                    "item {item_id} wears no livery and yet {liveried} of its vertices \
-                     sample one"
+                None => assert!(
+                    sampled.is_empty(),
+                    "item {item_id} wears no livery and yet {} of its vertices sample one",
+                    sampled.len()
                 ),
-                Some(_) => assert!(
-                    liveried > 0,
-                    "item {item_id} wears a livery that none of its vertices sample"
-                ),
+                // **Inside its own band, never another material's**, which is the property
+                // one image for every livery makes checkable. A shape whose mesh carries no
+                // real coordinates — armour, today — samples nothing at all and is
+                // unchanged; what must never happen is a blade reading the rows some other
+                // metal was written into.
+                Some(livery) => {
+                    for uv in &sampled {
+                        assert!(
+                            livery::band_holds(livery, *uv),
+                            "item {item_id} samples {uv:?}, outside the band {livery:?} was \
+                             written into"
+                        );
+                    }
+                }
             }
         }
+
+        // And at least one item reaches a livery through its mesh, so the clause above
+        // cannot be satisfied by nothing ever sampling anything.
+        let blades = items::known_item_ids()
+            .filter(|id| items::item_livery(*id).is_some())
+            .filter(|id| {
+                let appearance = selected_appearance(Some(InventoryStack {
+                    item_id: *id,
+                    count: 1,
+                    ..Default::default()
+                }));
+                uvs(&held_mesh(TEST_SKIN, appearance))
+                    .into_iter()
+                    .any(|uv| uv != neutral)
+            })
+            .count();
+        assert!(
+            blades >= 2,
+            "only {blades} items reach a livery through their mesh"
+        );
 
         // The empty hand, which has no item to be asked about and is the arrangement a
         // player spends most of their time looking at.
@@ -3281,8 +3343,8 @@ mod tests {
             positions.clone()
         };
         assert_eq!(
-            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust), None)),
-            read(&sword_with(SWORD_LENGTH, Some(Livery::Rust), None)),
+            read(&sword_with(SWORD_LENGTH, Some(Livery::WornSteel), None)),
+            read(&sword_with(SWORD_LENGTH, Some(Livery::WornSteel), None)),
             "two builds of one sword pit the blade in different places"
         );
     }
@@ -3399,7 +3461,7 @@ mod tests {
             let strongest = uvs(&mesh)
                 .into_iter()
                 .filter(|uv| *uv != neutral)
-                .map(|uv| livery::strength_at(Livery::Rust, uv))
+                .map(|uv| livery::strength_at(Livery::WornSteel, uv))
                 .fold(0.0_f32, f32::max);
             assert_eq!(
                 strongest > 0.0,
