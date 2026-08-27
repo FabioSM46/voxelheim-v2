@@ -277,18 +277,37 @@ impl FromWorld for Liveries {
 /// would draw untextured steel and look exactly like a livery nobody wrote.
 ///
 /// **A function rather than a `Plugin`, and that is not a style choice.** Bevy panics when
-/// one plugin is added twice, and the surfaces that draw a liveried item are about to be
-/// four modules rather than one, none of which can know whether another has already asked.
-/// Both calls below are idempotent, so every caller may say what it needs.
+/// one plugin is added twice, and the surfaces that draw a liveried item are four modules
+/// rather than one, none of which can know whether another has already asked.
+/// `App::init_resource` is idempotent, so every caller may say what it needs.
 ///
-/// `init_asset::<Image>` is for the headless tests — a no-op under `ImagePlugin`, and the
-/// same defence `HandsPlugin` keeps for the four resources it does not own.
+/// **`App::init_asset` is not, and the guard below is not defensive programming.** It ends
+/// `self.insert_resource(assets)` on a freshly defaulted `Assets<A>`, unconditionally — so
+/// calling it after `ImagePlugin` **replaces the whole image store**, dropping every image
+/// the renderer had already put there. That includes `FallbackImage`, whose D3 entry is what
+/// the mesh view bind group binds when there is no irradiance volume, and the client died on
+/// startup with `Texture binding 18 expects dimension = D3, but given a view with dimension
+/// = D2`.
+///
+/// **Nothing in this repository's test suite could have seen it**, which is the part worth
+/// recording. Every test here is headless: there is no render app, no `FallbackImage`, and no
+/// bind group to validate — and each one *builds* `Assets<Image>` itself, so the reset lands
+/// on an empty store and changes nothing. The gates were green, the review was clean, and it
+/// was found by running the game. [`registering_twice_keeps_the_images_already_loaded`] is
+/// the headless half that can be pinned: not the bind group, but the reset that caused it.
 pub(super) fn register(app: &mut App) {
-    app.init_asset::<Image>().init_resource::<Liveries>();
+    if !app.world().contains_resource::<Assets<Image>>() {
+        // For the focused headless tests, which build one module without `ImagePlugin` — the
+        // same defence `HandsPlugin` keeps for the four resources it does not own.
+        app.init_asset::<Image>();
+    }
+    app.init_resource::<Liveries>();
 }
 
 #[cfg(test)]
 mod tests {
+    use bevy::asset::AssetPlugin;
+
     use super::*;
 
     /// The bytes one texel of a generated livery carries.
@@ -299,6 +318,49 @@ mod tests {
             .expect("a generated livery carries data");
         let at = ((row * LIVERY_WIDTH + column) * 4) as usize;
         [data[at], data[at + 1], data[at + 2], data[at + 3]]
+    }
+
+    /// **Registering twice keeps the images already loaded**, which is the property the
+    /// client's startup crash was the absence of.
+    ///
+    /// `App::init_asset` ends in an unconditional `insert_resource` of a defaulted store, so
+    /// a second call after `ImagePlugin` throws away every image the renderer put there —
+    /// `FallbackImage` among them, and its D3 entry is what the mesh view bind group binds
+    /// when there is no irradiance volume. The observable failure was a validation error at
+    /// startup and a window that closed itself; what is checkable without a GPU is the reset
+    /// underneath it.
+    ///
+    /// **Asserted on a foreign image rather than on the livery's own**, because the livery is
+    /// re-created by `FromWorld` on the second call and would be present either way. The
+    /// image that must survive is one *somebody else* put in the store — which is exactly
+    /// what the renderer's fallbacks are.
+    #[test]
+    fn registering_twice_keeps_the_images_already_loaded() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        register(&mut app);
+
+        // Stand in for a fallback: an image this module did not create and does not know
+        // about, put in the store before the second registration.
+        let foreign = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(image_for(Livery::Rust));
+
+        register(&mut app);
+
+        assert!(
+            app.world().resource::<Assets<Image>>().contains(&foreign),
+            "registering a second time emptied the image store, so every texture the \
+             renderer had already loaded went with it"
+        );
+        // And the livery's own handle still resolves, which is the other half: a guard that
+        // skipped too much would leave `Liveries` pointing at nothing.
+        let handle = app.world().resource::<Liveries>().material_image();
+        assert!(
+            app.world().resource::<Assets<Image>>().contains(&handle),
+            "the livery handle no longer names an image in the store"
+        );
     }
 
     /// **The same livery every run**, which is what a seeded generator buys over a random
