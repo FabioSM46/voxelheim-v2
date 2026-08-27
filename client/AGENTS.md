@@ -528,6 +528,19 @@ The client samples the controls, sends what the player is *trying* to do at the 
   rather than two — and two `ConsumeRequest` frames for one intent is exactly what a
   branch each would have produced.
 
+  **A held key is one press, and that is measured rather than asserted.** The key is
+  edge-triggered for the same reason the buttons are, but what makes a repeat harmless is
+  `bevy_input`'s `press()` — it arms `just_pressed` only when the key was not already in
+  `pressed`, and the per-frame `clear()` never touches `pressed`. `keyboard_input_system`
+  does *not* filter `KeyboardInput { repeat: true }`, so a review on PR #403 read the code
+  and concluded a held key would drain a food stack frame by frame. It does not, but the
+  guarantee belongs to a dependency rather than to this tree, so a Bevy upgrade could take
+  it away silently. Two tests hold a key across frames through the real input pipeline and
+  pin it: `holding_the_consume_key_reports_one_press_and_a_later_press_reports_again` in
+  `ui/inventory.rs` and `holding_interact_asks_to_open_a_corpse_once_and_a_later_press_asks_again`
+  in `player/loot.rs`. Both also press again after a release, because a test that only
+  proved "one" would pass just as well with the key dead.
+
   **Food routing follows the kit pattern without copying the server's capability table.**
   `FOODS` names the ids whose consume press is worth sending, and `consume_request` is the
   only place a `ConsumeRequest` is built. It deliberately does not ask how much hunger an
