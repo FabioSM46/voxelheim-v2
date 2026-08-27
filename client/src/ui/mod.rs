@@ -2,6 +2,7 @@
 
 mod character;
 mod chat;
+mod compass;
 mod crosshair;
 mod experience;
 mod health;
@@ -155,7 +156,10 @@ impl Plugin for UiPlugin {
             .add_plugins((
                 character::CharacterUiPlugin,
                 chat::ChatUiPlugin,
-                crosshair::CrosshairPlugin,
+                // Nested rather than flat, because `add_plugins` accepts a tuple of at
+                // most fifteen and this list is at that ceiling. A tuple of plugins is
+                // itself `Plugins`, so the nesting changes nothing but the shape.
+                (compass::CompassUiPlugin, crosshair::CrosshairPlugin),
                 health::HealthUiPlugin,
                 hunger::HungerUiPlugin,
                 experience::ExperienceUiPlugin,
