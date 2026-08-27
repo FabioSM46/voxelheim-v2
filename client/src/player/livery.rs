@@ -21,6 +21,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
@@ -125,6 +126,30 @@ const FORGE_FLECKS: u32 = 9;
 /// Smaller than a rust freckle: scale is what did not come off, not what grew.
 const FORGE_FLECK_RADIUS: f32 = 0.055;
 
+/// How many grain lines run around a wooden piece.
+///
+/// Read around the perimeter rather than along the length, because that is the axis grain
+/// varies in — see [`grain_field`].
+const GRAIN_LINES: f32 = 11.0;
+
+/// How far a grain line drifts across the piece, as a fraction of the perimeter.
+///
+/// **Under half a line's spacing**, so two lines never cross and the grain stays a set of
+/// lines rather than a weave.
+const GRAIN_WANDER: f32 = 0.02;
+
+/// How many times a grain line wanders over the length of a piece.
+///
+/// Low, because a board's grain drifts slowly. Two full cycles over a haft is the difference
+/// between wood and a wave pattern.
+const GRAIN_WANDER_CYCLES: f32 = 1.5;
+
+/// How narrow a grain line is.
+///
+/// **A power over a raised cosine**, which is what turns a sine wave into a narrow dark band
+/// between wide light ones. One would be the wave itself and would read as corduroy.
+const GRAIN_SHARPNESS: f32 = 3.0;
+
 /// A deterministic value in `0.0..1.0` for one freckle and one of its dimensions.
 ///
 /// **A seeded hash rather than a crate**: `client/AGENTS.md` is explicit about the
@@ -160,6 +185,11 @@ fn scatter(mark: u32, channel: u32) -> f32 {
 fn tint(livery: Livery) -> [f32; 3] {
     match livery {
         Livery::WornSteel => [0.72, 0.38, 0.22],
+        // Grain is the dark line between two lighter ones, so wood darkens toward its own
+        // hue rather than away from it: `palette::LOG` is already a warm brown, and what a
+        // ring takes away is light rather than colour. Shallower than either steel, because
+        // wood is worked smooth and a deep line reads as a crack.
+        Livery::Wood => [0.62, 0.55, 0.48],
         // At full strength this is about 71% of the base and cooler than it in every
         // channel. The interactive model this was tuned in bottomed out near 69%; the third
         // decimal of that is not something a screen was going to settle.
@@ -177,7 +207,9 @@ fn tint(livery: Livery) -> [f32; 3] {
 pub(super) fn pit_depth(livery: Livery) -> f32 {
     match livery {
         Livery::WornSteel => 0.30,
-        Livery::ForgedSteel => 0.0,
+        // Forge marks are the record of work done to metal that is still whole, and grain is
+        // what a tree grew rather than what took its surface away. Neither displaces.
+        Livery::ForgedSteel | Livery::Wood => 0.0,
     }
 }
 
@@ -190,7 +222,28 @@ pub(super) fn field(livery: Livery, around: f32, along: f32) -> f32 {
     match livery {
         Livery::WornSteel => rust_field(around, along),
         Livery::ForgedSteel => forge_field(around, along),
+        Livery::Wood => grain_field(around, along),
     }
+}
+
+/// The grain field: lines along the piece, wandering across it.
+///
+/// **Along, and only slightly across.** Grain runs the length of a stave, a haft or a plank,
+/// so `along` is the axis it is continuous in and `around` is the one it varies in. A field
+/// that varied along the piece would be knots, which is a per-face question and a different
+/// mechanism.
+///
+/// **The wander is what stops it being a barcode.** A fixed frequency in `around` draws
+/// perfectly parallel lines, which reads as machine-cut plastic; displacing each line's
+/// position by a slow function of `along` gives the drift a sawn board actually has. The
+/// drift is a fraction of a line's own spacing, so lines never cross.
+fn grain_field(around: f32, along: f32) -> f32 {
+    let drift = GRAIN_WANDER * (along * GRAIN_WANDER_CYCLES * std::f32::consts::TAU).sin();
+    let lines = (around + drift) * GRAIN_LINES * std::f32::consts::TAU;
+    // Sharpened toward the dark line: a ring is a narrow dark band between wide light ones,
+    // not a sine wave. The power is what turns one into the other.
+    let wave = 0.5 - 0.5 * lines.cos();
+    wave.powf(GRAIN_SHARPNESS).clamp(0.0, 1.0)
 }
 
 /// How far across a flat a point is, in `0.0..=1.0`, and `0.0` on the cutting edges.
@@ -280,6 +333,28 @@ fn rust_field(around: f32, along: f32) -> f32 {
 pub(crate) fn field_rect(livery: Livery) -> Rect {
     let top = band_top(livery);
     Rect::new(0.0, top, LIVERY_WIDTH as f32, top + FIELD_ROWS as f32)
+}
+
+/// One mesh with its own texture coordinates squeezed into one livery's band.
+///
+/// **For a part whose material is a material rather than an item's.** A blade's loft is lofted
+/// against the field and knows where it is; a grip is a `Cylinder` that arrives with the
+/// coordinates Bevy generates, spanning the whole image. This keeps `u` — grain runs *around*
+/// a turned grip exactly as it runs around a stave — and folds `v` into the band, so the same
+/// primitive can wear a livery without being rebuilt against one.
+pub(super) fn wear(mesh: Mesh, livery: Livery) -> Mesh {
+    let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else {
+        // Every mesh this is handed carries Float32x2 coordinates; leaving it alone is the
+        // cosmetic direction to fail in, and it draws the neutral band it already pointed at.
+        return mesh;
+    };
+    let worn: Vec<[f32; 2]> = uvs
+        .iter()
+        .map(|[around, along]| blade_uv(livery, *around, along.clamp(0.0, 1.0)))
+        .collect();
+    let mut mesh = mesh;
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, worn);
+    mesh
 }
 
 /// The texture coordinate every vertex that wears no livery carries.
@@ -591,6 +666,35 @@ mod tests {
             "the rust covers {rusted} texels of {}, which is not what it covered",
             LIVERY_WIDTH * FIELD_ROWS
         );
+
+        // Wood, measured the same way. Grain is narrow dark lines on a light field, so its
+        // mean sits high and its darkest is the line itself.
+        let grained = band_texels(Livery::Wood);
+        let brightness_of =
+            |texel: &[u8; 4]| f32::from(texel[0]) + f32::from(texel[1]) + f32::from(texel[2]);
+        let wood_mean =
+            grained.iter().map(brightness_of).sum::<f32>() / grained.len() as f32 / (3.0 * 255.0);
+        let wood_darkest = grained
+            .iter()
+            .map(brightness_of)
+            .fold(f32::INFINITY, f32::min)
+            / (3.0 * 255.0);
+        // **Narrow dark lines on a light field**, which is what the two numbers say and what
+        // separates grain from corduroy: the mean sits high because most of a plank is not a
+        // ring, and the darkest is the ring itself at full tint.
+        assert!(
+            (wood_mean - 0.859).abs() < 5e-3,
+            "wood averages {wood_mean} of the base colour, not the 0.859 its lines produce"
+        );
+        assert!(
+            (wood_darkest - 0.549).abs() < 5e-3,
+            "wood bottoms out at {wood_darkest}, not the 0.549 its tint reaches"
+        );
+        // One texel in a line and one between two, so the falloff is pinned as well as the
+        // depth: a field that lost its sharpening would move the second one.
+        let wood_top = band_top(Livery::Wood) as u32;
+        assert_eq!(texel(&image, 8, wood_top + 20), [160, 142, 124, 255]);
+        assert_eq!(texel(&image, 30, wood_top + 40), [252, 251, 250, 255]);
 
         let forged = band_texels(Livery::ForgedSteel);
         let brightness =
