@@ -826,7 +826,34 @@ nowhere else to add half of one.
 block, material or bundle on top of it and a blade or tool through its grip. That fist is **one
 cube** since #396: the view model's material is `unlit`, so relief on a box 24 millimetres across
 is invisible by construction, and three iterations of modelled digits were deleted for costing
-geometry and buying nothing. What reads as a hand is the silhouette — a block at the end of a
+geometry and buying nothing.
+
+**That material still has no light, and since #434 the composition carries its own.** `unlit` means
+`StandardMaterial` ignores vertex normals outright, so every face of every held mesh rendered one
+colour — and two later changes were authored against a light that was not there.
+`BLADE_RIDGE_FRACTION`'s doc claimed six faces per span meant "the light catches a different pair
+as the hand turns"; #426's pitting displaces vertices in `x` alone and deliberately preserves the
+outline, so under a flat colour a pit changed nothing anybody could see. In the hand the rusty
+sword showed its livery's dark smudges and never the shape beneath them, while the *same meshes*
+showed their facets on the ground, because `drops.rs` mints a lit material. One asset read as two
+different objects depending on which surface drew it.
+
+`hands::shaded` folds `dot(normal, SHADE_LIGHT)` into the vertex colours of the whole first-person
+composition — fist, wrist, arm and held item — at build time. It **multiplies**, so it composes
+with the item's colour, a grip's wood and a bundle's straps; a fully lit face is identity, so
+nothing is ever brighter than what `player/items.rs` says, and `SHADE_FLOOR` keeps the far side a
+shade of the steel rather than a silhouette.
+
+**Two costs, both deliberate.** The light is in model space, so it turns with the sword instead of
+staying fixed in the world — under `unlit` there is no correct answer available, and a baked light
+is what a hand-painted low-poly asset does. And the pass is applied where the arrangement is
+*composed*, not where the geometry is *built*, which is what keeps it off the drop: baking a second
+light into a mesh a lit material draws would add to the real one.
+`the_dropped_sword_is_not_shaded_twice` is what holds that seam, because "it is applied somewhere
+else" is a claim about a call site and call sites move.
+
+Whether a shaded fist is now worth re-modelling is a live question again and its own issue — #396's
+reasoning was about a light that did not exist, and one does now. What reads as a hand is the silhouette — a block at the end of a
 narrower wrist. The two are merged
 into one mesh and carry absolute vertex colours — skin from the local player's `Appearance`, item
 from this table — under one white material. One stable mesh asset is rebuilt in place only when
