@@ -2076,7 +2076,9 @@ mod tests {
 
     #[test]
     fn a_character_that_cannot_be_written_down_costs_a_preselection_and_says_so() {
-        let scratch = Scratch::new("chosen-blocked");
+        // **The label carries the id on purpose**, which is what turns a one-in-thirty flake
+        // into a case this test exercises every run. See the assertion below.
+        let scratch = Scratch::new("chosen-blocked-900");
         let env = scratch.environment();
         let path = chosen_character_path("a.example:1", &env).expect("a path to write to");
         fs::create_dir_all(&path).expect("a directory standing where the file goes");
@@ -2084,12 +2086,27 @@ mod tests {
         let complaint = ChosenCharacter::open("a.example:1", &env)
             .remember(900)
             .expect("a write that cannot land is reported");
+        let named = path.display().to_string();
         assert!(
-            complaint.contains(&path.display().to_string()),
+            complaint.contains(&named),
             "the line names the file: {complaint}"
         );
+        // **The path is taken out before the id is looked for, and that is not tidiness.**
+        // `Scratch::new` builds its directory as `voxelheim-{label}-{pid}-{seq}`, and the
+        // complaint names that path — correctly, because naming the file is the other half of
+        // what this test asserts. So the id was being looked for in a string that legitimately
+        // contains a process id, and a pid that *happens to contain* `900` made this line fail
+        // on a message that was doing exactly what it should. It happened on `develop` at pid
+        // 2900 (#430).
+        //
+        // **The shape of flake this was is the expensive one**: the failure names a
+        // well-behaved message and reads as a real regression in whatever merged last. So the
+        // label above now carries `900` too, which makes the path contain it on *every* run —
+        // the case that used to be luck is the case this test is now always in, and removing
+        // the path is what makes the remaining check mean what it says.
+        let rest = complaint.replace(&named, "<the file>");
         assert!(
-            !complaint.contains("900"),
+            !rest.contains("900"),
             "and not the id, which would be noise: {complaint}"
         );
     }
