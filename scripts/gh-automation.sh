@@ -33,6 +33,9 @@
 #                                 absent label.
 #   is-ready-to-merge <pr-number>              Exit 0 if frozen rule met, 1 otherwise
 #   iteration-advance             Advance the completion-driven iteration ceremony state
+#   integration-report            File the alarm for a `develop` that failed post-merge
+#                                 verification, or comment on the one already open. Never
+#                                 reverts, rolls back or fixes anything — reporting only.
 # =============================================================================
 
 set -euo pipefail
@@ -1630,6 +1633,132 @@ cmd_iteration_advance() {
   die "Iteration planning ceremony is closed but milestone #${milestone_number} remains active. Repair the milestone manually, then dispatch recovery."
 }
 
+# ── integration-report — the alarm for a broken develop ──────────────────────
+
+# Hidden in the issue body, so a repeat failure comments on the open alarm instead of
+# opening a second one. The same idiom `iteration_marker` uses, and a marker rather than
+# a label for one reason: a label has to be DEFINED in the repository before it can be
+# applied, `repo_label_defined` refuses one that is not, and an alarm that cannot be
+# raised because a repository setting is missing is worse than an alarm with no label.
+INTEGRATION_FAILURE_MARKER="<!-- integration-failure -->"
+
+# Stable, so the open alarm is recognisable in the issue list and so a reader knows
+# every comment under it is the same fault recurring. The commit and the run belong in
+# the body, where they can accumulate.
+INTEGRATION_FAILURE_TITLE="[Integration] develop failed post-merge verification"
+
+# How many open issues are read when looking for an existing alarm. Unlike
+# CEREMONY_LOOKUP_LIMIT this one does not fail closed on a full page, and the direction
+# is deliberately the opposite: a truncated lookup here reads as "no alarm exists" and
+# files a duplicate, which is noise. Refusing instead would drop the alarm, which is the
+# failure this whole workflow exists to remove. **When the alarm and the tidiness
+# disagree, the alarm wins.**
+INTEGRATION_LOOKUP_LIMIT="${INTEGRATION_LOOKUP_LIMIT:-100}"
+
+# The jobs the verdict reads, in the order the workflow declares them. Each name is the
+# job id; each value comes from the matching `<NAME>_RESULT` environment variable that
+# scripts/integration-gate.sh has just evaluated.
+INTEGRATION_JOBS="privacy server client schemas automation"
+
+cmd_integration_report() {
+  require_gh
+  require_jq
+  resolve_repo || die "Could not resolve the repository for an integration failure report"
+
+  local sha="${INTEGRATION_SHA:-}" run_url="${INTEGRATION_RUN_URL:-}"
+  [ -n "$sha" ] || die "integration-report: INTEGRATION_SHA is unset — refusing to file a report that names no commit"
+  [ -n "$run_url" ] || die "integration-report: INTEGRATION_RUN_URL is unset — refusing to file a report that names no run"
+
+  local job var result rows="" failed=""
+  for job in $INTEGRATION_JOBS; do
+    var="${job^^}_RESULT"
+    result="${!var:-}"
+    rows+="- \`${job}\`: ${result:-<no result>}"$'\n'
+    if [ "$result" != "success" ]; then
+      failed+="${job} "
+    fi
+  done
+  [ -n "$failed" ] || die "integration-report: every job reports success — refusing to file an alarm for a run that passed"
+
+  # Only machine-generated facts reach this body: the commit SHA, the run URL and the
+  # job results. The commit's message and author are deliberately NOT interpolated —
+  # an issue opened by GITHUB_TOKEN triggers no workflow, so body-privacy.yml never
+  # scans it, and copying an arbitrary string into a public body nothing reads is
+  # exactly the surface AGENTS.md says can only be checked after it is already public.
+  local body
+  body=$(cat <<EOF
+${INTEGRATION_FAILURE_MARKER}
+
+\`develop\` did not pass verification after a merge.
+
+- **Commit**: \`${sha}\`
+- **Run**: ${run_url}
+- **Failed**: ${failed% }
+
+### Job results
+
+${rows}
+### Why this can happen with every pull request green
+
+CI runs on a pull request's merge ref and nowhere else, so two pull requests branched
+from the same base are each validated against a tree that does not contain the other.
+A combination that is broken only together turns nothing red until something builds it.
+This run is that build.
+
+### What this does NOT block
+
+Nothing. This check runs on \`develop\`'s tip, not on any pull request's head commit, so
+it is invisible to \`pr-status-json\` and it is not \`ci-gate\`. \`READY TO MERGE\` stays
+reachable on every open pull request — a merge is sometimes how a broken integration
+branch gets fixed.
+
+### What to do
+
+Reproduce at the named commit, fix forward through a pull request, and close this issue
+once a later run is green. Nothing here reverts, rolls back or fixes anything on its own.
+EOF
+)
+
+  # The lookup, and the one place this command is allowed to guess. A read that fails is
+  # not evidence that no alarm is open — but the alternative to guessing is staying
+  # silent, so it files a new issue and says that it could not check.
+  local existing="" lookup_ok=true
+  if ! existing=$(gh issue list --repo "$REPO" --state open \
+      --limit "$INTEGRATION_LOOKUP_LIMIT" --json number,body \
+      --jq ".[] | select(.body != null and (.body | contains(\"${INTEGRATION_FAILURE_MARKER}\"))) | .number"); then
+    lookup_ok=false
+    existing=""
+    echo "WARNING: could not read the open issues in ${REPO}; filing a new report rather than losing the alarm." >&2
+  fi
+
+  local issue_number=""
+  if [ -n "$existing" ]; then
+    # The newest open alarm. More than one means a lookup failed on an earlier run and
+    # a duplicate was filed, which is the direction chosen above; comment on one of them
+    # rather than opening a third.
+    issue_number=$(printf '%s\n' "$existing" | sort -n | tail -1)
+  fi
+
+  if [ -n "$issue_number" ]; then
+    if ! gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null; then
+      die "develop failed verification at ${sha} and the report could not be added to issue #${issue_number}."
+    fi
+    echo "Integration failure reported on existing issue #${issue_number} (${REPO})"
+    return 0
+  fi
+
+  local issue_url
+  issue_url=$(gh issue create --repo "$REPO" \
+    --title "$INTEGRATION_FAILURE_TITLE" \
+    --body "$body") ||
+    die "develop failed verification at ${sha} and the report issue could not be created."
+
+  if [ "$lookup_ok" = false ]; then
+    echo "WARNING: the open-issue lookup failed, so ${issue_url} may duplicate an existing alarm." >&2
+  fi
+  echo "Integration failure reported: ${issue_url}"
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 
 # Skipped when the script is sourced (tests source it to call functions directly).
@@ -1671,6 +1800,9 @@ case "${1:-}" in
   iteration-advance)
     shift; cmd_iteration_advance "$@"
     ;;
+  integration-report)
+    shift; cmd_integration_report "$@"
+    ;;
   *)
     cat <<EOF
 Usage: gh-automation.sh <command> [args]
@@ -1691,6 +1823,10 @@ Commands:
   pr-merge <pr> [--squash|--merge|--rebase]  Merge a PR; refuses base 'main' and
                                        fails closed on an unreadable base
   iteration-advance                   Advance completion-driven iteration ceremonies
+  integration-report                  File (or comment on) the alarm for a develop that
+                                      failed post-merge verification. Reads
+                                      INTEGRATION_SHA, INTEGRATION_RUN_URL and the
+                                      <JOB>_RESULT variables integration.yml sets.
 
 Frozen acceptance rule for READY TO MERGE:
   Add label only when: CI is green, unresolved review thread count is zero,

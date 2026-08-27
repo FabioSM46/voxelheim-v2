@@ -1,0 +1,370 @@
+name: Integration
+
+# Verify `develop` itself, after the merge has landed.
+#
+# ci.yml runs on `pull_request` and nowhere else, so every pull request is validated
+# against the `develop` that existed when its run started. Two pull requests branched
+# from the same base are therefore each validated against a tree that does not contain
+# the other, and a combination that is broken only together turns nothing red. That is
+# not hypothetical: #214 and #215 were each `ready_to_merge: true` on their own and
+# merging #214 alone left sign-in broken on `develop` at runtime; in Iteration 25, #402
+# and #403 were both branched from the same commit and were only ever verified together
+# because somebody made a worktree by hand and ran the client gates in it. **That hand
+# check is what this file replaces**, and it worked precisely as long as somebody
+# remembered.
+#
+# ── Why a second workflow rather than a `push:` trigger on ci.yml ──────────────
+#
+# The same reasoning client-cache.yml already carries, and for the same three reasons.
+# ci.yml's `concurrency.group` is keyed on the pull request number, which is EMPTY on a
+# push, so every push run would share one group under `cancel-in-progress: true`; its
+# `detect` job reads `pull_request.base.sha`, `.head.sha` and `.number` and fetches the
+# changed files from `pulls/<number>/files`, none of which exist on a push; and the
+# acceptance criterion hardest to satisfy any other way is that the pull-request
+# contract stays byte-for-byte unchanged in what it selects, skips and reports. A file
+# that ci.yml does not know about cannot change it.
+#
+# The cost of a second file is drift, and the answer to drift here is the same one the
+# repository already uses for client-cache.yml: scripts/test/integration-verify.test.sh
+# DERIVES the expected job bodies from ci.yml instead of restating them, and any change
+# under `.github/` selects the `automation` job that runs it. These two files can only
+# drift through a red gate.
+#
+# ── No diff classification, deliberately ───────────────────────────────────────
+#
+# The point of this run is the COMBINATION, and a combination is not describable as a
+# diff. There is no `detect` job and no `scripts/changed-areas.sh` call: every job runs,
+# and each one no-ops with a notice when its workspace is not scaffolded at this ref —
+# the same `present` guard ci.yml's jobs carry, and the same rule a `main`-targeted PR
+# already follows (validate everything that EXISTS).
+#
+# ── No `paths:` filters, and no `concurrency` either ───────────────────────────
+#
+# `paths:` is forbidden on a workload job for the reason AGENTS.md gives: a path-filtered
+# job creates no result for a gate to audit. `verdict` below audits every job in this
+# workflow, so the same rule applies here — client-cache.yml may use `paths:` only
+# because nothing audits it and it reports nothing.
+#
+# `concurrency` is omitted rather than copied, and that is a decision rather than an
+# oversight. Keyed on `pull_request.number` every push would share the group `ci-`
+# (trap 1). Keyed on the ref with `cancel-in-progress: true`, an intermediate merge would
+# be cancelled and never verified — the exact hole this workflow exists to close. And
+# `cancel-in-progress: false` is the same hole with an extra step: GitHub cancels a
+# PENDING run when a newer one queues behind it, so a burst of four merges would verify
+# the first and the last and silently drop the two in between. Every merge therefore gets
+# its own run.
+
+on:
+  push:
+    branches: [develop]
+
+# Every job starts read-only. `verdict` widens its own token to `issues: write`
+# explicitly, following pr-labeler.yml's precedent of granting GITHUB_TOKEN exactly what
+# one step needs rather than declaring it here for the whole file.
+permissions:
+  contents: read
+
+jobs:
+  # The two privacy scans ci.yml runs inside `detect`. A merge commit's own message and
+  # identity fields were never scanned by anything before this: check-commit-privacy.sh
+  # ran on the pull request's commits, and the merge commit does not exist yet then.
+  privacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reject publication privacy leaks
+        run: bash scripts/check-publication-privacy.sh
+      # `check-commit-privacy.sh <base> <head>` scans what HEAD adds over the merge base.
+      # On a push that range is `github.event.before` .. `github.event.after`, and
+      # `before` is forty zeroes when the branch is being created — a range that cannot
+      # be read, not an empty one.
+      #
+      # **It fails closed and says which read failed.** Passing the zero SHA through
+      # would make the helper exit 2 with "required commit is unavailable", which is the
+      # right answer arrived at by accident; treating it as "nothing to scan" would be a
+      # privacy check that skips itself on the one event it cannot interpret. There is no
+      # `workflow_dispatch` on this workflow for the same reason: a dispatch carries no
+      # `before` at all, so it could only ever reach this branch. Re-run a failed run
+      # from the UI instead — a re-run replays the original push payload.
+      - name: Reject commit privacy leaks
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          if [ -z "${BEFORE_SHA}" ] || [ "${BEFORE_SHA}" = "$zero" ]; then
+            echo "::error::commit privacy: this push carries no previous tip (before='${BEFORE_SHA:-<empty>}'), so the range cannot be read — refusing to skip the scan" >&2
+            exit 1
+          fi
+          if [ -z "${AFTER_SHA}" ]; then
+            echo "::error::commit privacy: this push carries no new tip, so the range cannot be read — refusing to skip the scan" >&2
+            exit 1
+          fi
+          if ! git rev-parse --verify --quiet "${BEFORE_SHA}^{commit}" >/dev/null; then
+            echo "::error::commit privacy: the previous tip is not present in this checkout, so the range cannot be read — refusing to skip the scan" >&2
+            exit 1
+          fi
+          bash scripts/check-commit-privacy.sh "${BEFORE_SHA}" "${AFTER_SHA}"
+
+  # ── The workload ──────────────────────────────────────────────────────────────
+  #
+  # Each job below is ci.yml's job with its selector removed. The step bodies are
+  # identical by test: integration-verify.test.sh compares them line for line against
+  # ci.yml's, comments aside, so a gate added there and not here is a red `automation`
+  # job rather than a hole nobody sees.
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect workspace presence
+        id: ws
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f server/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "server/ is not scaffolded at this ref — nothing to verify."
+          fi
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Format check (gofmt)
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt violations:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+      - name: Vet
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: go vet ./...
+      - name: Lint (golangci-lint)
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.12.2
+          working-directory: server
+          verify: true
+      - name: Build
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: go build ./...
+      - name: Cross-compile (32-bit)
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          GOARCH=386 go build ./...
+          GOARCH=arm go build ./...
+      - name: Test
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: go test ./...
+
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect workspace presence
+        id: ws
+        working-directory: ${{ github.workspace }}
+        run: |
+          if [ -f client/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "client/ is not scaffolded at this ref — nothing to verify."
+          fi
+      - name: Prefer the canonical Ubuntu archive over the Azure mirror
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            echo "APT mirrors after repointing the Azure entry:"
+            cat /etc/apt/apt-mirrors.txt
+          fi
+      - name: Install Bevy system dependencies
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        timeout-minutes: 5
+        run: |
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            update
+          sudo apt-get \
+            -o Acquire::Retries=2 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          components: rustfmt, clippy
+      # The same cache ci.yml's client job reads and client-cache.yml warms — on the
+      # default branch, which is the scope every pull request may read from. This run is
+      # therefore usually a restore rather than a nine-minute Bevy build.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        with:
+          workspaces: client
+          shared-key: client-gates
+      - name: Format check
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo fmt --all --check
+      - name: Clippy
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo build --workspace --locked
+      - name: Test
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: cargo test --workspace --locked
+
+  schemas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Detect workspace presence
+        id: ws
+        run: |
+          if [ -d schemas ] && [ -n "$(find schemas -name '*.fbs' -print -quit 2>/dev/null)" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "schemas/ holds no .fbs contracts at this ref — nothing to verify."
+          fi
+      - name: Install pinned flatc
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: |
+          FLATC_VERSION="$(tr -d '[:space:]' < .flatc-version)"
+          curl -fsSL -o /tmp/flatc.zip \
+            "https://github.com/google/flatbuffers/releases/download/v${FLATC_VERSION}/Linux.flatc.binary.g++-13.zip"
+          unzip -o /tmp/flatc.zip -d /tmp/flatc-bin
+          sudo install -m 0755 /tmp/flatc-bin/flatc /usr/local/bin/flatc
+          flatc --version
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        if: ${{ steps.ws.outputs.present == 'true' && hashFiles('server/go.mod') != '' }}
+        with:
+          go-version-file: server/go.mod
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        if: ${{ steps.ws.outputs.present == 'true' && hashFiles('client/Cargo.toml') != '' }}
+        with:
+          components: rustfmt
+      - name: Validate contracts
+        if: ${{ steps.ws.outputs.present == 'true' }}
+        run: bash scripts/check-schemas.sh
+
+  # The helper suite. ci.yml ENUMERATES it, deliberately — two of those tests assert
+  # their own presence in that list, so a test that cares about being run says so
+  # itself. Here the glob is right instead, and for the same reason /dev-issue's local
+  # gate globs: this run has no selector to exempt anything from, so the superset is
+  # simply the whole directory. `[ "$failed" -eq 0 ]` is the block's verdict — without
+  # it the loop's status is the last `echo`'s, which is a gate that prints FAILED and
+  # exits 0.
+  automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Automation helper tests
+        run: |
+          failed=0
+          for t in scripts/test/*.test.sh; do
+            printf '== %s\n' "$t"
+            bash "$t" || { echo "FAILED: $t"; failed=1; }
+          done
+          python3 .github/scripts/test_deepseek_review.py || failed=1
+          [ "$failed" -eq 0 ]
+
+  # ── The verdict, and the thing a person actually sees ─────────────────────────
+  #
+  # `always()`, because the whole job exists to speak when something upstream did not —
+  # and `always()` rather than `!cancelled()` on purpose. A cancelled run is an
+  # unverified merge, which is the state this workflow exists to remove, so it is
+  # reported like any other non-success; the body names the job and says `cancelled`, so
+  # a reader can tell a human's cancel from a real breakage in one line. Nothing here
+  # cancels anything, so the only way to reach that is somebody pressing the button.
+  # scripts/integration-gate.sh requires every job above to have reached exactly
+  # `success`: a `skipped` result — someone adding an `if:`, or a job dropped from
+  # `needs` — is rejected rather than read as "nothing to do", which is the one way a
+  # green run could mean less than it says.
+  #
+  # **A red run in a list nobody opens is not a notification**, so a failure files a
+  # GitHub issue: title, the commit, the run URL and which jobs failed. It appears in
+  # the issue list, notifies everyone watching the repository, and stays open until a
+  # person closes it — which is the property a workflow-run email does not have, since
+  # that depends on a per-account notification setting this repository cannot see or
+  # check. Repeat failures comment on the open issue rather than opening a second one.
+  #
+  # **This check can never make READY TO MERGE unreachable.** It runs on `push`, so its
+  # check run attaches to develop's tip and not to any pull request's head commit, which
+  # is the only SHA `pr-status-json` reads; it is not `ci-gate`, so it is not
+  # `REQUIRED_CHECK`; and nothing here writes a label. That is the same reasoning that
+  # keeps `labeler` outside the frozen rule — a broken integration branch must not also
+  # make every open pull request unmergeable, because a merge is sometimes how it gets
+  # fixed.
+  verdict:
+    name: integration-verdict
+    needs: [privacy, server, client, schemas, automation]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The one widened grant, and only for this job: filing the failure report. The
+      # GH_CI_TOKEN precedent in pr-labeler.yml is the shape — GITHUB_TOKEN with the
+      # permission the step needs named on the job, never a new repository secret.
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Evaluate the matrix and report a broken develop
+        env:
+          PRIVACY_RESULT: ${{ needs.privacy.result }}
+          SERVER_RESULT: ${{ needs.server.result }}
+          CLIENT_RESULT: ${{ needs.client.result }}
+          SCHEMAS_RESULT: ${{ needs.schemas.result }}
+          AUTOMATION_RESULT: ${{ needs.automation.result }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INTEGRATION_SHA: ${{ github.sha }}
+          INTEGRATION_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # `|| status=$?` and not a bare call: under `set -e` a failing gate would end
+          # the step where it stands and the report below — the entire point of this
+          # job — would never run. The gate's status is still what the step exits with.
+          status=0
+          bash scripts/integration-gate.sh || status=$?
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          bash scripts/gh-automation.sh integration-report ||
+            echo "::error::develop failed verification AND the failure report could not be filed — this run is the only record"
+          exit "$status"

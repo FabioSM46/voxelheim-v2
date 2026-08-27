@@ -316,6 +316,14 @@ are not the same thing:
    `scripts/interop-check.sh` is not a CI step. An ordering stated in a pull-request body binds
    whoever merges. **Read the bodies.**
 
+   **Since #409 something turns red afterwards, and that is a smaller claim than it sounds.**
+   `.github/workflows/integration.yml` runs the whole workload on `develop` after every merge and
+   files a GitHub issue when it fails, so a combination that is broken only together no longer
+   waits for somebody to happen to build it. What it does **not** do is prevent the merge: it
+   reports after the fact, deliberately, because the alternative shapes cost more than the report
+   is worth (the reasoning is under "What CI enforces"). So the ordering in a pull-request body
+   still binds whoever merges — what changed is only how long a mistake stays invisible.
+
 What still stands: `ci-gate` present and green, the rulesets, `DEEPSEEK_REVIEW_READ` as the one
 acknowledgement that a *person* read a finding, `NO_DEEPSEEK_REVIEW` beside it, and iteration
 planning as a human decision.
@@ -720,6 +728,9 @@ none of them, so an agent following the skills ran four server gates where CI ru
 | `automation` | The full `scripts/test/*.test.sh` suite plus `test_deepseek_review.py` — the pipeline's own regression tests |
 | `ci-gate`    | The one stable check: audits that every selected job succeeded and every skip was authorized |
 
+That is the pull-request half. `.github/workflows/integration.yml` runs the same workload again
+on `develop` after every merge — see "Nothing verified `develop` after a merge" below.
+
 #### CI runs only the jobs the diff can affect (the `detect` job)
 
 Every `ci.yml` run starts with `detect`. On a PR targeting `develop`, it classifies changed
@@ -760,3 +771,61 @@ Two traps to know before trying to trim CI further. Both are ways of making
    `synchronize` always carries a new head SHA, so the cancelled run belongs to a commit
    that is no longer the head and whose checks are never read. A cancellation landing on
    the *current* head SHA pins the PR at `needs-work` until a manual re-run.
+
+#### Nothing verified `develop` after a merge — `integration.yml` does
+
+`ci.yml` runs on a pull request's merge ref **and nowhere else**. Every pull request is therefore
+validated against the `develop` that existed when its run started, and two pull requests branched
+from the same base are each validated against a tree that does not contain the other. A
+combination that is broken only together turns nothing red. #214 and #215 were the first bill for
+that; in Iteration 25, #402 and #403 were verified together only because somebody made a worktree
+by hand and ran the client gates in it. **A process that depends on somebody remembering is not
+one**, and #409 replaced it.
+
+`.github/workflows/integration.yml` runs on `push: branches: [develop]`. It has **no `detect` job
+and no classifier**: the point of a post-merge run is the combination, and a combination is not
+describable as a diff, so every job runs and each no-ops with a notice when its workspace is not
+scaffolded — the same `present` guard, and the same rule a `main`-targeted pull request already
+follows. Alongside the four workloads it re-runs both privacy scans, which is the one thing here
+that is new rather than repeated: a merge commit's own message and identity fields were never
+scanned by anything, because they do not exist yet while the pull request is open.
+
+**Three shapes were weighed and two were rejected.** Adding `push` to `ci.yml` needs one
+definition and no drift, and costs conditionals through `detect`, `concurrency` and the privacy
+step in the file where a mistake is most expensive — the one file whose pull-request behaviour must
+not move. A merge queue (`merge_group`) is strictly better in kind, because it is the only shape
+that *prevents* the broken combination rather than reporting it, and it costs the most: it changes
+how merges happen, it interacts with both rulesets, and `pr-merge` would have to understand it. A
+separate workflow keeps `ci.yml`'s contract untouched by construction and costs drift — which this
+repository already knows how to pay, because `client-cache.yml` is the other copy of that same
+workload and `client-cache-parity.test.sh` is what keeps it honest.
+`scripts/test/integration-verify.test.sh` does the same job here: it **derives** the expected job
+bodies from `ci.yml` and compares them line for line, so the two files can only drift through a red
+`automation` job.
+
+**What a failure looks like.** `integration-verdict` audits every job — a `skipped` or empty result
+is rejected, since a skip here authorises nothing — and on failure runs
+`gh-automation.sh integration-report`, which opens a GitHub issue naming the commit, the run and
+the failing jobs, or comments on the one already open. A red run in a list nobody opens is not a
+notification, and a workflow-run email depends on a per-account setting this repository cannot see;
+an issue is a durable, watchable artifact that stays until a person closes it. Only machine-generated
+facts reach that body: an issue opened by `GITHUB_TOKEN` triggers no workflow, so `body-privacy.yml`
+never scans it. Nothing reverts, rolls back or fixes anything — reporting is the whole of it.
+
+**It cannot make `READY TO MERGE` unreachable, and that is a requirement rather than a
+side effect.** The run is on `develop`'s tip, so its check attaches to a commit that is no pull
+request's head — the only SHA `pr-status-json` reads. It is not `ci-gate`, so it is not
+`REQUIRED_CHECK`. This is the same reasoning that keeps `labeler` outside the frozen rule: a broken
+integration branch must not also make every open pull request unmergeable, because **a merge is
+sometimes how it gets fixed**.
+
+**There is no `concurrency` group, deliberately.** Keyed on `github.event.pull_request.number` —
+`ci.yml`'s group — every push would share the group `ci-`, because that context is empty outside a
+pull request. Keyed on the ref with `cancel-in-progress: true`, an intermediate merge would be
+cancelled and never verified, which is the hole this closes. And `cancel-in-progress: false` is the
+same hole with an extra step: GitHub cancels a **pending** run when a newer one queues behind it, so
+a burst of four merges would verify the first and the last and drop the two between. Every merge
+gets its own run. There is no `workflow_dispatch` either — a dispatch carries no `github.event.before`,
+and the commit-privacy range fails closed on a range it cannot read (a zero `before`, an absent tip),
+so a dispatch could only ever reach that refusal. Re-run a failed run from the UI: a re-run replays
+the original push payload.
