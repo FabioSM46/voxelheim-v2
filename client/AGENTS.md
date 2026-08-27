@@ -833,6 +833,35 @@ from this table — under one white material. One stable mesh asset is rebuilt i
 the selected item or skin colour changes, so arbitrary server colours cannot grow a cache and all
 three swing shapes still move one transform.
 
+**A sword's grip is turned wood, and the wood is reached by division rather than written down.**
+The gladius' three furniture pieces were boxes; the grip is now a cylinder of `GRIP_SIDES`
+inscribed in the box it replaced — same height, radius `GRIP_SIZE.x / 2` — so the three
+`const _: () = assert!` blocks between `GRIP_SIZE` and `HAND_SIZE` are unchanged, because a
+cylinder that stays inside the old extents satisfies every component-wise comparison they make.
+A vertex colour **multiplies** the item colour, so a mesh can only reach what is darker than its
+item in every channel; `wood_over` divides `palette::LOG` by the blade's own steel at build time,
+which lands the rusty sword's grip and the iron sword's on exactly the same wood. A single
+hard-coded multiplier would give them two different woods, silently, because `ForgedSteel` is
+brighter than `WornSteel`. A blade too dark to reach `LOG` in any channel gets steel and a log
+line rather than a colour nobody chose — unreached today, and swept.
+
+**The dropped sword gets the turned grip and not the wood, and that gap is deliberate.**
+`drops::drop_mesh` calls `sword_mesh`, so the geometry costs nothing and there is no second
+cylinder anywhere. The colour cannot follow it: `DropVisuals` caches **one mesh per `ItemShape`**,
+shared by both blades and coloured by a per-item material, and `wood_over` is a division by *that
+item's* steel — so a tint baked into the shared mesh would be right for one sword and quietly
+wrong for the other. `sword_mesh` therefore carries no vertex colours at all and the dropped grip
+stays the steel it has always been. That is an unclosed divergence rather than a new wrong one,
+and it is the same divergence the drop already has about rust.
+
+**Two independent readings guard a new solid, and signed volume is the general one.** A ring
+walked the wrong way round builds a part inside out; back-face culling then discards its front
+faces and keeps its back ones, so the result is a solid that renders transparent — what
+`BladeSection::perimeter` calls "a sword that vanishes when you look at it".
+`every_solid_in_the_sword_is_wound_outward` sums the divergence theorem over every triangle and
+requires a positive volume, and asserts the reversed winding reads negative so the test is not
+proving the mesh with the mesh. It covers the cylinder and every solid added after it.
+
 **The item colour source is deliberately beside the block palette rather than inside its id
 space.** `ItemColour::Block` reuses an existing terrain swatch for a block-like item;
 `WornSteel` and `ForgedSteel` are client-only presentation colours for things no block honestly
