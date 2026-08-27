@@ -1657,6 +1657,8 @@ fn craft_clicks(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
+    use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+    use bevy::input::{ButtonState, InputPlugin};
 
     use super::super::{COUNT_PLATE, DrawnCell, FILLED_CELL, drawn_cell, icon};
     use super::*;
@@ -2713,6 +2715,143 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// One keyboard event in the shape winit delivers it.
+    ///
+    /// Written as a message rather than poked into [`ButtonInput`] because that resource is
+    /// `keyboard_input_system`'s to maintain: it clears `just_pressed` at the top of every
+    /// frame, so a press set directly reaches `Update` already forgotten. `player/combat.rs`
+    /// says the same thing about the mouse half.
+    ///
+    /// `logical_key` is deliberately unidentified: `keyboard_input_system` presses it into
+    /// `ButtonInput<Key>`, which nothing on this path reads, and naming a layout here would
+    /// suggest otherwise.
+    fn key_event(key: KeyCode, state: ButtonState, repeat: bool) -> KeyboardInput {
+        KeyboardInput {
+            key_code: key,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat,
+            window: Entity::PLACEHOLDER,
+        }
+    }
+
+    /// The inventory screen with the real keyboard pipeline behind it, one cell hovered.
+    ///
+    /// [`InputPlugin`] is the whole difference from [`consume_frame`]: it puts
+    /// `keyboard_input_system` in `PreUpdate`, so `ButtonInput<KeyCode>` is maintained the
+    /// way the running client maintains it — cleared each frame, pressed once per `Pressed`
+    /// event, and emptied of a key only by a `Released`. A test that set the resource by
+    /// hand across frames would be restating that mechanism instead of exercising it.
+    fn held_key_app() -> App {
+        let mut app = app();
+        app.add_plugins(InputPlugin);
+        app.update();
+
+        let cell = cell_at(&mut app, HOVERED_SLOT);
+        *app.world_mut()
+            .entity_mut(cell)
+            .get_mut::<Interaction>()
+            .expect("buttons carry Interaction") = Interaction::Hovered;
+        app
+    }
+
+    /// Runs one frame after delivering the events winit would have delivered for it, and
+    /// reports what the screen wrote.
+    fn keyboard_frame(
+        app: &mut App,
+        events: impl IntoIterator<Item = KeyboardInput>,
+    ) -> Vec<InventoryClick> {
+        for event in events {
+            app.world_mut().write_message(event);
+        }
+        app.update();
+        app.world_mut()
+            .resource_mut::<Messages<InventoryClick>>()
+            .drain()
+            .collect()
+    }
+
+    fn consume_press() -> InventoryClick {
+        InventoryClick {
+            slot: HOVERED_SLOT,
+            kind: InventoryClickKind::Consume,
+        }
+    }
+
+    /// **A held consume key is one press, measured rather than read out of a dependency.**
+    ///
+    /// This exists to answer the review finding on PR #403, which argued that OS key repeat
+    /// would re-arm `just_pressed` every frame and drain a food stack automatically. The
+    /// finding was refuted and the thread resolved, but nothing in this tree pinned the
+    /// refutation: half of it is right — `keyboard_input_system` does not filter
+    /// `KeyboardInput { repeat: true }` — and what saves the other half lives in
+    /// `bevy_input`, whose `press()` arms `just_pressed` only when `pressed.insert()`
+    /// reports the key was not already down. That is a **dependency's** guarantee, so a Bevy
+    /// upgrade could take it away with nothing here turning red. Do not delete this as
+    /// redundant with the single-frame cases above: they press for one frame and would
+    /// notice nothing.
+    ///
+    /// The cell under the pointer is [`HOVERED_SLOT`], which is occupied and nothing more:
+    /// whether what is in it may be eaten is `player::inventory`'s question, and asking it
+    /// here is what this module's "nothing is decided here" contract forbids. What a
+    /// repeat would have drained is a stack, and this is the press that would have drained
+    /// it.
+    #[test]
+    fn holding_the_consume_key_reports_one_press_and_a_later_press_reports_again() {
+        const KEY: KeyCode = KeyCode::KeyC;
+        let mut app = held_key_app();
+        let mut reported = Vec::new();
+
+        reported.extend(keyboard_frame(
+            &mut app,
+            [key_event(KEY, ButtonState::Pressed, false)],
+        ));
+        // Three more frames of the key being held: the repeats winit sends when the OS is
+        // configured to send them, then a frame carrying no event at all, which is what the
+        // same held key looks like when it is not.
+        for _ in 0..3 {
+            reported.extend(keyboard_frame(
+                &mut app,
+                [key_event(KEY, ButtonState::Pressed, true)],
+            ));
+            assert!(
+                app.world().resource::<ButtonInput<KeyCode>>().pressed(KEY),
+                "a repeat is not a release"
+            );
+        }
+        reported.extend(keyboard_frame(&mut app, []));
+        assert!(
+            app.world().resource::<ButtonInput<KeyCode>>().pressed(KEY),
+            "a silent frame is not a release either"
+        );
+        assert_eq!(
+            reported,
+            vec![consume_press()],
+            "a held key is one press, so one stack is not eaten frame by frame"
+        );
+
+        // Releasing and pressing again has to report a second time. A test that only proved
+        // "one" would pass just as well if the key had stopped working entirely.
+        reported.extend(keyboard_frame(
+            &mut app,
+            [key_event(KEY, ButtonState::Released, false)],
+        ));
+        assert!(
+            !app.world().resource::<ButtonInput<KeyCode>>().pressed(KEY),
+            "the key was let go"
+        );
+        reported.extend(keyboard_frame(
+            &mut app,
+            [key_event(KEY, ButtonState::Pressed, false)],
+        ));
+        assert_eq!(
+            reported,
+            vec![consume_press(), consume_press()],
+            "a press after a release is a second press"
+        );
     }
 
     // -----------------------------------------------------------------------
