@@ -129,7 +129,7 @@ func TestAPlayerIsAdmittedWithTheAccountServiceGone(t *testing.T) {
 	// Gone. Not slow, not flaky: closed, with its listener released.
 	service.Close()
 
-	identities, err := session.NewIdentities(nil, nil, verifier, discard())
+	identities, err := session.NewIdentities(nil, nil, nil, verifier, discard())
 	if err != nil {
 		t.Fatalf("NewIdentities: %v", err)
 	}

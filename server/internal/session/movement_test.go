@@ -51,6 +51,11 @@ type collector struct {
 	// test needs to see is how the ledger was paged, not only what it added up to.
 	explored [][]world.Column
 
+	// markerLists is every MarkerList this session received, in order and unmerged. A
+	// list replaces the client's copy wholesale, so the order is the whole of the
+	// meaning: what matters is what the *last* one says, and how many arrived before it.
+	markerLists [][]protocol.Marker
+
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
 	// how the client reads it.
@@ -293,6 +298,22 @@ func (c *collector) absorb(frame []byte) {
 		closed.Init(table.Bytes, table.Pos)
 		c.lootClosed = append(c.lootClosed, closed.CorpseId())
 
+	case vnet.PayloadMarkerList:
+		list := new(vnet.MarkerList)
+		list.Init(table.Bytes, table.Pos)
+		marks := make([]protocol.Marker, 0, list.MarkersLength())
+		for index := range list.MarkersLength() {
+			marker := new(vnet.Marker)
+			if !list.Markers(marker, index) {
+				continue
+			}
+			marks = append(marks, protocol.Marker{
+				MarkerID: marker.MarkerId(), X: marker.X(), Z: marker.Z(),
+				Kind: marker.Kind(), Note: string(marker.Note()),
+			})
+		}
+		c.markerLists = append(c.markerLists, marks)
+
 	case vnet.PayloadMapExplored:
 		page := new(vnet.MapExplored)
 		page.Init(table.Bytes, table.Pos)
@@ -335,6 +356,18 @@ func (c *collector) exploredColumns() map[world.Column]struct{} {
 		}
 	}
 	return columns
+}
+
+// markerListsSeen is every MarkerList this session received, in order and unmerged.
+func (c *collector) markerListsSeen() [][]protocol.Marker {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	lists := make([][]protocol.Marker, len(c.markerLists))
+	for i, list := range c.markerLists {
+		lists[i] = slices.Clone(list)
+	}
+	return lists
 }
 
 // actionRefusals is every refusal the server has answered this session with, in order.

@@ -143,7 +143,14 @@ func identitiesOver(store *persist.Store) *session.Identities {
 // identitiesExploring is identitiesOver with a map ledger behind it too, for the tests
 // that are about what a character has walked rather than about what it is carrying.
 func identitiesExploring(store *persist.Store, explored *persist.ExplorationStore) *session.Identities {
-	identities, err := session.NewIdentities(store, explored, testVerifier(), nil)
+	return identitiesMapping(store, explored, nil)
+}
+
+// identitiesMapping is the whole map behind a claim set: the ledger of where a character
+// has been and the marks it has put on it, either of them nil for a world that remembers
+// that half of the map only for as long as the process lasts.
+func identitiesMapping(store *persist.Store, explored *persist.ExplorationStore, marks *persist.MarkerStore) *session.Identities {
+	identities, err := session.NewIdentities(store, explored, marks, testVerifier(), nil)
 	if err != nil {
 		// Unreachable, and a panic for the reason testVerifier's is.
 		panic("session_test: building a claim set: " + err.Error())

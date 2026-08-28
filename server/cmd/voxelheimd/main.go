@@ -279,6 +279,11 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return err
 	}
 
+	marks, err := openMarkers(opts, log)
+	if err != nil {
+		return err
+	}
+
 	tr, fingerprint, err := listen(opts, log)
 	if err != nil {
 		return err
@@ -304,7 +309,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// every session — being the one place that knows an account is already playing is
 	// the whole of what it does, and it holds the verifier for the same reason: one
 	// key, read once, shared by every door.
-	identities, err := session.NewIdentities(players, explored, verifier, log)
+	identities, err := session.NewIdentities(players, explored, marks, verifier, log)
 	if err != nil {
 		return err
 	}
@@ -538,6 +543,38 @@ func openExploration(opts options, log *slog.Logger) (*persist.ExplorationStore,
 	log.Info("exploration store opened",
 		"exploration_dir", store.Dir(), "format_version", persist.ExplorationVersion,
 		"max_columns_per_character", persist.MaxExploredColumns)
+
+	return store, nil
+}
+
+// openMarkers opens the per-character marker files under the same -world-dir, or answers
+// nil for an ephemeral world.
+//
+// Nil rather than a store that writes nowhere, the shape openWorld, openPlayers,
+// openStructures, openClock and openExploration all use. An ephemeral world's characters
+// still put marks on the map and are still answered with the whole list; what it does not
+// do is remember any of it after the process ends, which is exactly the difference the
+// operator chose.
+//
+// **No scan and no index**, for the reason openExploration gives: a character's marks are
+// opened by the id of the character playing them, one file at a time, and there is no
+// question about the directory as a whole for a startup pass to answer. A file this build
+// cannot read is therefore found at the login that needs it and set aside there — see
+// session.Identities.recallMarkers, which is also where the reason it does not refuse that
+// login is written down.
+func openMarkers(opts options, log *slog.Logger) (*persist.MarkerStore, error) {
+	if opts.worldDir == "" {
+		// openWorld has already warned that this world is ephemeral.
+		return nil, nil
+	}
+
+	store, err := persist.OpenMarkerStore(opts.worldDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening the marker store: %w", err)
+	}
+	log.Info("marker store opened",
+		"markers_dir", store.Dir(), "format_version", persist.MarkersVersion,
+		"max_marks_per_character", persist.MaxMarkers, "max_note_bytes", persist.MaxMarkerNote)
 
 	return store, nil
 }
