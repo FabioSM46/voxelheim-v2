@@ -15,6 +15,46 @@ func TestBlockIDsStayAppendOnly(t *testing.T) {
 	}
 }
 
+// The palette's two answers about water, which every consumer outside this package
+// reads instead of comparing ids of its own.
+//
+// **Neither is `!` of the other, and that is the whole reason both exist.** Air is
+// not solid and is not a fluid either, so a swim rule written against `!Solid` would
+// have a body treading water in mid air; ice is solid and is not a fluid, because it
+// is the lid you walk out onto.
+func TestWaterIsPassableAndIceIsNot(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		block                   Block
+		solid, fluid, placeable bool
+	}{
+		{Air, false, false, false},
+		{Water, false, true, false},
+		{Ice, true, false, true},
+		{Stone, true, false, true},
+		{Gravel, true, false, true},
+		{CoalOre, true, false, false},
+	} {
+		if got := Solid(tc.block); got != tc.solid {
+			t.Errorf("Solid(%d) = %t, want %t", tc.block, got, tc.solid)
+		}
+		if got := Fluid(tc.block); got != tc.fluid {
+			t.Errorf("Fluid(%d) = %t, want %t", tc.block, got, tc.fluid)
+		}
+		if got := Placeable(tc.block); got != tc.placeable {
+			t.Errorf("Placeable(%d) = %t, want %t", tc.block, got, tc.placeable)
+		}
+	}
+
+	// The two ids are appended, which is the whole of the compatibility rule: every id
+	// below them is already inside chunks a client holds and inside the delta files a
+	// played-in world directory holds.
+	if Water != 12 || Ice != 13 {
+		t.Errorf("Water = %d and Ice = %d, want the appended wire ids 12 and 13", Water, Ice)
+	}
+}
+
 // The index order is wire contract: schemas/world.fbs documents it and the
 // client's mesher indexes in it, so these four values are part of the protocol.
 func TestIndexOrderIsXFastestThenZThenY(t *testing.T) {

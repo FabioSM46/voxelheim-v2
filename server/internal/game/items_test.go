@@ -228,6 +228,7 @@ func TestTheThreeGroundBlocksOfWorldgenThreeCarryTheirPinnedIDs(t *testing.T) {
 		{ItemSand, 31, world.Sand},
 		{ItemSandstone, 32, world.Sandstone},
 		{ItemGravel, 33, world.Gravel},
+		{ItemIce, 34, world.Ice},
 	} {
 		if tc.item != tc.id {
 			t.Errorf("item id = %d, want appended wire id %d", tc.item, tc.id)
@@ -270,6 +271,7 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		world.Sand:      ItemSand,
 		world.Sandstone: ItemSandstone,
 		world.Gravel:    ItemGravel,
+		world.Ice:       ItemIce,
 	}
 	for block, itemID := range want {
 		if got := itemDroppedBy(block); got != itemID {
@@ -278,6 +280,13 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 	}
 	if got := itemDroppedBy(world.Air); got != ItemNone {
 		t.Errorf("Air drops item %d, want nothing", got)
+	}
+	// **Water is the second id with no yield, and unlike Leaves it has no row at
+	// all.** Leaves are breakable and drop nothing, which is a decision the table has
+	// to record; water is not breakable, so an absent row is the right shape and the
+	// fail-closed default is the right answer.
+	if got := itemDroppedBy(world.Water); got != ItemNone {
+		t.Errorf("Water drops item %d, want nothing", got)
 	}
 }
 
@@ -296,6 +305,7 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 		world.Sand:      0,
 		world.Sandstone: 0,
 		world.Gravel:    0,
+		world.Ice:       0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))

@@ -84,6 +84,7 @@ func (w dropTerrain) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w dropTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w dropTerrain) Solid(x, y, z int64) bool {
 	block, resident := w.Block(x, y, z)

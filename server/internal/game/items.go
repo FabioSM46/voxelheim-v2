@@ -96,6 +96,13 @@ const (
 	ItemSand
 	ItemSandstone
 	ItemGravel
+
+	// What worldgen 5 put in the ground to dig up, and there is exactly one of it: a
+	// player can carry the lid off a frozen lake, and cannot carry the lake. Appended
+	// for the reason every id above was — iota renumbers everything after an
+	// insertion, and this number is in a client's inventory the moment somebody breaks
+	// ice — and pinned by a test.
+	ItemIce
 )
 
 // What each blade is worth, and the only copy of it.
@@ -393,6 +400,11 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemSand:      {places: world.Sand, maxStack: 64},
 	ItemSandstone: {places: world.Sandstone, maxStack: 64},
 	ItemGravel:    {places: world.Gravel, maxStack: 64},
+
+	// Ice, on the same terms. **There is no ItemWater beside it, and that absence is
+	// the design rather than an omission**: water is never placeable, never breakable
+	// and drops nothing, so there is no object for a row to describe.
+	ItemIce: {places: world.Ice, maxStack: 64},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an
@@ -410,6 +422,7 @@ var blockDrops = map[world.Block]ItemID{
 	world.Sand:      ItemSand,
 	world.Sandstone: ItemSandstone,
 	world.Gravel:    ItemGravel,
+	world.Ice:       ItemIce,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -431,6 +444,9 @@ var blockExperience = map[world.Block]uint16{
 	world.Sand:      0,
 	world.Sandstone: 0,
 	world.Gravel:    0,
+
+	// And a fourth: breaking the ice off a lake is a way in, not a lesson.
+	world.Ice: 0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {

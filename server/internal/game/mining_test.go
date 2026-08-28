@@ -37,6 +37,7 @@ func (w *miningWorld) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return w.blocks[[3]int64{x, y, z}], true
 }
+func (w *miningWorld) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w *miningWorld) Solid(x, y, z int64) bool {
 	// A flat floor holds test players still. Explicit fixture blocks participate in

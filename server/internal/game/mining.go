@@ -84,6 +84,16 @@ var handMiningTimes = map[world.Block]time.Duration{
 	world.Sand:      500 * time.Millisecond,
 	world.Gravel:    600 * time.Millisecond,
 	world.Sandstone: 2 * time.Second,
+
+	// The lid on a frozen lake. Between a log and stone: harder than the snow beside
+	// it because it is not snow, and softer than rock because breaking a hole in ice
+	// is meant to be a way into the water rather than a quarrying job.
+	//
+	// **Water is deliberately absent, and the absence is the rule.** An id with no row
+	// here is not breakable at all, which is how Air is refused, so a mine request on
+	// water is refused by exactly the mechanism that already existed — no branch, no
+	// id comparison anywhere on the mining path.
+	world.Ice: 1500 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -136,6 +146,7 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		world.CoalOre:   {},
 		world.IronOre:   {},
 		world.Sandstone: {},
+		world.Ice:       {},
 	},
 	ItemAxe: {
 		world.Log:    {},

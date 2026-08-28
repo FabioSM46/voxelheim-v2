@@ -51,6 +51,18 @@ const (
 // the collision code is exercised against a shape nobody had to generate.
 // ---------------------------------------------------------------------------
 
+// blockReader and fluidByBlock are the copy for this file's fixtures. The one they
+// are a copy of is in terrain_fixture_test.go, which carries the reasoning; this is
+// the only fixture file outside `package game`, so it cannot borrow that one.
+type blockReader interface {
+	Block(x, y, z int64) (world.Block, bool)
+}
+
+func fluidByBlock(t blockReader, x, y, z int64) bool {
+	block, resident := t.Block(x, y, z)
+	return resident && world.Fluid(block)
+}
+
 // flatWorld is solid at and below groundTop, air above. The top face of the surface
 // is therefore at groundTop+1, which is where a player comes to rest.
 type flatWorld struct{ groundTop int64 }
@@ -62,6 +74,7 @@ func (w flatWorld) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w flatWorld) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // thinFloor is a single solid layer with nothing above or below it. What a long fall
 // has to be stopped by: three blocks of travel in one tick would step straight over
@@ -75,6 +88,7 @@ func (w thinFloor) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w thinFloor) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // wallWorld is a flat world with a solid slab from wallX eastwards.
 type wallWorld struct {
@@ -91,6 +105,7 @@ func (w wallWorld) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w wallWorld) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // ledgeWorld is high ground north of edgeZ and low ground south of it.
 type ledgeWorld struct {
@@ -111,6 +126,7 @@ func (w ledgeWorld) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w ledgeWorld) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // emptyWorld is all air. Nothing to stand on, which is the only way to observe an
 // unimpeded fall.
@@ -120,6 +136,7 @@ func (emptyWorld) Solid(_, _, _ int64) bool { return false }
 func (emptyWorld) Block(_, _, _ int64) (world.Block, bool) {
 	return world.Air, true
 }
+func (w emptyWorld) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // ---------------------------------------------------------------------------
 // The harness

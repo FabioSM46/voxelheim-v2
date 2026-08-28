@@ -1042,17 +1042,22 @@ production caller of `game.IsNight`.
   A column of terrain the cache has not composed would otherwise read as perfectly good
   ground under a perfectly clear sky. The surface voxel is re-read with `Terrain.Block`,
   which reports residency, and a non-resident one is a refusal.
-- **The headroom is asked for by block rather than inferred from the scan, and today that
-  question cannot come back no.** `Solid` is `!resident || block != Air`, so "not solid"
-  is exactly "resident air", and a scan that stopped at the first solid voxel has already
-  left air in every cell above it. **That equivalence belongs to the palette, not to the
-  rule**: it holds only while nothing in this world is passable, and the first fluid a
-  body can wade into ends it — the scan would walk straight down through the water and
-  hand back the lake bed with the lake still on top of it. The criterion is two blocks of
-  air, so the director asks for two blocks of air, in the shape `footprintFitsLocked`
-  already asks it for a structure's footprint. `TestNothingSpawnsInsideAFluid` scripts
-  such a block, so the check is pinned rather than dormant: delete it and a test goes red
-  today, not on the day somebody adds water.
+- **The headroom is asked for by block rather than inferred from the scan, and since
+  worldgen 5 that question comes back no.** `Solid` used to be `!resident || block != Air`,
+  so "not solid" was exactly "resident air" and a scan that stopped at the first solid
+  voxel had already left air in every cell above it. **That equivalence belonged to the
+  palette, not to the rule**, and water ended it: the classification now lives in
+  `world.Solid`, and the scan walks straight down through a lake and hands back the bed
+  with the lake still on top of it. The criterion is two blocks of air, so the director
+  asks for two blocks of air, in the shape `footprintFitsLocked` already asks it for a
+  structure's footprint. `TestNothingSpawnsInsideAFluid` was written against a synthetic
+  block before there was a real one; it now scripts `world.Water`.
+- **And the floor is asked about by name, because ice is the case the headroom rule cannot
+  reach.** A lid of ice over a lake is *solid*, so the downward scan stops on it, the two
+  cells above it are honest air, and every other check the director makes says yes.
+  `standableFloor` is the one thing that refuses it — a blacklist rather than a whitelist,
+  deliberately, because an unclassified block is ordinary ground and refusing to spawn on
+  it would silently empty a region every time the palette grew.
 - **One draw and one legality test per player per pass, and a refusal is not retried
   inside the pass.** That is what makes a pass a constant amount of work whatever the
   terrain looks like: a player standing in the middle of a lake would otherwise cost an
@@ -2296,6 +2301,16 @@ Recorded here so the next reader does not mistake them for oversights:
   Fimbulvetr storm is the reclaim, and it is its own issue.
 - **No fall damage, no health, no death.** A player who falls a hundred blocks lands and walks
   away. `TerminalFallSpeed` exists to bound the per-tick step, not to model anything.
+- **Water does not flow, and nothing drowns in it.** A voxel is `Water` because whatever wrote
+  it said so at that coordinate; there is no source, no spread and no distinction between the two.
+  Mining the wall beside a lake leaves a dry hole, and placing a block into water displaces it as
+  one ordinary delta — which is exactly what buys the generator its purity, and therefore what the
+  Fimbulvetr storm's "regenerate to the original procedural state" rests on. There is no breath
+  meter and no underwater damage either. **Mobs are not taught to swim**: a creature that walks
+  into a lake sinks and walks along the bed, because a mob has a path where a player has intent,
+  and answering the swim rules for a path is a change to the pathing. The spawn director is what
+  keeps that from being the common case — it refuses a spot whose floor or headroom is water or
+  ice — so a mob only ever reaches a lake by walking there.
 - **No anti-cheat beyond the speed clamp and the discard rule.** A client can send input as fast as
   it likes; the server only ever applies the newest one per tick, so the ceiling is the tick rate.
   Rate limiting the *socket* is a backpressure issue, not a movement one. `ChunkResendRequest` is
