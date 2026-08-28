@@ -62,13 +62,13 @@ pub use codec::{
     DropItemRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
     InventoryStack, InventoryState, ItemDropState, LifeState, LootClosed, LootEntry,
     LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS, MAP_TILE_EDGE,
-    MAX_VIEW_DISTANCE, MapColumn, MapExplored, MapSurface, MapTile, MapTileRequest, MineProgress,
-    MineRequest, MobAction, MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction,
-    PartyInvite, PartyMemberState, PartyRequest, PartyRosterMember, PlaceStructureRequest,
-    PlayerAppearance, PlayerInput, PlayerVitals, ProjectileKind, ProjectileState, RecipeId,
-    RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams,
-    Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate, map_tile_explored_bytes,
-    map_tile_span,
+    MAX_VIEW_DISTANCE, MapColumn, MapExplored, MapSurface, MapTile, MapTileRequest, Marker,
+    MarkerKind, MarkerList, MineProgress, MineRequest, MobAction, MobHit, MobKind, MobState,
+    PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
+    PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
+    ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
+    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
+    WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
@@ -500,9 +500,11 @@ impl LootInbox {
 
 /// Map payloads not yet consumed by the map screen, in wire order.
 ///
-/// Order is what makes the two kinds one queue rather than two: a `MapExplored` that
-/// arrives after a tile evicts it, and one that arrives before it does not, so the two
-/// cannot be sorted into separate inboxes without losing which happened first.
+/// Order is what makes these one queue rather than three: a `MapExplored` that arrives
+/// after a tile evicts it, and one that arrives before it does not, so the two cannot be
+/// sorted into separate inboxes without losing which happened first. A `MarkerList` joins
+/// them for the weaker reason that it is the same consumer and the same session rule --
+/// each list replaces the last outright, so nothing about it depends on order.
 ///
 /// It carries no session lifetime of its own, and no inbox in this module does: each is
 /// drained unconditionally every `Update` by its consumer, with no run condition, so an
@@ -513,13 +515,15 @@ impl LootInbox {
 #[derive(Resource, Debug, Default)]
 pub struct MapInbox(Vec<MapEvent>);
 
-/// The two server-owned things the map screen receives.
+/// The server-owned things the map screen receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MapEvent {
     /// One square, drawn for this character at the scale it was asked for.
     Tile(MapTile),
     /// One page of the ledger of where this character has been.
     Explored(MapExplored),
+    /// Every mark this character holds, **replacing** the screen's copy wholesale.
+    Markers(MarkerList),
 }
 
 /// Enough room for a full screen of tiles and the ledger pages a join sends, while an
@@ -1615,6 +1619,16 @@ fn drain_session_events(
             Ok(SessionEvent::MapExplored(explored)) => {
                 if let Some(map) = inboxes.map.as_deref_mut() {
                     map.push_bounded(MapEvent::Explored(explored));
+                }
+            }
+            // Not logged either, and it is the one of the three that could have been: a
+            // list arrives on join and once per accepted mark, which is rare enough for a
+            // line. It is queued silently anyway, because the marks on the screen are the
+            // signal a player reads and a second one in the log would only be a place for
+            // the two to disagree.
+            Ok(SessionEvent::MarkerList(list)) => {
+                if let Some(map) = inboxes.map.as_deref_mut() {
+                    map.push_bounded(MapEvent::Markers(list));
                 }
             }
 
