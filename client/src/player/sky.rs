@@ -48,11 +48,13 @@
 use std::f32::consts::{PI, TAU};
 use std::time::Instant;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::camera::WorldCamera;
-use crate::net::{Session, WorldClock};
+use crate::net::{BlockCoord, Session, WorldClock};
 use crate::settings::Settings;
+use crate::world::{ChunkStore, palette};
 
 /// How long dusk and dawn take, in seconds of real time.
 ///
@@ -162,6 +164,29 @@ const NIGHT_AMBIENT_BRIGHTNESS: f32 = 480.0;
 /// across the far half. Earlier and the world feels like a room; later and the fade is too
 /// abrupt to hide the edge it exists to hide.
 const FOG_START_FRACTION: f32 = 0.5;
+
+/// The sky and the fog seen from inside water, as sRGB.
+///
+/// **Not a time of day, and it overrides one.** Under a lake the sun is above the surface and
+/// what reaches the eye is whatever the water lets through, which does not care what hour it
+/// is. Bright enough to be readable — going under must not read as going blind — and far
+/// enough from every sky above it that the surface is a boundary the player can feel from
+/// underneath.
+const UNDERWATER_SKY: [f32; 3] = [0.05, 0.22, 0.35];
+
+/// How far a submerged eye sees, in blocks.
+///
+/// Ten, and short on purpose: it makes water a place with its own scale rather than the same
+/// view with a filter on it, and it is what stands between the player and the fact that this
+/// client draws no caustics, no surface from below and no light shafts. The render-distance
+/// setting is deliberately not consulted — that is a choice about how much *world* to draw,
+/// and how far you see through water is a property of the water.
+const UNDERWATER_VISIBILITY: f32 = 10.0;
+
+/// Where the underwater fog begins, in blocks: the same half of the way out that
+/// [`FOG_START_FRACTION`] puts it above the surface, so the fade has the same shape at a
+/// tenth of the scale.
+const UNDERWATER_START: f32 = UNDERWATER_VISIBILITY * FOG_START_FRACTION;
 
 /// Marks the one directional light this module owns.
 #[derive(Component)]
@@ -380,6 +405,22 @@ pub(super) fn spawn_sun(mut commands: Commands) {
     ));
 }
 
+/// Everything the sky is computed from, and nothing it writes.
+///
+/// One `SystemParam` rather than four resources threaded through a signature, for the reason
+/// [`super::camera::Aim`] is one: it names "the state the light is a function of" and it keeps
+/// [`drive_the_sky`] inside the argument budget the store took it past.
+#[derive(SystemParam)]
+pub(super) struct SkyInputs<'w> {
+    session: Option<Res<'w, Session>>,
+    clock: Res<'w, SkyClock>,
+    /// Read for exactly one question — is the eye inside a voxel of water — and read
+    /// only. This is the fourth edge from `player` to `world`, and `client/AGENTS.md`
+    /// enumerates it beside the other three.
+    store: Option<Res<'w, ChunkStore>>,
+    settings: Option<Res<'w, Settings>>,
+}
+
 /// Puts the sun, the sky, the ambient term and the fog where the server's clock says they
 /// are.
 ///
@@ -394,9 +435,15 @@ pub(super) fn spawn_sun(mut commands: Commands) {
 /// every frame would only mark two components changed for the rest of the session. The fog
 /// is the exception and is set either way, because how far the world is streamed is not a
 /// time of day.
+///
+/// **Water is the second exception, and it overrides the clock rather than blending with it.**
+/// When the camera's eye is inside a voxel of water the sky and the fog become
+/// [`UNDERWATER_SKY`] over [`UNDERWATER_VISIBILITY`] blocks, whatever hour it is and whether
+/// or not the server keeps a clock. Only those two: the sun's direction, its illuminance and
+/// the ambient term stay where the day left them, so terrain under water is lit as terrain
+/// and tinted rather than re-illuminated.
 pub(super) fn drive_the_sky(
-    session: Option<Res<Session>>,
-    clock: Res<SkyClock>,
+    read: SkyInputs<'_>,
     mut sun: Query<(&mut DirectionalLight, &mut Transform), With<Sun>>,
     mut cameras: Query<
         (
@@ -407,10 +454,20 @@ pub(super) fn drive_the_sky(
         ),
         With<WorldCamera>,
     >,
+    // Read separately from the query above, and `Without<Sun>` because the sun's `Transform`
+    // is taken mutably here: Bevy cannot prove the two filters name different entities and
+    // refuses the system rather than risk aliasing them.
+    eyes: Query<&Transform, (With<WorldCamera>, Without<Sun>)>,
     mut commands: Commands,
     mut announced: Local<bool>,
-    settings: Option<Res<Settings>>,
+    mut was_submerged: Local<bool>,
 ) {
+    let SkyInputs {
+        session,
+        clock,
+        store,
+        settings,
+    } = read;
     let Some(session) = session else {
         return;
     };
@@ -484,9 +541,32 @@ pub(super) fn drive_the_sky(
     );
     let ambient_brightness = light.ambient_brightness * brightness_scale;
 
+    // **The one thing in this module that is a function of where the player is.** `AimCamera`
+    // moves the camera after the set this system runs in, so the position read here is the one
+    // the previous frame drew from — which is why crossing the surface changes the sky on the
+    // next frame rather than this one.
+    let submerged = eyes.iter().next().is_some_and(|eye| {
+        submerged_at(
+            store.as_deref(),
+            eye.translation,
+            usize::from(params.chunk_size),
+        )
+    });
+    let (sky, start, end) = if submerged {
+        (submerged_sky(), UNDERWATER_START, UNDERWATER_VISIBILITY)
+    } else {
+        (light.sky, start, end)
+    };
+
     for (entity, mut camera, mut ambient, fog) in &mut cameras {
-        if declared {
-            camera.clear_color = ClearColorConfig::Custom(light.sky);
+        // Written on the frame the player goes under and on the frame they come back
+        // up, whatever the clock says — a server with no time of day still has to stop
+        // showing the underwater sky once the eye leaves the water. `*was_submerged` is
+        // what carries the second of those: `ClearColorConfig` has no `PartialEq` to
+        // compare against, so the restoring write is triggered by the transition rather
+        // than by a difference.
+        if declared || submerged || *was_submerged {
+            camera.clear_color = ClearColorConfig::Custom(sky);
         }
         // Outside the `declared` gate and guarded instead, because the brightness setting
         // moves on a server with no clock too — and the guard is what keeps an undeclared sky
@@ -501,20 +581,55 @@ pub(super) fn drive_the_sky(
             // ever moves — an unconditional write would re-extract the fog into the render
             // world on every frame of a session whose sky is a constant.
             Some(mut fog) => {
-                if fog.color != light.sky || !fades_between(&fog.falloff, start, end) {
-                    fog.color = light.sky;
+                if fog.color != sky || !fades_between(&fog.falloff, start, end) {
+                    fog.color = sky;
                     fog.falloff = FogFalloff::Linear { start, end };
                 }
             }
             None => {
                 commands.entity(entity).insert(DistanceFog {
-                    color: light.sky,
+                    color: sky,
                     falloff: FogFalloff::Linear { start, end },
                     ..default()
                 });
             }
         }
     }
+
+    *was_submerged = submerged;
+}
+
+/// Whether the voxel holding `eye` is water.
+///
+/// Presentation, and only presentation: the server decides what being in water *does* —
+/// `world.Fluid` drives the swim physics and this client predicts none of it — and this
+/// decides what it looks like. The two read the same block id and agree by construction
+/// rather than by a second copy of the rule.
+///
+/// A store this session has no chunk for answers air, which is [`ChunkStore::block_at`]'s
+/// own rule: a lake nobody has been sent is not one the player is inside.
+fn submerged_at(store: Option<&ChunkStore>, eye: Vec3, chunk_size: usize) -> bool {
+    let Some(store) = store else {
+        return false;
+    };
+    if !eye.is_finite() {
+        return false;
+    }
+    // `floor`, never a cast, for the reason `player/target.rs`'s raycast gives: `-0.5 as
+    // i32` truncates to 0 and the voxel containing -0.5 is -1. Half the world is on that
+    // side of the origin.
+    let voxel = eye.floor().as_ivec3();
+    let pos = BlockCoord {
+        x: voxel.x,
+        y: voxel.y,
+        z: voxel.z,
+    };
+    store.block_at(pos, chunk_size) == palette::WATER
+}
+
+/// The colour a submerged camera clears to and fades into.
+fn submerged_sky() -> Color {
+    Color::srgb(UNDERWATER_SKY[0], UNDERWATER_SKY[1], UNDERWATER_SKY[2])
 }
 
 /// Where the fog begins and where it is total, in blocks.
@@ -891,5 +1006,113 @@ mod tests {
             (wrapped - 10.0).abs() < 1e-3,
             "a second past 23 990 read {wrapped}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Under water
+    // -----------------------------------------------------------------------
+
+    /// A store holding one voxel of water in the chunk at the origin.
+    fn water_at(local: [usize; 3], size: usize) -> ChunkStore {
+        let mut chunk = crate::world::VoxelChunk::all_air(size);
+        chunk.set(local[0], local[1], local[2], palette::WATER);
+        let mut store = ChunkStore::default();
+        store.insert(
+            crate::net::ChunkCoord {
+                cx: 0,
+                cy: 0,
+                cz: 0,
+            },
+            chunk,
+        );
+        store
+    }
+
+    #[test]
+    fn an_eye_inside_a_voxel_of_water_is_submerged_and_one_above_it_is_not() {
+        let store = water_at([2, 3, 4], 32);
+
+        // The voxel spans [2, 3) x [3, 4) x [4, 5), and every corner of it counts.
+        for eye in [
+            Vec3::new(2.0, 3.0, 4.0),
+            Vec3::new(2.5, 3.5, 4.5),
+            Vec3::new(2.99, 3.99, 4.99),
+        ] {
+            assert!(
+                submerged_at(Some(&store), eye, 32),
+                "{eye:?} is in the water"
+            );
+        }
+        // One block up is the air above the surface, which is the boundary this whole
+        // colour exists to make visible.
+        assert!(!submerged_at(Some(&store), Vec3::new(2.5, 4.0, 4.5), 32));
+        assert!(!submerged_at(Some(&store), Vec3::new(2.5, 2.99, 4.5), 32));
+    }
+
+    #[test]
+    fn a_negative_eye_position_floors_rather_than_truncating() {
+        // The trap `player/target.rs`'s raycast names: `-0.5 as i32` is 0 and the voxel
+        // containing -0.5 is -1. Half the world is on that side of the origin.
+        let mut chunk = crate::world::VoxelChunk::all_air(32);
+        chunk.set(31, 31, 31, palette::WATER);
+        let mut store = ChunkStore::default();
+        store.insert(
+            crate::net::ChunkCoord {
+                cx: -1,
+                cy: -1,
+                cz: -1,
+            },
+            chunk,
+        );
+
+        assert!(submerged_at(Some(&store), Vec3::new(-0.5, -0.5, -0.5), 32));
+        assert!(!submerged_at(Some(&store), Vec3::new(0.5, 0.5, 0.5), 32));
+    }
+
+    #[test]
+    fn a_world_nobody_has_streamed_is_never_water() {
+        // Both shapes of "nothing to be inside": no store at all, which is every frame
+        // before the handshake, and no chunk there, which is the edge of the volume.
+        assert!(!submerged_at(None, Vec3::new(2.5, 3.5, 4.5), 32));
+        assert!(!submerged_at(
+            Some(&water_at([2, 3, 4], 32)),
+            Vec3::new(900.0, 900.0, 900.0),
+            32
+        ));
+    }
+
+    #[test]
+    fn an_eye_that_is_not_a_number_is_not_under_water() {
+        // A `NaN` reaches `floor` as a `NaN` and the cast as a zero, which would report the
+        // voxel at the origin. Refused before the cast, as the raycast does.
+        let store = water_at([0, 0, 0], 32);
+        for eye in [
+            Vec3::new(f32::NAN, 0.5, 0.5),
+            Vec3::new(0.5, f32::INFINITY, 0.5),
+            Vec3::splat(f32::NEG_INFINITY),
+        ] {
+            assert!(!submerged_at(Some(&store), eye, 32));
+        }
+    }
+
+    #[test]
+    fn the_underwater_fog_is_ten_blocks_and_the_sky_is_the_colour_it_fades_into() {
+        // The two numbers, pinned where they are written rather than where they are used.
+        assert_eq!(UNDERWATER_VISIBILITY, 10.0);
+        const { assert!(UNDERWATER_START > 0.0 && UNDERWATER_START < UNDERWATER_VISIBILITY) };
+        assert_eq!(
+            submerged_sky(),
+            Color::srgb(UNDERWATER_SKY[0], UNDERWATER_SKY[1], UNDERWATER_SKY[2])
+        );
+        // And nothing the clock can produce, at any hour.
+        let clock = clock();
+        for tick in (0..24_000).step_by(500) {
+            let sky = Daylight::at(&clock, tick as f32, 20).sky;
+            assert_ne!(
+                sky,
+                submerged_sky(),
+                "the sky reaches the water colour at tick {tick}"
+            );
+        }
     }
 }
