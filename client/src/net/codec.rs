@@ -1639,6 +1639,102 @@ pub struct LootClosed {
     pub corpse_id: u64,
 }
 
+/// The fixed pixel edge of every map tile, at every scale.
+///
+/// Fixing the pixel count rather than the block span is what keeps a tile's arrays a
+/// constant size: this side never allocates from a number the server chose.
+pub const MAP_TILE_EDGE: usize = 64;
+
+/// The entry count of [`MapTile::height`] and [`MapTile::surface`].
+pub const MAP_TILE_CELLS: usize = MAP_TILE_EDGE * MAP_TILE_EDGE;
+
+/// The block edge of one chunk column, which is the granularity the server records
+/// exploration at and therefore the granularity [`MapTile::explored`] is a mask over.
+pub const CHUNK_COLUMN_BLOCKS: i32 = 32;
+
+/// The most chunk columns one [`MapExplored`] page may carry.
+pub const MAX_EXPLORED_COLUMNS: usize = 4096;
+
+/// The most marks one character may hold.
+pub const MAX_MARKERS: usize = 64;
+
+/// The most bytes a mark's note may carry. Bytes rather than characters, because a byte
+/// is what the wire carries and what both decoders can count without agreeing on an
+/// encoding of characters.
+pub const MARKER_NOTE_MAX_BYTES: usize = 120;
+
+/// The only blocks-per-pixel values this contract has.
+///
+/// A scale is a member of a fixed set rather than a range, so the absent-field zero
+/// fails closed along with everything else.
+pub const MAP_TILE_SCALES: [u8; 3] = [1, 4, 16];
+
+/// How many blocks a tile covers on each axis at `scale`, and therefore the grid every
+/// tile origin sits on. `None` for a scale this contract has no member for.
+pub fn map_tile_span(scale: u8) -> Option<i32> {
+    MAP_TILE_SCALES
+        .contains(&scale)
+        .then(|| MAP_TILE_EDGE as i32 * i32::from(scale))
+}
+
+/// The exact byte length of [`MapTile::explored`] at `scale`.
+///
+/// The tile covers `(span / CHUNK_COLUMN_BLOCKS)²` chunk columns, one bit each, rounded
+/// up to whole bytes: 1, 8 and 128. Scale 1 is the one case that rounds, and its four
+/// unused high bits are zero.
+pub fn map_tile_explored_bytes(scale: u8) -> Option<usize> {
+    let span = map_tile_span(scale)?;
+    let edge = (span / CHUNK_COLUMN_BLOCKS) as usize;
+    Some(edge.pow(2).div_ceil(8))
+}
+
+/// The *kind* of what one map pixel shows from above. Deliberately not a block id.
+///
+/// `schemas/world.fbs` carries the argument: a map draws what a place is, and `Forest`,
+/// `Cave` and `Settlement` are none of them a block. `Unknown` **is** a variant here,
+/// unlike [`EditAction`]'s missing one, because this side receives it as a real value:
+/// it is what every pixel of an unexplored chunk column carries, and drawing nothing for
+/// it is the whole of what the mask is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapSurface {
+    /// Nothing is known about this pixel, or nothing may be said about it.
+    Unknown,
+    Grass,
+    Snow,
+    Sand,
+    Stone,
+    Gravel,
+    Water,
+    Ice,
+    Forest,
+    Cave,
+    Settlement,
+}
+
+impl MapSurface {
+    /// Partial, unlike [`RefusalReason::from_wire`], and the difference is what the
+    /// value costs when it cannot be read. A refusal nobody can name loses one sentence;
+    /// a surface nobody can name would be drawn, and a map with a guessed colour on it is
+    /// worse than no map. `Settlement` is reserved in the contract precisely so that this
+    /// stays a refusal rather than becoming a routine forward-compatibility case.
+    fn from_wire(value: fb::MapSurface) -> Option<Self> {
+        match value {
+            fb::MapSurface::Unknown => Some(Self::Unknown),
+            fb::MapSurface::Grass => Some(Self::Grass),
+            fb::MapSurface::Snow => Some(Self::Snow),
+            fb::MapSurface::Sand => Some(Self::Sand),
+            fb::MapSurface::Stone => Some(Self::Stone),
+            fb::MapSurface::Gravel => Some(Self::Gravel),
+            fb::MapSurface::Water => Some(Self::Water),
+            fb::MapSurface::Ice => Some(Self::Ice),
+            fb::MapSurface::Forest => Some(Self::Forest),
+            fb::MapSurface::Cave => Some(Self::Cave),
+            fb::MapSurface::Settlement => Some(Self::Settlement),
+            _ => None,
+        }
+    }
+}
+
 /// What a mark on the map means.
 ///
 /// The wire's `Unknown = 0` is deliberately **not** a variant, for the reason
@@ -1646,11 +1742,6 @@ pub struct LootClosed {
 /// server, and having it here would only be a value every encoder had to promise never to
 /// send. It is refused in the other direction too — a `Marker` carrying it is a protocol
 /// error rather than a pin nobody can read.
-// V24 establishes the vocabulary before the map window that offers a player a choice of
-// kinds lands, so every member but the one the encoder test picks is constructed nowhere
-// yet. The alternative is a contract that grows a member per issue, which is the thing
-// `MapSurface::Settlement` is reserved to avoid.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerKind {
     Resource,
@@ -1664,6 +1755,19 @@ pub enum MarkerKind {
 }
 
 impl MarkerKind {
+    fn from_wire(value: fb::MarkerKind) -> Option<Self> {
+        match value {
+            fb::MarkerKind::Resource => Some(Self::Resource),
+            fb::MarkerKind::Cave => Some(Self::Cave),
+            fb::MarkerKind::Monster => Some(Self::Monster),
+            fb::MarkerKind::Boss => Some(Self::Boss),
+            fb::MarkerKind::Camp => Some(Self::Camp),
+            fb::MarkerKind::Village => Some(Self::Village),
+            fb::MarkerKind::Note => Some(Self::Note),
+            _ => None,
+        }
+    }
+
     /// The wire value. Total, and that is the point of the missing `Unknown`.
     fn wire(self) -> fb::MarkerKind {
         match self {
@@ -1692,6 +1796,42 @@ pub struct MapTileRequest {
     pub client_tick: u32,
 }
 
+/// One 64 x 64 square of the map, as the server drew it for this character.
+///
+/// `height` and `surface` are [`MAP_TILE_CELLS`] entries each, row-major with z outer
+/// and x inner. A pixel whose chunk column is not set in `explored` carries `0` and
+/// [`MapSurface::Unknown`] — the server never sends the shape of the unexplored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapTile {
+    pub origin_x: i32,
+    pub origin_z: i32,
+    pub scale: u8,
+    /// Biased surface heights, `clamp(y + 64, 0, 255)`. Shading, never a coordinate.
+    pub height: Vec<u8>,
+    /// What each pixel is, in the same order as `height`.
+    pub surface: Vec<MapSurface>,
+    /// One bit per chunk column the tile covers, row-major and LSB first.
+    pub explored: Vec<u8>,
+}
+
+/// One chunk column's address on the horizontal plane. No `cy`: a character who has been
+/// somewhere has been there at every height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MapColumn {
+    pub cx: i32,
+    pub cz: i32,
+}
+
+/// One page of the additive ledger of where this character has been.
+///
+/// Additive is the whole protocol: a column named once is explored for good, so the
+/// client's ledger is the union of every page it has received and no page is ever the
+/// last one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapExplored {
+    pub columns: Vec<MapColumn>,
+}
+
 /// One mark this client asks to put on its map. It names no id, because identity is the
 /// server's to mint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1710,6 +1850,26 @@ pub struct MarkerPlaceRequest {
 pub struct MarkerRemoveRequest {
     pub marker_id: u64,
     pub client_tick: u32,
+}
+
+/// One authoritative mark on this character's map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marker {
+    /// Server-minted, stable for the life of the mark, unique within the character.
+    pub marker_id: u64,
+    pub x: i32,
+    pub z: i32,
+    pub kind: MarkerKind,
+    pub note: String,
+}
+
+/// Every mark this character holds, **replacing** the client's copy wholesale.
+///
+/// An empty list is meaningful and ordinary — a character who has marked nothing — which
+/// is why this is not the message whose empty case is refused. [`MapExplored`] is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerList {
+    pub markers: Vec<Marker>,
 }
 
 /// One authoritative monster blow that reduced this player's health.
@@ -1838,6 +1998,14 @@ pub enum Message {
     LootClosed(LootClosed),
     /// One monster blow that actually reduced this player's authoritative health.
     MobHit(MobHit),
+    /// One authoritative square of the map. Decoded and validated here; no ECS system
+    /// consumes it until the map window issue, exactly as `MineProgress` was decoded
+    /// from V2 and drawn later.
+    MapTile(MapTile),
+    /// One page of the additive ledger of where this character has been.
+    MapExplored(MapExplored),
+    /// Every mark this character holds, replacing the client's copy wholesale.
+    MarkerList(MarkerList),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -2207,6 +2375,40 @@ pub enum DecodeError {
     AppearanceWithoutLevel(u64),
     /// `LeaveStarted.remaining_ms` is zero, which describes a countdown already over.
     LeaveWithoutTime,
+    /// A `MapTile` names a blocks-per-pixel value this contract has no member for. The
+    /// absent-field zero is one of them.
+    MapTileScale(u8),
+    /// A `MapTile` names an origin that is not on the `64 * scale` grid. Checked on this
+    /// side as well as the server's, because this is where a tile is placed on a canvas.
+    MapTileOffGrid {
+        origin_x: i32,
+        origin_z: i32,
+        scale: u8,
+    },
+    /// A `MapTile` array is absent or the wrong length. A short array is a protocol
+    /// error, never a partially drawn tile.
+    MapTileArrayLength {
+        field: &'static str,
+        len: usize,
+        want: usize,
+    },
+    /// A `MapTile` carries a surface byte this build has no member for.
+    UnknownMapSurface { index: usize, value: u8 },
+    /// A `MapExplored` page carries no columns. An empty page states nothing, and
+    /// reading one as "the ledger is empty" would erase the client's map.
+    MapExploredWithoutColumns,
+    /// A `MapExplored` page carries more columns than the contract's bound.
+    MapExploredTooManyColumns(usize),
+    /// A `MarkerList` carries more marks than one character may hold.
+    TooManyMarkers(usize),
+    /// A `Marker` carries the reserved id 0.
+    MarkerWithoutIdentity,
+    /// One `marker_id` names two marks of the same list.
+    DuplicateMarker(u64),
+    /// A `Marker` carries a kind this build has no member for, `Unknown` included.
+    UnknownMarkerKind { marker_id: u64, value: u8 },
+    /// A `Marker` note is longer than the contract allows, measured in bytes.
+    MarkerNoteTooLong { marker_id: u64, len: usize },
 }
 
 impl fmt::Display for DecodeError {
@@ -2594,6 +2796,42 @@ impl fmt::Display for DecodeError {
                 )
             }
             Self::LeaveWithoutTime => write!(f, "LeaveStarted carries no time remaining"),
+            Self::MapTileScale(value) => write!(f, "map scale {value} is not 1, 4 or 16"),
+            Self::MapTileOffGrid {
+                origin_x,
+                origin_z,
+                scale,
+            } => write!(
+                f,
+                "map tile origin ({origin_x}, {origin_z}) is not on the grid scale {scale} sets"
+            ),
+            Self::MapTileArrayLength { field, len, want } => {
+                write!(f, "MapTile.{field} has {len} entries, want {want}")
+            }
+            Self::UnknownMapSurface { index, value } => {
+                write!(f, "MapTile.surface[{index}] is an unknown surface: {value}")
+            }
+            Self::MapExploredWithoutColumns => {
+                write!(f, "a MapExplored page carries no columns")
+            }
+            Self::MapExploredTooManyColumns(len) => write!(
+                f,
+                "a MapExplored page carries {len} columns, at most {MAX_EXPLORED_COLUMNS}"
+            ),
+            Self::TooManyMarkers(len) => {
+                write!(f, "a MarkerList carries {len} marks, at most {MAX_MARKERS}")
+            }
+            Self::MarkerWithoutIdentity => write!(f, "a Marker carries the reserved id 0"),
+            Self::DuplicateMarker(marker_id) => {
+                write!(f, "a MarkerList names mark {marker_id} twice")
+            }
+            Self::UnknownMarkerKind { marker_id, value } => {
+                write!(f, "mark {marker_id} has an unknown kind: {value}")
+            }
+            Self::MarkerNoteTooLong { marker_id, len } => write!(
+                f,
+                "mark {marker_id} has a {len}-byte note, at most {MARKER_NOTE_MAX_BYTES}"
+            ),
         }
     }
 }
@@ -2856,13 +3094,44 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 attacker_pos,
             }))
         }
-        // V24's three server -> client map payloads. The contract for them is settled and
-        // both sides' bindings are generated; nothing on this side reads one yet, so they
-        // are carried by name exactly as `MineProgress` was between V2 and the issue that
-        // drew it. Named rather than left to the fallback, which stays reachable only for
-        // a tag this build cannot put a name to at all.
-        fb::Payload::MapTile | fb::Payload::MapExplored | fb::Payload::MarkerList => {
-            Ok(Message::Deferred(name))
+        fb::Payload::MapTile => {
+            let payload = envelope
+                .payload_as_map_tile()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::MapTile(map_tile(&payload)?))
+        }
+        fb::Payload::MapExplored => {
+            let payload = envelope
+                .payload_as_map_explored()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let columns = payload
+                .columns()
+                .ok_or(DecodeError::MapExploredWithoutColumns)?;
+            if columns.is_empty() {
+                return Err(DecodeError::MapExploredWithoutColumns);
+            }
+            if columns.len() > MAX_EXPLORED_COLUMNS {
+                return Err(DecodeError::MapExploredTooManyColumns(columns.len()));
+            }
+            // Duplicates are deliberately not refused: the ledger is additive, so a
+            // column named twice has told this client the same true thing twice. That is
+            // the difference from `MarkerList`, where two rows with one id are two
+            // different marks and the receiver cannot tell which is meant.
+            Ok(Message::MapExplored(MapExplored {
+                columns: columns
+                    .iter()
+                    .map(|column| MapColumn {
+                        cx: column.cx(),
+                        cz: column.cz(),
+                    })
+                    .collect(),
+            }))
+        }
+        fb::Payload::MarkerList => {
+            let payload = envelope
+                .payload_as_marker_list()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::MarkerList(marker_list(&payload)?))
         }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
@@ -2912,6 +3181,126 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // arm distinguishable from the ones above at runtime, and so testable.
         _ => Ok(Message::Deferred(UNKNOWN_VARIANT)),
     }
+}
+
+/// Copies and validates one square of the map.
+///
+/// The scale is read first because everything else is measured against it: the origin
+/// grid, and the length of the explored mask. A scale this contract has no member for
+/// leaves nothing to check the rest against, which is why it is the first refusal.
+fn map_tile(tile: &fb::MapTile<'_>) -> Result<MapTile, DecodeError> {
+    let scale = tile.scale();
+    let span = map_tile_span(scale).ok_or(DecodeError::MapTileScale(scale))?;
+    let (origin_x, origin_z) = (tile.origin_x(), tile.origin_z());
+    if origin_x % span != 0 || origin_z % span != 0 {
+        return Err(DecodeError::MapTileOffGrid {
+            origin_x,
+            origin_z,
+            scale,
+        });
+    }
+
+    let height = tile.height().ok_or(DecodeError::MapTileArrayLength {
+        field: "height",
+        len: 0,
+        want: MAP_TILE_CELLS,
+    })?;
+    if height.len() != MAP_TILE_CELLS {
+        return Err(DecodeError::MapTileArrayLength {
+            field: "height",
+            len: height.len(),
+            want: MAP_TILE_CELLS,
+        });
+    }
+    let surface = tile.surface().ok_or(DecodeError::MapTileArrayLength {
+        field: "surface",
+        len: 0,
+        want: MAP_TILE_CELLS,
+    })?;
+    if surface.len() != MAP_TILE_CELLS {
+        return Err(DecodeError::MapTileArrayLength {
+            field: "surface",
+            len: surface.len(),
+            want: MAP_TILE_CELLS,
+        });
+    }
+    // Unwrapped rather than answered: the scale was checked above, and the two functions
+    // agree on the same three members by construction.
+    let want_explored = map_tile_explored_bytes(scale).ok_or(DecodeError::MapTileScale(scale))?;
+    let explored = tile.explored().ok_or(DecodeError::MapTileArrayLength {
+        field: "explored",
+        len: 0,
+        want: want_explored,
+    })?;
+    if explored.len() != want_explored {
+        return Err(DecodeError::MapTileArrayLength {
+            field: "explored",
+            len: explored.len(),
+            want: want_explored,
+        });
+    }
+
+    let mut surfaces = Vec::with_capacity(MAP_TILE_CELLS);
+    for (index, value) in surface.iter().enumerate() {
+        let named = MapSurface::from_wire(fb::MapSurface(value))
+            .ok_or(DecodeError::UnknownMapSurface { index, value })?;
+        surfaces.push(named);
+    }
+
+    Ok(MapTile {
+        origin_x,
+        origin_z,
+        scale,
+        height: height.iter().collect(),
+        surface: surfaces,
+        explored: explored.iter().collect(),
+    })
+}
+
+/// Copies and validates the complete list of marks one character holds.
+///
+/// An empty list is accepted, and it is the one a character who has marked nothing
+/// receives. Ids are checked for uniqueness because this list *replaces* the client's
+/// copy: two rows sharing an id are two different marks with one address, and nothing
+/// downstream could tell which of them a removal names.
+fn marker_list(list: &fb::MarkerList<'_>) -> Result<MarkerList, DecodeError> {
+    let markers = list.markers().unwrap_or_default();
+    if markers.len() > MAX_MARKERS {
+        return Err(DecodeError::TooManyMarkers(markers.len()));
+    }
+
+    let mut decoded = Vec::with_capacity(markers.len());
+    let mut identities = HashSet::new();
+    for marker in &markers {
+        let marker_id = marker.marker_id();
+        if marker_id == 0 {
+            return Err(DecodeError::MarkerWithoutIdentity);
+        }
+        if !identities.insert(marker_id) {
+            return Err(DecodeError::DuplicateMarker(marker_id));
+        }
+        let kind = MarkerKind::from_wire(marker.kind()).ok_or(DecodeError::UnknownMarkerKind {
+            marker_id,
+            value: marker.kind().0,
+        })?;
+        // Absent and empty are the same empty note. The bound is bytes, which is what
+        // `str::len` counts.
+        let note = marker.note().unwrap_or_default();
+        if note.len() > MARKER_NOTE_MAX_BYTES {
+            return Err(DecodeError::MarkerNoteTooLong {
+                marker_id,
+                len: note.len(),
+            });
+        }
+        decoded.push(Marker {
+            marker_id,
+            x: marker.x(),
+            z: marker.z(),
+            kind,
+            note: note.to_owned(),
+        });
+    }
+    Ok(MarkerList { markers: decoded })
 }
 
 /// Copies and validates one complete per-recipient corpse container.
@@ -5804,6 +6193,89 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::LootState, payload.as_union_value())
     }
 
+    /// Builds one `MapTile` frame from raw parts, so a test can present the decoder
+    /// with a tile no correct server would send: a short array, an absent one, a scale
+    /// this contract has no member for, a surface byte nobody names.
+    pub fn encode_map_tile(
+        origin_x: i32,
+        origin_z: i32,
+        scale: u8,
+        height: Option<&[u8]>,
+        surface: Option<&[u8]>,
+        explored: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let height = height.map(|bytes| builder.create_vector(bytes));
+        let surface = surface.map(|bytes| builder.create_vector(bytes));
+        let explored = explored.map(|bytes| builder.create_vector(bytes));
+        let payload = fb::MapTile::create(
+            &mut builder,
+            &fb::MapTileArgs {
+                origin_x,
+                origin_z,
+                scale,
+                height,
+                surface,
+                explored,
+            },
+        );
+        finish_envelope(builder, fb::Payload::MapTile, payload.as_union_value())
+    }
+
+    pub fn encode_map_explored(columns: Option<&[(i32, i32)]>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let columns = columns.map(|columns| {
+            let laid_out: Vec<_> = columns
+                .iter()
+                .map(|(cx, cz)| fb::MapColumn::new(*cx, *cz))
+                .collect();
+            builder.create_vector(&laid_out)
+        });
+        let payload = fb::MapExplored::create(&mut builder, &fb::MapExploredArgs { columns });
+        finish_envelope(builder, fb::Payload::MapExplored, payload.as_union_value())
+    }
+
+    /// One mark as raw wire parts, so a test can build a list a correct server never
+    /// sends: a reserved id, an `Unknown` kind, a note past the bound.
+    pub struct MarkerWire<'a> {
+        pub marker_id: u64,
+        pub x: i32,
+        pub z: i32,
+        pub kind: u8,
+        pub note: Option<&'a str>,
+    }
+
+    pub fn encode_marker_list(markers: Option<&[MarkerWire<'_>]>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let markers = markers.map(|markers| {
+            // Every note is written before any marker table opens: a table may not be
+            // under construction while a string is created.
+            let notes: Vec<_> = markers
+                .iter()
+                .map(|marker| marker.note.map(|note| builder.create_string(note)))
+                .collect();
+            let laid_out: Vec<_> = markers
+                .iter()
+                .zip(notes)
+                .map(|(marker, note)| {
+                    fb::Marker::create(
+                        &mut builder,
+                        &fb::MarkerArgs {
+                            marker_id: marker.marker_id,
+                            x: marker.x,
+                            z: marker.z,
+                            kind: fb::MarkerKind(marker.kind),
+                            note,
+                        },
+                    )
+                })
+                .collect();
+            builder.create_vector(&laid_out)
+        });
+        let payload = fb::MarkerList::create(&mut builder, &fb::MarkerListArgs { markers });
+        finish_envelope(builder, fb::Payload::MarkerList, payload.as_union_value())
+    }
+
     pub fn encode_loot_closed(corpse_id: u64) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let payload = fb::LootClosed::create(&mut builder, &fb::LootClosedArgs { corpse_id });
@@ -5910,7 +6382,7 @@ mod tests {
     use super::server_side;
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
-        ItemDropDurabilityWire, ItemDropStateWire, MobStateWire, PartyMemberStateWire,
+        ItemDropDurabilityWire, ItemDropStateWire, MarkerWire, MobStateWire, PartyMemberStateWire,
         PartyRosterMemberWire, PlayerVitalsWire, ProjectileStateWire, StructureStateWire,
         WelcomeWire, encode_action_refused, encode_bare_block_update, encode_bare_chunk_data,
         encode_bare_chunk_unload, encode_bare_entity_snapshot, encode_block_update,
@@ -5920,8 +6392,9 @@ mod tests {
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
         encode_entity_snapshot_with_roster, encode_entity_snapshot_without_vitals,
         encode_inventory_state, encode_inventory_state_with_durability, encode_leave_started,
-        encode_loot_closed, encode_loot_state, encode_mine_progress, encode_mob_hit,
-        encode_party_invite, encode_player_appearance, encode_player_appearance_with_worn,
+        encode_loot_closed, encode_loot_state, encode_map_explored, encode_map_tile,
+        encode_marker_list, encode_mine_progress, encode_mob_hit, encode_party_invite,
+        encode_player_appearance, encode_player_appearance_with_worn,
         encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
         encode_server_welcome,
     };
@@ -6199,11 +6672,11 @@ mod tests {
         (fb::Payload::BlockRequest, Handling::ClientOnly),
         (fb::Payload::LootTakeAllRequest, Handling::ClientOnly),
         (fb::Payload::MapTileRequest, Handling::ClientOnly),
-        (fb::Payload::MapTile, Handling::Deferred),
-        (fb::Payload::MapExplored, Handling::Deferred),
+        (fb::Payload::MapTile, Handling::Consumed),
+        (fb::Payload::MapExplored, Handling::Consumed),
         (fb::Payload::MarkerPlaceRequest, Handling::ClientOnly),
         (fb::Payload::MarkerRemoveRequest, Handling::ClientOnly),
-        (fb::Payload::MarkerList, Handling::Deferred),
+        (fb::Payload::MarkerList, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -6404,6 +6877,305 @@ mod tests {
     /// side does with it is [`RefusalReason::is_client_defect`], which is a `match` rather
     /// than a comparison: an arithmetic test would classify a member appended in a contract
     /// this build has never read, which is a guess about a group it cannot see.
+    /// A tile is placed on a canvas from what it says about itself, so this side holds
+    /// the same grid the server's decoder does.
+    ///
+    /// The scale is checked first because everything else is measured against it — the
+    /// origin grid and the mask length both — so a scale with no member leaves nothing
+    /// to check the rest against.
+    #[test]
+    fn a_map_tile_is_held_to_its_grid_its_lengths_and_its_vocabulary() {
+        let height = vec![7u8; MAP_TILE_CELLS];
+        let mut surface = vec![fb::MapSurface::Grass.0; MAP_TILE_CELLS];
+        surface[0] = fb::MapSurface::Unknown.0;
+        surface[1] = fb::MapSurface::Settlement.0;
+        let explored = vec![0b0000_0011u8; map_tile_explored_bytes(4).expect("scale 4")];
+
+        let frame = encode_map_tile(256, -512, 4, Some(&height), Some(&surface), Some(&explored));
+        let Ok(Message::MapTile(tile)) = decode(&frame) else {
+            panic!("a well-formed tile was refused: {:?}", decode(&frame));
+        };
+        assert_eq!((tile.origin_x, tile.origin_z, tile.scale), (256, -512, 4));
+        assert_eq!(tile.height.len(), MAP_TILE_CELLS);
+        assert_eq!(tile.surface[0], MapSurface::Unknown);
+        assert_eq!(tile.surface[1], MapSurface::Settlement);
+        assert_eq!(tile.surface[2], MapSurface::Grass);
+        assert_eq!(tile.explored, explored);
+
+        // The three scales and the exact mask each one needs. Scale 1 is the case that
+        // rounds: four chunk columns do not fill a byte, and the contract says the four
+        // unused high bits are zero rather than that the vector is half a byte long.
+        for (scale, span, bytes) in [(1u8, 64i32, 1usize), (4, 256, 8), (16, 1024, 128)] {
+            assert_eq!(map_tile_span(scale), Some(span), "scale {scale}");
+            assert_eq!(map_tile_explored_bytes(scale), Some(bytes), "scale {scale}");
+        }
+        assert_eq!(map_tile_span(2), None);
+        assert_eq!(map_tile_explored_bytes(0), None);
+
+        let short = vec![0u8; MAP_TILE_CELLS - 1];
+        let mask4 = vec![0u8; 8];
+        for (name, frame, want) in [
+            (
+                "absent scale",
+                encode_map_tile(0, 0, 0, Some(&height), Some(&surface), Some(&[0])),
+                DecodeError::MapTileScale(0),
+            ),
+            (
+                "a scale with no member",
+                encode_map_tile(0, 0, 3, Some(&height), Some(&surface), Some(&[0])),
+                DecodeError::MapTileScale(3),
+            ),
+            (
+                "an origin off the grid",
+                encode_map_tile(64, 0, 4, Some(&height), Some(&surface), Some(&mask4)),
+                DecodeError::MapTileOffGrid {
+                    origin_x: 64,
+                    origin_z: 0,
+                    scale: 4,
+                },
+            ),
+            (
+                "a short height array",
+                encode_map_tile(0, 0, 4, Some(&short), Some(&surface), Some(&mask4)),
+                DecodeError::MapTileArrayLength {
+                    field: "height",
+                    len: MAP_TILE_CELLS - 1,
+                    want: MAP_TILE_CELLS,
+                },
+            ),
+            (
+                "no surface array at all",
+                encode_map_tile(0, 0, 4, Some(&height), None, Some(&mask4)),
+                DecodeError::MapTileArrayLength {
+                    field: "surface",
+                    len: 0,
+                    want: MAP_TILE_CELLS,
+                },
+            ),
+            (
+                "a mask sized for another scale",
+                encode_map_tile(0, 0, 4, Some(&height), Some(&surface), Some(&[0])),
+                DecodeError::MapTileArrayLength {
+                    field: "explored",
+                    len: 1,
+                    want: 8,
+                },
+            ),
+        ] {
+            assert_eq!(decode(&frame), Err(want), "{name}");
+        }
+
+        // A surface byte this build cannot name is refused rather than drawn. The map is
+        // the one place a guessed value would be shown to a player as fact.
+        let mut unknown = surface.clone();
+        unknown[9] = 200;
+        assert_eq!(
+            decode(&encode_map_tile(
+                0,
+                0,
+                4,
+                Some(&height),
+                Some(&unknown),
+                Some(&mask4)
+            )),
+            Err(DecodeError::UnknownMapSurface {
+                index: 9,
+                value: 200
+            })
+        );
+    }
+
+    /// The ledger is additive, so an empty page is refused and a repeated column is not.
+    ///
+    /// The pair is the point: a column named twice has told this client the same true
+    /// thing twice, where an empty page read as "the ledger is empty" would erase a map.
+    #[test]
+    fn an_explored_page_is_bounded_and_never_empty() {
+        let Ok(Message::MapExplored(page)) =
+            decode(&encode_map_explored(Some(&[(0, 0), (-3, 91), (0, 0)])))
+        else {
+            panic!("a well-formed page was refused");
+        };
+        assert_eq!(
+            page.columns,
+            vec![
+                MapColumn { cx: 0, cz: 0 },
+                MapColumn { cx: -3, cz: 91 },
+                MapColumn { cx: 0, cz: 0 },
+            ]
+        );
+
+        assert_eq!(
+            decode(&encode_map_explored(Some(&[]))),
+            Err(DecodeError::MapExploredWithoutColumns)
+        );
+        assert_eq!(
+            decode(&encode_map_explored(None)),
+            Err(DecodeError::MapExploredWithoutColumns)
+        );
+
+        let full: Vec<(i32, i32)> = (0..MAX_EXPLORED_COLUMNS as i32).map(|i| (i, 0)).collect();
+        assert!(matches!(
+            decode(&encode_map_explored(Some(&full))),
+            Ok(Message::MapExplored(_))
+        ));
+        let over: Vec<(i32, i32)> = (0..MAX_EXPLORED_COLUMNS as i32 + 1)
+            .map(|i| (i, 0))
+            .collect();
+        assert_eq!(
+            decode(&encode_map_explored(Some(&over))),
+            Err(DecodeError::MapExploredTooManyColumns(
+                MAX_EXPLORED_COLUMNS + 1
+            ))
+        );
+    }
+
+    /// The complete list replaces the client's copy, so every bound it carries is held
+    /// here — and an empty list is the ordinary case rather than a refusal.
+    #[test]
+    fn a_marker_list_replaces_the_map_and_is_bounded_at_the_decode_boundary() {
+        let marks = [
+            MarkerWire {
+                marker_id: 1,
+                x: 10,
+                z: -10,
+                kind: fb::MarkerKind::Boss.0,
+                note: Some("the draugr"),
+            },
+            MarkerWire {
+                marker_id: 2,
+                x: 0,
+                z: 0,
+                kind: fb::MarkerKind::Note.0,
+                note: None,
+            },
+        ];
+        let Ok(Message::MarkerList(list)) = decode(&encode_marker_list(Some(&marks))) else {
+            panic!("a well-formed list was refused");
+        };
+        assert_eq!(
+            list.markers,
+            vec![
+                Marker {
+                    marker_id: 1,
+                    x: 10,
+                    z: -10,
+                    kind: MarkerKind::Boss,
+                    note: "the draugr".to_owned(),
+                },
+                // Absent and empty are the same empty note.
+                Marker {
+                    marker_id: 2,
+                    x: 0,
+                    z: 0,
+                    kind: MarkerKind::Note,
+                    note: String::new(),
+                },
+            ]
+        );
+
+        // A character who has marked nothing, and a message that has none of the vector
+        // at all: both are an empty map rather than an error.
+        for frame in [encode_marker_list(Some(&[])), encode_marker_list(None)] {
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::MarkerList(MarkerList { markers: vec![] }))
+            );
+        }
+
+        let one = |marker_id, kind, note| MarkerWire {
+            marker_id,
+            x: 0,
+            z: 0,
+            kind,
+            note,
+        };
+        let long = "a".repeat(MARKER_NOTE_MAX_BYTES + 1);
+        // Forty three-byte runes are exactly the bound; forty-one are 123 bytes and are
+        // not. A bound counted in characters would have accepted the second.
+        let runes = "\u{16D7}".repeat(40);
+        let over_runes = "\u{16D7}".repeat(41);
+        for (name, marks, want) in [
+            (
+                "the reserved id",
+                vec![one(0, fb::MarkerKind::Camp.0, None)],
+                DecodeError::MarkerWithoutIdentity,
+            ),
+            (
+                "one id twice",
+                vec![
+                    one(5, fb::MarkerKind::Camp.0, None),
+                    one(5, fb::MarkerKind::Cave.0, None),
+                ],
+                DecodeError::DuplicateMarker(5),
+            ),
+            (
+                "the absent-field kind",
+                vec![one(5, fb::MarkerKind::Unknown.0, None)],
+                DecodeError::UnknownMarkerKind {
+                    marker_id: 5,
+                    value: 0,
+                },
+            ),
+            (
+                "a kind with no member",
+                vec![one(5, 200, None)],
+                DecodeError::UnknownMarkerKind {
+                    marker_id: 5,
+                    value: 200,
+                },
+            ),
+            (
+                "a note past the bound",
+                vec![one(5, fb::MarkerKind::Note.0, Some(&long))],
+                DecodeError::MarkerNoteTooLong {
+                    marker_id: 5,
+                    len: MARKER_NOTE_MAX_BYTES + 1,
+                },
+            ),
+            (
+                "a multibyte note past the bound",
+                vec![one(5, fb::MarkerKind::Note.0, Some(&over_runes))],
+                DecodeError::MarkerNoteTooLong {
+                    marker_id: 5,
+                    len: 123,
+                },
+            ),
+        ] {
+            assert_eq!(
+                decode(&encode_marker_list(Some(&marks))),
+                Err(want),
+                "{name}"
+            );
+        }
+        assert!(
+            matches!(
+                decode(&encode_marker_list(Some(&[one(
+                    5,
+                    fb::MarkerKind::Note.0,
+                    Some(&runes)
+                )]))),
+                Ok(Message::MarkerList(_))
+            ),
+            "forty three-byte runes are exactly {MARKER_NOTE_MAX_BYTES} bytes"
+        );
+
+        let full: Vec<_> = (1..=MAX_MARKERS as u64)
+            .map(|id| one(id, fb::MarkerKind::Camp.0, None))
+            .collect();
+        assert!(matches!(
+            decode(&encode_marker_list(Some(&full))),
+            Ok(Message::MarkerList(_))
+        ));
+        let over: Vec<_> = (1..=MAX_MARKERS as u64 + 1)
+            .map(|id| one(id, fb::MarkerKind::Camp.0, None))
+            .collect();
+        assert_eq!(
+            decode(&encode_marker_list(Some(&over))),
+            Err(DecodeError::TooManyMarkers(MAX_MARKERS + 1))
+        );
+    }
+
     /// The three outbound map payloads carry intent and nothing else.
     ///
     /// The request encoder writes a misaligned origin exactly as given, deliberately: it

@@ -461,6 +461,15 @@ impl Handshake {
             (Phase::Established, Message::LootState(state)) => Ok(Transition::LootState(state)),
             (Phase::Established, Message::LootClosed(closed)) => Ok(Transition::LootClosed(closed)),
             (Phase::Established, Message::MobHit(hit)) => Ok(Transition::MobHit(hit)),
+            // V24's three map payloads. The codec has already copied and validated each
+            // one — the contract's bounds are held at the decode boundary, which is what
+            // this issue owes them — and nothing consumes one until the map window lands,
+            // so they are admitted and dropped rather than carried into an event nobody
+            // reads. `Ignored` is the same answer `MineProgress` had between V2 and the
+            // issue that drew it.
+            (Phase::Established, Message::MapTile(_)) => Ok(Transition::Ignored("MapTile")),
+            (Phase::Established, Message::MapExplored(_)) => Ok(Transition::Ignored("MapExplored")),
+            (Phase::Established, Message::MarkerList(_)) => Ok(Transition::Ignored("MarkerList")),
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -484,6 +493,9 @@ impl Handshake {
             (_, Message::LootState(_)) => Err(HandshakeError::Premature("LootState")),
             (_, Message::LootClosed(_)) => Err(HandshakeError::Premature("LootClosed")),
             (_, Message::MobHit(_)) => Err(HandshakeError::Premature("MobHit")),
+            (_, Message::MapTile(_)) => Err(HandshakeError::Premature("MapTile")),
+            (_, Message::MapExplored(_)) => Err(HandshakeError::Premature("MapExplored")),
+            (_, Message::MarkerList(_)) => Err(HandshakeError::Premature("MarkerList")),
         }
     }
 }
