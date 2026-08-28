@@ -43,6 +43,12 @@ const (
 	RefusedActionOpenLoot       RefusedAction = 9
 	RefusedActionTakeLoot       RefusedAction = 10
 	RefusedActionAttack         RefusedAction = 11
+	/// A `MapTileRequest` the server will not answer with a tile.
+	RefusedActionRequestMapTile RefusedAction = 12
+	/// A `MarkerPlaceRequest` that put no mark on the map.
+	RefusedActionPlaceMarker RefusedAction = 13
+	/// A `MarkerRemoveRequest` that took no mark off it.
+	RefusedActionRemoveMarker RefusedAction = 14
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -58,6 +64,9 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionOpenLoot:       "OpenLoot",
 	RefusedActionTakeLoot:       "TakeLoot",
 	RefusedActionAttack:         "Attack",
+	RefusedActionRequestMapTile: "RequestMapTile",
+	RefusedActionPlaceMarker:    "PlaceMarker",
+	RefusedActionRemoveMarker:   "RemoveMarker",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -73,6 +82,9 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"OpenLoot":       RefusedActionOpenLoot,
 	"TakeLoot":       RefusedActionTakeLoot,
 	"Attack":         RefusedActionAttack,
+	"RequestMapTile": RefusedActionRequestMapTile,
+	"PlaceMarker":    RefusedActionPlaceMarker,
+	"RemoveMarker":   RefusedActionRemoveMarker,
 }
 
 func (v RefusedAction) String() string {

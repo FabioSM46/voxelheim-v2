@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 39;
+pub const ENUM_MAX_PAYLOAD: u8 = 45;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 40] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 46] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -58,6 +58,12 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 40] = [
     Payload::MobHit,
     Payload::BlockRequest,
     Payload::LootTakeAllRequest,
+    Payload::MapTileRequest,
+    Payload::MapTile,
+    Payload::MapExplored,
+    Payload::MarkerPlaceRequest,
+    Payload::MarkerRemoveRequest,
+    Payload::MarkerList,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -124,9 +130,15 @@ impl Payload {
     pub const MobHit: Self = Self(37);
     pub const BlockRequest: Self = Self(38);
     pub const LootTakeAllRequest: Self = Self(39);
+    pub const MapTileRequest: Self = Self(40);
+    pub const MapTile: Self = Self(41);
+    pub const MapExplored: Self = Self(42);
+    pub const MarkerPlaceRequest: Self = Self(43);
+    pub const MarkerRemoveRequest: Self = Self(44);
+    pub const MarkerList: Self = Self(45);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 39;
+    pub const ENUM_MAX: u8 = 45;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -168,6 +180,12 @@ impl Payload {
         Self::MobHit,
         Self::BlockRequest,
         Self::LootTakeAllRequest,
+        Self::MapTileRequest,
+        Self::MapTile,
+        Self::MapExplored,
+        Self::MarkerPlaceRequest,
+        Self::MarkerRemoveRequest,
+        Self::MarkerList,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -212,6 +230,12 @@ impl Payload {
             Self::MobHit => Some("MobHit"),
             Self::BlockRequest => Some("BlockRequest"),
             Self::LootTakeAllRequest => Some("LootTakeAllRequest"),
+            Self::MapTileRequest => Some("MapTileRequest"),
+            Self::MapTile => Some("MapTile"),
+            Self::MapExplored => Some("MapExplored"),
+            Self::MarkerPlaceRequest => Some("MarkerPlaceRequest"),
+            Self::MarkerRemoveRequest => Some("MarkerRemoveRequest"),
+            Self::MarkerList => Some("MarkerList"),
             _ => None,
         }
     }

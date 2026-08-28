@@ -595,6 +595,147 @@ table LootClosed {
   corpse_id: ulong;
 }
 
+// -----------------------------------------------------------------------------
+// The character's marks on the map.
+//
+// Sixty-four per character, stored server-side and never held anywhere else. The
+// client draws what the server last said it holds; it does not keep a list of its
+// own and reconcile, because a mark is small enough that the complete list is
+// cheaper than any diff would be.
+// -----------------------------------------------------------------------------
+
+/// What a mark on the map means. A vocabulary, not a description.
+///
+/// The same shape `HairModel` is: the server stores the member and draws nothing, the
+/// client maps it to an icon. That is why every one of these is a category and none of
+/// them is a colour or a sprite name — a member is something both sides can carry without
+/// agreeing on any asset.
+///
+/// `Note` is the member with no subject: a mark that is only its text. It is last rather
+/// than first because it is the fallback, and a client that offers it as the default would
+/// get a map of unlabelled pins.
+///
+/// Zero member for the reason every enum in this contract has one, and it fails closed in
+/// both directions: a `MarkerPlaceRequest` that omits `kind` is refused rather than
+/// guessed at, and a `Marker` that arrives carrying it is a protocol error rather than a
+/// pin nobody can read.
+enum MarkerKind : ubyte {
+  /// Never sent deliberately, in either direction. The absent-field zero.
+  Unknown = 0,
+
+  Resource = 1,
+  Cave = 2,
+  Monster = 3,
+  Boss = 4,
+  Camp = 5,
+  Village = 6,
+
+  /// A mark that is only its note.
+  Note = 7
+}
+
+/// A client asking to put one mark on its map. **Intent, never outcome.**
+///
+/// It carries no marker id, because identity is the server's to mint: a client that
+/// named its own ids could collide with itself across two sessions, and a server that
+/// accepted them would be taking an identifier from untrusted input. The answer is the
+/// complete `MarkerList` that follows, exactly as a drop is answered by the complete
+/// `InventoryState`.
+///
+/// Invariants the server enforces on this untrusted input:
+///   - `kind` is a known member and is never `Unknown`
+///   - `note` is at most 120 bytes and is valid UTF-8. Bytes rather than characters,
+///     because a byte is what the wire and both decoders actually count; absent and
+///     empty are the same empty note, and a mark with no note is ordinary
+///   - `x` and `z` are block coordinates inside the world the server owns. The wire does
+///     not bound them — `int` is the same width `BlockCoord` uses, for the same reason —
+///     and the server refuses a mark outside its own extent
+///   - the character holds fewer than 64 marks already; the 64th is the last one accepted
+///   - `client_tick` is ordering and staleness only
+///
+/// Refused with `RefusedAction.PlaceMarker` and one of `TooManyMarkers`, `NoteTooLong`
+/// or `MalformedKind`; a decoder that can see the violation from the frame alone may
+/// close the session on it instead, which is the stricter of the two answers and the one
+/// the Go server gives for `kind` and for `note`. Both are refusals, and neither puts a
+/// mark on the map.
+table MarkerPlaceRequest {
+  /// Block x of the mark. No y: a mark is a place on a map, and a map has two axes.
+  x: int;
+
+  /// Block z of the mark.
+  z: int;
+
+  /// What the mark means. Never `Unknown` on the wire.
+  kind: MarkerKind;
+
+  /// The player's own text, copied verbatim. At most 120 bytes of valid UTF-8.
+  note: string;
+
+  /// The client's own tick counter. Ordering and staleness only.
+  client_tick: uint;
+}
+
+/// A client asking to take one of its own marks off the map. **Intent, never outcome.**
+///
+/// There is no edit message, and its absence is the design: a mark is a kind, a place and
+/// a line of text, and changing any of them is cheaper as a removal and a placement than
+/// as a fourth message both sides have to keep exhaustive. The answer to either is the
+/// same complete `MarkerList`.
+///
+/// Invariants the server enforces:
+///   - `marker_id` is non-zero and names a mark this character owns. A mark belonging to
+///     somebody else and a mark that never existed are one answer, `MarkerUnknown`
+///   - `client_tick` is ordering and staleness only
+table MarkerRemoveRequest {
+  marker_id: ulong;
+  client_tick: uint;
+}
+
+/// One mark on one character's map. Server -> client, and authoritative.
+///
+/// A table rather than a struct even though today's fields would inline: it is the least
+/// settled shape the map adds — a colour, an icon override and a created-at time are all
+/// things a later issue wants — and it carries a string, which a struct cannot hold at
+/// all. That is the `Appearance` argument, and the string half of it settles the question
+/// on its own.
+///
+/// Decoder invariants:
+///   - `marker_id` is non-zero, and no id appears twice in one `MarkerList`
+///   - `kind` is a known member and is never `Unknown`
+///   - `note` is at most 120 bytes of valid UTF-8; absent and empty are the same
+table Marker {
+  /// Server-minted, stable for the life of the mark, and unique within the character.
+  marker_id: ulong;
+
+  x: int;
+  z: int;
+  kind: MarkerKind;
+
+  /// The player's own text, exactly as the server stored it.
+  note: string;
+}
+
+/// Every mark this character holds. Server -> client, and it **replaces** the client's
+/// copy wholesale.
+///
+/// A complete list rather than a delta, for the reason `InventoryState` is one: sixty-four
+/// marks are small, a delta needs a revision and an ordering to be applied safely, and a
+/// client that has missed one delta is holding a map that is quietly wrong. Replacing is
+/// the only operation with no history to get right.
+///
+/// An empty list is meaningful and ordinary — a character who has marked nothing, or has
+/// just removed their last mark — which is why this message is not the one whose empty
+/// case is refused. `MapExplored` is, and the difference is that it is additive: an empty
+/// page of a ledger states nothing, where an empty list of marks states everything.
+///
+/// Decoder invariants:
+///   - `markers` is present; empty is legal
+///   - at most 64 entries
+///   - every entry satisfies `Marker`, and marker ids are unique within the list
+table MarkerList {
+  markers: [Marker];
+}
+
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is
@@ -631,7 +772,19 @@ enum RefusedAction : ubyte {
   Party = 8,
   OpenLoot = 9,
   TakeLoot = 10,
-  Attack = 11
+  Attack = 11,
+
+  // -- V24. The map's three client requests, appended for the reason the members above
+  //    were reserved: the number is free now and will not be once anything depends on it.
+
+  /// A `MapTileRequest` the server will not answer with a tile.
+  RequestMapTile = 12,
+
+  /// A `MarkerPlaceRequest` that put no mark on the map.
+  PlaceMarker = 13,
+
+  /// A `MarkerRemoveRequest` that took no mark off it.
+  RemoveMarker = 14
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -745,6 +898,32 @@ enum RefusalReason : ubyte {
   /// The selected launcher is usable, but no matching ammunition exists in the
   /// player's authoritative hotbar or pack.
   NoAmmunition = 22,
+
+  /// The tile request named an origin that is not a multiple of `64 * scale`, or a scale
+  /// outside `{1, 4, 16}`.
+  ///
+  /// **In the low group deliberately, and the split's own words are why.** The line is
+  /// "it asked a legal question and the answer was no", and the party this answer is news
+  /// for is the client rather than the player: the map is the one surface where the
+  /// *client* chooses the numbers, and its recourse is to ask again on the grid. The
+  /// 64-and-above group is for a request the server could not read at all, which this one
+  /// is not — every field is present and every value is in range for its type.
+  TileMisaligned = 23,
+
+  /// This character already holds the maximum number of marks. One map to a character and
+  /// sixty-four marks on it, because a map nobody can read is not a map.
+  TooManyMarkers = 24,
+
+  /// The note is longer than the 120 bytes a mark may carry. In the low group for the same
+  /// reason `TileMisaligned` is, and more plainly: the player typed too much, and the
+  /// remedy is theirs.
+  NoteTooLong = 25,
+
+  /// The named mark does not belong to this character, or no longer exists. One answer for
+  /// both, deliberately: telling them apart would let a client learn that somebody else's
+  /// mark exists by naming ids it was never given — the argument `RefusedAction` records
+  /// for having no member for a refused structure removal at all.
+  MarkerUnknown = 26,
 
   // -- The request said something no correct client sends. A defect in the peer.
 

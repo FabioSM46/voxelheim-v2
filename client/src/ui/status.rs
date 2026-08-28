@@ -595,6 +595,14 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::StaleRevision
         | RefusalReason::InventoryFull
         | RefusalReason::NoAmmunition
+        // V24's four map refusals. None of them is about a placement, and none of them
+        // has a sentence anywhere yet: the window that would show one lands with the map
+        // UI, and until then the outer match below answers them with silence rather than
+        // this build inventing a line for an action a player cannot take.
+        | RefusalReason::TileMisaligned
+        | RefusalReason::TooManyMarkers
+        | RefusalReason::NoteTooLong
+        | RefusalReason::MarkerUnknown
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing

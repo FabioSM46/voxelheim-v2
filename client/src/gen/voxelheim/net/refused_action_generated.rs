@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 11;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 14;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 12] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 15] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -30,6 +30,9 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 12] = [
     RefusedAction::OpenLoot,
     RefusedAction::TakeLoot,
     RefusedAction::Attack,
+    RefusedAction::RequestMapTile,
+    RefusedAction::PlaceMarker,
+    RefusedAction::RemoveMarker,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -73,9 +76,15 @@ impl RefusedAction {
     pub const OpenLoot: Self = Self(9);
     pub const TakeLoot: Self = Self(10);
     pub const Attack: Self = Self(11);
+    /// A `MapTileRequest` the server will not answer with a tile.
+    pub const RequestMapTile: Self = Self(12);
+    /// A `MarkerPlaceRequest` that put no mark on the map.
+    pub const PlaceMarker: Self = Self(13);
+    /// A `MarkerRemoveRequest` that took no mark off it.
+    pub const RemoveMarker: Self = Self(14);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 11;
+    pub const ENUM_MAX: u8 = 14;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -89,6 +98,9 @@ impl RefusedAction {
         Self::OpenLoot,
         Self::TakeLoot,
         Self::Attack,
+        Self::RequestMapTile,
+        Self::PlaceMarker,
+        Self::RemoveMarker,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -105,6 +117,9 @@ impl RefusedAction {
             Self::OpenLoot => Some("OpenLoot"),
             Self::TakeLoot => Some("TakeLoot"),
             Self::Attack => Some("Attack"),
+            Self::RequestMapTile => Some("RequestMapTile"),
+            Self::PlaceMarker => Some("PlaceMarker"),
+            Self::RemoveMarker => Some("RemoveMarker"),
             _ => None,
         }
     }

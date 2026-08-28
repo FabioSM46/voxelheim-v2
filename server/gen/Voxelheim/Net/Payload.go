@@ -66,6 +66,12 @@ const (
 	PayloadMobHit                 Payload = 37
 	PayloadBlockRequest           Payload = 38
 	PayloadLootTakeAllRequest     Payload = 39
+	PayloadMapTileRequest         Payload = 40
+	PayloadMapTile                Payload = 41
+	PayloadMapExplored            Payload = 42
+	PayloadMarkerPlaceRequest     Payload = 43
+	PayloadMarkerRemoveRequest    Payload = 44
+	PayloadMarkerList             Payload = 45
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -109,6 +115,12 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadMobHit:                 "MobHit",
 	PayloadBlockRequest:           "BlockRequest",
 	PayloadLootTakeAllRequest:     "LootTakeAllRequest",
+	PayloadMapTileRequest:         "MapTileRequest",
+	PayloadMapTile:                "MapTile",
+	PayloadMapExplored:            "MapExplored",
+	PayloadMarkerPlaceRequest:     "MarkerPlaceRequest",
+	PayloadMarkerRemoveRequest:    "MarkerRemoveRequest",
+	PayloadMarkerList:             "MarkerList",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -152,6 +164,12 @@ var EnumValuesPayload = map[string]Payload{
 	"MobHit":                 PayloadMobHit,
 	"BlockRequest":           PayloadBlockRequest,
 	"LootTakeAllRequest":     PayloadLootTakeAllRequest,
+	"MapTileRequest":         PayloadMapTileRequest,
+	"MapTile":                PayloadMapTile,
+	"MapExplored":            PayloadMapExplored,
+	"MarkerPlaceRequest":     PayloadMarkerPlaceRequest,
+	"MarkerRemoveRequest":    PayloadMarkerRemoveRequest,
+	"MarkerList":             PayloadMarkerList,
 }
 
 func (v Payload) String() string {
