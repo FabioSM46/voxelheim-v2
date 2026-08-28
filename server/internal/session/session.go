@@ -1483,6 +1483,54 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	case vnet.PayloadMapTileRequest:
+		if streamer == nil || msg.MapTileRequest == nil {
+			// Unreachable for the reason the cases above are, and stated for the same
+			// one: this function only runs on an admitted session, which has a streamer,
+			// and Decode sets the payload for this kind or fails the frame.
+			log.Debug("map tile request arrived with nothing to draw it from; discarding")
+			return nil
+		}
+
+		request := *msg.MapTileRequest
+		tile, tErr := streamer.DrawMapTile(request)
+		if tErr != nil {
+			// A spent bucket is silence, exactly as a throttled resend is: the client
+			// asked too fast for a square it can simply ask for again, and there is no
+			// message in the contract that says so.
+			if errors.Is(tErr, errMapTileThrottled) {
+				log.Debug("dropping map tile request", "reason", tErr.Error(),
+					"origin_x", request.OriginX, "origin_z", request.OriginZ, "scale", request.Scale)
+				return nil
+			}
+
+			// Off the grid is the contract's one refusal here, and it is actionable: a
+			// client whose arithmetic is wrong can fix it. Decode already closes the
+			// session over a violation it can see in the frame, so nothing on the wire
+			// reaches this — see errMapTileMisaligned for why it is answered anyway.
+			log.Debug("refusing map tile request", "reason", tErr.Error(),
+				"origin_x", request.OriginX, "origin_z", request.OriginZ, "scale", request.Scale)
+			refusal := protocol.ActionRefused{
+				Action: vnet.RefusedActionRequestMapTile,
+				Reason: vnet.RefusalReasonTileMisaligned,
+			}
+			if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+				return fmt.Errorf("session: send map tile refusal: %w", sErr)
+			}
+			return nil
+		}
+
+		// The blocking send, for the reason an inventory uses it: a tile is not
+		// superseded by the next tick the way a snapshot is, and a dropped one leaves
+		// the player looking at a square of map that never arrives.
+		if sErr := send(protocol.EncodeMapTile(tile)); sErr != nil {
+			return fmt.Errorf("session: send map tile: %w", sErr)
+		}
+		log.Debug("map tile drawn",
+			"origin_x", request.OriginX, "origin_z", request.OriginZ, "scale", request.Scale,
+			"client_tick", request.ClientTick)
+		return nil
+
 	case vnet.PayloadMarkerPlaceRequest:
 		if msg.MarkerPlace == nil {
 			// Unreachable for the reason the cases above are: Decode sets the payload for

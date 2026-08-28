@@ -56,6 +56,10 @@ type collector struct {
 	// meaning: what matters is what the *last* one says, and how many arrived before it.
 	markerLists [][]protocol.Marker
 
+	// mapTiles is every MapTile, whole. A tile is the answer to one request, so what a
+	// test asserts about it is the frame rather than a running total.
+	mapTiles []protocol.MapTile
+
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
 	// how the client reads it.
@@ -329,7 +333,29 @@ func (c *collector) absorb(frame []byte) {
 			columns = append(columns, world.Column{CX: column.Cx(), CZ: column.Cz()})
 		}
 		c.explored = append(c.explored, columns)
+
+	case vnet.PayloadMapTile:
+		tile := new(vnet.MapTile)
+		tile.Init(table.Bytes, table.Pos)
+		// Copied out of the frame rather than kept as accessors, for the reason
+		// protocol.Decode copies everything: the buffer under a table is the writer's,
+		// and a test holding a view into it is holding a race.
+		c.mapTiles = append(c.mapTiles, protocol.MapTile{
+			OriginX:  tile.OriginX(),
+			OriginZ:  tile.OriginZ(),
+			Scale:    tile.Scale(),
+			Height:   slices.Clone(tile.HeightBytes()),
+			Surface:  slices.Clone(tile.SurfaceBytes()),
+			Explored: slices.Clone(tile.ExploredBytes()),
+		})
 	}
+}
+
+// mapTilesReceived is every MapTile this session was sent, in arrival order.
+func (c *collector) mapTilesReceived() []protocol.MapTile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.mapTiles)
 }
 
 // exploredPages is every MapExplored this session received, in order and unmerged.
