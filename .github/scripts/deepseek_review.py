@@ -43,7 +43,9 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # The arithmetic, from the runs that reached the API:
 #
 #   *  45,415 chars (PR #501) — verdict, two findings, one of them a real defect
-#   *  50,963 chars (PR  #80) — 530,226 reasoning chars, passed at a 262,144 ceiling
+#   *  50,963 chars (PR  #80) — two runs on the same diff: 530,226 reasoning chars and no
+#                               verdict against a 131,072-token ceiling, then a verdict in
+#                               35,966 completion tokens against 262,144
 #   *  60,863 chars (PR #488) — 1,448,213 reasoning chars, finish_reason=length, no verdict
 #   *  64,167 chars (PR #168) — passed at 384,000 in 7m38s
 #   *  72,350 chars (PR #169) — passed at 384,000
@@ -56,12 +58,16 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # and 60,863 did not. Size is only a proxy for the binding variable, and the binding
 # variable is how hard the model reasons about *that particular* content: #164 reasoned at
 # 11.9 characters per character of diff, #488 at 23.8 — twice as hard, on a diff half the
-# size. At 23.8 the budget is full at about 62,300 characters, which is exactly where #488
-# landed and why it produced nothing after 33 minutes (#491).
+# size. 23.8 against a 1,481,000-character budget puts the fill point at about 62,300, but
+# that is an estimate carrying #164's characters-per-token, and the number to anchor on is
+# the one #488 measured: it emitted 1,448,213 characters at 60,863 and had nothing left to
+# write a verdict with after 33 minutes, so **60,863 is an observed fill point** and the
+# 62,300 estimate agrees with it to within 2.4% (#491). Corroboration, not the anchor.
 #
-# 90,000 was derived from 11.9, which was the only sample of the ratio there was. A cap set
-# from one observation of a quantity that varies 2x keeps failing on the hard half of the
-# distribution, and this is the third time this number has had to come down.
+# 90,000 was derived from 11.9, which was the only ratio anything had measured against the
+# ceiling it was setting a margin under. A cap set from one observation of a quantity that
+# varies 2x keeps failing on the hard half of the distribution, and this is the third time
+# this number has had to come down.
 #
 # **45,000 is set from the worst observed ratio rather than the average, because the two
 # failure directions are not symmetric.** Too high costs a 33-minute run that produces
@@ -72,25 +78,40 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # acknowledges the gap. One costs half an hour and a manual split; the other costs a
 # DEEPSEEK_REVIEW_READ click. Set the number from the tail.
 #
-# The margin is the one 90,000 already used — 72% of its 124,000 fill point — applied to
-# the 62,300 fill point of the worse ratio. 45,000 spends about 277,500 tokens reasoning at
-# 23.8 and leaves roughly 106,500 against the 384,000 ceiling; at 11.9 it spends about
-# 138,700 and is never close. PR #501 is the corroboration that this is not over-tightened:
-# 45,415 characters came back with a verdict and two substantive findings, so the safe
-# ceiling is bracketed between a measured success at 45,415 and a measured failure at
-# 60,863, and 45,000 sits just under the success.
+# The margin is the one 90,000 already used, taken against the observed point rather than
+# the estimated one: 90,000 was 72% of the 124,711 #164 measured, and **45,000 is 74% of
+# the 60,863 #488 measured.** That is a point *thinner* than the precedent rather than as
+# generous — 72% of 60,863 would be 43,900 — and it is stated rather than rounded away
+# because the gap is inside the noise of a ratio with two samples, which is exactly the
+# kind of claim this comment exists to keep honest. 45,000 spends about 277,400 tokens
+# reasoning at 23.8 and leaves roughly 106,600 against the 384,000 ceiling; at 11.9 it
+# spends about 138,500 and is never close. PR #501 is the corroboration that this is not
+# over-tightened: 45,415 characters came back with a verdict and two substantive findings,
+# so the safe ceiling is bracketed between a measured success at 45,415 and a measured
+# failure at 60,863, and 45,000 sits just under the success.
 #
 # **It costs review latency, deliberately.** Five of Iteration 29's seven issues already
 # needed splitting at 90,000; at 45,000 most changes become two or three pull requests.
 # That is the price of a review that answers, and it is the reason this number should not
 # be lowered further without a measurement forcing it.
 #
-# **Raising it again is what needs more samples; lowering it did not.** The ratio has
-# exactly two observations, because only a run that *fails* prints its reasoning length —
-# the four successes above bound it from one side and measure nothing. A third and fourth
-# sample would say whether 23.8 is the tail or the new middle, and `measure_only: true` on
-# the workflow's dispatch is how to get them: it replays a real diff without posting a
-# review or spending a round. Until then the asymmetry decides the direction on its own.
+# **Raising it again is what needs more samples; lowering it did not.** Two runs measure
+# the ratio *at exhaustion* — #164 at 11.9 and #488 at 23.8 — and those two are what the
+# cap is set from, because in each of them the 384,000-token ceiling this cap sits under is
+# what stopped the reasoning. The rest of the list bounds the ratio without sampling it:
+# reasoning_chars is printed only where a run returns no content, so a success reports
+# completion_tokens instead, and #80's replay printed 530,226 characters against a
+# 131,072-token ceiling it *hit*, which makes its 10.4 a floor rather than a value.
+#
+# What #80 does measure is worth more than a third point on the curve, because both of its
+# runs are the same 50,963-character diff: one reasoned past a 131,072-token ceiling, the
+# other finished inside 35,966 completion tokens — about 2.7 characters per character.
+# **The ratio varies run to run on identical input, not only between diffs**, which is the
+# strongest argument available that a cap set from one observation was never going to hold.
+# A third and fourth sample would say whether 23.8 is the tail or the new middle, and
+# `measure_only: true` on the workflow's dispatch is how to get them: it replays a real
+# diff without posting a review or spending a round. Until then the asymmetry decides the
+# direction on its own.
 #
 # **It is a truncation threshold and not a promise** — a review that still exhausts the
 # budget under it is a new measurement, and this number is what has to come down.
