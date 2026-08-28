@@ -17,9 +17,28 @@ var updateGolden = flag.Bool("update-golden", false, "rewrite the golden chunk f
 const (
 	goldenSeed = 0x5EED
 	goldenPath = "testdata/chunk_golden.bin"
+
+	// The second fixture, and why there is one.
+	//
+	// **A golden chunk only pins the features that happen to be in it.** The original
+	// coordinate sits at surfaces 61 to 72 — above the sea line, with no basin, no
+	// channel and nothing carved deep enough to stand in water — so worldgen 5 left
+	// its bytes *identical*, and the test that exists to make a generator change
+	// impossible to miss would have said nothing at all about the change that added
+	// water. That is the same shape of failure as a diagnostic nobody reads: not a
+	// wrong answer, an answer to a question nobody asked here.
+	//
+	// So the original stays, unchanged and still pinning the dry world it always
+	// pinned, and this one is added beside it. It was chosen by sweeping a region for
+	// the richest palette: it holds eight distinct block ids, among them the sea fill,
+	// a lid of ice, a beach and 1104 voxels of water standing in carved cave.
+	goldenWaterPath = "testdata/chunk_golden_water.bin"
 )
 
-var goldenCoord = Coord{X: 3, Y: 2, Z: -5}
+var (
+	goldenCoord      = Coord{X: 3, Y: 2, Z: -5}
+	goldenWaterCoord = Coord{X: 182, Y: 1, Z: -59}
+)
 
 // TestGenerateMatchesTheGoldenChunk is the determinism contract, and the reason
 // the generator uses fixed-point integers rather than float64.
@@ -38,34 +57,79 @@ var goldenCoord = Coord{X: 3, Y: 2, Z: -5}
 // A diff here means the world changed. That is either a bug or a decision that
 // abandons every existing save.
 func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
-	got := encodedBytes(Encode(Generate(goldenSeed, goldenCoord)))
+	for _, fixture := range []struct {
+		name  string
+		coord Coord
+		path  string
+	}{
+		{"dry", goldenCoord, goldenPath},
+		{"water", goldenWaterCoord, goldenWaterPath},
+	} {
+		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 
-	if *updateGolden {
-		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
-			t.Fatalf("create testdata: %v", err)
+		if *updateGolden {
+			if err := os.MkdirAll(filepath.Dir(fixture.path), 0o755); err != nil {
+				t.Fatalf("create testdata: %v", err)
+			}
+			if err := os.WriteFile(fixture.path, got, 0o644); err != nil {
+				t.Fatalf("write golden: %v", err)
+			}
+			t.Logf("%s golden fixture rewritten: %d bytes", fixture.name, len(got))
+			continue
 		}
-		if err := os.WriteFile(goldenPath, got, 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
+
+		want, err := os.ReadFile(fixture.path)
+		if err != nil {
+			t.Fatalf("read %s golden (regenerate with -update-golden if this is a new fixture): %v", fixture.name, err)
 		}
-		t.Logf("golden fixture rewritten: %d bytes", len(got))
-		return
+		if !bytes.Equal(got, want) {
+			t.Fatalf("chunk %+v for seed %#x no longer matches the %s golden fixture: %d bytes now, %d before",
+				fixture.coord, goldenSeed, fixture.name, len(got), len(want))
+		}
+	}
+}
+
+// The water fixture has to keep being about water, or it is a second copy of the dry
+// one and the reason it was added is gone.
+func TestTheWaterGoldenChunkActuallyHoldsWater(t *testing.T) {
+	t.Parallel()
+
+	chunk := Generate(goldenSeed, goldenWaterCoord)
+	counts := map[Block]int{}
+	for _, block := range chunk.Blocks {
+		counts[block]++
 	}
 
-	want, err := os.ReadFile(goldenPath)
-	if err != nil {
-		t.Fatalf("read golden (regenerate with -update-golden if this is a new fixture): %v", err)
+	for _, block := range []Block{Water, Ice, Sand} {
+		if counts[block] == 0 {
+			t.Errorf("the water golden chunk holds no block %d; it no longer pins what it was chosen for", block)
+		}
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("chunk %+v for seed %#x no longer matches the golden fixture: %d bytes now, %d before",
-			goldenCoord, goldenSeed, len(got), len(want))
+
+	// And some of that water is underground, which is the one fill the sea line does
+	// not produce.
+	originX, originY, originZ := goldenWaterCoord.Origin()
+	underground := 0
+	for z := range ChunkSize {
+		for x := range ChunkSize {
+			col := columnAt(goldenSeed, originX+int64(x), originZ+int64(z))
+			for y := range ChunkSize {
+				if chunk.At(x, y, z) == Water && originY+int64(y) <= int64(col.surface) {
+					underground++
+				}
+			}
+		}
+	}
+	if underground == 0 {
+		t.Error("the water golden chunk holds no water below a surface: the cave fill is not pinned")
 	}
 }
 
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 4 {
-		t.Fatalf("WorldgenVersion = %d, want 4 for caves", WorldgenVersion)
+	if WorldgenVersion != 5 {
+		t.Fatalf("WorldgenVersion = %d, want 5 for water", WorldgenVersion)
 	}
 }
 
@@ -170,8 +234,9 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 		worldY := originY + int64(y)
 		got, terrain := c.At(x, y, z), col.blockAt(int(worldY))
 		carved := caveAt(seed, worldX, worldY, worldZ, surface)
-		if carved && got != Air && got != Log && got != Leaves {
-			t.Fatalf("carved voxel (%d, %d, %d) is block %d rather than air", worldX, worldY, worldZ, got)
+		if carved && got != caveFillAt(int(worldY)) && got != Log && got != Leaves {
+			t.Fatalf("carved voxel (%d, %d, %d) is block %d rather than the %d the cave fill puts there",
+				worldX, worldY, worldZ, got, caveFillAt(int(worldY)))
 		}
 		switch got {
 		case CoalOre:
@@ -199,13 +264,36 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 			if (terrain != Air && !carved) || !treeCanPlace(seed, worldX, worldY, worldZ, Leaves) {
 				t.Fatalf("leaves at (%d, %d, %d) are not part of a deterministic canopy", worldX, worldY, worldZ)
 			}
+		case Water, Ice:
+			// Two fills, and which one applies is decided by whether the terrain
+			// here was ground. Above the surface it is the sea line's; below it, it
+			// is a carved voxel's, and anything else is water in solid rock.
+			featured = true
+			switch {
+			case terrain == Air:
+				if want := col.fillAt(int(worldY)); got != want {
+					t.Fatalf("fill at (%d, %d, %d) is %d, want %d above surface %d",
+						worldX, worldY, worldZ, got, want, surface)
+				}
+			case carved:
+				if want := caveFillAt(int(worldY)); got != want {
+					t.Fatalf("cave fill at (%d, %d, %d) is %d, want %d", worldX, worldY, worldZ, got, want)
+				}
+			default:
+				t.Fatalf("block %d at (%d, %d, %d) stands in terrain block %d that nothing carved",
+					got, worldX, worldY, worldZ, terrain)
+			}
 		case Air:
-			if terrain != Air {
+			switch {
+			case terrain != Air:
 				featured = true
 				if !carved {
 					t.Fatalf("plain chunk %+v voxel (%d, %d, %d) [world y=%d, surface=%d] is air, want %d",
 						c.Coord, x, y, z, worldY, surface, terrain)
 				}
+			case col.fillAt(int(worldY)) != Air:
+				t.Fatalf("plain chunk %+v voxel (%d, %d, %d) [world y=%d, surface=%d] is air, want the %d the sea line fills it with",
+					c.Coord, x, y, z, worldY, surface, col.fillAt(int(worldY)))
 			}
 		default:
 			if got != terrain {
@@ -244,7 +332,10 @@ func TestTerrainHasTheExpectedShape(t *testing.T) {
 		maxHeight = max(maxHeight, h)
 	}
 
-	lowest := baseHeight - mountainAmplitude/2
+	// A basin digs into whatever the amplitude produced, so the floor of the designed
+	// range is that much lower than the field alone can reach. The ceiling is
+	// untouched: nothing in this generator raises ground.
+	lowest := baseHeight - mountainAmplitude/2 - basinDepth
 	highest := baseHeight + mountainAmplitude/2
 	if minHeight < lowest || maxHeight > highest {
 		t.Errorf("heights ranged over [%d, %d], outside the designed [%d, %d]", minHeight, maxHeight, lowest, highest)
@@ -570,10 +661,14 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 
 		// Find the real top from generated voxels, independently of the helper SpawnAt
 		// uses. The global terrain maximum plus the tallest tree bounds the search.
+		//
+		// **Water is not a top and ice is**, which is the same rule generatedColumnTop
+		// follows: the only fill in this world that stops movement is the lid a tundra
+		// wears at the sea line, and a body stands on that.
 		searchTop := baseHeight + mountainAmplitude/2 + treeMinTrunkHeight + treeHeightVariants - 1 + treeCanopyAboveCrown
 		actualTop := surface
 		for worldY := surface + 1; worldY <= searchTop; worldY++ {
-			if at(worldY) != Air {
+			if Solid(at(worldY)) {
 				actualTop = worldY
 			}
 		}
@@ -583,15 +678,25 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 		if actualTop > surface {
 			canopySeeds++
 		}
-		if got, want := int(spawn[1]), actualTop+SpawnClearance; got != want {
-			t.Fatalf("seed %d spawns at y=%d, want %d above terrain/canopy top %d", seed, got, want, actualTop)
+		// The sea line is a floor under the reference, never a ceiling on it: a
+		// column that stands above the water is placed from its own top, and one that
+		// does not is placed from the surface of the water it stands in.
+		if got, want := int(spawn[1]), max(actualTop, seaLevel)+SpawnClearance; got != want {
+			t.Fatalf("seed %d spawns at y=%d, want %d above terrain/canopy top %d and sea line %d",
+				seed, got, want, actualTop, seaLevel)
 		}
 		if got := at(surface); got == Air {
 			t.Fatalf("seed %d has air at its own surface height %d", seed, surface)
 		}
 		for worldY := actualTop + 1; worldY <= int(spawn[1])+1; worldY++ {
-			if got := at(worldY); got != Air {
-				t.Fatalf("seed %d has block %d in spawn clearance at y=%d", seed, got, worldY)
+			got := at(worldY)
+			if Solid(got) {
+				t.Fatalf("seed %d has solid block %d in spawn clearance at y=%d", seed, got, worldY)
+			}
+			// Below the sea line the clearance may be water — the player swims out of
+			// it. Above it, nothing but air is a legal answer.
+			if worldY > seaLevel && got != Air {
+				t.Fatalf("seed %d has block %d in spawn clearance at y=%d, above the sea line", seed, got, worldY)
 			}
 		}
 	}
@@ -660,16 +765,67 @@ func TestSpawnClearanceKeepsThePlayerOnTheGroundWithoutBuryingThem(t *testing.T)
 	const maximumFall = 4
 
 	for seed := int64(1); seed <= 300; seed++ {
-		top := generatedColumnTop(seed, spawnColumnX, spawnColumnZ)
-		above := int(SpawnAt(seed)[1]) - top
+		// The reference the clearance is measured from, which is the generated top or
+		// the sea line above it — see SpawnAt. Measuring from the top alone would call
+		// a placement on the surface of a lake a seventeen-block fall, when what is
+		// under those seventeen blocks is water the player floats on.
+		reference := max(generatedColumnTop(seed, spawnColumnX, spawnColumnZ), seaLevel)
+		above := int(SpawnAt(seed)[1]) - reference
 
 		if above < minimumAir {
-			t.Fatalf("seed %d spawns %d blocks above its generated top %d: the player is inside terrain or canopy",
-				seed, above, top)
+			t.Fatalf("seed %d spawns %d blocks above its spawn reference %d: the player is inside terrain or canopy",
+				seed, above, reference)
 		}
 		if above > maximumFall {
-			t.Fatalf("seed %d spawns %d blocks above its generated top %d: that is a fall, not a placement",
-				seed, above, top)
+			t.Fatalf("seed %d spawns %d blocks above its spawn reference %d: that is a fall, not a placement",
+				seed, above, reference)
+		}
+	}
+}
+
+// A session never begins under water, for any seed.
+//
+// **spawnWaterClearance cannot deliver this on its own, which is why SpawnAt has a
+// floor as well.** The exemption keeps basins and channels off the spawn column, but
+// the ordinary height field is concentrated around 64 against a sea line at 47 and a
+// mountainAmplitude of 150, so a sizeable minority of seeds put the origin under
+// water with no water feature involved at all. The sweep is what says so out loud:
+// it fails if either half — the exemption or the floor — is removed.
+func TestASessionNeverBeginsUnderWater(t *testing.T) {
+	t.Parallel()
+
+	submergedColumns := 0
+	for seed := int64(1); seed <= 300; seed++ {
+		spawn := SpawnAt(seed)
+		if int(spawn[1]) <= seaLevel {
+			t.Fatalf("seed %d spawns at y=%v, at or under the sea line %d", seed, spawn[1], seaLevel)
+		}
+		if generatedColumnTop(seed, spawnColumnX, spawnColumnZ) < seaLevel {
+			submergedColumns++
+		}
+	}
+	if submergedColumns == 0 {
+		t.Fatal("no seed in the sweep put the spawn column under the sea line, so the floor was never exercised")
+	}
+}
+
+// Neither a basin nor a channel touches the ground around spawn.
+func TestNoWaterFeatureReachesTheSpawnSquare(t *testing.T) {
+	t.Parallel()
+
+	const seed = goldenSeed
+	for z := int64(spawnColumnZ - spawnWaterClearance); z <= spawnColumnZ+spawnWaterClearance; z++ {
+		for x := int64(spawnColumnX - spawnWaterClearance); x <= spawnColumnX+spawnWaterClearance; x++ {
+			col := columnAt(seed, x, z)
+			if col.river {
+				t.Errorf("a river channel runs through the spawn square at (%d, %d)", x, z)
+			}
+			nx := floorDiv(x<<fracBits, terrainScaleBlocks)
+			nz := floorDiv(z<<fracBits, terrainScaleBlocks)
+			base := baseHeight + int((amplitudeAt(seed, x, z)*(fbm2D(seed, nx, nz)-one/2))>>fracBits)
+			if col.surface != base {
+				t.Errorf("the column at (%d, %d) was lowered from %d to %d inside the spawn square", x, z, base, col.surface)
+			}
 		}
 	}
 }
