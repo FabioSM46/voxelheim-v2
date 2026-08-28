@@ -33,6 +33,12 @@
 //! array a headless test can read one pixel out of. [`compose`] is that rewrite, and it is
 //! pure: a viewport, a cache, and the bytes that fall out.
 //!
+//! There is a second image, and it is the whole of the exception: the player's arrowhead is
+//! a coverage mask a few dozen texels on a side, minted once, because `bevy_ui` draws
+//! rectangles and a heading wants a triangle. Everything else drawn over the picture --
+//! every mark, every icon inside one -- is still `bevy_ui` nodes, from the same vocabulary
+//! `ui/icon.rs` owns. See [`arrowhead_image`] for why that one shape earned an asset.
+//!
 //! **Fog answers two different questions and deliberately looks like one.** A pixel whose
 //! chunk column is clear in its tile's own mask is somewhere this character has not been;
 //! a pixel in a square the server has not drawn yet is somewhere this client has not been
@@ -805,8 +811,21 @@ struct MapDrag(Option<Vec2>);
 struct MapRoot;
 
 /// Where the player is standing, drawn over the picture and turned to face their heading.
+///
+/// **Still the dot, though nothing round is drawn in it any more.** "The player's dot" is
+/// what a map calls the thing that says *you are here*, whatever shape it wears -- and the
+/// shape is [`PlayerArrow`]'s business, one node down. Renaming this and
+/// [`place_the_player_dot`] to say "arrowhead" would move the drawing's name onto the node
+/// that holds the *position*, which is the one thing about it that did not change.
 #[derive(Component)]
 struct PlayerDot;
+
+/// The arrowhead itself, the one child of [`PlayerDot`].
+///
+/// Carried so the store-replacement guard in [`place_the_player_dot`] can re-point it at a
+/// picture that exists, which is the same reason [`MapCanvas`] is a component.
+#[derive(Component)]
+struct PlayerArrow;
 
 /// The node the picture is drawn inside, and the one the pointer is measured against.
 #[derive(Component)]
@@ -854,17 +873,156 @@ const TITLE_SIZE: f32 = 22.0;
 /// A readout, dimmer than the heading.
 const READING: Color = Color::srgb(0.78, 0.80, 0.84);
 
-/// The player's dot, in logical pixels.
-const DOT_SIZE: f32 = 10.0;
-
-/// The needle that says which way they are facing: as long again as the dot is wide, and
-/// narrow, so the heading reads at a glance without hiding the ground under it.
+/// The arrowhead that says where the player is and which way they are facing, in logical
+/// pixels.
 ///
-/// A needle rather than the wedge the issue asks for, and the reason is `bevy_ui`: it draws
-/// rectangles, and the triangle a wedge needs would have to be a rotated node pretending or
-/// an image nobody can read a heading off. This is the same information in the shape the
-/// toolkit has.
-const NEEDLE: Vec2 = Vec2::new(4.0, 12.0);
+/// Taller than it is wide, so the heading is in the silhouette itself rather than only in
+/// the rotation applied to it: a shape that reads the same upside down says nothing about
+/// facing until the player has something to compare it against.
+const ARROW: Vec2 = Vec2::new(15.0, 19.0);
+
+/// The arrowhead's colour.
+///
+/// **Red, and deliberately not [`super::SELECTED_EDGE`].** The amber this replaces is what
+/// *chosen* looks like on every other screen in this client, and the player is not a
+/// selection; a second meaning for one colour is a colour that has stopped meaning either.
+///
+/// It is also no [`MapSurface`] colour and no shade of one. The picture under it is made of
+/// measurements, so the one mark drawn over it that is *not* a measurement must not be
+/// mistakable for one -- the same argument [`MapSurface::Unknown`] is given its own colour
+/// for, in the other direction. `the_arrowhead_wears_a_red_the_map_never_paints` is what
+/// holds it.
+///
+/// **Saturated to the top of the red channel, and that is a measurement rather than a
+/// taste.** The nearest thing this map can paint is a settlement lit from above -- an
+/// orange whose red is most of the way up already -- so what separates the two has to be
+/// bought in the channels a settlement has and this does not. A gentler red is nearer that
+/// orange than the test above allows.
+const PLAYER_ARROW: Color = Color::srgb(1.0, 0.15, 0.22);
+
+/// The arrowhead's texture, in texels on a side.
+///
+/// Small on purpose: the shape is one notch and two slanted edges, and what makes those
+/// edges smooth is the coverage computed into the alpha below, not the resolution.
+const ARROW_TEXELS: u32 = 32;
+
+/// How many samples an edge texel is resolved with, on a side.
+const ARROW_SUPERSAMPLE: u32 = 4;
+
+/// The arrowhead's outline, in fractions of the texture, clockwise from the tip.
+///
+/// The notch is what makes it an arrowhead rather than a triangle: a plain triangle at this
+/// size reads as a diamond as soon as it is rotated off the axes, because the eye has
+/// nothing to tell the base from the point.
+const ARROW_TIP: Vec2 = Vec2::new(0.50, 0.03);
+const ARROW_RIGHT: Vec2 = Vec2::new(0.97, 0.97);
+const ARROW_NOTCH: Vec2 = Vec2::new(0.50, 0.68);
+const ARROW_LEFT: Vec2 = Vec2::new(0.03, 0.97);
+
+/// Whether one point of the texture is inside the arrowhead.
+///
+/// Two triangles rather than one four-cornered test, because the notch makes the outline
+/// concave and a crossing test over a concave polygon is the kind of arithmetic that is
+/// right until somebody moves a corner.
+fn in_arrowhead(point: Vec2) -> bool {
+    fn in_triangle(point: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
+        let side =
+            |p: Vec2, q: Vec2, r: Vec2| (p.x - r.x) * (q.y - r.y) - (q.x - r.x) * (p.y - r.y);
+        let first = side(point, a, b);
+        let second = side(point, b, c);
+        let third = side(point, c, a);
+        let below = first < 0.0 || second < 0.0 || third < 0.0;
+        let above = first > 0.0 || second > 0.0 || third > 0.0;
+        !(below && above)
+    }
+    in_triangle(point, ARROW_TIP, ARROW_RIGHT, ARROW_NOTCH)
+        || in_triangle(point, ARROW_TIP, ARROW_NOTCH, ARROW_LEFT)
+}
+
+/// The arrowhead, minted once as one small image.
+///
+/// **A picture, where this module and `ui/icon.rs` otherwise draw rectangles, and the
+/// reasoning the old `NEEDLE` carried here is what this replaces.** That comment was right
+/// about the toolkit -- `bevy_ui` draws rectangles and a triangle is not a shape a node has
+/// -- and wrong about what follows from it: an `ImageNode` is a node like any other, it
+/// carries a handle and a `color` that multiplies the texel, and the map beside it is
+/// already one composed `Image` for exactly the reason that it is cheaper than a pipeline
+/// and readable by a headless test. So the wedge costs a few dozen texels and the same
+/// `UiTransform` rotation the needle already turned by, rather than the render pass the old
+/// comment was declining.
+///
+/// **A coverage mask, not a coloured picture**: white throughout, with an alpha that is how
+/// much of the texel the shape covers, so [`PLAYER_ARROW`] is the whole of what decides the
+/// colour and there is one number to change rather than a texture to repaint.
+///
+/// **Antialiased here rather than by the sampler.** Bilinear filtering interpolates between
+/// texels that are each wholly in or wholly out, so it can soften a slanted edge but cannot
+/// know where inside a texel that edge fell; supersampling each texel is what makes
+/// [`ARROW_TEXELS`] enough for a shape drawn at nineteen logical pixels.
+fn arrowhead_image() -> Image {
+    let side = ARROW_SUPERSAMPLE as f32;
+    let edge = ARROW_TEXELS as f32;
+    let samples = ARROW_SUPERSAMPLE * ARROW_SUPERSAMPLE;
+    let mut data = Vec::with_capacity((ARROW_TEXELS * ARROW_TEXELS * 4) as usize);
+    for row in 0..ARROW_TEXELS {
+        for column in 0..ARROW_TEXELS {
+            let mut covered = 0_u32;
+            for sub_row in 0..ARROW_SUPERSAMPLE {
+                for sub_column in 0..ARROW_SUPERSAMPLE {
+                    let point = Vec2::new(
+                        (column as f32 + (sub_column as f32 + 0.5) / side) / edge,
+                        (row as f32 + (sub_row as f32 + 0.5) / side) / edge,
+                    );
+                    if in_arrowhead(point) {
+                        covered += 1;
+                    }
+                }
+            }
+            let alpha = (covered * u32::from(u8::MAX)).div_euclid(samples);
+            data.extend_from_slice(&[u8::MAX, u8::MAX, u8::MAX, alpha as u8]);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: ARROW_TEXELS,
+            height: ARROW_TEXELS,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        // Linear, for the reason [`surface_tint`] gives: an `Rgba8Unorm` texel is read as
+        // the number it is, so a mask of ones multiplies the tint by one and the colour on
+        // the screen is [`PLAYER_ARROW`] and not a second decoding of it.
+        TextureFormat::Rgba8Unorm,
+        // Both worlds, so a headless test can read the mask back out of the main-world
+        // store -- the same reason [`compose`] keeps its picture readable.
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        // **Linear here, where the map insists on nearest, and the difference is what the
+        // texels are.** A map pixel is a measurement of a square of world and blending two
+        // would draw a coastline nobody sent; these texels are a drawing of a symbol, where
+        // the only thing blending loses is the staircase on a slanted edge.
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+/// The arrowhead every open map draws the player as, as one asset for the life of the app.
+///
+/// [`MapPicture`]'s shape and for [`MapPicture`]'s reason: the `ImageNode` is spawned once,
+/// and a handle minted per frame would be a leak with a compass on it.
+#[derive(Resource, Debug, Clone)]
+struct ArrowPicture(Handle<Image>);
+
+impl FromWorld for ArrowPicture {
+    fn from_world(world: &mut World) -> Self {
+        Self(world.resource_mut::<Assets<Image>>().add(arrowhead_image()))
+    }
+}
 
 /// Keeps the map's viewport and its tile cache in step with the server.
 pub(super) struct MapUiPlugin;
@@ -895,6 +1053,7 @@ impl Plugin for MapUiPlugin {
             // `FromWorld`, so the handle exists before the `Startup` system that spawns
             // the node holding it — there is no ordering here for anybody to get wrong.
             .init_resource::<MapPicture>()
+            .init_resource::<ArrowPicture>()
             .init_resource::<Painted>()
             .init_resource::<MapPointer>()
             .init_resource::<MapDrag>()
@@ -939,7 +1098,12 @@ impl Plugin for MapUiPlugin {
                     // After the dot, because both are children of the picture and the
                     // picture is sized by the composition above them.
                     draw_the_marks,
-                    hover_a_mark,
+                    // After the marks it may name, and after `press_the_form` at the head of
+                    // this chain, which is what closes the form: the tooltip a frame raises
+                    // must be about the form that frame ended with rather than the one it
+                    // began on. `.chain()` already gives both edges -- this note is here so
+                    // the requirement stops being invisible if it is ever reordered.
+                    name_what_the_pointer_rests_on,
                     refresh_the_form,
                 )
                     .chain(),
@@ -956,7 +1120,7 @@ impl Plugin for MapUiPlugin {
 
 /// Builds the overlay once: a backdrop, the viewport the picture is drawn in, and the
 /// panel that reads out what the view is of.
-fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
+fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>, arrow: Res<ArrowPicture>) {
     commands
         .spawn((
             MapRoot,
@@ -1029,31 +1193,25 @@ fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
                                     },
                                     FocusPolicy::Pass,
                                 ))
+                                // One node rather than the two the dot and its needle were:
+                                // the heading is the shape now, so there is nothing left for
+                                // a second rectangle to say. It is laid out by the centring
+                                // above rather than pinned, so the middle of the arrowhead
+                                // is the point the projection answered -- the same rule
+                                // `pin_node` follows for a mark.
                                 .with_children(|dot| {
                                     dot.spawn((
+                                        PlayerArrow,
                                         Node {
-                                            position_type: PositionType::Absolute,
-                                            width: Val::Px(NEEDLE.x),
-                                            height: Val::Px(NEEDLE.y),
-                                            bottom: Val::Px(DOT_SIZE / 2.0),
-                                            border_radius: BorderRadius::all(Val::Px(
-                                                NEEDLE.x / 2.0,
-                                            )),
+                                            width: Val::Px(ARROW.x),
+                                            height: Val::Px(ARROW.y),
                                             ..default()
                                         },
-                                        BackgroundColor(super::SELECTED_EDGE),
-                                        FocusPolicy::Pass,
-                                    ));
-                                    dot.spawn((
-                                        Node {
-                                            width: Val::Px(DOT_SIZE),
-                                            height: Val::Px(DOT_SIZE),
-                                            border_radius: BorderRadius::all(Val::Px(
-                                                DOT_SIZE / 2.0,
-                                            )),
+                                        ImageNode {
+                                            image: arrow.0.clone(),
+                                            color: PLAYER_ARROW,
                                             ..default()
                                         },
-                                        BackgroundColor(super::SELECTED_EDGE),
                                         FocusPolicy::Pass,
                                     ));
                                 });
@@ -1385,19 +1543,42 @@ fn zoom_the_map(
     }
 }
 
-/// Puts the player's dot where the server says they are, facing where they are looking.
+/// Puts the player's arrowhead where the server says they are, facing where they are
+/// looking.
 ///
 /// **The server's position and the client's heading**, which is not an inconsistency: this
 /// client never sends its own place, so `PlayerStats::position` is the only answer to
 /// *where*, while the yaw is the one thing in `player/` that is genuinely local. A position
-/// the server has not sent, or one outside the picture, hides the dot rather than pinning
-/// it to an edge it is not at. Party members are not drawn — the map is this character's.
+/// the server has not sent, or one outside the picture, hides the arrowhead rather than
+/// pinning it to an edge it is not at. Party members are not drawn — the map is this
+/// character's.
+///
+/// **It also owns the arrowhead's picture, on the terms [`paint_the_map`] owns the map's.**
+/// A handle names a slot in the store it was minted from, so an `Assets<Image>` replaced
+/// under the app leaves this one naming nothing — the hazard `player/livery.rs` records —
+/// and an arrowhead that has quietly stopped drawing is the same failure as a blank map,
+/// one node smaller. The mint is guarded on the store rather than on anything this system
+/// already tracks, because nothing this system tracks would move on the frame the store
+/// went.
 fn place_the_player_dot(
     screen: Res<MapScreen>,
     stats: Res<PlayerStats>,
     look: Res<LookState>,
+    mut arrow: ResMut<ArrowPicture>,
+    mut images: ResMut<Assets<Image>>,
     mut dots: Query<(&mut Node, &mut UiTransform), With<PlayerDot>>,
+    mut arrows: Query<&mut ImageNode, With<PlayerArrow>>,
 ) {
+    if !images.contains(&arrow.0) {
+        // Minted afresh into the store that is there now, and the node re-pointed at it:
+        // writing the old handle again would name the same absent slot every frame for the
+        // rest of the session.
+        arrow.0 = images.add(arrowhead_image());
+        for mut node in &mut arrows {
+            node.image = arrow.0.clone();
+        }
+    }
+
     let placed = stats
         .position
         .filter(|position| position.is_finite())
@@ -1405,7 +1586,10 @@ fn place_the_player_dot(
         .filter(|point| screen.is_open() && screen.shows(*point));
     // The compass's own convention: a positive yaw turns west, so the bearing is the yaw
     // negated — and a `bevy_ui` rotation is applied in a space whose y grows downward, so
-    // that same bearing is the clockwise turn a map needs.
+    // that same bearing is the clockwise turn a map needs. A yaw that is not a number has
+    // no bearing to negate, so the arrowhead is turned back to north instead: a `Rot2`
+    // built from a NaN is neither equal to itself nor to anything else, so it would be
+    // rewritten every frame and drawn as nothing at all.
     let facing = Rot2::radians(if look.yaw.is_finite() { -look.yaw } else { 0.0 });
     for (mut node, mut transform) in &mut dots {
         let wanted = match placed {
@@ -1445,13 +1629,31 @@ struct MarkerPin {
     kind: MarkerKind,
 }
 
-/// The map's single tooltip node, which says what the mark under the pointer is.
+/// The map's single tooltip node, which says what the pointer is resting on -- a mark on
+/// the picture, or one of the form's kind buttons.
+///
+/// One node for the screen, with one writer: see [`name_what_the_pointer_rests_on`] for why
+/// the second source of text is a second branch there rather than a second system here.
 #[derive(Component)]
 struct MarkerTooltip;
 
 /// One mark's icon, in logical pixels. Big enough to read a silhouette off and small enough
 /// that a cluster of marks is still ground rather than a wall of pictures.
-const MARKER_SIZE: f32 = 22.0;
+///
+/// **28 rather than the 22 it was, and it is two numbers at once**: the pin is its own hover
+/// target, so this is simultaneously how big a mark is drawn and how big a mark is to hit.
+/// Twenty-two logical pixels is a quarter of a square inch on a laptop panel and the seven
+/// silhouettes are told apart *inside* it; the rise is 27% across and 62% of the area, which
+/// is the step at which a cave stops being a smudge.
+///
+/// The bound above it is the ground. The map opens at four blocks a map pixel drawn at a
+/// zoom of two, so a mark covers 56 blocks of a viewport a thousand or more across, and at
+/// the closest look -- one block a pixel at a zoom of four -- it is seven blocks wide, still
+/// smaller than the clearing a camp is in. The bound below is the form: [`KIND_BUTTON`] is
+/// 30 outside its border and 26 of drawing inside it, so 28 sits between the picture a
+/// player pressed and the control it was drawn in. A mark larger than the button that chose
+/// it would read as a different object rather than as the same one, placed.
+const MARKER_SIZE: f32 = 28.0;
 
 /// What one kind of mark is called on screen.
 ///
@@ -1573,28 +1775,53 @@ fn draw_the_marks(
     }
 }
 
-/// Names the mark under the pointer, and nothing else.
+/// Names whatever the pointer is resting on: a kind button in the form, or a mark on the
+/// picture.
 ///
 /// **Display only, and structurally so**, exactly as `ui/inventory.rs`'s does: it writes no
-/// message and touches no resource, so resting the pointer on a mark cannot become a
+/// message and touches no resource, so resting the pointer on either cannot become a
 /// request. It is the same single-node mechanism too -- one tooltip for the screen, moved
-/// and rewritten rather than spawned per mark.
+/// and rewritten rather than spawned per thing that can be hovered.
 ///
-/// The text comes from [`Markers`] rather than from the pin, because the note does: a pin
-/// carries what it needs to be drawn, and the list is the state.
-fn hover_a_mark(
+/// **Two sources of text and one system, rather than two systems and one node.** The kind
+/// buttons want the mark's behaviour with a different word in it, and a second system
+/// writing the same tooltip would be a race whose winner is whichever the schedule ran last
+/// -- a design that is decided by a schedule is not one. So the resolution is written down
+/// instead: **the form wins.** It is drawn over the picture and a pointer inside it is not
+/// over the ground behind it, whatever [`FocusPolicy`] the marks under it carry.
+///
+/// The button's name is [`marker_label`] and nothing else -- the same table the marks are
+/// named from, so the word on the button that places a kind and the word on the mark it
+/// placed cannot come apart. A mark's text comes from [`Markers`] rather than from the pin,
+/// because the note does: a pin carries what it needs to be drawn, and the list is the
+/// state.
+fn name_what_the_pointer_rests_on(
     screen: Res<MapScreen>,
+    form: Res<MarkerForm>,
     markers: Res<Markers>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    kinds: Query<(&Interaction, &MarkerKindButton)>,
     pins: Query<(&Interaction, &MarkerPin)>,
     mut tooltips: Query<(&mut Node, &mut Text, &mut Visibility), With<MarkerTooltip>>,
 ) {
-    let hovered = screen
-        .is_open()
+    // The form's own state and not the buttons' visibility: a closed form leaves seven
+    // hidden nodes behind, and whether a hidden node's `Interaction` has been cleared is the
+    // focus pass's business rather than something this may assume. Asked here, the tooltip
+    // cannot outlive the form that raised it.
+    let on_a_button = (screen.is_open() && form.is_open())
+        .then(|| {
+            kinds
+                .iter()
+                // The same "any interaction at all" the marks and the inventory read, so a
+                // button held down keeps the name it was hovered with.
+                .find(|(interaction, _)| **interaction != Interaction::None)
+                .map(|(_, button)| marker_label(button.0).to_owned())
+        })
+        .flatten();
+
+    let on_a_mark = (screen.is_open() && on_a_button.is_none())
         .then(|| {
             pins.iter()
-                // The same "any interaction at all" the inventory reads, so a mark held
-                // down keeps the label it was hovered with.
                 .find(|(interaction, _)| **interaction != Interaction::None)
                 .map(|(_, pin)| pin.marker_id)
         })
@@ -1606,6 +1833,8 @@ fn hover_a_mark(
                 .find(|marker| marker.marker_id == marker_id)
         })
         .map(marker_reading);
+
+    let hovered = on_a_button.or(on_a_mark);
 
     let pointer = super::pointer_in_window(&windows);
     for (mut node, mut text, mut visibility) in &mut tooltips {
@@ -3014,6 +3243,229 @@ mod tests {
         assert_eq!(dot(&mut app).0, Display::None);
     }
 
+    /// One texel of the arrowhead's mask, by column and row.
+    fn arrow_alpha(image: &Image, column: u32, row: u32) -> u8 {
+        texel(image, column, row)[3]
+    }
+
+    /// The mask the arrowhead is currently drawing, read off the node rather than off the
+    /// resource -- the node is what a player sees, and the two part company exactly when the
+    /// re-mint below forgets to re-point it.
+    fn arrow_image(app: &mut App) -> Image {
+        let handle = app
+            .world_mut()
+            .query_filtered::<&ImageNode, With<PlayerArrow>>()
+            .iter(app.world())
+            .next()
+            .map(|node| node.image.clone())
+            .expect("the arrowhead is spawned with the picture");
+        app.world()
+            .resource::<Assets<Image>>()
+            .get(&handle)
+            .cloned()
+            .expect("the arrowhead the node points at is in the store")
+    }
+
+    /// How the arrowhead is currently turned.
+    fn arrow_facing(app: &mut App) -> Rot2 {
+        app.world_mut()
+            .query_filtered::<&UiTransform, With<PlayerDot>>()
+            .iter(app.world())
+            .next()
+            .map(|transform| transform.rotation)
+            .expect("the arrowhead is spawned with the picture")
+    }
+
+    /// The arrowhead is a head, and it points at the top of the texture.
+    ///
+    /// The half of the heading that the rotation below cannot state: a rotation turns a
+    /// picture, and a picture that says nothing about direction is still saying nothing
+    /// after it has been turned. So the notch and the two barbs are asserted where they are
+    /// -- solid on the centreline near the top, nothing on the centreline near the bottom,
+    /// solid out at both bottom corners.
+    #[test]
+    fn the_arrowhead_is_a_head_and_it_points_at_the_top_of_the_texture() {
+        let image = arrowhead_image();
+        assert_eq!(image.texture_descriptor.size.width, ARROW_TEXELS);
+        assert_eq!(image.texture_descriptor.size.height, ARROW_TEXELS);
+
+        for column in [15, 16] {
+            assert!(
+                arrow_alpha(&image, column, 3) >= 200,
+                "the point is on the centreline, three rows down"
+            );
+            assert_eq!(
+                arrow_alpha(&image, column, 26),
+                0,
+                "and the notch is on the centreline, near the bottom"
+            );
+        }
+        for column in [5, 26] {
+            assert!(
+                arrow_alpha(&image, column, 26) >= 200,
+                "the barbs are out at the corners the notch is between"
+            );
+        }
+
+        // A mask, not a picture: every texel is white and the alpha is the whole of the
+        // shape, which is what makes `PLAYER_ARROW` the one thing that decides the colour.
+        assert_eq!(texel(&image, 15, 3)[..3], [u8::MAX; 3]);
+    }
+
+    /// The arrowhead's colour in the space the map paints in.
+    fn arrow_bytes() -> [u8; 3] {
+        let linear = PLAYER_ARROW.to_linear();
+        [linear.red, linear.green, linear.blue].map(|channel| {
+            // The same conversion `shaded` ends with, so the two are one comparison.
+            (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+        })
+    }
+
+    /// How far apart two linear colours are.
+    fn apart(one: [u8; 3], other: [u8; 3]) -> f32 {
+        let square = |index: usize| {
+            let difference = f32::from(one[index]) - f32::from(other[index]);
+            difference * difference
+        };
+        (square(0) + square(1) + square(2)).sqrt()
+    }
+
+    /// The least two colours may be apart and still be two colours.
+    ///
+    /// **Distinct is not the property that matters here** -- an orange one byte off the
+    /// arrowhead is distinct and is still the arrowhead as far as anyone reading a map is
+    /// concerned, which is why this is a distance rather than an `assert_ne!`. A hundred is
+    /// under a quarter of the cube's longest diagonal, so it is a floor on "these are two
+    /// colours" and not a claim about taste.
+    const APART: f32 = 100.0;
+
+    /// The player is drawn in a red the picture underneath can never produce.
+    ///
+    /// The counterpart to [`MapSurface::Unknown`]'s own colour, in the other direction: that
+    /// one says *this is not a measurement*, and so does this. It is checked across the
+    /// whole shading band rather than against the base tints, because what is on the screen
+    /// is a tint multiplied by the ground's height and a colour that only avoids the tint
+    /// avoids nothing.
+    #[test]
+    fn the_arrowhead_wears_a_red_the_map_never_paints() {
+        let arrow = arrow_bytes();
+        let surfaces = [
+            MapSurface::Unknown,
+            MapSurface::Grass,
+            MapSurface::Snow,
+            MapSurface::Sand,
+            MapSurface::Stone,
+            MapSurface::Gravel,
+            MapSurface::Water,
+            MapSurface::Ice,
+            MapSurface::Forest,
+            MapSurface::Cave,
+            MapSurface::Settlement,
+        ];
+        for surface in surfaces {
+            for height in 0..=u8::MAX {
+                let ground = shaded(surface, height);
+                assert!(
+                    apart(arrow, ground) >= APART,
+                    "the player would be read as {surface:?} at height {height}: \
+                     {arrow:?} against {ground:?}"
+                );
+            }
+        }
+
+        // And the fog, which is the other thing a pixel of this picture can be.
+        let fog = FOG.map(|channel| (channel * 255.0).round() as u8);
+        assert!(apart(arrow, fog) >= APART);
+
+        // Not the amber either. `super::SELECTED_EDGE` means *chosen* on every screen this
+        // client draws, and the player is not a selection.
+        let selected = super::super::SELECTED_EDGE.to_linear();
+        let selected = [selected.red, selected.green, selected.blue]
+            .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+        assert!(
+            apart(arrow, selected) >= APART,
+            "the arrowhead is the amber it replaced: {arrow:?} against {selected:?}"
+        );
+    }
+
+    /// The arrowhead turns with the look, and the way it turns is the map's own.
+    #[test]
+    fn the_arrowhead_points_the_way_the_player_faces() {
+        let (mut app, _frames) = app();
+        app.world_mut().resource_mut::<PlayerStats>().position = Some(Vec3::new(8.0, 70.0, 8.0));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+
+        // Where the tip of the texture ends up, in the picture's own axes: x grows east and
+        // y grows south, which is what `MapScreen::point_of` answers in.
+        let tip = |app: &mut App| arrow_facing(app) * Vec2::new(0.0, -1.0);
+
+        let north = tip(&mut app);
+        assert!(
+            north.y < -0.99,
+            "a yaw of nothing looks along -Z, which is up the picture: {north:?}"
+        );
+
+        // A positive yaw turns west — the compass's convention, and the one
+        // `place_the_player_dot` negates. West is -X, which is left on the picture.
+        app.world_mut().resource_mut::<LookState>().yaw = std::f32::consts::FRAC_PI_2;
+        app.update();
+        let west = tip(&mut app);
+        assert!(west.x < -0.99, "the arrowhead points west: {west:?}");
+
+        app.world_mut().resource_mut::<LookState>().yaw = std::f32::consts::PI;
+        app.update();
+        let south = tip(&mut app);
+        assert!(south.y > 0.99, "and south: {south:?}");
+
+        // A yaw that is not a number is not a bearing, so the arrowhead falls back to
+        // north rather than carrying the NaN into the transform — the rule every float
+        // this client reads follows. North and not the last good heading, deliberately:
+        // a stale bearing is a wrong one that looks measured, and this one is visibly
+        // the default.
+        app.world_mut().resource_mut::<LookState>().yaw = f32::NAN;
+        app.update();
+        assert_eq!(arrow_facing(&mut app), Rot2::IDENTITY);
+    }
+
+    #[test]
+    fn an_arrowhead_the_store_lost_is_minted_again_rather_than_left_blank() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        let before = arrow_image(&mut app);
+        assert!(arrow_alpha(&before, 15, 3) >= 200, "an open map draws it");
+
+        // The whole image store replaced under the app: `player/livery.rs`'s hazard, and the
+        // one thing that makes this resource's handle name nothing. Neither the position nor
+        // the heading moved, so a guard that asked only about those would answer "no" on
+        // this frame and on every frame after it.
+        app.world_mut().insert_resource(Assets::<Image>::default());
+        app.update();
+
+        let after = arrow_image(&mut app);
+        assert_eq!(
+            after.texture_descriptor.size.width, ARROW_TEXELS,
+            "the arrowhead is drawn again rather than staying blank for the session"
+        );
+        assert_eq!(
+            arrow_alpha(&after, 15, 3),
+            arrow_alpha(&before, 15, 3),
+            "and it is the same shape, not a placeholder"
+        );
+        let drawn = app
+            .world_mut()
+            .query_filtered::<&ImageNode, With<PlayerArrow>>()
+            .iter(app.world())
+            .next()
+            .map(|node| node.image.clone());
+        assert_eq!(
+            drawn,
+            Some(app.world().resource::<ArrowPicture>().0.clone()),
+            "the node draws the arrowhead that exists, not the one that was lost"
+        );
+    }
+
     fn mark(marker_id: u64, x: i32, z: i32, kind: MarkerKind, note: &str) -> Marker {
         Marker {
             marker_id,
@@ -3232,6 +3684,167 @@ mod tests {
             .expect("the map's tooltip")
             .clone();
         assert_eq!(node.position_type, PositionType::Absolute);
+    }
+
+    /// Every kind button, by the kind it places.
+    fn kind_buttons(app: &mut App) -> Vec<(Entity, MarkerKind)> {
+        app.world_mut()
+            .query::<(Entity, &MarkerKindButton)>()
+            .iter(app.world())
+            .map(|(entity, button)| (entity, button.0))
+            .collect()
+    }
+
+    /// Rests the pointer on one entity, taking it off every other button and pin.
+    fn hover_only(app: &mut App, wanted: Option<Entity>) {
+        let hoverable: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<Interaction>>()
+            .iter(app.world())
+            .collect();
+        for entity in hoverable {
+            let next = if Some(entity) == wanted {
+                Interaction::Hovered
+            } else {
+                Interaction::None
+            };
+            if let Some(mut interaction) = app.world_mut().get_mut::<Interaction>(entity) {
+                *interaction = next;
+            }
+        }
+        app.update();
+    }
+
+    /// How many tooltip nodes the screen holds.
+    fn tooltips(app: &mut App) -> usize {
+        app.world_mut()
+            .query_filtered::<Entity, With<MarkerTooltip>>()
+            .iter(app.world())
+            .count()
+    }
+
+    #[test]
+    fn resting_the_pointer_on_a_kind_button_names_the_kind_it_places() {
+        let (mut app, _frames) = app_with_a_window();
+        open_the_form(&mut app);
+        app.update();
+        assert_eq!(
+            tooltip(&mut app).1,
+            Visibility::Hidden,
+            "an open form with nothing hovered names nothing"
+        );
+
+        let buttons = kind_buttons(&mut app);
+        assert_eq!(buttons.len(), MarkerKind::ALL.len());
+        for (entity, kind) in buttons {
+            hover_only(&mut app, Some(entity));
+            assert_eq!(
+                tooltip(&mut app),
+                (marker_label(kind).to_owned(), Visibility::Inherited),
+                "{kind:?} is not named by the button that places it"
+            );
+            assert_eq!(
+                tooltips(&mut app),
+                1,
+                "one tooltip for the screen, moved rather than spawned per button"
+            );
+        }
+
+        // The anchor is the shared one, so the box is pinned away from the window edge the
+        // pointer is nearer rather than clamped against it.
+        let node = app
+            .world_mut()
+            .query_filtered::<&Node, With<MarkerTooltip>>()
+            .iter(app.world())
+            .next()
+            .expect("the map's tooltip")
+            .clone();
+        assert_eq!(node.position_type, PositionType::Absolute);
+    }
+
+    #[test]
+    fn a_kind_buttons_name_does_not_outlive_the_pointer_the_form_or_the_map() {
+        let (mut app, _frames) = app_with_a_window();
+        open_the_form(&mut app);
+        app.update();
+        let (button, kind) = kind_buttons(&mut app)
+            .into_iter()
+            .next()
+            .expect("the form has kind buttons");
+
+        hover_only(&mut app, Some(button));
+        assert_eq!(tooltip(&mut app).0, marker_label(kind));
+
+        // The pointer leaves.
+        hover_only(&mut app, None);
+        assert_eq!(tooltip(&mut app).1, Visibility::Hidden);
+
+        // The form closes under a pointer that never moved. The button is still hovered as
+        // far as its own component is concerned, which is the whole point: what the tooltip
+        // was describing has gone.
+        hover_only(&mut app, Some(button));
+        assert_eq!(tooltip(&mut app).1, Visibility::Inherited);
+        app.world_mut().resource_mut::<MarkerForm>().0 = None;
+        app.update();
+        assert_eq!(
+            tooltip(&mut app).1,
+            Visibility::Hidden,
+            "a name for a control that is no longer up"
+        );
+
+        // And the map closes under it, with the form open again.
+        open_the_form(&mut app);
+        app.update();
+        assert_eq!(tooltip(&mut app).1, Visibility::Inherited);
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert_eq!(tooltip(&mut app).1, Visibility::Hidden);
+    }
+
+    /// The form sits over the picture, so the form answers.
+    ///
+    /// Deterministic and stated, rather than left to whichever query the schedule reached
+    /// first: two systems writing one node would have made this a race, and the reason there
+    /// is one system is that a race has no answer to assert here.
+    #[test]
+    fn a_hovered_button_takes_the_tooltip_from_a_hovered_mark() {
+        let (mut app, _frames) = app_with_a_window();
+        list(&mut app, vec![mark(1, 0, 0, MarkerKind::Cave, "bats")]);
+        let pin = app
+            .world_mut()
+            .query_filtered::<Entity, With<MarkerPin>>()
+            .iter(app.world())
+            .next()
+            .expect("the mark is drawn");
+
+        hover_only(&mut app, Some(pin));
+        assert_eq!(tooltip(&mut app).0, "Cave | bats", "no form is up");
+
+        open_the_form(&mut app);
+        let button = kind_buttons(&mut app)
+            .into_iter()
+            .find(|(_, kind)| *kind == MarkerKind::Village)
+            .expect("the village button")
+            .0;
+        *app.world_mut()
+            .get_mut::<Interaction>(pin)
+            .expect("a mark takes the pointer") = Interaction::Hovered;
+        *app.world_mut()
+            .get_mut::<Interaction>(button)
+            .expect("a button takes the pointer") = Interaction::Hovered;
+        app.update();
+        assert_eq!(
+            tooltip(&mut app),
+            ("Village".to_owned(), Visibility::Inherited),
+            "the form is over the picture, so the form wins"
+        );
+        assert_eq!(tooltips(&mut app), 1);
+
+        // And the mark answers again once the form is out of the way, which is what says the
+        // rule is a resolution rather than the button having taken the node for good.
+        app.world_mut().resource_mut::<MarkerForm>().0 = None;
+        app.update();
+        assert_eq!(tooltip(&mut app).0, "Cave | bats");
     }
 
     #[test]
