@@ -30,8 +30,8 @@ use std::fmt;
 
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
-    LootState, MapExplored, MapTile, Message, MineProgress, MobHit, PartyInvite, PlayerAppearance,
-    Reject, SessionParams, Snapshot, WorldClock, WorldUpdate,
+    LootState, MapExplored, MapTile, MarkerList, Message, MineProgress, MobHit, PartyInvite,
+    PlayerAppearance, Reject, SessionParams, Snapshot, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -114,6 +114,12 @@ pub enum Transition {
     MapTile(MapTile),
     /// One page of the ledger of where this character has been.
     MapExplored(MapExplored),
+    /// Every mark this character holds, admitted because a session exists.
+    ///
+    /// Nothing is checked here either: the ids, the kinds and the note lengths are
+    /// properties of the list, held at the decode boundary, and a list is complete by
+    /// definition so there is no earlier one for the welcome to check it against.
+    MarkerList(MarkerList),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -469,15 +475,13 @@ impl Handshake {
             (Phase::Established, Message::LootState(state)) => Ok(Transition::LootState(state)),
             (Phase::Established, Message::LootClosed(closed)) => Ok(Transition::LootClosed(closed)),
             (Phase::Established, Message::MobHit(hit)) => Ok(Transition::MobHit(hit)),
-            // Two of V24's three map payloads are consumed now: the codec has already
+            // All three of V24's map payloads are consumed now: the codec has already
             // copied and validated each one, and the map window is what reads them.
-            // `MarkerList` is still admitted and dropped — marks are #453 — which is the
-            // same answer `MineProgress` had between V2 and the issue that drew it.
             (Phase::Established, Message::MapTile(tile)) => Ok(Transition::MapTile(tile)),
             (Phase::Established, Message::MapExplored(explored)) => {
                 Ok(Transition::MapExplored(explored))
             }
-            (Phase::Established, Message::MarkerList(_)) => Ok(Transition::Ignored("MarkerList")),
+            (Phase::Established, Message::MarkerList(list)) => Ok(Transition::MarkerList(list)),
 
             // -- And the same payloads before there is a session --------------------
             //

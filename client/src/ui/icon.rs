@@ -16,12 +16,18 @@
 //! **A picture decides nothing.** The shape is presentation, exactly as its row says: what
 //! an item does is the server's registry, and a cell drawn as a blade no more swings than
 //! a hand drawn as one does.
+//!
+//! **The map's marks are drawn here too**, from the same [`IconPart`] vocabulary and through
+//! the same [`part_bundle`], keyed on [`MarkerKind`] instead of on [`ItemShape`]. They are
+//! not items and share no table with them; what they share is the renderer, which is the
+//! whole reason a second picture in this client costs a table and not a mechanism.
 
 use bevy::color::LinearRgba;
 use bevy::math::Rot2;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
+use crate::net::MarkerKind;
 use crate::player::{ItemShape, Liveries, Livery, field_rect};
 
 /// The picture one cell is drawing: a shape, in the item's colour.
@@ -603,6 +609,260 @@ fn livery_node(
     })
 }
 
+/// A pick: a diagonal haft under a curved head. What a resource is worth going back for.
+const PICK: [IconPart; 2] = [
+    IconPart {
+        left: 46.0,
+        top: 16.0,
+        width: 8.0,
+        height: 68.0,
+        radius: 20.0,
+        rotation: 0.70,
+        shade: -0.35,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 14.0,
+        top: 22.0,
+        width: 72.0,
+        height: 12.0,
+        radius: 30.0,
+        rotation: -0.35,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+];
+
+/// An arch: rock with a mouth cut out of it. The dark part is the cave.
+const ARCH: [IconPart; 2] = [
+    IconPart {
+        left: 20.0,
+        top: 30.0,
+        width: 60.0,
+        height: 55.0,
+        radius: 45.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 32.0,
+        top: 44.0,
+        width: 36.0,
+        height: 41.0,
+        radius: 45.0,
+        shade: -0.75,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A fang: a brow with two tapering teeth under it.
+const FANG: [IconPart; 3] = [
+    IconPart {
+        left: 24.0,
+        top: 20.0,
+        width: 52.0,
+        height: 14.0,
+        radius: 8.0,
+        shade: -0.30,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 30.0,
+        top: 30.0,
+        width: 12.0,
+        height: 46.0,
+        radius: 40.0,
+        rotation: 0.18,
+        shade: 0.35,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 58.0,
+        top: 30.0,
+        width: 12.0,
+        height: 46.0,
+        radius: 40.0,
+        rotation: -0.18,
+        shade: 0.35,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A crown: a band with three points, the middle one tallest and brightest.
+const CROWN: [IconPart; 4] = [
+    IconPart {
+        left: 20.0,
+        top: 58.0,
+        width: 60.0,
+        height: 20.0,
+        radius: 6.0,
+        shade: -0.15,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 20.0,
+        top: 26.0,
+        width: 14.0,
+        height: 36.0,
+        radius: 6.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 43.0,
+        top: 18.0,
+        width: 14.0,
+        height: 44.0,
+        radius: 6.0,
+        shade: 0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 66.0,
+        top: 26.0,
+        width: 14.0,
+        height: 36.0,
+        radius: 6.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A tent: two leaning panels on a strip of trodden ground.
+const TENT: [IconPart; 3] = [
+    IconPart {
+        left: 24.0,
+        top: 26.0,
+        width: 20.0,
+        height: 58.0,
+        radius: 4.0,
+        rotation: 0.30,
+        shade: 0.28,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 56.0,
+        top: 26.0,
+        width: 20.0,
+        height: 58.0,
+        radius: 4.0,
+        rotation: -0.30,
+        shade: -0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 16.0,
+        top: 76.0,
+        width: 68.0,
+        height: 9.0,
+        radius: 4.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A roof over a wall: the smallest thing that reads as somewhere people live.
+const ROOF: [IconPart; 3] = [
+    IconPart {
+        left: 20.0,
+        top: 26.0,
+        width: 34.0,
+        height: 12.0,
+        radius: 4.0,
+        rotation: 0.55,
+        shade: 0.35,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 46.0,
+        top: 26.0,
+        width: 34.0,
+        height: 12.0,
+        radius: 4.0,
+        rotation: -0.55,
+        shade: 0.10,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 28.0,
+        top: 50.0,
+        width: 44.0,
+        height: 34.0,
+        radius: 3.0,
+        shade: -0.28,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A flag: a pole and a banner. The mark that is only its note.
+const FLAG: [IconPart; 2] = [
+    IconPart {
+        left: 30.0,
+        top: 14.0,
+        width: 8.0,
+        height: 72.0,
+        radius: 20.0,
+        shade: -0.40,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 38.0,
+        top: 20.0,
+        width: 40.0,
+        height: 28.0,
+        radius: 3.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+];
+
+/// The rectangles one kind of mark is drawn from, in the order they are stacked.
+///
+/// **Exhaustive, with no wildcard arm**, for the reason [`parts`] is: an eighth
+/// [`MarkerKind`] does not compile until somebody has drawn it, rather than falling through
+/// into whichever picture the wildcard happened to name.
+fn marker_parts(kind: MarkerKind) -> &'static [IconPart] {
+    match kind {
+        MarkerKind::Resource => &PICK,
+        MarkerKind::Cave => &ARCH,
+        MarkerKind::Monster => &FANG,
+        MarkerKind::Boss => &CROWN,
+        MarkerKind::Camp => &TENT,
+        MarkerKind::Village => &ROOF,
+        MarkerKind::Note => &FLAG,
+    }
+}
+
+/// What one kind of mark is drawn in.
+///
+/// **A constant per kind, not a colour anybody chooses.** Seven silhouettes at twenty-odd
+/// pixels are not seven things a player can tell apart at a glance, and the colour is what
+/// makes the row of kind buttons readable as well. It decides nothing: the kind is the
+/// server's, and this is the paint over it.
+fn marker_colour(kind: MarkerKind) -> Color {
+    match kind {
+        MarkerKind::Resource => Color::srgb(0.85, 0.62, 0.25),
+        MarkerKind::Cave => Color::srgb(0.55, 0.58, 0.66),
+        MarkerKind::Monster => Color::srgb(0.80, 0.28, 0.26),
+        MarkerKind::Boss => Color::srgb(0.95, 0.78, 0.30),
+        MarkerKind::Camp => Color::srgb(0.72, 0.55, 0.34),
+        MarkerKind::Village => Color::srgb(0.42, 0.68, 0.40),
+        MarkerKind::Note => Color::srgb(0.62, 0.74, 0.92),
+    }
+}
+
+/// Draws one mark's picture under `host`.
+///
+/// The same rectangles a cell gets and the same [`part_bundle`], so a mark on the map and a
+/// stack in the pack are drawn by one renderer. No livery: a livery is a material's surface
+/// and a mark is not made of anything.
+pub(crate) fn spawn_marker(host: &mut ChildSpawnerCommands<'_>, kind: MarkerKind) {
+    let base = marker_colour(kind).to_linear();
+    for part in marker_parts(kind) {
+        host.spawn(part_bundle(part, base));
+    }
+}
+
 /// One rectangle of a drawn icon. Carried so a test can count what a cell drew without
 /// walking the hierarchy looking for anything with a background.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -653,6 +913,39 @@ mod tests {
                     parts(*shape),
                     parts(*other),
                     "{shape:?} and {other:?} draw the same picture"
+                );
+            }
+        }
+    }
+
+    /// The same sweep for the map's marks: every kind is drawn, no two the same, and no two
+    /// wear the same colour either.
+    ///
+    /// The colour half has no counterpart above because an item's colour comes from the
+    /// registry, where the sweep already lives. A mark's comes from this file, so this is
+    /// the only place that can notice two kinds painted alike -- which at this size is the
+    /// same failure as two kinds drawn alike.
+    #[test]
+    fn every_kind_of_mark_has_a_drawing_and_a_colour_of_its_own() {
+        for kind in MarkerKind::ALL {
+            assert!(
+                is_a_drawing(marker_parts(kind)),
+                "{kind:?} has no drawing: {:?}",
+                marker_parts(kind)
+            );
+        }
+
+        for (index, kind) in MarkerKind::ALL.iter().enumerate() {
+            for other in &MarkerKind::ALL[index + 1..] {
+                assert_ne!(
+                    marker_parts(*kind),
+                    marker_parts(*other),
+                    "{kind:?} and {other:?} draw the same picture"
+                );
+                assert_ne!(
+                    marker_colour(*kind).to_linear(),
+                    marker_colour(*other).to_linear(),
+                    "{kind:?} and {other:?} are painted the same"
                 );
             }
         }

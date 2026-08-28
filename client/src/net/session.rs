@@ -239,6 +239,8 @@ pub(super) enum SessionEvent {
     MapTile(codec::MapTile),
     /// One page of the additive ledger of where this character has been.
     MapExplored(codec::MapExplored),
+    /// Every mark this character holds, **replacing** the client's copy wholesale.
+    MarkerList(codec::MarkerList),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1422,6 +1424,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::MapExplored(explored)) => {
                     events.send(SessionEvent::MapExplored(explored)).ok()?;
+                }
+                Ok(Transition::MarkerList(list)) => {
+                    events.send(SessionEvent::MarkerList(list)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;
