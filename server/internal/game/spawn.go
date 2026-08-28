@@ -148,22 +148,16 @@ func (s *Sim) removeSpentMobsLocked(players []*Player, mobs []*mob) bool {
 	daylight := !IsNight(s.tickOfDay)
 
 	var removed bool
+	// **Nothing here can reach a creature that has been killed, and that is now
+	// structural.** Both rules below remove a mob *instead of* killing it, which is exactly
+	// what makes "a despawn leaves nothing" true — so either of them reaching a body a
+	// player had already earned would delete that loot. This loop used to guard against it
+	// explicitly, because a killed creature stayed in Sim.mobs for MobDeathDuration and,
+	// being nocturnal with its target cleared at the blow, matched the daylight rule on
+	// every tick of its own death. A killing blow now takes the creature out of Sim.mobs
+	// before the caller of this ever assembles the slice, so there is no window left to
+	// guard.
 	for _, m := range mobs {
-		// **A kill in progress is not a creature that stopped being worth simulating.**
-		// Both rules below remove a mob *instead of* killing it, which is exactly what makes
-		// "a despawn leaves nothing" true — so applying either to a body that is already
-		// going down would delete loot a player has already earned. The dawn is the one that
-		// really reaches: a dying draugr is nocturnal and, its target cleared at the blow,
-		// hunts nobody, so it matched the daylight rule on every tick of its own death.
-		//
-		// The distance rule could not reach it today — MobDespawnGrace is twice
-		// MobDeathDuration, and the body goes first — and it is guarded here anyway, because
-		// "the arithmetic does not currently allow it" is a property of two constants rather
-		// than of this loop.
-		if m.dying() {
-			continue
-		}
-
 		if daylight && m.species().nocturnal && huntable(players, m.target) == nil {
 			s.discardMobLocked(m)
 			s.log.Debug("mob left with the night", "entity_id", m.entityID, "kind", m.kind,

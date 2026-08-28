@@ -4,7 +4,6 @@ import (
 	"io"
 	"log/slog"
 	"testing"
-	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 )
@@ -22,25 +21,30 @@ import (
 
 // drops is every drop in the world, in identity order, copied under the lock that owns
 // them. A copy rather than the pointers, because a test reads them on its own goroutine
-// **The creature is dying when this returns, not gone.** A blow no longer removes anything
-// and no longer puts anything on the ground: the body stays in the world in
-// MobActionDying for MobDeathDuration, and what it left behind is rolled when that runs
-// out. This half exists for the tests that ask about the window in between;
-// killWithTheStarterBlade below is the whole story.
+// killWithTheStarterBlade swings until the named creature is dead, and reports where its
+// corpse is.
+//
+// **There is nothing to step out afterwards, and that is what #441 changed.** The blow
+// that empties a creature's health takes it out of Sim.mobs and rolls its container in the
+// same call, so the tick this returns on is the tick the corpse exists on. It used to swing
+// and then spend MobDeathDuration waiting, because nothing a kill produced existed until
+// the reap had run — a test that stopped at the blow was asking its question of a world
+// half way through a death and got "nothing on the ground" for an answer whatever the loot
+// rules said.
 //
 // Through the authoritative path — Attack, then the tick — rather than by calling
-// damageMobLocked, because the whole question this file asks is what happens when a kill
-// is resolved *inside* the tick, under the lock spawnDrop wants.
-func (h *vitalsHarness) strikeDown(p *Player, id uint64) [3]float64 {
+// damageMobLocked, because the whole question this file asks is what happens when a kill is
+// resolved *inside* the tick, under the lock spawnDrop wants.
+//
+// The position is the corpse's own rather than the last one the body was seen at: they are
+// the same value, and reading it back from the corpse is what makes the caller's comparison
+// an assertion about the server's answer instead of about the harness's bookkeeping.
+func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64 {
 	h.t.Helper()
 
 	for blow := 1; blow <= 10; blow++ {
-		stood, live := h.mobState(id)
-		if !live {
+		if _, live := h.mobState(id); !live {
 			h.t.Fatalf("creature %d was already gone at blow %d", id, blow)
-		}
-		if stood.dying() {
-			h.t.Fatalf("creature %d was already dying at blow %d", id, blow)
 		}
 		// The client tick is taken from the simulation's own rather than from the blow
 		// number, because Attack refuses a stale one and a second kill in the same harness
@@ -49,8 +53,8 @@ func (h *vitalsHarness) strikeDown(p *Player, id uint64) [3]float64 {
 			h.t.Fatalf("swing %d was refused: %v", blow, err)
 		}
 		h.step()
-		if struck, live := h.mobState(id); live && struck.dying() {
-			return struck.pos
+		if _, live := h.mobState(id); !live {
+			return h.corpsePos(id)
 		}
 		// Past the cooldown before the next one, which is the server's cadence and not
 		// the client's.
@@ -60,32 +64,18 @@ func (h *vitalsHarness) strikeDown(p *Player, id uint64) [3]float64 {
 	return [3]float64{}
 }
 
-// killWithTheStarterBlade swings until the named creature is dead *and* its body has
-// stopped existing, and reports where that body came to rest.
-//
-// **Stepping the death out is the point rather than a detail.** Nothing a kill produces
-// exists until the reap has run, so a test that stopped at the blow would be asking its
-// question of a world half way through a death and would get "nothing on the ground" for
-// an answer whatever the loot rules said.
-//
-// The resting position is re-read every tick rather than taken from the blow, because a
-// body falls while it is dying — which is the whole reason the roll happens at the reap.
-func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64 {
+// corpsePos is where the server put the named corpse, and it fails the test rather than
+// answering a zero vector when there is no corpse under that identity.
+func (h *vitalsHarness) corpsePos(id uint64) [3]float64 {
 	h.t.Helper()
 
-	resting := h.strikeDown(p, id)
-	// Two ticks of slack over the countdown, so the failure below means "the body outlived
-	// its own death" rather than "the arithmetic was one out".
-	for range int(h.sim.mobDeathTicks) + 2 {
-		body, live := h.mobState(id)
-		if !live {
-			return resting
-		}
-		resting = body.pos
-		h.step()
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	c := h.sim.corpses[id]
+	if c == nil {
+		h.t.Fatalf("no corpse stands under identity %d", id)
 	}
-	h.t.Fatalf("creature %d was still in the world after the whole of its death", id)
-	return [3]float64{}
+	return c.pos
 }
 
 // armedAgainst is a player holding the starter blade with one creature of the named
@@ -175,69 +165,17 @@ func TestOnlyArrowsAndTheSceptreConsumeBones(t *testing.T) {
 	}
 }
 
-// The wait is the same wall-clock length at every tick rate, which is what makes it the
-// server's rather than a count of frames.
+// A corpse is never spent a swing on, and a swing aimed past one reaches what is behind.
 //
-// **A client cannot shorten it and cannot lengthen it**, because nothing a client sends is
-// read anywhere on this path: the countdown is set from MobDeathDuration at construction,
-// spent by Step, and the corpse does not exist until it runs out. The rate sweep is what says
-// so mechanically — an operator's -tick-rate is the only thing that changes how many ticks
-// the wait takes, and it changes nothing about how long it lasts.
-//
-// # The bound, and the three dead branches it replaced
-//
-// The review on the pull request that added this found `slack < -MobDeathDuration` to be
-// unreachable, and it was: `elapsed` is a tick count times a tick duration, so it is never
-// negative and the slack is never below -MobDeathDuration — for *any* implementation of
-// ticksFor, not merely for the current one. That is the distinction worth keeping, because
-// it is what separates a dead branch from an assertion that happens to hold: a check nobody
-// can trip is a claim nobody verifies.
-//
-// Checking it turned up two more of the same shape, which is why this comment is longer
-// than the fix:
-//
-//   - **The upper half was dead too.** ticksFor floors, and `time.Second / rate` floors
-//     again, so `elapsed = floor(2.5·rate) · floor(1e9/rate) <= 2.5e9` — the conversion
-//     cannot overshoot *at all*, and `slack > one tick` could never fire either.
-//   - **The zero guard was dead**, and the comment above it was wrong about why it existed.
-//     `ticksFor(2500ms, 1)` is 2, not 1: the `max` binds only when `d_ms × rate < 1000`,
-//     which for two and a half seconds needs a rate of zero, and NewLoop refuses one. It is
-//     gone rather than repaired, because the bound below catches a zero anyway — elapsed
-//     would be 0 and the slack -2.5 s — and the message now names the tick count.
-//
-// **What is actually true, and what is asserted: the conversion never overshoots, and never
-// undershoots by a whole tick.** Both halves fire on a real change rather than on none.
-// `slack > 0` goes off the moment ticksFor rounds to nearest instead of flooring, which is a
-// one-character edit somebody could plausibly make; `slack <= -tick` goes off if a whole
-// tick is lost.
-//
-// Swept over all 255 legal rates while working the bound out: zero overshoot, zero lost
-// ticks, and the clamp binding nowhere. The tightest undershoot is 0.5002 of a tick at
-// 247 Hz, so "one tick" is the right statement — half a tick would be false, and anything
-// looser would stop describing the rounding.
-func TestTheDeathIsTheSameLengthAtEveryRate(t *testing.T) {
-	t.Parallel()
-
-	for _, rate := range []uint8{1, 5, DefaultTickRate, 60, 255} {
-		ticks := ticksFor(MobDeathDuration, rate)
-		tick := time.Second / time.Duration(rate)
-		elapsed := time.Duration(ticks) * tick
-
-		if slack := elapsed - MobDeathDuration; slack > 0 || slack <= -tick {
-			t.Errorf("a death lasts %s (%d ticks of %s) at %d Hz, want %s to within one tick",
-				elapsed, ticks, tick, rate, MobDeathDuration)
-		}
-	}
-}
-
-// A body on its way down is not a target, and a swing aimed past it reaches what is behind.
-//
-// **Being immune is not enough, and that is the point of the test.** damageMobLocked
-// refuses a creature with no health left whatever happens here, so a corpse left in the
-// candidate set would take no damage — and would still be *chosen*, because the search
-// returns the nearest thing in the arc. Every swing would then be spent on the body lying
-// in front of the draugr that killed it.
-func TestASwingIsNotSpentOnABodyGoingDown(t *testing.T) {
+// **The mechanism changed and the property did not, which is the whole reason this test
+// stays.** A killed creature used to lie in Sim.mobs for MobDeathDuration; it was immune —
+// damageMobLocked refuses a creature with no health left — but it was still the nearest
+// thing in the arc, so every swing was *spent* on the body lying in front of the draugr
+// that killed it, and one explicit skip in swingTargetLocked was all that stood between a
+// player and that. A corpse is now not in Sim.mobs at all, so the search cannot return one.
+// A test that only asserted the skip would have been deleted with it; this one asks the
+// question a player asks.
+func TestASwingIsNotSpentOnACorpse(t *testing.T) {
 	t.Parallel()
 
 	// Two draugr in a line ahead of the player, both inside SwordReach. The near one is
@@ -245,9 +183,13 @@ func TestASwingIsNotSpentOnABodyGoingDown(t *testing.T) {
 	h, player, _, near := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
 	far := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{0.5, 64, -2.2})
 
-	h.strikeDown(player, near)
-	if body, live := h.mobState(near); !live || !body.dying() {
-		t.Fatal("the near draugr was not left going down, so this test asked nothing")
+	h.killWithTheStarterBlade(player, near)
+	h.sim.mu.Lock()
+	_, stillAMob := h.sim.mobs[near]
+	_, isACorpse := h.sim.corpses[near]
+	h.sim.mu.Unlock()
+	if stillAMob || !isACorpse {
+		t.Fatal("the near draugr was not left as a corpse, so this test asked nothing")
 	}
 
 	h.advance(int(h.sim.attackCooldown))
@@ -265,9 +207,15 @@ func TestASwingIsNotSpentOnABodyGoingDown(t *testing.T) {
 	}
 }
 
-// A body going down does nothing else: it does not chase, does not swing, and does not
-// keep whatever it was hunting.
-func TestABodyGoingDownStopsDoingEverythingElse(t *testing.T) {
+// A creature killed inside its own telegraph lands nothing, and nothing of it is left
+// standing to try again.
+//
+// **Both halves used to be one half.** The blow that killed it left a body in the world
+// that had to be checked for not chasing, not swinging and not still hunting anybody,
+// because it was still a mob for two and a half seconds. It is not a mob at all now: the
+// assertion is that it is gone from Sim.mobs on the instant, that a corpse stands where it
+// was, and that the windup it was one tick from completing never reached the player.
+func TestAKilledCreatureLandsNothingAndLeavesNothingStanding(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
@@ -280,28 +228,26 @@ func TestABodyGoingDownStopsDoingEverythingElse(t *testing.T) {
 	m.action = vnet.MobActionWindup
 	m.actionTicks = 1
 	m.target = player.entityID
+	stood := m.pos
 	h.sim.damageMobLocked(m, draugrRow.maxHealth)
 	h.sim.mu.Unlock()
 
-	body, live := h.mobState(id)
-	if !live {
-		t.Fatal("the body left the world on the blow")
+	if _, live := h.mobState(id); live {
+		t.Error("a killed draugr is still a mob on the tick of the blow")
 	}
-	if body.target != 0 {
-		t.Errorf("a body going down is still hunting entity %d", body.target)
+	if resting := h.corpsePos(id); resting != stood {
+		t.Errorf("the corpse stands at %v; the blow landed at %v", resting, stood)
 	}
 
-	stood := body.pos
 	h.advance(5)
-	moved, live := h.mobState(id)
-	if !live {
-		t.Fatal("the body did not last five ticks")
+	if _, live := h.mobState(id); live {
+		t.Error("a killed draugr came back into Sim.mobs")
 	}
-	if moved.pos[0] != stood[0] || moved.pos[2] != stood[2] {
-		t.Errorf("a body going down walked from %v to %v", stood, moved.pos)
+	if moved := h.corpsePos(id); moved != stood {
+		t.Errorf("the corpse walked from %v to %v", stood, moved)
 	}
 	if got := h.vitals(player).Health; got != PlayerMaxHealth {
-		t.Errorf("a body going down landed the blow it was winding up: %d health lost", PlayerMaxHealth-got)
+		t.Errorf("a killed draugr landed the blow it was winding up: %d health lost", PlayerMaxHealth-got)
 	}
 }
 

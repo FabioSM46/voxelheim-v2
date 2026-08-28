@@ -292,7 +292,11 @@ func (s *Sim) firstProjectileTargetLocked(proj *projectile, players []*Player, m
 	}
 
 	for _, m := range mobs {
-		if m.dying() || m.health == 0 {
+		// The slice was taken once, before the first projectile of this tick moved, so a
+		// creature an earlier one killed is still in it — out of Sim.mobs and already a
+		// corpse, but here, with no health. This is the guard that keeps the second arrow
+		// of a volley from being spent on it.
+		if m.health == 0 {
 			continue
 		}
 		consider(m, m.entityID, m.species().body.boxAt(m.pos))

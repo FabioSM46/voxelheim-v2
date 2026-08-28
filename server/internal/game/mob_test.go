@@ -669,23 +669,24 @@ func TestTheAttackCadenceIsTheSameAtEveryTickRate(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Dying
+// Death
 // ---------------------------------------------------------------------------
 
-// A kill puts a draugr down, takes it away when its death is over, and schedules nothing.
+// A kill takes a draugr out of the world on the tick of the blow, leaves a corpse under
+// the same identity, and schedules nothing.
 //
-// **The absence is the assertion.** Killing one used to start a countdown to a fresh
-// draugr at the same anchor, which made a kill a way of *moving* a creature rather than
-// of removing it — the same one came back, in the same field, however many times you
+// **The absence is the assertion, twice over.** Killing one used to start a countdown to a
+// fresh draugr at the same anchor, which made a kill a way of *moving* a creature rather
+// than of removing it — the same one came back, in the same field, however many times you
 // went there. Nothing replaces it now; what refills the world is the director, and only
 // where somebody is standing.
 //
-// **The removal is no longer the blow, and both halves are asserted.** A killed creature
-// stays in the world, and in every snapshot, in MobActionDying with no health left; the
-// body stops existing MobDeathDuration later. A test that only checked the end state would
-// pass just as well against a server that deleted it on the instant, which is the design
-// this replaced.
-func TestAKilledDraugrGoesDownAndThenLeavesTheWorld(t *testing.T) {
+// **And the death itself is now an absence too.** A killed creature used to stay in
+// Sim.mobs and in every snapshot in MobActionDying with no health left, for
+// MobDeathDuration, and only then become a corpse. The blow does both halves now, so the
+// entity that was a draugr in the snapshot before the blow is a corpse in the one after
+// it, with no state in between and no snapshot on which nothing could be taken from it.
+func TestAKilledDraugrBecomesACorpseOnTheTickOfTheBlow(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
@@ -696,56 +697,37 @@ func TestAKilledDraugrGoesDownAndThenLeavesTheWorld(t *testing.T) {
 
 	h.sim.mu.Lock()
 	h.sim.damageMobLocked(h.sim.mobs[first], draugrRow.maxHealth)
+	_, stillAMob := h.sim.mobs[first]
+	body := h.sim.corpses[first]
 	h.sim.mu.Unlock()
 
-	body, live := h.mobState(first)
-	if !live {
-		t.Fatal("a killed draugr left the world on the tick of the blow, with no death to watch")
+	if stillAMob {
+		t.Error("a killed draugr is still in Sim.mobs on the tick of the blow")
 	}
-	if !body.dying() {
-		t.Errorf("a killed draugr is in %s, want Dying", body.action)
-	}
-	if body.health != 0 {
-		t.Errorf("a killed draugr has %d health, want none", body.health)
+	if body == nil {
+		t.Fatal("a killed draugr left no corpse on the tick of the blow")
 	}
 
 	h.step()
+	// By identity rather than by count: the entity stays continuous as an inert corpse,
+	// while the director may also have added fresh creatures.
 	var shown bool
 	for _, state := range newestSnapshotMobs(t, out) {
 		if state.EntityID != first {
 			continue
 		}
 		shown = true
-		if state.Action != vnet.MobActionDying || state.Health != 0 {
-			t.Errorf("the snapshot draws the body as %s with %d health, want Dying with none",
+		if state.Action != vnet.MobActionCorpse || state.Health != 0 {
+			t.Errorf("the snapshot draws the body as %s with %d health, want inert Corpse",
 				state.Action, state.Health)
 		}
 	}
 	if !shown {
-		t.Error("a body going down is in no snapshot entry, so nothing can draw it falling")
+		t.Error("a killed draugr is in no snapshot entry, so nothing can draw it going down")
 	}
-	// The wait is the server's, and nothing is on the ground until it is over.
+	// The container belongs to the corpse and never to the ground, before and after.
 	if got := h.sim.DropCount(); got != 0 {
-		t.Errorf("a draugr still going down has already left %d drops", got)
-	}
-
-	h.advance(int(h.sim.mobDeathTicks) + 1)
-	if _, live := h.mobState(first); live {
-		t.Fatal("the body outlived the whole of its own death")
-	}
-	// By identity rather than by count: the entity stays continuous as an inert corpse,
-	// while the director may also have added fresh creatures during the death.
-	var shownCorpse bool
-	for _, state := range newestSnapshotMobs(t, out) {
-		if state.EntityID == first {
-			shownCorpse = true
-			if state.Action != vnet.MobActionCorpse || state.Health != 0 {
-				t.Errorf("completed death projects as %s with %d health, want inert Corpse", state.Action, state.Health)
-			}
-		}
-	}
-	if !shownCorpse {
-		t.Error("completed death did not preserve its entity identity as a corpse")
+		t.Errorf("a killed draugr left %d ground drops", got)
 	}
 
 	// Nothing comes back at that spot. The director may put a creature *somewhere* —
@@ -758,6 +740,58 @@ func TestAKilledDraugrGoesDownAndThenLeavesTheWorld(t *testing.T) {
 		if m.pos == ([3]float64{12.5, 64, 0.5}) {
 			t.Errorf("a draugr stands at the spot the dead one was killed on: %v", m.pos)
 		}
+	}
+}
+
+// **MobActionDying stays in the contract and this server never sends it.**
+//
+// The two halves are one statement rather than two. Nothing was removed from the wire —
+// a client built against V9 still decodes the value, and narrowing an enumeration because
+// one server stopped emitting one of its members would be a schema change made for a
+// reason that is not the schema's — so the only thing that can say the state is gone is a
+// test that watches every snapshot of a whole kill and never sees it.
+//
+// Every tick from before the blow to well after it, and every mob entry in each, because
+// what is being asserted is an absence: sampling the tick after the blow would pass
+// against a server that emitted Dying for one tick and then thought better of it.
+func TestNoSnapshotEverCarriesDying(t *testing.T) {
+	t.Parallel()
+
+	if vnet.EnumNamesMobAction[vnet.MobActionDying] != "Dying" {
+		t.Fatalf("MobAction has no Dying member; the contract was narrowed")
+	}
+
+	h, player, out, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
+
+	seen := func(when string) {
+		t.Helper()
+		for _, state := range newestSnapshotMobs(t, out) {
+			if state.Action == vnet.MobActionDying {
+				t.Fatalf("the snapshot %s draws mob %d as Dying", when, state.EntityID)
+			}
+		}
+	}
+
+	for blow := 1; blow <= 10; blow++ {
+		if err := h.swing(player, 0, uint32(h.tick)+1); err != nil {
+			t.Fatalf("swing %d was refused: %v", blow, err)
+		}
+		h.step()
+		seen("after the blow")
+		if _, live := h.mobState(id); !live {
+			break
+		}
+		for range int(h.sim.attackCooldown) {
+			h.step()
+			seen("between blows")
+		}
+	}
+	if _, live := h.mobState(id); live {
+		t.Fatal("ten blows of the starter blade did not kill the draugr")
+	}
+	for range 3 * DefaultTickRate {
+		h.step()
+		seen("after the kill")
 	}
 }
 

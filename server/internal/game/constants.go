@@ -245,35 +245,26 @@ const (
 	// whether the dark is what brings one out are per-species rows in `mobRegistry` —
 	// species.go — for the reason a blade's damage sits beside `itemRegistry` rather than
 	// here: they describe one *creature*, and nothing about any of them generalises to the
-	// next. The one number below that is not the *director*'s is MobDeathDuration, and it
-	// is here for the same reason the rest are not: it holds for every species alike.
-
-	// MobDeathDuration is how long a killed creature stays Dying before it becomes an
-	// inert owned corpse and its loot container is rolled.
+	// next.
 	//
-	// **Not a registry column, and the rule species.go states is why.** Every number that
-	// describes one creature is a row in mobRegistry; a column that would hold the same
-	// value in every row is not a species difference. How long a body takes to go down is
-	// a fact about dying, and a draugr and a vargr do it for the same length of time — what
-	// differs is the *pose*, and a pose is drawn rather than simulated, so no number for it
-	// belongs on this side at all.
+	// **There is no death duration here any more, and its absence is the point.**
+	// MobDeathDuration was two and a half seconds a killed creature spent in
+	// [vnet.MobActionDying] before its corpse existed, and it was defended as a statement
+	// about when an item *exists*: a client with the animation turned off had to wait
+	// exactly as long as one watching it, because the wait was not the animation's.
 	//
-	// **It is the delay the drop waits, and that is the whole reason it is a server
-	// number.** A kill used to put items on the ground on the tick it happened. Holding
-	// them back until the body is gone is a statement about when an item *exists*, which is
-	// a gameplay outcome and never a client's to schedule: a client with the animation
-	// turned off waits exactly as long as one watching it, because the wait is not the
-	// animation's — the animation merely fills it.
+	// That argument was sound and the premise under it was wrong. The wait was never
+	// deciding *whether* the drop was earned — the killing blow decides that — only when
+	// the player was allowed to reach for it, and two and a half seconds of not being
+	// allowed to press F is a pause in a fight rather than a rule about it. A body still
+	// goes down; the fall is drawn on the client, out of the same snapshot that already
+	// says Corpse, and the client is still told nothing about how long it lasts. What was
+	// deleted is the *server* waiting for an animation it does not play.
 	//
-	// Two and a half seconds: long enough that a body visibly goes down and lies there
-	// before anything appears beside it, short enough that a fight with three draugr in it
-	// is not three separate waits. It sits inside the two-to-three-second band the issue
-	// asked for rather than at either edge of it, so neither rounding at a low tick rate
-	// nor the one-tick gap between the body leaving and the drop arriving takes it out.
-	//
-	// Converted to ticks per server for the reason every other duration here is, and
-	// ticksFor never rounds one to zero — a body nobody sees is not a death.
-	MobDeathDuration = 2500 * time.Millisecond
+	// So there is no number to convert to ticks and no state between the blow and the
+	// corpse: [Sim.damageMobLocked] rolls the container on the tick the health runs out.
+	// [vnet.MobActionDying] stays in the contract — a wire enumeration is not narrowed
+	// because one server stopped sending one of its values — and no snapshot carries it.
 
 	// --- The spawn director -----------------------------------------------------
 	//
@@ -281,9 +272,6 @@ const (
 	// here bounds something: the two caps bound the tick's cost and the snapshot's
 	// size, the ring bounds where a creature may appear, and the two radii bound where
 	// it may not. See spawn.go, which is the only file that reads any of them.
-	//
-	// MobDeathDuration below is the exception the paragraph above admits: it is not the
-	// director's and it is not per species either.
 
 	// MobsPerPlayer is how many mobs may be alive inside one player's streamed cube.
 	//

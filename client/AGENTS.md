@@ -1944,13 +1944,22 @@ Recorded here so the next reader does not mistake them for oversights:
   stand a fallen camera up or drop an upright one on its back. It was also the last playing-mode
   key `SelfVitals::dead` did not already close.
 - **None of that decides anything, and the drop is the proof.** Player falls follow the
-  server's complete `EntitySnapshot.dead_players` list and mob falls follow `MobAction.Dying`;
-  a client that drew neither would be dead for the same three seconds, respawn at the same
-  moment, and pick up a draugr's bones at the same moment, because the wait before a kill's loot
-  exists is `MobDeathDuration` on the server and nothing here is asked about it. There is
-  deliberately **no mirror of that number on this side**: a body's fall is a curve that
-  finishes, and what ends a death is the server no longer sending the creature, which despawns
-  it through the branch one that walked out of view takes.
+  server's complete `EntitySnapshot.dead_players` list and mob falls follow the snapshot's
+  `MobAction`; a client that drew neither would be dead for the same three seconds, respawn at
+  the same moment, and pick up a draugr's bones at the same moment. Since #441 that last one is
+  *immediate*: a killing blow produces the lootable corpse on the tick it lands, so the snapshot
+  that first says `Corpse` is the snapshot the fall starts on and the snapshot F already works
+  on. `nearest_accessible_corpse` reads `mobs` and `accessible_loot_corpses` and nothing else —
+  no `Mob` component, no `falling`, no `FALL_TIME` — which is what makes "press F while the body
+  is still going over" a property rather than a coincidence.
+- **There is no mirror of any server death number on this side, and there is no longer one to
+  mirror.** `FALL_TIME` is 700 ms of presentation with nothing waiting behind it. It used to be
+  argued against `MobDeathDuration`, the two and a half seconds the server spent between the blow
+  and the corpse; that constant is gone. A body's fall is a curve that finishes, and what ends a
+  death is the server no longer sending the creature, which despawns it through the branch one
+  that walked out of view takes. `MobAction::Dying` is still in the contract and this server never
+  sends it — the client still handles it, because a wire enumeration is not narrowed by one
+  server's choice not to use a value.
 - **A draugr topples backwards and a vargr slumps sideways with its legs splaying**, which is
   the one thing about a death that differs by species and the only place `player/mobs.rs`
   matches on the kind to decide a pose. Both pivot at the feet, because every mesh in that
