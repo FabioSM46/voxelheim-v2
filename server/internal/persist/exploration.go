@@ -225,7 +225,8 @@ func (s *ExplorationStore) Save(id CharacterID, columns []world.Column) error {
 // expected to survive it and let the character in, rather than refusing a connection
 // over a map. Where a record's caller refuses when the move *fails*, this one has the
 // other answer available: write nothing for the rest of that session, which keeps the
-// evidence without costing anybody their evening.
+// evidence without costing anybody their evening. See session.Exploration, which is
+// where that decision is made.
 func (s *ExplorationStore) Quarantine(id CharacterID) (string, error) {
 	if s == nil || s.dir == "" {
 		return "", nil

@@ -32,6 +32,13 @@ type View struct {
 	center world.Coord
 	placed bool
 	loaded map[world.Coord]struct{}
+
+	// reveal is told about the column of every chunk this view records as delivered, or
+	// nil when nobody is keeping a map. It is the whole of the exploration hook, and it
+	// hangs here rather than in Streamer because MarkLoaded is the moment: a chunk is
+	// only explored once it has actually reached the client, which is the same
+	// distinction MoveTo refuses to blur by marking chunks it has merely scheduled.
+	reveal func(world.Column)
 }
 
 // NewView returns an empty view with the given radius, in chunks.
@@ -93,8 +100,30 @@ func (v *View) MoveTo(center world.Coord) (load, unload []world.Coord) {
 // send recoverable instead of permanently invisible.
 func (v *View) MarkLoaded(coord world.Coord) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	v.loaded[coord] = struct{}{}
+	reveal := v.reveal
+	v.mu.Unlock()
+
+	// **Outside the lock, deliberately.** The set this calls into has a mutex of its
+	// own and is read from the session goroutine while this runs on the streaming one;
+	// holding two locks in one order here and the other order there is how a deadlock
+	// is built out of two correct types. Nothing in the view is read after the release,
+	// so there is nothing for the gap to invalidate: a column revealed twice is a
+	// no-op, which is the property Exploration.Reveal is built around.
+	if reveal != nil {
+		reveal(coord.Column())
+	}
+}
+
+// RecordExploration makes this view report every chunk it records as delivered to
+// reveal, and replaces whatever was there before. A nil reveal turns the hook off.
+//
+// Set once, before the streaming goroutine starts, which is what makes it safe for the
+// hook itself to be read under the same lock the loaded set is.
+func (v *View) RecordExploration(reveal func(world.Column)) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.reveal = reveal
 }
 
 // Holds reports whether this session has been sent the chunk at coord.
@@ -242,6 +271,12 @@ type Streamer struct {
 	// this one. Written and read only on the streaming goroutine, which is the single
 	// caller of MoveTo — Resend touches the view and the wake, never this.
 	repairing bool
+
+	// explored is this character's map ledger, or nil when nobody is keeping one. The
+	// streamer holds it so that the columns a pass reveals leave on the same pass that
+	// revealed them: the reveal happens inside sendChunk, and this is the first place
+	// afterwards that knows the pass is over.
+	explored *Exploration
 }
 
 // NewStreamer returns a streamer for one session.
@@ -336,6 +371,13 @@ func (s *Streamer) MoveTo(ctx context.Context, center world.Coord) error {
 		}
 	}
 
+	// Whatever those sends revealed, in one message rather than one per chunk: a view
+	// diff at the default distance delivers up to 343 chunks and the columns under them
+	// are at most 49, so batching is the difference between one frame and hundreds.
+	if err := s.sendExplored(); err != nil {
+		return err
+	}
+
 	if len(load) > 0 || len(unload) > 0 {
 		s.log.Debug("view updated", "center", center, "sent", len(load), "unloaded", len(unload), "resident", s.view.Loaded())
 	}
@@ -419,6 +461,39 @@ func (s *Streamer) sendChunk(ctx context.Context, coord world.Coord, repairing b
 			return nil
 		}
 	}
+}
+
+// RecordExploration attaches a character's map ledger to this streamer: the view
+// reports every delivered chunk's column to it, and every view diff that revealed
+// something sends one MapExplored batch.
+//
+// Separate from [NewStreamer] rather than a seventh argument, because a ledger belongs
+// to a *character* and a streamer is built one line before the session has finished
+// assembling one. It is called once, on the session goroutine, before the streaming
+// goroutine starts — which is the ordering that makes both fields safe to read without
+// a lock of the streamer's own.
+func (s *Streamer) RecordExploration(explored *Exploration) {
+	s.explored = explored
+	s.view.RecordExploration(explored.Reveal)
+}
+
+// sendExplored puts this pass's newly revealed columns on the wire, and sends nothing
+// when the pass revealed none — which is every pass a player who is standing still
+// produces.
+//
+// After the chunks rather than before them, because a column is revealed by a chunk
+// being delivered and a client told about a column it has no terrain for has learned
+// something it cannot draw yet. After the unloads too, which costs nothing: a column
+// leaving the view is still explored, for good.
+func (s *Streamer) sendExplored() error {
+	batch := s.explored.TakeRevealed()
+	if len(batch) == 0 {
+		return nil
+	}
+	if err := sendExplored(s.send, batch); err != nil {
+		return fmt.Errorf("session: send %d newly explored columns: %w", len(batch), err)
+	}
+	return nil
 }
 
 // View exposes the streamer's chunk bookkeeping, for tests and for the movement

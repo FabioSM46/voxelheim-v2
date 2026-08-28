@@ -196,6 +196,21 @@ type Resolved struct {
 	// Returning reports whether the player store already held a life for Character.
 	Returning bool
 
+	// Explored is where this character has been, loaded from its own file beside the
+	// life and never nil.
+	//
+	// **A separate file and therefore a separate load**, for the reason
+	// persist.ExplorationVersion gives: a player record has no extensible area, and a
+	// list that grows to sixty-five thousand entries is not something to give it one
+	// for. It is loaded here rather than later because this is the one place that knows
+	// which character is playing before the welcome goes out, and the ledger's first
+	// pages follow that welcome immediately.
+	//
+	// Never nil, including in an ephemeral world and including for a character whose
+	// file could not be read: a blank ledger is a value, and a nil one would put a
+	// branch at every call site that reveals a column.
+	Explored *Exploration
+
 	// Life is what this character left behind — where they stood, their health and their
 	// pack — or nil for a character the store has never had a readable life for.
 	//
@@ -224,6 +239,13 @@ type Resolved struct {
 // same player, so what an ephemeral world costs is the life, not the name.
 type Identities struct {
 	store *persist.Store
+
+	// exploration is the directory of per-character map ledgers, or nil in an ephemeral
+	// world. Nil rather than a memory substitute, unlike store above: what a memory
+	// store buys is the world's *rules* — a unique name, a per-account limit — and a map
+	// has none of those to enforce. An ephemeral world's characters still explore, they
+	// still get their MapExplored batches, and none of it survives the process.
+	exploration *persist.ExplorationStore
 
 	// verifier is how a ticket becomes an account. Never nil: NewIdentities refuses to
 	// build a claim set without one, because a server that cannot check a ticket
@@ -260,6 +282,15 @@ type liveIdentity struct {
 	// [Identities.playing] when a selection or a creation settles it.
 	character persist.CharacterID
 
+	// exploration is the live ledger of that character's map, so that the autosave can
+	// write it. RememberAll is handed lives by the simulation, and the simulation knows
+	// nothing about maps — the claim is the only thing that can join one to the other,
+	// exactly as it is the only thing that knows which character a life belongs to.
+	//
+	// **Nil for a session that has been admitted and has not chosen yet**, like
+	// character beside it, and every reader fails closed over that window.
+	exploration *Exploration
+
 	// finalised records that this session's teardown has already written its last
 	// word. See RememberAll, which is the only reader.
 	finalised bool
@@ -277,13 +308,18 @@ type liveIdentity struct {
 // as a persistent one does. So the ephemeral world is a store with no directory under
 // it, and this type never branches on having one.
 //
+// **A nil exploration store stays nil**, and that is not the same decision. What the
+// memory store above buys is the world's own rules, which a map has none of; a nil one
+// is a no-op at every method, so an ephemeral world's characters explore and are told
+// about it and nothing is written down. See the field.
+//
 // **A nil verifier is an error and not a permissive default**, and that is the whole of
 // the acceptance criterion in the type system: there is no way to build a claim set that
 // admits players without checking them, so "a server that cannot verify a ticket cannot
 // admit anybody" cannot be undone by forgetting an argument. The alternative — a nil
 // verifier meaning "let everyone in" — is the second way in that this design exists to
 // remove, and it would be reached by an omission rather than by a decision.
-func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (*Identities, error) {
+func NewIdentities(store *persist.Store, exploration *persist.ExplorationStore, verifier *Verifier, log *slog.Logger) (*Identities, error) {
 	if verifier == nil {
 		return nil, errors.New("session: a claim set needs a verifier; a server that cannot check a ticket cannot admit anybody")
 	}
@@ -294,10 +330,11 @@ func NewIdentities(store *persist.Store, verifier *Verifier, log *slog.Logger) (
 		store = persist.NewMemoryStore()
 	}
 	return &Identities{
-		store:    store,
-		verifier: verifier,
-		log:      log,
-		live:     make(map[identity.PlayerID]*liveIdentity),
+		store:       store,
+		exploration: exploration,
+		verifier:    verifier,
+		log:         log,
+		live:        make(map[identity.PlayerID]*liveIdentity),
 	}, nil
 }
 
@@ -531,9 +568,15 @@ func (i *Identities) Create(admitted Admitted, name string, appearance protocol.
 // it: the autosave asks the *simulation* which lives to write, and a session that has
 // not chosen has not joined. [Identities.stillPlaying] fails closed over the same window.
 func (i *Identities) playing(admitted Admitted, character persist.Character, returning bool, life *game.Life) Resolved {
+	// Before the lock, because it reads a file: the claim map is taken by every
+	// admission and every autosave pass, and a disk read under it would make one
+	// character's slow directory everybody's.
+	explored := i.recallExploration(character)
+
 	i.mu.Lock()
 	if held, live := i.live[admitted.ID]; live {
 		held.character = character.ID
+		held.exploration = explored
 	}
 	// A claim that is not there is unreachable — this session holds it from Admit until
 	// its own teardown — and the absence of an else is deliberate: there is nothing this
@@ -547,6 +590,7 @@ func (i *Identities) playing(admitted Admitted, character persist.Character, ret
 		Name:       character.Name,
 		Appearance: character.Appearance,
 		Returning:  returning,
+		Explored:   explored,
 		Life:       life,
 	}
 }
@@ -794,7 +838,7 @@ func (i *Identities) Remember(self Resolved, life game.Life) error {
 	i.writeMu.Lock()
 	defer i.writeMu.Unlock()
 
-	err := i.write(self.Character, life)
+	err := i.write(self.Character, life, self.Explored)
 	i.finalise(self.ID)
 	return err
 }
@@ -883,25 +927,44 @@ func (i *Identities) RememberAll(lives map[identity.PlayerID]game.Life) error {
 		// which character stood there. The live claim is what knows, and asking it is
 		// also the skip: an account whose session has ended, or has written its last
 		// word, has no character here to write under.
-		character, playing := i.stillPlaying(id)
+		character, explored, playing := i.stillPlaying(id)
 		if !playing {
 			continue
 		}
-		if err := i.write(character, life); err != nil {
+		if err := i.write(character, life, explored); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// write puts one life on disk under the character it belongs to. The caller holds
-// writeMu.
+// write puts everything one session owns about a character on disk: the life, and the
+// map of where it has been. The caller holds writeMu.
+//
+// **Two files rather than one, and every caller of this writes both**, which is the
+// whole of "the map is as durable as the life". The alternative — a second save
+// schedule for exploration — would be a second set of decisions about when it is safe to
+// touch a file, and this one is already made: the teardown and the autosave, both off
+// the tick goroutine, both under the write lock that orders them against each other.
+func (i *Identities) write(character persist.CharacterID, life game.Life, explored *Exploration) error {
+	// **Both files or as many of them as land, and every failure reported.** The ledger
+	// is written first because it is the one that costs nothing when nothing changed —
+	// Exploration.Save is a no-op on an unchanged set — so the ordinary autosave pass
+	// for a stationary player reaches the record write having done no I/O at all. A
+	// failure of either does not skip the other: they are two independent things this
+	// character owns, and losing one is not a reason to lose both.
+	explErr := explored.Save()
+	recErr := i.writeLife(character, life)
+	return errors.Join(recErr, explErr)
+}
+
+// writeLife puts one life on disk under the character it belongs to.
 //
 // **Nothing here names the character or its owner**, and that is the store's rule rather
 // than an omission: persist.Store.Save fills both from its own index and ignores what a
 // caller put in them, so there is no way for a save to rename a character or move it to
 // another account. A session writes a life; who lived it was decided at creation.
-func (i *Identities) write(character persist.CharacterID, life game.Life) error {
+func (i *Identities) writeLife(character persist.CharacterID, life game.Life) error {
 	return i.store.Save(character, persist.Record{
 		// When this record was written, which is the end of the session on the teardown
 		// path and the moment of the pass on the autosave's. Both are "the last time
@@ -926,15 +989,15 @@ func (i *Identities) write(character persist.CharacterID, life game.Life) error 
 // life to [Store.Save] under the id that names no character, which is a write refused
 // with an error rather than a write to the wrong file. Failing closed here costs
 // nothing and keeps that from being the only thing standing in the way.
-func (i *Identities) stillPlaying(id identity.PlayerID) (persist.CharacterID, bool) {
+func (i *Identities) stillPlaying(id identity.PlayerID) (persist.CharacterID, *Exploration, bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	held, live := i.live[id]
 	if !live || held.finalised || held.character.IsZero() {
-		return 0, false
+		return 0, nil, false
 	}
-	return held.character, true
+	return held.character, held.exploration, true
 }
 
 // finalise records that id's session has written its last word.
