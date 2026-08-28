@@ -537,6 +537,32 @@ func TestMarkerRequestsCarryOnlyIntentAndAreBoundedAtTheDecodeBoundary(t *testin
 	if _, err := Decode(EncodeMarkerPlaceRequest(MarkerPlaceRequest{Kind: vnet.MarkerKindNote, Note: strings.Repeat("ᛗ", 40)})); err != nil {
 		t.Errorf("40 three-byte runes are exactly %d bytes and were refused: %v", MarkerNoteMaxBytes, err)
 	}
+
+	// The kind is a byte on the wire, and the refusals above pin membership rather than
+	// number: they would pass unchanged with Cave and Monster swapped, which turns every
+	// cave already saved to a marker file into a monster. Integers, in the shape V7 pins
+	// HairModel's and V25 pins ResidentRole's.
+	for name, pair := range map[string][2]byte{
+		"MarkerKind.Unknown":  {byte(vnet.MarkerKindUnknown), 0},
+		"MarkerKind.Resource": {byte(vnet.MarkerKindResource), 1},
+		"MarkerKind.Cave":     {byte(vnet.MarkerKindCave), 2},
+		"MarkerKind.Monster":  {byte(vnet.MarkerKindMonster), 3},
+		"MarkerKind.Boss":     {byte(vnet.MarkerKindBoss), 4},
+		"MarkerKind.Camp":     {byte(vnet.MarkerKindCamp), 5},
+		"MarkerKind.Village":  {byte(vnet.MarkerKindVillage), 6},
+		// Note is last because it is the fallback, not because it arrived last.
+		"MarkerKind.Note": {byte(vnet.MarkerKindNote), 7},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
+		}
+	}
+	// An eighth kind is invisible to everything above — it is in neither list — while
+	// MarkerKindOK answers false for it and internal/persist refuses the file that
+	// carries it as corrupt. That decision is taken here or it is not taken.
+	if got := len(vnet.EnumNamesMarkerKind); got != 8 {
+		t.Errorf("MarkerKind has %d members, want 8 — a new one needs a decision, not a test edit", got)
+	}
 }
 
 // The three server-to-client map messages encode the shapes their decoders are held to.
@@ -654,8 +680,13 @@ func TestSettlementRequestsCarryOnlyIntentAndRejectAbsentIdentities(t *testing.T
 	}
 
 	// Both directions round trip, because `buying` is a bool and both of its values are
-	// legal: the false case is a sale into the vendor's `buys` vector, not an absent
-	// field standing in for one.
+	// legal. **The false case is genuinely an absent field, and that is what makes it
+	// safe**: TradeRequestAddBuying is `PrependBoolSlot(3, buying, false)`, so a sale
+	// writes no `buying` slot at all and the reader answers false off the vtable's
+	// default. Legal here precisely because the field is a bool — absent, default and
+	// "selling" are one value, and there is no third meaning for the elision to be
+	// confused with. The four ids below are the opposite case: their absent-field zero
+	// is not a legal value, which is why each of them is refused by name.
 	for name, want := range map[string]TradeRequest{
 		"buying":  {EntityID: 4242, ItemID: 31, Count: 4, Buying: true, Revision: 2, ClientTick: 22},
 		"selling": {EntityID: 4242, ItemID: 8, Count: 1, Buying: false, Revision: 2, ClientTick: 23},
@@ -712,8 +743,16 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 	if decoded.Role() != resident.Role {
 		t.Errorf("role = %s, want %s", decoded.Role(), resident.Role)
 	}
-	if decoded.Appearance(new(vnet.Appearance)) == nil {
-		t.Error("appearance did not survive the round trip")
+	// Read back rather than merely present. A non-nil table says the field was written,
+	// not that any of the resident's face was: an encoder that nested a zero Appearance
+	// would satisfy a presence check and put the same bald, black-haired stranger over
+	// every name in the settlement.
+	appearance := decoded.Appearance(nil)
+	if appearance == nil {
+		t.Fatal("appearance did not survive the round trip")
+	}
+	if got := decodeAppearance(appearance); got != resident.Appearance {
+		t.Errorf("appearance = %+v, want %+v", got, resident.Appearance)
 	}
 
 	// Every member the contract names is a role, and the absent-field zero is not.
@@ -731,16 +770,93 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 		}
 	}
 
-	// A name is written exactly as given, over-long ones included: the bound belongs to
-	// the client's decoder, and truncating here would hide a caller's defect from the one
-	// thing that checks.
-	long := ResidentAppearance{EntityID: 901, Name: strings.Repeat("a", ResidentNameMaxBytes+1), HasName: true, Role: vnet.ResidentRoleGuard}
-	longEnv := vnet.GetRootAsEnvelope(EncodeResidentAppearance(long), 0)
-	longTable := payloadTable(t, longEnv)
-	longDecoded := new(vnet.ResidentAppearance)
-	longDecoded.Init(longTable.Bytes, longTable.Pos)
-	if got := len(longDecoded.Name()); got != ResidentNameMaxBytes+1 {
-		t.Errorf("over-long name arrived %d bytes, want %d written verbatim", got, ResidentNameMaxBytes+1)
+	// The number is the contract, and the loop above does not pin one: it asks whether
+	// each name is a member, so swapping Smith and Carpenter passes it while relabelling
+	// every smith already on a screen. Integers, in the shape V7 pins HairModel's.
+	for name, pair := range map[string][2]byte{
+		// The absent-field zero, first because it is the member ResidentRoleOK exists
+		// to exclude.
+		"ResidentRole.Unknown": {byte(vnet.ResidentRoleUnknown), 0},
+		// Villager is 1 rather than last because it is the ordinary case, which is a
+		// decision schemas/player.fbs argues and this is where it is held.
+		"ResidentRole.Villager":  {byte(vnet.ResidentRoleVillager), 1},
+		"ResidentRole.Smith":     {byte(vnet.ResidentRoleSmith), 2},
+		"ResidentRole.Carpenter": {byte(vnet.ResidentRoleCarpenter), 3},
+		"ResidentRole.Cook":      {byte(vnet.ResidentRoleCook), 4},
+		"ResidentRole.Trader":    {byte(vnet.ResidentRoleTrader), 5},
+		"ResidentRole.Guard":     {byte(vnet.ResidentRoleGuard), 6},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
+		}
+	}
+	// And the count, because both loops above enumerate only what they already know
+	// about: an eighth member appended to the schema is in neither of them, so nothing
+	// here would notice while ResidentRoleOK went on answering false for a role the
+	// contract now names. That is the one question this file can ask about a member
+	// nobody has written down yet.
+	if got := len(vnet.EnumNamesResidentRole); got != 7 {
+		t.Errorf("ResidentRole has %d members, want 7 — a new one needs a decision, not a test edit", got)
+	}
+
+	// A name is written exactly as given, over-long ones included: truncating here would
+	// hide a caller's defect from the decoder, which is where the bound belongs.
+	//
+	// **Nothing enforces that bound yet, and this test does not pretend otherwise.**
+	// ResidentAppearance travels server -> client only, so this package has no decode arm
+	// for it, and the client half of this branch carries the payload as
+	// `Handling::Deferred` — named, and then dropped. The decoder that will read it is
+	// part 2 of #457. ResidentNameMaxBytes therefore has no non-test reader
+	// anywhere in the tree today — it is schemas/player.fbs's "at most 32 bytes" written
+	// down where the decoder will reach for it, and the refusal arrives with that decoder.
+	// What the four cases below pin is the only rule that exists now, the encoder's:
+	// verbatim, whatever the caller handed it. They are the MarkerNoteMaxBytes cases in
+	// the same file, minus the refusal — that bound is enforced because MarkerPlaceRequest
+	// travels the other way and this package decodes it.
+	for label, text := range map[string]string{
+		"exactly at the bound": strings.Repeat("a", ResidentNameMaxBytes),
+		"one byte past it":     strings.Repeat("a", ResidentNameMaxBytes+1),
+		// Bytes, not characters: 11 three-byte runes are 33 bytes and past the bound,
+		// 10 are 30 and are not. A bound counted in characters would accept the first.
+		"multibyte past the bound": strings.Repeat("ᛗ", 11),
+		// string() over invalid bytes succeeds silently in Go, so a name that is not
+		// UTF-8 reaches the wire intact and only a decoder can ever tell.
+		"not valid utf-8": string([]byte{0xff, 0xfe}),
+	} {
+		named := new(vnet.ResidentAppearance)
+		namedTable := payloadTable(t, vnet.GetRootAsEnvelope(EncodeResidentAppearance(
+			ResidentAppearance{EntityID: 901, Name: text, HasName: true, Role: vnet.ResidentRoleGuard}), 0))
+		named.Init(namedTable.Bytes, namedTable.Pos)
+		if got := string(named.Name()); got != text {
+			t.Errorf("a name %s arrived as %q (%d bytes), want %q (%d bytes) written verbatim",
+				label, got, len(got), text, len(text))
+		}
+		// None of these frames sets HasAppearance, and an omitted appearance must read as
+		// a null table rather than an appearance of zeros — the call
+		// TestAPlayerAppearanceWithNoAppearanceIsAbsentRatherThanBlack makes for the
+		// player's own, and the reason HasAppearance is a field at all.
+		if named.Appearance(nil) != nil {
+			t.Errorf("a name %s carried an appearance nobody set", label)
+		}
+	}
+
+	// **The nameless resident is the frame a client has to refuse**, and HasName exists so
+	// that there is a way to build one. Absent, not present-and-empty: the encoder must
+	// honour the flag rather than infer the field from a non-empty string, so the empty
+	// name below is written and the missing one is not.
+	nameless := new(vnet.ResidentAppearance)
+	namelessTable := payloadTable(t, vnet.GetRootAsEnvelope(EncodeResidentAppearance(
+		ResidentAppearance{EntityID: 902, Role: vnet.ResidentRoleCook}), 0))
+	nameless.Init(namelessTable.Bytes, namelessTable.Pos)
+	if got := nameless.Name(); got != nil {
+		t.Errorf("omitted name = %q, want nil", got)
+	}
+	emptyNamed := new(vnet.ResidentAppearance)
+	emptyNamedTable := payloadTable(t, vnet.GetRootAsEnvelope(EncodeResidentAppearance(
+		ResidentAppearance{EntityID: 903, HasName: true, Role: vnet.ResidentRoleCook}), 0))
+	emptyNamed.Init(emptyNamedTable.Bytes, emptyNamedTable.Pos)
+	if got := emptyNamed.Name(); got == nil || string(got) != "" {
+		t.Errorf("present empty name = %q, want a present empty string", got)
 	}
 
 	state := VendorState{
@@ -799,6 +915,22 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 	sellOnlyVendorTable := sellOnlyState.Table()
 	if sellOnlyVendorTable.Offset(buysVTableSlot) == 0 {
 		t.Error("a sell-only vendor omitted buys; the contract requires an empty vector")
+	}
+
+	// The other direction, which is not the same assertion: the two vectors are built by
+	// two separate loops over two separate slices, so one of them can be right while the
+	// other is not. `sells` is the third field, so its vtable slot is 4 + 2*2.
+	const sellsVTableSlot = flatbuffers.VOffsetT(8)
+	buyOnly := vnet.GetRootAsEnvelope(EncodeVendorState(VendorState{EntityID: 900, Revision: 5, Buys: []VendorEntry{{ItemID: 8, Price: 3}}}), 0)
+	buyOnlyTable := payloadTable(t, buyOnly)
+	buyOnlyState := new(vnet.VendorState)
+	buyOnlyState.Init(buyOnlyTable.Bytes, buyOnlyTable.Pos)
+	if buyOnlyState.SellsLength() != 0 {
+		t.Errorf("a buy-only vendor carries %d sells, want 0", buyOnlyState.SellsLength())
+	}
+	buyOnlyVendorTable := buyOnlyState.Table()
+	if buyOnlyVendorTable.Offset(sellsVTableSlot) == 0 {
+		t.Error("a buy-only vendor omitted sells; the contract requires an empty vector")
 	}
 
 	closedEnv := vnet.GetRootAsEnvelope(EncodeVendorClosed(VendorClosed{EntityID: 900}), 0)
@@ -2039,7 +2171,7 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// **A drop has one for exactly that reason read the other way.** Every question a refused
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
-	// nine is the count, and it is what says nobody added another for a removal.
+	// seventeen is the count, and it is what says nobody added another for a removal.
 	if got := len(vnet.EnumNamesRefusedAction); got != 17 {
 		t.Errorf("RefusedAction has %d members, want 17 — a removal is refused in silence by design", got)
 	}

@@ -1745,8 +1745,18 @@ func Decode(frame []byte) (msg Message, err error) {
 // resident is, so there is nothing here to be tolerant of.
 //
 // Exported because a resident's role reaches the wire from the world's own tables as
-// well as from a test, and a build that cannot name the role it is about to send must
-// find that out before the frame leaves.
+// well as from a test, and the code that fills a ResidentAppearance is where the
+// question belongs.
+//
+// **It is not asked on the way out, and no encoder here asks anything.**
+// EncodeResidentAppearance writes the role it is handed, Unknown included, for the
+// reason it writes an over-long name and the reason decodeAppearance carries an Unknown
+// hair model: no encoder in this file validates, not one of them has an error to return,
+// and a refusal here would put a contract check inside the layer that owns framing and
+// nothing else. That is MarkerKindOK's arrangement too — internal/persist asks it before
+// it builds a MarkerList, and EncodeMarkerList still writes whatever it is given. So
+// this is a predicate a caller uses, not a gate the frame passes through, and the
+// settlement's own code is the caller it is waiting for.
 func ResidentRoleOK(role vnet.ResidentRole) bool {
 	switch role {
 	case vnet.ResidentRoleVillager, vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
