@@ -25,9 +25,12 @@ use bevy::window::{PrimaryWindow, WindowResized};
 
 use super::icon::DrawnIcon;
 use super::{
-    BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, TAB_SELECTED, button_colour, cell_node,
-    refresh_cell_contents, spawn_cell_contents, stack_style,
+    BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, TAB_SELECTED, anchor_for, button_colour,
+    cell_node, pointer_in_window, refresh_cell_contents, spawn_cell_contents, stack_style,
+    tooltip_bundle,
 };
+#[cfg(test)]
+use super::{TOOLTIP_GAP, TooltipAnchor};
 use crate::net::{InventoryStack, Session, StructureKind};
 #[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
@@ -240,16 +243,6 @@ const REFUSED_TINT: Color = Color::srgb(0.88, 0.44, 0.38);
 
 /// The station note. Amber, and never a disabled state: proximity is the server's call.
 const RECIPE_STATION: Color = Color::srgb(0.95, 0.76, 0.35);
-
-/// The tooltip's surface and text. Darker than the panel it floats over, inside the same
-/// grey the cells are bordered with, so it reads as a label on top rather than a third
-/// panel.
-const TOOLTIP_BACKGROUND: Color = Color::srgba(0.020, 0.026, 0.036, 0.97);
-const TOOLTIP_TEXT: Color = Color::srgb(0.92, 0.94, 0.97);
-
-/// How far from the pointer the tooltip sits, in logical pixels. Enough that the cursor
-/// glyph never covers the first letter.
-const TOOLTIP_GAP: f32 = 14.0;
 
 /// A fixed frame is the layout decision that keeps the tab strip stable: tab contents may
 /// differ, but neither participates in sizing this node.
@@ -491,7 +484,7 @@ fn spawn_inventory_screen(mut commands: Commands) {
                                 });
                         });
                 });
-            overlay.spawn(tooltip_bundle());
+            overlay.spawn(tooltip_bundle(SlotTooltip));
         });
 }
 
@@ -508,39 +501,6 @@ fn tab_panel_node(display: Display) -> Node {
         row_gap: Val::Px(10.0),
         ..default()
     }
-}
-
-/// The single tooltip node: absolutely positioned, empty, and hidden until a cell is
-/// hovered. [`hover_tooltip`] owns its text, its visibility and where it sits.
-fn tooltip_bundle() -> impl Bundle {
-    (
-        SlotTooltip,
-        Node {
-            position_type: PositionType::Absolute,
-            padding: UiRect::axes(Val::Px(9.0), Val::Px(5.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
-            ..default()
-        },
-        BackgroundColor(TOOLTIP_BACKGROUND),
-        BorderColor::all(CELL_EDGE),
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(16.0),
-            ..default()
-        },
-        TextColor(TOOLTIP_TEXT),
-        TextShadow::default(),
-        Visibility::Hidden,
-        // Above the panel it floats over, which is the whole point of a tooltip.
-        GlobalZIndex(31),
-        // And therefore above the cells, which is a trap without this: a node with no
-        // `FocusPolicy` *blocks*, so a tooltip the pointer ever landed inside would
-        // capture the interaction, the cell under it would go to `Interaction::None`, and
-        // the tooltip would hide and reappear every other frame. `TOOLTIP_GAP` keeps the
-        // pointer outside it today; `Pass` is what stops that being load-bearing.
-        FocusPolicy::Pass,
-    )
 }
 
 /// Builds the four local shelves above the bounded recipe viewport.
@@ -1439,51 +1399,6 @@ fn reclamp_inventory_window_on_resize(
     }
 }
 
-/// Where the absolutely positioned tooltip is pinned, for one pointer position.
-///
-/// Two of the four are `Auto`: an absolutely positioned node is anchored by the edges that
-/// are not.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct TooltipAnchor {
-    left: Val,
-    right: Val,
-    top: Val,
-    bottom: Val,
-}
-
-/// Anchors the tooltip to the pointer, away from whichever window edge is nearer.
-///
-/// **Anchored rather than clamped, because the width is not known here.** A node's size is
-/// decided by layout, one frame after this runs, so a clamp against the right edge would
-/// have to guess how wide the word is and would clip whenever it guessed low. Pinning the
-/// *right* edge of the tooltip instead makes it grow leftwards, away from the edge it is
-/// near, and the same argument in the other axis keeps it off the bottom of the window. No
-/// measurement, and no way to be clipped.
-fn anchor_for(cursor: Vec2, window: Vec2) -> TooltipAnchor {
-    let (left, right) = if cursor.x * 2.0 <= window.x {
-        (Val::Px(cursor.x + TOOLTIP_GAP), Val::Auto)
-    } else {
-        (
-            Val::Auto,
-            Val::Px((window.x - cursor.x).max(0.0) + TOOLTIP_GAP),
-        )
-    };
-    let (top, bottom) = if cursor.y * 2.0 <= window.y {
-        (Val::Px(cursor.y + TOOLTIP_GAP), Val::Auto)
-    } else {
-        (
-            Val::Auto,
-            Val::Px((window.y - cursor.y).max(0.0) + TOOLTIP_GAP),
-        )
-    };
-    TooltipAnchor {
-        left,
-        right,
-        top,
-        bottom,
-    }
-}
-
 /// Names the item under the pointer, and nothing else.
 ///
 /// **Display only, and structurally so.** It writes no message, touches no resource and
@@ -1514,14 +1429,7 @@ fn hover_tooltip(
                 .map(|stack| stack.item_id)
         });
 
-    // `None` while the pointer is outside the window, and no window at all in a headless
-    // test: in both the tooltip keeps the position it had, because there is nothing newer
-    // to move it to.
-    let pointer = windows.iter().next().and_then(|window| {
-        window
-            .cursor_position()
-            .map(|cursor| (cursor, Vec2::new(window.width(), window.height())))
-    });
+    let pointer = pointer_in_window(&windows);
 
     for (mut node, mut text, mut visibility) in &mut tooltips {
         let next = match hovered {
@@ -1542,17 +1450,7 @@ fn hover_tooltip(
         let Some((cursor, window)) = pointer.filter(|_| hovered.is_some()) else {
             continue;
         };
-        let anchor = anchor_for(cursor, window);
-        if node.left != anchor.left
-            || node.right != anchor.right
-            || node.top != anchor.top
-            || node.bottom != anchor.bottom
-        {
-            node.left = anchor.left;
-            node.right = anchor.right;
-            node.top = anchor.top;
-            node.bottom = anchor.bottom;
-        }
+        anchor_for(cursor, window).apply_to(&mut node);
     }
 }
 

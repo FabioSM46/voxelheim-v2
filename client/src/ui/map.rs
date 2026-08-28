@@ -916,6 +916,7 @@ impl Plugin for MapUiPlugin {
                     // After the dot, because both are children of the picture and the
                     // picture is sized by the composition above them.
                     draw_the_marks,
+                    hover_a_mark,
                 )
                     .chain(),
             )
@@ -1090,6 +1091,12 @@ fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
                         FocusPolicy::Pass,
                     ));
                 });
+
+            // A child of the overlay rather than of the picture: it is anchored to the
+            // window's own corners, and a node inside the clipped viewport could not reach
+            // them. `GlobalZIndex(31)` is the shared bundle's, one above this overlay, so a
+            // mark's tooltip is over the marks without any of them being over the panel.
+            overlay.spawn(super::tooltip_bundle(MarkerTooltip));
         });
 }
 
@@ -1406,9 +1413,44 @@ struct MarkerPin {
     kind: MarkerKind,
 }
 
+/// The map's single tooltip node, which says what the mark under the pointer is.
+#[derive(Component)]
+struct MarkerTooltip;
+
 /// One mark's icon, in logical pixels. Big enough to read a silhouette off and small enough
 /// that a cluster of marks is still ground rather than a wall of pictures.
 const MARKER_SIZE: f32 = 22.0;
+
+/// What one kind of mark is called on screen.
+///
+/// ASCII only, for the reason every string this client draws is: the embedded fallback font
+/// is the whole font stack and a glyph it lacks renders as nothing at all.
+const fn marker_label(kind: MarkerKind) -> &'static str {
+    match kind {
+        MarkerKind::Resource => "Resource",
+        MarkerKind::Cave => "Cave",
+        MarkerKind::Monster => "Monster",
+        MarkerKind::Boss => "Boss",
+        MarkerKind::Camp => "Camp",
+        MarkerKind::Village => "Village",
+        MarkerKind::Note => "Note",
+    }
+}
+
+/// What the tooltip says about one mark.
+///
+/// A mark with no note is its kind and nothing else, rather than a kind followed by an empty
+/// box: an empty note is ordinary -- a pin on a cave is a complete thought -- and a
+/// separator with nothing after it would read as text that failed to load.
+///
+/// `|` is the separator, the one the panel and the level readout already use. The typographic
+/// alternatives are exactly the characters the font cannot draw.
+fn marker_reading(marker: &Marker) -> String {
+    match marker.note.trim() {
+        "" => marker_label(marker.kind).to_owned(),
+        note => format!("{} | {note}", marker_label(marker.kind)),
+    }
+}
 
 /// Where one mark's icon sits on the picture, given the point its block projects to.
 ///
@@ -1496,6 +1538,62 @@ fn draw_the_marks(
                 FocusPolicy::Block,
             ))
             .with_children(|pin| super::icon::spawn_marker(pin, kind));
+    }
+}
+
+/// Names the mark under the pointer, and nothing else.
+///
+/// **Display only, and structurally so**, exactly as `ui/inventory.rs`'s does: it writes no
+/// message and touches no resource, so resting the pointer on a mark cannot become a
+/// request. It is the same single-node mechanism too -- one tooltip for the screen, moved
+/// and rewritten rather than spawned per mark.
+///
+/// The text comes from [`Markers`] rather than from the pin, because the note does: a pin
+/// carries what it needs to be drawn, and the list is the state.
+fn hover_a_mark(
+    screen: Res<MapScreen>,
+    markers: Res<Markers>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    pins: Query<(&Interaction, &MarkerPin)>,
+    mut tooltips: Query<(&mut Node, &mut Text, &mut Visibility), With<MarkerTooltip>>,
+) {
+    let hovered = screen
+        .is_open()
+        .then(|| {
+            pins.iter()
+                // The same "any interaction at all" the inventory reads, so a mark held
+                // down keeps the label it was hovered with.
+                .find(|(interaction, _)| **interaction != Interaction::None)
+                .map(|(_, pin)| pin.marker_id)
+        })
+        .flatten()
+        .and_then(|marker_id| {
+            markers
+                .0
+                .iter()
+                .find(|marker| marker.marker_id == marker_id)
+        })
+        .map(marker_reading);
+
+    let pointer = super::pointer_in_window(&windows);
+    for (mut node, mut text, mut visibility) in &mut tooltips {
+        let next = match hovered {
+            // `Inherited` rather than `Visible`: the overlay owns whether the map is up at
+            // all, and a tooltip must not survive it closing.
+            Some(_) => Visibility::Inherited,
+            None => Visibility::Hidden,
+        };
+        if *visibility != next {
+            *visibility = next;
+        }
+        let reading = hovered.as_deref().unwrap_or("");
+        if text.0 != reading {
+            text.0 = reading.to_owned();
+        }
+        let Some((cursor, window)) = pointer.filter(|_| hovered.is_some()) else {
+            continue;
+        };
+        super::anchor_for(cursor, window).apply_to(&mut node);
     }
 }
 
@@ -2435,6 +2533,16 @@ mod tests {
         drawn
     }
 
+    /// What the map's tooltip currently says, and whether it is up.
+    fn tooltip(app: &mut App) -> (String, Visibility) {
+        app.world_mut()
+            .query_filtered::<(&Text, &Visibility), With<MarkerTooltip>>()
+            .iter(app.world())
+            .next()
+            .map(|(text, visibility)| (text.0.clone(), *visibility))
+            .expect("the map spawns one tooltip at startup")
+    }
+
     /// Where the picture puts the middle of one block.
     fn pin_at(screen: &MapScreen, x: i32, z: i32) -> (Val, Val) {
         let point = screen.point_of(Vec2::new(x as f32 + 0.5, z as f32 + 0.5));
@@ -2528,6 +2636,85 @@ mod tests {
     }
 
     #[test]
+    fn resting_the_pointer_on_a_mark_names_it_and_reads_out_its_note() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.world_mut().spawn((
+            Window {
+                resolution: bevy::window::WindowResolution::new(800, 600),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app.update();
+        list(
+            &mut app,
+            vec![
+                mark(1, 0, 0, MarkerKind::Cave, "  bats, and a way down  "),
+                mark(2, 64, 64, MarkerKind::Boss, ""),
+            ],
+        );
+        assert_eq!(
+            tooltip(&mut app).1,
+            Visibility::Hidden,
+            "nothing is hovered"
+        );
+
+        let pins: Vec<(Entity, u64)> = app
+            .world_mut()
+            .query::<(Entity, &MarkerPin)>()
+            .iter(app.world())
+            .map(|(entity, pin)| (entity, pin.marker_id))
+            .collect();
+        let noted = pins
+            .iter()
+            .find(|(_, marker_id)| *marker_id == 1)
+            .expect("the noted mark is drawn")
+            .0;
+        let bare = pins
+            .iter()
+            .find(|(_, marker_id)| *marker_id == 2)
+            .expect("the bare mark is drawn")
+            .0;
+
+        *app.world_mut()
+            .get_mut::<Interaction>(noted)
+            .expect("a mark takes the pointer") = Interaction::Hovered;
+        app.update();
+        assert_eq!(
+            tooltip(&mut app),
+            (
+                "Cave | bats, and a way down".to_owned(),
+                Visibility::Inherited
+            )
+        );
+
+        *app.world_mut()
+            .get_mut::<Interaction>(noted)
+            .expect("a mark takes the pointer") = Interaction::None;
+        *app.world_mut()
+            .get_mut::<Interaction>(bare)
+            .expect("a mark takes the pointer") = Interaction::Pressed;
+        app.update();
+        assert_eq!(
+            tooltip(&mut app),
+            ("Boss".to_owned(), Visibility::Inherited),
+            "a mark with no note is its kind and nothing else"
+        );
+
+        // And the tooltip is anchored away from the pointer, through the same mechanism the
+        // inventory's is.
+        let node = app
+            .world_mut()
+            .query_filtered::<&Node, With<MarkerTooltip>>()
+            .iter(app.world())
+            .next()
+            .expect("the map's tooltip")
+            .clone();
+        assert_eq!(node.position_type, PositionType::Absolute);
+    }
+
+    #[test]
     fn the_marks_do_not_outlive_the_session() {
         let (mut app, _frames) = app();
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
@@ -2562,6 +2749,24 @@ mod tests {
             1,
             "the list is the server's and outlives the window that draws it"
         );
+    }
+
+    /// Every kind is named, and no two share a name.
+    ///
+    /// The counterpart to the icon sweep: a kind that fell through to another kind's label
+    /// would draw its own picture over somebody else's word.
+    #[test]
+    fn every_kind_of_mark_has_a_name_of_its_own() {
+        for (index, kind) in MarkerKind::ALL.iter().enumerate() {
+            assert!(!marker_label(*kind).is_empty(), "{kind:?} has no name");
+            for other in &MarkerKind::ALL[index + 1..] {
+                assert_ne!(
+                    marker_label(*kind),
+                    marker_label(*other),
+                    "{kind:?} and {other:?} are called the same thing"
+                );
+            }
+        }
     }
 
     #[test]
