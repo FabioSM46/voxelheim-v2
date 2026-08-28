@@ -249,17 +249,23 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // name the client request, and a V22 client cannot accept a snapshot that omits the
 // matching blocking statements after a clean handshake.
 //
-// The rule that generalises, now that eight shapes have been argued: **ask what the receiver
+// **V23 appends LootTakeAllRequest.** A V22 server cannot name that tag and closes the
+// session rather than dropping it, so a V23 client must not handshake with one and then
+// discover the mismatch on the first corpse it empties. Nothing server -> client is added:
+// the answer is the LootState, LootClosed and TakeLoot/InventoryFull refusal V21 already
+// defined.
+//
+// The rule that generalises, now that nine shapes have been argued: **ask what the receiver
 // does with the value it does not recognise, not which way it travelled.** Dropping it is a
 // bump avoided; refusing it is a bump owed. The same words are in schemas/common.fbs,
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV22NamesCombatRoles(t *testing.T) {
+func TestProtocolV23NamesTakeAllLoot(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 22 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 22", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 23 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 23", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -300,6 +306,7 @@ func TestProtocolV22NamesCombatRoles(t *testing.T) {
 		vnet.PayloadLootClosed,
 		vnet.PayloadMobHit,
 		vnet.PayloadBlockRequest,
+		vnet.PayloadLootTakeAllRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -337,11 +344,24 @@ func TestLootRequestsCarryOnlyIntentAndRejectAbsentIdentities(t *testing.T) {
 		t.Fatalf("loot take round trip = %+v, %v; want %+v", take, err, takeWant)
 	}
 
+	// V23's take-everything intent is the single take with the entry id removed: the
+	// server owns the order and the fit, so there is nothing left for the client to name.
+	// Its revision is still mandatory, because a request written against a window the
+	// server has since changed must be refused rather than applied to a different one.
+	takeAllWant := LootTakeAllRequest{CorpseID: 91, Revision: 3, ClientTick: 46}
+	takeAll, err := Decode(EncodeLootTakeAllRequest(takeAllWant))
+	if err != nil || takeAll.Kind != vnet.PayloadLootTakeAllRequest ||
+		takeAll.LootTakeAll == nil || *takeAll.LootTakeAll != takeAllWant {
+		t.Fatalf("loot take-all round trip = %+v, %v; want %+v", takeAll, err, takeAllWant)
+	}
+
 	for name, frame := range map[string][]byte{
-		"open without corpse":   EncodeLootOpenRequest(LootOpenRequest{}),
-		"take without corpse":   EncodeLootTakeRequest(LootTakeRequest{EntryID: 1, Revision: 1}),
-		"take without entry":    EncodeLootTakeRequest(LootTakeRequest{CorpseID: 1, Revision: 1}),
-		"take without revision": EncodeLootTakeRequest(LootTakeRequest{CorpseID: 1, EntryID: 1}),
+		"open without corpse":       EncodeLootOpenRequest(LootOpenRequest{}),
+		"take without corpse":       EncodeLootTakeRequest(LootTakeRequest{EntryID: 1, Revision: 1}),
+		"take without entry":        EncodeLootTakeRequest(LootTakeRequest{CorpseID: 1, Revision: 1}),
+		"take without revision":     EncodeLootTakeRequest(LootTakeRequest{CorpseID: 1, EntryID: 1}),
+		"take all without corpse":   EncodeLootTakeAllRequest(LootTakeAllRequest{Revision: 1}),
+		"take all without revision": EncodeLootTakeAllRequest(LootTakeAllRequest{CorpseID: 1}),
 	} {
 		if _, decodeErr := Decode(frame); !errors.Is(decodeErr, ErrMalformed) {
 			t.Errorf("%s decoded with %v, want ErrMalformed", name, decodeErr)

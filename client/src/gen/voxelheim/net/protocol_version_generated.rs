@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 22;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 23;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -122,6 +122,13 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// The projectile, target, off-hand and paired blocking fields are append-only additions:
 /// older peers see their absent defaults, so those fields do not independently owe a bump.
 /// They share V22 so every dependent consumer builds from one settled contract.
+///
+/// **V23 adds one request that empties a corpse.** `LootTakeAllRequest` travels
+/// client -> server, so a V22 server cannot name the tag and closes the session rather
+/// than dropping it — the exact mid-session failure a clean handshake must not hide.
+/// That one union member is the whole of the break: nothing else in the contract moves,
+/// no enum gains a member, and the partial-fill report reuses the `TakeLoot` /
+/// `InventoryFull` pair `LootTakeRequest` already answers with.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -132,10 +139,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(22);
+    pub const Current: Self = Self(23);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 22;
+    pub const ENUM_MAX: u16 = 23;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

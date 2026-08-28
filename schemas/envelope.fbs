@@ -133,7 +133,15 @@ union Payload {
   //
   //    Client -> server intent. An older server cannot name this payload and closes
   //    the session rather than dropping it, so the V22 protocol bump is owed.
-  BlockRequest             // 38
+  BlockRequest,            // 38
+
+  // -- V23. Appended, so the tags of 1..38 are untouched.
+  //
+  //    Client -> server intent: take everything in a corpse that fits. An older server
+  //    cannot name this payload and closes the session rather than dropping it, so the
+  //    V23 protocol bump is owed. The answer reuses LootState, LootClosed and
+  //    ActionRefused, so nothing server -> client is added here.
+  LootTakeAllRequest       // 39
 }
 
 table Envelope {

@@ -106,6 +106,13 @@ import "strconv"
 // / The projectile, target, off-hand and paired blocking fields are append-only additions:
 // / older peers see their absent defaults, so those fields do not independently owe a bump.
 // / They share V22 so every dependent consumer builds from one settled contract.
+// /
+// / **V23 adds one request that empties a corpse.** `LootTakeAllRequest` travels
+// / client -> server, so a V22 server cannot name the tag and closes the session rather
+// / than dropping it — the exact mid-session failure a clean handshake must not hide.
+// / That one union member is the whole of the break: nothing else in the contract moves,
+// / no enum gains a member, and the partial-fill report reuses the `TakeLoot` /
+// / `InventoryFull` pair `LootTakeRequest` already answers with.
 type ProtocolVersion uint16
 
 const (
@@ -114,7 +121,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 22
+	ProtocolVersionCurrent ProtocolVersion = 23
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{
