@@ -167,6 +167,20 @@ func TestEachClimateBuildsItsOwnColumn(t *testing.T) {
 				continue
 			}
 
+			// Water's own two surfaces beat the climate's ground, and they are checked
+			// before the switch because a river bed and a shore are the same blocks in
+			// every climate that has one. See column.blockAt for the precedence.
+			if col.river {
+				if got := col.blockAt(col.surface); got != Gravel {
+					t.Fatalf("%v river bed at (%d, %d) is %d at depth 0, want Gravel", col.climate, x, z, got)
+				}
+				continue
+			}
+			if col.beach {
+				assertColumnMaterials(t, col, x, z, []Block{Sand, Sand, Sand})
+				continue
+			}
+
 			switch col.climate {
 			case Desert:
 				assertColumnMaterials(t, col, x, z, []Block{Sand, Sand, Sand, Sand, Sandstone, Sandstone, Sandstone, Sandstone, Sandstone, Sandstone, Sandstone, Sandstone, Stone})
@@ -272,7 +286,10 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				if col.climate != tc.climate {
 					t.Fatalf("%s square is not one climate: (%d, %d) is %v", tc.name, x, z, col.climate)
 				}
-				if col.blockAt(col.surface) == Grass {
+				// A column under the sea line grows nothing however green its bed is,
+				// so it is not a candidate the density is measured against. See
+				// treeAtColumn, which refuses it for the same reason.
+				if col.blockAt(col.surface) == Grass && col.surface >= seaLevel {
 					eligible++
 				}
 				if _, ok := treeAtColumn(climateSeed, x, z, col); ok {
@@ -310,6 +327,13 @@ func TestGravelPatchesAreRareAndOnlyOnSoil(t *testing.T) {
 			patches++
 			if !soil {
 				t.Fatalf("gravel at (%d, %d): climate %v, surface %d", x, z, col.climate, col.surface)
+			}
+			// The field still says "patch here"; what a *shore* is made of simply
+			// beats it, and a river bed is gravel anyway but only one block deep. Both
+			// are counted above, because what is being measured is the field's share
+			// of eligible columns rather than how often it is the last word.
+			if col.beach || col.river {
+				continue
 			}
 			if got := col.blockAt(col.surface); got != Gravel {
 				t.Fatalf("gravel column at (%d, %d) has surface block %d", x, z, got)
@@ -437,6 +461,15 @@ func TestClimateThresholdsClassifyInOrder(t *testing.T) {
 // field — and a change that moves one of them is a change to this number. There is
 // no headroom left above it: the next feature that wants per-voxel noise has to buy
 // it back somewhere first.
+//
+// **Worldgen 5 is water, and it cost 1.06× — because it wanted no per-voxel noise.**
+// Measured interleaved against worldgen 4 on one machine, nine samples each of 400
+// chunk generations: 3.25 ms/op before, 3.43 after. Basins and channels are two more
+// fbm2D sums per *column*, which is about 32K extra lattice hashes for a chunk
+// against the roughly 1.3M the cave fields already spend inside it; everything else
+// water added — the sea fill, the cave fill, the beach and the bed — is integer
+// comparisons on voxels that were already being visited. The warning above still
+// stands and is still unspent.
 //
 // **Sweep the vertical coordinate, and do not measure one chunk layer.** The first
 // attempt pinned Y=2 and reported 2.9×, which was not the climate fields at all: the
