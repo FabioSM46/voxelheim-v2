@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 14;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 16;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 15] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 17] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -33,6 +33,8 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 15] = [
     RefusedAction::RequestMapTile,
     RefusedAction::PlaceMarker,
     RefusedAction::RemoveMarker,
+    RefusedAction::Interact,
+    RefusedAction::Trade,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -82,9 +84,17 @@ impl RefusedAction {
     pub const PlaceMarker: Self = Self(13);
     /// A `MarkerRemoveRequest` that took no mark off it.
     pub const RemoveMarker: Self = Self(14);
+    /// An `NpcInteractRequest` that opened nothing. The player addressed a resident and
+    /// the server had no answer to give them — the resident is not a vendor, is out of
+    /// reach, or the player is dead.
+    pub const Interact: Self = Self(15);
+    /// A `TradeRequest` that moved no item and no silver. Trade is all-or-nothing: a
+    /// refusal means the vendor's stock, the player's pack and the player's purse are
+    /// exactly as they were.
+    pub const Trade: Self = Self(16);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 14;
+    pub const ENUM_MAX: u8 = 16;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -101,6 +111,8 @@ impl RefusedAction {
         Self::RequestMapTile,
         Self::PlaceMarker,
         Self::RemoveMarker,
+        Self::Interact,
+        Self::Trade,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -120,6 +132,8 @@ impl RefusedAction {
             Self::RequestMapTile => Some("RequestMapTile"),
             Self::PlaceMarker => Some("PlaceMarker"),
             Self::RemoveMarker => Some("RemoveMarker"),
+            Self::Interact => Some("Interact"),
+            Self::Trade => Some("Trade"),
             _ => None,
         }
     }

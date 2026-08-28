@@ -36,6 +36,8 @@ pub mod voxelheim {
         pub use self::mob_action_generated::*;
         mod structure_kind_generated;
         pub use self::structure_kind_generated::*;
+        mod resident_role_generated;
+        pub use self::resident_role_generated::*;
         mod payload_generated;
         pub use self::payload_generated::*;
         mod vec_3_generated;
@@ -162,6 +164,18 @@ pub mod voxelheim {
         pub use self::inventory_state_generated::*;
         mod player_appearance_generated;
         pub use self::player_appearance_generated::*;
+        mod resident_appearance_generated;
+        pub use self::resident_appearance_generated::*;
+        mod npc_interact_request_generated;
+        pub use self::npc_interact_request_generated::*;
+        mod vendor_entry_generated;
+        pub use self::vendor_entry_generated::*;
+        mod vendor_state_generated;
+        pub use self::vendor_state_generated::*;
+        mod trade_request_generated;
+        pub use self::trade_request_generated::*;
+        mod vendor_closed_generated;
+        pub use self::vendor_closed_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

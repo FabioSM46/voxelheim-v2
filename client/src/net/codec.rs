@@ -3177,7 +3177,17 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::MapTileRequest
         | fb::Payload::MarkerPlaceRequest
         | fb::Payload::MarkerRemoveRequest
+        | fb::Payload::NpcInteractRequest
+        | fb::Payload::TradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
+        // V25's three server→client payloads, carried by name until their decoders land.
+        // Named here rather than left to the fallback for the reason `NONE` is: the
+        // fallback answers `UNKNOWN_VARIANT`, and a member this build *can* name reaching
+        // it would report a contract gap that does not exist. The contract half of #457
+        // settles the tags; the decoders that copy and validate these three follow it.
+        fb::Payload::ResidentAppearance | fb::Payload::VendorState | fb::Payload::VendorClosed => {
+            Ok(Message::Deferred(name))
+        }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -6541,14 +6551,24 @@ mod tests {
     /// bump: `RefusedAction::from_wire` and `RefusalReason::from_wire` are total by
     /// design, so an unreadable member costs one sentence rather than the session.
     ///
+    /// **V25 appends the settlement: five members, two of them client to server.** A V24
+    /// server cannot name `NpcInteractRequest` or `TradeRequest` and closes the session on
+    /// either, so each owes the bump alone. What makes this version worth reading twice is
+    /// the member that is *not* in the union: `MobKind::Villager` travels server to client
+    /// inside a `MobState`, and it moves the version where an appended `RefusalReason`
+    /// member does not — because [`MobKind::from_wire`] answers `None` and the caller ends
+    /// the session, while `RefusalReason::from_wire` is total and answers `Unknown`. Two
+    /// appended enum members, opposite conclusions, and the receiver is the whole of the
+    /// difference.
+    ///
     /// The rule that generalises, now that eight shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v24_names_the_map() {
+    fn protocol_v25_names_the_settlement() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 24);
+        assert_eq!(fb::ProtocolVersion::Current.0, 25);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -6595,6 +6615,11 @@ mod tests {
             (fb::Payload::MarkerPlaceRequest, 43),
             (fb::Payload::MarkerRemoveRequest, 44),
             (fb::Payload::MarkerList, 45),
+            (fb::Payload::ResidentAppearance, 46),
+            (fb::Payload::NpcInteractRequest, 47),
+            (fb::Payload::VendorState, 48),
+            (fb::Payload::TradeRequest, 49),
+            (fb::Payload::VendorClosed, 50),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -6610,7 +6635,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            46,
+            51,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -6640,7 +6665,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 46] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 51] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -6687,6 +6712,15 @@ mod tests {
         (fb::Payload::MarkerPlaceRequest, Handling::ClientOnly),
         (fb::Payload::MarkerRemoveRequest, Handling::ClientOnly),
         (fb::Payload::MarkerList, Handling::Consumed),
+        // V25's five. The two requests are refused by direction here and now; the three
+        // that travel back are named as `Deferred` until the decoders land, which is the
+        // same staged shape V24's map payloads had between its two halves. `Deferred`
+        // means "this build has no arm yet", not "this contract has no member".
+        (fb::Payload::ResidentAppearance, Handling::Deferred),
+        (fb::Payload::NpcInteractRequest, Handling::ClientOnly),
+        (fb::Payload::VendorState, Handling::Deferred),
+        (fb::Payload::TradeRequest, Handling::ClientOnly),
+        (fb::Payload::VendorClosed, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -7349,6 +7383,9 @@ mod tests {
         assert_eq!(fb::RefusedAction::RequestMapTile.0, 12);
         assert_eq!(fb::RefusedAction::PlaceMarker.0, 13);
         assert_eq!(fb::RefusedAction::RemoveMarker.0, 14);
+        // V25 reserves the settlement's two, on the same terms.
+        assert_eq!(fb::RefusedAction::Interact.0, 15);
+        assert_eq!(fb::RefusedAction::Trade.0, 16);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -7359,7 +7396,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            15,
+            17,
             "a removal is refused in silence by design"
         );
 
@@ -7391,6 +7428,11 @@ mod tests {
             (fb::RefusalReason::TooManyMarkers, 24),
             (fb::RefusalReason::NoteTooLong, 25),
             (fb::RefusalReason::MarkerUnknown, 26),
+            // V25's three, appended inside the low group: each is the world answering a
+            // legal question no.
+            (fb::RefusalReason::NotAVendor, 27),
+            (fb::RefusalReason::NotEnoughSilver, 28),
+            (fb::RefusalReason::VendorDoesNotWant, 29),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -7400,7 +7442,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            31,
+            34,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -7469,6 +7511,7 @@ mod tests {
         assert_eq!(fb::MobKind::Draugr.0, 1);
         assert_eq!(fb::MobKind::Vargr.0, 2);
         assert_eq!(fb::MobKind::Deer.0, 3);
+        assert_eq!(fb::MobKind::Villager.0, 4);
 
         assert_eq!(fb::MobAction::Unknown.0, 0);
         assert_eq!(fb::MobAction::Idle.0, 1);

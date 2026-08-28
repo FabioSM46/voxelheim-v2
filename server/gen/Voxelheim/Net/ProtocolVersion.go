@@ -132,6 +132,33 @@ import "strconv"
 // / way, and it is worth saying out loud so the next reader does not conclude that every
 // / appended enum member is a break. It is the receiver's behaviour that decides, and this
 // / receiver drops.
+// /
+// / **V25 adds the settlement: a villager with a name and a role, a word with one, and a
+// / stall's prices.** Two of the five new union members travel client -> server —
+// / `NpcInteractRequest` and `TradeRequest` — and each is a bump owed on its own, for the
+// / reason `DropItemRequest` was: a V24 server cannot name the tag and closes the session
+// / rather than dropping it, so a V25 client would handshake cleanly and lose the
+// / connection the first time somebody spoke to a resident. The other three —
+// / `ResidentAppearance`, `VendorState`, `VendorClosed` — travel the ordinary way and
+// / would have owed nothing alone.
+// /
+// / **`MobKind.Villager` owes the bump by itself, and it is the `MobAction.Dying`
+// / argument rather than the `RefusedAction` one.** It is an enum member inside a table
+// / field travelling server -> client, and `MobState.kind` states its invariant as a known
+// / non-zero member: both decoders refuse a kind they cannot name, and refusing ends the
+// / session. So a V24 client against a V25 server would handshake cleanly and drop the
+// / connection the first time a resident walked into view. That is the receiver behaviour
+// / that decides — dropping the value is a bump avoided, refusing it is a bump owed — and
+// / this receiver refuses.
+// /
+// / The two refusal enums gain members here too and owe nothing on their own, for the
+// / reason V24 records: an `ActionRefused` is decoded totally on both sides, an
+// / unrecognised action or reason reads as `Unknown`, and the cost is one sentence rather
+// / than the session.
+// /
+// / Three bumps owed are still one bump. Taking them together is what lets the resident
+// / and vendor issues that follow consume one settled contract instead of moving this
+// / number again.
 type ProtocolVersion uint16
 
 const (
@@ -140,7 +167,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 24
+	ProtocolVersionCurrent ProtocolVersion = 25
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{
