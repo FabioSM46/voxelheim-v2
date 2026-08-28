@@ -41,8 +41,8 @@ func livingWorldConfig() session.Config {
 }
 
 // persistentServer is the whole server over one directory — the world's chunks, the
-// players' records, the camp and the clock — so a "restart" is this called twice on the
-// same path.
+// players' records and their maps, the camp and the clock — so a "restart" is this
+// called twice on the same path.
 //
 // It restores the camp and the clock exactly where main does, before anything is served,
 // which is what makes the second call a restart rather than a fresh world that happens
@@ -54,6 +54,7 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	players := openPlayerStore(t, dir)
 	camp := openStructureStore(t, dir)
 	clock := openClockStore(t, dir)
+	explored := openExplorationStore(t, dir)
 	registry := session.NewRegistry()
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, discard())
 	if err != nil {
@@ -65,7 +66,7 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	return &server{
 		tr:         tr,
 		registry:   registry,
-		identities: testIdentities(t, players),
+		identities: testIdentities(t, players, explored),
 		cfg:        cfg,
 		timeouts:   session.Timeouts{},
 		chunks:     chunks,
@@ -360,6 +361,17 @@ func openStructureStore(t *testing.T, dir string) *persist.StructureStore {
 	store, err := persist.OpenStructureStore(dir)
 	if err != nil {
 		t.Fatalf("persist.OpenStructureStore: %v", err)
+	}
+	return store
+}
+
+// openExplorationStore is the map ledger's counterpart to openPlayerStore.
+func openExplorationStore(t *testing.T, dir string) *persist.ExplorationStore {
+	t.Helper()
+
+	store, err := persist.OpenExplorationStore(dir)
+	if err != nil {
+		t.Fatalf("OpenExplorationStore: %v", err)
 	}
 	return store
 }

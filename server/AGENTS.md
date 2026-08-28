@@ -1417,13 +1417,21 @@ flush are wired in `cmd/voxelheimd/main.go`.
   written by a *newer* build is the one case that refuses to start instead.
 
 
-## Where a character has been, and the file that records it
+## Where a character has been, and what "explored" is allowed to mean
 
+- **Explored means streamed, and that is the only definition this server can enforce.** A column
+  enters the ledger when `View.MarkLoaded` records a chunk in it as *delivered* — not when it is
+  scheduled, which is the same distinction streaming already draws for its own reason: a chunk that
+  never arrived is terrain the client does not have, and calling it explored would draw a map of
+  places nobody saw. "Looked at" and "walked through" are facts about a camera and a pair of feet,
+  both of which live on the client, and a server that asked would be taking a claim from the one
+  party that benefits from lying about it. It also costs one map insert on a path that was already
+  doing one.
 - **The unit is the chunk column, and a column has no height.** A character who has been somewhere
-  has been there at every y, so the whole vertical stack of a view cube is one place rather than
+  has been there at every y, so the whole vertical stack of a view cube adds one entry rather than
   seven. `world.Column` is that type — `{CX, CZ}`, chunk units, deliberately not a `Coord` with a
   field every caller has to remember to zero — and `schemas/world.fbs` names `MapColumn`'s fields
-  the same way for the same reason.
+  the same way.
 - **It is a second file per character, for the reason `structures.bin` was a second file.**
   `persist.Record`'s layout is fixed-width-then-one-variable-length-name with an exact size check
   at the read, which is what makes a truncated record refusable; it has no extensible area, and
@@ -1431,14 +1439,40 @@ flush are wired in `cmd/voxelheimd/main.go`.
   the thing every player's life is stored in. So `exploration/<character-id-hex>.bin` carries its
   own `persist.ExplorationVersion`, and a change to one format never bumps the other.
 - **Two caps with one name, and they are not the same number.** `persist.MaxExploredColumns` is
-  65,536 — the ledger's own bound, 512 KiB per character, refused at the *write* as well as at the
-  read so this build can never write a file it would then refuse to read.
-  `protocol.MaxExploredColumns` is 4096 — the most columns one `MapExplored` frame may carry. The
-  gap between them is why the ledger is sent in pages at all.
+  65,536 — the ledger's own bound, 512 KiB per character, enforced at the reveal *and* at the write
+  so this build can never write a file it would refuse to read. `protocol.MaxExploredColumns` is
+  4096 — the most columns one `MapExplored` frame may carry. Paging exists because of the gap.
+  A character at the cap keeps playing; what stops is the map growing, and the session says so once
+  at `Warn` rather than once per chunk crossing.
 - **An unreadable ledger is kept and never written over**, which is `Store.Quarantine`'s doctrine
   one file along: the bytes are the only evidence of what went wrong, and the session that could
   not read them is about to write to that exact path. Both go through the same `setAside`, so the
   timestamp that keeps a second quarantine from destroying the first is written down once.
+- **The set lives on the session, not in `game.Life`.** `game` never imports `persist`, and the
+  tick loop has no business learning about map state; the code that knows a chunk reached a client
+  is in `session`. `session.Exploration` is that set, it carries its own mutex because the
+  streaming goroutine reveals into it while the session goroutine reads it, and `MarkLoaded`
+  deliberately calls out to it **with the view's lock released** — two correct types locked in two
+  orders is how a deadlock gets built.
+- **It is saved exactly where a record is saved, and nowhere else.** `Identities.write` writes both,
+  so the teardown and the autosave are the whole schedule and there is no second decision to get
+  wrong about when a file may be touched. An unchanged ledger costs no write, which is what keeps
+  the autosave cheap for the many connected players standing still, and the dirty flag is cleared
+  *before* the write for `world.Cache.takeDirty`'s reason — the worst case is writing the same bytes
+  twice, where the other order loses a column entirely.
+- **An unreadable ledger never refuses the connection, and that asymmetry with a record is the
+  point.** An unreadable *life* is refused when it cannot be set aside, because the session that
+  followed would write its own life over the only evidence. An unreadable *map* costs the fog and
+  nothing else — no items, no position, no progress — so the character plays with a blank one. The
+  evidence is protected the other way: the file is quarantined if it can be, and if it cannot be
+  moved, or could not be *reached* in the first place, the ledger is **sealed** and this session
+  writes nothing at all. Sealing has to be said out loud, unlike `restoreStructures` leaving a camp
+  file alone, because a ledger *is* rewritten by the session that could not read it.
+- **The ordering on the wire is the ordering of the facts.** The whole stored ledger goes out in
+  pages immediately after `ServerWelcome` and before the streamer exists; every later view diff
+  that revealed columns sends one batch. A client's ledger is the union of every `MapExplored` it
+  has received, there is no revision number and no end marker, and an empty page is a message the
+  contract forbids — a client reading one as "you have explored nothing" would erase its own map.
 
 ## What a player looks like, and the "once" that is not once per session
 

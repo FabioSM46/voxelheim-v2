@@ -47,6 +47,10 @@ type collector struct {
 	lootClosed  []uint64
 	accessible  []uint64
 
+	// explored is every MapExplored page, in arrival order and never merged: what a
+	// test needs to see is how the ledger was paged, not only what it added up to.
+	explored [][]world.Column
+
 	// drops is the newest snapshot's drop vector, replaced rather than appended:
 	// a snapshot is the complete set of drops this session can see, which is exactly
 	// how the client reads it.
@@ -288,7 +292,49 @@ func (c *collector) absorb(frame []byte) {
 		closed := new(vnet.LootClosed)
 		closed.Init(table.Bytes, table.Pos)
 		c.lootClosed = append(c.lootClosed, closed.CorpseId())
+
+	case vnet.PayloadMapExplored:
+		page := new(vnet.MapExplored)
+		page.Init(table.Bytes, table.Pos)
+		// One entry per message, kept whole rather than merged into a set: the ledger is
+		// additive, so a union would be right about the map and blind to how it arrived
+		// — and paging is exactly what these tests are about.
+		columns := make([]world.Column, 0, page.ColumnsLength())
+		for index := range page.ColumnsLength() {
+			column := new(vnet.MapColumn)
+			if !page.Columns(column, index) {
+				continue
+			}
+			columns = append(columns, world.Column{CX: column.Cx(), CZ: column.Cz()})
+		}
+		c.explored = append(c.explored, columns)
 	}
+}
+
+// exploredPages is every MapExplored this session received, in order and unmerged.
+func (c *collector) exploredPages() [][]world.Column {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	pages := make([][]world.Column, len(c.explored))
+	for i, page := range c.explored {
+		pages[i] = slices.Clone(page)
+	}
+	return pages
+}
+
+// exploredColumns is the union of every page, which is what a client's own ledger is.
+func (c *collector) exploredColumns() map[world.Column]struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	columns := make(map[world.Column]struct{})
+	for _, page := range c.explored {
+		for _, column := range page {
+			columns[column] = struct{}{}
+		}
+	}
+	return columns
 }
 
 // actionRefusals is every refusal the server has answered this session with, in order.

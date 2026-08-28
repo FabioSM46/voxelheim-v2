@@ -135,9 +135,15 @@ func testVerifier() *session.Verifier {
 func ephemeralIdentities() *session.Identities { return identitiesOver(nil) }
 
 // identitiesOver is a claim set over store — nil for the ephemeral world — admitting
-// tickets from the package's own account service.
+// tickets from the package's own account service, remembering no exploration.
 func identitiesOver(store *persist.Store) *session.Identities {
-	identities, err := session.NewIdentities(store, testVerifier(), nil)
+	return identitiesExploring(store, nil)
+}
+
+// identitiesExploring is identitiesOver with a map ledger behind it too, for the tests
+// that are about what a character has walked rather than about what it is carrying.
+func identitiesExploring(store *persist.Store, explored *persist.ExplorationStore) *session.Identities {
+	identities, err := session.NewIdentities(store, explored, testVerifier(), nil)
 	if err != nil {
 		// Unreachable, and a panic for the reason testVerifier's is.
 		panic("session_test: building a claim set: " + err.Error())

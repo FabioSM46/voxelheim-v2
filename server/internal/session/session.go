@@ -748,12 +748,33 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return fmt.Errorf("session: send the inventory on join: %w", iErr)
 			}
 
+			// The map's ledger, in pages, before the streamer exists. Authoritative
+			// state sent once on every join, like the inventory above it: MapExplored is
+			// additive, so a client that kept a previous session's copy would be right
+			// about it, and sending the whole ledger anyway is what makes a login from a
+			// second machine show the same map as the first.
+			//
+			// **Before streaming starts, so the order on the wire is the order of the
+			// facts**: everything this character had explored before this session, and
+			// then the batches this session reveals. Reversed, a client would receive a
+			// batch and then a page that contains it, which is harmless — the ledger is a
+			// union — and needlessly hard to read in a capture.
+			if eErr := sendExplored(enqueue, self.Explored.Snapshot()); eErr != nil {
+				return fmt.Errorf("session: send the explored ledger on join: %w", eErr)
+			}
+
 			// Built here rather than beside enqueue because it needs the player: a repair
 			// has to be able to ask for a view diff, and the only thing that can ask is
 			// the doorbell the tick loop rings — game.Player.WakeStreaming. Assigned to
 			// the outer variable, once, before the goroutine below starts reading it and
 			// before any post-handshake frame can reach the handler that uses it.
 			streamer = NewStreamer(chunks, cfg.ViewDistance, enqueue, admitted.WakeStreaming, time.Now, log)
+
+			// Wired before the streaming goroutine reads either of them, which is the
+			// ordering that makes the hook safe to set with no lock of the streamer's
+			// own. From here every chunk that reaches this client adds its column to the
+			// ledger, and every view diff that revealed one says so.
+			streamer.RecordExploration(self.Explored)
 
 			// Follow the player from its own goroutine. Two reasons, and the second is
 			// structural: the initial view is hundreds of frames, and producing them
