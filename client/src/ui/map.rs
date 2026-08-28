@@ -66,8 +66,16 @@ const DEFAULT_VIEWPORT: UVec2 = UVec2::new(1024, 768);
 ///
 /// A guard rather than a rule: the viewport is this client's own number, so nothing
 /// hostile can drive it. What it stops is a mistake in the layout half producing an
-/// allocation proportional to a garbage size.
-const MAX_TILES_IN_VIEW: usize = 64;
+/// allocation proportional to a garbage size — so it is checked against the grid's
+/// extent *before* the squares are built, because truncating them afterwards has
+/// already paid for the allocation it is guarding against and silently drops squares a
+/// real viewport reaches. [`DEFAULT_VIEWPORT`] at the closest zoom is sixteen squares
+/// by twelve, and a cap a screenful can touch leaves permanent holes in the map.
+///
+/// The number sits above every viewport and below the arithmetic's own ceiling:
+/// [`MapScreen::image_size`] clamps each axis to `1 << 14` pixels, so the widest grid
+/// askable is 257 by 257, while a 7680 by 4320 viewport at the closest zoom is 121 by 68.
+const MAX_TILES_IN_VIEW: usize = 16_384;
 
 /// How many blocks one map pixel covers.
 ///
@@ -243,7 +251,14 @@ impl MapScreen {
             bounds(self.centre.y, extent.y),
         );
         let (first_x, first_z) = (first_x as i32, first_z as i32);
-        let mut tiles = Vec::new();
+        // Counted before anything is allocated, which is the whole of what
+        // `MAX_TILES_IN_VIEW` is for. A grid this wide is a layout that has handed the
+        // map a size no window has, and asking for nothing is what that costs.
+        let count = i64::from(count_x) * i64::from(count_z);
+        if count > MAX_TILES_IN_VIEW as i64 {
+            return Vec::new();
+        }
+        let mut tiles = Vec::with_capacity(count as usize);
         for step_z in 0..count_z {
             for step_x in 0..count_x {
                 let origin_x = first_x.saturating_add(step_x.saturating_mul(span));
@@ -263,7 +278,6 @@ impl MapScreen {
             let dz = i64::from(tile.origin_z) + half - i64::from(self.centre.y);
             (dx * dx + dz * dz, tile.origin_z, tile.origin_x)
         });
-        tiles.truncate(MAX_TILES_IN_VIEW);
         tiles
     }
 }
@@ -276,34 +290,60 @@ impl MapScreen {
 #[derive(Resource, Debug, Default)]
 pub(super) struct MapTiles {
     tiles: HashMap<TileKey, MapTile>,
-    /// When each outstanding request stops holding its square, on `Time`'s clock.
+    /// The requests this client is still waiting for, by the square each one holds.
+    in_flight: HashMap<TileKey, InFlight>,
+    /// Ordering and staleness for the server, never a clock. See `MapTileRequest`.
+    next_tick: u32,
+}
+
+/// One request that has gone out and not been answered.
+#[derive(Debug, Clone, Copy)]
+struct InFlight {
+    /// When this note stops holding its square, on `Time`'s clock.
     ///
     /// A deadline rather than a departure time, so the expiry is one comparison and a
     /// test can retire a note by writing a number instead of moving a clock.
-    in_flight: HashMap<TileKey, Duration>,
-    /// Ordering and staleness for the server, never a clock. See `MapTileRequest`.
-    next_tick: u32,
+    expires: Duration,
+    /// A chunk column that became explored while this request was outstanding, if one
+    /// did. See [`MapTiles::evict`] for what it is for.
+    overtaken: Option<MapColumn>,
 }
 
 impl MapTiles {
     /// Records one drawn square. A tile the client never asked for is kept all the same —
     /// the server is the authority on what it sends, and a square is a square.
+    ///
+    /// The one answer thrown away is one the ledger has overtaken, and the tile settles
+    /// that itself: a tile that does not know about the column that evicted its square
+    /// was drawn before that column was explored. Dropping the note with it offers the
+    /// square again on the next pass.
     fn insert(&mut self, tile: MapTile) {
         let Some(key) = key_of(&tile) else {
             return;
         };
-        self.in_flight.remove(&key);
+        let overtaken = self.in_flight.remove(&key).and_then(|note| note.overtaken);
+        if overtaken.is_some_and(|column| drawn_with(&tile, column) == Some(false)) {
+            return;
+        }
         self.tiles.insert(key, tile);
     }
 
     /// Throws away every square `column` falls inside, so each is asked for again.
     ///
-    /// It clears the in-flight note too: a request that went out before the column was
-    /// explored would be answered with the same stale square, and keeping the note would
-    /// let that answer back into the cache.
+    /// A square with a request still outstanding has nothing to throw away yet, and its
+    /// note is marked rather than dropped. **The answer in the mail may or may not be
+    /// stale, and only it knows which**: `DrawMapTile` runs on the session's read loop
+    /// while the ledger's pages leave on the streaming goroutine, so a tile drawn before
+    /// this column was explored can still be enqueued after the page that names it.
+    /// Dropping the note would ask a second time for a square whose first answer is
+    /// still coming, and would cache that answer whichever it was.
     fn evict(&mut self, column: MapColumn) {
         self.tiles.retain(|key, _| !key.contains(column));
-        self.in_flight.retain(|key, _| !key.contains(column));
+        for (key, note) in &mut self.in_flight {
+            if key.contains(column) {
+                note.overtaken = Some(column);
+            }
+        }
     }
 
     /// Forgets everything. The end of a session, and nothing else.
@@ -311,6 +351,32 @@ impl MapTiles {
         self.tiles.clear();
         self.in_flight.clear();
     }
+}
+
+/// Whether `tile` was drawn with `column` already explored, or `None` for a column that
+/// is not one of the tile's own — which [`TileKey::contains`] has already settled, so it
+/// is a guard rather than a case.
+///
+/// The server's `drawMapTile` fills the `explored` mask from the same ledger it then
+/// draws the pixels from, one bit per chunk column, row-major with z outer and LSB first
+/// within each byte. The mask is therefore not a hint about the tile — it *is* the ledger
+/// the tile was drawn from, which is what lets a client holding a newer page tell an
+/// overtaken answer from a fresh one without a clock.
+fn drawn_with(tile: &MapTile, column: MapColumn) -> Option<bool> {
+    let span = i64::from(map_tile_span(tile.scale)?);
+    let columns = i64::from(CHUNK_COLUMN_BLOCKS);
+    let edge = span / columns;
+    // `div_euclid` for the reason every other coordinate here uses it: a tile origin is
+    // a multiple of its span and every span is a multiple of a chunk column, so this is
+    // exact on both sides of the origin where a truncating divide is not.
+    let cx = i64::from(column.cx) - i64::from(tile.origin_x).div_euclid(columns);
+    let cz = i64::from(column.cz) - i64::from(tile.origin_z).div_euclid(columns);
+    if cx < 0 || cz < 0 || cx >= edge || cz >= edge {
+        return None;
+    }
+    let bit = (cz * edge + cx) as usize;
+    let byte = tile.explored.get(bit / 8)?;
+    Some(byte & (1u8 << (bit % 8)) != 0)
 }
 
 /// The square a drawn tile belongs to, or `None` for a scale this client has no member
@@ -433,7 +499,7 @@ fn request_map_tiles(
     let now = time.elapsed();
     // An expired note is a request the server never answered — a spent token bucket says
     // nothing, so this is the only thing that ever makes the square askable again.
-    tiles.in_flight.retain(|_, expires| *expires > now);
+    tiles.in_flight.retain(|_, note| note.expires > now);
 
     if !screen.is_open() || session.is_none() {
         return;
@@ -457,7 +523,13 @@ fn request_map_tiles(
             scale: key.scale.wire(),
             client_tick,
         }));
-        tiles.in_flight.insert(key, now + REQUEST_RETRY);
+        tiles.in_flight.insert(
+            key,
+            InFlight {
+                expires: now + REQUEST_RETRY,
+                overtaken: None,
+            },
+        );
     }
 }
 
@@ -623,6 +695,120 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_the_ledger_has_overtaken_is_thrown_away() {
+        let (mut app, frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert!(
+            requested(&frames) > 0,
+            "an open map asks for what it does not hold"
+        );
+
+        let key = TileKey {
+            origin_x: 0,
+            origin_z: 0,
+            scale: MapScale::S4,
+        };
+        assert!(
+            app.world()
+                .resource::<MapTiles>()
+                .in_flight
+                .contains_key(&key),
+            "the square under the player is one of the first asked for"
+        );
+
+        // The page arrives while that square's request is still outstanding. The note is
+        // what holds the square, so nothing is asked for a second time.
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Explored(MapExplored {
+                columns: vec![MapColumn { cx: 1, cz: 1 }],
+            }));
+        app.update();
+        assert_eq!(
+            requested(&frames),
+            0,
+            "a square with an answer in the mail is not asked for again"
+        );
+
+        // An answer drawn before that column was explored says so in its own mask.
+        let mut overtaken = tile(0, 0, 4);
+        overtaken.explored = vec![0; map_tile_explored_bytes(4).unwrap_or(1)];
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Tile(overtaken));
+        app.update();
+        assert!(
+            !app.world().resource::<MapTiles>().tiles.contains_key(&key),
+            "a tile drawn without the explored column is the stale square the page evicted"
+        );
+        assert_eq!(
+            requested(&frames),
+            1,
+            "and dropping its note is what offers the square again"
+        );
+
+        // One drawn with the column explored is the answer the page was waiting for.
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Tile(tile(0, 0, 4)));
+        app.update();
+        assert!(app.world().resource::<MapTiles>().tiles.contains_key(&key));
+    }
+
+    #[test]
+    fn a_tile_carries_the_ledger_it_was_drawn_from() {
+        let mut drawn = tile(0, 0, 4);
+        // A scale-4 tile covers eight chunk columns each way, one bit each, row-major
+        // with z outer: column (1, 1) is bit nine.
+        drawn.explored = vec![0; map_tile_explored_bytes(4).unwrap_or(1)];
+        drawn.explored[1] = 0b0000_0010;
+        assert_eq!(drawn_with(&drawn, MapColumn { cx: 1, cz: 1 }), Some(true));
+        assert_eq!(drawn_with(&drawn, MapColumn { cx: 0, cz: 0 }), Some(false));
+        assert_eq!(
+            drawn_with(&drawn, MapColumn { cx: 8, cz: 0 }),
+            None,
+            "next square"
+        );
+
+        let negative = tile(-256, -256, 4);
+        assert_eq!(
+            drawn_with(&negative, MapColumn { cx: -8, cz: -8 }),
+            Some(true)
+        );
+        assert_eq!(drawn_with(&negative, MapColumn { cx: -9, cz: -8 }), None);
+    }
+
+    #[test]
+    fn a_whole_screenful_is_asked_for_at_the_closest_zoom() {
+        let screen = MapScreen {
+            open: true,
+            centre: IVec2::ZERO,
+            scale: MapScale::S4,
+            zoom: 1,
+            viewport: DEFAULT_VIEWPORT,
+        };
+        // 1024 by 768 tile pixels over 64-pixel squares, and the default centre sits on
+        // a corner: sixteen squares by twelve, every one of them asked for.
+        assert_eq!(screen.tiles_in_view().len(), 16 * 12);
+    }
+
+    #[test]
+    fn a_viewport_no_window_could_have_is_asked_nothing() {
+        let screen = MapScreen {
+            open: true,
+            centre: IVec2::ZERO,
+            scale: MapScale::S4,
+            zoom: 1,
+            viewport: UVec2::splat(u32::MAX),
+        };
+        assert!(
+            screen.tiles_in_view().is_empty(),
+            "a grid past the guard is a layout bug, and it allocates nothing"
+        );
+    }
+
+    #[test]
     fn a_column_outside_a_square_leaves_it_alone() {
         let key = TileKey {
             origin_x: 0,
@@ -645,13 +831,13 @@ mod tests {
 
         // A spent token bucket is silence, so the only thing that frees the square is the
         // note expiring. Retiring the deadlines is what stands in for a clock that moved.
-        for expires in app
+        for note in app
             .world_mut()
             .resource_mut::<MapTiles>()
             .in_flight
             .values_mut()
         {
-            *expires = Duration::ZERO;
+            note.expires = Duration::ZERO;
         }
         app.update();
         assert_eq!(
