@@ -8,6 +8,17 @@ use crate::player::{InputMode, Liveries, LootTakeClick, LootWindow, item_label};
 
 const WIDTH: f32 = 430.0;
 
+/// The label the take-all line names, kept beside the window that prints it.
+///
+/// It is the *default* binding rather than the bound one: `Settings` is a resource this
+/// module deliberately does not read, and a hint is presentation. A rebound interact key
+/// makes this line wrong, which is a smaller cost than the UI growing an opinion about
+/// input — and the issue that rebinds it is the one that should fix it here.
+const TAKE_ALL_KEY: &str = "F";
+
+/// Dimmer than the entries, because it is an instruction rather than a thing to click.
+const HINT: Color = Color::srgb(0.62, 0.62, 0.66);
+
 #[derive(Component)]
 struct LootRoot;
 
@@ -72,6 +83,21 @@ fn rebuild_window(
                     ..default()
                 },
                 TextColor(Color::WHITE),
+            ));
+            // The second gesture the window answers to, written down because nothing else
+            // says it: interact opened this, and interact again empties it.
+            //
+            // ASCII, and the hyphen is deliberate. Bevy's `default_font` is the whole font
+            // stack here — a 95-glyph subset of FiraMono — so an em dash is a glyph it
+            // does not have and would render as nothing at all, which on a line whose only
+            // job is to teach a control is the one failure that hides itself.
+            root.spawn((
+                Text::new(format!("{} - take all", TAKE_ALL_KEY)),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(HINT),
             ));
             for entry in &state.entries {
                 let durability = if entry.max_durability == 0 {
@@ -209,6 +235,16 @@ mod tests {
         let mut texts = world.query::<&Text>();
         let lines: Vec<_> = texts.iter(world).map(|text| text.0.as_str()).collect();
         assert!(lines.contains(&"Loot · revision 4"));
+        // The take-all line, spelled out rather than matched loosely, because what is
+        // under test is partly the *glyphs*: Bevy's embedded fallback font is a 95-glyph
+        // ASCII subset, so a hint written with a typographic dash draws as "F  take all"
+        // while still passing any `contains("take all")` somebody might write instead.
+        let hint = lines
+            .iter()
+            .find(|line| line.contains("take all"))
+            .expect("the window names the take-all control");
+        assert_eq!(*hint, "F - take all");
+        assert!(hint.is_ascii(), "the hint carries an undrawable glyph");
         assert!(
             lines
                 .iter()

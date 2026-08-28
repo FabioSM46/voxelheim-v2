@@ -1243,6 +1243,23 @@ kill. A draugr leaves 1..2 bones, a vargr leaves exactly one pelt, and two pelts
   is collected by walking over it, and is refused if the item is unregistered or the count is
   zero. `lootDrop` carries a voxel rather than a `*mob` because by the time it is spawned the
   creature has already left `Sim.mobs`.
+- **Emptying a corpse is one walk, one revision and two answers.** `TakeLoot` moves one
+  named entry and is all-or-nothing; `TakeAllLoot` shares its preconditions through
+  `openContainerLocked` — reachable, owned, open on this session, at the revision the
+  request names — and differs only in the loop. It walks the entries in `entryID` order
+  and **skips** what does not fit rather than stopping at it, so a bone behind a blade the
+  pack has no empty slot for still comes home. One `revision++` for the whole walk if
+  anything moved, none if nothing did. A bare container is `removeCorpseLocked` and the
+  existing `LootClosed`; a remainder is `lootDirty` and a `TakeLoot`/`InventoryFull`
+  refusal, which is the one place in this file where a *partial success* is reported as
+  both things it is — the entries that moved are committed, and the refusal is what says
+  the rest did not. The whole walk is inside the one `inventory.mu.TryLock` window, which
+  is what makes "what fits" a question about a pack no other request is halfway through
+  changing. On a boss corpse the walk is over `containerFor`'s answer and can therefore
+  only ever be the requester's own container.
+- **Take-all is its own client-ordering stream**, beside open's and take's, for the reason
+  those two are separate: pressing F is not clicking an entry, and a tick number spent on
+  one must not silence the other in the frame they share.
 - **Arrows are the only bone sink, and `TestOnlyArrowsConsumeBones` makes that a claim.**
   One bone and one log make four arrows; no other recipe, durability or combat rule consumes
   bone. The alternative was a creature that left a resource with no present use.
