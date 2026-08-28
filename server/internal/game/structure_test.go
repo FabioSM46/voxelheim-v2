@@ -1319,6 +1319,15 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		// V22 reserves this authoritative launcher refusal for the dependent bow
 		// issue. It is still the player's own inventory state, never a client defect.
 		vnet.RefusalReasonNoAmmunition,
+		// V24 reserves the map's four refusals for the dependent server issues. Every one
+		// of them is a legal question the world answered no to — a grid the client should
+		// ask again on, a map that is full, a note the player should shorten, a mark that
+		// is not theirs — so all four belong in the low group, and schemas/player.fbs
+		// carries the argument for the two that read like peer defects at first glance.
+		vnet.RefusalReasonTileMisaligned,
+		vnet.RefusalReasonTooManyMarkers,
+		vnet.RefusalReasonNoteTooLong,
+		vnet.RefusalReasonMarkerUnknown,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1340,8 +1349,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// vocabulary now and receive producers in the dependent authoritative loot issue;
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 27 {
-		t.Errorf("RefusalReason has %d members, want 27 — a new one needs a producer and client handling, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 31 {
+		t.Errorf("RefusalReason has %d members, want 31 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

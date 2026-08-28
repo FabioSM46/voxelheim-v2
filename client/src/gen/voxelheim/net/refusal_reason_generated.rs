@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 27] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 31] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -41,6 +41,10 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 27] = [
     RefusalReason::StaleRevision,
     RefusalReason::InventoryFull,
     RefusalReason::NoAmmunition,
+    RefusalReason::TileMisaligned,
+    RefusalReason::TooManyMarkers,
+    RefusalReason::NoteTooLong,
+    RefusalReason::MarkerUnknown,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -138,6 +142,28 @@ impl RefusalReason {
     /// The selected launcher is usable, but no matching ammunition exists in the
     /// player's authoritative hotbar or pack.
     pub const NoAmmunition: Self = Self(22);
+    /// The tile request named an origin that is not a multiple of `64 * scale`, or a scale
+    /// outside `{1, 4, 16}`.
+    ///
+    /// **In the low group deliberately, and the split's own words are why.** The line is
+    /// "it asked a legal question and the answer was no", and the party this answer is news
+    /// for is the client rather than the player: the map is the one surface where the
+    /// *client* chooses the numbers, and its recourse is to ask again on the grid. The
+    /// 64-and-above group is for a request the server could not read at all, which this one
+    /// is not — every field is present and every value is in range for its type.
+    pub const TileMisaligned: Self = Self(23);
+    /// This character already holds the maximum number of marks. One map to a character and
+    /// sixty-four marks on it, because a map nobody can read is not a map.
+    pub const TooManyMarkers: Self = Self(24);
+    /// The note is longer than the 120 bytes a mark may carry. In the low group for the same
+    /// reason `TileMisaligned` is, and more plainly: the player typed too much, and the
+    /// remedy is theirs.
+    pub const NoteTooLong: Self = Self(25);
+    /// The named mark does not belong to this character, or no longer exists. One answer for
+    /// both, deliberately: telling them apart would let a client learn that somebody else's
+    /// mark exists by naming ids it was never given — the argument `RefusedAction` records
+    /// for having no member for a refused structure removal at all.
+    pub const MarkerUnknown: Self = Self(26);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -177,6 +203,10 @@ impl RefusalReason {
         Self::StaleRevision,
         Self::InventoryFull,
         Self::NoAmmunition,
+        Self::TileMisaligned,
+        Self::TooManyMarkers,
+        Self::NoteTooLong,
+        Self::MarkerUnknown,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -208,6 +238,10 @@ impl RefusalReason {
             Self::StaleRevision => Some("StaleRevision"),
             Self::InventoryFull => Some("InventoryFull"),
             Self::NoAmmunition => Some("NoAmmunition"),
+            Self::TileMisaligned => Some("TileMisaligned"),
+            Self::TooManyMarkers => Some("TooManyMarkers"),
+            Self::NoteTooLong => Some("NoteTooLong"),
+            Self::MarkerUnknown => Some("MarkerUnknown"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

@@ -93,6 +93,28 @@ const (
 	/// The selected launcher is usable, but no matching ammunition exists in the
 	/// player's authoritative hotbar or pack.
 	RefusalReasonNoAmmunition RefusalReason = 22
+	/// The tile request named an origin that is not a multiple of `64 * scale`, or a scale
+	/// outside `{1, 4, 16}`.
+	///
+	/// **In the low group deliberately, and the split's own words are why.** The line is
+	/// "it asked a legal question and the answer was no", and the party this answer is news
+	/// for is the client rather than the player: the map is the one surface where the
+	/// *client* chooses the numbers, and its recourse is to ask again on the grid. The
+	/// 64-and-above group is for a request the server could not read at all, which this one
+	/// is not — every field is present and every value is in range for its type.
+	RefusalReasonTileMisaligned RefusalReason = 23
+	/// This character already holds the maximum number of marks. One map to a character and
+	/// sixty-four marks on it, because a map nobody can read is not a map.
+	RefusalReasonTooManyMarkers RefusalReason = 24
+	/// The note is longer than the 120 bytes a mark may carry. In the low group for the same
+	/// reason `TileMisaligned` is, and more plainly: the player typed too much, and the
+	/// remedy is theirs.
+	RefusalReasonNoteTooLong RefusalReason = 25
+	/// The named mark does not belong to this character, or no longer exists. One answer for
+	/// both, deliberately: telling them apart would let a client learn that somebody else's
+	/// mark exists by naming ids it was never given — the argument `RefusedAction` records
+	/// for having no member for a refused structure removal at all.
+	RefusalReasonMarkerUnknown RefusalReason = 26
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -131,6 +153,10 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonStaleRevision:      "StaleRevision",
 	RefusalReasonInventoryFull:      "InventoryFull",
 	RefusalReasonNoAmmunition:       "NoAmmunition",
+	RefusalReasonTileMisaligned:     "TileMisaligned",
+	RefusalReasonTooManyMarkers:     "TooManyMarkers",
+	RefusalReasonNoteTooLong:        "NoteTooLong",
+	RefusalReasonMarkerUnknown:      "MarkerUnknown",
 	RefusalReasonMalformedNoAnchor:  "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:    "MalformedFacing",
 	RefusalReasonMalformedSlot:      "MalformedSlot",
@@ -161,6 +187,10 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"StaleRevision":      RefusalReasonStaleRevision,
 	"InventoryFull":      RefusalReasonInventoryFull,
 	"NoAmmunition":       RefusalReasonNoAmmunition,
+	"TileMisaligned":     RefusalReasonTileMisaligned,
+	"TooManyMarkers":     RefusalReasonTooManyMarkers,
+	"NoteTooLong":        RefusalReasonNoteTooLong,
+	"MarkerUnknown":      RefusalReasonMarkerUnknown,
 	"MalformedNoAnchor":  RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":    RefusalReasonMalformedFacing,
 	"MalformedSlot":      RefusalReasonMalformedSlot,
