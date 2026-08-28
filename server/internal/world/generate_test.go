@@ -64,8 +64,8 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 3 {
-		t.Fatalf("WorldgenVersion = %d, want 3 for climates, mountains and gravel", WorldgenVersion)
+	if WorldgenVersion != 4 {
+		t.Fatalf("WorldgenVersion = %d, want 4 for caves", WorldgenVersion)
 	}
 }
 
@@ -152,6 +152,11 @@ func TestVerticallyStackedChunksAgree(t *testing.T) {
 // assertColumn returns whether the column contains a feature. It never turns a
 // mismatch into "feature-shaped enough": every non-feature voxel must equal the
 // old terrain function, while each feature has a separate placement proof.
+//
+// **Carving is a feature that removes rather than adds, so it is the one the
+// default branch has to know about.** Air where the terrain function says stone is
+// either a cave or the bug this function exists to catch, and only caveAt can tell
+// the two apart.
 func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 	t.Helper()
 
@@ -164,6 +169,10 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 	for y := range ChunkSize {
 		worldY := originY + int64(y)
 		got, terrain := c.At(x, y, z), col.blockAt(int(worldY))
+		carved := caveAt(seed, worldX, worldY, worldZ, surface)
+		if carved && got != Air && got != Log && got != Leaves {
+			t.Fatalf("carved voxel (%d, %d, %d) is block %d rather than air", worldX, worldY, worldZ, got)
+		}
 		switch got {
 		case CoalOre:
 			featured = true
@@ -185,8 +194,18 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 			}
 		case Leaves:
 			featured = true
-			if terrain != Air || !treeCanPlace(seed, worldX, worldY, worldZ, Leaves) {
+			// A canopy fills whatever was air when placeTrees ran, and a cave mouth in
+			// a column the tree overhangs is air by then. Both are honest fills.
+			if (terrain != Air && !carved) || !treeCanPlace(seed, worldX, worldY, worldZ, Leaves) {
 				t.Fatalf("leaves at (%d, %d, %d) are not part of a deterministic canopy", worldX, worldY, worldZ)
+			}
+		case Air:
+			if terrain != Air {
+				featured = true
+				if !carved {
+					t.Fatalf("plain chunk %+v voxel (%d, %d, %d) [world y=%d, surface=%d] is air, want %d",
+						c.Coord, x, y, z, worldY, surface, terrain)
+				}
 			}
 		default:
 			if got != terrain {
@@ -275,6 +294,9 @@ func TestSurfaceBlocksFollowTheirClimateAndAltitude(t *testing.T) {
 			localY := col.surface - 2*ChunkSize
 			if localY < 0 || localY >= ChunkSize {
 				continue // this column's surface is in another chunk
+			}
+			if caveAt(seed, int64(x), int64(col.surface), int64(z), col.surface) {
+				continue // a cave mouth has opened this column's surface; caves_test.go owns that rule
 			}
 			checked++
 
