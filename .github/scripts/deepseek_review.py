@@ -81,11 +81,12 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # The margin is the one 90,000 already used, taken against the observed point rather than
 # the estimated one: 90,000 was 72% of the 124,711 #164 measured, and **45,000 is 74% of
 # the 60,863 #488 measured.** That is a point *thinner* than the precedent rather than as
-# generous — 72% of 60,863 would be 43,900 — and it is stated rather than rounded away
-# because the gap is inside the noise of a ratio with two samples, which is exactly the
-# kind of claim this comment exists to keep honest. 45,000 spends about 277,400 tokens
-# reasoning at 23.8 and leaves roughly 106,600 against the 384,000 ceiling; at 11.9 it
-# spends about 138,500 and is never close. PR #501 is the corroboration that this is not
+# generous — the precedent's exact 72.2% of 60,863 is 43,900, and a flat 72% is 43,800 —
+# and it is stated rather than rounded away, because the gap is inside the noise of a
+# ratio with two samples and that is exactly the kind of claim this comment keeps honest.
+#
+# 45,000 spends about 277,400 tokens reasoning at 23.8 and leaves roughly 106,600 against
+# the 384,000 ceiling; at 11.9 it spends about 138,500 and is never close. PR #501 is the corroboration that this is not
 # over-tightened: 45,415 characters came back with a verdict and two substantive findings,
 # so the safe ceiling is bracketed between a measured success at 45,415 and a measured
 # failure at 60,863, and 45,000 sits just under the success.

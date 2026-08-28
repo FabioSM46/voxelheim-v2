@@ -562,13 +562,13 @@ verdict with nothing anywhere saying the size was the problem. PR #164 is where 
 review (#167).
 
 **Then it was 90,000, and that number was measured — from the only full-ceiling sample there was
-of a quantity that varies by a factor of two.** From #164, the model emitted 1,481,442 characters for 384,000 tokens
-— 3.86 characters per token, so the output budget is about 1,481,000 characters — and that run
-reasoned about **11.9** characters per character of diff. The diff which exactly fills the budget
-at that ratio is about 124,000 characters, which is where #164 landed; 90,000 was set at 72% of it
-and left roughly 107,000 tokens over. Then PR #488 reasoned at **23.8** — twice as hard, on a diff
-half the size — and 60,863 characters exhausted the whole ceiling in 33 minutes with no verdict
-(#491).
+of a quantity that varies by a factor of two.** From #164, the model emitted 1,481,442 characters
+for 384,000 tokens — 3.86 characters per token, so the output budget is about 1,481,000
+characters — and that run reasoned about **11.9** characters per character of diff. The diff
+which exactly fills the budget at that ratio is about 124,000 characters, which is where #164
+landed; 90,000 was set at 72% of it and left roughly 107,000 tokens over. Then PR #488 reasoned
+at **23.8** — twice as hard, on a diff half the size — and 60,863 characters exhausted the
+whole ceiling in 33 minutes with no verdict (#491).
 
 **45,000 is set from the worst observed ratio, not the average.** 23.8 against a
 1,481,000-character budget puts the fill point at about 62,300 — but that is an estimate carrying
@@ -577,11 +577,12 @@ half the size — and 60,863 characters exhausted the whole ceiling in 33 minute
 point** and 62,300 corroborates it to within 2.4% rather than replacing it. The margin is the one
 90,000 already used, taken against the observed point: 90,000 was 72% of the 124,711 #164 measured,
 and **45,000 is 74% of the 60,863 #488 measured** — a point *thinner* than that precedent rather
-than as generous (72% would have been 43,900), which is said out loud because the gap is inside the
-noise of a two-sample ratio. It spends about 277,400 tokens reasoning at the bad ratio and about
-138,500 at the good one. **The outcome is not monotonic in diff size, and that is the finding** —
-72,350 (#169) succeeded and 60,863 failed, so size is a proxy for the binding variable and the
-binding variable is how hard the model reasons about *that* content.
+than as generous (the precedent's exact 72.2% of 60,863 is 43,900, a flat 72% is 43,800), which is
+said out loud because the gap is inside the noise of a two-sample ratio. It spends about 277,400
+tokens reasoning at the bad ratio and about 138,500 at the good one. **The outcome is not
+monotonic in diff size, and that is the finding** — 72,350 (#169) succeeded and 60,863 failed,
+so size is a proxy for the binding variable and the binding variable is how hard the model
+reasons about *that* content.
 
 | PR | Diff chars | Reasoning chars | Ratio | Outcome |
 |---|---|---|---|---|
