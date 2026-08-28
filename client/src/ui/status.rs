@@ -21,8 +21,8 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use crate::net::{
-    ActionRefused, ConnectionState, Identity, RefusalInbox, RefusalReason, RefusedAction, Reject,
-    ServerAddress, Session,
+    ActionRefused, ConnectionState, Identity, MAX_MARKERS, RefusalInbox, RefusalReason,
+    RefusedAction, Reject, ServerAddress, Session,
 };
 use crate::player::PlayerStats;
 use crate::settings::{Corner, Settings};
@@ -595,10 +595,10 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::StaleRevision
         | RefusalReason::InventoryFull
         | RefusalReason::NoAmmunition
-        // V24's four map refusals. None of them is about a placement, and none of them
-        // has a sentence anywhere yet: the window that would show one lands with the map
-        // UI, and until then the outer match below answers them with silence rather than
-        // this build inventing a line for an action a player cannot take.
+        // V24's four map refusals. None of them is about a placement: the three that are
+        // about a mark are answered by `marker_reason` below, and `TileMisaligned` still has
+        // no sentence anywhere -- a misaligned tile request is a defect in this build, and
+        // the player did not ask for it.
         | RefusalReason::TileMisaligned
         | RefusalReason::TooManyMarkers
         | RefusalReason::NoteTooLong
@@ -620,7 +620,27 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         _ => None,
     };
 
+    // The three a mark can be refused for. Whole sentences rather than the "Cannot X: y"
+    // shape the placement and party lines use, because the map is not somewhere a player is
+    // trying to do a thing to the world -- it is their own notebook, and a full one has a
+    // number worth reading.
+    //
+    // `NoteTooLong` is here and cannot arrive: the decoder refuses an over-long note by
+    // closing the session, so the server's own bound is unreachable over the wire. It is
+    // written anyway for the reason `session/markers.go` checks it anyway -- this is the
+    // sentence a client would be told if that ever stopped being true, and a reason with no
+    // line is a refusal that reaches nobody.
+    let marker_reason = match refused.reason {
+        RefusalReason::TooManyMarkers => {
+            Some(format!("The map holds no more marks ({MAX_MARKERS})"))
+        }
+        RefusalReason::NoteTooLong => Some("That note is too long".to_owned()),
+        RefusalReason::MarkerUnknown => Some("That mark is already gone".to_owned()),
+        _ => None,
+    };
+
     match (refused.action, refused.reason) {
+        (RefusedAction::PlaceMarker, _) => marker_reason,
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
         (RefusedAction::PlaceStructure, _) => {
             placement_reason.map(|reason| format!("Cannot build here: {reason}"))
@@ -1329,6 +1349,41 @@ mod tests {
                 assert!(line.contains(fragment), "{action:?}/{reason:?}: {line}");
             }
         }
+    }
+
+    /// The two refusals a placement can draw, and the reason it cannot.
+    ///
+    /// `NoteTooLong` is in the list and cannot arrive over the wire -- the decoder closes the
+    /// session over an over-long note before the store ever answers -- so what is pinned here
+    /// is that the sentence exists rather than that a player will read it. A reason the server
+    /// names and this client has no line for is a refusal that reaches nobody.
+    #[test]
+    fn a_refused_placement_says_which_of_the_two_things_went_wrong() {
+        for (reason, want) in [
+            (
+                RefusalReason::TooManyMarkers,
+                "The map holds no more marks (64)",
+            ),
+            (RefusalReason::NoteTooLong, "That note is too long"),
+        ] {
+            let line = describe_refusal(&ActionRefused {
+                action: RefusedAction::PlaceMarker,
+                reason,
+                anchor: None,
+            });
+            assert_eq!(line.as_deref(), Some(want), "{reason:?}");
+        }
+
+        // A reason that is about a tile rather than a mark still says nothing: a misaligned
+        // request is a defect in this build and the player did not make it.
+        assert_eq!(
+            describe_refusal(&ActionRefused {
+                action: RefusedAction::PlaceMarker,
+                reason: RefusalReason::TileMisaligned,
+                anchor: None,
+            }),
+            None
+        );
     }
 
     /// An action this build has no verb for says nothing, whatever the reason is.

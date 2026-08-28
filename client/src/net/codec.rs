@@ -1759,10 +1759,6 @@ impl MarkerKind {
     ///
     /// One list, so the row of kind buttons on the map is laid out from the contract rather
     /// than from a second enumeration somebody has to remember to extend.
-    // The row of buttons is the control that places a mark, and it lands with the form that
-    // holds it; drawing the marks the server already sent needs no enumeration. Until then
-    // the sweep over every kind's picture is what reads this.
-    #[allow(dead_code)]
     pub const ALL: [Self; 7] = [
         Self::Resource,
         Self::Cave,
@@ -4519,8 +4515,6 @@ pub fn encode_map_tile_request(request: &MapTileRequest) -> Vec<u8> {
 
 /// Builds one mark-placement intent. It carries no marker id, because identity is the
 /// server's to mint, and the note is copied verbatim for the server to bound.
-// V24 establishes this outbound contract before the map window lands.
-#[allow(dead_code)]
 pub fn encode_marker_place_request(request: &MarkerPlaceRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY * 2);
     let note = builder.create_string(&request.note);
