@@ -41,6 +41,12 @@ pub const GRAVEL: BlockId = 11;
 pub const WATER: BlockId = 12;
 /// The lid on some of the water. Ordinary ground: solid, opaque, walked on.
 pub const ICE: BlockId = 13;
+/// Sawn timber: what a settlement's walls and a keep's roof are made of.
+pub const PLANKS: BlockId = 14;
+/// Dressed rubble: footings, a smithy's walls and the whole of a keep.
+pub const COBBLESTONE: BlockId = 15;
+/// Straw: what every roof but the keep's is thatched with.
+pub const THATCH: BlockId = 16;
 
 /// Whether a block stops a body and can be aimed at.
 ///
@@ -69,8 +75,23 @@ pub fn is_opaque(block: BlockId) -> bool {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 13] = [
-    STONE, DIRT, GRASS, SNOW, LOG, LEAVES, COAL_ORE, IRON_ORE, SAND, SANDSTONE, GRAVEL, WATER, ICE,
+pub const PALETTE: [BlockId; 16] = [
+    STONE,
+    DIRT,
+    GRASS,
+    SNOW,
+    LOG,
+    LEAVES,
+    COAL_ORE,
+    IRON_ORE,
+    SAND,
+    SANDSTONE,
+    GRAVEL,
+    WATER,
+    ICE,
+    PLANKS,
+    COBBLESTONE,
+    THATCH,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -133,6 +154,18 @@ const WATER_LINEAR: [f32; 3] = [0.010_330, 0.074_214, 0.262_251];
 /// against the bank it meets. `#A6CBD8`.
 const ICE_LINEAR: [f32; 3] = [0.381_326, 0.597_202, 0.686_685];
 
+/// Sawn pine, warmer and lighter than the bark it came off, so a wall reads against the
+/// forest behind it. `#B08640`.
+const PLANKS_LINEAR: [f32; 3] = [0.434_154, 0.238_398, 0.051_269];
+
+/// Dressed rubble: the same slate as the ground it was quarried from, a shade lighter
+/// and warmer, so a wall is legible against the hillside behind it. `#8A8A86`.
+const COBBLESTONE_LINEAR: [f32; 3] = [0.254_152, 0.254_152, 0.238_398];
+
+/// Dry straw, the brightest thing in a settlement — a roof is what is seen first from a
+/// distance. `#C7A24E`.
+const THATCH_LINEAR: [f32; 3] = [0.571_125, 0.361_307, 0.076_185];
+
 /// The colour of "this build has no colour for that id". `#C81E96`.
 ///
 /// Magenta on purpose: a server one contract ahead sends a block this client has
@@ -159,6 +192,9 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         SANDSTONE => SANDSTONE_LINEAR,
         GRAVEL => GRAVEL_LINEAR,
         ICE => ICE_LINEAR,
+        PLANKS => PLANKS_LINEAR,
+        COBBLESTONE => COBBLESTONE_LINEAR,
+        THATCH => THATCH_LINEAR,
         // The one early return: every other id leaves this match with an opaque
         // alpha appended below, and water is the one that must not.
         WATER => {
@@ -194,7 +230,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 14] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 17] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -208,6 +244,9 @@ mod tests {
         ("gravel", [0x5C, 0x5F, 0x63], GRAVEL_LINEAR),
         ("water", [0x1A, 0x4D, 0x8C], WATER_LINEAR),
         ("ice", [0xA6, 0xCB, 0xD8], ICE_LINEAR),
+        ("planks", [0xB0, 0x86, 0x40], PLANKS_LINEAR),
+        ("cobblestone", [0x8A, 0x8A, 0x86], COBBLESTONE_LINEAR),
+        ("thatch", [0xC7, 0xA2, 0x4E], THATCH_LINEAR),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
 

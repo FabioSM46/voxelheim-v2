@@ -113,6 +113,15 @@ const (
 	// #454 records: silver occupies pack slots like everything else, so carrying money home
 	// costs the same room as carrying bones home.
 	ItemSilver
+
+	// What a settlement is built out of, and therefore what a player can take out of
+	// one and put up somewhere else. Appended for the reason every id above was —
+	// iota renumbers everything after an insertion, and these numbers are in a
+	// client's inventory the moment somebody prises a plank off a hut — and pinned by
+	// a test.
+	ItemPlanks
+	ItemCobblestone
+	ItemThatch
 )
 
 // What each blade is worth, and the only copy of it.
@@ -428,24 +437,36 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// is chosen for the game that is coming rather than for the one line of loot that
 	// exists.
 	ItemSilver: {places: world.Air, maxStack: 200},
+
+	// The three building materials, on the same terms as every other block item: they
+	// place the voxel they came from and sixty-four fit in a slot. Nothing else about
+	// them is special — a plank is not equipment, wears out nothing, damages nothing
+	// and feeds nobody — which is the point. A settlement is made of ordinary blocks,
+	// so a player can take one apart and build with what it was built from.
+	ItemPlanks:      {places: world.Planks, maxStack: 64},
+	ItemCobblestone: {places: world.Cobblestone, maxStack: 64},
+	ItemThatch:      {places: world.Thatch, maxStack: 64},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an
 // explicit yield for Leaves; an absent entry also means no yield, so new blocks
 // fail closed until their drop is deliberately chosen.
 var blockDrops = map[world.Block]ItemID{
-	world.Stone:     ItemStone,
-	world.Dirt:      ItemDirt,
-	world.Grass:     ItemDirt,
-	world.Snow:      ItemSnow,
-	world.Log:       ItemLog,
-	world.Leaves:    ItemNone,
-	world.CoalOre:   ItemRawCoal,
-	world.IronOre:   ItemRawIron,
-	world.Sand:      ItemSand,
-	world.Sandstone: ItemSandstone,
-	world.Gravel:    ItemGravel,
-	world.Ice:       ItemIce,
+	world.Stone:       ItemStone,
+	world.Dirt:        ItemDirt,
+	world.Grass:       ItemDirt,
+	world.Snow:        ItemSnow,
+	world.Log:         ItemLog,
+	world.Leaves:      ItemNone,
+	world.CoalOre:     ItemRawCoal,
+	world.IronOre:     ItemRawIron,
+	world.Sand:        ItemSand,
+	world.Sandstone:   ItemSandstone,
+	world.Gravel:      ItemGravel,
+	world.Ice:         ItemIce,
+	world.Planks:      ItemPlanks,
+	world.Cobblestone: ItemCobblestone,
+	world.Thatch:      ItemThatch,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -470,6 +491,13 @@ var blockExperience = map[world.Block]uint16{
 
 	// And a fourth: breaking the ice off a lake is a way in, not a lesson.
 	world.Ice: 0,
+
+	// Three more zeroes, and the same reason: taking a settlement apart is salvage,
+	// not a lesson. The rows exist because an absent one is a registry error rather
+	// than an implicit choice of none.
+	world.Planks:      0,
+	world.Cobblestone: 0,
+	world.Thatch:      0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {
