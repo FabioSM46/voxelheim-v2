@@ -64,8 +64,8 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 2 {
-		t.Fatalf("WorldgenVersion = %d, want 2 for trees and ore", WorldgenVersion)
+	if WorldgenVersion != 3 {
+		t.Fatalf("WorldgenVersion = %d, want 3 for climates, mountains and gravel", WorldgenVersion)
 	}
 }
 
@@ -157,12 +157,13 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 
 	originX, originY, originZ := c.Coord.Origin()
 	worldX, worldZ := originX+int64(x), originZ+int64(z)
-	surface := HeightAt(seed, worldX, worldZ)
+	col := columnAt(seed, worldX, worldZ)
+	surface := col.surface
 	featured := false
 
 	for y := range ChunkSize {
 		worldY := originY + int64(y)
-		got, terrain := c.At(x, y, z), blockAt(int(worldY), surface)
+		got, terrain := c.At(x, y, z), col.blockAt(int(worldY))
 		switch got {
 		case CoalOre:
 			featured = true
@@ -224,12 +225,12 @@ func TestTerrainHasTheExpectedShape(t *testing.T) {
 		maxHeight = max(maxHeight, h)
 	}
 
-	lowest := baseHeight - heightAmplitude/2
-	highest := baseHeight + heightAmplitude - heightAmplitude/2
+	lowest := baseHeight - mountainAmplitude/2
+	highest := baseHeight + mountainAmplitude/2
 	if minHeight < lowest || maxHeight > highest {
 		t.Errorf("heights ranged over [%d, %d], outside the designed [%d, %d]", minHeight, maxHeight, lowest, highest)
 	}
-	if maxHeight-minHeight < heightAmplitude/4 {
+	if maxHeight-minHeight < plainsAmplitude {
 		t.Errorf("heights only ranged over %d blocks; the terrain is nearly flat", maxHeight-minHeight)
 	}
 
@@ -251,34 +252,43 @@ func TestTerrainHasTheExpectedShape(t *testing.T) {
 	}
 }
 
-func TestSurfaceBlocksFollowTheSnowLine(t *testing.T) {
+// The generated surface voxel is the one its column's climate and altitude ask
+// for — for plain columns and for a column with a tree standing on it.
+//
+// **This replaced a test named after the snow line, and the rename is the
+// feature.** The old rule was "grass, or snow at or above 78", and the old terrain
+// topped out at 84, so the surface of a column was decided by the seed. There are
+// now four climate columns and two altitude overrides above them, and what a
+// column's top block is has to be read from the same function the generator used
+// rather than restated as a two-branch rule here.
+func TestSurfaceBlocksFollowTheirClimateAndAltitude(t *testing.T) {
 	t.Parallel()
 
 	const seed = 4242
 	chunk := Generate(seed, Coord{X: 0, Y: 2, Z: 0})
 
 	checked, plainColumns, featureColumns := 0, 0, 0
+	surfaces := map[Block]int{}
 	for z := range ChunkSize {
 		for x := range ChunkSize {
-			surface := HeightAt(seed, int64(x), int64(z))
-			localY := surface - 2*ChunkSize
+			col := columnAt(seed, int64(x), int64(z))
+			localY := col.surface - 2*ChunkSize
 			if localY < 0 || localY >= ChunkSize {
 				continue // this column's surface is in another chunk
 			}
 			checked++
 
-			want := Grass
-			if surface >= snowLine {
-				want = Snow
-			}
+			want := col.blockAt(col.surface)
 			if got := chunk.At(x, localY, z); got != want {
 				kind := "plain"
-				if generatedColumnTop(seed, int64(x), int64(z)) > surface {
+				if generatedColumnTop(seed, int64(x), int64(z)) > col.surface {
 					kind = "feature-bearing"
 				}
-				t.Fatalf("%s surface at (%d, %d) is height %d and block %d, want %d", kind, x, z, surface, got, want)
+				t.Fatalf("%s %v surface at (%d, %d) is height %d and block %d, want %d",
+					kind, col.climate, x, z, col.surface, got, want)
 			}
-			if generatedColumnTop(seed, int64(x), int64(z)) > surface {
+			surfaces[want]++
+			if generatedColumnTop(seed, int64(x), int64(z)) > col.surface {
 				featureColumns++
 			} else {
 				plainColumns++
@@ -287,6 +297,16 @@ func TestSurfaceBlocksFollowTheSnowLine(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Skip("no column's surface falls in this chunk")
+	}
+
+	// The altitude overrides are the only way a surface block can disagree with its
+	// climate, so no surface voxel may be a block no rule can produce.
+	for block := range surfaces {
+		switch block {
+		case Grass, Snow, Sand, Gravel, Stone:
+		default:
+			t.Errorf("a surface voxel is block %d, which no climate column produces", block)
+		}
 	}
 
 	// The original chunk happens to be plain at this tree density. Add one known
@@ -303,7 +323,7 @@ func TestSurfaceBlocksFollowTheSnowLine(t *testing.T) {
 	featureColumns++
 
 	if plainColumns == 0 || featureColumns == 0 {
-		t.Fatalf("surface sample had %d plain and %d feature-bearing columns; both need their snow-line assertion", plainColumns, featureColumns)
+		t.Fatalf("surface sample had %d plain and %d feature-bearing columns; both need their surface assertion", plainColumns, featureColumns)
 	}
 }
 
@@ -322,7 +342,8 @@ func TestOreAppearsOnlyInStoneAndInsideItsDepthBand(t *testing.T) {
 					for z := range ChunkSize {
 						for x := range ChunkSize {
 							worldX, worldZ := originX+int64(x), originZ+int64(z)
-							surface := HeightAt(seed, worldX, worldZ)
+							col := columnAt(seed, worldX, worldZ)
+							surface := col.surface
 							for y := range ChunkSize {
 								worldY := originY + int64(y)
 								got := chunk.At(x, y, z)
@@ -338,7 +359,7 @@ func TestOreAppearsOnlyInStoneAndInsideItsDepthBand(t *testing.T) {
 								}
 
 								depth := int64(surface) - worldY
-								if terrain := blockAt(int(worldY), surface); terrain != Stone {
+								if terrain := col.blockAt(int(worldY)); terrain != Stone {
 									t.Fatalf("ore %d at (%d, %d, %d) replaced terrain block %d", got, worldX, worldY, worldZ, terrain)
 								}
 								switch got {
@@ -371,7 +392,7 @@ func TestOreAppearsOnlyInStoneAndInsideItsDepthBand(t *testing.T) {
 	}
 }
 
-func TestTreesGrowOnlyFromGrassBelowTheSnowLine(t *testing.T) {
+func TestTreesGrowOnlyFromGrass(t *testing.T) {
 	t.Parallel()
 
 	logs, leaves := 0, 0
@@ -391,8 +412,8 @@ func TestTreesGrowOnlyFromGrassBelowTheSnowLine(t *testing.T) {
 									logs++
 									worldY := originY + int64(y)
 									surface, trunkHeight, ok := treeAt(seed, worldX, worldZ)
-									if !ok || surface >= snowLine || blockAt(surface, surface) != Grass {
-										t.Fatalf("log at (%d, %d, %d) has no grass root below the snow line", worldX, worldY, worldZ)
+									if !ok || columnAt(seed, worldX, worldZ).blockAt(surface) != Grass {
+										t.Fatalf("log at (%d, %d, %d) has no grass root", worldX, worldY, worldZ)
 									}
 									if worldY <= int64(surface) || worldY > int64(surface+trunkHeight) {
 										t.Fatalf("log at y=%d lies outside its trunk [%d, %d]", worldY, surface+1, surface+trunkHeight)
@@ -436,7 +457,7 @@ func TestATreeCrossingAChunkBorderIsCompleteInEitherGenerationOrder(t *testing.T
 	features := [2]int{}
 	for pos, block := range want {
 		worldX, worldY, worldZ := pos[0], pos[1], pos[2]
-		if blockAt(int(worldY), HeightAt(seed, worldX, worldZ)) != Air {
+		if columnAt(seed, worldX, worldZ).blockAt(int(worldY)) != Air {
 			continue // foliage clipped honestly by a neighbouring slope
 		}
 		var chunk *Chunk
@@ -527,7 +548,7 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 
 		// Find the real top from generated voxels, independently of the helper SpawnAt
 		// uses. The global terrain maximum plus the tallest tree bounds the search.
-		searchTop := baseHeight + heightAmplitude/2 + treeMinTrunkHeight + treeHeightVariants - 1 + treeCanopyAboveCrown
+		searchTop := baseHeight + mountainAmplitude/2 + treeMinTrunkHeight + treeHeightVariants - 1 + treeCanopyAboveCrown
 		actualTop := surface
 		for worldY := surface + 1; worldY <= searchTop; worldY++ {
 			if at(worldY) != Air {
@@ -558,13 +579,19 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 }
 
 // The named regression. These are real seeds whose surface at the spawn column reaches
-// or passes the old hardcoded y=80, so the constant put the player inside rock — 523
-// and 1301 peak at 82. The sweep above would miss them: only about one seed in 500 is
-// affected, so a range test is a coin flip and these names are not.
+// or passes the old hardcoded y=80, so the constant put the player inside rock — 43
+// peaks at 97 and 109 at 101. The sweep above would miss them: only a few seeds in a
+// hundred are affected, so a range test is a coin flip and these names are not.
+//
+// **The list was recomputed for worldgen 3 and the old one is gone**, exactly as the
+// refusal below instructs: 523, 546, 1098, 1301, 2128 and 2289 were the seeds that
+// cleared 80 under a single 40-block amplitude, and a relief-driven amplitude moves
+// every column of every seed. What the test pins is the relationship, not the names —
+// the names only exist so the relationship is exercised at all.
 func TestSeedsThatUsedToBuryThePlayerNowSpawnInAir(t *testing.T) {
 	t.Parallel()
 
-	for _, seed := range []int64{523, 546, 1098, 1301, 2128, 2289} {
+	for _, seed := range []int64{19, 24, 38, 43, 81, 86, 92, 109} {
 		surface := HeightAt(seed, spawnColumnX, spawnColumnZ)
 		if surface < 80 {
 			t.Fatalf("seed %d no longer reaches y=80 (surface %d): the terrain changed, so this "+

@@ -30,6 +30,12 @@ pub const LEAVES: BlockId = 6;
 pub const COAL_ORE: BlockId = 7;
 /// Iron-bearing stone.
 pub const IRON_ORE: BlockId = 8;
+/// The desert surface.
+pub const SAND: BlockId = 9;
+/// What sits under a desert's sand.
+pub const SANDSTONE: BlockId = 10;
+/// The loose patches that break up plains and taiga soil.
+pub const GRAVEL: BlockId = 11;
 
 /// Whether a block has faces at all.
 ///
@@ -45,7 +51,9 @@ pub fn is_solid(block: BlockId) -> bool {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 8] = [STONE, DIRT, GRASS, SNOW, LOG, LEAVES, COAL_ORE, IRON_ORE];
+pub const PALETTE: [BlockId; 11] = [
+    STONE, DIRT, GRASS, SNOW, LOG, LEAVES, COAL_ORE, IRON_ORE, SAND, SANDSTONE, GRAVEL,
+];
 
 // The colours, **linear**, which is the space vertex colours are multiplied into the
 // material's `base_color` in. Each is the sRGB value in its doc comment run through
@@ -81,6 +89,15 @@ const COAL_ORE_LINEAR: [f32; 3] = [0.029_557, 0.034_340, 0.042_311];
 /// Cold rock stained with oxidised iron. `#9A6543`.
 const IRON_ORE_LINEAR: [f32; 3] = [0.323_143, 0.130_136, 0.056_128];
 
+/// Pale, faintly warm sand — a cold-world desert rather than a beach. `#C9B383`.
+const SAND_LINEAR: [f32; 3] = [0.584_078, 0.450_786, 0.226_966];
+
+/// Compacted sand, darker and more orange than the loose grains above it. `#A8865A`.
+const SANDSTONE_LINEAR: [f32; 3] = [0.391_572, 0.238_398, 0.102_242];
+
+/// Wet grey shingle, cooler and darker than stone so a patch reads against it. `#5C5F63`.
+const GRAVEL_LINEAR: [f32; 3] = [0.107_023, 0.114_435, 0.124_772];
+
 /// The colour of "this build has no colour for that id". `#C81E96`.
 ///
 /// Magenta on purpose: a server one contract ahead sends a block this client has
@@ -102,6 +119,9 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         LEAVES => LEAVES_LINEAR,
         COAL_ORE => COAL_ORE_LINEAR,
         IRON_ORE => IRON_ORE_LINEAR,
+        SAND => SAND_LINEAR,
+        SANDSTONE => SANDSTONE_LINEAR,
+        GRAVEL => GRAVEL_LINEAR,
         // `AIR` lands here with everything else, and correctly so: asking for the
         // colour of nothing is a meshing bug, and magenta is how it announces itself
         // instead of hiding as a plausible shade.
@@ -127,7 +147,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 9] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 12] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -136,6 +156,9 @@ mod tests {
         ("leaves", [0x29, 0x4F, 0x38], LEAVES_LINEAR),
         ("coal ore", [0x30, 0x34, 0x3A], COAL_ORE_LINEAR),
         ("iron ore", [0x9A, 0x65, 0x43], IRON_ORE_LINEAR),
+        ("sand", [0xC9, 0xB3, 0x83], SAND_LINEAR),
+        ("sandstone", [0xA8, 0x86, 0x5A], SANDSTONE_LINEAR),
+        ("gravel", [0x5C, 0x5F, 0x63], GRAVEL_LINEAR),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
 

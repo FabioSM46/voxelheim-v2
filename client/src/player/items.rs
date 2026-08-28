@@ -32,7 +32,7 @@ use crate::world::{BlockId, palette};
 // Presentation-only item ids. The server registry remains the sole authority on whether
 // any of these can be placed and which block an action actually creates.
 //
-// These nine live here because no module *acts* on them — they are ids this client only
+// These twelve live here because no module *acts* on them — they are ids this client only
 // ever draws. Items that a module does act on stay where that module declares them:
 // the blade in `super::combat`, the three bundles in `super::structures`, the forge's two
 // products and the patch beside them in `super::crafting`. The table below names them from
@@ -59,6 +59,17 @@ pub(super) const ITEM_RAW_IRON: u16 = 6;
 pub(super) const ITEM_BONE: u16 = 13;
 pub(super) const ITEM_VARGR_PELT: u16 = 14;
 pub(super) const ITEM_RAW_MEAT: u16 = 19;
+
+/// The three blocks worldgen 3 put in the ground: a desert's sand and sandstone,
+/// and the gravel patches that break up plains and taiga soil.
+///
+/// Here for the reason the six block and resource ids above are: nothing on this side
+/// *acts* on them. They are placeable — the server's registry gives each of them a block
+/// to place — but a place press reads whatever the hotbar holds rather than a list of ids,
+/// so this client never spells one of these numbers outside the display table.
+pub(super) const ITEM_SAND: u16 = 31;
+pub(super) const ITEM_SANDSTONE: u16 = 32;
+pub(super) const ITEM_GRAVEL: u16 = 33;
 
 /// The shapes an item is drawn in.
 ///
@@ -322,7 +333,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 30] = [
+pub(super) const ITEMS: [ItemDisplay; 33] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -568,6 +579,39 @@ pub(super) const ITEMS: [ItemDisplay; 30] = [
         colour: ItemColour::Block(palette::LOG),
         livery: Some(Livery::Wood),
     },
+    // What a desert and a gravel bar are dug into. Three plain block items, each
+    // naming the terrain swatch it came out of, so a pack holding sand and
+    // sandstone reads as two layers of the same place rather than two anonymous
+    // stubs.
+    //
+    // **`ItemShape::Block` rather than `Material`, deliberately.** All three are
+    // placeable — the server registry gives each of them a `places` block, and
+    // `world.Placeable` says yes — and `Block` is documented right above as "what a
+    // voxel looks like carried, and what a place press will ask for". Drawing them
+    // as `Material` would be the one thing a shape can get wrong: telling a player
+    // that the thing in their hand has no place press behind it. Stone, dirt, snow
+    // and the log are `Block` for the same reason.
+    ItemDisplay {
+        item_id: ITEM_SAND,
+        name: "sand",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::SAND),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_SANDSTONE,
+        name: "sandstone",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::SANDSTONE),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_GRAVEL,
+        name: "gravel",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::GRAVEL),
+        livery: None,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -781,6 +825,9 @@ mod tests {
             ITEM_BOW,
             ITEM_ARROW,
             ITEM_WOODEN_SCEPTRE,
+            ITEM_SAND,
+            ITEM_SANDSTONE,
+            ITEM_GRAVEL,
         ];
         for item_id in declared {
             assert!(

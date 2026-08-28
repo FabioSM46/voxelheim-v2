@@ -425,7 +425,7 @@ func TestConcurrentEditsAndReadsAgree(t *testing.T) {
 func TestPlaceableIncludesBuildingBlocksAndExcludesAirAndOre(t *testing.T) {
 	t.Parallel()
 
-	for _, block := range []Block{Stone, Dirt, Grass, Snow, Log, Leaves} {
+	for _, block := range []Block{Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel} {
 		if !Placeable(block) {
 			t.Errorf("building block %d is not placeable", block)
 		}
@@ -435,7 +435,9 @@ func TestPlaceableIncludesBuildingBlocksAndExcludesAirAndOre(t *testing.T) {
 	if Placeable(Air) {
 		t.Error("Air is placeable; a client can break a block by placing air into it")
 	}
-	for _, block := range []Block{CoalOre, IronOre, 9, 99, 0xFFFF} {
+	// 12 is the first id nothing has been appended at; 99 and 0xFFFF are ids a
+	// newer contract might one day issue and this build must refuse today.
+	for _, block := range []Block{CoalOre, IronOre, 12, 99, 0xFFFF} {
 		if Placeable(block) {
 			t.Errorf("ore or unknown block %d is placeable", block)
 		}
