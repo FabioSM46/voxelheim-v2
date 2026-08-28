@@ -1564,7 +1564,7 @@ func Decode(frame []byte) (msg Message, err error) {
 		var request vnet.MarkerPlaceRequest
 		request.Init(table.Bytes, table.Pos)
 		kind := request.Kind()
-		if !markerKindOK(kind) {
+		if !MarkerKindOK(kind) {
 			return Message{}, fmt.Errorf("%w: MarkerPlaceRequest kind %d is unknown", ErrMalformed, kind)
 		}
 		// Note is copied verbatim, and its length is measured in bytes for the reason the
@@ -1602,12 +1602,19 @@ func Decode(frame []byte) (msg Message, err error) {
 	return msg, nil
 }
 
-// markerKindOK reports whether kind is a member this contract names, Unknown excluded.
+// MarkerKindOK reports whether kind is a member this contract names, Unknown excluded.
 //
 // Unknown is excluded rather than mapped, because it is the absent-field zero: a
 // MarkerPlaceRequest that omits kind must be refused rather than given a meaning
 // nobody asked for. That is the same call BlockEditRequest's EditAction.Unknown gets.
-func markerKindOK(kind vnet.MarkerKind) bool {
+//
+// **Exported because the wire is no longer the only place a kind arrives from.** A
+// stored marker file carries one byte per mark, and a file this build cannot turn into
+// a legal `MarkerList` must be refused as corrupt rather than put on the wire — so
+// internal/persist asks exactly this question, of exactly this list. A second switch
+// there would be a second answer to keep in step, and the one that drifted would be the
+// one nobody reads.
+func MarkerKindOK(kind vnet.MarkerKind) bool {
 	switch kind {
 	case vnet.MarkerKindResource, vnet.MarkerKindCave, vnet.MarkerKindMonster,
 		vnet.MarkerKindBoss, vnet.MarkerKindCamp, vnet.MarkerKindVillage,

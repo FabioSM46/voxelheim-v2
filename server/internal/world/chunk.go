@@ -24,6 +24,30 @@ const (
 	ChunkVolume = ChunkSize * ChunkSize * ChunkSize
 )
 
+// BlockLimit is the arithmetic edge of the world, in blocks: every coordinate this
+// server will address satisfies |x| <= BlockLimit on each axis.
+//
+// Beyond it a float32 cannot address individual blocks — 2^24 is where the spacing
+// between representable values reaches one — and the int64 voxel arithmetic the
+// simulation collides with stops being meaningful. Everything out there is solid, so
+// the world ends in a wall rather than in undefined behaviour. At walking speed it is
+// about six months away.
+//
+// **It lives here rather than in internal/game because the world is what has an edge,
+// not the simulation.** The number was game's alone for as long as the only things that
+// named a coordinate were a body being moved and a block being placed, and both of those
+// start from terrain this server generated: nothing a client sent could be outside the
+// world, because nothing a client sent was a coordinate at all. The map ends that —
+// `MarkerPlaceRequest` is the first message in which a client chooses an x and a z
+// outright — and internal/session cannot read game.worldLimit and must not grow a second
+// copy of it. internal/world is the leaf both of them already import, and the edge of the
+// world is a fact about the world.
+//
+// Blocks, and no y: the two axes are the ones a place on a map has. game.worldLimit
+// applies the same number to the vertical too, which is its business and not this
+// constant's — see collide.beyondTheWorld.
+const BlockLimit = 1 << 24
+
 // Compile-time guard on the wire format: an RLE run length is a uint16, so a
 // chunk must fit inside one run. 32³ = 32768 fits; raising ChunkSize past 40
 // would not, and schemas/world.fbs documents that as a protocol version bump.
