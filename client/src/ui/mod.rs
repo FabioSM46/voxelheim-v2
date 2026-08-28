@@ -371,8 +371,18 @@ fn choose_input_mode(
     // one key it answers is taken. `Control::Map` deliberately still closes the map over an
     // open form, discarding the note -- a window a player has pressed `M` to leave should
     // leave, and the note was never sent anywhere.
+    //
+    // **`Escape` the key, and not `Control::Menu` the action.** The field answers the key --
+    // `ui/text_input.rs` reads the logical `Escape` and nothing in it reads a binding -- so
+    // the collision this guard exists to prevent is only ever there while the pause menu
+    // sits on its default key. Swallowing the *action* instead would hand a player who
+    // moved the menu to `F1` a key that does nothing whatever over an open form: the menu
+    // declines to open, and the field, which was never listening for `F1`, does not cancel
+    // either. `Control::Menu` on any other key is therefore let through, and takes the same
+    // route `Control::Map` does -- the mode leaves `Map`, and `follow_input_mode` discards
+    // the draft with the window it belonged to.
     if keys.just_pressed(bindings.key(Control::Menu)) {
-        if typing.a_field_owns_escape() {
+        if typing.a_field_owns_escape() && bindings.key(Control::Menu) == KeyCode::Escape {
             return;
         }
         let next = match *mode {

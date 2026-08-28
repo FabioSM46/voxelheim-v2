@@ -916,7 +916,15 @@ impl Plugin for MapUiPlugin {
                     // is what suspends the two below it.
                     click_the_map,
                     press_the_form,
-                    type_the_note,
+                    // After the mode for a second reason, written here rather than left to
+                    // be inherited from the head of this chain: `ui/mod.rs` decides whether
+                    // `Escape` belongs to the note field by asking whether the field is
+                    // open, so a frame that cancelled the note first would answer that
+                    // question about a form that no longer exists and let the one press
+                    // close the map behind it too. The edge is already there by way of
+                    // `follow_input_mode` above -- what this line adds is that the
+                    // requirement stops being invisible if the chain is ever reordered.
+                    type_the_note.after(crate::player::ApplyInputMode),
                     drag_the_map,
                     zoom_the_map,
                     request_map_tiles,
@@ -2187,9 +2195,11 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     use bevy::asset::AssetPlugin;
-    use bevy::input::ButtonState;
     use bevy::input::keyboard::Key;
+    use bevy::input::{ButtonState, InputPlugin};
 
+    use crate::player::SelfVitals;
+    use crate::settings::{Control, Settings};
     use crate::wire::voxelheim::net as fb;
 
     use crate::net::{
@@ -3489,6 +3499,144 @@ mod tests {
         app.update();
         assert_eq!(draft(&mut app), None);
         assert_eq!(place_frames(&frames), 0, "neither ending sends anything");
+    }
+
+    /// A map app running the real input-mode systems beside the real map systems.
+    ///
+    /// Both plugins' own registrations rather than a copy of either: what the two tests
+    /// below are about is *when* `choose_input_mode` runs relative to `type_the_note`, and a
+    /// registration copied into a test would only ever pin the copy. `InputPlugin` is what
+    /// turns one `KeyboardInput` message into the `just_pressed` edge `choose_input_mode`
+    /// reads, so a single press reaches both halves exactly as it does in the built client
+    /// -- every other test in this module writes the message alone, which is why none of
+    /// them can see either of these.
+    fn app_with_the_mode_systems(settings: Settings) -> (App, Receiver<Vec<u8>>) {
+        let (outbound, frames) = Outbound::to_a_test(64);
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin))
+            .add_plugins(MapUiPlugin)
+            .insert_resource(outbound)
+            .insert_resource(session())
+            .insert_resource(settings)
+            .init_resource::<SelfVitals>();
+        // `ui/mod.rs`'s registration, which is where the ordering under test is written.
+        super::super::add_input_mode_systems(&mut app);
+        app.world_mut().spawn((
+            Window {
+                resolution: bevy::window::WindowResolution::new(800, 600),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        (app, frames)
+    }
+
+    /// Opens the note form on a block, without the gesture that normally opens it.
+    ///
+    /// The gesture is `click_pointer`'s and is tested there; it also drives
+    /// `ButtonInput<MouseButton>` by inserting the resource, which `InputPlugin` clears
+    /// from under it. What these tests need is only that the form is up when the key lands.
+    fn open_the_form(app: &mut App) {
+        app.world_mut().resource_mut::<MarkerForm>().0 = Some(MarkerDraft {
+            block: IVec2::new(12, -4),
+            cursor: Vec2::new(300.0, 200.0),
+            kind: MarkerKind::Note,
+            note: String::new(),
+        });
+    }
+
+    /// One press of a physical key, through `InputPlugin`, so the same edge reaches
+    /// `just_pressed` and the field's `KeyboardInput` reader.
+    fn press_the_key(app: &mut App, key_code: KeyCode, logical_key: Key) {
+        app.world_mut().write_message(KeyboardInput {
+            key_code,
+            logical_key,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+    }
+
+    /// **`Escape` over an open note cancels the note and leaves the map where it was.**
+    ///
+    /// One press, two readers, in the order the two plugins really register them --
+    /// `choose_input_mode` decides the mode, and only then does the field get to answer the
+    /// key. Inverted, the form is already `None` when `a_field_owns_escape()` is asked, so
+    /// the press that discarded the note drops the player back into the world as well.
+    ///
+    /// **What this catches and what the schedule catches.** An inversion is caught by Bevy
+    /// itself, as a cycle through `ApplyInputMode`, because `type_the_note` is ordered after
+    /// that set twice over. This test is the other half: that the two systems, wired the way
+    /// the built client wires them, produce the behaviour the map's acceptance criteria ask
+    /// for from one real key edge rather than from a message written straight into the
+    /// world. It is deliberately not a claim about the schedule graph -- drop *both*
+    /// orderings and the executor is free to pick either order, which no assertion about a
+    /// single run can pin.
+    #[test]
+    fn escape_over_the_note_cancels_it_without_closing_the_map() {
+        let (mut app, _frames) = app_with_the_mode_systems(Settings::default());
+        open_the_form(&mut app);
+
+        press_the_key(&mut app, KeyCode::Escape, Key::Escape);
+
+        assert_eq!(draft(&mut app), None, "the field took the press");
+        assert_eq!(
+            *app.world().resource::<InputMode>(),
+            InputMode::Map,
+            "the press that discarded the note also left the map"
+        );
+        assert!(
+            app.world().resource::<MapScreen>().is_open(),
+            "and the screen closed behind it"
+        );
+    }
+
+    /// **The field owns `Escape` the key, not `Control::Menu` the action.**
+    ///
+    /// The guard sits inside the `Control::Menu` branch of `choose_input_mode`, so a player
+    /// who moves the pause menu off its default key is the whole of what tells the two
+    /// readings apart. On `F1` the menu must still answer over an open form: swallowing that
+    /// press would leave a key that does nothing whatever, since `ui/text_input.rs` cancels
+    /// on the logical `Escape` and has never heard of a binding. And `Escape`, now bound to
+    /// no control at all, must still reach the field.
+    #[test]
+    fn a_rebound_pause_menu_is_not_the_key_the_note_field_owns() {
+        let mut settings = Settings::default();
+        settings
+            .rebind(Control::Menu, KeyCode::F1)
+            .expect("f1 is offered and free");
+
+        let (mut app, _frames) = app_with_the_mode_systems(settings.clone());
+        open_the_form(&mut app);
+        press_the_key(&mut app, KeyCode::Escape, Key::Escape);
+        assert_eq!(
+            draft(&mut app),
+            None,
+            "the field answers the key rather than the binding"
+        );
+        assert_eq!(
+            *app.world().resource::<InputMode>(),
+            InputMode::Map,
+            "and an Escape bound to nothing moved the mode"
+        );
+
+        let (mut app, _frames) = app_with_the_mode_systems(settings);
+        open_the_form(&mut app);
+        press_the_key(&mut app, KeyCode::F1, Key::F1);
+        assert_eq!(
+            *app.world().resource::<InputMode>(),
+            InputMode::Playing,
+            "the rebound pause-menu key was swallowed and did nothing at all"
+        );
+        assert_eq!(
+            draft(&mut app),
+            None,
+            "and the draft leaves with the window it was opened over"
+        );
     }
 
     #[test]
