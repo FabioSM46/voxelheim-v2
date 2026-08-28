@@ -737,7 +737,7 @@ impl Settings {
         match knob {
             Knob::LookSensitivity => format!("{:.4}", self.look_sensitivity),
             Knob::RenderDistance => format!("{} chunks", self.render_distance),
-            Knob::FieldOfView => format!("{:.0}°", self.field_of_view),
+            Knob::FieldOfView => format!("{:.0} deg", self.field_of_view),
             Knob::Brightness => format!("{:.2}x", self.brightness),
             Knob::FogStart => format!("{:.0}%", self.fog_start * 100.0),
             Knob::FrameCap if self.frame_cap == NO_FRAME_CAP => "uncapped".to_owned(),

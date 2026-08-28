@@ -161,7 +161,7 @@ fn ingest_server_lines(
             ChatEntry::PartyInvite(invite) => {
                 let sender = bounded_display(&invite.from_name, SENDER_CHARACTERS);
                 log.push_highlighted(
-                    format!("{sender} invites you to a party — /accept or /decline"),
+                    format!("{sender} invites you to a party - /accept or /decline"),
                     now,
                 );
             }
@@ -290,23 +290,51 @@ fn outgoing_frame(line: &str, log: &mut ChatLog, now: Duration) -> Option<Vec<u8
     }
 }
 
-fn bounded_display(value: &str, limit: usize) -> String {
-    let mut characters = value.chars();
-    let mut shown = String::with_capacity(limit.saturating_mul(4));
-    for position in 0..limit {
-        let Some(character) = characters.next() else {
-            return shown;
-        };
-        if position + 1 == limit && characters.next().is_some() {
-            shown.push('…');
-            return shown;
-        }
-        shown.push(if character.is_control() {
-            '\u{fffd}'
-        } else {
-            character
-        });
+/// The mark a shortened value ends with.
+///
+/// Three full stops rather than `…` (U+2026), and the reason is the font rather than
+/// taste: Bevy's `default_font` is a 95-glyph ASCII subset of FiraMono, so an ellipsis
+/// draws as nothing at all and a name that *had* been shortened would read as a name that
+/// simply ended there - the one thing a truncation mark exists to deny.
+///
+/// It costs no width. [`bounded_display`] spends the mark's three characters out of
+/// `limit` rather than adding them to it, so what reaches Bevy's layout engine is still at
+/// most `limit` characters however hostile the value was.
+const TRUNCATION_MARK: &str = "...";
+
+/// What a character Bevy's layout engine must not see is shown as.
+///
+/// It was U+FFFD, the replacement character, which is the conventional answer and is not
+/// in this font either - so a control character was replaced by a glyph of zero advance
+/// and vanished as completely as it would have with nothing replacing it. A question mark
+/// occupies its column, which is the whole of what this substitution is for.
+const CONTROL_MARK: char = '?';
+
+/// One display character, with anything the layout engine must not see replaced.
+///
+/// Only controls are touched. A player's name may legitimately be in a script this font
+/// cannot draw, and what to do about that is a question about names rather than about the
+/// strings this client composes.
+fn displayable(character: char) -> char {
+    if character.is_control() {
+        CONTROL_MARK
+    } else {
+        character
     }
+}
+
+fn bounded_display(value: &str, limit: usize) -> String {
+    // One character past the bound is what makes this a truncation rather than a fit: a
+    // value of exactly `limit` characters is shown whole, as it always was.
+    let head: Vec<char> = value.chars().take(limit.saturating_add(1)).collect();
+    let mut shown = String::with_capacity(limit.saturating_mul(4));
+    if head.len() <= limit {
+        shown.extend(head.into_iter().map(displayable));
+        return shown;
+    }
+    let kept = limit.saturating_sub(TRUNCATION_MARK.chars().count());
+    shown.extend(head.into_iter().take(kept).map(displayable));
+    shown.push_str(TRUNCATION_MARK);
     shown
 }
 
@@ -462,8 +490,12 @@ mod tests {
 
     #[test]
     fn hostile_display_text_is_bounded_and_single_line() {
-        assert_eq!(bounded_display("Ei\nvor", 8), "Ei�vor");
-        assert_eq!(bounded_display("abcdefghij", 5), "abcd…");
+        assert_eq!(bounded_display("Ei\nvor", 8), "Ei?vor");
+        // Exactly the bound is shown whole; one character more spends three of them on
+        // the mark, so the bound itself never moves.
+        assert_eq!(bounded_display("abcde", 5), "abcde");
+        assert_eq!(bounded_display("abcdefghij", 5), "ab...");
+        assert_eq!(bounded_display("abcdefghij", 5).chars().count(), 5);
     }
 
     #[test]
@@ -515,7 +547,7 @@ mod tests {
         let line = app.world().resource::<ChatLog>().0.back().unwrap();
         assert_eq!(
             line.text,
-            "Eivor invites you to a party — /accept or /decline"
+            "Eivor invites you to a party - /accept or /decline"
         );
         assert!(line.highlighted);
     }

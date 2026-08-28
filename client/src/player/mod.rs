@@ -1925,34 +1925,61 @@ fn pose_body_shields(
 /// leaving them intact would let one name create an unbounded stack of lines. Truncation
 /// walks Unicode scalars, so it can never split UTF-8. A combining sequence may end at the
 /// boundary and remains valid text — no grapheme dependency is introduced for cosmetics.
+/// The separator between the level and the name.
+///
+/// A vertical bar rather than `·` (U+00B7), for the same reason the mark below is three
+/// full stops: Bevy's `default_font` is a 95-glyph ASCII subset of FiraMono, and a middle
+/// dot is not one of the 95 - it laid out with zero advance, so the plate read
+/// `Lv 7  Eivor` and the two fields ran together with nothing between them.
+const NAME_PLATE_SEPARATOR: &str = " | ";
+
+/// The mark a shortened name ends with, spelled in ASCII and paid for out of the bound.
+///
+/// `…` is absent from the same font, so a name that had been shortened read as a name that
+/// simply ended there. The three characters come out of [`NAME_PLATE_CHARACTERS`] rather
+/// than being added to it, so the plate is no wider than it was.
+const NAME_PLATE_TRUNCATION_MARK: &str = "...";
+
+/// What a control character in a hostile name is shown as.
+///
+/// U+FFFD is the conventional answer and is missing from this font too, so it replaced a
+/// character the layout engine must not see with one nothing draws. A question mark takes
+/// up its column.
+const NAME_PLATE_CONTROL_MARK: char = '?';
+
 fn name_plate_text(level: u16, name: &str) -> String {
-    let prefix = format!("Lv {level} · ");
+    let prefix = format!("Lv {level}{NAME_PLATE_SEPARATOR}");
     let name_characters = NAME_PLATE_CHARACTERS
         .checked_sub(prefix.chars().count())
         .expect("a u16 level prefix fits inside the name-plate bound");
-    let mut chars = name.chars();
     let mut shown = String::with_capacity(NAME_PLATE_CHARACTERS * 4);
     shown.push_str(&prefix);
-    for position in 0..name_characters {
-        let Some(character) = chars.next() else {
-            return shown;
-        };
-        if position + 1 == name_characters && chars.next().is_some() {
-            shown.push('…');
-            return shown;
-        }
-        shown.push(if character.is_control() {
-            '\u{fffd}'
+    // One character past the bound is what makes this a truncation rather than a fit: a
+    // name of exactly `name_characters` characters is shown whole.
+    let head: Vec<char> = name
+        .chars()
+        .take(name_characters.saturating_add(1))
+        .collect();
+    let displayable = |character: char| {
+        if char::is_control(character) {
+            NAME_PLATE_CONTROL_MARK
         } else {
             character
-        });
+        }
+    };
+    if head.len() <= name_characters {
+        shown.extend(head.into_iter().map(displayable));
+        return shown;
     }
+    let kept = name_characters.saturating_sub(NAME_PLATE_TRUNCATION_MARK.chars().count());
+    shown.extend(head.into_iter().take(kept).map(displayable));
+    shown.push_str(NAME_PLATE_TRUNCATION_MARK);
     shown
 }
 
 fn name_plate_name(name: &str) -> String {
     name_plate_text(0, name)
-        .strip_prefix("Lv 0 · ")
+        .strip_prefix(&format!("Lv 0{NAME_PLATE_SEPARATOR}"))
         .unwrap_or(name)
         .to_owned()
 }

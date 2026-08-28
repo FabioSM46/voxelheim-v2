@@ -317,7 +317,7 @@ fn describe_readout(frame_rate: f32, snapshot_age: Option<Duration>) -> String {
         Some(age) => format!("{} ms", age.as_millis()),
         None => "-".to_owned(),
     };
-    format!("{frame_rate:.0} fps · snapshot {age}")
+    format!("{frame_rate:.0} fps | snapshot {age}")
 }
 
 /// Samples the two values the readout presents on every frame.
@@ -1729,10 +1729,10 @@ mod tests {
     /// A readout with no session says so rather than claiming a latency of nought.
     #[test]
     fn the_snapshot_age_is_a_dash_until_a_snapshot_has_arrived() {
-        assert_eq!(describe_readout(60.0, None), "60 fps · snapshot -");
+        assert_eq!(describe_readout(60.0, None), "60 fps | snapshot -");
         assert_eq!(
             describe_readout(59.6, Some(Duration::from_millis(48))),
-            "60 fps · snapshot 48 ms"
+            "60 fps | snapshot 48 ms"
         );
     }
 
