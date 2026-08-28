@@ -63,13 +63,13 @@ pub use codec::{
     InventoryStack, InventoryState, ItemDropState, LifeState, LootClosed, LootEntry,
     LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS, MAP_TILE_EDGE,
     MARKER_NOTE_MAX_BYTES, MAX_MARKERS, MAX_VIEW_DISTANCE, MapColumn, MapExplored, MapSurface,
-    MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest, MineProgress,
-    MineRequest, MobAction, MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction,
-    PartyInvite, PartyMemberState, PartyRequest, PartyRosterMember, PlaceStructureRequest,
-    PlayerAppearance, PlayerInput, PlayerVitals, ProjectileKind, ProjectileState, RecipeId,
-    RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams,
-    Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate, map_tile_explored_bytes,
-    map_tile_span,
+    MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest,
+    MarkerRemoveRequest, MineProgress, MineRequest, MobAction, MobHit, MobKind, MobState,
+    PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
+    PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
+    ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
+    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
+    WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
@@ -84,9 +84,9 @@ pub use codec::{
     encode_chunk_resend_request, encode_consume_request, encode_craft_request,
     encode_drop_item_request, encode_inventory_move_request, encode_loot_open_request,
     encode_loot_take_all_request, encode_loot_take_request, encode_map_tile_request,
-    encode_marker_place_request, encode_mine_request, encode_party_request,
-    encode_place_structure_request, encode_player_input, encode_remove_structure_request,
-    encode_repair_request,
+    encode_marker_place_request, encode_marker_remove_request, encode_mine_request,
+    encode_party_request, encode_place_structure_request, encode_player_input,
+    encode_remove_structure_request, encode_repair_request,
 };
 pub use servers::ListedServer;
 use servers::ServerListEvent;
