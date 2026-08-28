@@ -1417,6 +1417,29 @@ flush are wired in `cmd/voxelheimd/main.go`.
   written by a *newer* build is the one case that refuses to start instead.
 
 
+## Where a character has been, and the file that records it
+
+- **The unit is the chunk column, and a column has no height.** A character who has been somewhere
+  has been there at every y, so the whole vertical stack of a view cube is one place rather than
+  seven. `world.Column` is that type — `{CX, CZ}`, chunk units, deliberately not a `Coord` with a
+  field every caller has to remember to zero — and `schemas/world.fbs` names `MapColumn`'s fields
+  the same way for the same reason.
+- **It is a second file per character, for the reason `structures.bin` was a second file.**
+  `persist.Record`'s layout is fixed-width-then-one-variable-length-name with an exact size check
+  at the read, which is what makes a truncated record refusable; it has no extensible area, and
+  giving it one to hold a list that reaches sixty-five thousand entries would change the shape of
+  the thing every player's life is stored in. So `exploration/<character-id-hex>.bin` carries its
+  own `persist.ExplorationVersion`, and a change to one format never bumps the other.
+- **Two caps with one name, and they are not the same number.** `persist.MaxExploredColumns` is
+  65,536 — the ledger's own bound, 512 KiB per character, refused at the *write* as well as at the
+  read so this build can never write a file it would then refuse to read.
+  `protocol.MaxExploredColumns` is 4096 — the most columns one `MapExplored` frame may carry. The
+  gap between them is why the ledger is sent in pages at all.
+- **An unreadable ledger is kept and never written over**, which is `Store.Quarantine`'s doctrine
+  one file along: the bytes are the only evidence of what went wrong, and the session that could
+  not read them is about to write to that exact path. Both go through the same `setAside`, so the
+  timestamp that keeps a second quarantine from destroying the first is written down once.
+
 ## What a player looks like, and the "once" that is not once per session
 
 `PlayerAppearance` is the only message this server sends per *entity* rather than per tick or per
@@ -2113,9 +2136,9 @@ and the reasoning above it, which is the pattern any second command copies.
 ### What the world directory holds, and the one thing that surprises people
 
 It is the default (`world`, resolved against the working directory, so `cd server && go run …`
-writes `server/world/` — git-ignored) and it holds four things: the chunk deltas players made, the
-player records, the clock, and **the server's TLS key**. The terrain itself is not in there; it is
-a function of `-seed`.
+writes `server/world/` — git-ignored) and it holds five things: the chunk deltas players made, the
+player records, the map ledgers under `exploration/`, the clock, and **the server's TLS key**. The
+terrain itself is not in there; it is a function of `-seed`.
 
 That last item is why `-world-dir ""` costs more than the edits it discards. A server with
 nowhere to keep a key mints a new certificate on every start, and what a client will accept is
