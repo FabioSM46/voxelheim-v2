@@ -256,6 +256,52 @@ func TestTheThreeGroundBlocksOfWorldgenThreeCarryTheirPinnedIDs(t *testing.T) {
 	}
 }
 
+// The three blocks worldgen 6 builds a settlement out of, at the ids the registry
+// appended them at and with the plain block-item row each of them has.
+//
+// **The sibling of TestTheThreeGroundBlocksOfWorldgenThreeCarryTheirPinnedIDs, and it
+// did not exist.** items.go says of these three that their numbers are "pinned by a
+// test"; nothing pinned them, so the prose was a claim about the suite that the suite
+// did not keep — and the numbers moved once already, when silver landed at 35 and
+// pushed all three of these up by one. An id that can move unobserved is an inventory
+// that can be reinterpreted after a server upgrade.
+func TestTheThreeSettlementBlocksCarryTheirPinnedIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		item   ItemID
+		id     ItemID
+		places world.Block
+	}{
+		{ItemPlanks, 36, world.Planks},
+		{ItemCobblestone, 37, world.Cobblestone},
+		{ItemThatch, 38, world.Thatch},
+	} {
+		if tc.item != tc.id {
+			t.Errorf("item id = %d, want appended wire id %d", tc.item, tc.id)
+		}
+		got, registered := itemByID(tc.item)
+		if !registered {
+			t.Errorf("item %d is not registered", tc.item)
+			continue
+		}
+		want := itemDefinition{places: tc.places, maxStack: 64}
+		if got != want {
+			t.Errorf("item %d row = %+v, want %+v", tc.item, got, want)
+		}
+		// The registry proposes and world.Placeable disposes; both have to say yes
+		// before a place request can put one of these back in the ground, which is the
+		// whole of "a player can take a settlement apart and build with it".
+		block, placeable := blockPlacedBy(tc.item)
+		if !placeable || block != tc.places {
+			t.Errorf("item %d places block %d (placeable %v), want %d", tc.item, block, placeable, tc.places)
+		}
+		if dropped := itemDroppedBy(tc.places); dropped != tc.item {
+			t.Errorf("block %d drops item %d, want %d", tc.places, dropped, tc.item)
+		}
+	}
+}
+
 func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -272,6 +318,20 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		world.Sandstone: ItemSandstone,
 		world.Gravel:    ItemGravel,
 		world.Ice:       ItemIce,
+
+		// The three a settlement is built from: each gives back the block that was
+		// broken, which is what makes a hut something a player can carry away.
+		world.Planks:      ItemPlanks,
+		world.Cobblestone: ItemCobblestone,
+		world.Thatch:      ItemThatch,
+	}
+	// **The same length guard TestBlockExperienceNamesEveryRewardAndExplicitZero has,
+	// and it was missing here.** Without it this loop only checks the rows somebody
+	// remembered to copy across, so a block appended to blockDrops and forgotten here
+	// was never checked at all — which is exactly what happened to all three of the
+	// settlement blocks until this line was written.
+	if len(blockDrops) != len(want) {
+		t.Fatalf("the drop table has %d rows and this test names %d", len(blockDrops), len(want))
 	}
 	for block, itemID := range want {
 		if got := itemDroppedBy(block); got != itemID {
