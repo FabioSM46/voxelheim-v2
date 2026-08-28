@@ -419,3 +419,38 @@ func TestAMapOfMarksSurvivesADisconnect(t *testing.T) {
 		}
 	}
 }
+
+// The ephemeral world, driven end to end through a real session: marks are placed and
+// answered, and nothing is written down.
+//
+// **The store is nil here, and that is a shape main really produces** — openMarkers
+// answers nil for an empty -world-dir, and NewIdentities keeps it as given. So every
+// method Markers reaches for is called on a nil *persist.MarkerStore: Load through
+// recallMarkers on the way in, Save through the teardown on the way out. Each is
+// nil-receiver-safe by construction, which TestANilMarkerStoreKeepsNothing pins one layer
+// down; this test is the other end of that contract, because a nil check at the call site
+// is the alternative that package deliberately refused and the one that is forgotten
+// panics.
+//
+// The player store is real, because a character has to be selected before there is a
+// session to mark from — the nil under test is the marker store and nothing else.
+func TestAnEphemeralWorldMarksAndRemembersNothing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store, err := persist.OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+
+	m := resumeMarking(t, store, nil, testAccount(49), "Eivor", 1)
+
+	m.place(120, -340, "iron under the hill")
+	lists := m.waitForLists(t, 2)
+	if placed := lists[1]; len(placed) != 1 {
+		t.Fatalf("the answer to one placement holds %d marks, want 1", len(placed))
+	}
+
+	// The teardown's save runs here, on the nil store, and returns rather than panics.
+	m.stop(t)
+}
