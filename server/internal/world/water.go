@@ -194,12 +194,24 @@ const (
 	riverSeedOffset int64 = 0x9216D5D9
 )
 
-// The beach band only names a band while its two halves bound one: reorder them and
-// this conversion is a compile error rather than a shore that is never sand.
+// The beach band only names a band while its two halves bound one, and non-emptiness
+// is the whole of what this checks: beachAt selects
+// seaLevel-beachBelowSea ≤ surface ≤ seaLevel+beachAboveSea, which is no column at all
+// once the two sum below zero. It does **not** catch the two being swapped — the sum
+// is the same either way — and there is nothing there to catch: two blocks of sand
+// under the water and one above is a differently shaped shore, not a broken one.
+// Which half is which is a retune; a band no surface can land in is the bug.
 const _ = uint8(beachAboveSea + beachBelowSea)
 
-// A river bed has to be under the sea line, or a river holds no water at all.
+// A river bed sits under the sea line and above the floor of the world, and it takes
+// two conversions to say so. The first is the end a river needs in order to hold any
+// water: at riverBedDrop = 0 the bed is *at* the sea line and the channel is dry. The
+// second is the end one guard alone left open — uint8 accepts up to 255, so a
+// riverBedDrop raised past seaLevel still compiled and put the bed at or under y = 0,
+// which is a trench in the bottom of the world with no ground beneath it rather than
+// a river. Together they bound it to 1 ≤ riverBedDrop ≤ seaLevel-1.
 const _ = uint8(riverBedDrop - 1)
+const _ = uint8(seaLevel - riverBedDrop - 1)
 
 // A basin has to deepen with the field rather than the other way about. Swap these
 // two and the rescale below divides by a negative, which is a compile error here

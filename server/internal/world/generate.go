@@ -129,16 +129,30 @@ const _ = uint8(ironMinDepth - coalMaxDepth - 1)
 // topmost block before features. A tree may put solid voxels above it; callers
 // that need the generated column's ceiling use generatedColumnTop instead.
 //
-// Exported because it is the seam every consumer needs — the generator fills
-// columns with it, the border-continuity test compares neighbouring chunks
-// through it, and spawn placement starts from it. It is the terrain-shape
-// determinism contract in one function: a pure integer function of (seed, x, z).
+// Exported because it is the terrain-shape determinism contract in one function —
+// a pure integer function of (seed, x, z) — and the seam for a caller holding no
+// column: the border-continuity test compares neighbouring chunks this way, and the
+// height sweeps measure the world this way.
 //
-// The shape is baseHeight + amplitude(relief) × (noise − ½). Two continuous
-// fields multiplied, which is what keeps the mountains seamless: amplitude varies
-// as smoothly as the noise it scales, so there is no boundary anywhere for a
-// range to end at. Climate is deliberately absent — where the land is high is not
-// the same question as what grows on it.
+// The shape is baseHeight + amplitude(relief) × (noise − ½), and then the two water
+// features that move the ground rather than fill it: a basin lowers the column and a
+// river channel replaces its height with a fixed bed. The first part is two
+// continuous fields multiplied, which is what keeps the mountains seamless —
+// amplitude varies as smoothly as the noise it scales, so there is no boundary
+// anywhere for a range to end at.
+//
+// **Climate was deliberately absent here and no longer is**, because basins are
+// absent from desert and the height field therefore has to know the classification.
+// That is what this costs: ClimateAt's two fields on top of the height and relief
+// fields, plus the basin field, plus the river field on ground low enough for a
+// channel — three to four times the noise it used to pay.
+//
+// **Nothing on a hot path pays that, and nothing new should start.** [Generate] goes
+// through columnAt, which samples the climate once and hands it to shapeAt, so a
+// generated column sees only the added basin and river sums; physics and edits read
+// terrain out of the chunk cache rather than from the height field at all; [SpawnAt]
+// goes through generatedColumnTop, which is columnAt again. A caller that finds
+// itself asking for a height per entity or per tick wants columnAt, not this.
 func HeightAt(seed int64, worldX, worldZ int64) int {
 	surface, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
 	return surface
@@ -227,7 +241,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // now lie inside a band a tunnel can cut. Nothing above ground moves *except*
 // where a mouth removes a surface — but the interior of every hill does, so this
 // is the same total break the last bump was.
-// 4 → 5: water. A sea line at 60 fills every air voxel above a lower surface,
+// 4 → 5: water. A sea line at 47 fills every air voxel above a lower surface,
 // basins dig lakes under it, river channels cut a fixed bed across the low ground,
 // tundra wears a lid of ice and the deep of the cave system stands in water. Two
 // of those change [HeightAt] itself, so the *shape* of the land moves and not only
@@ -691,8 +705,10 @@ func SpawnAt(seed int64) [3]float32 {
 
 	// **A session never begins under water.** spawnWaterClearance keeps basins and
 	// river channels off this column, but it cannot keep the ordinary height field
-	// above the sea line — the terrain is concentrated around 64 and the sea is at
-	// 60, so a sizeable minority of seeds put spawn on a lake bed. Lifting the
+	// above the sea line — the terrain is concentrated around 64 against a sea line
+	// at 47, and a mountainAmplitude of 150 is wide enough that a sizeable minority of
+	// seeds still put the origin on a lake bed with no water feature involved at all.
+	// TestASessionNeverBeginsUnderWater is that sweep. Lifting the
 	// reference to the sea line puts the player on the surface of the water instead
 	// of inside it: they swim rather than drown, which is the fail-safe direction and
 	// the only one the swim rules make sense in.
