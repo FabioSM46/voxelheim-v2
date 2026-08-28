@@ -615,6 +615,135 @@ pub(crate) fn drawn_cell(world: &World, cell: Entity) -> DrawnCell {
     drawn
 }
 
+/// The tooltip's surface and text. Darker than the panel it floats over, inside the same
+/// grey the cells are bordered with, so it reads as a label on top rather than a third
+/// panel.
+pub(super) const TOOLTIP_BACKGROUND: Color = Color::srgba(0.020, 0.026, 0.036, 0.97);
+pub(super) const TOOLTIP_TEXT: Color = Color::srgb(0.92, 0.94, 0.97);
+
+/// How far from the pointer a tooltip sits, in logical pixels. Enough that the cursor
+/// glyph never covers the first letter.
+pub(super) const TOOLTIP_GAP: f32 = 14.0;
+
+/// The one tooltip node a screen hangs off its own root, tagged with whatever component
+/// that screen finds it by.
+///
+/// **One node per screen, never one per hovered thing.** Accumulation is then not a rule
+/// anybody has to remember: the system that shows a tooltip rewrites this node's text and
+/// moves it, and there is nothing to despawn.
+///
+/// `GlobalZIndex(31)` puts it over the overlays this client draws, which are all at 30 --
+/// the whole point of a tooltip. `FocusPolicy::Pass` is the trap that comes with that: a
+/// node with no policy **blocks**, so a tooltip the pointer ever landed inside would
+/// capture the interaction, whatever is under it would fall to `Interaction::None`, and the
+/// tooltip would hide and reappear every other frame. [`TOOLTIP_GAP`] keeps the pointer
+/// outside it today; `Pass` is what stops that being load-bearing.
+///
+/// `Visibility::Hidden` to start, and the shower puts it back to `Inherited` rather than
+/// `Visible`: the overlay above it owns whether the screen is on at all, and a tooltip must
+/// not survive it being closed.
+pub(super) fn tooltip_bundle(tag: impl Component) -> impl Bundle {
+    (
+        tag,
+        Node {
+            position_type: PositionType::Absolute,
+            padding: UiRect::axes(Val::Px(9.0), Val::Px(5.0)),
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(4.0)),
+            ..default()
+        },
+        BackgroundColor(TOOLTIP_BACKGROUND),
+        BorderColor::all(CELL_EDGE),
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(16.0),
+            ..default()
+        },
+        TextColor(TOOLTIP_TEXT),
+        TextShadow::default(),
+        Visibility::Hidden,
+        GlobalZIndex(31),
+        FocusPolicy::Pass,
+    )
+}
+
+/// Where the absolutely positioned tooltip is pinned, for one pointer position.
+///
+/// Two of the four are `Auto`: an absolutely positioned node is anchored by the edges that
+/// are not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TooltipAnchor {
+    pub(super) left: Val,
+    pub(super) right: Val,
+    pub(super) top: Val,
+    pub(super) bottom: Val,
+}
+
+impl TooltipAnchor {
+    /// Writes this anchor onto a node, and answers whether anything moved.
+    ///
+    /// The write is guarded because a tooltip that reassigns four `Val`s every frame marks
+    /// its `Node` as changed every frame, which is a layout pass for a label nobody moved.
+    pub(super) fn apply_to(self, node: &mut Node) -> bool {
+        if node.left == self.left
+            && node.right == self.right
+            && node.top == self.top
+            && node.bottom == self.bottom
+        {
+            return false;
+        }
+        (node.left, node.right, node.top, node.bottom) =
+            (self.left, self.right, self.top, self.bottom);
+        true
+    }
+}
+
+/// Anchors the tooltip to the pointer, away from whichever window edge is nearer.
+///
+/// **Anchored rather than clamped, because the width is not known here.** A node's size is
+/// decided by layout, one frame after this runs, so a clamp against the right edge would
+/// have to guess how wide the word is and would clip whenever it guessed low. Pinning the
+/// *right* edge of the tooltip instead makes it grow leftwards, away from the edge it is
+/// near, and the same argument in the other axis keeps it off the bottom of the window. No
+/// measurement, and no way to be clipped.
+pub(super) fn anchor_for(cursor: Vec2, window: Vec2) -> TooltipAnchor {
+    let (left, right) = if cursor.x * 2.0 <= window.x {
+        (Val::Px(cursor.x + TOOLTIP_GAP), Val::Auto)
+    } else {
+        (
+            Val::Auto,
+            Val::Px((window.x - cursor.x).max(0.0) + TOOLTIP_GAP),
+        )
+    };
+    let (top, bottom) = if cursor.y * 2.0 <= window.y {
+        (Val::Px(cursor.y + TOOLTIP_GAP), Val::Auto)
+    } else {
+        (
+            Val::Auto,
+            Val::Px((window.y - cursor.y).max(0.0) + TOOLTIP_GAP),
+        )
+    };
+    TooltipAnchor {
+        left,
+        right,
+        top,
+        bottom,
+    }
+}
+
+/// Where the pointer is and how big the window is, or `None` when there is neither.
+///
+/// `None` while the pointer is outside the window, and no window at all in a headless test:
+/// in both a tooltip keeps the position it had, because there is nothing newer to move it
+/// to.
+pub(super) fn pointer_in_window(
+    windows: &Query<'_, '_, &Window, With<PrimaryWindow>>,
+) -> Option<(Vec2, Vec2)> {
+    let window = windows.iter().next()?;
+    let cursor = window.cursor_position()?;
+    Some((cursor, Vec2::new(window.width(), window.height())))
+}
+
 /// The one rule that keeps every string this client composes drawable.
 ///
 /// Bevy's `default_font` is the whole font stack here: `FiraMono-subset.ttf`, embedded in
