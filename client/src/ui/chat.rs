@@ -7,8 +7,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use bevy::input::ButtonState;
-use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::keyboard::KeyboardInput;
+#[cfg(test)]
+use bevy::input::{ButtonState, keyboard::Key};
 use bevy::prelude::*;
 use bevy::time::Real;
 
@@ -19,6 +20,7 @@ use crate::net::{
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
 use super::set_mode;
+use super::text_input::{TextEdit, apply_key};
 
 const LINE_COUNT: usize = 8;
 const LINE_LIFETIME: Duration = Duration::from_secs(12);
@@ -200,40 +202,24 @@ fn capture_chat(
     }
 
     for key in typed.read() {
-        if key.state != ButtonState::Pressed {
-            continue;
-        }
-        match &key.logical_key {
-            Key::Escape => {
+        // The reading of a key is `ui/text_input.rs`'s, shared with the map's note field.
+        // What stays here is what makes this line chat's: the mode it lives in, and that
+        // `Enter` is a message to the world rather than a mark on a map.
+        match apply_key(key, &mut draft.0, DRAFT_LIMIT_BYTES) {
+            Some(TextEdit::Cancelled) => {
                 draft.0.clear();
                 set_mode(&mut mode, InputMode::Playing);
                 return;
             }
-            Key::Enter => {
+            Some(TextEdit::Submitted) => {
                 let line = std::mem::take(&mut draft.0);
                 send_line(line, outbound.as_deref_mut(), &mut log, time.elapsed());
                 set_mode(&mut mode, InputMode::Playing);
                 return;
             }
-            Key::Backspace => {
-                draft.0.pop();
-            }
-            Key::Space => push_character(&mut draft.0, ' '),
-            Key::Character(text) => {
-                for character in text.chars() {
-                    push_character(&mut draft.0, character);
-                }
-            }
-            _ => {}
+            Some(TextEdit::Typed) | None => {}
         }
     }
-}
-
-fn push_character(line: &mut String, character: char) {
-    if character.is_control() || line.len() + character.len_utf8() > DRAFT_LIMIT_BYTES {
-        return;
-    }
-    line.push(character);
 }
 
 fn send_line(line: String, outbound: Option<&mut Outbound>, log: &mut ChatLog, now: Duration) {
@@ -440,17 +426,22 @@ mod tests {
         });
     }
 
+    /// The draft is still bounded, now through the shared field.
+    ///
+    /// What the bound *is* -- bytes, whole characters, no controls -- is
+    /// `ui/text_input.rs`'s own test. This is the wiring: that this line passes its own
+    /// limit down, and that a full line stops taking characters.
     #[test]
-    fn draft_limit_is_utf8_safe_and_rejects_controls() {
-        let mut line = "a".repeat(DRAFT_LIMIT_BYTES - 1);
-        push_character(&mut line, 'é');
-        assert_eq!(line.len(), DRAFT_LIMIT_BYTES - 1);
-        push_character(&mut line, 'b');
-        push_character(&mut line, '\n');
-        assert_eq!(line.len(), DRAFT_LIMIT_BYTES);
-        assert!(line.is_char_boundary(line.len()));
-        line.pop();
-        assert_eq!(line.len(), DRAFT_LIMIT_BYTES - 1);
+    fn the_draft_is_still_bounded_through_the_shared_field() {
+        let mut app = capture_app(None);
+        for _ in 0..DRAFT_LIMIT_BYTES + 8 {
+            type_key(&mut app, Key::Character("a".into()));
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<ChatLine>().0.len(),
+            DRAFT_LIMIT_BYTES
+        );
     }
 
     #[test]

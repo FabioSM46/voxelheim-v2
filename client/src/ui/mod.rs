@@ -24,6 +24,7 @@ mod party;
 mod servers;
 mod settings;
 mod status;
+mod text_input;
 
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
