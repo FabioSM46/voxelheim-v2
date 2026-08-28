@@ -906,33 +906,47 @@ fn measure_the_viewport(
 fn paint_the_map(
     screen: Res<MapScreen>,
     tiles: Res<MapTiles>,
-    picture: Res<MapPicture>,
+    mut picture: ResMut<MapPicture>,
     mut painted: ResMut<Painted>,
     mut images: ResMut<Assets<Image>>,
-    mut canvases: Query<&mut Node, With<MapCanvas>>,
+    mut canvases: Query<(&mut Node, &mut ImageNode), With<MapCanvas>>,
 ) {
     if !screen.is_open() {
         return;
     }
     let wanted = Some((*screen, tiles.revision));
-    if painted.0 == wanted {
+    // **Whether the picture is still there is part of the guard, not a step after it.**
+    // `painted` records what was last composed, never that there is still somewhere to
+    // compose into, so a store replaced under the app leaves the two describing different
+    // worlds. Ask only whether the view moved and the answer on the frame after such a
+    // replacement is "no": the map would keep the early return, never reach the store, and
+    // stay blank for the rest of the session without one frame ever noticing.
+    if painted.0 == wanted && images.contains(&picture.0) {
         return;
     }
-    let Some(mut slot) = images.get_mut(&picture.0) else {
+    let composed = compose(&screen, &tiles);
+    if let Some(mut slot) = images.get_mut(&picture.0) {
+        *slot = composed;
+    } else {
         // The handle is this resource's own and the store is the one it was minted from,
-        // so an absent asset is a store that has been replaced under the app. Nothing is
-        // recorded as painted, so the next frame composes again rather than leaving the
-        // last picture on the screen for good.
-        return;
-    };
-    *slot = compose(&screen, &tiles);
+        // so an absent asset is a store that has been replaced under the app --
+        // `player/livery.rs` records what that cost and why every `init_asset` here is
+        // guarded. **Composing into the old handle again is not a recovery**: the id names
+        // a slot in a store that no longer exists, so it would fail exactly as it just
+        // did, every frame, for good. The picture is minted afresh into the store that is
+        // actually there now and the node re-pointed at it.
+        picture.0 = images.add(composed);
+        for (_, mut node) in &mut canvases {
+            node.image = picture.0.clone();
+        }
+    }
     painted.0 = wanted;
 
     // The node is sized in logical screen pixels and the image in map pixels: the zoom is
     // the whole of the difference, and it is applied here rather than in the composition
     // so that magnifying costs no texels.
     let drawn = screen.drawn_size().as_vec2();
-    for mut canvas in &mut canvases {
+    for (mut canvas, _) in &mut canvases {
         let (width, height) = (Val::Px(drawn.x), Val::Px(drawn.y));
         if canvas.width != width {
             canvas.width = width;
@@ -1591,6 +1605,52 @@ mod tests {
             *app.world().resource::<Painted>(),
             first,
             "a drawn square is something new to draw"
+        );
+    }
+
+    /// What the canvas node is actually drawing.
+    fn canvas_image(app: &mut App) -> Handle<Image> {
+        app.world_mut()
+            .query_filtered::<&ImageNode, With<MapCanvas>>()
+            .iter(app.world())
+            .next()
+            .map(|node| node.image.clone())
+            .expect("the map canvas is spawned once at startup")
+    }
+
+    #[test]
+    fn a_picture_the_store_lost_is_minted_again_rather_than_left_blank() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        let first = app.world().resource::<MapPicture>().0.clone();
+        assert!(
+            app.world().resource::<Assets<Image>>().contains(&first),
+            "an open map composes its picture"
+        );
+
+        // The whole image store replaced under the app: the hazard `player/livery.rs`
+        // records, and the one thing that makes the map's own handle name nothing. Not one
+        // number the view is composed from moved, so a guard that asks only whether the
+        // view moved answers "no" on this frame and on every frame after it.
+        app.world_mut().insert_resource(Assets::<Image>::default());
+        app.update();
+
+        // Not `assert_ne!` on the handle: a fresh store hands out the same index again, so
+        // what proves the recovery is that the picture is *in the store that is there now*
+        // -- under a guard that latches, this store is still empty and the `expect` fires.
+        let second = app.world().resource::<MapPicture>().0.clone();
+        let picture = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&second)
+            .cloned()
+            .expect("the map draws again rather than staying blank for the session");
+        assert_eq!(picture.texture_descriptor.size.width, 512);
+        assert_eq!(
+            canvas_image(&mut app),
+            second,
+            "the node draws the picture that exists, not the one that was lost"
         );
     }
 
