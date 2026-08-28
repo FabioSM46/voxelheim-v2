@@ -208,7 +208,10 @@ func TestTheDraugrsNumbersSurvivedTheMoveIntoTheRegistry(t *testing.T) {
 		// until loot existed — but part of the row now, and pinned for exactly the reason
 		// the rest of it is: what a creature is worth killing is a balance decision, and
 		// it should have to be made here as well as in the table.
-		loot: []lootRoll{{item: ItemBone, min: 1, max: 2}},
+		loot: []lootRoll{
+			{item: ItemBone, min: 1, max: 2},
+			{item: ItemSilver, min: 2, max: 6},
+		},
 	}
 	// DeepEqual rather than `!=`, because a row carries a slice and slices are not
 	// comparable. The whole-row comparison is what gives this test its teeth — a field

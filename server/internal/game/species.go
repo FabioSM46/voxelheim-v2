@@ -182,7 +182,16 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		// would make a night's hunting arithmetic rather than a run of luck. Nothing
 		// consumes bones yet — see ItemBone, where that is a decision rather than an
 		// omission.
-		loot: []lootRoll{{item: ItemBone, min: 1, max: 2}},
+		// Two to six silver beside the bones, and the wider range is the point of it: a
+		// draugr is the creature a player kills most, so it is the only creature whose
+		// takings can be a *purse* rather than a fixed wage. Nothing sells anything yet —
+		// see ItemSilver, where that is a decision rather than an omission — and the
+		// vargr and the deer deliberately carry none, so money in this world comes off the
+		// thing the night sends after you.
+		loot: []lootRoll{
+			{item: ItemBone, min: 1, max: 2},
+			{item: ItemSilver, min: 2, max: 6},
+		},
 	},
 
 	// The vargr — something faster than you.

@@ -23,11 +23,11 @@ use bevy::prelude::*;
 use bevy::ui::{FocusPolicy, UiSystems};
 use bevy::window::{PrimaryWindow, WindowResized};
 
-use super::icon::DrawnIcon;
+use super::icon::{self, DrawnIcon, StackIcon};
 use super::{
-    BUTTON, CELL_EDGE, SELECTED_EDGE, SlotCount, TAB_SELECTED, anchor_for, button_colour,
-    cell_node, pointer_in_window, refresh_cell_contents, spawn_cell_contents, stack_style,
-    tooltip_bundle,
+    BUTTON, CELL_EDGE, COUNT_FONT_SIZE, SELECTED_EDGE, SlotCount, TAB_SELECTED, anchor_for,
+    button_colour, cell_node, pointer_in_window, refresh_cell_contents, spawn_cell_contents,
+    stack_style, tooltip_bundle,
 };
 #[cfg(test)]
 use super::{TOOLTIP_GAP, TooltipAnchor};
@@ -35,7 +35,7 @@ use crate::net::{InventoryStack, Session, StructureKind};
 #[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
-    ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
+    ApplyInventory, CraftClick, ITEM_SILVER, Ingredient, InputMode, Inventory, InventoryClick,
     InventoryClickKind, Liveries, PickedStack, RECIPES, Recipe, RecipeCategory,
     equipment_item_fits, item_label,
 };
@@ -62,6 +62,7 @@ impl Plugin for InventoryUiPlugin {
                     ApplyDeferred,
                     refresh_inventory_cells,
                     refresh_recipe_rows,
+                    refresh_silver_readout,
                     show_inventory,
                     // After `show_inventory`, which resets the tab when the screen opens,
                     // so the frame it appears on is already showing the pack.
@@ -102,6 +103,24 @@ struct InventoryGrabArea;
 /// stability contract between the two content panels.
 #[derive(Component)]
 struct InventoryTabStrip;
+
+/// How much silver the last authoritative state put in this player's slots.
+///
+/// **A child of the window and a sibling of the tab strip, not of either tab panel**, which
+/// is what makes it visible on both halves without either half owning it — the same position
+/// the strip itself holds, and for the same reason.
+///
+/// It originates nothing. There is no purse, no currency slot and no second count anywhere:
+/// silver is an ordinary stackable item in ordinary slots, and this reads
+/// [`Inventory::count`] over the state the server sent exactly as a recipe's `held/needed`
+/// label does.
+#[derive(Component)]
+struct SilverReadout;
+
+/// The number inside the readout, kept off the container so a refresh writes text and
+/// nothing else.
+#[derive(Component)]
+struct SilverCount;
 
 /// Where the inventory was last put during this run.
 ///
@@ -264,6 +283,17 @@ const INVENTORY_WINDOW_PADDING: f32 = 24.0;
 
 /// The grab bar stays this tall regardless of which tab is active.
 const GRAB_AREA_HEIGHT: f32 = 34.0;
+
+/// The coin beside the silver count, in logical pixels.
+///
+/// A third of a cell, so the readout reads as a label rather than as a slot somebody could
+/// click. Every part of the picture is a percentage of its host — see `ui::icon::IconPart` —
+/// so drawing the same coin small costs this number and nothing else.
+const SILVER_ICON_SIZE: f32 = 18.0;
+
+/// The silver count's own ink: brighter than a recipe's cost line, because it is the one
+/// number on this screen that is not a comparison.
+const SILVER_TEXT: Color = Color::srgb(0.85, 0.88, 0.94);
 
 /// One wheel line in logical pixels. A little under one recipe row, so a single notch
 /// advances the list without skipping over a compact recipe entirely.
@@ -483,6 +513,9 @@ fn spawn_inventory_screen(mut commands: Commands) {
                                     crafting.spawn(hint("Click a recipe to craft    E: close"));
                                 });
                         });
+                    // Last of the window's children, so it draws over whichever tab is
+                    // occupying the content area beneath it.
+                    spawn_silver_readout(panel);
                 });
             overlay.spawn(tooltip_bundle(SlotTooltip));
         });
@@ -500,6 +533,102 @@ fn tab_panel_node(display: Display) -> Node {
         top: Val::Px(0.0),
         row_gap: Val::Px(10.0),
         ..default()
+    }
+}
+
+/// The coin and the count, anchored in the window's bottom-right corner.
+///
+/// Absolutely positioned and inset by [`INVENTORY_WINDOW_PADDING`], which puts it inside the
+/// window's own padding rather than against its edge: an absolute child's inset is measured
+/// from the padding box, so a zero here would sit the coin on the frame.
+///
+/// `FocusPolicy::Pass` on the container is load-bearing and the omission is silent — a node
+/// with no policy blocks — and it is the same trap `ui::icon::host_bundle` records: this
+/// overlays the bottom of whichever tab panel is showing, and a readout that took the pointer
+/// would make a strip of that panel unclickable with nothing to see.
+fn spawn_silver_readout(panel: &mut ChildSpawnerCommands<'_>) {
+    panel
+        .spawn((
+            SilverReadout,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(INVENTORY_WINDOW_PADDING),
+                bottom: Val::Px(INVENTORY_WINDOW_PADDING),
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+            FocusPolicy::Pass,
+        ))
+        .with_children(|readout| {
+            readout
+                .spawn((
+                    Node {
+                        position_type: PositionType::Relative,
+                        width: Val::Px(SILVER_ICON_SIZE),
+                        height: Val::Px(SILVER_ICON_SIZE),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    FocusPolicy::Pass,
+                ))
+                .with_children(|host| {
+                    // `None` for the liveries: silver wears none, so there is no resource to
+                    // reach for and nothing about this picture that could sample one.
+                    if let Some(coin) = silver_icon() {
+                        icon::spawn(host, coin, None);
+                    }
+                });
+            readout.spawn((
+                SilverCount,
+                Text::new("0"),
+                TextFont {
+                    font_size: FontSize::Px(COUNT_FONT_SIZE),
+                    ..default()
+                },
+                TextColor(SILVER_TEXT),
+                TextShadow::default(),
+                FocusPolicy::Pass,
+            ));
+        });
+}
+
+/// The coin this readout draws, taken from the one path a pack cell draws its icon with.
+///
+/// Through [`stack_style`] rather than by naming a shape and a colour here, so the coin in
+/// the corner cannot drift from the coin in the slot: both are `player::items`' row for
+/// [`ITEM_SILVER`], read once. `None` is unreachable for an id this build has a row for, and
+/// it is answered by drawing no coin rather than by a panic — a missing row is a version
+/// skew, and the count beside it is still the truth.
+fn silver_icon() -> Option<StackIcon> {
+    stack_style(Some(InventoryStack {
+        item_id: ITEM_SILVER,
+        count: 1,
+        ..Default::default()
+    }))
+    .icon
+}
+
+/// Writes what the last authoritative state holds, and only when it has changed.
+///
+/// **Every slot, not the pack**: [`Inventory::count`] sums the whole state the server sent,
+/// hotbar and equipment included. No equipment slot can hold silver — the server's registry
+/// names no body location for it — so the sum is simply the total, and reading it this way
+/// is what keeps this client from having a second opinion about which slots money may sit in.
+fn refresh_silver_readout(
+    inventory: Option<Res<Inventory>>,
+    mut counts: Query<&mut Text, With<SilverCount>>,
+) {
+    let Some(inventory) = inventory else {
+        return;
+    };
+    let label = inventory.count(ITEM_SILVER).to_string();
+    for mut text in &mut counts {
+        if text.0 != label {
+            text.0.clone_from(&label);
+        }
     }
 }
 
@@ -1676,6 +1805,40 @@ mod tests {
             .get::<BackgroundColor>(button)
             .expect("a tab is drawn")
             .0
+    }
+
+    /// A seven-slot state with silver in three of them, one of which is an equipment slot.
+    ///
+    /// The equipment one is deliberate: the server's registry names no body location for
+    /// silver, so a slot there is unreachable in the running game — and putting one in the
+    /// fixture is what pins that the readout sums the *whole* state rather than the pack,
+    /// which is the direction a later change could narrow without anything noticing.
+    fn silvered_inventory() -> Inventory {
+        let mut stacks = vec![InventoryStack::default(); 7];
+        for (slot, count) in [(0usize, 3u16), (2, 4), (6, 5)] {
+            stacks[slot] = InventoryStack {
+                item_id: ITEM_SILVER,
+                count,
+                ..Default::default()
+            };
+        }
+        Inventory::from_stacks(stacks)
+    }
+
+    fn silver_readout(app: &mut App) -> Entity {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<SilverReadout>>();
+        query.single(world).expect("exactly one silver readout")
+    }
+
+    fn silver_label(app: &mut App) -> String {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Text, With<SilverCount>>();
+        query
+            .single(world)
+            .expect("exactly one silver count")
+            .0
+            .clone()
     }
 
     fn inventory_window(app: &mut App) -> Entity {
@@ -3625,5 +3788,110 @@ mod tests {
         assert_eq!(node.top, Val::Auto);
         assert_eq!(node.right, Val::Px(1280.0 - 1000.0 + TOOLTIP_GAP));
         assert_eq!(node.bottom, Val::Px(720.0 - 600.0 + TOOLTIP_GAP));
+    }
+
+    /// The readout counts every slot the last authoritative state put silver in.
+    ///
+    /// **It is a sum over what the server sent, and nothing else.** There is no purse and no
+    /// currency slot: silver is an ordinary stackable item occupying ordinary slots, so the
+    /// number in the corner is [`Inventory::count`] over the same mirror the cells draw.
+    #[test]
+    fn the_readout_sums_every_slot_holding_silver() {
+        let mut app = app();
+        *app.world_mut().resource_mut::<Inventory>() = silvered_inventory();
+        app.update();
+
+        assert_eq!(silver_label(&mut app), "12");
+    }
+
+    /// A pack with no silver in it reads `0` rather than reading nothing.
+    ///
+    /// An absent count would be indistinguishable from a readout that had stopped
+    /// refreshing, which is the failure this screen has no other way to show.
+    #[test]
+    fn the_readout_reads_zero_when_there_is_no_silver() {
+        let mut app = app();
+        app.update();
+
+        assert_eq!(silver_label(&mut app), "0");
+
+        // And it follows the state rather than being written once at spawn.
+        *app.world_mut().resource_mut::<Inventory>() = silvered_inventory();
+        app.update();
+        assert_eq!(silver_label(&mut app), "12");
+    }
+
+    /// The readout belongs to the window, so both tabs show it and neither owns it.
+    ///
+    /// `Display` is what selects a tab — a `TabPanel` that is not active is laid out at no
+    /// size — so a readout parented to one would vanish with it. Asserting the parent is
+    /// stronger than asserting it is visible on both: it is the reason it is visible on both.
+    ///
+    /// `FocusPolicy::Pass` is the other half. The readout is absolutely positioned over the
+    /// bottom of whichever panel is showing, and a node with no policy **blocks**, so
+    /// without this a strip of that panel would stop responding to the pointer with nothing
+    /// on screen to explain it.
+    #[test]
+    fn the_readout_hangs_off_the_window_and_passes_the_pointer() {
+        let mut app = app();
+        app.update();
+
+        let window = inventory_window(&mut app);
+        let readout = silver_readout(&mut app);
+        let parent = app
+            .world()
+            .get::<ChildOf>(readout)
+            .expect("the readout is parented");
+        assert_eq!(
+            parent.parent(),
+            window,
+            "the readout hangs off a tab panel rather than off the window"
+        );
+        assert_eq!(
+            app.world().get::<FocusPolicy>(readout),
+            Some(&FocusPolicy::Pass)
+        );
+
+        // Both tabs, read the way the panels themselves are selected: the readout is not one
+        // of them and is never the node a switch touches.
+        for tab in InventoryTab::ALL {
+            *app.world_mut().resource_mut::<InventoryTab>() = tab;
+            app.update();
+            assert!(
+                !shown(&mut app).is_empty(),
+                "no panel is showing, so {tab:?} asked nothing"
+            );
+            let node = app
+                .world()
+                .get::<Node>(readout)
+                .expect("the readout's node");
+            assert_ne!(
+                node.display,
+                Display::None,
+                "the readout is hidden on {tab:?}"
+            );
+        }
+    }
+
+    /// The coin in the corner is the coin in a slot: one row, read once.
+    ///
+    /// [`silver_icon`] goes through [`stack_style`], so this is the assertion that the corner
+    /// cannot drift from the cell — the failure the item registry exists to make impossible
+    /// and that a hand-written shape and colour here would have reintroduced.
+    #[test]
+    fn the_corner_draws_the_same_coin_a_slot_does() {
+        let coin = silver_icon().expect("silver has a display row");
+        assert_eq!(coin.shape, ItemShape::Coin);
+        assert_eq!(coin.livery, None);
+        assert_eq!(
+            coin,
+            stack_style(Some(InventoryStack {
+                item_id: ITEM_SILVER,
+                count: 99,
+                ..Default::default()
+            }))
+            .icon
+            .expect("a silver slot draws a coin")
+        );
     }
 }

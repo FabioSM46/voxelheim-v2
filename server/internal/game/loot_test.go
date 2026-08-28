@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 // What the dead leave behind, and what one of those things mends.
@@ -315,10 +316,16 @@ func TestADespawnedMobLeavesNothing(t *testing.T) {
 // The rolls are taken directly rather than through a scripted fight, because thirty-two
 // of them is what makes "a different seed is a different sequence" a real statement about
 // a one-in-two draw rather than a coin landing the same way twice.
+//
+// **Both of a draugr's lines are read, not only the first.** Silver was appended to that
+// table after this test was written, and a roll function that kept returning the bone count
+// alone would have gone on passing while saying nothing at all about the line beside it —
+// including nothing about whether the second draw is seeded, which is the one property this
+// test exists for.
 func TestTheSameWorldLeavesTheSameLoot(t *testing.T) {
 	t.Parallel()
 
-	roll := func(seed int64, times int) []uint16 {
+	roll := func(seed int64, times int) [][2]uint16 {
 		t.Helper()
 
 		sim, err := NewSim(DefaultTickRate, 8, seed, dropTerrain{groundTop: 63}, refusedEdits{},
@@ -335,13 +342,13 @@ func TestTheSameWorldLeavesTheSameLoot(t *testing.T) {
 			t.Fatal("the simulation refused to place a draugr")
 		}
 
-		counts := make([]uint16, 0, times)
+		counts := make([][2]uint16, 0, times)
 		for range times {
 			left := sim.rollLootLocked(sim.mobs[id])
-			if len(left) != 1 || left[0].stack.item != ItemBone {
-				t.Fatalf("a draugr rolled %v, want one line of bones", left)
+			if len(left) != 2 || left[0].stack.item != ItemBone || left[1].stack.item != ItemSilver {
+				t.Fatalf("a draugr rolled %v, want a line of bones and a line of silver", left)
 			}
-			counts = append(counts, left[0].stack.count)
+			counts = append(counts, [2]uint16{left[0].stack.count, left[1].stack.count})
 		}
 		return counts
 	}
@@ -354,27 +361,36 @@ func TestTheSameWorldLeavesTheSameLoot(t *testing.T) {
 		t.Errorf("two different worlds rolled the same %v, so the seed is being ignored", first)
 	}
 
-	// And the range in the table is the range that comes out: one or two, both of them
-	// reachable. Without this the sequence above could be a constant and still agree with
-	// itself.
+	// And the ranges in the table are the ranges that come out: one or two bones, both of
+	// them reachable, and two to six silver with every value reachable. Without this the
+	// sequences above could be constants and still agree with themselves.
 	var sawOne, sawTwo bool
+	silver := map[uint16]bool{}
 	for _, count := range first {
-		switch count {
+		switch count[0] {
 		case 1:
 			sawOne = true
 		case 2:
 			sawTwo = true
 		default:
-			t.Fatalf("a draugr left %d bones, and its table says one or two", count)
+			t.Fatalf("a draugr left %d bones, and its table says one or two", count[0])
 		}
+		if count[1] < 2 || count[1] > 6 {
+			t.Fatalf("a draugr left %d silver, and its table says two to six", count[1])
+		}
+		silver[count[1]] = true
 	}
 	if !sawOne || !sawTwo {
 		t.Errorf("thirty-two rolls of 1..2 produced one=%v two=%v, so the range is not being rolled",
 			sawOne, sawTwo)
 	}
+	if len(silver) != 5 {
+		t.Errorf("thirty-two rolls of 2..6 produced %v, so the whole range is not being rolled",
+			silver)
+	}
 }
 
-func equalCounts(a, b []uint16) bool {
+func equalCounts(a, b [][2]uint16) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -384,6 +400,82 @@ func equalCounts(a, b []uint16) bool {
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// Silver
+// ---------------------------------------------------------------------------
+
+// The coin's id, its row, and the three creatures' answer to "is there money on this one".
+//
+// Pinned by name for the reason every id before it is: iota renumbers everything after an
+// insertion, and this number is inside a persisted pack the moment somebody kills a draugr.
+//
+// The row is asserted whole rather than field by field, so a later edit that quietly makes
+// silver wearable, placeable, edible or a repair kit fails here — those are the registry's
+// documented zeroes, and a coin is the item that is nothing but its stack.
+func TestSilverIsAPlainCoinDroppedOnlyByDraugr(t *testing.T) {
+	t.Parallel()
+
+	if ItemSilver != 35 {
+		t.Errorf("silver is item %d, want the appended wire id 35", ItemSilver)
+	}
+	got, registered := itemByID(ItemSilver)
+	if !registered {
+		t.Fatal("silver is not registered")
+	}
+	want := itemDefinition{places: world.Air, maxStack: 200}
+	if got != want {
+		t.Errorf("silver's row is %+v, want %+v", got, want)
+	}
+	// The two the acceptance criteria name, restated against the palette and the equipment
+	// column rather than against the struct literal above, because those are the two
+	// readers that would act on a non-zero value.
+	if block, placeable := blockPlacedBy(ItemSilver); placeable {
+		t.Errorf("silver places block %d", block)
+	}
+	if got.wornAt != wornNowhere {
+		t.Errorf("silver is worn at %d, and a coin is not equipment", got.wornAt)
+	}
+
+	// Only the draugr carries any, which is what makes money something the night pays for.
+	for kind, def := range mobRegistry {
+		var silver int
+		for _, roll := range def.loot {
+			if roll.item != ItemSilver {
+				continue
+			}
+			silver++
+			if roll.min != 2 || roll.max != 6 {
+				t.Errorf("%s leaves %d..%d silver, want 2..6", kind, roll.min, roll.max)
+			}
+		}
+		wantLines := 0
+		if kind == vnet.MobKindDraugr {
+			wantLines = 1
+		}
+		if silver != wantLines {
+			t.Errorf("%s has %d silver loot lines, want %d", kind, silver, wantLines)
+		}
+	}
+
+	// And nothing crafts it or breaks out of the ground into it: a draugr is the only
+	// channel, which is what "no silver from mining, chests or quests" means in code.
+	for id, r := range recipeTable {
+		if r.product == ItemSilver {
+			t.Errorf("%s produces silver, which comes off a corpse rather than out of a recipe", id)
+		}
+		for _, needed := range r.ingredients {
+			if needed.item == ItemSilver {
+				t.Errorf("%s costs silver, and nothing is bought with it yet", id)
+			}
+		}
+	}
+	for block, dropped := range blockDrops {
+		if dropped == ItemSilver {
+			t.Errorf("block %d drops silver, and silver comes off a draugr", block)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
