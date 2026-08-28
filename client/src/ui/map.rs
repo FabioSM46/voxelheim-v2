@@ -39,6 +39,16 @@
 //! told about. Both are *nothing is known here*, and inventing a difference would put a
 //! second kind of emptiness on the map that means nothing to the player.
 //!
+//! ## The pointer moves the view, and one method is how
+//!
+//! Panning and zooming are the same question asked twice — *put this world position back
+//! under this point on the picture* — so they are one method, [`MapScreen::look_so_that`],
+//! and neither accumulates anything. A drag remembers the world position it grabbed and
+//! re-answers it every frame from the pointer's current place, which is why a slow drag at
+//! one block per pixel does not lose fractions to an integer centre; a zoom step asks the
+//! same thing of the pointer's own position, which is the whole of "the pointer's world
+//! position is kept under the pointer".
+//!
 //! **An unnamed surface is not drawn as stone.** [`MapSurface::Unknown`] on an explored
 //! pixel means this build has no name for what the server put there — a contract that has
 //! grown a member since this binary was compiled. Painting it as the nearest thing would
@@ -50,16 +60,18 @@ use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::ui::{FocusPolicy, UiSystems};
+use bevy::ui::{FocusPolicy, UiGlobalTransform, UiSystems};
+use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MapColumn, MapEvent, MapInbox, MapSurface, MapTile,
     MapTileRequest, Outbound, Session, encode_map_tile_request, map_tile_span,
 };
-use crate::player::{InputMode, PlayerStats};
+use crate::player::{InputMode, LookState, PlayerStats};
 
 /// How far from the origin a map coordinate may be, on either axis.
 ///
@@ -87,6 +99,31 @@ const REQUEST_RETRY: Duration = Duration::from_secs(2);
 /// This is the value the cache works from until then, so the asking is complete on its
 /// own rather than waiting for something to be drawn.
 const DEFAULT_VIEWPORT: UVec2 = UVec2::new(1024, 768);
+
+/// Every look the wheel steps through, widest first.
+///
+/// Two knobs and one ladder. The zoom magnifies what the server already drew, so it runs
+/// out at four; past that the only way closer is to ask for a finer tile, which is what
+/// stepping the scale down does. **The rungs where they meet are not duplicates**: a
+/// sixteen-block pixel magnified four times and a four-block pixel drawn once cover the
+/// same width of world, and the second is the one made of measurements — same coverage,
+/// four times the detail, which is exactly the step a player asking "what is actually
+/// down there" wants.
+const ZOOM_LADDER: [(MapScale, u8); 9] = [
+    (MapScale::S16, 1),
+    (MapScale::S16, 2),
+    (MapScale::S16, 4),
+    (MapScale::S4, 1),
+    (MapScale::S4, 2),
+    (MapScale::S4, 4),
+    (MapScale::S1, 1),
+    (MapScale::S1, 2),
+    (MapScale::S1, 4),
+];
+
+/// The rung the map opens at: [`MapScale::S4`] at a zoom of two, in the middle of the
+/// ladder, so the first turn of the wheel goes somewhere in either direction.
+const DEFAULT_RUNG: usize = 4;
 
 /// The most squares one viewport may be broken into.
 ///
@@ -271,6 +308,17 @@ impl MapScreen {
         self.image_size() * u32::from(self.zoom).max(1)
     }
 
+    /// Whether a point on the picture is over something the picture drew.
+    ///
+    /// The picture is centred in a viewport it rarely divides exactly, so a pointer inside
+    /// the window can still be beside the map rather than on it. A gesture does not ask
+    /// this — a drag that leaves the edge is still a drag — and the readout does, because
+    /// naming a block nobody is pointing at is the one answer worse than saying nothing.
+    fn shows(&self, point: Vec2) -> bool {
+        let drawn = self.drawn_size().as_vec2();
+        (0.0..drawn.x).contains(&point.x) && (0.0..drawn.y).contains(&point.y)
+    }
+
     /// The block the picture's top-left pixel shows.
     ///
     /// Every coordinate on the map is this plus an offset, so it is the one place the
@@ -283,6 +331,81 @@ impl MapScreen {
             self.centre.x.saturating_sub(extent.x / 2),
             self.centre.y.saturating_sub(extent.y / 2),
         )
+    }
+
+    /// The world position under a point on the picture, in blocks and fractional.
+    ///
+    /// Fractional on purpose. A pan and a zoom both have to put a place back where it was,
+    /// and rounding it to a block first is what turns a slow drag into a stuck one.
+    fn world_at(&self, point: Vec2) -> Vec2 {
+        let blocks = self.scale.blocks() as f32;
+        let zoom = f32::from(self.zoom.max(1));
+        self.origin_block().as_vec2() + point / zoom * blocks
+    }
+
+    /// Where a world position is drawn, in logical screen pixels from the picture's
+    /// top-left corner.
+    ///
+    /// The inverse of [`Self::world_at`], and the two are a pair on purpose: the dot that
+    /// says where the player is and the readout that says what the pointer is over are the
+    /// same arithmetic run in opposite directions, and a map where they disagree is a map
+    /// that lies about one of them.
+    fn point_of(&self, world: Vec2) -> Vec2 {
+        let blocks = self.scale.blocks() as f32;
+        let zoom = f32::from(self.zoom.max(1));
+        (world - self.origin_block().as_vec2()) / blocks * zoom
+    }
+
+    /// The block under a point on the picture.
+    fn block_at(&self, point: Vec2) -> IVec2 {
+        let world = self.world_at(point);
+        // `floor` and not a truncating cast, for the reason `ui/compass.rs` gives, and the
+        // same non-finite guard: a pointer position comes from a window rather than from
+        // this module.
+        IVec2::new(block_of(world.x), block_of(world.y))
+    }
+
+    /// Looks so that `world` sits under `point` on the picture.
+    ///
+    /// The one movement this screen has. A drag is this with the world position it grabbed
+    /// and the pointer's place now; a zoom step is this with the pointer's own world
+    /// position and the pointer's own place. **Nothing accumulates**, so neither gesture
+    /// can drift, and a centre that has to be a whole block does not eat a slow drag one
+    /// rounded fraction at a time.
+    fn look_so_that(&mut self, world: Vec2, point: Vec2) {
+        let blocks = self.scale.blocks() as f32;
+        let zoom = f32::from(self.zoom.max(1));
+        let extent = self.span_blocks().as_vec2();
+        let centre = world + extent / 2.0 - point / zoom * blocks;
+        self.centre = IVec2::new(block_of(centre.x), block_of(centre.y));
+    }
+
+    /// Which rung of [`ZOOM_LADDER`] this view is on, or the rung it opens at for a pair
+    /// the ladder has no place for — which nothing can produce, since the ladder is the
+    /// only thing that writes the pair.
+    fn rung(&self) -> usize {
+        ZOOM_LADDER
+            .iter()
+            .position(|step| *step == (self.scale, self.zoom))
+            .unwrap_or(DEFAULT_RUNG)
+    }
+
+    /// Steps the view along [`ZOOM_LADDER`], keeping whatever is under `point` under it.
+    ///
+    /// `steps` is positive to zoom in. The ends of the ladder are ends rather than wraps:
+    /// a wheel that jumped from the closest look to the widest would lose the place the
+    /// player was reading.
+    fn zoom_by(&mut self, steps: i32, point: Vec2) {
+        let held = self.world_at(point);
+        let last = ZOOM_LADDER.len() as i32 - 1;
+        let rung = (self.rung() as i32 + steps).clamp(0, last) as usize;
+        let (scale, zoom) = ZOOM_LADDER[rung];
+        if (self.scale, self.zoom) == (scale, zoom) {
+            return;
+        }
+        self.scale = scale;
+        self.zoom = zoom;
+        self.look_so_that(held, point);
     }
 
     /// Every square the viewport overlaps, nearest the centre first.
@@ -655,9 +778,31 @@ impl FromWorld for MapPicture {
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Painted(Option<(MapScreen, u64)>);
 
+/// Where the pointer is on the picture, in logical pixels from its top-left corner, or
+/// `None` when the window has no pointer.
+///
+/// **Deliberately not clamped to the picture.** A pan that drags past the edge is still a
+/// pan, so the gesture reads this raw; [`MapScreen::shows`] is what the readout asks. It is
+/// written in `PostUpdate` because a node's place on the screen is a layout answer, and it
+/// is a resource so that everything else can read a number instead of a layout.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct MapPointer(Option<Vec2>);
+
+/// The world position one drag grabbed, held until the button comes up.
+///
+/// The world rather than the pointer's offset: the view is re-derived from it every frame,
+/// so a drag cannot drift, and a centre that must be a whole block does not swallow a slow
+/// drag one rounded fraction at a time.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct MapDrag(Option<Vec2>);
+
 /// The full-screen overlay the map lives in.
 #[derive(Component)]
 struct MapRoot;
+
+/// Where the player is standing, drawn over the picture and turned to face their heading.
+#[derive(Component)]
+struct PlayerDot;
 
 /// The node the picture is drawn inside, and the one the pointer is measured against.
 #[derive(Component)]
@@ -674,6 +819,8 @@ struct MapCanvas;
 /// it is a build failure rather than a label that never changes.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum MapReading {
+    /// What the pointer is over.
+    Cursor,
     /// Where the player stands, from the server's own answer.
     You,
     /// How much world one map pixel covers.
@@ -703,6 +850,18 @@ const TITLE_SIZE: f32 = 22.0;
 /// A readout, dimmer than the heading.
 const READING: Color = Color::srgb(0.78, 0.80, 0.84);
 
+/// The player's dot, in logical pixels.
+const DOT_SIZE: f32 = 10.0;
+
+/// The needle that says which way they are facing: as long again as the dot is wide, and
+/// narrow, so the heading reads at a glance without hiding the ground under it.
+///
+/// A needle rather than the wedge the issue asks for, and the reason is `bevy_ui`: it draws
+/// rectangles, and the triangle a wedge needs would have to be a rotated node pretending or
+/// an image nobody can read a heading off. This is the same information in the shape the
+/// toolkit has.
+const NEEDLE: Vec2 = Vec2::new(4.0, 12.0);
+
 /// Keeps the map's viewport and its tile cache in step with the server.
 pub(super) struct MapUiPlugin;
 
@@ -728,6 +887,9 @@ impl Plugin for MapUiPlugin {
             // the node holding it — there is no ordering here for anybody to get wrong.
             .init_resource::<MapPicture>()
             .init_resource::<Painted>()
+            .init_resource::<MapPointer>()
+            .init_resource::<MapDrag>()
+            .init_resource::<LookState>()
             .add_systems(Startup, spawn_map_screen)
             .add_systems(
                 Update,
@@ -739,19 +901,27 @@ impl Plugin for MapUiPlugin {
                     // After the network, so a tile that arrived this frame is in the
                     // cache before the request pass decides it is missing.
                     ingest_map_payloads.after(crate::net::DrainNetwork),
+                    // Before the asking, so a frame that panned asks for the squares the
+                    // view it ended on overlaps rather than the one it started from.
+                    drag_the_map,
+                    zoom_the_map,
                     request_map_tiles,
                     // Last, so the picture drawn this frame is composed from the cache
                     // this frame ended with rather than the one it started on.
                     paint_the_map,
                     show_the_map,
                     refresh_the_panel,
+                    place_the_player_dot,
                 )
                     .chain(),
             )
             // The viewport's size is a layout answer, so it can only be read after taffy
             // has written one — the same `PostUpdate` placement the crafting scrollbar
             // uses, and for the same reason.
-            .add_systems(PostUpdate, measure_the_viewport.after(UiSystems::Layout));
+            .add_systems(
+                PostUpdate,
+                (measure_the_viewport, follow_the_pointer).after(UiSystems::Layout),
+            );
     }
 }
 
@@ -797,19 +967,68 @@ fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
                     FocusPolicy::Block,
                 ))
                 .with_children(|viewport| {
-                    viewport.spawn((
-                        MapCanvas,
-                        ImageNode::new(picture.0.clone()),
-                        Node {
-                            width: Val::Px(0.0),
-                            height: Val::Px(0.0),
-                            ..default()
-                        },
-                        // The picture is drawn on top of the viewport and must not take
-                        // the pointer off it, or a drag would begin only in the margin the
-                        // rounding leaves.
-                        FocusPolicy::Pass,
-                    ));
+                    viewport
+                        .spawn((
+                            MapCanvas,
+                            ImageNode::new(picture.0.clone()),
+                            Node {
+                                width: Val::Px(0.0),
+                                height: Val::Px(0.0),
+                                ..default()
+                            },
+                            // The picture is drawn on top of the viewport and must not take
+                            // the pointer off it, or a drag would begin only in the margin the
+                            // rounding leaves.
+                            FocusPolicy::Pass,
+                        ))
+                        // A child of the picture and not of the viewport, so its place is the
+                        // projection's own answer with nothing added: the picture is centred
+                        // in a viewport it rarely divides exactly, and a dot measured from the
+                        // viewport's corner would carry that leftover as an error.
+                        .with_children(|canvas| {
+                            canvas
+                                .spawn((
+                                    PlayerDot,
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        display: Display::None,
+                                        width: Val::Px(0.0),
+                                        height: Val::Px(0.0),
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        ..default()
+                                    },
+                                    FocusPolicy::Pass,
+                                ))
+                                .with_children(|dot| {
+                                    dot.spawn((
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            width: Val::Px(NEEDLE.x),
+                                            height: Val::Px(NEEDLE.y),
+                                            bottom: Val::Px(DOT_SIZE / 2.0),
+                                            border_radius: BorderRadius::all(Val::Px(
+                                                NEEDLE.x / 2.0,
+                                            )),
+                                            ..default()
+                                        },
+                                        BackgroundColor(super::SELECTED_EDGE),
+                                        FocusPolicy::Pass,
+                                    ));
+                                    dot.spawn((
+                                        Node {
+                                            width: Val::Px(DOT_SIZE),
+                                            height: Val::Px(DOT_SIZE),
+                                            border_radius: BorderRadius::all(Val::Px(
+                                                DOT_SIZE / 2.0,
+                                            )),
+                                            ..default()
+                                        },
+                                        BackgroundColor(super::SELECTED_EDGE),
+                                        FocusPolicy::Pass,
+                                    ));
+                                });
+                        });
                 });
 
             overlay
@@ -834,6 +1053,16 @@ fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
                             ..default()
                         },
                         TextColor(Color::WHITE),
+                        FocusPolicy::Pass,
+                    ));
+                    panel.spawn((
+                        MapReading::Cursor,
+                        Text::new(cursor_reading(None)),
+                        TextFont {
+                            font_size: FontSize::Px(READING_SIZE),
+                            ..default()
+                        },
+                        TextColor(READING),
                         FocusPolicy::Pass,
                     ));
                     panel.spawn((
@@ -978,22 +1207,173 @@ fn scale_reading(scale: MapScale) -> String {
     }
 }
 
-/// Keeps the two readouts in step with the view and the server's answer.
+/// What the panel says about the block under the pointer.
+///
+/// **A pointer that is not over the map says so rather than naming a block.** The picture
+/// does not fill the viewport exactly, and a readout that answered from the nearest edge
+/// would be a coordinate a player could act on and nobody was pointing at.
+fn cursor_reading(block: Option<IVec2>) -> String {
+    match block {
+        Some(block) => format!("Cursor X {} | Z {}", block.x, block.y),
+        None => "Cursor off the map".to_owned(),
+    }
+}
+
+/// Keeps the three readouts in step with the view, the pointer and the server's answer.
 fn refresh_the_panel(
     screen: Res<MapScreen>,
     stats: Res<PlayerStats>,
+    pointer: Res<MapPointer>,
     mut readings: Query<(&MapReading, &mut Text)>,
 ) {
     if !screen.is_open() {
         return;
     }
+    let under = pointer
+        .0
+        .filter(|point| screen.shows(*point))
+        .map(|point| screen.block_at(point));
     for (reading, mut text) in &mut readings {
         let next = match reading {
+            MapReading::Cursor => cursor_reading(under),
             MapReading::You => you_reading(stats.position),
             MapReading::Scale => scale_reading(screen.scale),
         };
         if text.0 != next {
             text.0 = next;
+        }
+    }
+}
+
+/// Puts the pointer on the picture, in the picture's own pixels.
+///
+/// The one system here that reads a layout, which is why it runs in `PostUpdate` after
+/// taffy has written one — the `sync_craft_scrollbar` placement, for the same reason.
+/// `UiGlobalTransform` and not `GlobalTransform`: `bevy_ui` writes the first and leaves the
+/// second at the identity, which `ui/character.rs` records putting every node at the
+/// screen's corner.
+fn follow_the_pointer(
+    screen: Res<MapScreen>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    canvases: Query<(&ComputedNode, &UiGlobalTransform), With<MapCanvas>>,
+    mut pointer: ResMut<MapPointer>,
+) {
+    let placed = screen.is_open().then_some(()).and_then(|()| {
+        let cursor = windows.iter().next()?.cursor_position()?;
+        let (node, transform) = canvases.iter().next()?;
+        // Logical pixels on both sides: the cursor is one already, and the node's own
+        // inverse scale factor is what takes its physical rect back to one.
+        let scale = node.inverse_scale_factor;
+        let size = node.size() * scale;
+        // The transform's translation *is* the node's centre — see `ui/character.rs` — so
+        // the corner is half a size away from it.
+        let corner = transform.translation * scale - size / 2.0;
+        Some(cursor - corner)
+    });
+    if pointer.0 != placed {
+        pointer.0 = placed;
+    }
+}
+
+/// Moves the view while the primary button is held, keeping the place that was grabbed
+/// under the pointer.
+///
+/// The inventory's drag rule with the inventory's ending: the gesture lives only as long as
+/// the button, and losing the pointer ends it, because a release outside the window is not
+/// delivered on every platform.
+fn drag_the_map(
+    buttons: Option<Res<ButtonInput<MouseButton>>>,
+    pointer: Res<MapPointer>,
+    mut drag: ResMut<MapDrag>,
+    mut screen: ResMut<MapScreen>,
+) {
+    let held = buttons
+        .as_deref()
+        .is_some_and(|buttons| buttons.pressed(MouseButton::Left));
+    let grabbing = held && screen.is_open();
+    let Some(point) = pointer.0.filter(|_| grabbing) else {
+        if drag.0.is_some() {
+            drag.0 = None;
+        }
+        return;
+    };
+    // The first frame of a gesture is what decides the place; every frame after it only
+    // answers where that place has to be now.
+    let grabbed = match drag.0 {
+        Some(world) => world,
+        None => {
+            let world = screen.world_at(point);
+            drag.0 = Some(world);
+            world
+        }
+    };
+    let mut moved = *screen;
+    moved.look_so_that(grabbed, point);
+    if moved != *screen {
+        *screen = moved;
+    }
+}
+
+/// Steps the view along the zoom ladder with the wheel.
+fn zoom_the_map(
+    scroll: Option<Res<AccumulatedMouseScroll>>,
+    pointer: Res<MapPointer>,
+    mut screen: ResMut<MapScreen>,
+) {
+    if !screen.is_open() {
+        return;
+    }
+    let Some(steps) = scroll
+        .filter(|scroll| scroll.delta.y.is_finite() && scroll.delta.y != 0.0)
+        .map(|scroll| scroll.delta.y.signum() as i32)
+    else {
+        return;
+    };
+    // A wheel turned while the pointer is beside the map still has somewhere to go, and
+    // the middle of the picture is the only answer that is not a guess about intent.
+    let point = pointer
+        .0
+        .filter(|point| screen.shows(*point))
+        .unwrap_or_else(|| screen.drawn_size().as_vec2() / 2.0);
+    let mut stepped = *screen;
+    stepped.zoom_by(steps, point);
+    if stepped != *screen {
+        *screen = stepped;
+    }
+}
+
+/// Puts the player's dot where the server says they are, facing where they are looking.
+///
+/// **The server's position and the client's heading**, which is not an inconsistency: this
+/// client never sends its own place, so `PlayerStats::position` is the only answer to
+/// *where*, while the yaw is the one thing in `player/` that is genuinely local. A position
+/// the server has not sent, or one outside the picture, hides the dot rather than pinning
+/// it to an edge it is not at. Party members are not drawn — the map is this character's.
+fn place_the_player_dot(
+    screen: Res<MapScreen>,
+    stats: Res<PlayerStats>,
+    look: Res<LookState>,
+    mut dots: Query<(&mut Node, &mut UiTransform), With<PlayerDot>>,
+) {
+    let placed = stats
+        .position
+        .filter(|position| position.is_finite())
+        .map(|position| screen.point_of(Vec2::new(position.x, position.z)))
+        .filter(|point| screen.is_open() && screen.shows(*point));
+    // The compass's own convention: a positive yaw turns west, so the bearing is the yaw
+    // negated — and a `bevy_ui` rotation is applied in a space whose y grows downward, so
+    // that same bearing is the clockwise turn a map needs.
+    let facing = Rot2::radians(if look.yaw.is_finite() { -look.yaw } else { 0.0 });
+    for (mut node, mut transform) in &mut dots {
+        let wanted = match placed {
+            Some(point) => (Display::Flex, Val::Px(point.x), Val::Px(point.y)),
+            None => (Display::None, node.left, node.top),
+        };
+        if (node.display, node.left, node.top) != wanted {
+            (node.display, node.left, node.top) = wanted;
+        }
+        if transform.rotation != facing {
+            transform.rotation = facing;
         }
     }
 }
@@ -1174,6 +1554,16 @@ mod tests {
             .iter(app.world())
             .next()
             .expect("the map overlay is spawned once at startup")
+    }
+
+    /// How the player's dot is currently drawn.
+    fn dot(app: &mut App) -> (Display, Val, Val) {
+        app.world_mut()
+            .query_filtered::<&Node, With<PlayerDot>>()
+            .iter(app.world())
+            .next()
+            .map(|node| (node.display, node.left, node.top))
+            .expect("the dot is spawned with the picture")
     }
 
     /// What one of the side panel's readouts currently says.
@@ -1652,6 +2042,156 @@ mod tests {
             second,
             "the node draws the picture that exists, not the one that was lost"
         );
+    }
+
+    /// A view big enough to drag around, at the rung the map opens on.
+    fn wide_view() -> MapScreen {
+        MapScreen {
+            open: true,
+            centre: IVec2::new(1000, -400),
+            scale: MapScale::S4,
+            zoom: 2,
+            viewport: UVec2::new(800, 600),
+        }
+    }
+
+    #[test]
+    fn a_world_position_projects_to_a_point_and_back() {
+        let screen = wide_view();
+        for point in [Vec2::ZERO, Vec2::new(123.0, 47.0), Vec2::new(799.0, 599.0)] {
+            let world = screen.world_at(point);
+            assert!(
+                screen.point_of(world).distance(point) < 0.001,
+                "{point} came back as {}",
+                screen.point_of(world)
+            );
+        }
+        // The block under a point is the world position floored, on both sides of the
+        // origin, which is the half a truncating cast gets wrong.
+        let screen = MapScreen {
+            centre: IVec2::ZERO,
+            zoom: 1,
+            viewport: UVec2::splat(16),
+            ..wide_view()
+        };
+        assert_eq!(screen.block_at(Vec2::ZERO), IVec2::splat(-32));
+        assert_eq!(screen.block_at(Vec2::new(8.0, 8.0)), IVec2::ZERO);
+    }
+
+    #[test]
+    fn a_drag_keeps_the_place_it_grabbed_under_the_pointer() {
+        let mut screen = wide_view();
+        let grabbed_at = Vec2::new(300.0, 220.0);
+        let grabbed = screen.world_at(grabbed_at);
+
+        // A gesture is re-answered from where it began, so the intermediate steps are not
+        // a sequence that can drift: each of these is the whole drag so far.
+        for step in [
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-37.5, 12.5),
+            Vec2::new(0.0, 0.5),
+        ] {
+            let now = grabbed_at + step;
+            screen.look_so_that(grabbed, now);
+            assert!(
+                screen.world_at(now).distance(grabbed) < 2.0,
+                "{step} lost the place: {} is not {grabbed}",
+                screen.world_at(now)
+            );
+        }
+    }
+
+    #[test]
+    fn a_zoom_step_keeps_the_pointers_world_position_under_the_pointer() {
+        let under = Vec2::new(120.0, 470.0);
+        for steps in [1, -1, 2, -2] {
+            let mut screen = wide_view();
+            let before = screen.world_at(under);
+            screen.zoom_by(steps, under);
+            assert_ne!(
+                (screen.scale, screen.zoom),
+                (MapScale::S4, 2),
+                "{steps} steps moved nothing"
+            );
+            let after = screen.world_at(under);
+            assert!(
+                after.distance(before) < 2.0,
+                "{steps} steps moved {before} to {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zoom_ladder_runs_from_end_to_end_and_stops() {
+        let mut screen = wide_view();
+        assert_eq!(screen.rung(), DEFAULT_RUNG);
+
+        screen.zoom_by(99, Vec2::ZERO);
+        assert_eq!((screen.scale, screen.zoom), (MapScale::S1, 4), "closest");
+        screen.zoom_by(1, Vec2::ZERO);
+        assert_eq!(
+            (screen.scale, screen.zoom),
+            (MapScale::S1, 4),
+            "the end is an end, not a wrap"
+        );
+
+        screen.zoom_by(-99, Vec2::ZERO);
+        assert_eq!((screen.scale, screen.zoom), (MapScale::S16, 1), "widest");
+        screen.zoom_by(-1, Vec2::ZERO);
+        assert_eq!((screen.scale, screen.zoom), (MapScale::S16, 1));
+    }
+
+    #[test]
+    fn the_cursor_names_a_block_only_while_one_is_under_it() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert_eq!(reading(&mut app, MapReading::Cursor), "Cursor off the map");
+
+        // The picture is 1024 by 768 logical pixels at the default view, and its top-left
+        // pixel is the block the projection says it is.
+        let screen = screen_of(&mut app);
+        let corner = screen.origin_block();
+        app.world_mut().resource_mut::<MapPointer>().0 = Some(Vec2::ZERO);
+        app.update();
+        assert_eq!(
+            reading(&mut app, MapReading::Cursor),
+            format!("Cursor X {} | Z {}", corner.x, corner.y)
+        );
+
+        // Beside the picture rather than on it: the readout says so instead of naming the
+        // nearest block.
+        app.world_mut().resource_mut::<MapPointer>().0 = Some(Vec2::new(-4.0, 20.0));
+        app.update();
+        assert_eq!(reading(&mut app, MapReading::Cursor), "Cursor off the map");
+    }
+
+    #[test]
+    fn the_dot_waits_for_the_server_to_say_where_the_player_is() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert_eq!(dot(&mut app).0, Display::None, "nobody has been placed");
+
+        // The map opens on the player, so a map reopened once the server has said where
+        // they are puts them in the middle of the picture.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        app.world_mut().resource_mut::<PlayerStats>().position = Some(Vec3::new(8.0, 70.0, 8.0));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        let (display, left, top) = dot(&mut app);
+        assert_eq!(display, Display::Flex);
+        let middle = screen_of(&mut app).drawn_size().as_vec2() / 2.0;
+        assert_eq!(left, Val::Px(middle.x));
+        assert_eq!(top, Val::Px(middle.y));
+
+        // Somewhere the picture does not reach: hidden rather than pinned to an edge the
+        // player is not standing on.
+        app.world_mut().resource_mut::<PlayerStats>().position =
+            Some(Vec3::new(200_000.0, 70.0, 8.0));
+        app.update();
+        assert_eq!(dot(&mut app).0, Display::None);
     }
 
     #[test]
