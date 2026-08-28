@@ -33,7 +33,14 @@ const collisionSkin = 1e-4
 // between representable values reaches one) and the int64 voxel arithmetic below
 // stops being meaningful. Everything out there is solid, so the world ends in a wall
 // rather than in undefined behaviour. At WalkSpeed it is about six months away.
-const worldLimit = 1 << 24
+//
+// **One number, named twice for two audiences.** [world.BlockLimit] is the definition
+// and this is the name the simulation reads it under; a second literal here would be a
+// second edge to keep in step, and the first client-chosen coordinate this server ever
+// receives — a map mark's x and z — is checked against the other one. What stays local
+// is how the number is *used*: this package applies it to the vertical axis too, which
+// is a property of the box being moved rather than of the world.
+const worldLimit = world.BlockLimit
 
 // Terrain is the read-only world the simulation collides against.
 type Terrain interface {

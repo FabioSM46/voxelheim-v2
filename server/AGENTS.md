@@ -1474,6 +1474,66 @@ flush are wired in `cmd/voxelheimd/main.go`.
   has received, there is no revision number and no end marker, and an empty page is a message the
   contract forbids — a client reading one as "you have explored nothing" would erase its own map.
 
+## The marks a character puts on the map, and where the world ends
+
+- **A mark is not gameplay, and that is why it lives where it does.** Nothing in `game` reads one,
+  no outcome depends on one, and a character with sixty-four of them plays exactly like a character
+  with none. So marks live in `persist` and `session` only, which is where the exploration ledger
+  landed and for the same reason: state with a file and a wire message and no simulation half.
+- **A third file per character, for the reason `exploration/` was a second one.** `persist.Record`
+  has no extensible area, and a list of sixty-four entries each carrying a hundred and twenty bytes
+  of somebody's own text is not what to give it one for. `markers/<character-id-hex>.bin` carries
+  its own `persist.MarkersVersion`, and a change to one format never bumps the others:
+
+  ```
+  magic[4] version:u32 next_id:u64 count:u32
+  count × (marker_id:u64, x:i32, z:i32, kind:u8, note_len:u8, note[120])
+  crc32:u32
+  ```
+
+- **The note is zero-padded to its maximum with an explicit length, so the decoder's only variable
+  quantity is still the count.** That is the discipline the player record's layout insists on,
+  applied to the one field that would otherwise reintroduce a second one — and it is what makes a
+  truncated file fail the exact-size check rather than read as a shorter map.
+- **`next_id` is in the header rather than derived from the entries, and that is the whole of "an
+  id is never reused".** Derived as `max(id)+1` it falls back the moment the highest-numbered mark
+  is removed, and the next placement mints an id the client has already been told means something
+  else. Stored, a removal costs nothing and the counter only ever goes up.
+- **`persist.MaxMarkers` and `persist.MaxMarkerNote` are literals pinned to the wire's, never
+  aliases of it.** They must equal `protocol.MaxMarkers` and `protocol.MarkerNoteMaxBytes` — a
+  stored mark goes on the wire unchanged, so a file that could hold more than a `MarkerList` may
+  carry is one this server could read and then not send — and the entry width above is a *function*
+  of the note cap, so an alias would let a contract change reshape every file on disk with nothing
+  saying so and `MarkersVersion` unbumped. Two compile-time guards in `markers.go` pin the pair in
+  both directions; widening one is then a build failure at the line where somebody has to decide.
+- **This store judges more than the ledger store does, and the reason is where the value goes
+  next.** A column is two int32s and any pair is a place this world could have streamed. A mark is
+  put straight on the wire, and `schemas/player.fbs` states what a `MarkerList` may carry: a
+  non-zero id unique within the list, a known kind, a note of at most 120 valid UTF-8 bytes. A file
+  that cannot produce that is refused as corrupt, because the alternative is a server answering
+  with an illegal frame. `protocol.MarkerKindOK` is exported for exactly that check — a second
+  switch would be a second answer to keep in step.
+- **An unreadable marker file is kept and never written over**, through the same `setAside` a
+  player record and an exploration ledger both use, timestamp included.
+
+### `world.BlockLimit` — the world has an edge, and now it has a name
+
+- **The number is 2²⁴ and it did not move.** It was `game.worldLimit` and is now
+  `world.BlockLimit`, which `game.worldLimit` is defined as: one number, named twice for two
+  audiences. Beyond it a `float32` cannot address individual blocks and the `int64` voxel
+  arithmetic stops being meaningful.
+- **It was promoted because `MarkerPlaceRequest` is the first message in which a client chooses a
+  coordinate outright.** Everything before it — a block edit's target, a structure's anchor, a
+  chunk resend, a mined voxel — starts from terrain *this server streamed*, so "inside the world"
+  was a property of the input rather than a question about it. A mark's `x` and `z` are a bare pair
+  of ints nothing produced, and `schemas/player.fbs` says the server refuses one outside its own
+  extent without naming a number, because the number is the server's.
+- **`internal/world` is where it belongs**, not `internal/game`: the world is what has an edge, and
+  `world` is the leaf that `game`, `session` and `persist` all already import. `session` cannot read
+  `game.worldLimit` and must not grow a second copy of it. What stays local to `game` is how the
+  number is *used* — that package applies it to the vertical axis too, which is a property of the
+  box being moved rather than of the world.
+
 ## What a player looks like, and the "once" that is not once per session
 
 `PlayerAppearance` is the only message this server sends per *entity* rather than per tick or per
