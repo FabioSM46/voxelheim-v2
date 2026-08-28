@@ -189,7 +189,10 @@ func TestHardnessTableOrdersEveryBreakableBlockByHand(t *testing.T) {
 	t.Parallel()
 
 	sim, _, _, _ := newMiningPlayer(t, nil)
-	blocks := []world.Block{world.Leaves, world.Grass, world.Dirt, world.Snow, world.Log, world.Stone, world.CoalOre, world.IronOre}
+	blocks := []world.Block{
+		world.Leaves, world.Grass, world.Dirt, world.Snow, world.Log, world.Stone, world.CoalOre, world.IronOre,
+		world.Sand, world.Gravel, world.Sandstone,
+	}
 	costs := make(map[world.Block]int, len(blocks))
 	for _, block := range blocks {
 		cost, ok := sim.hardnessTicks(block, ItemNone)
@@ -198,16 +201,25 @@ func TestHardnessTableOrdersEveryBreakableBlockByHand(t *testing.T) {
 		}
 		costs[block] = cost
 	}
-	ordered := costs[world.Leaves] < costs[world.Grass] &&
+	// Loose ground first, then soil, then the two compacted rocks, then ore. Gravel
+	// and grass cost the same, and so do dirt and snow: the table has more blocks in
+	// it than it has distinct hardnesses, and an equality is a decision here rather
+	// than a gap in the ordering.
+	ordered := costs[world.Leaves] < costs[world.Sand] &&
+		costs[world.Sand] < costs[world.Gravel] &&
+		costs[world.Gravel] == costs[world.Grass] &&
 		costs[world.Grass] < costs[world.Dirt] &&
 		costs[world.Dirt] == costs[world.Snow] &&
-		costs[world.Snow] < costs[world.Stone] &&
+		costs[world.Snow] < costs[world.Sandstone] &&
+		costs[world.Sandstone] < costs[world.Log] &&
+		costs[world.Log] < costs[world.Stone] &&
 		costs[world.Stone] < costs[world.CoalOre] &&
 		costs[world.CoalOre] < costs[world.IronOre]
 	if !ordered {
 		t.Fatalf("hardness order is %+v", costs)
 	}
-	for _, block := range []world.Block{world.Air, 9, 0xffff} {
+	// 12 is the first block id nothing has been appended at yet.
+	for _, block := range []world.Block{world.Air, 12, 0xffff} {
 		if cost, ok := sim.hardnessTicks(block, ItemNone); ok || cost != 0 {
 			t.Errorf("block %d has cost %d, breakable %t; want no mining cost", block, cost, ok)
 		}

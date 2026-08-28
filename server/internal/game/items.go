@@ -88,6 +88,14 @@ const (
 
 	// The ammunition-free launcher. Appended because item ids cross the wire.
 	ItemWoodenSceptre
+
+	// What worldgen 3 put in the ground to dig up: the desert's two layers and the
+	// gravel bars on plains and taiga. Appended for the reason every id above was —
+	// iota renumbers everything after an insertion, and these numbers are already in
+	// a client's inventory the moment somebody digs one — and pinned by a test.
+	ItemSand
+	ItemSandstone
+	ItemGravel
 )
 
 // What each blade is worth, and the only copy of it.
@@ -377,20 +385,31 @@ var itemRegistry = map[ItemID]itemDefinition{
 		places: world.Air, maxStack: 1, maxDurability: SceptreMaxDurability,
 		launches: vnet.ProjectileKindEnergyOrb,
 	},
+
+	// The three blocks worldgen 3 added, on exactly the terms the first four block
+	// items are held: they place the voxel they came from and sixty-four fit in a
+	// slot. Every other column is the registry's documented zero — sand is not
+	// equipment, wears out nothing, damages nothing and feeds nobody.
+	ItemSand:      {places: world.Sand, maxStack: 64},
+	ItemSandstone: {places: world.Sandstone, maxStack: 64},
+	ItemGravel:    {places: world.Gravel, maxStack: 64},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an
 // explicit yield for Leaves; an absent entry also means no yield, so new blocks
 // fail closed until their drop is deliberately chosen.
 var blockDrops = map[world.Block]ItemID{
-	world.Stone:   ItemStone,
-	world.Dirt:    ItemDirt,
-	world.Grass:   ItemDirt,
-	world.Snow:    ItemSnow,
-	world.Log:     ItemLog,
-	world.Leaves:  ItemNone,
-	world.CoalOre: ItemRawCoal,
-	world.IronOre: ItemRawIron,
+	world.Stone:     ItemStone,
+	world.Dirt:      ItemDirt,
+	world.Grass:     ItemDirt,
+	world.Snow:      ItemSnow,
+	world.Log:       ItemLog,
+	world.Leaves:    ItemNone,
+	world.CoalOre:   ItemRawCoal,
+	world.IronOre:   ItemRawIron,
+	world.Sand:      ItemSand,
+	world.Sandstone: ItemSandstone,
+	world.Gravel:    ItemGravel,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -405,6 +424,13 @@ var blockExperience = map[world.Block]uint16{
 	world.Leaves:  0,
 	world.CoalOre: 4,
 	world.IronOre: 6,
+
+	// Three more ground blocks, and three more deliberate zeroes: digging sand is
+	// not learning anything, exactly as digging dirt is not. The rows exist because
+	// an absent one is a registry error rather than an implicit choice of none.
+	world.Sand:      0,
+	world.Sandstone: 0,
+	world.Gravel:    0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {
