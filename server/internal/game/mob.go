@@ -675,6 +675,16 @@ func (m *mob) faceToward(target *Player) {
 }
 
 // physics falls the mob, moves it, and hops it over a one-block step.
+//
+// **Nothing here knows about water, and that is the decision worldgen 5 made rather
+// than a gap it left.** A creature that walks into a lake sinks through it — water
+// does not stop movement — and walks along the bed until it walks out again. The
+// player integrator learned to swim because a player's *intent* is the thing the
+// swim rules answer; a mob has a path and no intent, so teaching it to swim means
+// teaching the pathing to want to be at the surface, which is a different piece of
+// work. What keeps the result from being creatures standing in ponds is upstream:
+// the spawn director refuses a spot whose floor or headroom is water or ice, so a
+// mob only ever reaches a lake by walking there.
 func (m *mob) physics(s *Sim) {
 	m.vel[1] = max(m.vel[1]-Gravity*s.dt, -TerminalFallSpeed)
 

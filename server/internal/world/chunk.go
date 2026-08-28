@@ -53,7 +53,39 @@ const (
 	Sand      Block = 9
 	Sandstone Block = 10
 	Gravel    Block = 11
+
+	// The two blocks water is made of. Appended for the reason every id above was,
+	// and the first pair in this palette that are not interchangeable in the way the
+	// rest are: [Water] is the one id in the world a body moves *through*, and [Ice]
+	// is ordinary ground that happens to be the lid on some of it.
+	//
+	// **Water is not placeable and has no item**, which is the whole of "water is
+	// static here": it appears because the generator says so, it is displaced by
+	// anything put into its voxel, and nothing a player does ever creates one.
+	Water Block = 12
+	Ice   Block = 13
 )
+
+// Solid reports whether a block stops movement.
+//
+// **The palette owns this question, not the collision.** `Terrain.Solid` used to
+// spell it as `block != Air`, which was correct only while nothing in the world was
+// passable — and every rule that read it that way (the spawn director's headroom
+// scan, the collision sweep) inherited the assumption without stating it. Water is
+// the first id that ends the equivalence, so the answer moved to where the ids are.
+func Solid(b Block) bool {
+	return b != Air && b != Water
+}
+
+// Fluid reports whether a block is one a body wades and swims in rather than walks
+// through or stands on.
+//
+// Deliberately not `!Solid(b)`: air is not solid and is not a fluid either, and a
+// swim rule written against "not solid" would have players treading water in mid
+// air. [Ice] is absent for the opposite reason — it is the lid, and you walk on it.
+func Fluid(b Block) bool {
+	return b == Water
+}
 
 // Placeable reports whether a block id names something a player may put into the
 // world.
@@ -67,9 +99,16 @@ const (
 // server's own placement of Air — "the client does not get to choose what a broken
 // block leaves behind". Allowing it here would give the client a second, unchecked
 // route to the same effect.
+//
+// **Water is not placeable either, and for a different reason.** Air is refused
+// because placing it is *breaking*; water is refused because there is no such thing
+// as a piece of water to hold. It has no item, it drops nothing, and the only thing
+// that ever writes one is the generator — which is what "water is static" means in
+// this codebase. Ice is placeable because it is ordinary ground: it is mined, it
+// drops itself, and it can be put back.
 func Placeable(b Block) bool {
 	switch b {
-	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel:
+	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice:
 		return true
 	default:
 		return false

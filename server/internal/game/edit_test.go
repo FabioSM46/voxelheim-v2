@@ -356,6 +356,46 @@ func TestPlacingIntoASolidVoxelIsRefused(t *testing.T) {
 	}
 }
 
+// Water is displaced by a placement rather than obstructing it, and the placement is
+// one ordinary edit — one item spent, one voxel changed.
+//
+// **The water is scripted here rather than generated, and that is the point of the
+// split this pull request is half of.** Nothing in this build puts water in the
+// ground yet; what exists is the id, the passability rule and the legality test, and
+// those are exactly what this exercises. The generator's own water arrives with the
+// worldgen half, and the fixture writes below are the same direct cache writes
+// `giveBlock` already uses to stage a block to carry.
+func TestPlacingIntoWaterReplacesIt(t *testing.T) {
+	t.Parallel()
+
+	h, chunks := editWorld(t)
+	player, _ := h.join(1, [3]float32{0.5, 200, 0.5})
+	giveBlock(t, h, player, chunks, world.Stone)
+
+	target := [3]int32{3, 200, 0}
+	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.Water, nil); err != nil {
+		t.Fatalf("flood the target voxel: %v", err)
+	}
+	if got := blockAt(t, chunks, 3, 200, 0); got != world.Water {
+		t.Fatalf("the fixture target holds block %d, want Water", got)
+	}
+
+	before := countOf(player.InventoryState(), game.ItemStone)
+	result, err := player.Edit(context.Background(), placeAt(t, player, target, world.Stone))
+	if err != nil {
+		t.Fatalf("placing Stone into water was refused: %v", err)
+	}
+	if got := blockAt(t, chunks, 3, 200, 0); got != world.Stone {
+		t.Errorf("the target voxel holds block %d after the placement, want Stone", got)
+	}
+	if result.Inventory == nil {
+		t.Fatal("the accepted placement reported no inventory change")
+	}
+	if got := countOf(*result.Inventory, game.ItemStone); got != before-1 {
+		t.Errorf("Stone count after placing = %d, want %d: a placement into water spends one block like any other", got, before-1)
+	}
+}
+
 // A block placed inside a player would leave them stuck: moveAndCollide refuses to move a
 // player who is already inside a solid rather than teleporting them out of it.
 func TestPlacingInsideAPlayersBoxIsRefused(t *testing.T) {

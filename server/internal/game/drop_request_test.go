@@ -243,6 +243,7 @@ func (w dropWallTerrain) Block(x, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w dropWallTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // walkAway moves a player far enough that nothing they dropped is within pickup range.
 //

@@ -50,6 +50,21 @@ type Terrain interface {
 	// "solid" and "air", and "air" drops the player through a world that is merely
 	// still loading.
 	Solid(x, y, z int64) bool
+
+	// Fluid reports whether the voxel is one a body wades and swims in.
+	//
+	// **Not the complement of Solid, and a method rather than a block comparison at
+	// the caller.** Air is not solid and is not a fluid either, so a swim rule
+	// written against `!Solid` would have players treading water in mid air; and a
+	// caller that asked [Terrain.Block] instead would have to learn a block id, pay
+	// a chunk lookup per voxel where Solid pays a memo hit, and decide for itself
+	// what an absent chunk means.
+	//
+	// A voxel the server has not generated yet MUST answer false, which is the
+	// opposite fail-safe direction from Solid and the same reasoning: an absent
+	// chunk already stops the body where it stands, and calling it water as well
+	// would let a player swim upward through terrain that has not arrived.
+	Fluid(x, y, z int64) bool
 }
 
 // CacheTerrain reads the chunks the server has already generated.
@@ -92,9 +107,25 @@ func NewCacheTerrain(cache *world.Cache) *CacheTerrain {
 }
 
 // Solid reports whether a world voxel stops movement.
+//
+// **The palette answers what a block is; this answers what an absent chunk is.**
+// The rule used to be spelled `block != world.Air` here, which was right only while
+// nothing in the world was passable — water ended that, so the classification moved
+// to [world.Solid] where the ids live and this kept the half that is about
+// residency.
 func (t *CacheTerrain) Solid(x, y, z int64) bool {
 	block, resident := t.cachedBlock(x, y, z)
-	return !resident || block != world.Air
+	return !resident || world.Solid(block)
+}
+
+// Fluid reports whether a world voxel is one a body swims in.
+//
+// A non-resident chunk is not water — see the interface, where the direction of
+// that fail-safe is argued. It reads through the same memo Solid does, because a
+// swim test is a box scan on the tick like every other one.
+func (t *CacheTerrain) Fluid(x, y, z int64) bool {
+	block, resident := t.cachedBlock(x, y, z)
+	return resident && world.Fluid(block)
 }
 
 // Block reads one resident voxel without ever asking the cache to generate its
@@ -306,17 +337,35 @@ func overlaps(t Terrain, b box) bool {
 	if b.beyondTheWorld() {
 		return true
 	}
+	return anyVoxel(b, func(x, y, z int64) bool { return t.Solid(x, y, z) })
+}
 
+// overlapsFluid reports whether any voxel a body swims in intersects the box.
+//
+// **Beyond the world is not water**, which is the opposite answer overlaps gives to
+// the same question and the same fail-safe reasoning: out there everything is solid,
+// so a body is already stopped, and reporting fluid as well would let it swim
+// upwards through the wall the world ends in.
+func overlapsFluid(t Terrain, b box) bool {
+	if b.beyondTheWorld() {
+		return false
+	}
+	return anyVoxel(b, func(x, y, z int64) bool { return t.Fluid(x, y, z) })
+}
+
+// anyVoxel reports whether any voxel the box touches satisfies want.
+//
+// y outermost, then z, then x, matching world.Index: the innermost loop walks
+// consecutive blocks of a chunk.
+func anyVoxel(b box, want func(x, y, z int64) bool) bool {
 	x0, x1 := voxelSpan(b.min[0], b.max[0])
 	y0, y1 := voxelSpan(b.min[1], b.max[1])
 	z0, z1 := voxelSpan(b.min[2], b.max[2])
 
-	// y outermost, then z, then x, matching world.Index: the innermost loop walks
-	// consecutive blocks of a chunk.
 	for y := y0; y <= y1; y++ {
 		for z := z0; z <= z1; z++ {
 			for x := x0; x <= x1; x++ {
-				if t.Solid(x, y, z) {
+				if want(x, y, z) {
 					return true
 				}
 			}

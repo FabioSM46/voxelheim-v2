@@ -88,6 +88,33 @@ const (
 	// from passing through the ground. 60 blocks/s is 3 blocks per tick at 20 Hz.
 	TerminalFallSpeed = 60.0
 
+	// The swim rules: what a body does while its box overlaps water. Four numbers,
+	// all of them relationships against the three above rather than tastes of their
+	// own.
+	//
+	// **Water replaces gravity; it does not fight it.** A drag term that opposed
+	// Gravity would need a mass and a coefficient to be anything but a second guess,
+	// and the result would still be a terminal velocity — so this integrates straight
+	// to the terminal velocity and skips the invention. What a player feels is the
+	// same either way: you stop falling and start sinking.
+	//
+	// SwimSinkSpeed is one block a second, which is slow enough to read as floating
+	// and fast enough that a player who does nothing reaches the bottom of a
+	// ten-block basin in ten seconds. SwimRiseSpeed is three, a third of
+	// JumpImpulse: rising out of water is deliberate and unhurried where a jump is a
+	// shove. SwimAcceleration is how fast the vertical speed eases toward whichever
+	// of those applies — twelve blocks per second squared is well under Gravity's
+	// twenty-eight, so entering water decelerates a fall over about a second rather
+	// than stopping it dead, and leaving the surface on a rise costs no jerk either.
+	//
+	// SwimSpeed is horizontal, and it is a fraction of WalkSpeed rather than a number
+	// because what is being said is "slower than walking". Six tenths is 2.58 blocks
+	// a second: still faster than nothing, and slower than the draugr on the bank.
+	SwimSinkSpeed    = -1.0
+	SwimRiseSpeed    = 3.0
+	SwimAcceleration = 12.0
+	SwimSpeed        = WalkSpeed * 0.6
+
 	// PlayerWidth is the edge of the player's square footprint, in blocks.
 	//
 	// Under one block on purpose: a body wider than the grid cannot fit through a

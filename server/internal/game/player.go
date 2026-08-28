@@ -1330,6 +1330,12 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	forward := [2]float64{-sinYaw, -cosYaw}
 	right := [2]float64{cosYaw, -sinYaw}
 
+	// Whether this body is in water, asked once and read by all three of the rules
+	// below. A box query through the same Terrain seam the collision uses, so it sees
+	// a player's own digging and an absent chunk answers "not water" — see
+	// [Terrain.Fluid], where that direction is argued.
+	inWater := overlapsFluid(terrain, playerBox(p.pos))
+
 	// Horizontal velocity is *set* from the intent, not accumulated into. There is no
 	// momentum in this issue, so releasing the controls stops the player on the same
 	// tick and there is no acceleration curve to exploit.
@@ -1337,16 +1343,34 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	if p.hunger == 0 {
 		speed *= StarvingSpeedScale
 	}
+	if inWater {
+		// A cap rather than a scale, so it composes with starvation the only way that
+		// makes sense: a starving swimmer is a swimmer, not eight tenths of one.
+		speed = min(speed, SwimSpeed)
+	}
 	p.vel[0] = (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * speed
 	p.vel[2] = (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * speed
 
 	// Whether a jump *happens* is the server's decision, and ground contact is the
 	// part of it a client cannot know. onGround is last tick's answer, which is the
 	// only one that exists when the intent is applied.
-	if p.current.jump && p.onGround {
+	//
+	// **In water the ground contact is not required**, and that is the whole of "hold
+	// jump to swim up": the intent means "rise" there rather than "leap", so it is
+	// answered every tick the body is in water instead of only on the tick it is
+	// standing on something.
+	switch {
+	case p.current.jump && inWater:
+		p.vel[1] = SwimRiseSpeed
+	case p.current.jump && p.onGround:
 		p.vel[1] = JumpImpulse
 	}
-	p.vel[1] = max(p.vel[1]-Gravity*dt, -TerminalFallSpeed)
+
+	if inWater {
+		p.vel[1] = approach(p.vel[1], SwimSinkSpeed, SwimAcceleration*dt)
+	} else {
+		p.vel[1] = max(p.vel[1]-Gravity*dt, -TerminalFallSpeed)
+	}
 
 	delta := [3]float64{p.vel[0] * dt, p.vel[1] * dt, p.vel[2] * dt}
 	pos, blocked := moveAndCollide(terrain, playerBody, p.pos, delta)
@@ -1381,9 +1405,31 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// is reached constantly; asking the chunk cache about the floor under every standing
 	// player twenty times a second would be a real cost for an answer that only matters
 	// on the rare tick an impact is hard enough to hurt.
-	if damage := fallDamage(impact); damage > 0 && landedOnResidentTerrain(terrain, p.pos) {
+	//
+	// **Water resets the reference speed the impact is measured from, so no fall into
+	// water hurts however far it fell.** It is read at the *landing* position rather
+	// than reusing inWater from the top of this tick, because a fast fall can cross
+	// the surface and reach the bed inside one step — and it is read last, beside the
+	// residency check and for the same reason: a damaging impact is rare, and this
+	// box scan is only paid on the ticks that have one.
+	if damage := fallDamage(impact); damage > 0 &&
+		!overlapsFluid(terrain, playerBox(p.pos)) &&
+		landedOnResidentTerrain(terrain, p.pos) {
 		p.damageLocked(damage)
 	}
+}
+
+// approach moves current toward target by at most step, without overshooting.
+//
+// The whole of the swim integrator. A signed max/min pair rather than an
+// exponential ease, because the result has to be the same on every build for the
+// same reason the generator is integer-only — and because "eases toward a terminal
+// velocity" is exactly what this says, with no time constant to tune.
+func approach(current, target, step float64) float64 {
+	if current > target {
+		return max(current-step, target)
+	}
+	return min(current+step, target)
 }
 
 // acceptIntent turns accepted input into the intent the integrator reads.
