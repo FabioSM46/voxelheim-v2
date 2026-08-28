@@ -306,6 +306,12 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 		world.Sandstone: 0,
 		world.Gravel:    0,
 		world.Ice:       0,
+
+		// The three a settlement is built from. Salvage is not a lesson, so all three
+		// are explicit zeroes for the reason sand and gravel are.
+		world.Planks:      0,
+		world.Cobblestone: 0,
+		world.Thatch:      0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))

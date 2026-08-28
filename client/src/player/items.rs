@@ -90,6 +90,12 @@ pub(super) const ITEM_ICE: u16 = 34;
 /// declaration read from several places cannot drift the way two of the same number can.
 pub(crate) const ITEM_SILVER: u16 = 35;
 
+/// The three materials worldgen 6 builds a settlement out of, here for the reason every
+/// block id above is: nothing on this side acts on them either.
+pub(super) const ITEM_PLANKS: u16 = 36;
+pub(super) const ITEM_COBBLESTONE: u16 = 37;
+pub(super) const ITEM_THATCH: u16 = 38;
+
 /// The shapes an item is drawn in.
 ///
 /// Four variants and no "nothing": an empty hand is not an item's shape, so
@@ -373,7 +379,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 35] = [
+pub(super) const ITEMS: [ItemDisplay; 38] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -675,6 +681,31 @@ pub(super) const ITEMS: [ItemDisplay; 35] = [
         colour: ItemColour::Silver,
         livery: None,
     },
+    // The three a settlement is built from. `Block` for all of them, for the reason ice
+    // is: the server's registry gives each of them a voxel to place, and a shape that
+    // said otherwise would be telling a player there is no place press behind what they
+    // are holding.
+    ItemDisplay {
+        item_id: ITEM_PLANKS,
+        name: "planks",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::PLANKS),
+        livery: Some(Livery::Wood),
+    },
+    ItemDisplay {
+        item_id: ITEM_COBBLESTONE,
+        name: "cobblestone",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::COBBLESTONE),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_THATCH,
+        name: "thatch",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::THATCH),
+        livery: None,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -893,6 +924,9 @@ mod tests {
             ITEM_GRAVEL,
             ITEM_ICE,
             ITEM_SILVER,
+            ITEM_PLANKS,
+            ITEM_COBBLESTONE,
+            ITEM_THATCH,
         ];
         for item_id in declared {
             assert!(

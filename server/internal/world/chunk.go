@@ -88,6 +88,21 @@ const (
 	// anything put into its voxel, and nothing a player does ever creates one.
 	Water Block = 12
 	Ice   Block = 13
+
+	// What a settlement is built out of: sawn timber, dressed rubble and a straw
+	// roof. Appended for the reason every id above was — each of them is already on
+	// the wire inside chunks a client holds and inside the delta files a played-in
+	// world directory keeps, and an insertion would renumber the lot.
+	//
+	// **Three materials rather than one, because a building has to read as a
+	// building from a distance.** A keep of one grey block is a rock; a wall, a
+	// frame and a roof in three colours is a silhouette somebody can find again.
+	// All three are ordinary ground as far as every other rule is concerned: they
+	// are mined, they drop themselves, and they can be put back — see [Placeable],
+	// which is the whole of what "a player may build with this" means here.
+	Planks      Block = 14
+	Cobblestone Block = 15
+	Thatch      Block = 16
 )
 
 // Solid reports whether a block stops movement.
@@ -132,7 +147,8 @@ func Fluid(b Block) bool {
 // drops itself, and it can be put back.
 func Placeable(b Block) bool {
 	switch b {
-	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice:
+	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice,
+		Planks, Cobblestone, Thatch:
 		return true
 	default:
 		return false
