@@ -18,6 +18,7 @@ pub(crate) mod icon;
 mod inventory;
 mod login;
 mod loot;
+mod map;
 mod menu;
 mod party;
 mod servers;
@@ -171,7 +172,9 @@ impl Plugin for UiPlugin {
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
                 login::LoginPlugin,
-                loot::LootUiPlugin,
+                // Nested for the reason the compass and the crosshair are, one entry
+                // above: the tuple is at `add_plugins`' fifteen-plugin ceiling.
+                (loot::LootUiPlugin, map::MapUiPlugin),
                 menu::MenuPlugin,
                 party::PartyUiPlugin,
                 servers::ServerListUiPlugin,

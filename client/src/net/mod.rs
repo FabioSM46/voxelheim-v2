@@ -498,13 +498,7 @@ impl LootInbox {
     }
 }
 
-/// Map payloads waiting for the map screen, in wire order.
-///
-/// **Nothing reads it yet, and the bound below is why that is safe.** The screen that
-/// drains it is the second half of #452; until then a session that sends ledger pages
-/// after its welcome fills this to [`MAP_INBOX_CAPACITY`] and stops there. Queuing a
-/// payload the ECS does not consume yet is the shape this module already uses for the
-/// outbound encoders that precede their controls.
+/// Map payloads not yet consumed by the map screen, in wire order.
 ///
 /// Order is what makes the two kinds one queue rather than two: a `MapExplored` that
 /// arrives after a tile evicts it, and one that arrives before it does not, so the two
@@ -539,6 +533,16 @@ impl MapInbox {
             self.0.remove(0);
         }
         self.0.push(event);
+    }
+
+    /// Takes every queued payload in wire order, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<MapEvent> {
+        std::mem::take(&mut self.0)
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, event: MapEvent) {
+        self.push_bounded(event);
     }
 }
 
