@@ -71,6 +71,14 @@ pub use codec::{
     RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
     WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
+// V25's settlement surface, ahead of the consumers that read it: the resident window is
+// #458 and the vendor window is #459. Named here for the reason the block above is —
+// so neither issue has to reopen `codec.rs` to find out what it is allowed to spell.
+#[allow(unused_imports)] // V25 protocol surface; ECS consumers land in #458 and #459.
+pub use codec::{
+    NpcInteractRequest, RESIDENT_NAME_MAX_BYTES, ResidentAppearance, ResidentRole, TradeRequest,
+    VendorClosed, VendorEntry, VendorState,
+};
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
@@ -88,6 +96,8 @@ pub use codec::{
     encode_party_request, encode_place_structure_request, encode_player_input,
     encode_remove_structure_request, encode_repair_request,
 };
+#[allow(unused_imports)] // V25 outbound encoders precede their UI controls (#458, #459).
+pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
 use servers::ServerListEvent;
 use session::{Choice, NetCommand, SessionEvent};

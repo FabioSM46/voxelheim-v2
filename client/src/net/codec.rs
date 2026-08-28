@@ -7919,7 +7919,9 @@ mod tests {
             .windows(NAME.len())
             .position(|window| window == NAME)
             .expect("the name is in the frame it was encoded into");
-        // The replacement is the same length as what it replaces, so no offset moves.
+        // Two of the four bytes, overwritten in place: the replacement is the same length
+        // as the slice it replaces, so the string's length prefix and every offset after it
+        // stay exactly where the encoder put them.
         frame[at..at + NOT_UTF8.len()].copy_from_slice(NOT_UTF8);
 
         // The reason is pinned, not just the refusal: a patched buffer could in principle

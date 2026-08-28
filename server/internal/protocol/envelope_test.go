@@ -806,7 +806,11 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 	// only, so this package has no decode arm for it; the reader is the client's, and it
 	// refuses a 33-byte name as RESIDENT_NAME_MAX_BYTES in client/src/net/codec.rs. The two
 	// constants are one number written twice, once on each side of the wire, and
-	// schemas/player.fbs's "at most 32 bytes" is what both of them copy. What the four
+	// schemas/player.fbs's "at most 32 bytes" is what both of them copy -- which is a claim
+	// about the world, so TestTheSharedBoundsAreOneNumberOnBothSidesOfTheWire is what
+	// re-checks it. It did not exist when this comment was first written and the sentence
+	// was true of nothing: ResidentNameMaxBytes = 33 left this whole package green while the
+	// client went on refusing at 32. What the four
 	// cases below pin is this side's only rule, the encoder's: verbatim, whatever the
 	// caller handed it — over-long, multibyte and not-even-UTF-8 alike, so that a caller's
 	// defect arrives at the decoder intact instead of being quietly made to look legal.

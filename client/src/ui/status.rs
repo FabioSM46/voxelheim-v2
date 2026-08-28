@@ -531,6 +531,11 @@ fn refresh_notice_text(
                 notice.show(line, now);
                 changed = true;
             }
+            // A silence this build chose: the reason is named and decoded, and the
+            // surface that will answer it does not exist yet. Logging it would put a line
+            // per refusal in front of an operator for a decision already recorded in
+            // `has_no_sentence_yet`.
+            None if has_no_sentence_yet(refused.reason) => {}
             // A defect in this build, or a code from a contract this build has not read.
             // Neither is news the player can act on, and inventing a sentence for the
             // second would present a guess as the server's answer.
@@ -557,15 +562,44 @@ fn refresh_notice_text(
 /// fault an operator greps for, and these are answers about the ground under a player's
 /// feet. `schemas/player.fbs` spells them as domain tokens for the same reason.
 ///
-/// Two kinds of `None`, and both are silence on purpose:
+/// Three kinds of `None`, and all three are silence on purpose:
 ///
 ///   - a reason that says the *request* was wrong. A correct client never produces one,
 ///     so it is a defect in this build; the player did nothing and can do nothing.
 ///   - a reason or an action this build cannot name, which is a server one contract
 ///     ahead. There is no sentence to write that would not be a guess.
+///   - a reason this build *can* name and has deliberately not written a sentence for,
+///     because the surface that would answer it does not exist yet — see
+///     [`has_no_sentence_yet`]. The third kind was added by V25; before it, the two above
+///     were stated as exhaustive and a reason like `NotAVendor` fell through the second,
+///     which reported a contract this build had read as one it had not.
 ///
 /// ASCII only, for the reason [`describe`] is: the embedded fallback font is the whole
 /// font stack, and a glyph it lacks renders as nothing.
+/// Whether this build can name the reason and has deliberately written no sentence for it.
+///
+/// **Not a defect, and not an unreadable code** — the two silences that existed before
+/// V25. These are reasons the contract names, this build decodes, and no surface answers
+/// yet: the three settlement refusals are answered where the vendor window is, and that
+/// window lands in #458 and #459. `TileMisaligned` is here for a different reason with the
+/// same shape — a misaligned tile request is this build asking wrongly, but it is not one
+/// of the four `Malformed*` codes [`RefusalReason::is_client_defect`] names, so nothing
+/// classified it at all.
+///
+/// It exists because the sweep needs a third category to assert against, and because the
+/// caller needs one to keep from logging "no sentence for" at a reason whose silence is a
+/// decision. A reason leaves this list when something answers it, which is the edit
+/// #458 and #459 each make.
+fn has_no_sentence_yet(reason: RefusalReason) -> bool {
+    matches!(
+        reason,
+        RefusalReason::TileMisaligned
+            | RefusalReason::NotAVendor
+            | RefusalReason::NotEnoughSilver
+            | RefusalReason::VendorDoesNotWant
+    )
+}
+
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     if refused.reason.is_client_defect() {
         return None;
@@ -1204,10 +1238,17 @@ mod tests {
     ///
     /// Written out rather than derived, for the reason the codec's `CLASSIFICATION` table
     /// is: a list computed from the same `match` it checks would agree with every hole in
-    /// that `match`. A reason appended later without a sentence fails
-    /// [`every_reason_is_either_a_sentence_or_a_deliberate_silence`] only because this list
-    /// has to be extended by hand to compile past it.
-    const EVERY_REASON: [RefusalReason; 27] = [
+    /// that `match`.
+    ///
+    /// **What keeps it complete is [`every_reason_is_in_the_sweep`], not the compiler.**
+    /// This comment used to claim a reason appended later "has to be extended by hand to
+    /// compile past it", and that is simply false: a fixed-size array of enum values does
+    /// not stop compiling when the enum grows. It cost two batches. V24's four map reasons
+    /// and V25's three settlement ones were both appended without being added here, so
+    /// every sweep below ran over 27 of 34 members while reading as though it swept them
+    /// all — and a wrong sentence for any of the seven was green. The length assert is
+    /// what the old comment only promised.
+    const EVERY_REASON: [RefusalReason; 34] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1231,6 +1272,15 @@ mod tests {
         RefusalReason::StaleRevision,
         RefusalReason::InventoryFull,
         RefusalReason::NoAmmunition,
+        // V24's four map reasons.
+        RefusalReason::TileMisaligned,
+        RefusalReason::TooManyMarkers,
+        RefusalReason::NoteTooLong,
+        RefusalReason::MarkerUnknown,
+        // V25's three settlement reasons.
+        RefusalReason::NotAVendor,
+        RefusalReason::NotEnoughSilver,
+        RefusalReason::VendorDoesNotWant,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1246,6 +1296,11 @@ mod tests {
             | RefusalReason::NoInvite
             | RefusalReason::NotLeader => RefusedAction::Party,
             RefusalReason::NoAmmunition => RefusedAction::Attack,
+            // Their sentences live behind a marker action, so a placement action here
+            // would sweep them as silent and pin the opposite of what is true.
+            RefusalReason::TooManyMarkers
+            | RefusalReason::NoteTooLong
+            | RefusalReason::MarkerUnknown => RefusedAction::PlaceMarker,
             RefusalReason::CorpseUnavailable
             | RefusalReason::LootNotOwned
             | RefusalReason::StaleRevision
@@ -1259,35 +1314,104 @@ mod tests {
         }
     }
 
+    /// [`EVERY_REASON`] is every reason, and a length is what says so.
+    ///
+    /// The sweeps in this module are only as good as the list they run over, and nothing
+    /// in the language makes that list complete: a `[RefusalReason; N]` compiles perfectly
+    /// while the enum grows past `N`. That is not hypothetical — it happened twice, in
+    /// V24 and again in V25, and both times every sweep below went on passing over a
+    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count, which is the
+    /// same pin the codec puts on `CLASSIFICATION`.
+    #[test]
+    fn every_reason_is_in_the_sweep() {
+        assert_eq!(
+            EVERY_REASON.len(),
+            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len(),
+            "a reason the contract names is missing from EVERY_REASON, so every sweep in \
+             this module is reporting on a subset while reading as if it swept them all"
+        );
+
+        // A length on its own would be satisfied by naming one member twice while another
+        // stayed missing, which is the same hole one step in.
+        for (seen, reason) in EVERY_REASON.iter().enumerate() {
+            assert!(
+                !EVERY_REASON[..seen].contains(reason),
+                "{reason:?} appears twice in EVERY_REASON, so some other reason is absent"
+            );
+        }
+    }
+
     /// Every reason either becomes a sentence or is deliberately shown to nobody.
     ///
-    /// The two silences are not the same thing and both are on purpose:
+    /// The three silences are not the same thing and all of them are on purpose:
     ///
     ///   - a reason that says the *request* was wrong. A correct client never produces one,
     ///     so it is this build's own defect; the player did nothing and can do nothing.
     ///   - `Unknown`, which is a server one contract ahead. Writing a sentence for a code
     ///     this build cannot read would present a guess as the server's answer.
+    ///   - a reason this build can name whose answering surface is not written yet, listed
+    ///     in [`has_no_sentence_yet`]. **The third category is not a widening to make this
+    ///     test pass** — it is the category V24 and V25 both landed in while
+    ///     [`EVERY_REASON`] was too short to notice. With the seven restored, this test
+    ///     fails on `TileMisaligned` before it ever reaches V25's three: the invariant had
+    ///     been outgrown one contract earlier and nothing said so.
     ///
-    /// A reason appended later lands in neither, so it has to be given one or the other
-    /// here — which is the whole point of sweeping the list rather than spot-checking it.
+    /// A reason appended later lands in none of the three, so it has to be given a
+    /// sentence or a place in one of the two lists — which is the whole point of sweeping
+    /// the list rather than spot-checking it.
     #[test]
     fn every_reason_is_either_a_sentence_or_a_deliberate_silence() {
         for reason in EVERY_REASON {
             let shown = describe_refusal(&refusal(reason));
-            let silent = reason == RefusalReason::Unknown || reason.is_client_defect();
+            let silent = reason == RefusalReason::Unknown
+                || reason.is_client_defect()
+                || has_no_sentence_yet(reason);
             assert_eq!(
                 shown.is_none(),
                 silent,
-                "{reason:?} -> {shown:?}; silence is for this build's own defects and for \
-                 codes it cannot read, and for nothing else"
+                "{reason:?} -> {shown:?}; silence is for this build's own defects, for \
+                 codes it cannot read, and for reasons whose surface is not written yet, \
+                 and for nothing else"
             );
             if let Some(line) = shown {
+                // The map's three are whole sentences rather than the "Cannot X: y" shape,
+                // deliberately: a notebook that is full has a number worth reading.
                 assert!(
-                    line.starts_with("Cannot ") || line == "No arrows",
+                    line.starts_with("Cannot ")
+                        || line == "No arrows"
+                        || line.starts_with("The map holds no more marks")
+                        || line == "That note is too long"
+                        || line == "That mark is already gone",
                     "{reason:?} -> {line}"
                 );
             }
         }
+    }
+
+    /// The three silences are three, and no reason is in two of them at once.
+    ///
+    /// [`has_no_sentence_yet`] is the category the test above checks against, so a member
+    /// slipped into it is a member excused from ever getting a sentence. It must not
+    /// overlap the defects — those are silent for a different reason and stay silent
+    /// forever, while every name here is one #458 or #459 removes.
+    #[test]
+    fn the_deliberate_silences_do_not_overlap() {
+        for reason in EVERY_REASON {
+            assert!(
+                !(has_no_sentence_yet(reason) && reason.is_client_defect()),
+                "{reason:?} is both a client defect and a reason awaiting a surface"
+            );
+            assert!(
+                !(has_no_sentence_yet(reason) && reason == RefusalReason::Unknown),
+                "Unknown is silent because it cannot be read, not because nobody wrote it"
+            );
+        }
+        // The list is not empty today, and when #458 and #459 empty it this test says so
+        // rather than the category quietly becoming decorative.
+        assert!(
+            EVERY_REASON.iter().copied().any(has_no_sentence_yet),
+            "no reason awaits a surface; delete `has_no_sentence_yet` and its category"
+        );
     }
 
     #[test]
