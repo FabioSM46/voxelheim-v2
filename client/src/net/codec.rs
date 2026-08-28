@@ -1590,6 +1590,17 @@ pub struct LootTakeRequest {
     pub client_tick: u32,
 }
 
+/// Intent to move every entry of one authoritative revision that fits.
+///
+/// It names no entry and carries no count, because neither is this side's to decide: the
+/// server owns the order it walks the container in and whether each stack fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LootTakeAllRequest {
+    pub corpse_id: u64,
+    pub revision: u32,
+    pub client_tick: u32,
+}
+
 /// One authoritative stack in a corpse container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootEntry {
@@ -3949,6 +3960,28 @@ pub fn encode_loot_take_request(request: &LootTakeRequest) -> Vec<u8> {
     finish_envelope(
         builder,
         fb::Payload::LootTakeRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one take-everything intent, from the revision currently on screen.
+///
+/// The revision is what makes this safe to originate from a view one message old: a
+/// container that changed since answers `StaleRevision` rather than emptying something
+/// the player never saw.
+pub fn encode_loot_take_all_request(request: &LootTakeAllRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::LootTakeAllRequest::create(
+        &mut builder,
+        &fb::LootTakeAllRequestArgs {
+            corpse_id: request.corpse_id,
+            revision: request.revision,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::LootTakeAllRequest,
         payload.as_union_value(),
     )
 }
@@ -9198,6 +9231,33 @@ mod tests {
                 wire.client_tick()
             ),
             (400, 7, 3, 92)
+        );
+    }
+
+    /// **V23's take-all carries identity, revision and ordering — and no entry.**
+    ///
+    /// The absence is the contract: an entry id would be this side naming what comes home,
+    /// and a count would be it naming how much. The server walks its own container.
+    #[test]
+    fn the_take_all_request_names_no_entry_and_no_count() {
+        let take_all = LootTakeAllRequest {
+            corpse_id: 400,
+            revision: 3,
+            client_tick: 93,
+        };
+        let frame = encode_loot_take_all_request(&take_all);
+        assert_eq!(
+            decode(&frame),
+            Ok(Message::ClientOnly("LootTakeAllRequest"))
+        );
+        let envelope = fb::root_as_envelope(&frame).expect("valid loot-take-all request");
+        assert_eq!(envelope.payload_type(), fb::Payload::LootTakeAllRequest);
+        let wire = envelope
+            .payload_as_loot_take_all_request()
+            .expect("LootTakeAllRequest payload");
+        assert_eq!(
+            (wire.corpse_id(), wire.revision(), wire.client_tick()),
+            (400, 3, 93)
         );
     }
 

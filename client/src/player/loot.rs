@@ -8,8 +8,9 @@ use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, SnapshotBuffer,
 };
 use crate::net::{
-    LootEvent, LootInbox, LootOpenRequest, LootState, LootTakeRequest, Outbound, Session,
-    encode_loot_open_request, encode_loot_take_request,
+    LootEvent, LootInbox, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest,
+    Outbound, Session, encode_loot_open_request, encode_loot_take_all_request,
+    encode_loot_take_request,
 };
 use crate::settings::{Control, Settings};
 
@@ -166,6 +167,14 @@ fn send_loot_intents(
         window.dismiss_current();
     }
 
+    // Read once, above the branch, because interact now means two things and the key is
+    // edge-triggered: `just_pressed` is cleared per frame rather than per reader, so a
+    // second read in the other arm would be a second press to whichever arm ran first.
+    let bindings = settings
+        .as_deref()
+        .map_or_else(Default::default, |settings| *settings.bindings());
+    let interact = keys.is_some_and(|keys| keys.just_pressed(bindings.key(Control::Interact)));
+
     if gate.mode() == InputMode::Loot && !gate.dead() {
         let Some(outbound) = outbound.as_deref_mut() else {
             return;
@@ -184,15 +193,21 @@ fn send_loot_intents(
                 client_tick: cadence.client_tick,
             }));
         }
+        // The same key that opened the corpse empties it. One request from the revision
+        // currently on screen, and no opinion about what will fit: a pack that cannot hold
+        // everything is answered with the remainder and a refusal, and this side finds out
+        // the way it finds out about every other outcome.
+        if interact && let Some(state) = window.current.as_ref() {
+            outbound.send(encode_loot_take_all_request(&LootTakeAllRequest {
+                corpse_id: state.corpse_id,
+                revision: state.revision,
+                client_tick: cadence.client_tick,
+            }));
+        }
         return;
     }
 
-    let bindings = settings
-        .as_deref()
-        .map_or_else(Default::default, |settings| *settings.bindings());
-    if !gate.may_act()
-        || !keys.is_some_and(|keys| keys.just_pressed(bindings.key(Control::Interact)))
-    {
+    if !gate.may_act() || !interact {
         return;
     }
     let (Some(session), Some(outbound)) = (session, outbound.as_deref_mut()) else {
@@ -511,6 +526,135 @@ mod tests {
         );
     }
 
+    /// **F in the loot window asks for everything, from the revision on screen.**
+    ///
+    /// One request, and it names neither an entry nor a count: which stacks fit is the
+    /// server's answer, and the revision is what makes originating from a one-message-old
+    /// view safe — a container that moved on since is refused rather than emptied blind.
+    #[test]
+    fn interact_inside_the_loot_window_asks_to_take_everything_shown() {
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(4);
+        app.insert_resource(outbound)
+            .insert_resource(ButtonInput::<KeyCode>::default());
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(state(6, 61)));
+        app.update();
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Loot);
+        // The open the window is already showing was never sent from this test, so
+        // anything in the channel now is what this frame's key produced.
+        assert!(frames.try_recv().is_err());
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.update();
+        assert_eq!(
+            frames.try_recv().unwrap(),
+            encode_loot_take_all_request(&LootTakeAllRequest {
+                corpse_id: CORPSE,
+                revision: 6,
+                client_tick: 0,
+            })
+        );
+        assert!(
+            frames.try_recv().is_err(),
+            "the same press also asked to open a corpse"
+        );
+        assert_eq!(
+            app.world().resource::<LootWindow>().state(),
+            Some(&state(6, 61)),
+            "the client removed an entry the server has not answered about"
+        );
+    }
+
+    /// **A held F empties the corpse once**, the property #408 pinned for the open key,
+    /// on the request the same key now also originates. A repeat frame that re-armed
+    /// `just_pressed` would send a take-all per frame at a container that answers
+    /// `StaleRevision` to all but the first — a burst of refusals for one press.
+    #[test]
+    fn holding_interact_inside_the_window_asks_to_take_everything_once() {
+        const KEY: KeyCode = KeyCode::KeyF;
+        let (mut app, frames) = held_key_app();
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(state(6, 61)));
+        app.update();
+        assert!(frames.try_iter().collect::<Vec<_>>().is_empty());
+
+        let mut sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KEY, ButtonState::Pressed, false)],
+        );
+        for _ in 0..3 {
+            sent.extend(keyboard_frame(
+                &mut app,
+                &frames,
+                [key_event(KEY, ButtonState::Pressed, true)],
+            ));
+        }
+        sent.extend(keyboard_frame(&mut app, &frames, []));
+        let take_all = encode_loot_take_all_request(&LootTakeAllRequest {
+            corpse_id: CORPSE,
+            revision: 6,
+            client_tick: 0,
+        });
+        assert_eq!(sent, vec![take_all.clone()], "a held key is one press");
+
+        sent.extend(keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KEY, ButtonState::Released, false)],
+        ));
+        sent.extend(keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KEY, ButtonState::Pressed, false)],
+        ));
+        assert_eq!(
+            sent,
+            vec![take_all.clone(), take_all],
+            "a press after a release is a second press"
+        );
+    }
+
+    /// **A full pack leaves the window open; an emptied corpse closes it.**
+    ///
+    /// The two answers a take-all can come back as, from the side that has to keep
+    /// showing the remainder. `RefusedAction::TakeLoot` moves nothing here — this client
+    /// does not decide what came home — and the newest-revision guard accepts the
+    /// remainder precisely because the server spent a revision on the entries that moved.
+    #[test]
+    fn a_refused_take_all_keeps_the_window_and_a_closure_ends_it() {
+        let mut app = app();
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(state(6, 61)));
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::State(state(7, 62)));
+        app.update();
+        assert_eq!(
+            app.world().resource::<LootWindow>().state(),
+            Some(&state(7, 62)),
+            "the remainder of a partial take-all was refused as stale"
+        );
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Loot);
+
+        app.world_mut()
+            .resource_mut::<LootInbox>()
+            .push(LootEvent::Closed(LootClosed { corpse_id: CORPSE }));
+        app.update();
+        assert!(app.world().resource::<LootWindow>().state().is_none());
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+    }
+
     #[test]
     fn interact_and_take_send_only_intent_and_keep_the_authoritative_entries() {
         let mut app = app();
@@ -530,6 +674,15 @@ mod tests {
                 client_tick: 0,
             })
         );
+
+        // What `keyboard_input_system` does at the top of every frame, and what this test
+        // has to do by hand because it inserts the resource rather than running the input
+        // pipeline: `just_pressed` is per frame, and a press left armed would be read again
+        // by the take-all branch the moment the window opens. The two held-key tests above
+        // are where that edge is actually pinned, through the real plugin.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
 
         app.world_mut()
             .resource_mut::<LootInbox>()

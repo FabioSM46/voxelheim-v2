@@ -1423,6 +1423,35 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	// Take-all answers through the same TakeLoot channel, because a refusal names the
+	// action a player took rather than the message that carried it: "take everything"
+	// that could not is still "cannot loot", and a second refused action would be a
+	// wire distinction with no sentence behind it. A partially satisfied take-all
+	// arrives here too — the entries that moved are already committed, and the refusal
+	// is what says the rest did not.
+	case vnet.PayloadLootTakeAllRequest:
+		if player == nil || msg.LootTakeAll == nil {
+			log.Debug("loot take-all arrived with no player or intent; discarding")
+			return nil
+		}
+
+		request := *msg.LootTakeAll
+		reason, takeErr := player.TakeAllLoot(request)
+		if takeErr == nil {
+			return nil
+		}
+		log.Debug("refusing loot take-all", "corpse_id", request.CorpseID,
+			"revision", request.Revision, "client_tick", request.ClientTick,
+			"reason", takeErr.Error(), "code", reason.String())
+		if reason == vnet.RefusalReasonUnknown {
+			return nil
+		}
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionTakeLoot, Reason: reason}
+		if sendErr := send(protocol.EncodeActionRefused(refusal)); sendErr != nil {
+			return fmt.Errorf("session: send loot-take-all refusal: %w", sendErr)
+		}
+		return nil
+
 	case vnet.PayloadLeaveRequest:
 		if player == nil || msg.LeaveRequest == nil {
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)

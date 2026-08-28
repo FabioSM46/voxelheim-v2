@@ -345,15 +345,9 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 	}
 	p.haveLootTakeTick, p.lastLootTakeTick = true, req.ClientTick
 
-	c, container, reason, err := p.accessibleCorpseLocked(req.CorpseID)
+	c, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
 	if err != nil {
 		return reason, err
-	}
-	if p.openLootID != c.entityID {
-		return vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse container is not open")
-	}
-	if req.Revision != container.revision {
-		return vnet.RefusalReasonStaleRevision, fmt.Errorf("loot revision %d is not current revision %d", req.Revision, container.revision)
 	}
 	entryIndex := -1
 	for index := range container.entries {
@@ -381,6 +375,84 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 		p.sim.removeCorpseLocked(c.entityID)
 	}
 	return vnet.RefusalReasonUnknown, nil
+}
+
+// TakeAllLoot empties into the pack every entry of one known revision that fits, in
+// entry order, and leaves the rest where they are.
+//
+// It is TakeLoot's preconditions and a different loop: an entry that does not fit is
+// skipped rather than aborted on, so a bone behind a blade still comes home. The whole
+// walk runs inside the one TryLock window, which is what makes "what fits" a question
+// about a pack no other request can be halfway through changing.
+//
+// Partial success is reported as both things it is: the entries that moved are
+// committed and dirty the two states, and the remainder answers InventoryFull so the
+// player is told why the window is still open. Nothing moving is the same shape with
+// no revision spent.
+func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReason, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if err := p.cannotActLocked(); err != nil {
+		return vnet.RefusalReasonPlayerIsDead, err
+	}
+	if p.haveLootTakeAllTick && !newerTick(req.ClientTick, p.lastLootTakeAllTick) {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("stale loot-take-all client tick %d; newest is %d", req.ClientTick, p.lastLootTakeAllTick)
+	}
+	p.haveLootTakeAllTick, p.lastLootTakeAllTick = true, req.ClientTick
+
+	c, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
+	if err != nil {
+		return reason, err
+	}
+	if !p.inventory.mu.TryLock() {
+		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
+	}
+	defer p.inventory.mu.Unlock()
+
+	// Filtered in place: the write index never overtakes the read index, so an entry
+	// is always read before its slot can be reused. Nothing is committed to the
+	// container until the walk has finished counting what moved.
+	kept, moved := container.entries[:0], 0
+	for _, entry := range container.entries {
+		if p.inventory.insertWholeStackLocked(entry.stack) {
+			moved++
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if moved > 0 {
+		container.entries = kept
+		container.revision++
+		p.inventoryDirty = true
+		p.lootDirty = true
+		if !c.hasLoot() {
+			p.sim.removeCorpseLocked(c.entityID)
+			return vnet.RefusalReasonUnknown, nil
+		}
+	}
+	if len(container.entries) > 0 {
+		return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d loot entries do not fit", len(container.entries))
+	}
+	return vnet.RefusalReasonUnknown, nil
+}
+
+// openContainerLocked names the one container a take may act on: reachable, owned,
+// non-empty, currently open on this session, and at the revision the request carries.
+// Both take paths share it so that "which container, and is the client's view of it
+// current" has exactly one answer.
+func (p *Player) openContainerLocked(corpseID uint64, revision uint32) (*corpse, *corpseContainer, vnet.RefusalReason, error) {
+	c, container, reason, err := p.accessibleCorpseLocked(corpseID)
+	if err != nil {
+		return nil, nil, reason, err
+	}
+	if p.openLootID != c.entityID {
+		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse container is not open")
+	}
+	if revision != container.revision {
+		return nil, nil, vnet.RefusalReasonStaleRevision, fmt.Errorf("loot revision %d is not current revision %d", revision, container.revision)
+	}
+	return c, container, vnet.RefusalReasonUnknown, nil
 }
 
 func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, vnet.RefusalReason, error) {

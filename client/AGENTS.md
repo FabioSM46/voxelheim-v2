@@ -528,6 +528,23 @@ The client samples the controls, sends what the player is *trying* to do at the 
   rather than two — and two `ConsumeRequest` frames for one intent is exactly what a
   branch each would have produced.
 
+  **Interact means two things, and which one it means is the input mode.** Out of the loot
+  window `Control::Interact` asks to *open* the nearest accessible corpse; inside it, the
+  same press asks to *empty* the one on screen — one `LootTakeAllRequest` carrying the
+  corpse id and the revision currently shown, and naming no entry and no count, because
+  which stacks fit is the server's answer and not this side's. So a routine kill is two
+  presses and no clicking, and clicking an entry still takes exactly that entry.
+  `send_loot_intents` reads the key **once, above the mode branch**, for the reason the
+  consume press is read once: `just_pressed` is cleared per frame rather than per reader,
+  so a second read in the other arm would be a second press to whichever arm ran first.
+
+  The three answers a take-all can come back as are all the ones the window already knew.
+  A bare corpse is a `LootClosed` and the window goes; a partial one is a `LootState` of the
+  remainder, which the newest-revision guard accepts precisely because the server spent a
+  revision on the entries that did move, beside a `TakeLoot`/`InventoryFull` refusal that
+  the status line already had a sentence for. Nothing here removes an entry, closes the
+  window or predicts a fit on its own.
+
   **A held key is one press, and that is measured rather than asserted.** The key is
   edge-triggered for the same reason the buttons are, but what makes a repeat harmless is
   `bevy_input`'s `press()` — it arms `just_pressed` only when the key was not already in
@@ -535,11 +552,12 @@ The client samples the controls, sends what the player is *trying* to do at the 
   does *not* filter `KeyboardInput { repeat: true }`, so a review on PR #403 read the code
   and concluded a held key would drain a food stack frame by frame. It does not, but the
   guarantee belongs to a dependency rather than to this tree, so a Bevy upgrade could take
-  it away silently. Two tests hold a key across frames through the real input pipeline and
+  it away silently. Three tests hold a key across frames through the real input pipeline and
   pin it: `holding_the_consume_key_reports_one_press_and_a_later_press_reports_again` in
-  `ui/inventory.rs` and `holding_interact_asks_to_open_a_corpse_once_and_a_later_press_asks_again`
-  in `player/loot.rs`. Both also press again after a release, because a test that only
-  proved "one" would pass just as well with the key dead.
+  `ui/inventory.rs`, and `holding_interact_asks_to_open_a_corpse_once_and_a_later_press_asks_again`
+  and `holding_interact_inside_the_window_asks_to_take_everything_once` in `player/loot.rs` —
+  one per thing the interact key now means. All three also press again after a release,
+  because a test that only proved "one" would pass just as well with the key dead.
 
   **Food routing follows the kit pattern without copying the server's capability table.**
   `FOODS` names the ids whose consume press is worth sending, and `consume_request` is the
