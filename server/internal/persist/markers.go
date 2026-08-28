@@ -292,10 +292,17 @@ func (s *MarkerStore) markerPath(id CharacterID) string {
 //
 // **What is refused here is what this build could not read back**, which is the
 // [encodeExploration] rule and is stricter here because a mark carries more that can be
-// wrong: too many marks, a note too long for its field, a zero id, and an id at or above
-// the counter that is supposed to be past all of them. Each is a bug in the caller rather
-// than a state a player can reach, and each would otherwise be discovered at the next
-// login as a quarantined file.
+// wrong. The loop below is [decodeMarkers]'s, check for check and in its order: a zero id,
+// an id at or above the counter that is supposed to be past all of them, one id naming two
+// marks, a kind this contract does not name, a note too long for its field, and a note
+// that is not valid UTF-8 — plus the count, which the reader takes from the header. Each
+// is a bug in the caller rather than a state a player can reach, and each would otherwise
+// be discovered at the next login as a quarantined file.
+//
+// The three the writer used to leave to the reader — kind, uniqueness, UTF-8 — are the
+// three a caller can get wrong without noticing, because none of them is refused by the
+// type system and all three are checked at the wire instead, where a mark that failed
+// them would already be an illegal frame.
 func encodeMarkers(stored StoredMarkers) ([]byte, error) {
 	if len(stored.Markers) > MaxMarkers {
 		return nil, fmt.Errorf("%w: %d marks, more than the %d one character's file can hold",
@@ -304,17 +311,35 @@ func encodeMarkers(stored StoredMarkers) ([]byte, error) {
 	if stored.NextID == 0 {
 		return nil, errors.New("persist: a marker file must carry a next id of at least 1; zero is the absent-field value no mark may take")
 	}
+	// Seen rather than a sort, for the reason [decodeMarkers] keeps one: the order is the
+	// caller's, and rearranging it to find duplicates would be this package forming the
+	// second opinion its own layout comment says it has no business having.
+	seen := make(map[uint64]struct{}, len(stored.Markers))
 	for _, marker := range stored.Markers {
-		if len(marker.Note) > MaxMarkerNote {
-			return nil, fmt.Errorf("persist: a mark's note is %d bytes, more than the %d one may carry",
-				len(marker.Note), MaxMarkerNote)
-		}
 		if marker.MarkerID == 0 {
 			return nil, errors.New("persist: a mark with no id cannot be written down; zero is the absent-field value")
 		}
 		if marker.MarkerID >= stored.NextID {
 			return nil, fmt.Errorf("persist: a mark carries id %d and the next id to mint is %d; the counter must be past every id it has handed out",
 				marker.MarkerID, stored.NextID)
+		}
+		if _, twice := seen[marker.MarkerID]; twice {
+			return nil, fmt.Errorf("persist: id %d names two marks, and a MarkerList may not carry one id twice",
+				marker.MarkerID)
+		}
+		seen[marker.MarkerID] = struct{}{}
+		if !protocol.MarkerKindOK(marker.Kind) {
+			return nil, fmt.Errorf("persist: a mark carries kind %d, which is not one this contract names",
+				byte(marker.Kind))
+		}
+		if len(marker.Note) > MaxMarkerNote {
+			return nil, fmt.Errorf("persist: a mark's note is %d bytes, more than the %d one may carry",
+				len(marker.Note), MaxMarkerNote)
+		}
+		if !utf8.ValidString(marker.Note) {
+			// The note is never printed here, only measured and judged: it is a player's
+			// own text, and the repository's privacy boundary covers it.
+			return nil, errors.New("persist: a mark's note is not valid UTF-8, and string() over invalid bytes is silent in Go")
 		}
 	}
 

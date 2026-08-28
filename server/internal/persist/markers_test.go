@@ -250,6 +250,27 @@ func TestTheWriterRefusesWhatTheReaderWould(t *testing.T) {
 		"a counter of zero": {
 			NextID: 0,
 		},
+		"one id naming two marks": {
+			NextID: 3,
+			Markers: []protocol.Marker{
+				{MarkerID: 2, Kind: vnet.MarkerKindCave},
+				{MarkerID: 2, Kind: vnet.MarkerKindNote},
+			},
+		},
+		"a kind this contract does not name": {
+			NextID:  2,
+			Markers: []protocol.Marker{{MarkerID: 1, Kind: vnet.MarkerKind(200)}},
+		},
+		"the absent-field kind": {
+			NextID:  2,
+			Markers: []protocol.Marker{{MarkerID: 1, Kind: vnet.MarkerKindUnknown}},
+		},
+		// The bytes the reader's own UTF-8 case uses: a lead byte promising a
+		// continuation and an ASCII '(' where that continuation should be.
+		"a note that is not valid UTF-8": {
+			NextID:  2,
+			Markers: []protocol.Marker{{MarkerID: 1, Kind: vnet.MarkerKindNote, Note: "\xc3("}},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
