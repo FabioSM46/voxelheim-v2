@@ -1864,7 +1864,7 @@ fn only_a_described_remote_body_gets_a_fixed_size_name_plate() {
         "a body is not labelled with a name the server has not described"
     );
     let (plate, text) = name_plate_of(&mut app, 99).expect("the described remote has a plate");
-    assert_eq!(text, "Lv 1 · Astrid");
+    assert_eq!(text, "Lv 1 | Astrid");
 
     let world = app.world();
     let node = world.entity(plate).get::<Node>().expect("the plate is UI");
@@ -1974,7 +1974,7 @@ fn a_description_that_arrives_late_adds_a_plate_without_replacing_the_body() {
     assert_eq!(body_of(&mut app, 99), Some(body));
     assert_eq!(
         name_plate_of(&mut app, 99).map(|(_, text)| text),
-        Some("Lv 1 · Bjorn".to_owned())
+        Some("Lv 1 | Bjorn".to_owned())
     );
 
     let (plate, _) = name_plate_of(&mut app, 99).expect("the late description added a plate");
@@ -1984,7 +1984,7 @@ fn a_description_that_arrives_late_adds_a_plate_without_replacing_the_body() {
     assert_eq!(body_of(&mut app, 99), Some(body));
     assert_eq!(
         name_plate_of(&mut app, 99),
-        Some((plate, "Lv 7 · Ragnar".to_owned())),
+        Some((plate, "Lv 7 | Ragnar".to_owned())),
         "a new description rewrites the existing plate without replacing either entity"
     );
 }
@@ -2023,17 +2023,25 @@ fn a_player_who_leaves_takes_their_name_plate_with_them() {
 
 #[test]
 fn hostile_and_unicode_names_remain_bounded_valid_single_line_text() {
-    assert_eq!(name_plate_text(7, ""), "Lv 7 · ");
-    assert_eq!(
-        name_plate_text(7, "Sigrid\nJarl"),
-        "Lv 7 · Sigrid\u{fffd}Jarl"
-    );
-    assert_eq!(name_plate_text(7, "石のᚠe\u{301}"), "Lv 7 · 石のᚠe\u{301}");
+    assert_eq!(name_plate_text(7, ""), "Lv 7 | ");
+    assert_eq!(name_plate_text(7, "Sigrid\nJarl"), "Lv 7 | Sigrid?Jarl");
+    assert_eq!(name_plate_text(7, "石のᚠe\u{301}"), "Lv 7 | 石のᚠe\u{301}");
 
     let long = "界".repeat(NAME_PLATE_CHARACTERS + 20);
     let shown = name_plate_text(u16::MAX, &long);
     assert_eq!(shown.chars().count(), NAME_PLATE_CHARACTERS);
-    assert!(shown.ends_with('…'));
+    assert!(shown.ends_with("..."), "{shown}");
+
+    // The mark is taken out of the bound, so the bound is what holds — for every level a
+    // `u16` can carry, not only for the short prefixes a test would think to write.
+    for level in [0, 9, 10, 99, 100, 9_999, 10_000, u16::MAX] {
+        let shown = name_plate_text(level, &long);
+        assert!(
+            shown.chars().count() <= NAME_PLATE_CHARACTERS,
+            "level {level} drew {} characters onto a {NAME_PLATE_CHARACTERS}-character plate: {shown}",
+            shown.chars().count()
+        );
+    }
 }
 
 #[test]

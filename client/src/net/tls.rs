@@ -623,7 +623,7 @@ fn refusal(
                 "refusing to connect to {addr}: it presented a different certificate than the one \
                  the server list carries for it.\n  the list says: {listed}\n  it presented:   \
                  {observed}\n\nThis means either that the server was moved or rebuilt without its \
-                 key and never re-registered, or that something is standing between you and it — \
+                 key and never re-registered, or that something is standing between you and it - \
                  and nothing here can tell those apart. Ask whoever runs the server for the \
                  fingerprint it logs when it starts; if it is the one presented, they need to \
                  register it again before this client will connect."
@@ -637,7 +637,7 @@ fn refusal(
                 "refusing to sign in at {addr}: it presented a different certificate than the one \
                  this client was told to expect.\n  you gave:      {supplied}\n  it presented:  \
                  {observed}\n\nThis means either that whoever runs the account service replaced \
-                 its certificate, or that something is standing between you and it — and nothing \
+                 its certificate, or that something is standing between you and it - and nothing \
                  here can tell those apart. Ask them for the fingerprint it prints when it starts \
                  (certificate_sha256) and pass that to --account-service-fingerprint. Nothing this \
                  client can read will settle it on its own: this connection is where its trust \

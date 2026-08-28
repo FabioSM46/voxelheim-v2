@@ -333,7 +333,7 @@ fn fill_percent(vitals: PlayerVitals) -> f32 {
 /// The complete progression reading drawn inside the bar.
 fn experience_label(vitals: PlayerVitals) -> String {
     format!(
-        "Lv {} · {} / {}",
+        "Lv {} | {} / {}",
         vitals.level, vitals.experience, vitals.experience_to_next
     )
 }
@@ -459,11 +459,11 @@ mod tests {
         assert_eq!(fill_percent(vitals(7, 120, 350)), 120.0 / 3.5);
         assert_eq!(fill_percent(vitals(7, 350, 350)), 100.0);
         assert_eq!(fill_percent(vitals(u16::MAX, u32::MAX, u32::MAX)), 100.0);
-        assert_eq!(experience_label(vitals(7, 120, 350)), "Lv 7 · 120 / 350");
+        assert_eq!(experience_label(vitals(7, 120, 350)), "Lv 7 | 120 / 350");
 
         let mut app = hud(Some(vitals(7, 120, 350)));
         assert_eq!(fill_width(&mut app), Val::Percent(120.0 / 3.5));
-        assert_eq!(bar_label(&mut app), "Lv 7 · 120 / 350");
+        assert_eq!(bar_label(&mut app), "Lv 7 | 120 / 350");
 
         deliver(&mut app, vitals(7, 350, 350));
         assert_eq!(fill_width(&mut app), Val::Percent(100.0));

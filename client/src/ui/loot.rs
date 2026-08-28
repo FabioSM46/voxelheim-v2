@@ -77,7 +77,7 @@ fn rebuild_window(
         };
         commands.entity(root).with_children(|root| {
             root.spawn((
-                Text::new(format!("Loot · revision {}", state.revision)),
+                Text::new(format!("Loot | revision {}", state.revision)),
                 TextFont {
                     font_size: FontSize::Px(22.0),
                     ..default()
@@ -104,7 +104,7 @@ fn rebuild_window(
                     String::new()
                 } else {
                     format!(
-                        " · durability {}/{}",
+                        " | durability {}/{}",
                         entry.durability, entry.max_durability
                     )
                 };
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(roots.single(world).unwrap(), &Visibility::Visible);
         let mut texts = world.query::<&Text>();
         let lines: Vec<_> = texts.iter(world).map(|text| text.0.as_str()).collect();
-        assert!(lines.contains(&"Loot · revision 4"));
+        assert!(lines.contains(&"Loot | revision 4"));
         // The take-all line, spelled out rather than matched loosely, because what is
         // under test is partly the *glyphs*: Bevy's embedded fallback font is a 95-glyph
         // ASCII subset, so a hint written with a typographic dash draws as "F  take all"

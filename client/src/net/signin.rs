@@ -169,7 +169,7 @@ impl AccountService {
             "https" => {}
             "http" => {
                 return Err(format!(
-                    "{raw} is http, and the account service listens over TLS. Use https:// — and \
+                    "{raw} is http, and the account service listens over TLS. Use https:// - and \
                      pass the fingerprint it prints when it starts, which is what this client \
                      checks instead of a certificate authority."
                 ));
@@ -825,7 +825,7 @@ fn refusal(response: &http::Response) -> String {
         // predates that change refuses it. Said plainly, because "malformed" would
         // send somebody looking at this client.
         "world_not_named" => {
-            "that account service does not issue account tickets yet — it will only sign for a \
+            "that account service does not issue account tickets yet - it will only sign for a \
              named world."
         }
         "malformed_request" => "the account service could not read this client's request.",

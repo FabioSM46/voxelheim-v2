@@ -380,7 +380,7 @@ fn spawn_inventory_screen(mut commands: Commands) {
                             BackgroundColor(Color::srgb(0.10, 0.115, 0.14)),
                         ))
                         .with_child((
-                            Text::new("INVENTORY  —  DRAG"),
+                            Text::new("INVENTORY  -  DRAG"),
                             TextFont {
                                 font_size: FontSize::Px(15.0),
                                 ..default()

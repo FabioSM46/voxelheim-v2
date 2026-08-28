@@ -502,7 +502,7 @@ fn parse_launch(args: &[String], env: &LaunchEnv) -> Result<Launch, String> {
                  That service prints one at every start, as certificate_sha256; pass it \
                  with --account-service-fingerprint. This client checks it instead of a \
                  certificate authority, and a connection it cannot check is one anybody \
-                 on the way can answer — including with a signing key of their own.",
+                 on the way can answer - including with a signing key of their own.",
                 raw.trim()
             ));
         }
