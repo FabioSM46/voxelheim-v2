@@ -94,6 +94,14 @@ var handMiningTimes = map[world.Block]time.Duration{
 	// water is refused by exactly the mechanism that already existed — no branch, no
 	// id comparison anywhere on the mining path.
 	world.Ice: 1500 * time.Millisecond,
+
+	// What a settlement is made of, and the three of them span nearly the whole table
+	// on purpose: a roof comes off faster than leaves, a plank wall sits between grass
+	// and a log, and dressed stone is most of the way to bare rock. Taking a hut apart
+	// should be quick and taking a keep apart should be a job.
+	world.Thatch:      400 * time.Millisecond,
+	world.Planks:      800 * time.Millisecond,
+	world.Cobblestone: 2500 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -142,15 +150,24 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		world.Gravel: {},
 	},
 	ItemPickaxe: {
-		world.Stone:     {},
-		world.CoalOre:   {},
-		world.IronOre:   {},
-		world.Sandstone: {},
-		world.Ice:       {},
+		world.Stone:       {},
+		world.CoalOre:     {},
+		world.IronOre:     {},
+		world.Sandstone:   {},
+		world.Ice:         {},
+		world.Cobblestone: {},
 	},
 	ItemAxe: {
 		world.Log:    {},
 		world.Leaves: {},
+
+		// A settlement's two soft materials. Sawn timber is what an axe is for,
+		// exactly as the log it came from is; thatch joins it beside the leaves it is
+		// made of rather than being left unhelped, because every block a hand can
+		// break has exactly one implement for it and that invariant is worth more
+		// than the taste question of what one strips a roof with.
+		world.Planks: {},
+		world.Thatch: {},
 	},
 }
 

@@ -90,6 +90,12 @@ pub(super) const ITEM_ICE: u16 = 34;
 /// declaration read from several places cannot drift the way two of the same number can.
 pub(crate) const ITEM_SILVER: u16 = 35;
 
+/// The three materials worldgen 6 builds a settlement out of, here for the reason every
+/// block id above is: nothing on this side acts on them either.
+pub(super) const ITEM_PLANKS: u16 = 36;
+pub(super) const ITEM_COBBLESTONE: u16 = 37;
+pub(super) const ITEM_THATCH: u16 = 38;
+
 /// The shapes an item is drawn in.
 ///
 /// Four variants and no "nothing": an empty hand is not an item's shape, so
@@ -373,7 +379,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 35] = [
+pub(super) const ITEMS: [ItemDisplay; 38] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -675,6 +681,31 @@ pub(super) const ITEMS: [ItemDisplay; 35] = [
         colour: ItemColour::Silver,
         livery: None,
     },
+    // The three a settlement is built from. `Block` for all of them, for the reason ice
+    // is: the server's registry gives each of them a voxel to place, and a shape that
+    // said otherwise would be telling a player there is no place press behind what they
+    // are holding.
+    ItemDisplay {
+        item_id: ITEM_PLANKS,
+        name: "planks",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::PLANKS),
+        livery: Some(Livery::Wood),
+    },
+    ItemDisplay {
+        item_id: ITEM_COBBLESTONE,
+        name: "cobblestone",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::COBBLESTONE),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_THATCH,
+        name: "thatch",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::THATCH),
+        livery: None,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -893,6 +924,9 @@ mod tests {
             ITEM_GRAVEL,
             ITEM_ICE,
             ITEM_SILVER,
+            ITEM_PLANKS,
+            ITEM_COBBLESTONE,
+            ITEM_THATCH,
         ];
         for item_id in declared {
             assert!(
@@ -951,6 +985,39 @@ mod tests {
             item_linear_rgba(ITEM_SILVER),
             item_linear_rgba(ITEM_IRON_SWORD)
         );
+    }
+
+    /// The three a settlement is built out of.
+    ///
+    /// **The sibling of the test above, and the ids it pins moved once already.** This
+    /// branch first wrote them as 35, 36 and 37; silver landed on `develop` at 35 and
+    /// pushed all three up by one. An id that can move without a test noticing is a
+    /// persisted pack that a later build reads as something else, so the numbers are
+    /// written out here rather than derived from the table's order.
+    ///
+    /// Planks carry the wood livery for the reason the log does — sawn timber is still
+    /// timber — and the other two carry none: dressed rubble and straw have no grain to
+    /// draw at a cell's size.
+    #[test]
+    fn the_three_a_settlement_is_built_from_carry_their_pinned_ids() {
+        assert_eq!(ITEM_PLANKS, 36);
+        assert_eq!(ITEM_COBBLESTONE, 37);
+        assert_eq!(ITEM_THATCH, 38);
+
+        for (item_id, name, swatch, livery) in [
+            (ITEM_PLANKS, "planks", palette::PLANKS, Some(Livery::Wood)),
+            (ITEM_COBBLESTONE, "cobblestone", palette::COBBLESTONE, None),
+            (ITEM_THATCH, "thatch", palette::THATCH, None),
+        ] {
+            let row = display(item_id).expect("a settlement block is registered");
+            assert_eq!(row.name, name);
+            // `Block` rather than `Material`: the server's registry gives each of these
+            // a voxel to place, and a shape that said otherwise would be telling a
+            // player there is no place press behind what they are holding.
+            assert_eq!(row.shape, ItemShape::Block);
+            assert_eq!(row.colour, ItemColour::Block(swatch));
+            assert_eq!(row.livery, livery);
+        }
     }
 
     /// The three the recipe-driven name table could never have covered.

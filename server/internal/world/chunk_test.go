@@ -55,6 +55,41 @@ func TestWaterIsPassableAndIceIsNot(t *testing.T) {
 	}
 }
 
+// The three materials a settlement is built out of, against the same three predicates
+// water and ice are checked against above.
+//
+// **The point of the test is that none of the three needed a line of code.** [Solid] is
+// stated as "not air, not water" rather than as a list of the ids that stop a body, so
+// an appended block is solid the moment it exists — and that is the answer a settlement
+// depends on: part 2 writes these ids into chunks, and a wall a player walks through is
+// not a wall. A list would have needed extending here and would have failed open until
+// somebody remembered; this shape fails closed, and this test is what says so out loud.
+// [Placeable] is the opposite shape on purpose — an allowlist, because an unknown id
+// must never be stored — so it *is* the one the three had to be added to.
+func TestTheSettlementBlocksAreOrdinaryGround(t *testing.T) {
+	t.Parallel()
+
+	for _, block := range []Block{Planks, Cobblestone, Thatch} {
+		if !Solid(block) {
+			t.Errorf("Solid(%d) = false, want true: a wall a body walks through is not a wall", block)
+		}
+		if Fluid(block) {
+			t.Errorf("Fluid(%d) = true, want false", block)
+		}
+		if !Placeable(block) {
+			t.Errorf("Placeable(%d) = false, want true: a player takes a settlement apart and builds with it", block)
+		}
+	}
+
+	// Appended, which is the whole of the compatibility rule: every id below these is
+	// already inside chunks a client holds and inside the delta files a played-in world
+	// directory keeps.
+	if Planks != 14 || Cobblestone != 15 || Thatch != 16 {
+		t.Errorf("Planks = %d, Cobblestone = %d, Thatch = %d, want the appended wire ids 14, 15 and 16",
+			Planks, Cobblestone, Thatch)
+	}
+}
+
 // The index order is wire contract: schemas/world.fbs documents it and the
 // client's mesher indexes in it, so these four values are part of the protocol.
 func TestIndexOrderIsXFastestThenZThenY(t *testing.T) {
