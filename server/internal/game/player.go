@@ -523,6 +523,10 @@ type Player struct {
 	lastLootOpenTick uint32
 	haveLootTakeTick bool
 	lastLootTakeTick uint32
+	// Take-all is its own stream for the same reason: pressing F is not a click on an
+	// entry, and one must never silence the other in the frame they share.
+	haveLootTakeAllTick bool
+	lastLootTakeAllTick uint32
 
 	// described is every entity this session has been told the appearance of, against
 	// the tick it was last visible on. **This player is the viewer here, not the

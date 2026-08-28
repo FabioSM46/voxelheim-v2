@@ -61,10 +61,10 @@ pub use codec::{
     ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest, DropItemRequest,
     EditAction, EntityState, Facing, HairModel, InventoryMoveRequest, InventoryStack,
     InventoryState, ItemDropState, LifeState, LootClosed, LootEntry, LootOpenRequest, LootState,
-    LootTakeRequest, MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction, MobHit, MobKind,
-    MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
-    PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
-    ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
+    LootTakeAllRequest, LootTakeRequest, MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction,
+    MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState,
+    PartyRequest, PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput,
+    PlayerVitals, ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
     RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
     WorldClock, WorldUpdate,
 };
@@ -80,9 +80,9 @@ pub use codec::{
     encode_attack_request, encode_block_edit_request, encode_chat_request,
     encode_chunk_resend_request, encode_consume_request, encode_craft_request,
     encode_drop_item_request, encode_inventory_move_request, encode_loot_open_request,
-    encode_loot_take_request, encode_mine_request, encode_party_request,
-    encode_place_structure_request, encode_player_input, encode_remove_structure_request,
-    encode_repair_request,
+    encode_loot_take_all_request, encode_loot_take_request, encode_mine_request,
+    encode_party_request, encode_place_structure_request, encode_player_input,
+    encode_remove_structure_request, encode_repair_request,
 };
 pub use servers::ListedServer;
 use servers::ServerListEvent;
