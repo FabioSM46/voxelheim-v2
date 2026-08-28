@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
-pub use mesher::{ChunkMesh, Neighbours, mesh_chunk};
+pub use mesher::{ChunkMesh, Neighbours, SurfaceMesh, mesh_chunk};
 pub use render::MeshStats;
 
 use crate::net::{
@@ -463,31 +463,44 @@ impl ChunkStore {
         BlockApplied::Rewritten { coord, remeshed }
     }
 
-    /// Whether the voxel at this world block coordinate is solid.
+    /// The block at this world block coordinate.
     ///
-    /// The question a raycast asks, and it lives here because the store is the
-    /// authority on what exists and `palette` is the authority on what is solid.
-    ///
-    /// A voxel in a chunk this session does not hold answers `false`. That is the
-    /// honest answer rather than a cautious one: what a player can aim at is what the
-    /// server has streamed them, and a chunk that has not arrived contains nothing
-    /// this client knows about. Aiming into one is a corner case regardless — the
-    /// reach is a few blocks and the player stands in the middle of the streamed
+    /// **A voxel this session does not hold answers [`palette::AIR`]**, and so does a
+    /// coordinate that resolves to no chunk at all. That is the honest answer rather
+    /// than a cautious one: what a player can aim at, walk into or be submerged by is
+    /// what the server has streamed them, and a chunk that has not arrived contains
+    /// nothing this client knows about. Aiming into one is a corner case regardless —
+    /// the reach is a few blocks and the player stands in the middle of the streamed
     /// volume — and the server refuses an edit inside a chunk it never sent anyway.
-    pub fn solid_at(&self, pos: BlockCoord, size: usize) -> bool {
+    ///
+    /// The one place a world coordinate becomes a block id, so every question about
+    /// what is at a position — solidity here, submersion in `player/sky.rs` — resolves
+    /// the coordinate exactly once and in one way.
+    pub fn block_at(&self, pos: BlockCoord, size: usize) -> BlockId {
         let Some((coord, local)) = locate(pos, size) else {
-            return false;
+            return palette::AIR;
         };
         let Some(chunk) = self.chunks.get(&coord) else {
-            return false;
+            return palette::AIR;
         };
         // Same reasoning as `with_block`'s per-axis check: an out-of-range component
         // would read a valid offset in the wrong row rather than fail.
         if local.iter().any(|axis| *axis >= chunk.size()) {
-            return false;
+            return palette::AIR;
         }
 
-        palette::is_solid(chunk.block(local))
+        chunk.block(local)
+    }
+
+    /// Whether the voxel at this world block coordinate stops a body.
+    ///
+    /// The question a raycast asks, and it lives here because the store is the
+    /// authority on what exists and `palette` is the authority on what is solid.
+    /// **Water is not**, since #446: the aiming ray passes through a lake and outlines
+    /// the bed under it, which is one predicate away from the behaviour that shipped
+    /// before water existed.
+    pub fn solid_at(&self, pos: BlockCoord, size: usize) -> bool {
+        palette::is_solid(self.block_at(pos, size))
     }
 
     /// How many chunks the session holds. Shown in the debug overlay.
@@ -1993,7 +2006,11 @@ mod tests {
             &store.neighbours(coord(0, 0, 0)),
         );
         assert_eq!(mesh.quad_count(), 1);
-        assert_eq!(mesh.normals[0], [0.0, 1.0, 0.0], "the wrong wall came back");
+        assert_eq!(
+            mesh.opaque.normals[0],
+            [0.0, 1.0, 0.0],
+            "the wrong wall came back"
+        );
     }
 
     #[test]
@@ -2271,6 +2288,45 @@ mod tests {
         assert!(
             !store.solid_at(at(0, 0, 0), 0),
             "and an impossible chunk edge is not a panic"
+        );
+    }
+
+    #[test]
+    fn block_at_names_the_id_and_answers_air_for_everything_it_cannot_reach() {
+        // The one place a world coordinate becomes a block id. Every "what is here"
+        // question in the client resolves through it, so its three refusals are the three
+        // that matter: no chunk, no coordinate, and a chunk edge that cannot exist.
+        let mut store = store_with_stone_at(coord(0, 0, 0));
+        store.apply_block(at(5, 5, 5), palette::WATER, SIZE);
+
+        assert_eq!(store.block_at(at(6, 5, 5), SIZE), palette::STONE);
+        assert_eq!(store.block_at(at(5, 5, 5), SIZE), palette::WATER);
+        assert_eq!(
+            store.block_at(at(-1, 0, 0), SIZE),
+            palette::AIR,
+            "a chunk this session does not hold contains nothing it knows about"
+        );
+        assert_eq!(
+            store.block_at(at(0, 0, 0), 0),
+            palette::AIR,
+            "and an impossible chunk edge is not a panic"
+        );
+    }
+
+    #[test]
+    fn water_is_not_solid_so_the_ray_goes_through_it() {
+        // #446 made water a block a body moves through, and this is the client half of
+        // it: the voxel is held, it is not air, and it still stops nothing. The lake bed
+        // behind it is what the aiming ray reports.
+        let mut store = store_with_stone_at(coord(0, 0, 0));
+        store.apply_block(at(5, 5, 5), palette::WATER, SIZE);
+        store.apply_block(at(5, 6, 5), palette::ICE, SIZE);
+
+        assert_eq!(store.block_at(at(5, 5, 5), SIZE), palette::WATER);
+        assert!(!store.solid_at(at(5, 5, 5), SIZE), "water stops nothing");
+        assert!(
+            store.solid_at(at(5, 6, 5), SIZE),
+            "ice is ordinary ground and stops everything"
         );
     }
 

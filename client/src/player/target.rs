@@ -1521,6 +1521,31 @@ mod tests {
         store
     }
 
+    /// The same world, with each voxel's block id named rather than assumed to be stone.
+    fn store_of(blocks: &[(IVec3, crate::world::BlockId)]) -> ChunkStore {
+        let mut chunk = VoxelChunk::all_air(usize::from(SIZE));
+        let edge = i32::from(SIZE);
+        for (voxel, block) in blocks {
+            chunk.set(
+                voxel.x.rem_euclid(edge) as usize,
+                voxel.y.rem_euclid(edge) as usize,
+                voxel.z.rem_euclid(edge) as usize,
+                *block,
+            );
+        }
+
+        let mut store = ChunkStore::default();
+        store.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 2,
+                cz: 0,
+            },
+            chunk,
+        );
+        store
+    }
+
     /// The player module on a headless app, aiming along +x at the world in `store`.
     ///
     /// The look state is set rather than driven through the pointer, and one snapshot places
@@ -2154,6 +2179,44 @@ mod tests {
             1,
             "a request changed a count before any InventoryState arrived"
         );
+    }
+
+    #[test]
+    fn the_ray_goes_through_water_and_outlines_the_bed_behind_it() {
+        // Water is held, is not air, and stops nothing — so what the player aims at
+        // through a lake is the bed. One predicate in `palette` decides it; the ray
+        // special-cases nothing.
+        let water = IVec3::new(2, 81, 0);
+        let bed = IVec3::new(3, 81, 0);
+        let mut app = aiming_app(store_of(&[(water, palette::WATER), (bed, palette::STONE)]));
+        app.update();
+
+        let hit = target(&app).0.expect("something is aimed at");
+        assert_eq!(hit.block, bed, "the water is never the target");
+        assert_eq!(
+            hit.face,
+            IVec3::new(-1, 0, 0),
+            "and it was entered through the face the water is on"
+        );
+    }
+
+    #[test]
+    fn a_place_against_a_face_under_water_names_the_water_voxel() {
+        // The other half of the same rule, needing no client-side check: the request goes
+        // one step back along the ray, which under water is a voxel of water, and the
+        // server displaces it — `allowPlacement` treats a fluid as empty.
+        let water = IVec3::new(2, 81, 0);
+        let bed = IVec3::new(3, 81, 0);
+        let (mut app, sent) =
+            clicking_app(store_of(&[(water, palette::WATER), (bed, palette::STONE)]));
+        app.update();
+
+        click(&mut app, PLACE_BUTTON);
+        app.update();
+
+        let (pos, action, _slot, _tick) = one_edit(&sent);
+        assert_eq!(pos, [water.x, water.y, water.z]);
+        assert_eq!(action, fb::EditAction::Place);
     }
 
     #[test]

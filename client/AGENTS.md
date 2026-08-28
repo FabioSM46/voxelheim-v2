@@ -59,8 +59,8 @@ keeps meaning "everything the client is".
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the six chunks a mesh is culled against | mesh, or spawn anything |
 | `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed | mention a Bevy type, or read a chunk it was not given |
-| `world/render.rs` | the meshing tasks, the mesh assets, one entity per chunk | mesh on the main schedule, or own a camera or a light |
-| `world/palette.rs` | block id → colour, and which ids are solid | know about meshes or about the wire |
+| `world/render.rs` | the meshing tasks, the mesh assets, the two materials, one entity per chunk with the water half as its child | mesh on the main schedule, or own a camera or a light |
+| `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`) and which hide what is behind them (`is_opaque`) | know about meshes or about the wire |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
@@ -71,7 +71,7 @@ keeps meaning "everything the client is".
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
 | `player/interpolate.rs` | the two-snapshot buffer and the interpolation | mention a Bevy world, or extrapolate |
 | `player/camera.rs` | the one camera, and what it follows | decide a gameplay outcome |
-| `player/sky.rs` | the one directional light, and the curve the sun, the sky colour, the ambient term and the fog are read from | hold a boundary the server sent, let anything read a rule back out of a colour, or own a light that is not the sky's |
+| `player/sky.rs` | the one directional light, the curve the sun, the sky colour, the ambient term and the fog are read from, and the sky and fog a submerged eye sees instead | hold a boundary the server sent, let anything read a rule back out of a colour, own a light that is not the sky's, or decide what being in water *does* |
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
@@ -114,15 +114,19 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are two**:
+**Every edge from `player` to `world` is narrow and read-only, and there are four**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
-the authority on which of those exist; `player/items.rs` asks `palette` for a terrain swatch when
-an item deliberately reuses one. The first-person hand takes its skin colour from the local
-player's server-sent `Appearance`, not from a terrain approximation. Neither edge writes world
-state, and no edge points back from `world` to `player`. A third, in either direction, is a design
-question rather than an import.
+the authority on which of those exist; `player/camera.rs` reads it for the same question one step
+further on, so the third-person boom stops at a wall instead of going through it;
+`player/sky.rs` reads it for exactly one voxel — the one the eye is inside — because water is the
+one block that changes what the sky looks like; and `player/items.rs` asks `palette` for a terrain
+swatch when an item deliberately reuses one. The first-person hand takes its skin colour from the
+local player's server-sent `Appearance`, not from a terrain approximation. **No edge writes world
+state, and no edge points back from `world` to `player`.** A fifth, in either direction, is a
+design question rather than an import. The three that read the store all resolve their voxel
+through `ChunkStore::block_at`, the one place a world coordinate becomes a block id.
 
-**The second of those is the client's one opinion about what an item looks like, and every
+**The last of those is the client's one opinion about what an item looks like, and every
 renderer reads it rather than owning a second one.** `items::item_linear_rgba` answers which
 linear colour an *item* id presents as: a block-like item may reuse a real block swatch, while an
 item with no honest block counterpart names an item-only colour in the same row. The block id
@@ -412,11 +416,26 @@ one of these; it can, because it is holding the socket. Here the result is a hol
 with the coordinate and the reason in the log, which beats a client that exits over one bad
 frame out of five thousand.
 
-**Colour comes from vertex colours, and there is exactly one material.** `palette.rs` maps a
+**Colour comes from vertex colours, and there are exactly two materials.** `palette.rs` maps a
 block id to a linear RGBA; the PBR shader multiplies the material's `base_color` by it, which
-is why that colour is white and must stay white. One material means one pipeline for the whole
-world. An id this build has no colour for renders magenta rather than a plausible grey — a
-server one contract ahead should be obvious, not invisible.
+is why both of those colours are white and must stay white. An id this build has no colour for
+renders magenta rather than a plausible grey — a server one contract ahead should be obvious,
+not invisible.
+
+**The second material is water, and the split is by alpha mode rather than by block.** Blending
+is order-dependent where opacity is not, and Bevy sorts transparent meshes back to front **per
+entity** — so one mesh carrying both kinds would have one sort key and would draw the water
+either in front of the lake bed it is seen through or behind the far bank. `mesh_chunk` therefore
+returns two `SurfaceMesh`es: the chunk's entity carries the opaque one and the water one hangs
+off it as a child, which is also why unloading needed no new code, since `despawn` takes
+descendants. A chunk in the middle of a lake gets the parent with no mesh of its own, because an
+empty opaque mesh is a draw call that renders nothing.
+
+**`palette.rs` answers two questions and they are not the same question.** `is_solid` is "does
+this stop a body and can it be aimed at" — `solid_at`, the raycast, the camera boom. `is_opaque`
+is "does this hide what is behind it" — the mesher, and only the mesher. Water happens to answer
+no to both; glass is the id that will separate them from *each other*. Keep them as two
+functions.
 
 **`world/render.rs` owns the one camera, and it is a `Camera3d`.** Two cameras targeting one
 window need explicit ordering and clear-colour configuration to keep one from erasing the
@@ -783,9 +802,22 @@ numbers, carried over unchanged.
 camera that follows a gameplay entity belongs to the module that reads the snapshots; so does a
 sun that follows `EntitySnapshot.tick_of_day`. It was in `world/render.rs` for as long as it was
 a constant, which is to say for as long as where it lived did not matter. Moving it is also what
-keeps the count of `player` → `world` edges at the three enumerated above rather than adding a
-fourth: the alternative was a `world` system reading a `player` resource, which is the same edge
-pointing the other way.
+kept it from becoming a `world` system reading a `player` resource, which is the same edge
+pointing the wrong way.
+
+**Water is the one thing here that is a function of where the player is, and it overrides the
+clock rather than blending with it.** When the camera's eye is inside a voxel of `WATER` the
+clear colour and the fog colour become `UNDERWATER_SKY` over `UNDERWATER_VISIBILITY` blocks,
+whatever hour it is and whether or not the server keeps a clock. **Only those two values move**:
+the sun's direction, its illuminance and the ambient term stay where the day left them, so
+terrain under water is lit as terrain and *tinted* rather than re-lit.
+
+It decides nothing. The server owns what being in water *means* — `world.Fluid` drives the swim
+physics and this client predicts none of it — and both sides read the same id through
+`ChunkStore::block_at`, so they agree by construction. The eye comes from the camera's
+`Transform`, which `AimCamera` writes *after* the set this system runs in, so crossing the
+surface changes the sky on the next frame; the alternative is ordering the sky behind the camera
+and the camera behind its snapshot, for one frame of a colour nobody sees arrive late.
 
 **The boundaries are the server's and there is exactly one copy of them.** `ServerWelcome`
 carries `day_length_ticks`, `night_start_ticks` and `night_end_ticks`; `net/codec.rs` validates

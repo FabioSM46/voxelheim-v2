@@ -61,19 +61,31 @@
 //! `tick_of_day` it belonged with the rest of the snapshot-driven presentation, and
 //! `player/sky.rs` owns it now.
 //!
-//! What stayed is what this module can answer for on its own: the chunk meshes and the one
-//! material they share.
+//! What stayed is what this module can answer for on its own: the chunk meshes and the two
+//! materials they share.
+//!
+//! ## Two materials, and one entity per chunk with one child
+//!
+//! `mesh_chunk` returns a [`ChunkMesh`] holding an opaque surface and a water surface — the
+//! reason is on that type — and each half gets a material and a `Mesh3d`. The chunk's entity
+//! carries the opaque half and the transform; the water half hangs off it as a child, so it
+//! inherits that transform and goes with it under the same `despawn()`.
+//!
+//! **A chunk with water but no opaque surface still gets the parent entity**, without a mesh
+//! on it: the middle of a lake is exactly that shape. A chunk with neither half gets no entity
+//! at all, which is the case this module has always skipped and is most of the sky.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::SystemParam;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
-use super::{ChunkChange, ChunkMesh, ChunkStore, DecodeQueue, VoxelChunk, mesh_chunk};
+use super::{ChunkChange, ChunkMesh, ChunkStore, DecodeQueue, SurfaceMesh, VoxelChunk, mesh_chunk};
 use crate::net::{ChunkCoord, Session};
 
 /// How many meshing tasks may be started per frame.
@@ -98,7 +110,7 @@ impl Plugin for ChunkRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MeshJobs>()
             .init_resource::<MeshStats>()
-            .add_systems(Startup, create_terrain_material)
+            .add_systems(Startup, create_materials)
             .add_systems(
                 Update,
                 (
@@ -113,14 +125,37 @@ impl Plugin for ChunkRenderPlugin {
     }
 }
 
-/// The single material every chunk mesh shares.
+/// The material every opaque chunk face shares.
 ///
-/// One material, and therefore one pipeline for the whole world, because the colour
-/// comes from the mesh's vertex colours rather than from the material — see
+/// One material, and therefore one pipeline for the whole opaque world, because the
+/// colour comes from the mesh's vertex colours rather than from the material — see
 /// `palette.rs`. The alternative is a material per block type, which means a mesh
 /// per block type per chunk.
 #[derive(Resource, Debug)]
 struct TerrainMaterial(Handle<StandardMaterial>);
+
+/// The material every water face shares.
+///
+/// The second material and the only one, because the split is by **alpha mode** and
+/// not by block: a material is a pipeline, `AlphaMode::Blend` is what a pipeline has
+/// to be built for, and every block that is ever drawn through is drawn through the
+/// same way. Its base colour is white for the same reason [`TerrainMaterial`]'s is —
+/// `palette::linear_rgba` owns what water looks like, alpha included, and a tint here
+/// would multiply into itself.
+#[derive(Resource, Debug)]
+struct WaterMaterial(Handle<StandardMaterial>);
+
+/// The two materials a chunk is drawn with, as one system parameter.
+///
+/// Two resources and not one, because they answer two different questions and a system
+/// that needs only one should say so. Bundled for the reason `player/camera.rs`'s `Aim`
+/// is: it names the pair, and it keeps [`apply_finished_meshes`] inside the argument
+/// budget the second material took it past. Both are absent only before `Startup`.
+#[derive(SystemParam)]
+struct ChunkMaterials<'w> {
+    opaque: Option<Res<'w, TerrainMaterial>>,
+    water: Option<Res<'w, WaterMaterial>>,
+}
 
 /// Marks the entities this module spawns for chunks, so a query can find them
 /// without also matching the camera and the light.
@@ -223,10 +258,7 @@ struct MeshJobs {
     meshed: HashMap<ChunkCoord, MeshedChunk>,
 }
 
-fn create_terrain_material(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn create_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
     commands.insert_resource(TerrainMaterial(materials.add(StandardMaterial {
         // White, and that is load-bearing: the shader multiplies the material's
         // base colour by the vertex colour, so anything else here tints the whole
@@ -234,6 +266,22 @@ fn create_terrain_material(
         base_color: Color::WHITE,
         // Rock, earth and snow, none of which are shiny.
         perceptual_roughness: 0.95,
+        ..default()
+    })));
+
+    commands.insert_resource(WaterMaterial(materials.add(StandardMaterial {
+        // White for the reason above, and it matters more here: the vertex colour carries
+        // water's alpha as well as its blue, so a tinted base colour would fade the water
+        // by `WATER_ALPHA` twice over.
+        base_color: Color::WHITE,
+        // The whole of what makes this a second material. `Blend` puts the mesh in the
+        // transparent phase, where Bevy sorts entities back to front — which is why the
+        // water half has to be its own entity rather than more quads in the opaque mesh.
+        alpha_mode: AlphaMode::Blend,
+        // The one wet surface in this world; everything else is rock, earth or snow at
+        // 0.95. Low enough for a highlight, which is most of what tells a still lake from
+        // a hole in the ground.
+        perceptual_roughness: 0.15,
         ..default()
     })));
 }
@@ -336,14 +384,16 @@ fn apply_finished_meshes(
     mut jobs: ResMut<MeshJobs>,
     mut stats: ResMut<MeshStats>,
     mut meshes: ResMut<Assets<Mesh>>,
-    material: Option<Res<TerrainMaterial>>,
+    materials: ChunkMaterials<'_>,
     store: Res<ChunkStore>,
     session: Option<Res<Session>>,
     mut commands: Commands,
 ) {
-    // Both exist from the first frame after startup. A frame without them is a frame
-    // before there is a world, and there is nothing to place a chunk relative to.
-    let (Some(material), Some(session)) = (material, session) else {
+    // All three exist from the first frame after startup. A frame without them is a
+    // frame before there is a world, and there is nothing to place a chunk relative to.
+    let (Some(material), Some(water_material), Some(session)) =
+        (materials.opaque, materials.water, session)
+    else {
         return;
     };
     let chunk_size = f32::from(session.0.chunk_size);
@@ -405,14 +455,37 @@ fn apply_finished_meshes(
         }
 
         let quads = outcome.mesh.quad_count();
-        let entity = commands
-            .spawn((
-                ChunkMeshEntity,
-                Mesh3d(meshes.add(to_bevy_mesh(outcome.mesh))),
+        let ChunkMesh {
+            opaque,
+            water: water_surface,
+        } = outcome.mesh;
+
+        // The chunk's own entity: the transform both halves are placed by, and the opaque
+        // mesh when there is one. A chunk in the middle of a lake has water and no opaque
+        // surface, and it gets the entity without a mesh rather than an empty asset.
+        let mut chunk_entity = commands.spawn((
+            ChunkMeshEntity,
+            Transform::from_translation(chunk_origin(coord, chunk_size)),
+            Visibility::default(),
+        ));
+        if !opaque.is_empty() {
+            chunk_entity.insert((
+                Mesh3d(meshes.add(to_bevy_mesh(opaque))),
                 MeshMaterial3d(material.0.clone()),
-                Transform::from_translation(chunk_origin(coord, chunk_size)),
-            ))
-            .id();
+            ));
+        }
+        let entity = chunk_entity.id();
+
+        // A child rather than a sibling, so the `despawn` above takes both — it despawns
+        // descendants — and so the water is placed by the chunk's own transform.
+        if !water_surface.is_empty() {
+            commands.spawn((
+                Mesh3d(meshes.add(to_bevy_mesh(water_surface))),
+                MeshMaterial3d(water_material.0.clone()),
+                Transform::default(),
+                ChildOf(entity),
+            ));
+        }
 
         jobs.meshed.insert(coord, MeshedChunk { entity, quads });
     }
@@ -505,12 +578,12 @@ fn chunk_origin(coord: ChunkCoord, chunk_size: f32) -> Vec3 {
     )
 }
 
-/// Wraps the mesher's buffers in the asset the renderer draws.
+/// Wraps one half of the mesher's buffers in the asset the renderer draws.
 ///
-/// The only place a [`ChunkMesh`] meets a Bevy type, which is what keeps `mesher.rs`
+/// The only place a [`SurfaceMesh`] meets a Bevy type, which is what keeps `mesher.rs`
 /// free of them. Consumes the buffers rather than cloning: they are hundreds of
 /// kilobytes each and the task's result is owned here.
-fn to_bevy_mesh(mesh: ChunkMesh) -> Mesh {
+fn to_bevy_mesh(mesh: SurfaceMesh) -> Mesh {
     // `RenderAssetUsages::default()` keeps the vertex data in the main world as well
     // as the render world, which is what lets Bevy compute the mesh's bounding box
     // for frustum culling. `RENDER_WORLD` alone frees the data before that happens.
@@ -718,6 +791,138 @@ mod tests {
         assert!(settled.last_mesh.is_some(), "the duration is recorded");
         assert_eq!(meshed_coords(&app), vec![(0, 2, 0)]);
         assert_eq!(chunk_entity_count(&mut app), 1);
+    }
+
+    /// Bottom half stone, top half water: the smallest chunk with both halves of a
+    /// [`ChunkMesh`].
+    fn lake_chunk() -> Vec<u16> {
+        // y is the slowest axis of the wire's index order, so half the chunk is one
+        // contiguous run.
+        const HALF: u16 = 16 * SIZE * SIZE;
+        vec![palette::STONE, HALF, palette::WATER, HALF]
+    }
+
+    /// The chunk entities and their children, as `(has its own mesh, child count)`.
+    fn chunk_entities(app: &mut App) -> Vec<(bool, usize)> {
+        let world = app.world_mut();
+        let mut query =
+            world.query_filtered::<(Option<&Mesh3d>, Option<&Children>), With<ChunkMeshEntity>>();
+        query
+            .iter(world)
+            .map(|(mesh, children)| (mesh.is_some(), children.map_or(0, |c| c.len())))
+            .collect()
+    }
+
+    /// Every material handle hanging off a chunk entity's children.
+    fn water_child_materials(app: &mut App) -> Vec<Handle<StandardMaterial>> {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<ChildOf>>();
+        query
+            .iter(world)
+            .map(|material| material.0.clone())
+            .collect()
+    }
+
+    #[test]
+    fn water_is_drawn_by_a_child_entity_with_the_blending_material() {
+        // The rendering split on one chunk: the chunk entity carries the opaque surface,
+        // one child carries the water, and the materials are the two the plugin created.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: lake_chunk(),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+
+        assert_eq!(
+            chunk_entities(&mut app),
+            vec![(true, 1)],
+            "one chunk entity with its own opaque mesh and one water child"
+        );
+
+        let water = app.world().resource::<WaterMaterial>().0.clone();
+        let terrain = app.world().resource::<TerrainMaterial>().0.clone();
+        assert_ne!(water, terrain, "two materials, not one handle twice");
+        assert_eq!(water_child_materials(&mut app), vec![water.clone()]);
+
+        // And the material really is the blending one, which is the property that makes
+        // the child necessary at all.
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            materials.get(&water).expect("water material").alpha_mode,
+            AlphaMode::Blend
+        );
+        assert_eq!(
+            materials
+                .get(&terrain)
+                .expect("terrain material")
+                .alpha_mode,
+            AlphaMode::Opaque,
+            "the opaque half must stay in the opaque phase"
+        );
+    }
+
+    #[test]
+    fn a_chunk_of_nothing_but_water_gets_a_placer_with_no_mesh_of_its_own() {
+        // The middle of a lake: the entity exists because the water has to be placed by
+        // something, and carries no `Mesh3d` because an empty one draws nothing.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: solid_chunk(palette::WATER),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+
+        assert_eq!(chunk_entities(&mut app), vec![(false, 1)]);
+        assert_eq!(
+            stats(&app).total_quads,
+            6,
+            "one merged wall per direction, all of it water"
+        );
+    }
+
+    #[test]
+    fn unloading_a_chunk_takes_its_water_with_it() {
+        // `despawn` takes descendants, which is why the water is a child and not a
+        // sibling: nothing in the unload path had to learn about a second entity.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: lake_chunk(),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+        assert_eq!(water_child_materials(&mut app).len(), 1);
+
+        push(
+            &mut app,
+            WorldUpdate::Unload {
+                coord: coord(0, 0, 0),
+            },
+        );
+        pump_until(&mut app, "the chunk to go", |app| {
+            stats(app).meshed_chunks == 0
+        });
+
+        assert_eq!(chunk_entity_count(&mut app), 0);
+        assert!(
+            water_child_materials(&mut app).is_empty(),
+            "the water outlived the chunk it belonged to"
+        );
     }
 
     #[test]
@@ -1656,7 +1861,7 @@ mod tests {
         // `to_bevy_mesh` is never called with an empty mesh in production, because the
         // caller skips those. Asserted anyway: it must be a mesh with no triangles
         // rather than a panic, so a later caller cannot be surprised by it.
-        let mesh = to_bevy_mesh(ChunkMesh::default());
+        let mesh = to_bevy_mesh(SurfaceMesh::default());
 
         assert_eq!(mesh.count_vertices(), 0);
         assert_eq!(mesh.indices().map(|indices| indices.len()), Some(0));
@@ -1664,9 +1869,11 @@ mod tests {
 
     #[test]
     fn every_chunk_mesh_shares_one_material() {
-        // One material, and therefore one pipeline, for the whole world; the colour
-        // comes from vertex colours. A material per chunk would be a pipeline change
-        // per draw call.
+        // One material, and therefore one pipeline, for the whole *opaque* world; the
+        // colour comes from vertex colours. A material per chunk would be a pipeline
+        // change per draw call. The chunks here hold no water, so the two handles below
+        // are the only ones in the world — `water_is_drawn_by_a_child_entity_with_the_
+        // blending_material` is where the second material is pinned.
         let mut app = headless_world();
         for cx in 0..2 {
             push(

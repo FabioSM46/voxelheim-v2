@@ -9,14 +9,22 @@
 //!
 //! The standard three-axis sweep. For each axis `d`, walk the `size + 1` planes
 //! perpendicular to it. Each plane separates two voxels; a face exists there
-//! exactly when one side is solid and the other is not, and it points away from the
-//! solid side. That is written into a 2D mask over the plane's other two axes, and
+//! exactly when one side hides what is behind it and the other does not, and it
+//! points away from the hiding side. That is written into a 2D mask over the plane's other two axes, and
 //! the mask is then consumed by growing maximal rectangles of identical entries —
 //! width first along `u`, then height along `v` while every cell of the row
 //! matches. One rectangle becomes one quad, whatever its size.
 //!
-//! Interior faces vanish for free: a plane with solid voxels on both sides
+//! Interior faces vanish for free: a plane with opaque voxels on both sides
 //! contributes nothing to the mask.
+//!
+//! ## Two masks, two meshes
+//!
+//! The sweep fills two masks per plane from one pair of samples and produces a
+//! [`ChunkMesh`] holding two [`SurfaceMesh`]es: the opaque surface and the water
+//! surface. The reason is on [`ChunkMesh`] itself — blending is order-dependent and
+//! Bevy sorts per entity, so the two have to be separate draws. The face rules are
+//! on [`build_masks`]; the greedy merge below is shared and knows about neither.
 //!
 //! ## The chunk border is culled against the neighbour it is handed
 //!
@@ -36,7 +44,7 @@
 //! is a hole a player *can* see. It is not permanent either — `render.rs` remeshes a
 //! chunk when a neighbour arrives, which is what turns the over-draw into a wait.
 //!
-//! **A chunk draws only its own faces.** A face belongs to the solid voxel it sits
+//! **A chunk draws only its own faces.** A face belongs to the voxel it sits
 //! on, and at the two border planes that voxel can be the neighbour's — in which case
 //! the neighbour emits it from its own sweep, at the same world position. Emitting it
 //! here as well would put two coincident copies of one quad in the world and let them
@@ -51,14 +59,14 @@ use super::{BlockId, VoxelChunk, palette};
 /// an edge disagree about both the normal and the colour there.
 const VERTICES_PER_QUAD: usize = 4;
 
-/// One chunk's surface, as the parallel attribute buffers a GPU wants.
+/// One pass's worth of surface, as the parallel attribute buffers a GPU wants.
 ///
 /// Deliberately not a `bevy::mesh::Mesh`: this type crosses a thread boundary and
 /// is compared field by field in tests, and both are easier when it is plain data.
 /// `render.rs` turns it into a `Mesh` on the main thread, which is the only place
 /// that is allowed to.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ChunkMesh {
+pub struct SurfaceMesh {
     /// Vertex positions in chunk-local blocks, four per quad, in winding order.
     pub positions: Vec<[f32; 3]>,
     /// One outward face normal per vertex. Flat by construction — every vertex of
@@ -70,7 +78,7 @@ pub struct ChunkMesh {
     pub indices: Vec<u32>,
 }
 
-impl ChunkMesh {
+impl SurfaceMesh {
     /// How many merged quads the mesh holds.
     pub fn quad_count(&self) -> usize {
         self.positions.len() / VERTICES_PER_QUAD
@@ -98,6 +106,40 @@ impl ChunkMesh {
             .extend(std::iter::repeat_n(color, VERTICES_PER_QUAD));
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+}
+
+/// One chunk's surface, split by how the GPU has to draw it.
+///
+/// **Two meshes and not one, because blending is ordered and opacity is not.** An opaque
+/// quad writes depth and can be drawn in any order; a translucent one is composited over
+/// what is already behind it, which Bevy arranges by sorting transparent entities back to
+/// front. One mesh carrying both kinds would be one entity with one sort key, so its water
+/// would draw either before the lake bed it is seen through or after the far bank it sits
+/// in front of. Splitting here is what lets `render.rs` give each half a material, and it
+/// costs one extra mask per plane rather than a second traversal.
+///
+/// The split is by *material*, not by block, so a chunk is at most two draw calls however
+/// many block ids it holds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChunkMesh {
+    /// Every face of every block that hides what is behind it.
+    pub opaque: SurfaceMesh,
+    /// Every face where water meets air, and nothing else. Water against water and
+    /// water against a solid block are both interior surfaces nobody can see.
+    pub water: SurfaceMesh,
+}
+
+impl ChunkMesh {
+    /// How many merged quads the chunk holds across both halves.
+    pub fn quad_count(&self) -> usize {
+        self.opaque.quad_count() + self.water.quad_count()
+    }
+
+    /// Whether there is anything at all to draw. Both halves empty, which is the
+    /// all-air chunk and the wholly-buried one.
+    pub fn is_empty(&self) -> bool {
+        self.opaque.is_empty() && self.water.is_empty()
     }
 }
 
@@ -189,7 +231,10 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
 
     // Reused across every plane of every axis, cleared rather than reallocated:
     // a 32³ chunk sweeps 99 planes, and 99 allocations of 4 KiB is pure waste.
-    let mut mask = vec![None; size * size];
+    // Two of them now, filled from one pass over the plane — the second mask is
+    // what the split costs, and it is cheaper than sweeping the chunk twice.
+    let mut opaque_mask = vec![None; size * size];
+    let mut water_mask = vec![None; size * size];
 
     for axis in 0..3 {
         // The two axes that span the plane. This cyclic choice makes (u, v, axis) a
@@ -199,15 +244,25 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
         let v = (axis + 2) % 3;
 
         for plane in 0..=size {
-            build_mask(chunk, neighbours, axis, u, v, plane, &mut mask);
-            merge_mask(&mut mesh, size, axis, u, v, plane, &mut mask);
+            build_masks(
+                chunk,
+                neighbours,
+                axis,
+                u,
+                v,
+                plane,
+                &mut opaque_mask,
+                &mut water_mask,
+            );
+            merge_mask(&mut mesh.opaque, size, axis, u, v, plane, &mut opaque_mask);
+            merge_mask(&mut mesh.water, size, axis, u, v, plane, &mut water_mask);
         }
     }
 
     mesh
 }
 
-/// Fills `mask` with the faces on the plane at `axis = plane`.
+/// Fills both masks with the faces on the plane at `axis = plane`.
 ///
 /// The plane sits between the voxels at `plane - 1` and `plane` along `axis`. At the
 /// first and the last plane one of those two voxels is outside the chunk, and it is
@@ -215,18 +270,34 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
 /// neighbour to read, which is what leaves a border face exposed rather than culling
 /// it against data nobody has.
 ///
-/// Only a face whose **solid side is inside this chunk** is written. At a border plane
-/// the solid side can be the neighbour's, and that face is the neighbour's to draw
+/// Only a face whose **own side is inside this chunk** is written. At a border plane
+/// that side can be the neighbour's, and the face is then the neighbour's to draw
 /// from its own sweep at the same world position; emitting it here too would put two
 /// coincident copies of one quad in the world.
-fn build_mask(
+///
+/// **The two masks ask different questions of the same pair of voxels**, which is the whole
+/// of the split:
+///
+/// - `opaque_mask` gets a face wherever exactly one side is opaque, so an opaque block
+///   draws against air *and* against water — that is what makes a lake bed visible.
+/// - `water_mask` gets a face only where water meets **air**. Water against water is the
+///   interior of a body of water, and water against an opaque block is a surface that block
+///   has already drawn from the other side of the same plane; a water quad there would be a
+///   translucent sheet buried in the terrain, sorted against it every frame.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sweep's coordinate frame plus the two masks it fills; the frame is \
+              already the shape `merge_mask` and `quad_corners` take"
+)]
+fn build_masks(
     chunk: &VoxelChunk,
     neighbours: &Neighbours,
     axis: usize,
     u: usize,
     v: usize,
     plane: usize,
-    mask: &mut [Option<Face>],
+    opaque_mask: &mut [Option<Face>],
+    water_mask: &mut [Option<Face>],
 ) {
     let size = chunk.size();
 
@@ -257,22 +328,38 @@ fn build_mask(
             let negative = sample(below, axis, u, v, i, j);
             let positive = sample(above, axis, u, v, i, j);
 
-            mask[j * size + i] = match (palette::is_solid(negative), palette::is_solid(positive)) {
-                // Solid below, air above: the face belongs to the solid voxel and
-                // points along +axis.
-                (true, false) if below_is_ours => Some(Face {
-                    block: negative,
+            opaque_mask[j * size + i] =
+                match (palette::is_opaque(negative), palette::is_opaque(positive)) {
+                    // Opaque below, see-through above: the face belongs to the opaque
+                    // voxel and points along +axis. "See-through" is air or water,
+                    // which is what keeps the lake bed's top.
+                    (true, false) if below_is_ours => Some(Face {
+                        block: negative,
+                        positive: true,
+                    }),
+                    (false, true) if above_is_ours => Some(Face {
+                        block: positive,
+                        positive: false,
+                    }),
+                    // See-through on both sides: nothing. Opaque on both sides: an
+                    // interior face, which is what greedy meshing exists never to emit.
+                    // What is left is a face whose opaque side is across the border, and
+                    // the chunk that owns it draws it.
+                    _ => None,
+                };
+
+            water_mask[j * size + i] = match (negative, positive) {
+                // The surface, from below and from above. Only against air: see this
+                // function's doc comment for why water against anything else is a
+                // sheet nobody can see and everything has to sort against.
+                (palette::WATER, palette::AIR) if below_is_ours => Some(Face {
+                    block: palette::WATER,
                     positive: true,
                 }),
-                (false, true) if above_is_ours => Some(Face {
-                    block: positive,
+                (palette::AIR, palette::WATER) if above_is_ours => Some(Face {
+                    block: palette::WATER,
                     positive: false,
                 }),
-                // Air on both sides: nothing. Solid on both sides: an interior face,
-                // which is exactly what greedy meshing exists to never emit — and a
-                // face buried against a neighbour is now one of those. What is left is
-                // a face whose solid side is across the border, and the chunk that owns
-                // it draws it.
                 _ => None,
             };
         }
@@ -307,7 +394,7 @@ fn sample(
 /// Leaves the mask empty, which is what lets the caller reuse the buffer for the
 /// next plane without clearing it separately.
 fn merge_mask(
-    mesh: &mut ChunkMesh,
+    mesh: &mut SurfaceMesh,
     size: usize,
     axis: usize,
     u: usize,
@@ -428,6 +515,18 @@ mod tests {
         VoxelChunk::all_air(size)
     }
 
+    /// The opaque half of a chunk's surface, under the name the sweep's own tests have
+    /// always called for.
+    ///
+    /// **It deliberately shadows [`super::mesh_chunk`]**, which is what a glob import lets
+    /// an explicit item do. Every assertion that uses it is about the sweep — winding,
+    /// merging, border culling, determinism — and none about the opaque/water split, so
+    /// restating each as `.opaque` would be thirty-five edits that say nothing. The tests
+    /// that *are* about the split spell `super::mesh_chunk` and name both halves.
+    fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> SurfaceMesh {
+        super::mesh_chunk(chunk, neighbours).opaque
+    }
+
     /// A chunk of one block, in the middle so no border face is involved.
     fn single_block(size: usize, block: BlockId) -> VoxelChunk {
         let mut chunk = air(size);
@@ -471,7 +570,7 @@ mod tests {
 
     /// How many quads face each direction, keyed by the normal as integers so the
     /// map is ordered and the failure message readable.
-    fn quads_by_normal(mesh: &ChunkMesh) -> BTreeMap<[i32; 3], usize> {
+    fn quads_by_normal(mesh: &SurfaceMesh) -> BTreeMap<[i32; 3], usize> {
         let mut counts = BTreeMap::new();
         for quad in 0..mesh.quad_count() {
             let n = mesh.normals[quad * VERTICES_PER_QUAD];
@@ -483,7 +582,7 @@ mod tests {
 
     /// The area of a quad in blocks, from the two edges leaving its first corner.
     /// The cross product's magnitude is exactly that area.
-    fn quad_area(mesh: &ChunkMesh, quad: usize) -> f32 {
+    fn quad_area(mesh: &SurfaceMesh, quad: usize) -> f32 {
         let n = winding_normal(mesh, quad);
         (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
     }
@@ -504,7 +603,7 @@ mod tests {
     ///
     /// This is what the GPU derives the facing from, so comparing it against the
     /// normal attribute is how a winding mistake is caught without a screen.
-    fn winding_normal(mesh: &ChunkMesh, quad: usize) -> [f32; 3] {
+    fn winding_normal(mesh: &SurfaceMesh, quad: usize) -> [f32; 3] {
         let c = |k: usize| mesh.positions[quad * VERTICES_PER_QUAD + k];
         let (c0, c1, c3) = (c(0), c(1), c(3));
         let a = [c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]];
@@ -1060,5 +1159,173 @@ mod tests {
             elapsed < CEILING,
             "the worst case took {elapsed:?}, over the {CEILING:?} tripwire"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Water: the second mesh, and the faces that do and do not reach it
+    // -----------------------------------------------------------------------
+
+    /// A column of `blocks` standing on the chunk's floor at its centre, bottom
+    /// first. Everything above them is air.
+    fn column(size: usize, blocks: &[BlockId]) -> VoxelChunk {
+        let mut chunk = air(size);
+        for (y, block) in blocks.iter().enumerate() {
+            chunk.set(size / 2, y, size / 2, *block);
+        }
+        chunk
+    }
+
+    #[test]
+    fn water_over_stone_draws_the_lake_bed_and_one_surface() {
+        // Stone at y = 0 with water directly on top of it.
+        let chunk = column(SIZE, &[palette::STONE, palette::WATER]);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        // The stone keeps all six faces: five meet air and the sixth meets water, which
+        // is the whole point.
+        assert_eq!(mesh.opaque.quad_count(), 6, "the stone keeps every face");
+        let by_normal = quads_by_normal(&mesh.opaque);
+        for direction in six_directions() {
+            assert_eq!(
+                by_normal.get(&direction),
+                Some(&1),
+                "the stone's {direction:?} face, the top one included — it is under \
+                 the water, and it is what the water is looked through at"
+            );
+        }
+
+        // One voxel of water with air on five sides and stone below: five faces.
+        assert_eq!(mesh.water.quad_count(), 5);
+        assert_eq!(
+            quads_by_normal(&mesh.water).get(&[0, -1, 0]),
+            None,
+            "the face water shares with the stone under it is nobody's to draw twice"
+        );
+        assert_eq!(
+            quads_by_normal(&mesh.water).get(&[0, 1, 0]),
+            Some(&1),
+            "the surface, which is the face the player looks down through"
+        );
+    }
+
+    #[test]
+    fn water_beside_water_has_no_surface_between_it() {
+        // Two voxels of water in one column. The face between them is what the merge
+        // exists never to emit, and the four sides merge across both.
+        let chunk = column(SIZE, &[palette::WATER, palette::WATER]);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert!(
+            mesh.opaque.is_empty(),
+            "there is nothing opaque in the chunk"
+        );
+        assert_eq!(
+            quads_by_normal(&mesh.water),
+            BTreeMap::from([
+                ([0, 1, 0], 1),
+                ([0, -1, 0], 1),
+                ([1, 0, 0], 1),
+                ([-1, 0, 0], 1),
+                ([0, 0, 1], 1),
+                ([0, 0, -1], 1),
+            ]),
+            "one surface, one floor, and four sides merged over both voxels"
+        );
+    }
+
+    #[test]
+    fn water_against_a_solid_block_draws_no_water_face() {
+        // Water with stone on every side: the stone draws the faces they share and the
+        // water draws nothing. A water quad there would be a sheet buried in the rock.
+        let mut chunk = solid(SIZE, palette::STONE);
+        chunk.set(SIZE / 2, SIZE / 2, SIZE / 2, palette::WATER);
+        let mesh = super::mesh_chunk(&chunk, &surrounded_by(&solid(SIZE, palette::STONE)));
+
+        assert!(
+            mesh.water.is_empty(),
+            "water sealed in stone has no surface"
+        );
+        assert_eq!(
+            mesh.opaque.quad_count(),
+            6,
+            "the six stone faces around the pocket, and nothing else in a solid chunk"
+        );
+    }
+
+    #[test]
+    fn a_water_column_at_the_border_draws_its_side_once() {
+        // Water filling the -x layer, with an air neighbour across that face. The side
+        // face is emitted exactly once, by the chunk the water is in.
+        let mut chunk = air(SIZE);
+        for y in 0..SIZE {
+            for z in 0..SIZE {
+                chunk.set(0, y, z, palette::WATER);
+            }
+        }
+        let mesh = super::mesh_chunk(&chunk, &across(0, false, air(SIZE)));
+
+        assert_eq!(
+            quads_by_normal(&mesh.water).get(&[-1, 0, 0]),
+            Some(&1),
+            "one merged quad over the whole border layer, drawn by its own chunk"
+        );
+
+        // And the neighbour, meshed from its own side, draws none of it: the water is
+        // not its water.
+        let neighbour = super::mesh_chunk(&air(SIZE), &across(0, true, chunk));
+        assert!(
+            neighbour.water.is_empty(),
+            "the air chunk across the border draws nobody else's surface"
+        );
+    }
+
+    #[test]
+    fn water_across_a_border_is_culled_against_the_neighbour_that_holds_it() {
+        // The rule the opaque sweep already follows, on the other mesh.
+        let water = solid(SIZE, palette::WATER);
+        let mesh = super::mesh_chunk(&water, &surrounded_by(&water));
+
+        assert!(mesh.is_empty(), "a chunk inside a lake draws nothing");
+
+        // Alone, every border face is emitted — the conservative answer this mesher
+        // gives whenever a neighbour has not arrived.
+        assert_eq!(mesh_chunk(&water, &alone()).quad_count(), 0);
+        assert_eq!(super::mesh_chunk(&water, &alone()).water.quad_count(), 6);
+    }
+
+    #[test]
+    fn ice_is_meshed_as_ordinary_ground() {
+        // The other half of #446's pair took none of water's behaviour with it: ice is
+        // opaque, so it meshes exactly like stone and never reaches the water half.
+        let ice = super::mesh_chunk(&single_block(SIZE, palette::ICE), &alone());
+        let stone = super::mesh_chunk(&single_block(SIZE, palette::STONE), &alone());
+
+        assert_eq!(ice.opaque.quad_count(), stone.opaque.quad_count());
+        assert_eq!(ice.opaque.positions, stone.opaque.positions);
+        assert!(ice.water.is_empty());
+    }
+
+    #[test]
+    fn the_two_halves_never_share_a_quad() {
+        // A slab of stone under a slab of water under air, and the invariant that keeps
+        // the two draw calls off each other: no quad appears in both meshes.
+        let mut chunk = air(SIZE);
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                chunk.set(x, 0, z, palette::STONE);
+                chunk.set(x, 1, z, palette::WATER);
+            }
+        }
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert!(!mesh.opaque.is_empty() && !mesh.water.is_empty());
+        for quad in 0..mesh.opaque.quad_count() {
+            let corners = &mesh.opaque.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+            for other in 0..mesh.water.quad_count() {
+                let against =
+                    &mesh.water.positions[other * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+                assert_ne!(corners, against, "a quad is in both meshes");
+            }
+        }
     }
 }
