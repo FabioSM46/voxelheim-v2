@@ -119,7 +119,8 @@ fn mesh_varies_with_livery(shape: ItemShape) -> bool {
         | ItemShape::Armour
         | ItemShape::Shield
         | ItemShape::Bow
-        | ItemShape::Sceptre => false,
+        | ItemShape::Sceptre
+        | ItemShape::Coin => false,
     }
 }
 
@@ -420,6 +421,11 @@ fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
         ItemShape::Shield => shield_mesh(DROP_EDGE * 2.0),
         ItemShape::Bow => bow_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Sceptre => sceptre_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
+        // A coin lies where it fell: a disc a third of a drop across and a tenth of one
+        // thick. Its own silhouette rather than the material stub's, which is what
+        // `every_shape_is_drawn_from_its_own_silhouette` insists on and what stops a purse
+        // on the ground looking like a pile of ore.
+        ItemShape::Coin => Mesh::from(Cylinder::new(DROP_EDGE * 0.34, DROP_EDGE * 0.10)),
     }
 }
 
