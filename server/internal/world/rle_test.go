@@ -71,10 +71,21 @@ func TestUniformChunkEncodesToOnePair(t *testing.T) {
 // The size assertion is the reason the encoding exists: 32³ voxels are 64 KiB raw,
 // and streaming a view distance of 3 raw would be 22 MiB per join. A regression in
 // the encoder shows up here rather than as a slow connection.
+//
+// **The ceiling was 4096 and worldgen 3 moved it, which is a cost of mountains
+// rather than a regression in the encoder.** Runs are broken by the surface, and the
+// surface now crosses a chunk far more steeply: relief lets a column's amplitude
+// reach 150 blocks where it used to be 40 everywhere, so a chunk on a mountainside
+// holds a few hundred short runs where the old terrain gave it a few dozen long
+// ones. Measured over 605 chunks at this seed the median is 4 bytes (a chunk of one
+// block), the mean is 1075 and the worst is 10412 — still six times better than raw
+// at the worst chunk and sixty on average. Twelve KiB leaves room above that
+// measurement without coming near the 131072 an encoder that had stopped
+// compressing would emit, which is the regression this number exists to catch.
 func TestTerrainChunkEncodesUnderTheCeiling(t *testing.T) {
 	t.Parallel()
 
-	const ceilingBytes = 4096
+	const ceilingBytes = 12288
 
 	for _, coord := range []Coord{{X: 0, Y: 2, Z: 0}, {X: 3, Y: 2, Z: -5}, {X: -12, Y: 1, Z: 7}} {
 		pairs := Encode(Generate(0x5EED, coord))

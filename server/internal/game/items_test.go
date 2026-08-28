@@ -209,18 +209,67 @@ func TestRawAndCookedMeatAreTheOnlyFoods(t *testing.T) {
 	}
 }
 
+// The three blocks worldgen 3 put in the ground, at the ids the registry appended
+// them at and with the plain block-item row each of them has.
+//
+// **The ids are pinned by name.** Item ids cross the wire inside inventories that
+// are already persisted, so an insertion above any of these renumbers a saved pack;
+// the id is the one fact about a block item that a later edit cannot be allowed to
+// choose freely, and stating it here is what makes an insertion a failing test
+// rather than a silent loss.
+func TestTheThreeGroundBlocksOfWorldgenThreeCarryTheirPinnedIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		item   ItemID
+		id     ItemID
+		places world.Block
+	}{
+		{ItemSand, 31, world.Sand},
+		{ItemSandstone, 32, world.Sandstone},
+		{ItemGravel, 33, world.Gravel},
+	} {
+		if tc.item != tc.id {
+			t.Errorf("item id = %d, want appended wire id %d", tc.item, tc.id)
+		}
+		got, registered := itemByID(tc.item)
+		if !registered {
+			t.Errorf("item %d is not registered", tc.item)
+			continue
+		}
+		want := itemDefinition{places: tc.places, maxStack: 64}
+		if got != want {
+			t.Errorf("item %d row = %+v, want %+v", tc.item, got, want)
+		}
+		// The registry proposes and world.Placeable disposes; both have to say yes
+		// before a place request can put one of these in the ground.
+		block, placeable := blockPlacedBy(tc.item)
+		if !placeable || block != tc.places {
+			t.Errorf("item %d places block %d (placeable %v), want %d", tc.item, block, placeable, tc.places)
+		}
+		// Breaking one gives back exactly the block that was broken, which is what
+		// makes a desert something you can carry home and build with.
+		if dropped := itemDroppedBy(tc.places); dropped != tc.item {
+			t.Errorf("block %d drops item %d, want %d", tc.places, dropped, tc.item)
+		}
+	}
+}
+
 func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 	t.Parallel()
 
 	want := map[world.Block]ItemID{
-		world.Stone:   ItemStone,
-		world.Dirt:    ItemDirt,
-		world.Grass:   ItemDirt,
-		world.Snow:    ItemSnow,
-		world.Log:     ItemLog,
-		world.Leaves:  ItemNone,
-		world.CoalOre: ItemRawCoal,
-		world.IronOre: ItemRawIron,
+		world.Stone:     ItemStone,
+		world.Dirt:      ItemDirt,
+		world.Grass:     ItemDirt,
+		world.Snow:      ItemSnow,
+		world.Log:       ItemLog,
+		world.Leaves:    ItemNone,
+		world.CoalOre:   ItemRawCoal,
+		world.IronOre:   ItemRawIron,
+		world.Sand:      ItemSand,
+		world.Sandstone: ItemSandstone,
+		world.Gravel:    ItemGravel,
 	}
 	for block, itemID := range want {
 		if got := itemDroppedBy(block); got != itemID {
@@ -236,14 +285,17 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 	t.Parallel()
 
 	want := map[world.Block]uint16{
-		world.Stone:   0,
-		world.Dirt:    0,
-		world.Grass:   0,
-		world.Snow:    0,
-		world.Log:     2,
-		world.Leaves:  0,
-		world.CoalOre: 4,
-		world.IronOre: 6,
+		world.Stone:     0,
+		world.Dirt:      0,
+		world.Grass:     0,
+		world.Snow:      0,
+		world.Log:       2,
+		world.Leaves:    0,
+		world.CoalOre:   4,
+		world.IronOre:   6,
+		world.Sand:      0,
+		world.Sandstone: 0,
+		world.Gravel:    0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))

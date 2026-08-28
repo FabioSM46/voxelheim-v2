@@ -45,6 +45,14 @@ const (
 	Leaves  Block = 6
 	CoalOre Block = 7
 	IronOre Block = 8
+
+	// What a desert and a gravel bar are made of. Appended, never inserted: every
+	// id above is already on the wire inside chunks a client has, and inside the
+	// delta files a played-in world directory holds. All three are building blocks
+	// rather than ore, so Placeable says yes to each of them.
+	Sand      Block = 9
+	Sandstone Block = 10
+	Gravel    Block = 11
 )
 
 // Placeable reports whether a block id names something a player may put into the
@@ -61,7 +69,7 @@ const (
 // route to the same effect.
 func Placeable(b Block) bool {
 	switch b {
-	case Stone, Dirt, Grass, Snow, Log, Leaves:
+	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel:
 		return true
 	default:
 		return false

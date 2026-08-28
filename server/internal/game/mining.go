@@ -76,6 +76,14 @@ var handMiningTimes = map[world.Block]time.Duration{
 	world.Stone:   4 * time.Second,
 	world.CoalOre: 6 * time.Second,
 	world.IronOre: 8 * time.Second,
+
+	// The desert and the gravel bars. Sand and gravel are the loosest ground in the
+	// game and go faster than dirt; sandstone is compacted sand and sits between a
+	// log and stone, which is what makes a desert quarry worth a pickaxe rather than
+	// a detour.
+	world.Sand:      500 * time.Millisecond,
+	world.Gravel:    600 * time.Millisecond,
+	world.Sandstone: 2 * time.Second,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -117,14 +125,17 @@ const ToolSpeedFactor = 4
 // forgotten here is merely unhelped, never accidentally four times faster.
 var toolFamilies = map[ItemID]map[world.Block]struct{}{
 	ItemShovel: {
-		world.Dirt:  {},
-		world.Grass: {},
-		world.Snow:  {},
+		world.Dirt:   {},
+		world.Grass:  {},
+		world.Snow:   {},
+		world.Sand:   {},
+		world.Gravel: {},
 	},
 	ItemPickaxe: {
-		world.Stone:   {},
-		world.CoalOre: {},
-		world.IronOre: {},
+		world.Stone:     {},
+		world.CoalOre:   {},
+		world.IronOre:   {},
+		world.Sandstone: {},
 	},
 	ItemAxe: {
 		world.Log:    {},
