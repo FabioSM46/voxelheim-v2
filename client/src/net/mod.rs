@@ -509,6 +509,13 @@ impl LootInbox {
 /// Order is what makes the two kinds one queue rather than two: a `MapExplored` that
 /// arrives after a tile evicts it, and one that arrives before it does not, so the two
 /// cannot be sorted into separate inboxes without losing which happened first.
+///
+/// It carries no session lifetime of its own, and no inbox in this module does: each is
+/// drained unconditionally every `Update` by its consumer, with no run condition, so an
+/// inbox is a one-frame queue and cannot hold anything across a boundary that takes many
+/// frames to cross. The map data that *does* outlive a frame is the tile cache the screen
+/// reads, and that is where the session rule belongs, because a tile is drawn for one
+/// character in one world.
 #[derive(Resource, Debug, Default)]
 pub struct MapInbox(Vec<MapEvent>);
 
