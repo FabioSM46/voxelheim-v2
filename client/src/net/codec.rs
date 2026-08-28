@@ -7869,6 +7869,74 @@ mod tests {
         );
     }
 
+    /// A resident name that is not UTF-8 is refused before the accessor that would read
+    /// it runs.
+    ///
+    /// The third instance of the property
+    /// [`a_character_name_that_is_not_utf8_is_refused_before_the_accessor_runs`] pins and
+    /// [`a_marker_note_that_is_not_utf8_is_refused_before_the_accessor_runs`] pinned
+    /// again, here for the one string this protocol version adds.
+    /// `ResidentAppearance::name()` is `from_utf8_unchecked` like every other generated
+    /// string accessor, so what stands between a hostile frame and undefined behaviour is
+    /// that [`decode`] goes through `root_as_envelope`: the generated verifier visits
+    /// `name` as `ForwardsUOffset<&str>`, and that impl runs `core::str::from_utf8` and
+    /// returns `InvalidFlatbuffer::Utf8Error` before any accessor is called.
+    ///
+    /// The `RESIDENT_NAME_MAX_BYTES` bound in the decode arm is a *length* check reached
+    /// only afterwards — it is not what makes the read safe, and reading the code cannot
+    /// show that it does not have to be. That is the whole reason this is pinned rather
+    /// than left to library behaviour plus the "never `root_as_envelope_unchecked`"
+    /// convention plus a pinned `Cargo.lock`: two of those three are conventions, and a
+    /// convention is what a regression walks through.
+    ///
+    /// The bytes are patched into a finished frame rather than built through
+    /// `from_utf8_unchecked`, because `client/Cargo.toml` records that hand-written client
+    /// code contains no `unsafe` and a safety test is a poor place to write the first.
+    #[test]
+    fn a_resident_name_that_is_not_utf8_is_refused_before_the_accessor_runs() {
+        // Distinctive enough to appear once in a frame, and checked below rather than
+        // assumed. 0xC3 opens a two-byte sequence and 0x28 is not a continuation byte.
+        const NAME: &[u8] = b"Qxvz";
+        const NOT_UTF8: &[u8] = &[0xC3, 0x28];
+
+        let mut frame = encode_resident_appearance(
+            900,
+            Some(core::str::from_utf8(NAME).expect("the fixture name is ascii")),
+            fb::ResidentRole::Smith.0,
+            Some(AppearanceWire::default()),
+        );
+
+        // The frame this patches is a good one, which is what makes the refusal below a
+        // statement about the bytes rather than about the fixture.
+        assert!(
+            decode(&frame).is_ok(),
+            "the unpatched fixture is not a decodable frame"
+        );
+
+        let occurrences = frame.windows(NAME.len()).filter(|w| *w == NAME).count();
+        assert_eq!(occurrences, 1, "the fixture name is not uniquely locatable");
+        let at = frame
+            .windows(NAME.len())
+            .position(|window| window == NAME)
+            .expect("the name is in the frame it was encoded into");
+        // The replacement is the same length as what it replaces, so no offset moves.
+        frame[at..at + NOT_UTF8.len()].copy_from_slice(NOT_UTF8);
+
+        // The reason is pinned, not just the refusal: a patched buffer could in principle
+        // be refused for something that has nothing to do with UTF-8, which would leave
+        // this test passing while the property it exists for went unchecked. It must also
+        // not be `ResidentWithoutName` or `ResidentNameTooLong` — either would mean this
+        // arm's own checks had run first, on a `&str` the accessor had already fabricated.
+        let refusal = decode(&frame);
+        let Err(DecodeError::Malformed(reason)) = &refusal else {
+            panic!("invalid UTF-8 in a resident name was not refused: {refusal:?}");
+        };
+        assert!(
+            reason.contains("Utf8") && reason.contains("name"),
+            "the frame was refused for something other than the name's encoding: {reason}"
+        );
+    }
+
     /// A price list replaces the client's view of one vendor, so every bound it carries
     /// is held here.
     ///
