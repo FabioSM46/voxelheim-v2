@@ -106,7 +106,7 @@ func onlyCharacter(t *testing.T, store *persist.Store, account ticket.AccountID)
 func identitiesWith(t *testing.T, verifier *session.Verifier) *session.Identities {
 	t.Helper()
 
-	identities, err := session.NewIdentities(nil, verifier, nil)
+	identities, err := session.NewIdentities(nil, nil, verifier, nil)
 	if err != nil {
 		t.Fatalf("NewIdentities: %v", err)
 	}

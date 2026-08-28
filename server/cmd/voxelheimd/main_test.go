@@ -64,16 +64,16 @@ func TestMain(m *testing.M) {
 	defer os.Exit(code)
 }
 
-// testIdentities is a claim set over store — nil for the ephemeral world — admitting
-// tickets from the package's own account service.
-func testIdentities(t *testing.T, store *persist.Store) *session.Identities {
+// testIdentities is a claim set over store and explored — nil for the ephemeral world
+// — admitting tickets from the package's own account service.
+func testIdentities(t *testing.T, store *persist.Store, explored *persist.ExplorationStore) *session.Identities {
 	t.Helper()
 
 	verifier, err := session.NewVerifier(testPair.Public(), testWorld, nil)
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
-	identities, err := session.NewIdentities(store, verifier, discard())
+	identities, err := session.NewIdentities(store, explored, verifier, discard())
 	if err != nil {
 		t.Fatalf("NewIdentities: %v", err)
 	}
@@ -166,7 +166,7 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 		// A nil player store is the ephemeral world, which is how most of these tests
 		// run: tickets are still verified and accounts are still exclusive, and nothing
 		// is written.
-		identities: testIdentities(t, players),
+		identities: testIdentities(t, players, nil),
 		cfg:        cfg,
 		// Left zero on purpose: these tests are about shutdown ordering and accept-loop
 		// behaviour, and a read deadline would end their connections on a schedule they
