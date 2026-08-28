@@ -56,9 +56,9 @@ const (
 	// a ceiling.
 	SurfaceCave SurfaceKind = 9
 
-	// SurfaceSettlement is reserved for the settlement iteration. Nothing returns it,
-	// and the number is agreed on here for the reason schemas/world.fbs agrees on it
-	// there: a colour should not cost a protocol bump.
+	// SurfaceSettlement is a column standing inside a settlement's flattened ground:
+	// a capital or a village, whether the pixel happens to fall on a roof or on the
+	// square between two of them.
 	SurfaceSettlement SurfaceKind = 10
 )
 
@@ -104,7 +104,16 @@ func SurfaceAt(seed int64, x, z int64) (height int, kind SurfaceKind) {
 		return col.surface, SurfaceWater
 	}
 
-	if caveAt(seed, x, int64(col.surface), z, col.surface) {
+	// A settlement, before the ground it stands on. Inside the radius the surface is
+	// the plateau and there is a building somewhere on it, so the one word for the
+	// column is that there is a place here — the grass between two huts is not what a
+	// map of this square is for. It cannot collide with the water above it: a site is
+	// refused below seaLevel + 3.
+	if col.settlement {
+		return col.surface, SurfaceSettlement
+	}
+
+	if col.carvedAt(seed, x, int64(col.surface), z) {
 		return col.surface, SurfaceCave
 	}
 

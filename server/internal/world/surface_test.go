@@ -126,6 +126,26 @@ func TestSurfaceAtNamesWhatTheGeneratorBuilt(t *testing.T) {
 					t.Fatalf("(%d, %d) drawn as a cave, but the voxel at height %d is %d", x, z, height, surface)
 				}
 
+			case SurfaceSettlement:
+				// Inside a settlement the surface is the plateau, so the voxel at the
+				// reported height is still the ground its climate asks for — every
+				// building starts one block above it. What the pixel claims is that
+				// there is a settlement standing on this column, and the way to check
+				// that against the world rather than against the rule is to ask the
+				// lattice for one and measure.
+				s, ok := NearestSettlement(surfaceSeed, x, z)
+				if !ok {
+					t.Fatalf("(%d, %d) drawn as a settlement, but no settlement is within reach", x, z)
+				}
+				if d := isqrt(squaredDistance(x, z, s.CentreX, s.CentreZ)); d > int64(s.Radius) {
+					t.Fatalf("(%d, %d) drawn as a settlement, but the nearest one is %d blocks away and its radius is %d",
+						x, z, d, s.Radius)
+				}
+				if height != s.Plateau {
+					t.Fatalf("(%d, %d) is drawn at height %d, but the settlement it is in has its plateau at %d",
+						x, z, height, s.Plateau)
+				}
+
 			case SurfaceForest:
 				// A conifer's trunk starts one voxel above the ground it is rooted in.
 				if got := voxel(x, int64(height)+1, z); got != Log {
@@ -151,12 +171,17 @@ func TestSurfaceAtNamesWhatTheGeneratorBuilt(t *testing.T) {
 		}
 	}
 	// Unknown is the contract's "nothing may be said", which the tile path writes for
-	// an unexplored column and this function must never write for an explored one;
-	// Settlement waits for the settlement iteration.
-	for _, kind := range []SurfaceKind{SurfaceUnknown, SurfaceSettlement} {
-		if checked[kind] != 0 {
-			t.Errorf("%d columns drawn as %d, which nothing may return", checked[kind], kind)
-		}
+	// an unexplored column and this function must never write for an explored one.
+	//
+	// **Settlement is deliberately not in the quota above.** Settlements are a lattice
+	// rather than a field: this sweep steps 149 blocks and a village's flat ground is
+	// 56 across, so how many of them a sample lands on is a coincidence of the two
+	// numbers — measured at seed 0x5EED it is twelve, which is the quota exactly and
+	// therefore no margin at all. What the settlement branch owes is asserted where it
+	// can be asserted deterministically, in settlement_test.go, against a settlement
+	// this test does not have to be lucky to find.
+	if checked[SurfaceUnknown] != 0 {
+		t.Errorf("%d columns drawn as %d, which nothing may return", checked[SurfaceUnknown], SurfaceUnknown)
 	}
 }
 

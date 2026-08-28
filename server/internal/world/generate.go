@@ -154,8 +154,27 @@ const _ = uint8(ironMinDepth - coalMaxDepth - 1)
 // goes through generatedColumnTop, which is columnAt again. A caller that finds
 // itself asking for a height per entity or per tick wants columnAt, not this.
 func HeightAt(seed int64, worldX, worldZ int64) int {
-	surface, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
+	surface, _, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
 	return surface
+}
+
+// unloweredHeightAt is the terrain before anything moves it: the amplitude-scaled noise
+// alone, with no basin, no river bed and no settlement plateau.
+//
+// **The one definition of "what the land was doing here".** Three rules read it and all
+// three would be wrong against the final height: riverMaxSurface asks whether the ground
+// is low enough for a channel, the settlement site rules ask whether it is high enough
+// to build on, and the plateau blend eases back towards it. Reading the finished surface
+// instead would make each of them depend on the order the lowerings happened to run in.
+func unloweredHeightAt(seed, worldX, worldZ int64) int {
+	// Position in Q16.16 lattice units. Integer division truncates toward zero,
+	// which for negative coordinates would mirror the terrain across the origin;
+	// floorDiv keeps the field continuous through x = 0.
+	nx := floorDiv(worldX<<fracBits, terrainScaleBlocks)
+	nz := floorDiv(worldZ<<fracBits, terrainScaleBlocks)
+
+	n := fbm2D(seed, nx, nz) // [0, one]
+	return baseHeight + int((amplitudeAt(seed, worldX, worldZ)*(n-one/2))>>fracBits)
 }
 
 // shapeAt is [HeightAt] for a caller that already knows the column's climate, and it
@@ -168,30 +187,32 @@ func HeightAt(seed int64, worldX, worldZ int64) int {
 // cannot be asked again afterwards without paying a second fbm2D for an answer this
 // function already had; worse, a second reading could disagree with the ground,
 // because a column near spawn passes the river field and has no channel.
-func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river bool) {
-	// Position in Q16.16 lattice units. Integer division truncates toward zero,
-	// which for negative coordinates would mirror the terrain across the origin;
-	// floorDiv keeps the field continuous through x = 0.
-	nx := floorDiv(worldX<<fracBits, terrainScaleBlocks)
-	nz := floorDiv(worldZ<<fracBits, terrainScaleBlocks)
-
-	n := fbm2D(seed, nx, nz) // [0, one]
-	base := baseHeight + int((amplitudeAt(seed, worldX, worldZ)*(n-one/2))>>fracBits)
+func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, settled bool) {
+	base := unloweredHeightAt(seed, worldX, worldZ)
 
 	// The square around spawn keeps the terrain it would have had. See
 	// spawnWaterClearance, and spawnCaveClearance beside it: the two exemptions are
 	// the same shape and are checked the same way, before any noise is paid for.
 	if nearSpawnColumn(worldX, worldZ) {
-		return base, false
+		return base, false, false
+	}
+
+	// **The plateau comes before both water features, and that is the whole of "a
+	// settlement's ground does not move".** Inside the radius the surface is the
+	// plateau; out to the end of the blend band it eases back towards `base`, and
+	// neither a basin nor a channel is applied anywhere in that band — both of them
+	// lower ground, and the ground under a village is the one ground that must not.
+	if plateau, inside, near := settlementShapeAt(seed, worldX, worldZ, base); near {
+		return plateau, false, inside
 	}
 
 	// **The height test comes before the river field, and the order is the budget.**
 	// riverMaxSurface rejects high ground with one comparison; the fbm2D behind
 	// riverAt is only paid where a channel could actually be.
 	if base <= riverMaxSurface && riverAt(seed, worldX, worldZ) {
-		return seaLevel - riverBedDrop, true
+		return seaLevel - riverBedDrop, true, false
 	}
-	return base - basinAt(seed, worldX, worldZ, climate), false
+	return base - basinAt(seed, worldX, worldZ, climate), false, false
 }
 
 // amplitudeAt is the peak-to-trough range in blocks at one column, in whole
@@ -247,7 +268,15 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // of those change [HeightAt] itself, so the *shape* of the land moves and not only
 // what fills it — every column outside the spawn square is a candidate, which
 // makes this the same total break the last two bumps were.
-const WorldgenVersion uint32 = 5
+// 5 → 6: settlements. A capital stands within two hundred blocks of every spawn and
+// villages sit on a two-kilometre lattice across the rest of the world, each on a
+// plateau [HeightAt] itself imposes — so the *shape* of the land moves again, and with
+// it every tree, ore band, cave mouth and map tile that reads the height field. Three
+// blocks are appended to the palette to build with. Only ground within seventy-two
+// blocks of a settlement's centre moves, which makes this the narrowest of the five
+// breaks; it is a break all the same, because a stored world's deltas would resolve
+// onto a landscape that no longer has a village in it.
+const WorldgenVersion uint32 = 6
 
 // Generate builds the chunk at coord for seed.
 //
@@ -276,6 +305,11 @@ func Generate(seed int64, coord Coord) *Chunk {
 		}
 	}
 
+	// **Buildings before trees, and the order is the clip.** Both features fill only
+	// air, so whichever runs first wins a contested voxel — and a canopy grown just
+	// outside a settlement may overhang its edge. A roof is what should survive that
+	// meeting.
+	placeSettlements(seed, chunk)
 	placeTrees(seed, chunk, &columns)
 
 	return chunk
@@ -293,6 +327,18 @@ type column struct {
 	gravel  bool
 	river   bool
 	beach   bool
+
+	// settlement is whether this column stands inside a settlement's radius, where
+	// the surface is the plateau exactly.
+	//
+	// **Resolved once per column rather than once per voxel, which is the only reason
+	// the feature is affordable.** Three rules read it — no tree roots here, nothing
+	// is carved within [settlementCaveClearance] of the surface, and a map tile draws
+	// [SurfaceSettlement] — and the first two of those are asked per voxel by their
+	// natural callers. [settlementShapeAt] costs twenty-seven fbm sums for a column
+	// that is actually in a settlement, so paying it per voxel would cost more than
+	// the rest of generation put together.
+	settlement bool
 }
 
 // columnAt resolves one world column. Pure in (seed, x, z), like everything else
@@ -304,14 +350,40 @@ type column struct {
 // know what its ground is made of.
 func columnAt(seed, worldX, worldZ int64) column {
 	climate := ClimateAt(seed, worldX, worldZ)
-	surface, river := shapeAt(seed, worldX, worldZ, climate)
+	surface, river, settled := shapeAt(seed, worldX, worldZ, climate)
 	return column{
-		surface: surface,
-		climate: climate,
-		gravel:  gravelAt(seed, worldX, worldZ, surface, climate),
-		river:   river,
-		beach:   beachAt(surface, climate),
+		surface:    surface,
+		climate:    climate,
+		gravel:     gravelAt(seed, worldX, worldZ, surface, climate),
+		river:      river,
+		beach:      beachAt(surface, climate),
+		settlement: settled,
 	}
+}
+
+// carvedAt is [caveAt] with this column's settlement exemption applied.
+//
+// **A settlement's foundations are the one place carving is refused for a reason that
+// is not about the cave system.** Inside a radius the surface *is* the plateau, so
+// "above Plateau − settlementCaveClearance" is exactly "shallower than that many
+// blocks", and the exemption costs one field read and one subtraction on a path that
+// otherwise pays two fbm3D sums. Every caller that holds a column goes through here;
+// [caveAt] itself stays the plain carve field, which is what caves_test.go measures.
+func (c column) carvedAt(seed, worldX, worldY, worldZ int64) bool {
+	if c.settlement && int64(c.surface)-worldY < settlementCaveClearance {
+		return false
+	}
+	return caveAt(seed, worldX, worldY, worldZ, c.surface)
+}
+
+// carvedTop is [carvedColumnTop] for a caller that already resolved the column, so the
+// settlement exemption applies to it too.
+func (c column) carvedTop(seed, worldX, worldZ int64) int {
+	top := c.surface
+	for c.carvedAt(seed, worldX, int64(top), worldZ) {
+		top--
+	}
+	return top
 }
 
 // blockAt is [blockAt] with this column's own surfaces layered over it: a river
@@ -364,7 +436,7 @@ func (c column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
 		// Above the ground, so this is the sea line's to fill. Water, or the ice on
 		// top of it in a tundra, or air above both.
 		return c.fillAt(int(worldY))
-	case caveAt(seed, worldX, worldY, worldZ, c.surface):
+	case c.carvedAt(seed, worldX, worldY, worldZ):
 		// **Carving is asked before the fill, and the two fills are separate rules.**
 		// A carved voxel is below the surface by construction, so the sea line above
 		// can never reach it — an air pocket under a lake bed stays an air pocket,
@@ -522,6 +594,14 @@ func treeAt(seed, worldX, worldZ int64) (surface, trunkHeight int, ok bool) {
 // the column's top voxel air while blockAt still calls it grass. That check is
 // therefore explicit, and it is last — see the comment at it.
 func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok bool) {
+	// **Nothing grows inside a settlement**, and this is the cheapest of the four
+	// refusals below because the column already carries the answer. A conifer on a
+	// plateau would stand in a courtyard, put its canopy through a roof, and — since
+	// the clip only fills air — leave a crown floating over a hall.
+	if col.settlement {
+		return 0, false
+	}
+
 	denominator := treeChanceDenominator(col.climate)
 	if denominator == 0 {
 		return 0, false
@@ -548,7 +628,7 @@ func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok b
 	// Nothing roots in a hole. The carve test is last on purpose: it is the most
 	// expensive question here by an order of magnitude, and the density check above
 	// has already rejected all but one candidate column in ninety-six.
-	if caveAt(seed, worldX, int64(col.surface), worldZ, col.surface) {
+	if col.carvedAt(seed, worldX, int64(col.surface), worldZ) {
 		return 0, false
 	}
 
@@ -652,7 +732,7 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 // therefore the highest generated solid in the column.
 func generatedColumnTop(seed, worldX, worldZ int64) int {
 	col := columnAt(seed, worldX, worldZ)
-	top := carvedColumnTop(seed, worldX, worldZ, col.surface)
+	top := col.carvedTop(seed, worldX, worldZ)
 	if col.surface < seaLevel && col.fillAt(seaLevel) == Ice {
 		top = max(top, seaLevel)
 	}
