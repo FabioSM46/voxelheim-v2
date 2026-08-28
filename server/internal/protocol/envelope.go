@@ -134,6 +134,33 @@ func MapTileExploredBytes(scale uint8) int {
 	return (edge*edge + 7) / 8
 }
 
+// MapTileHeight encodes one terrain height into the byte MapTile.height carries:
+// clamp(y + 64, 0, 255).
+//
+// **A byte of shading, and the bias is what makes the world's negative half survive
+// it.** Terrain here ranges over roughly [-11, 139] and nothing bounds it on either
+// side, so the encoding saturates rather than wraps: a peak past 191 draws as the
+// highest shade there is and a trench under -64 as the lowest, which is a picture that
+// stops improving rather than one that lies. schemas/world.fbs states the same
+// arithmetic and adds the rule that goes with it — a client reads this as shading and
+// never as a coordinate.
+//
+// It lives here rather than in the session because it is a fact about the wire, and
+// because the one thing worse than a bias in two places is a bias in two places that
+// disagree.
+func MapTileHeight(y int) byte {
+	const bias = 64
+
+	switch biased := y + bias; {
+	case biased < 0:
+		return 0
+	case biased > 255:
+		return 255
+	default:
+		return byte(biased)
+	}
+}
+
 // ErrMalformed marks a frame that is not a decodable Envelope. Every malformed
 // input funnels through it, so callers can log one class and close the
 // connection rather than branching on the shape of the damage.

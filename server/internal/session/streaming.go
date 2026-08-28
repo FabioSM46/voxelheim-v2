@@ -265,7 +265,11 @@ type Streamer struct {
 	// resends bounds what a client can ask for with ChunkResendRequest. Its own mutex
 	// guards it, because Resend runs on the session's read loop while everything else
 	// here runs on the streaming goroutine.
-	resends *resendLimiter
+	resends *tokenBucket
+
+	// tiles bounds what a client can ask for with MapTileRequest, for the same reason
+	// and with the same mutex discipline: DrawMapTile runs on the session's read loop.
+	tiles *tokenBucket
 
 	// repairing says that the previous pass ended by giving up on a chunk and asking for
 	// this one. Written and read only on the streaming goroutine, which is the single
@@ -289,7 +293,8 @@ type Streamer struct {
 // "the next diff" is otherwise not a time at all. game.Player.WakeStreaming is the one
 // the server passes; it rings the doorbell the tick loop already rings.
 //
-// now is the clock the resend limiter refills against. Injected rather than read from
+// now is the clock this session's rate limits refill against — the resend bucket and
+// the map-tile bucket both. Injected rather than read from
 // time.Now for the reason game.Clock exists: a test has to be able to spend a bucket
 // without spending a second, and a bound nothing can test is a bound nobody can change
 // safely.
@@ -301,6 +306,7 @@ func NewStreamer(cache *world.Cache, radius uint8, send func([]byte) error, wake
 		wake:    wake,
 		log:     log,
 		resends: newResendLimiter(radius, now),
+		tiles:   newMapTileLimiter(now),
 	}
 }
 
@@ -538,7 +544,41 @@ func fromProtocolCoord(c protocol.ChunkCoord) world.Coord {
 // no chunks at all.
 const resendRefillPerSecond = game.TerminalFallSpeed / world.ChunkSize
 
-// resendLimiter is the token bucket that bounds ChunkResendRequest, per session.
+// tokenBucket is the shape every per-session rate limit in this package has: a
+// capacity, a sustained refill rate, and a clock to refill against.
+//
+// **One mechanism, and each rate's derivation stays with the constructor that sets
+// it.** Refilling from elapsed time, capping at the capacity and spending one token or
+// refusing is the same arithmetic for every request a client may repeat; what differs
+// is the pair of numbers, and a number is only defensible beside the sentence that
+// derives it. So this type carries the arithmetic and [newResendLimiter] and
+// [newMapTileLimiter] carry the arguments.
+type tokenBucket struct {
+	capacity float64
+	refill   float64
+	now      func() time.Time
+
+	mu     sync.Mutex
+	tokens float64
+	last   time.Time
+}
+
+// newTokenBucket returns a full bucket of capacity tokens, refilling at refill tokens
+// a second.
+//
+// Full rather than empty for every caller: an empty bucket refuses a session's first
+// request until one token has accrued, which bounds the join rather than the abuse.
+func newTokenBucket(capacity, refill float64, now func() time.Time) *tokenBucket {
+	return &tokenBucket{
+		capacity: capacity,
+		refill:   refill,
+		now:      now,
+		tokens:   capacity,
+		last:     now(),
+	}
+}
+
+// The resend limiter bounds ChunkResendRequest, per session.
 //
 // **Why the request is bounded at all.** A resend is a cache read and a frame in the
 // cheap case. In the expensive one the server's chunk cache has evicted the chunk since
@@ -562,42 +602,62 @@ const resendRefillPerSecond = game.TerminalFallSpeed / world.ChunkSize
 // precisely this volume. So a full bucket buys the worst client one extra join, and after
 // that the refill rate is all it has.
 //
-// This is the first rate limit in this repository; world chat is the second. What is
+// This is the first rate limit in this repository; world chat is the second and the map
+// tile bucket below is the third. What is
 // bounded here is *chunk work* a client can ask for, not the text messages it can send.
 // A request refused by Resendable costs a mutex and a map lookup and spends nothing,
 // deliberately. The remaining socket-level backpressure gaps are recorded in
 // server/AGENTS.md.
-type resendLimiter struct {
-	capacity float64
-	refill   float64
-	now      func() time.Time
-
-	mu     sync.Mutex
-	tokens float64
-	last   time.Time
-}
-
-// newResendLimiter returns a full bucket.
 //
 // Full rather than empty: a client that has just joined holds no chunks, so every request
 // it could make is refused by Resendable anyway. Starting empty would only delay the
 // first honest repair of a session that had been running long enough to have something to
 // repair.
-func newResendLimiter(radius uint8, now func() time.Time) *resendLimiter {
+func newResendLimiter(radius uint8, now func() time.Time) *tokenBucket {
 	side := 2*float64(radius) + 1
 	volume := side * side * side
 
-	return &resendLimiter{
-		capacity: volume,
-		refill:   resendRefillPerSecond,
-		now:      now,
-		tokens:   volume,
-		last:     now(),
-	}
+	return newTokenBucket(volume, resendRefillPerSecond, now)
+}
+
+// mapTileRefillPerSecond is the sustained rate at which one session may ask the server
+// to draw it a square of the map, and mapTileBurst is how many it may ask for at once.
+//
+// **Derived from what a client legitimately needs, not from what the server can bear.**
+// A map is a fixed grid of 64×64-pixel tiles, so the honest need is "the tiles the
+// window shows, once" plus "the tiles a pan brings into it". A full-screen map at scale
+// 16 covers a handful of tiles; opening the map and dragging it across a continent
+// touches a few a second. Eight a second serves that with room to spare, and it is
+// still two orders of magnitude below what a client could ask for if it simply sent
+// requests as fast as the socket accepts them.
+//
+// **The burst is what one opening of the map costs.** Thirty-two tiles is a 8×4 grid of
+// them, more than any window shows at once, so a client that opens the map cold never
+// meets the limit; what it bounds is the client that keeps asking after the map is
+// already drawn.
+//
+// **An empty bucket drops the request in silence, which is the chunk-resend precedent
+// and not the refusal channel.** A refusal names something the player did wrong, and
+// asking for a tile too often is not that — the contract's one refusal here is
+// TileMisaligned, which is a malformed request rather than an impatient one. A dropped
+// tile costs the client a redraw of a square it will ask for again, and nothing else.
+//
+// The work being bounded is real but bounded on its own: a tile is 4096 evaluations of
+// the height field on the session's own goroutine, taking no lock and touching no chunk
+// cache, so a client spending its whole bucket delays nobody's terrain but its own.
+// That is why the number can be generous where resendRefillPerSecond could not be.
+const (
+	mapTileRefillPerSecond = 8
+	mapTileBurst           = 32
+)
+
+// newMapTileLimiter returns this session's full map-tile bucket.
+func newMapTileLimiter(now func() time.Time) *tokenBucket {
+	return newTokenBucket(mapTileBurst, mapTileRefillPerSecond, now)
 }
 
 // allow spends one token if the bucket has one, and reports whether it did.
-func (l *resendLimiter) allow() bool {
+func (l *tokenBucket) allow() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
