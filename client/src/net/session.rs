@@ -235,6 +235,10 @@ pub(super) enum SessionEvent {
     LootClosed(codec::LootClosed),
     /// One authoritative monster blow that reduced this player's health.
     MobHit(MobHit),
+    /// One square of the map, as the server drew it for this character.
+    MapTile(codec::MapTile),
+    /// One page of the additive ledger of where this character has been.
+    MapExplored(codec::MapExplored),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1412,6 +1416,12 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::MobHit(hit)) => {
                     events.send(SessionEvent::MobHit(hit)).ok()?;
+                }
+                Ok(Transition::MapTile(tile)) => {
+                    events.send(SessionEvent::MapTile(tile)).ok()?;
+                }
+                Ok(Transition::MapExplored(explored)) => {
+                    events.send(SessionEvent::MapExplored(explored)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;
