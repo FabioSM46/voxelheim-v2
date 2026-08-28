@@ -25,7 +25,10 @@ pub enum MarkerPlaceRequestOffset {}
 ///   - `client_tick` is ordering and staleness only
 ///
 /// Refused with `RefusedAction.PlaceMarker` and one of `TooManyMarkers`, `NoteTooLong`
-/// or `MalformedKind`.
+/// or `MalformedKind`; a decoder that can see the violation from the frame alone may
+/// close the session on it instead, which is the stricter of the two answers and the one
+/// the Go server gives for `kind` and for `note`. Both are refusals, and neither puts a
+/// mark on the map.
 pub struct MarkerPlaceRequest<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
