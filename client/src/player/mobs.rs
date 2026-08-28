@@ -70,6 +70,12 @@ pub(super) const fn body(kind: MobKind) -> Body {
         MobKind::Draugr => DRAUGR_BODY,
         MobKind::Vargr => VARGR_BODY,
         MobKind::Deer => DEER_BODY,
+        // V25 names the kind; #458 gives it a body of its own. The draugr's box is the
+        // placeholder because a villager is the same shape of thing — humanoid, upright,
+        // roughly a person tall — so nothing downstream is asked to hold a number that is
+        // wrong in kind. Nothing sends this yet: the server has no villager to spawn until
+        // #458, so this arm exists to keep the match total rather than to draw anybody.
+        MobKind::Villager => DRAUGR_BODY,
     }
 }
 
@@ -239,6 +245,10 @@ impl MobVisuals {
             MobKind::Draugr => &self.draugr,
             MobKind::Vargr => &self.vargr,
             MobKind::Deer => &self.deer,
+            // The [`body`] placeholder's counterpart, and unreachable for the same
+            // reason: no villager reaches this module until #458 gives residents meshes
+            // and colours of their own.
+            MobKind::Villager => &self.draugr,
         }
     }
 }
@@ -801,7 +811,10 @@ fn fallen(elapsed: Duration) -> f32 {
 /// creature is dying or not.
 fn collapse(kind: MobKind, fallen: f32) -> Quat {
     match kind {
-        MobKind::Draugr => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
+        // A villager topples the way the other humanoid does. It is placeholder in the
+        // same sense as [`body`]'s arm and unreachable in the same way: a resident is
+        // never lootable and never a corpse, so nothing sends one a `Dying` action.
+        MobKind::Draugr | MobKind::Villager => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
     }
@@ -817,7 +830,7 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
 /// fight happens at, what reads is the splay.
 fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
-        MobKind::Draugr => Vec3::ONE,
+        MobKind::Draugr | MobKind::Villager => Vec3::ONE,
         MobKind::Vargr => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
             Vec3::new(out, 1.0, out)
@@ -1858,7 +1871,7 @@ mod tests {
     /// anything — a body on its way over is deliberately outside the box it stood in.
     #[test]
     fn the_drawn_body_is_the_box_the_server_collides() {
-        for (kind, meshes) in [
+        let drawn = [
             (
                 MobKind::Draugr,
                 vec![draugr_body_mesh(), draugr_head_mesh()],
@@ -1871,7 +1884,41 @@ mod tests {
                 MobKind::Deer,
                 vec![deer_body_mesh(), deer_head_mesh(), deer_legs_mesh()],
             ),
-        ] {
+            // The villager is drawn as a draugr on purpose until #458, and this row is
+            // what makes that a decision rather than a coincidence: it pins the aliasing
+            // the comments on `body` and `MobVisuals::of` promise, so a placeholder
+            // that drifted to the vargr's box or the vargr's meshes fails here. It is not
+            // a claim that a villager looks right — only that it looks like what this
+            // build says it borrows, and that the box still matches what the server
+            // collides.
+            (
+                MobKind::Villager,
+                vec![draugr_body_mesh(), draugr_head_mesh()],
+            ),
+        ];
+
+        // The list above is hand-written, for the reason every list like it in this
+        // repository is: one derived from the same `match` it checks would agree with
+        // every hole in that `match`. But hand-written is exactly how V25's villager got
+        // as far as a merged pull request with all four of its arms untested — a `for`
+        // over an array does not stop compiling when the enum grows. So the length is
+        // pinned to the contract's own count, the way `EVERY_REASON` and the codec's
+        // `CLASSIFICATION` are. `Unknown` is the one member with no row and never gets
+        // one: `MobKind::from_wire` answers `None` for it, so no body is ever drawn from
+        // it and there is no box for it to be wrong about.
+        assert_eq!(
+            drawn.len(),
+            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 1,
+            "a species the contract names is drawn by nobody here, so its box is unchecked"
+        );
+        for (seen, (kind, _)) in drawn.iter().enumerate() {
+            assert!(
+                !drawn[..seen].iter().any(|(other, _)| other == kind),
+                "{kind:?} appears twice, so some other species is absent"
+            );
+        }
+
+        for (kind, meshes) in drawn {
             let expected = body(kind);
             let (min, max) = drawn_extent(&meshes);
             let half = expected.width / 2.0;
@@ -1894,6 +1941,81 @@ mod tests {
             assert!(
                 (min.x + half).abs() < 1e-5 && (max.x - half).abs() < 1e-5,
                 "a {kind:?} is not centred on the position the server sends"
+            );
+        }
+    }
+
+    /// A villager falls the way the other humanoid falls, at every point of the fall.
+    ///
+    /// The third and fourth `Villager` arms, and the two a mesh list cannot reach.
+    /// [`collapse`] and [`leg_splay`] are pure functions of kind and progress, so the
+    /// placeholder is checkable directly: a villager is not merely *shaped* like a draugr,
+    /// it topples like one, and split out to the vargr's roll it would pitch sideways
+    /// while standing in a draugr's box.
+    ///
+    /// Swept across the fall rather than at its end, because both functions take `fallen`
+    /// and an arm that agreed only at 0.0 and 1.0 would be a different animation in
+    /// between — which is the whole of what either function is for.
+    #[test]
+    fn a_villager_falls_exactly_as_the_draugr_does() {
+        for step in 0..=10 {
+            let fallen = step as f32 / 10.0;
+            assert_eq!(
+                collapse(MobKind::Villager, fallen),
+                collapse(MobKind::Draugr, fallen),
+                "a villager collapses differently from a draugr at {fallen}"
+            );
+            assert_eq!(
+                leg_splay(MobKind::Villager, fallen),
+                leg_splay(MobKind::Draugr, fallen),
+                "a villager's legs splay differently from a draugr's at {fallen}"
+            );
+        }
+
+        // And the placeholder is the humanoid's, not just any arm's: a villager that had
+        // silently picked up the vargr's roll would satisfy every assert above only if the
+        // draugr had too, so the difference is pinned rather than assumed.
+        assert_ne!(
+            collapse(MobKind::Villager, 1.0),
+            collapse(MobKind::Vargr, 1.0),
+            "a villager topples like a vargr, which is not what a humanoid placeholder means"
+        );
+    }
+
+    /// A villager borrows the draugr's meshes and colours, and borrows them on purpose.
+    ///
+    /// [`the_drawn_body_is_the_box_the_server_collides`] pins the *box* a villager is
+    /// drawn in; this pins the *handles* it is drawn from, which is the other half of the
+    /// same placeholder and the half a mesh list written by hand cannot see. Together they
+    /// are what makes `MobKind::Villager => &self.draugr` a decision rather than a typo:
+    /// pointed at the vargr instead, the box test still passes for a hand-written draugr
+    /// mesh list while every villager on screen is a wolf.
+    ///
+    /// **Nothing sends a villager today** — the server has no villager to spawn until #458
+    /// — but `MobKind::from_wire(fb::MobKind::Villager)` already answers `Some(Villager)`,
+    /// so "unreachable" rests entirely on the server's restraint rather than on anything
+    /// this side enforces. A V25 server that spawned one would get exactly what these two
+    /// tests describe, which is the reason to describe it.
+    #[test]
+    fn a_villager_is_drawn_from_the_draugrs_meshes_until_it_has_its_own() {
+        let mut app = headless();
+        app.update();
+        let world = app.world();
+        let visuals = world.resource::<MobVisuals>();
+
+        // Pointer equality rather than field-by-field: the claim is that the two kinds
+        // resolve to the *same* entry, which is what a placeholder means and what a
+        // per-field comparison would keep asserting after the draugr and the villager had
+        // been given identical-but-separate visuals.
+        assert!(
+            std::ptr::eq(visuals.of(MobKind::Villager), visuals.of(MobKind::Draugr)),
+            "a villager is no longer drawn from the draugr's visuals; if #458 gave it its \
+             own, delete this test rather than repointing it"
+        );
+        for other in [MobKind::Vargr, MobKind::Deer] {
+            assert!(
+                !std::ptr::eq(visuals.of(MobKind::Villager), visuals.of(other)),
+                "a villager is drawn from the {other:?}'s visuals"
             );
         }
     }
