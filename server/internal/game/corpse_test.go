@@ -36,6 +36,58 @@ func TestNormalKillBecomesOneContinuousOwnedCorpse(t *testing.T) {
 	}
 }
 
+// **The corpse is in the snapshot the killing blow produced, and the owner is told in that
+// same frame that it can be opened.**
+//
+// This is the whole of #441 in one assertion, and it is deliberately about the *tick*
+// rather than about the eventual state. A killed creature used to spend MobDeathDuration in
+// Sim.mobs: the snapshot of the killing tick drew it as Dying with no health, listed
+// nothing in accessible_loot_corpses, and OpenLoot refused it, for two and a half seconds
+// after the player had earned it. Every one of those three now answers on the tick of the
+// blow, and OpenLoot is checked here as well as the vector, because the vector is what the
+// client draws with and OpenLoot is what actually decides.
+func TestTheKillingTicksSnapshotAlreadyCarriesAnOpenableCorpse(t *testing.T) {
+	t.Parallel()
+	h, player, out, id := armedAgainst(t, vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
+
+	// Wounded to within one blow, so the kill lands on a tick this test names rather than
+	// on whichever of three the cooldown happened to put it on.
+	h.sim.mu.Lock()
+	h.sim.mobs[id].health = RustySwordDamage
+	h.sim.mu.Unlock()
+
+	if err := h.swing(player, 0, uint32(h.tick)+1); err != nil {
+		t.Fatalf("the killing swing was refused: %v", err)
+	}
+	h.step()
+
+	var drawn bool
+	for _, state := range newestSnapshotMobs(t, out) {
+		if state.EntityID != id {
+			continue
+		}
+		drawn = true
+		if state.Action != vnet.MobActionCorpse || state.Health != 0 {
+			t.Errorf("the killing tick draws %d as %s with %d health, want inert Corpse",
+				id, state.Action, state.Health)
+		}
+	}
+	if !drawn {
+		t.Fatal("the killing tick's snapshot does not carry the body at all")
+	}
+
+	snapshot := newestSnapshot(t, out)
+	if snapshot.AccessibleLootCorpsesLength() != 1 || snapshot.AccessibleLootCorpses(0) != id {
+		t.Errorf("the killing tick advertises %d accessible corpses, want just %d",
+			snapshot.AccessibleLootCorpsesLength(), id)
+	}
+
+	// And the server agrees when actually asked, which is the half a client cannot fake.
+	if reason, err := player.OpenLoot(protocol.LootOpenRequest{CorpseID: id, ClientTick: uint32(h.tick) + 1}); err != nil {
+		t.Fatalf("opening the corpse on the tick of the kill = %s, %v", reason, err)
+	}
+}
+
 func TestSnapshotsAdvertiseOnlyCorpsesTheRecipientCanOpen(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})

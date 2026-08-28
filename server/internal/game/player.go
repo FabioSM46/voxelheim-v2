@@ -96,17 +96,6 @@ type Sim struct {
 	spawnEvery      uint32
 	mobDespawnTicks uint32
 
-	// mobDeathTicks is MobDeathDuration in the ticks Step counts: how long a killed
-	// creature remains Dying before it becomes a lootable corpse. Derived per server for
-	// the reason deathTicks is — two and a half seconds of
-	// dying has to be two and a half seconds at every rate.
-	//
-	// **It is neither of the two above.** The director's removals take away a creature
-	// *instead of* killing it, which is what makes "a despawn leaves nothing" true; this
-	// one counts a creature that has already been killed out of the world, and it is the
-	// only countdown loot waits on.
-	mobDeathTicks uint32
-
 	// threatDecayTicks is one second and threatForgetTicks is
 	// ThreatForgetSeconds in authoritative ticks. Threat is stepped by the same clock
 	// as the creature that owns it, never by a goroutine or wall time.
@@ -114,7 +103,8 @@ type Sim struct {
 	threatForgetTicks uint32
 
 	// corpseLifetimeTicks is CorpseLifetime in authoritative ticks. A corpse records
-	// its absolute expiry tick when Dying completes; opening it never changes this.
+	// its absolute expiry tick on the tick it is created, which is the tick of the
+	// killing blow; opening it never changes this.
 	corpseLifetimeTicks uint64
 
 	// attackCooldown is SwordCooldown in the ticks Step counts, so a blade recovers in
@@ -199,9 +189,10 @@ type Sim struct {
 	// than a file could give.
 	mobs map[uint64]*mob
 
-	// corpses are killed normal mobs after their Dying duration. Kept separately from
-	// mobs so they cannot act, collide, acquire a target or count toward spawn ceilings;
-	// the snapshot projection merges both collections back into entity-id order.
+	// corpses are killed normal mobs, created on the tick the killing blow lands. Kept
+	// separately from mobs so they cannot act, collide, acquire a target or count toward
+	// spawn ceilings; the snapshot projection merges both collections back into entity-id
+	// order.
 	corpses map[uint64]*corpse
 
 	// spawns is the director's random source: seeded from the world seed at
@@ -324,7 +315,6 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		mobTimings:           mobTimingsFor(tickRate),
 		spawnEvery:           ticksFor(SpawnDirectorInterval, tickRate),
 		mobDespawnTicks:      ticksFor(MobDespawnGrace, tickRate),
-		mobDeathTicks:        ticksFor(MobDeathDuration, tickRate),
 		threatDecayTicks:     uint32(tickRate),
 		threatForgetTicks:    uint32(ThreatForgetSeconds) * uint32(tickRate),
 		corpseLifetimeTicks:  uint64(ticksFor(CorpseLifetime, tickRate)),
@@ -923,7 +913,7 @@ func (p *Player) NextChunk(ctx context.Context) (world.Coord, error) {
 func (p *Player) WakeStreaming() { p.chunks.ring() }
 
 // Step advances the authoritative world by one tick. Normal-mob loot remains inside
-// Sim.mu because the Dying-to-Corpse transition only mutates simulation-owned state;
+// Sim.mu because the kill-to-corpse transition only mutates simulation-owned state;
 // ordinary world drops retain their separate session-safe spawn path.
 func (s *Sim) Step(tick uint64) {
 	s.stepWorld(tick)
@@ -991,8 +981,12 @@ func (s *Sim) stepWorld(tick uint64) {
 	// produced, so network scheduling cannot choose an in-between one to be judged at,
 	// and a draugr killed here cannot land an attack later in the same tick.
 	//
-	// A blow that kills only starts the Dying duration. The reap below later creates the
-	// server-owned corpse and rolls its container without involving the ground-drop path.
+	// **A blow that kills produces the corpse here, in this loop.** There is no countdown
+	// between the two: damageMobLocked takes the creature out of Sim.mobs and rolls its
+	// container on the spot, without involving the ground-drop path. Everything below —
+	// the mobs, the director, the snapshot projection and offerLootLocked — therefore sees
+	// the corpse on this same tick, which is what makes the body lootable in the snapshot
+	// that first draws it going down.
 	for _, p := range players {
 		p.resolveAttackLocked()
 	}
@@ -1003,9 +997,9 @@ func (s *Sim) stepWorld(tick uint64) {
 	projectiles := s.advanceProjectilesLocked(players)
 
 	// The mobs, after the players have moved so a chase steers at the position this tick
-	// produced rather than the last one's — and after the swings above. This is also where
-	// a body whose time is up becomes an inert owned corpse. The transition and its one
-	// loot roll happen here under the same lock as the final resting position.
+	// produced rather than the last one's — and after the swings above. Nothing dies here
+	// any more: a creature killed above is already a corpse and is already out of Sim.mobs,
+	// so this steps the survivors and nothing else.
 	mobs := s.advanceMobsLocked(players)
 
 	// And the director last, after the creatures it manages have been advanced: what it
