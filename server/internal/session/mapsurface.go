@@ -42,3 +42,9 @@ const (
 	_ = uint8(world.SurfaceSettlement - world.SurfaceKind(vnet.MapSurfaceSettlement))
 	_ = uint8(vnet.MapSurfaceSettlement - vnet.MapSurface(world.SurfaceSettlement))
 )
+
+// mapSurfaceOf converts one [world.SurfaceKind] to the wire's `MapSurface`. It is a
+// conversion rather than a translation, and the constants above are why.
+func mapSurfaceOf(kind world.SurfaceKind) vnet.MapSurface {
+	return vnet.MapSurface(kind)
+}
