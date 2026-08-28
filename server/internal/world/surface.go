@@ -107,8 +107,19 @@ func SurfaceAt(seed int64, x, z int64) (height int, kind SurfaceKind) {
 	// A settlement, before the ground it stands on. Inside the radius the surface is
 	// the plateau and there is a building somewhere on it, so the one word for the
 	// column is that there is a place here — the grass between two huts is not what a
-	// map of this square is for. It cannot collide with the water above it: a site is
-	// refused below seaLevel + 3.
+	// map of this square is for.
+	//
+	// **Two of the three orderings around this branch are defensive rather than
+	// load-bearing, which is worth knowing before anyone reorders them.** It cannot
+	// collide with the water case above it: `settlementMinPlateau` is `seaLevel + 3`
+	// and the fallback capital is lifted to the same floor, so no settlement column is
+	// ever under the sea line and the branch above can never take one. Nor with the
+	// cave case below it: `column.carvedAt` refuses the top `settlementCaveClearance`
+	// blocks inside a settlement, so a settlement column is never drawn as a cave
+	// whichever order these two stand in. The tree case below *is* load-bearing in the
+	// same sense as the rest — trees are suppressed inside the radius, so it too cannot
+	// fire — which leaves this branch's position a statement of what a map is for
+	// rather than a mechanism.
 	if col.settlement {
 		return col.surface, SurfaceSettlement
 	}

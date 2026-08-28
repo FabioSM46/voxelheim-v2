@@ -21,9 +21,16 @@ import (
 // **The lattice is centred on spawn rather than cornered on it.** `settlementCellOf`
 // shifts by half a cell, so the origin sits in the middle of cell (0, 0) and the
 // capital can stand at any bearing from the player's first step without falling into a
-// neighbouring cell — which would make it invisible to the four-cell lookup every
-// column does, because that lookup is by cell index and reaches only as far as one
-// settlement's radius.
+// neighbouring cell. (At any bearing up to the 1/cos θ clustering [capitalCandidateAt]
+// documents.)
+//
+// **The per-column lookup reads the four cells nearest a column, and measured, three of
+// them never hold anything.** Every village centre is [villageCellInset] inside its own
+// cell and the capital is most of a cell from any edge, so a column within
+// [settlementReach] of a settlement is always in that settlement's own cell — collapsing
+// the scan to one cell leaves the world byte-identical today. The scan is insurance
+// against a future placement that does not inset, and the compile-time assertion beside
+// [settlementReach] is what states the invariant it rests on.
 //
 // # The ground has to agree
 //
@@ -58,9 +65,25 @@ const (
 	// Sixteen blocks of smoothstep rather than a step, for the reason `basinAt`
 	// interpolates its rim: a plateau that ended at a cliff would put a wall around
 	// every village, and the derivative jump would be visible from a long way off.
-	// Nothing inside the radius plus this band carries a basin or a river channel —
+	// No basin and no river channel is *applied* inside the radius plus this band —
 	// both of those move the ground, and the whole point here is that it does not
-	// move.
+	// move — though the band eases towards the height they would have produced, which
+	// is what keeps its outer edge continuous with the land. See [shapeAt].
+	//
+	// **It terraces where the drop is large, and the number is known and accepted.**
+	// `t` is quantised to sixteen integer rings and smoothstep's slope peaks at 1.5, so
+	// the worst single-column step the blend can produce is about `1.5 × drop / 16`, or
+	// 9.4% of the difference between the plateau and the land. Independently measured
+	// over 150 seeds, isolating this feature by differencing against the same terrain
+	// with it removed: **4 blocks for a capital on an accepted offset, 5 on the
+	// fallback path, 3 for a village.** A five-block terrace is a ring a player cannot
+	// walk up, and the fallback is where the largest drops live because neither the
+	// relief limit nor the plateau floor constrains the *choice* there — see
+	// [capitalSiteAt].
+	//
+	// Widening the band or raising the ring count would both fix it and both move every
+	// column near every settlement again; it is recorded here rather than fixed inside
+	// a pull request that has already changed the height field twice.
 	settlementBlendBlocks = 16
 
 	// settlementReach is how far from a settlement's centre anything about it can be
@@ -143,17 +166,65 @@ const (
 	settlementLayoutSeedOffset int64 = 0x5BE0CD19
 )
 
-// The lattice has to be wide enough that a column can only ever be reached by the
-// settlements of the four cells nearest it. Two reaches plus a cell has to fit in two
-// cells, which is this conversion; break it and the four-cell lookup below silently
-// starts missing settlements instead of failing.
+// The half-footprints these guards are written against. Named here because the drawings
+// are `var`s built at init and a const expression cannot read one — so the numbers are
+// restated, and [TestTheGuardsBelowDescribeTheActualDrawings] is what keeps the restating
+// honest.
+//
+// The diagonal is what matters for a building on a ring: a footprint 2h+1 across, centred
+// on a ring at radius r, reaches r + h√2 at its corner, so `ceil(h√2)` is the clearance a
+// ring needs from the edge of the plateau.
+const (
+	hutHalfFootprint      = 3 // hutSchematic is 7 across
+	hutRingClearance      = 5 // ceil(3√2)
+	smithyHalfFootprint   = 4 // smithySchematic is 9 across
+	hallHalfFootprint     = 6 // hallSchematic is 13 across
+	largestHalfFootprint  = 7 // keepSchematic is 15 across
+	publicHalfFootprint   = hallHalfFootprint
+	plotRingHalfFootprint = hallHalfFootprint
+)
+
+// **The scan in [settlementShapeAt] reads four cells, and what makes that enough is not
+// this constant.** The comment here used to claim that breaking it would make the scan
+// "silently start missing settlements", which is backwards: the scan derives its cell
+// range from [settlementReach], so a larger reach makes it *wider*, never narrower. What
+// this bounds is how many cells that range can span, and therefore the cost.
 const _ uint64 = settlementCellBlocks/2 - settlementReach
 
-// A capital's ring of huts has to stand clear of the hall and the smithy inside it,
-// and the plateau has to be wide enough to hold the ring. Both are compile errors
-// rather than a building with its corner in another building.
-const _ = uint8(capitalRadius - capitalHutRingRadius - 4)
-const _ = uint8(capitalHutRingRadius - capitalPlotRadius - 10)
+// **This is the invariant that actually makes the scan sound, and it had no guard.**
+// Every village centre sits at least [villageCellInset] inside its own cell, so a column
+// within [settlementReach] of one is in that same cell — which is what lets
+// [settlementShapeAt] return on its first hit and what keeps two settlements from ever
+// reaching the same column. (The capital is the other case and has far more room: it
+// stands within [capitalMaxSpawnDistance] of spawn, which is the middle of its cell.)
+//
+// Measured consequence of it holding: collapsing that scan to the single cell holding the
+// column leaves the world byte-identical today. The scan is therefore insurance rather
+// than machinery — it is what stops a future placement that does not inset from failing
+// silently — and this line is what says so at compile time.
+const _ = uint8(villageCellInset - settlementReach)
+
+// A capital's ring of huts has to stand clear of the hall and the smithy inside it, and
+// the plateau has to be wide enough to hold the ring. Both are compile errors rather than
+// a building with its corner in another building.
+const _ = uint8(capitalRadius - capitalHutRingRadius - hutRingClearance)
+const _ = uint8(capitalHutRingRadius - capitalPlotRadius - plotRingHalfFootprint - hutHalfFootprint)
+
+// **And the same three for a village, which had none of them.** The capital's guards were
+// the only ones, so `villageHutRingRadius` could be raised from 16 to 26 — still under
+// `villageRadius`, so it reads as safe — and put a ring of huts over the edge of the
+// plateau; and `villageHutVariants` could be raised to give nine huts on a twelve-bearing
+// ring, which puts pairs of them on adjacent bearings 8.3 blocks apart with a 7-block
+// footprint each. Both are caught by
+// [TestBuildingsStandClearOfEachOtherAndInsideThePlateau] over its forty seeds, which is
+// how they were found; a compile error is the cheaper place to learn it.
+const _ = uint8(villageRadius - villageHutRingRadius - hutRingClearance)
+const _ = uint8(villageHutRingRadius - publicHalfFootprint - hutHalfFootprint)
+
+// At most every other bearing, so two huts on a ring are never neighbours on the
+// twelve-bearing table. Six is what [capitalHutCount] already is.
+const _ = uint8(len(settlementBearings)/2 - (villageMinHuts + villageHutVariants - 1))
+const _ = uint8(len(settlementBearings)/2 - capitalHutCount)
 
 // SettlementKind tells a capital from a village.
 //
@@ -255,24 +326,106 @@ func SettlementsNear(seed int64, x, z int64, cells int) []Settlement {
 	return found
 }
 
-// nearestSettlementCells is how far [NearestSettlement] looks. Three cells out is a
-// six-kilometre square, which at one settlement in three cells holds about sixteen of
-// them: far enough that the answer is essentially never empty, and bounded so the
-// search is a constant rather than a spiral that might not terminate.
-const nearestSettlementCells = 3
-
-// NearestSettlement returns the settlement whose centre is closest to (x, z), searching
-// up to [nearestSettlementCells] cells out.
+// nearestSettlementBlocks is how far [NearestSettlement] looks, **in blocks and from the
+// column rather than from its cell**.
 //
-// The false is real and callers must handle it: a stretch of world where every nearby
-// cell rolled no village, or rolled one on ground the site rules refused, genuinely has
-// no settlement in reach.
+// Six kilometres, which at one settlement in three cells holds about sixteen of them: far
+// enough that the answer is essentially never empty, and bounded so the search is a
+// constant rather than a spiral that might not terminate.
+//
+// **The unit is the whole of the fix here, and the bug it replaces was in the exported
+// answer.** This used to be a count of cells handed to [SettlementsNear], whose square is
+// centred on the *cell* holding the column. From a column near one edge of its own cell
+// that square reached 6144 blocks one way and 2047 + 6144 = 8191 the other, so a
+// settlement 6200 blocks to the right could fall outside it while one 8000 blocks to the
+// left was inside — and the sort then honestly reported the wrong winner. Measured over
+// 40 seeds and 268,960 columns: **109 answers were not the nearest and 105 said there was
+// none where a 6-cell search finds one.** It was also discontinuous across a cell edge:
+// on seed 1 at z = -4681, x = -5121 answered 6903 blocks away and x = -5120 answered 6584.
+const nearestSettlementBlocks = 3 * settlementCellBlocks
+
+// NearestSettlement returns the settlement whose centre is closest to (x, z).
+//
+// **When it returns true the answer is the nearest settlement in the world, with no
+// caveat**, and the bound below is about how far it looks before giving up rather than
+// about how good the answer is. The first pass covers [nearestSettlementBlocks]; if the
+// best it found is further away than that, one widening to that distance is provably
+// enough — everything the wider square can hold is at most that far away, and the square
+// now contains it — so the search is two passes at worst and never a spiral.
+//
+// **The false is real, and it is exactly this: no cell overlapping the six-kilometre
+// square about (x, z) holds a settlement at all.** It is not "the nearest is further than
+// six kilometres" — a settlement whose centre lies beyond that but whose *cell* overlaps
+// the square is found, and then the widening makes it exact. So the boundary is
+// lattice-shaped rather than circular, and a caller that needs a distance bound must
+// apply its own; what a caller can rely on is that the answer, when there is one, is the
+// nearest in the world.
+//
+// The alternative — widening until something turns up — cannot be bounded here. Every
+// world does have a settlement, because the spawn cell always holds the capital, so an
+// exhaustive search would always succeed; from a column at the edge of the world it would
+// enumerate on the order of 10^8 cells to prove it. A bounded search that can say "not
+// near here" is the affordable shape, and this is it.
+//
+// **It compares sites and lays out only the winner.** Going through [SettlementsNear]
+// meant [settlementFrom] ran for every candidate, so about sixteen settlements' worth of
+// Buildings and Anchors slices were allocated to pick one: 13.9 µs, 8320 B and 70
+// allocations per call. [settlementSiteAt] answers where a settlement is without laying
+// out a single hut, which is the same split the height field already relies on. Nothing
+// calls this per tick today; the residents and stations issues might.
 func NearestSettlement(seed int64, x, z int64) (Settlement, bool) {
-	near := SettlementsNear(seed, x, z, nearestSettlementCells)
-	if len(near) == 0 {
+	site, cellX, cellZ, d2, found := nearestSettlementSite(seed, x, z, nearestSettlementBlocks)
+	if !found {
 		return Settlement{}, false
 	}
-	return near[0], true
+	if reach := isqrt(d2) + 1; reach > nearestSettlementBlocks {
+		site, cellX, cellZ, _, found = nearestSettlementSite(seed, x, z, reach)
+		if !found {
+			// Unreachable: the wider square contains the first pass's square. Refusing
+			// rather than returning a zero Settlement keeps the failure loud if it ever
+			// stops being unreachable.
+			return Settlement{}, false
+		}
+	}
+	return settlementFrom(seed, cellX, cellZ, site), true
+}
+
+// nearestSettlementSite is [NearestSettlement]'s scan: the closest site whose centre lies
+// in a cell overlapping the square of `reach` blocks about (x, z), with the cell it came
+// from so the winner can be laid out afterwards.
+//
+// **The square is centred on the column, not on the cell holding it**, and that is the
+// whole of the defect this replaces. Deriving the range from the cell made it reach
+// `3 × 2048` blocks one way and `2047 + 3 × 2048` the other, so a settlement 6200 blocks
+// to the right could fall outside while one 8000 to the left was inside — and the sort
+// then honestly reported the wrong winner. Measured over 40 seeds and 268,960 columns:
+// 109 answers were not the nearest and 105 said there was none where a six-cell search
+// finds one, and the answer jumped 319 blocks between two adjacent columns either side of
+// a cell edge. [settlementShapeAt] already derives its range from the column this way; so
+// does this now.
+func nearestSettlementSite(seed int64, x, z, reach int64) (best settlementSite, cellX, cellZ, d2 int64, found bool) {
+	loX, hiX := settlementCellOf(x-reach), settlementCellOf(x+reach)
+	loZ, hiZ := settlementCellOf(z-reach), settlementCellOf(z+reach)
+
+	d2 = -1
+	for cz := loZ; cz <= hiZ; cz++ {
+		for cx := loX; cx <= hiX; cx++ {
+			site, ok := settlementSiteAt(seed, cx, cz)
+			if !ok {
+				continue
+			}
+			candidate := squaredDistance(x, z, site.centreX, site.centreZ)
+			// The same total order [SettlementsNear] sorts by — distance, then the
+			// centre's z, then its x — so the two surfaces cannot disagree about which
+			// of two equally distant settlements is the nearer.
+			if d2 < 0 || candidate < d2 ||
+				(candidate == d2 && (site.centreZ < best.centreZ ||
+					(site.centreZ == best.centreZ && site.centreX < best.centreX))) {
+				best, cellX, cellZ, d2, found = site, cx, cz, candidate, true
+			}
+		}
+	}
+	return best, cellX, cellZ, d2, found
 }
 
 // settlementCellOf maps a world coordinate on one axis to its lattice cell.
@@ -338,6 +491,13 @@ func isCapitalCell(cellX, cellZ int64) bool {
 // The distance is exact rather than approximate, and the integer square root is why: a
 // bearing chosen as an angle would need trigonometry, so instead one leg is hashed, the
 // other is the leg that completes the triangle, and the two signs are two more bits.
+//
+// **What that costs is the bearing's uniformity, and the file header overstates it.**
+// Hashing `dx` uniformly and solving for `dz` makes the *leg* uniform rather than the
+// angle, so candidate density goes as 1/cos θ and capitals cluster towards the ±X axis.
+// The distance bound the header cares about is exact either way, and a player cannot see
+// a distribution from inside one world; it is recorded because "at any bearing from the
+// player's first step" is a stronger claim than this arithmetic makes.
 // The rounding costs at most one block, which is why the hashed distance starts one
 // above the minimum — so every offset is genuinely inside
 // [capitalMinSpawnDistance, capitalMaxSpawnDistance].
@@ -422,6 +582,17 @@ func settlementSiteAt(seed int64, cellX, cellZ int64) (settlementSite, bool) {
 // stands on dry ground even where the land around spawn does not. That floor is
 // [SpawnAt]'s, for [SpawnAt]'s reason — lifting is the fail-safe direction and lowering
 // is not.
+//
+// **"Last resort" describes the branch and understates how often it is taken: it is the
+// modal outcome.** Chosen attempt over two thousand seeds — 0: 973, 1: 99, 2: 45, 3: 31,
+// **fallback: 852**. Forty-three per cent of worlds put their capital on an offset that
+// no rule accepted, which is the paragraph above working as designed rather than a bug:
+// four candidates inside 200 blocks of spawn are reading a relief field whose lattice is
+// 768 blocks wide, so they fail together far more often than four independent rolls
+// would. Two consequences worth carrying: the largest plateau-to-land drops live on this
+// path, which is where [settlementBlendBlocks] terraces worst; and *which* candidate the
+// fallback returns is load-bearing for 43% of worlds, so it is pinned by a test rather
+// than left to read as an unimportant default.
 func capitalSiteAt(seed int64, cellX, cellZ int64) settlementSite {
 	var first settlementSite
 	for attempt := range capitalSiteAttempts {
@@ -735,9 +906,17 @@ var tallestSchematic = max(
 //
 // [setTreeBlock]'s clip without the log-over-leaves exception: a building is written in
 // one pass over one drawing, so there is no ordering between two features to reconcile.
-// Filling only air is what keeps a schematic from eating the ground it stands on — and
-// it is why the `_` of a layer literal costs nothing, since writing air into air is
-// already a no-op.
+//
+// **Two clips, and only one of them can fire today.** The bounds test is load-bearing —
+// remove it and the golden chunk and the surface sweep both go red, because
+// [visitSchematic] yields a whole building and a chunk holds part of one. The air test
+// cannot fire at all as the feature currently stands: a building's floor is `plateau + 1`
+// and the plateau is flat across the whole disc, so no schematic voxel is ever at or
+// below the ground it is standing on, and no two buildings of one settlement share a
+// footprint. It is kept because it is what makes the `_` of a layer literal free — writing
+// air into air is a no-op — and because a later feature that puts a building on something
+// other than its own plateau would need it. It is not, today, what stops a schematic
+// eating the ground; nothing needs to.
 func setSettlementBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 	originX, originY, originZ := chunk.Coord.Origin()
 	localX, localY, localZ := worldX-originX, worldY-originY, worldZ-originZ
@@ -754,6 +933,11 @@ func setSettlementBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block)
 // squaredDistance is the horizontal distance between two columns, squared. Kept squared
 // wherever a comparison is all that is wanted, so the integer square root is paid only
 // where a length is.
+//
+// It overflows int64 for a separation past about 3.04e9 blocks, which is two orders of
+// magnitude beyond [BlockLimit] and unreachable from the height path or from
+// [NearestSettlement]; only [SettlementsNear] with an absurd `cells` could construct it,
+// and a [Coord] is an int32 so the world itself stops long before.
 func squaredDistance(ax, az, bx, bz int64) int64 {
 	dx, dz := ax-bx, az-bz
 	return dx*dx + dz*dz

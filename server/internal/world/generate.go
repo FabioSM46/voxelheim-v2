@@ -333,6 +333,13 @@ func Generate(seed int64, coord Coord) *Chunk {
 	// air, so whichever runs first wins a contested voxel — and a canopy grown just
 	// outside a settlement may overhang its edge. A roof is what should survive that
 	// meeting.
+	//
+	// **No voxel is actually contested yet, and swapping these two lines changes
+	// nothing near spawn.** Trees are suppressed inside the radius, and a conifer rooted
+	// outside it would have to be within a canopy's reach of a building that is itself
+	// well inside — measured over the settlements within three cells of spawn, that
+	// never happens. The order is the decision this file wants to have already made
+	// when it does, not a behaviour under test.
 	placeSettlements(seed, chunk)
 	placeTrees(seed, chunk, &columns)
 

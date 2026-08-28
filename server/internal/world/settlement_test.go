@@ -155,6 +155,157 @@ func TestTheLatticeIsTheSameWorldEveryTime(t *testing.T) {
 	}
 }
 
+// TestTheGuardsBelowDescribeTheActualDrawings ties the half-footprint constants that the
+// compile-time layout guards are written against back to the schematics they claim to
+// describe.
+//
+// **A const expression cannot read a `var`, and the four drawings are built at init**, so
+// the guards restate their widths as literals. That restating is the weak point: resize a
+// schematic and the guards keep protecting the old one, silently. This is the one line of
+// defence against that, and it is a test rather than a compile error for exactly the
+// reason the numbers are literals in the first place.
+func TestTheGuardsBelowDescribeTheActualDrawings(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		kind BuildingKind
+		half int
+	}{
+		{BuildingHut, hutHalfFootprint},
+		{BuildingSmithy, smithyHalfFootprint},
+		{BuildingHall, hallHalfFootprint},
+		{BuildingKeep, largestHalfFootprint},
+	} {
+		schematic := SchematicFor(tc.kind)
+		if schematic.W != 2*tc.half+1 || schematic.D != 2*tc.half+1 {
+			t.Errorf("the %v is %d×%d and the layout guards are written for a half-footprint of %d",
+				tc.kind, schematic.W, schematic.D, tc.half)
+		}
+	}
+
+	// The largest is the largest, which is what makes it usable as a bound.
+	for _, drawing := range everySchematic() {
+		if drawing.s.W > 2*largestHalfFootprint+1 || drawing.s.D > 2*largestHalfFootprint+1 {
+			t.Errorf("the %v is %d×%d, wider than the largest half-footprint of %d allows",
+				drawing.kind, drawing.s.W, drawing.s.D, largestHalfFootprint)
+		}
+	}
+
+	// ceil(3√2) = 5: a 7-across footprint centred on a ring reaches this far past it at
+	// its corner, which is the clearance both hut-ring guards subtract.
+	if got := hutHalfFootprint * hutHalfFootprint * 2; got > hutRingClearance*hutRingClearance {
+		t.Errorf("a hut's corner reaches sqrt(%d) past its ring and the guards allow %d", got, hutRingClearance)
+	}
+	if got := (hutRingClearance - 1) * (hutRingClearance - 1); got >= hutHalfFootprint*hutHalfFootprint*2 {
+		t.Errorf("the hut ring clearance of %d is larger than the corner needs; it should be the ceiling, not padding", hutRingClearance)
+	}
+}
+
+// TestTheCapitalsPlanIsTheSamePlanEveryTime is the capital's half of the positional pin,
+// and it did not exist.
+//
+// **[TestTheLatticeIsTheSameWorldEveryTime] records a settlement's centre, plateau and
+// building *count*, and every one of the capital's geometry constants can move without
+// disturbing any of the three.** Measured against the mutations that were green before
+// this test: `capitalRadius` 56 → 60 changes the terrain around spawn outright;
+// `capitalPlotRadius` 25 → 20 walks the hall and the smithy five blocks in;
+// `capitalHutRingRadius` 40 → 52 pushes the ring twelve blocks out; fixing the hut ring's
+// `start` bearing to zero orients every capital in every world identically; replacing the
+// even hut spacing with `start+i` bunches all six into a 150° arc; and putting the keep on
+// the ring instead of at the origin means a capital has no middle. All nine buildings
+// survive each of those, so a count cannot see any of it, and no golden fixture covers the
+// capital — `chunk_golden_settlement.bin` is a village nearly nine kilometres out.
+//
+// So the plan is written down. The origins are world coordinates, which folds in the
+// centre, the plateau, the two ring radii, the bearings and the facing rule at once.
+func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
+	t.Parallel()
+
+	// **The four constants are pinned as literals, not read from themselves.** This is
+	// the lesson the blend band already learned: a bound derived from the constant it is
+	// checking asserts only that the code agrees with itself, and moves when it moves.
+	for _, c := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"capitalRadius", capitalRadius, 56},
+		{"capitalPlotRadius", capitalPlotRadius, 25},
+		{"capitalHutRingRadius", capitalHutRingRadius, 40},
+		{"capitalHutCount", capitalHutCount, 6},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 6 is the world it produces",
+				c.name, c.got, c.want)
+		}
+	}
+
+	s := theCapital(t, settlementTestSeed)
+
+	want := []struct {
+		kind                      BuildingKind
+		originX, originY, originZ int64
+		facing                    Facing
+	}{
+		{BuildingKeep, 109, 64, 104, FacingPlusZ},
+		{BuildingHall, 135, 64, 105, FacingMinusX},
+		{BuildingSmithy, 90, 64, 119, FacingPlusX},
+		{BuildingHut, 133, 64, 142, FacingMinusZ},
+		{BuildingHut, 93, 64, 142, FacingMinusZ},
+		{BuildingHut, 73, 64, 108, FacingPlusX},
+		{BuildingHut, 93, 64, 73, FacingPlusZ},
+		{BuildingHut, 133, 64, 73, FacingPlusZ},
+		{BuildingHut, 153, 64, 108, FacingMinusX},
+	}
+	if len(s.Buildings) != len(want) {
+		t.Fatalf("the capital has %d buildings, want %d", len(s.Buildings), len(want))
+	}
+	for i, b := range s.Buildings {
+		w := want[i]
+		if b.Kind != w.kind || b.OriginX != w.originX || b.OriginY != w.originY ||
+			b.OriginZ != w.originZ || b.Facing != w.facing {
+			t.Errorf("the capital's building %d is a %v at (%d, %d, %d) facing %d; want a %v at (%d, %d, %d) facing %d",
+				i, b.Kind, b.OriginX, b.OriginY, b.OriginZ, b.Facing,
+				w.kind, w.originX, w.originY, w.originZ, w.facing)
+		}
+	}
+
+	// The keep is the middle. It is the one building whose plot is the centre, which is
+	// why it keeps its drawing's own orientation instead of turning to face anything.
+	keep := s.Buildings[0]
+	kw, kd := rotatedFootprint(SchematicFor(BuildingKeep), keep.Facing)
+	if keep.OriginX+int64(kw/2) != s.CentreX || keep.OriginZ+int64(kd/2) != s.CentreZ {
+		t.Errorf("the keep is centred on (%d, %d) and the capital's centre is (%d, %d)",
+			keep.OriginX+int64(kw/2), keep.OriginZ+int64(kd/2), s.CentreX, s.CentreZ)
+	}
+
+	// And the six huts are spread round the whole circle rather than bunched on one
+	// side of it: no two share a bearing, and the arc they span is the whole of it.
+	seen := map[[2]int64]bool{}
+	for _, b := range s.Buildings[3:] {
+		w, d := rotatedFootprint(SchematicFor(b.Kind), b.Facing)
+		offset := [2]int64{
+			b.OriginX + int64(w/2) - s.CentreX,
+			b.OriginZ + int64(d/2) - s.CentreZ,
+		}
+		if seen[offset] {
+			t.Errorf("two of the capital's huts stand at the same offset %v from its centre", offset)
+		}
+		seen[offset] = true
+	}
+	// Six evenly spaced bearings reach both signs on both axes; six bunched into half
+	// the circle cannot.
+	var minX, maxX, minZ, maxZ int64
+	for offset := range seen {
+		minX, maxX = min(minX, offset[0]), max(maxX, offset[0])
+		minZ, maxZ = min(minZ, offset[1]), max(maxZ, offset[1])
+	}
+	if minX >= 0 || maxX <= 0 || minZ >= 0 || maxZ <= 0 {
+		t.Errorf("the capital's huts span x %d..%d and z %d..%d from its centre; six evenly spaced bearings reach past it on both axes",
+			minX, maxX, minZ, maxZ)
+	}
+}
+
 // TestVillagesAreAboutOneCellInThree is [villageInverseDensity], measured.
 //
 // The constant is a design decision — "a long walk with something at the end of it
@@ -232,6 +383,7 @@ func TestTheCapitalUsesALaterOffsetWhenTheFirstIsRefused(t *testing.T) {
 	if !ok {
 		t.Fatalf("seed %d has no capital", lateSeed)
 	}
+	assertTheFallbackIsTheFirstOffset(t, cellX, cellZ)
 	for bearing := range len(settlementBearings) {
 		for _, distance := range []int{0, s.Radius / 2, s.Radius} {
 			dx, dz := ringOffset(distance, bearing)
@@ -241,6 +393,58 @@ func TestTheCapitalUsesALaterOffsetWhenTheFirstIsRefused(t *testing.T) {
 					lateSeed, x, z, distance, got, s.Plateau)
 			}
 		}
+	}
+}
+
+// assertTheFallbackIsTheFirstOffset pins which offset a capital gets when none of the
+// four is acceptable.
+//
+// **The doc on [capitalSiteAt] calls this a last resort, and measured it is the modal
+// outcome: 85 of the first 200 seeds reach it.** Both facts are worth having — it is
+// genuinely the branch taken when every ranked attempt failed, *and* it is what most
+// worlds get, because the relief field's lattice is 768 blocks wide while every candidate
+// is inside 200 of spawn, so four correlated rolls fail together far more often than four
+// independent ones would.
+//
+// Nothing asserted which candidate it returns. Returning the *fourth* offset instead of
+// the first leaves every existing assertion intact — the distance bound, the plateau
+// floor, the radius and the building count are properties of any offset — while moving
+// the capital of 85 worlds. Seed 1's would go from (86, -148) to (132, 99).
+func assertTheFallbackIsTheFirstOffset(t *testing.T, cellX, cellZ int64) {
+	t.Helper()
+
+	fellBack := 0
+	for seed := int64(1); seed <= 200; seed++ {
+		acceptable := false
+		for attempt := range capitalSiteAttempts {
+			candidate := capitalCandidateAt(seed, cellX, cellZ, attempt)
+			if unloweredHeightAt(seed, candidate.centreX, candidate.centreZ) >= settlementMinPlateau &&
+				reliefAt(seed, candidate.centreX, candidate.centreZ) <= settlementReliefLimit {
+				acceptable = true
+				break
+			}
+		}
+		if acceptable {
+			continue
+		}
+		fellBack++
+
+		first := capitalCandidateAt(seed, cellX, cellZ, 0)
+		site := capitalSiteAt(seed, cellX, cellZ)
+		if site.centreX != first.centreX || site.centreZ != first.centreZ {
+			t.Fatalf("seed %d has no acceptable offset and its capital stands at (%d, %d); the fallback is the first offset, at (%d, %d)",
+				seed, site.centreX, site.centreZ, first.centreX, first.centreZ)
+		}
+		// And the floor is lifted rather than the site refused, which is the other half
+		// of "the capital always exists": lifting is the fail-safe direction and
+		// lowering is not.
+		if site.plateau < settlementMinPlateau {
+			t.Fatalf("seed %d fell back to a plateau at %d, under the floor of %d", seed, site.plateau, settlementMinPlateau)
+		}
+	}
+
+	if fellBack == 0 {
+		t.Fatal("no seed in two hundred reaches the fallback; the branch this asserts is not being exercised")
 	}
 }
 
@@ -362,6 +566,90 @@ func TestNoSettlementIsPlantedOnAnObviousRiver(t *testing.T) {
 	}
 }
 
+// riverSampleRings is the twelve ring columns [riverCrossesSite] reads, written out.
+//
+// **Written out rather than derived, because the version that derived them moved with the
+// code.** The helper this replaces re-ran the production loop from
+// [settlementRiverSampleRings] and the same `radius * ring / rings` expression, so
+// collapsing the two rings into one, or reading both of them at the full radius, changed
+// the census of a 61×61 block of cells from 530 settlements to 524 — a different world,
+// with no [WorldgenVersion] bump — and the test moved along with it and stayed green.
+// Bearings were already pinned, because the interleave is spelled out below; radii and
+// ring count were not.
+//
+// Two rings at half the radius and the full radius, interleaved so twelve samples cover
+// twelve directions rather than six directions twice. With the centre that is the
+// thirteen columns the function's own doc argues for at 1.11 µs against 1.73 µs for
+// twenty-five.
+func riverSampleRings(radius int) []struct{ radius, bearing int } {
+	var out []struct{ radius, bearing int }
+	for _, bearing := range []int{0, 2, 4, 6, 8, 10} {
+		out = append(out, struct{ radius, bearing int }{radius / 2, bearing})
+	}
+	for _, bearing := range []int{1, 3, 5, 7, 9, 11} {
+		out = append(out, struct{ radius, bearing int }{radius, bearing})
+	}
+	return out
+}
+
+// TestTheRiverSampleIsThirteenColumnsInTwoInterleavedRings is the geometry of the sample,
+// pinned as a number rather than as an expression.
+//
+// The centre plus twelve, and the two radii are half and whole. Both halves of that are
+// load-bearing and neither was asserted: one ring reads six directions instead of twelve,
+// and two rings at the same radius read a circle instead of a disc. Each is a different
+// world for the price of a constant.
+func TestTheRiverSampleIsThirteenColumnsInTwoInterleavedRings(t *testing.T) {
+	t.Parallel()
+
+	// Thirteen distinct columns, for a village-sized disc.
+	distinct := map[[2]int64]bool{{0, 0}: true}
+	for _, sample := range riverSampleRings(villageRadius) {
+		dx, dz := ringOffset(sample.radius, sample.bearing)
+		distinct[[2]int64{dx, dz}] = true
+	}
+	if len(distinct) != 13 {
+		t.Errorf("the river sample reads %d distinct columns of a village-sized disc, want 13", len(distinct))
+	}
+
+	// And the production predicate agrees with that set everywhere. This is what makes
+	// the list above a pin rather than a second opinion: a sample set that differs from
+	// the one [riverCrossesSite] actually reads shows up as a disagreement on some
+	// candidate in the sweep.
+	agreed, refused := 0, 0
+	for cz := int64(-30); cz <= 30; cz++ {
+		for cx := int64(-30); cx <= 30; cx++ {
+			if isCapitalCell(cx, cz) {
+				continue
+			}
+			candidate, proposed := settlementCandidateAt(settlementTestSeed, cx, cz)
+			if !proposed {
+				continue
+			}
+			want := riverAt(settlementTestSeed, candidate.centreX, candidate.centreZ)
+			if !want {
+				for _, sample := range riverSampleRings(candidate.radius) {
+					dx, dz := ringOffset(sample.radius, sample.bearing)
+					if riverAt(settlementTestSeed, candidate.centreX+dx, candidate.centreZ+dz) {
+						want = true
+						break
+					}
+				}
+			}
+			if got := riverCrossesSite(settlementTestSeed, candidate); got != want {
+				t.Fatalf("cell (%d, %d): riverCrossesSite says %v and the thirteen columns say %v", cx, cz, got, want)
+			}
+			agreed++
+			if want {
+				refused++
+			}
+		}
+	}
+	if agreed == 0 || refused == 0 {
+		t.Fatalf("the sweep compared %d candidates of which %d were refused; both are needed", agreed, refused)
+	}
+}
+
 // TestTheRiverCentreSampleIsTheOnlyThingRefusingSomeSites is the half of
 // [riverCrossesSite] that its own rings cannot cover for it.
 //
@@ -381,13 +669,10 @@ func TestTheRiverCentreSampleIsTheOnlyThingRefusingSomeSites(t *testing.T) {
 	t.Parallel()
 
 	ringsRefuse := func(c settlementCandidate) bool {
-		for ring := 1; ring <= settlementRiverSampleRings; ring++ {
-			radius := c.radius * ring / settlementRiverSampleRings
-			for bearing := ring - 1; bearing < len(settlementBearings); bearing += settlementRiverSampleRings {
-				dx, dz := ringOffset(radius, bearing)
-				if riverAt(settlementTestSeed, c.centreX+dx, c.centreZ+dz) {
-					return true
-				}
+		for _, sample := range riverSampleRings(c.radius) {
+			dx, dz := ringOffset(sample.radius, sample.bearing)
+			if riverAt(settlementTestSeed, c.centreX+dx, c.centreZ+dz) {
+				return true
 			}
 		}
 		return false
@@ -732,10 +1017,24 @@ func TestEveryAnchorIsAirOverSolidGround(t *testing.T) {
 	world := newGeneratedWorld(settlementTestSeed)
 	kinds := map[AnchorKind]int{}
 
-	for _, s := range SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, 1) {
+	for _, s := range SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, 3) {
 		anchors := s.Anchors()
 		if len(anchors) == 0 {
 			t.Fatalf("the %v at (%d, %d) offers no slot", s.Kind, s.CentreX, s.CentreZ)
+		}
+		// **Every building's slots, not some of them.** The only completeness check here
+		// used to be the count of distinct kinds at the end, and a settlement's first
+		// building alone already offers four — so [Settlement.Anchors] could return the
+		// keep's three and drop the other eleven with nothing to show for it. This is
+		// the call #456 and #458 read a settlement through: what it must be is a
+		// concatenation, not a sample.
+		total := 0
+		for _, b := range s.Buildings {
+			total += len(b.Anchors)
+		}
+		if len(anchors) != total {
+			t.Fatalf("the %v at (%d, %d) has %d slots across its %d buildings and Anchors() returned %d",
+				s.Kind, s.CentreX, s.CentreZ, total, len(s.Buildings), len(anchors))
 		}
 		for _, a := range anchors {
 			kinds[a.Kind]++
@@ -761,63 +1060,100 @@ func TestEveryAnchorIsAirOverSolidGround(t *testing.T) {
 //
 // **A building is the first feature here bigger than a chunk**, so this is not the same
 // statement the canopy makes: a keep is fifteen blocks across and fourteen tall and can
-// straddle four chunk columns at once. Generating the pair in both orders is what says
-// no chunk is reading, caching or mutating anything belonging to its neighbour — which,
-// if it ever became untrue, would show up as a wall that exists only when a player
-// happens to walk in from the east.
+// straddle eight chunks at once. Generating them in both orders is what says no chunk is
+// reading, caching or mutating anything belonging to its neighbour — which, if it ever
+// became untrue, would show up as a wall that exists only when a player happens to walk
+// in from the east.
+//
+// **The y axis is a chunk border like the other two, and this test used to pretend it
+// was not.** Both chunks of its pair were taken at `b.OriginY`, so every voxel above the
+// first chunk boundary fell outside the map and was silently skipped by the `!held`
+// return. What that hid: [placeSettlements] skips a chunk whose y range holds none of the
+// building, and the top of that range is `plateau + tallestSchematic`. Narrowing it to
+// `plateau + 1` — dropping every chunk above the floor — left this file entirely green
+// while removing **3,112 non-air voxels from 22 buildings** within six cells of spawn:
+// roofs and upper walls simply absent, one chunk up. Twenty-two of the hundred and
+// twenty-two buildings near spawn straddle a y boundary, and the golden fixture is the
+// *lower* chunk of a village, so it could not see it either.
+//
+// So the coordinate set is now every chunk the building's box touches, on all three
+// axes, and both kinds of split are counted and required.
 func TestABuildingIsBuiltFromItsDrawingWhicheverChunkAsks(t *testing.T) {
 	t.Parallel()
 
-	s := theCapital(t, settlementTestSeed)
-	split, checked := 0, 0
+	horizontal, vertical, checked := 0, 0, 0
 
-	for _, b := range s.Buildings {
-		schematic := SchematicFor(b.Kind)
-		w, d := rotatedFootprint(schematic, b.Facing)
-		if ChunkOf(b.OriginX, 0, 0).X == ChunkOf(b.OriginX+int64(w)-1, 0, 0).X &&
-			ChunkOf(0, 0, b.OriginZ).Z == ChunkOf(0, 0, b.OriginZ+int64(d)-1).Z {
-			continue // wholly inside one chunk column; the split ones are the point
+	for _, s := range SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, 3) {
+		for _, b := range s.Buildings {
+			schematic := SchematicFor(b.Kind)
+			w, d := rotatedFootprint(schematic, b.Facing)
+			hiX, hiY, hiZ := b.OriginX+int64(w)-1, b.OriginY+int64(schematic.H)-1, b.OriginZ+int64(d)-1
+
+			low := ChunkOf(b.OriginX, b.OriginY, b.OriginZ)
+			high := ChunkOf(hiX, hiY, hiZ)
+			splitAcross := low.X != high.X || low.Z != high.Z
+			splitUp := low.Y != high.Y
+			if !splitAcross && !splitUp {
+				continue // wholly inside one chunk; the split ones are the point
+			}
+			if splitAcross {
+				horizontal++
+			}
+			if splitUp {
+				vertical++
+			}
+
+			// Every chunk the box touches, which for a keep on a corner is eight.
+			var coords []Coord
+			for cy := low.Y; cy <= high.Y; cy++ {
+				for cz := low.Z; cz <= high.Z; cz++ {
+					for cx := low.X; cx <= high.X; cx++ {
+						coords = append(coords, Coord{X: cx, Y: cy, Z: cz})
+					}
+				}
+			}
+
+			forwards := map[Coord]*Chunk{}
+			for _, coord := range coords {
+				forwards[coord] = Generate(settlementTestSeed, coord)
+			}
+			backwards := map[Coord]*Chunk{}
+			for i := len(coords) - 1; i >= 0; i-- {
+				backwards[coords[i]] = Generate(settlementTestSeed, coords[i])
+			}
+
+			visitSchematic(b, func(x, y, z int64, block Block) {
+				if block == Air {
+					return // the clip writes nothing for a room's air; there is nothing to compare
+				}
+				coord := ChunkOf(x, y, z)
+				chunk, held := forwards[coord]
+				if !held {
+					t.Fatalf("the %v yields (%d, %d, %d), in chunk %+v, which is outside the box its own footprint claims",
+						b.Kind, x, y, z, coord)
+				}
+				checked++
+				local := [3]int{Local(x), Local(y), Local(z)}
+				got := chunk.At(local[0], local[1], local[2])
+				if got != block {
+					t.Fatalf("the %v's voxel at (%d, %d, %d) is block %d in chunk %+v, and its drawing says %d",
+						b.Kind, x, y, z, got, coord, block)
+				}
+				if other := backwards[coord].At(local[0], local[1], local[2]); other != got {
+					t.Fatalf("the %v's voxel at (%d, %d, %d) is %d in one generation order and %d in the other",
+						b.Kind, x, y, z, got, other)
+				}
+			})
 		}
-		split++
-
-		low := ChunkOf(b.OriginX, b.OriginY, b.OriginZ)
-		high := ChunkOf(b.OriginX+int64(w)-1, b.OriginY, b.OriginZ+int64(d)-1)
-
-		forwards := map[Coord]*Chunk{}
-		for _, coord := range []Coord{low, high} {
-			forwards[coord] = Generate(settlementTestSeed, coord)
-		}
-		backwards := map[Coord]*Chunk{}
-		for _, coord := range []Coord{high, low} {
-			backwards[coord] = Generate(settlementTestSeed, coord)
-		}
-
-		visitSchematic(b, func(x, y, z int64, block Block) {
-			if block == Air {
-				return // the clip writes nothing for a room's air; there is nothing to compare
-			}
-			coord := ChunkOf(x, y, z)
-			chunk, held := forwards[coord]
-			if !held {
-				return
-			}
-			checked++
-			local := [3]int{Local(x), Local(y), Local(z)}
-			got := chunk.At(local[0], local[1], local[2])
-			if got != block {
-				t.Fatalf("the %v's voxel at (%d, %d, %d) is block %d, and its drawing says %d",
-					b.Kind, x, y, z, got, block)
-			}
-			if other := backwards[coord].At(local[0], local[1], local[2]); other != got {
-				t.Fatalf("the %v's voxel at (%d, %d, %d) is %d in one generation order and %d in the other",
-					b.Kind, x, y, z, got, other)
-			}
-		})
 	}
 
-	if split == 0 || checked == 0 {
-		t.Fatalf("%d of the capital's buildings cross a chunk border and %d voxels were compared; the test asserted nothing",
-			split, checked)
+	// **Both kinds of split have to be present or the assertion above is partial**, and
+	// the vertical one is the half that was missing: buildings are up to fourteen
+	// blocks tall on thirty-two-block chunks, so a y straddle is a minority case that a
+	// narrower sweep can miss entirely.
+	if horizontal == 0 || vertical == 0 || checked == 0 {
+		t.Fatalf("%d buildings cross a chunk column border, %d cross a chunk height border and %d voxels were compared; each needs one",
+			horizontal, vertical, checked)
 	}
 }
 
@@ -840,13 +1176,22 @@ func TestSettlementsNearIsOrderedAndNearestAgreesWithIt(t *testing.T) {
 		}
 	}
 
+	// **The referee is a wide search, not this two-cell one.** [NearestSettlement] looks
+	// six kilometres from the column itself, which is a different region from "two cells
+	// around the cell this column is in" — the head of a narrow cell-centred search is
+	// not the nearest settlement, and asserting they agree is what let the defect in
+	// [TestNearestSettlementIsActuallyTheNearest] survive.
 	nearest, ok := NearestSettlement(settlementTestSeed, x, z)
 	if !ok {
-		t.Fatal("no settlement within three cells of a column that has two within two")
+		t.Fatal("no settlement within reach of a column that has two within two cells")
 	}
-	if nearest.CentreX != near[0].CentreX || nearest.CentreZ != near[0].CentreZ {
-		t.Fatalf("NearestSettlement is at (%d, %d) and the head of SettlementsNear is at (%d, %d)",
-			nearest.CentreX, nearest.CentreZ, near[0].CentreX, near[0].CentreZ)
+	wide := SettlementsNear(settlementTestSeed, x, z, 6)
+	if nearest.CentreX != wide[0].CentreX || nearest.CentreZ != wide[0].CentreZ {
+		t.Fatalf("NearestSettlement is at (%d, %d) and the nearest of a six-cell search is at (%d, %d)",
+			nearest.CentreX, nearest.CentreZ, wide[0].CentreX, wide[0].CentreZ)
+	}
+	if squaredDistance(x, z, nearest.CentreX, nearest.CentreZ) > squaredDistance(x, z, near[0].CentreX, near[0].CentreZ) {
+		t.Fatalf("NearestSettlement is further away than the head of a two-cell search")
 	}
 
 	// A count of zero is one cell — the one the column is in — rather than nothing.
@@ -910,7 +1255,13 @@ func TestSettlementsNearIsOrderedAndNearestAgreesWithIt(t *testing.T) {
 func TestTwoSettlementsExactlyAsFarAwayComeBackInAFixedOrder(t *testing.T) {
 	t.Parallel()
 
-	const x, z = 4169, -5205
+	// **The pair has to be one where the two candidate orders disagree**, and the first
+	// version of this test used one where they did not: (1914, -6156) and (6424, -4254)
+	// sort the same way whether the comparator reads z before x or x before z, so
+	// swapping those two lines in [SettlementsNear] was invisible. This column is
+	// equidistant from (6424, -4254) and (2118, 236), whose z order and x order are
+	// opposite — z puts the first ahead, x puts the second.
+	const x, z = 4271, -2009
 
 	near := SettlementsNear(settlementTestSeed, x, z, 3)
 	if len(near) < 2 {
@@ -931,9 +1282,15 @@ func TestTwoSettlementsExactlyAsFarAwayComeBackInAFixedOrder(t *testing.T) {
 			x, z, near[0].CentreX, near[0].CentreZ, near[1].CentreX, near[1].CentreZ)
 	}
 
-	// Repeating the call must give the same head. A comparator that answers zero for
-	// the tie can still be deterministic for one slice; what it cannot survive is the
-	// same tie reached through a different number of cells.
+	// The two orders genuinely disagree here, which is what makes the assertion above
+	// mean something. If a later change to the lattice makes them agree, this test goes
+	// quiet without failing — so it says so.
+	if (near[0].CentreZ < near[1].CentreZ) == (near[0].CentreX < near[1].CentreX) {
+		t.Errorf("the tied pair (%d, %d) and (%d, %d) sorts the same way on z as on x; the tiebreak's order is not being tested",
+			near[0].CentreX, near[0].CentreZ, near[1].CentreX, near[1].CentreZ)
+	}
+
+	// Repeating the call must give the same head, through a different number of cells.
 	for _, cells := range []int{2, 3} {
 		again := SettlementsNear(settlementTestSeed, x, z, cells)
 		if len(again) < 2 {
@@ -944,16 +1301,38 @@ func TestTwoSettlementsExactlyAsFarAwayComeBackInAFixedOrder(t *testing.T) {
 				cells, again[0].CentreX, again[0].CentreZ, near[0].CentreX, near[0].CentreZ)
 		}
 	}
+
+	// **[NearestSettlement] breaks the same tie the same way**, which is the half of
+	// "the order is total" that spans the two exported surfaces. It runs its own
+	// comparison rather than sorting, so nothing but this says the two agree: swapping
+	// z and x in its tiebreak alone leaves every other assertion in this file standing.
+	nearest, ok := NearestSettlement(settlementTestSeed, x, z)
+	if !ok {
+		t.Fatal("no settlement within reach of a column with two exactly as far away")
+	}
+	if nearest.CentreX != near[0].CentreX || nearest.CentreZ != near[0].CentreZ {
+		t.Errorf("two settlements are exactly as far from (%d, %d); SettlementsNear puts (%d, %d) first and NearestSettlement answers (%d, %d)",
+			x, z, near[0].CentreX, near[0].CentreZ, nearest.CentreX, nearest.CentreZ)
+	}
+
+	// **What this still cannot demonstrate is that the tiebreak is reached at all**, and
+	// that is worth stating rather than leaving as a silence. Deleting it — `return 0`
+	// for a tie — passes everything above, because [villageCellInset] keeps every centre
+	// strictly inside its own cell, so the cell scan that builds the slice already
+	// emits z-then-x order and `slices.SortFunc` has nothing to disturb. The tiebreak is
+	// insurance against a sort that reorders equal elements, which `slices.SortFunc` is
+	// explicitly permitted to do. What is asserted above is the documented order, not
+	// proof that the comparator's third and fourth lines ran.
 }
 
-// TestNearestSettlementReachesFurtherThanOneCell is what [nearestSettlementCells] is for.
+// TestNearestSettlementReachesFurtherThanOneCell is what [nearestSettlementBlocks] is for.
 //
-// **Three cells is a promise about emptiness, and one cell would keep every other test
-// in this file green.** The ordering test above stands on a column with settlements in
-// its own cell, so the bound is invisible there. This column has none within one cell
-// and several within two, which is exactly the case the constant exists to answer: a
-// respawn or a station lookup on a quiet stretch of world must still be told where the
-// nearest settlement is rather than that there is none.
+// **Six kilometres is a promise about emptiness, and two kilometres would keep every
+// other test in this file green.** The ordering test above stands on a column with
+// settlements in its own cell, so the reach is invisible there. This column has none
+// within one cell and several within two, which is exactly the case the constant exists
+// to answer: a respawn or a station lookup on a quiet stretch of world must still be told
+// where the nearest settlement is rather than that there is none.
 func TestNearestSettlementReachesFurtherThanOneCell(t *testing.T) {
 	t.Parallel()
 
@@ -964,10 +1343,127 @@ func TestNearestSettlementReachesFurtherThanOneCell(t *testing.T) {
 	}
 	s, ok := NearestSettlement(settlementTestSeed, x, z)
 	if !ok {
-		t.Fatalf("(%d, %d) has no settlement within %d cells, and the search should reach that far", x, z, nearestSettlementCells)
+		t.Fatalf("(%d, %d) has no settlement within %d blocks, and the search should reach that far", x, z, nearestSettlementBlocks)
 	}
-	if d := isqrt(squaredDistance(x, z, s.CentreX, s.CentreZ)); d > int64(nearestSettlementCells)*settlementCellBlocks {
-		t.Fatalf("the nearest settlement to (%d, %d) is %d blocks away, further than %d cells reach", x, z, d, nearestSettlementCells)
+	if d := isqrt(squaredDistance(x, z, s.CentreX, s.CentreZ)); d > nearestSettlementBlocks {
+		t.Fatalf("the nearest settlement to (%d, %d) is %d blocks away, further than the search reaches", x, z, d)
+	}
+}
+
+// TestNearestSettlementIsActuallyTheNearest is the regression for a defect in the one
+// call #460 is written against.
+//
+// **The search square used to be centred on the *cell* holding the column rather than on
+// the column**, so from a column near one edge of its cell it reached 6144 blocks one way
+// and 8191 the other. A settlement 6200 blocks to the right could fall outside it while
+// one 8000 to the left was inside, and the sort then honestly reported the wrong winner.
+// Measured over 40 seeds and 268,960 columns before the fix: **109 answers were not the
+// nearest, and 105 said there was none where a six-cell search finds one.**
+//
+// Three shapes are pinned. The first two are recorded instances, because a sweep that
+// stops finding them tells you nothing about why; the third is the sweep, because two
+// instances are not a contract.
+func TestNearestSettlementIsActuallyTheNearest(t *testing.T) {
+	t.Parallel()
+
+	distance := func(x, z int64, s Settlement) int64 {
+		return isqrt(squaredDistance(x, z, s.CentreX, s.CentreZ))
+	}
+
+	// A wrong winner: the true nearest sits in the cell column the old square never
+	// reached, 43 blocks the wrong side of a cell edge.
+	{
+		const seed, x, z = 38, -7212, 7957
+		got, ok := NearestSettlement(seed, x, z)
+		if !ok {
+			t.Fatal("seed 38 has no settlement near (-7212, 7957), and it has several")
+		}
+		if d := distance(x, z, got); d > 7201 {
+			t.Errorf("the nearest settlement to (%d, %d) on seed %d is %d blocks away; one at 7201 was being missed",
+				x, z, seed, d)
+		}
+	}
+
+	// **A "none", and it is the contract rather than the defect.** A six-cell search
+	// finds twenty-one settlements around this column, the nearest 8576 blocks away —
+	// beyond the reach, and in a cell the six-kilometre square does not overlap. What
+	// the old behaviour got wrong was answering none while one stood 7201 blocks away
+	// *inside* the reach; what is asserted here is the boundary itself, so that moving
+	// it is a deliberate act.
+	{
+		const seed, x, z = 36, 3032, 7957
+		if _, ok := NearestSettlement(seed, x, z); ok {
+			t.Errorf("seed %d now finds a settlement near (%d, %d); this column was chosen because the reach ends before the nearest one",
+				seed, x, z)
+		}
+		wide := SettlementsNear(seed, x, z, 6)
+		if len(wide) == 0 {
+			t.Fatalf("seed %d has no settlement at all near (%d, %d); the column was chosen for the opposite reason", seed, x, z)
+		}
+		if d := distance(x, z, wide[0]); d <= nearestSettlementBlocks {
+			t.Errorf("seed %d has a settlement %d blocks from (%d, %d), inside the %d-block reach, and NearestSettlement missed it",
+				seed, d, x, z, nearestSettlementBlocks)
+		}
+	}
+
+	// And it is continuous across a cell edge, which the cell-centred square could not
+	// be: on seed 1 at this row, x = -5121 answered 6903 blocks away and x = -5120
+	// answered 6584 — a 319-block jump between adjacent columns.
+	{
+		const seed, z = 1, -4681
+		left, okL := NearestSettlement(seed, -5121, z)
+		right, okR := NearestSettlement(seed, -5120, z)
+		if !okL || !okR {
+			t.Fatal("seed 1 has no settlement near the cell edge at x = -5120")
+		}
+		dl, dr := distance(-5121, z, left), distance(-5120, z, right)
+		if left.CentreX != right.CentreX || left.CentreZ != right.CentreZ {
+			t.Errorf("adjacent columns either side of a cell edge answer different settlements, at (%d, %d) and (%d, %d)",
+				left.CentreX, left.CentreZ, right.CentreX, right.CentreZ)
+		}
+		if d := max(dl-dr, dr-dl); d > 2 {
+			t.Errorf("adjacent columns either side of a cell edge answer %d and %d blocks; the search is centred on the cell rather than the column",
+				dl, dr)
+		}
+	}
+
+	// **The sweep, against a search wide enough to be the referee, and with no
+	// distance qualifier on the assertion.** Six cells around the column's own cell
+	// always contains the six-kilometre disc about the column, so its head is at least
+	// as near as anything [NearestSettlement]'s first pass can see; and because that
+	// function widens once when its best lies beyond its first reach, "nearest" here is
+	// the whole world's nearest rather than the nearest inside a radius. Over 268,960
+	// columns of 40 seeds after the fix: zero wrong, zero missed, and zero suboptimal
+	// even outside the first reach.
+	wrong, missed, checked := 0, 0, 0
+	for seed := int64(1); seed <= 12; seed++ {
+		for z := int64(-8000); z <= 8000; z += 907 {
+			for x := int64(-8000); x <= 8000; x += 907 {
+				reference := SettlementsNear(seed, x, z, 6)
+				if len(reference) == 0 {
+					continue
+				}
+				checked++
+				got, ok := NearestSettlement(seed, x, z)
+				if !ok {
+					// A refusal is only honest if nothing stood inside the reach.
+					if distance(x, z, reference[0]) <= nearestSettlementBlocks {
+						missed++
+					}
+					continue
+				}
+				if distance(x, z, got) > distance(x, z, reference[0]) {
+					wrong++
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("the sweep found no column with a settlement in reach; it asserted nothing")
+	}
+	if wrong != 0 || missed != 0 {
+		t.Errorf("over %d columns: %d answers were not the nearest and %d reported none while a six-cell search finds one",
+			checked, wrong, missed)
 	}
 }
 
