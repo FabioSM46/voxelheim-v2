@@ -784,7 +784,20 @@ enum RefusedAction : ubyte {
   PlaceMarker = 13,
 
   /// A `MarkerRemoveRequest` that took no mark off it.
-  RemoveMarker = 14
+  RemoveMarker = 14,
+
+  // -- V25. The settlement's two client requests, appended for the reason every member
+  //    above was: the number is free now and will not be once anything depends on it.
+
+  /// An `NpcInteractRequest` that opened nothing. The player addressed a resident and
+  /// the server had no answer to give them — the resident is not a vendor, is out of
+  /// reach, or the player is dead.
+  Interact = 15,
+
+  /// A `TradeRequest` that moved no item and no silver. Trade is all-or-nothing: a
+  /// refusal means the vendor's stock, the player's pack and the player's purse are
+  /// exactly as they were.
+  Trade = 16
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -924,6 +937,23 @@ enum RefusalReason : ubyte {
   /// mark exists by naming ids it was never given — the argument `RefusedAction` records
   /// for having no member for a refused structure removal at all.
   MarkerUnknown = 26,
+
+  /// The addressed entity exists and sells nothing. In the low group deliberately: the
+  /// request was legal and the answer is about the world, not about the build that
+  /// asked — a resident who is a guard rather than a trader is an ordinary thing to
+  /// walk up to. It is also the one answer a client cannot compute for itself, because
+  /// nothing on the wire says which residents keep a stall until one is opened.
+  NotAVendor = 27,
+
+  /// The player's purse holds less silver than the authoritative total for this
+  /// purchase. The server owns the price and the purse both; the client's arithmetic is
+  /// presentation and this is what corrects it.
+  NotEnoughSilver = 28,
+
+  /// The vendor does not buy the offered item at all. Distinct from `NotEnoughSilver`,
+  /// which is the purchase direction, and from `NotAVendor`, which is about the
+  /// resident rather than the item: this vendor trades, and not in that.
+  VendorDoesNotWant = 29,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -1112,7 +1142,19 @@ enum MobKind : ubyte {
   Vargr = 2,
 
   /// A passive animal that runs from nearby live players rather than attacking them.
-  Deer = 3
+  Deer = 3,
+
+  /// A settlement's resident. Never hostile, never lootable, never a `Corpse`: a
+  /// villager has no aggro, no `MobHit`, and no death that leaves a container behind.
+  /// What distinguishes it from `Deer` is that it can be addressed — see
+  /// `NpcInteractRequest` — and that its name and role arrive once in a
+  /// `ResidentAppearance` rather than being inferred from the kind.
+  ///
+  /// Appended rather than inserted, and it is the one member of this enum that moved
+  /// `ProtocolVersion.Current` on its own: `MobState.kind` is refused when it is a
+  /// member the receiver cannot name, so a V24 client meeting one would drop the
+  /// session rather than the value. The argument is written out in `common.fbs`.
+  Villager = 4
 }
 
 /// What a mob is doing this tick, as the server's finite-state machine holds it.
@@ -1724,4 +1766,224 @@ table PlayerAppearance {
 
   /// Item id in the trailing off-hand equipment slot, or zero when nothing is held.
   worn_offhand: ushort;
+}
+
+// -----------------------------------------------------------------------------
+// The settlement: a resident with a name and a role, a word with one, and a stall.
+//
+// A resident rides the existing `MobState` stream as `MobKind.Villager` — position,
+// yaw, `Idle` — because the client's interpolation and view culling already work for
+// mobs and a villager needs neither more nor less than a deer does. What a resident
+// is *called* and what they *do* travels once, in a `ResidentAppearance`, for exactly
+// the reason a player's colours travel in a `PlayerAppearance`: both are static per
+// entity, and paying for them at the tick rate would be paying for a value that is
+// identical in every frame.
+//
+// Everything below is server -> client except `NpcInteractRequest` and `TradeRequest`,
+// which carry intent and nothing else. The client never decides that a stall opens,
+// what it stocks, what anything costs, or whether a trade went through.
+// -----------------------------------------------------------------------------
+
+/// What a resident does in their settlement. A vocabulary, not a description.
+///
+/// The same shape `MarkerKind` and `HairModel` are: the server stores the member and
+/// draws nothing, and the client maps it to whatever it shows — a word under the name,
+/// an icon, an apron. That is why every member is an occupation and none of them is a
+/// sprite, a schedule or a dialogue tree.
+///
+/// **`Villager` is the member with no trade**, and it is 1 rather than last because it
+/// is the ordinary case: most residents of a village are not smiths. It is distinct from
+/// `Unknown`, which is the absent-field zero and means the message failed to say.
+///
+/// **A role is not a capability.** `Trader` does not mean this entity has a stall, and
+/// `Smith` does not mean it will repair anything: whether a `VendorState` opens is the
+/// server's answer to an `NpcInteractRequest` and is never inferred from this member.
+/// A client that greyed out the interact prompt for every non-`Trader` would be deciding
+/// a gameplay outcome, which is the one thing it may not do.
+///
+/// Zero member for the reason every enum in this contract has one, and it fails closed:
+/// a `ResidentAppearance` whose role is `Unknown` is refused rather than drawn as a
+/// generic villager, because the server always knows what a resident is.
+enum ResidentRole : ubyte {
+  Unknown = 0,
+  Villager = 1,
+  Smith = 2,
+  Carpenter = 3,
+  Cook = 4,
+  Trader = 5,
+  Guard = 6
+}
+
+/// What one resident is called and what they do. **Server -> client, and static per
+/// entity.**
+///
+/// Sent once, when the resident enters this session's view, and cached by the client
+/// against the entity id for as long as the entity is known. It is not resent every tick
+/// and it is not part of a snapshot — the `PlayerAppearance` precedent exactly, and the
+/// argument written beside that message applies here without change.
+///
+/// **Why it is not `PlayerAppearance` with a role field.** That message carries a level,
+/// four worn item ids and a character's stored name; a resident has none of those and
+/// would send four zeroes and a one for ever. More to the point, `PlayerAppearance` is
+/// keyed to entities the client draws as players, and a client that had to consult the
+/// snapshot's `MobKind` before deciding which fields of an appearance were real would be
+/// carrying the ambiguity in every frame. Two messages, one shape each.
+///
+/// **An appearance for an entity the client has never seen is not an error**, and
+/// neither is a `MobState` for a villager whose appearance has not arrived. The two
+/// streams are not ordered against each other, for the reason `PlayerAppearance` records:
+/// appearance is sent per entity as it comes into view, snapshots are sent per tick, and
+/// either may arrive first. A resident with no appearance yet is drawn with no name and
+/// no role, and redrawn as soon as one arrives.
+///
+/// Decoder invariants:
+///   - `entity_id` is never 0, which names no entity anywhere in this contract, and it
+///     matches the `MobState.entity_id` of a mob whose kind is `MobKind.Villager`
+///   - `name` is present, non-empty, valid UTF-8 and at most 32 bytes. Bytes, not
+///     characters: a byte is what the wire carries and what both decoders can count
+///     without agreeing on an encoding. It is display text — shown, never parsed, never
+///     used as identity, which is what `entity_id` is for
+///   - `role` is a member this contract names and is never `Unknown`
+///   - `appearance` is present and satisfies every invariant `Appearance` documents
+table ResidentAppearance {
+  /// The entity this belongs to, matching `MobState.entity_id` in the snapshots that
+  /// carry that resident.
+  entity_id: ulong;
+
+  /// The resident's name, from the server and from nothing this session said. Display
+  /// text only, at most 32 bytes.
+  name: string;
+
+  /// What this resident does. Never `Unknown`.
+  role: ResidentRole;
+
+  /// What the resident looks like. See `Appearance` in `common.fbs`, which is
+  /// authoritative for the colour encoding. Residents and players share one description
+  /// deliberately: a village is people, and a second appearance type would be a second
+  /// palette to keep in step for no gain.
+  appearance: Appearance;
+}
+
+/// "I address this resident." Client -> server.
+///
+/// It asks and states nothing, which is what keeps it on the right side of rule 4 in
+/// `schemas/AGENTS.md`: it carries no distance, no reachability, no shop and no outcome.
+/// The server decides whether the player is close enough, whether the entity is a
+/// resident at all, and whether anything opens — a `VendorState`, an
+/// `ActionRefused{Interact, ...}`, or nothing.
+///
+/// **There is no acceptance payload and no "closed the conversation" request.** A stall
+/// that opens says so by sending a `VendorState`; one that ends says so with
+/// `VendorClosed`. A client that walks away simply stops drawing the window, and the
+/// server will not hold state on the strength of a message the client never sent.
+///
+/// Decoder invariants:
+///   - `entity_id` is non-zero
+///   - `client_tick` is the sender's own tick counter, carried for latency accounting
+///     and never used as authority
+table NpcInteractRequest {
+  entity_id: ulong;
+  client_tick: uint;
+}
+
+/// One line of a stall's price list.
+///
+/// A fixed struct because the complete list is replaced as one value and every entry has
+/// the same settled shape — the `LootEntry` argument, for the same reason. There is no
+/// stock count: **stock is unlimited by contract**, so a vendor entry is a price and
+/// nothing else, and a client that showed "3 left" would be inventing a number the server
+/// never sends.
+///
+/// Decoder invariants:
+///   - `item_id` is non-zero and appears at most once per vector
+///   - `price` is non-zero. A vendor that gave something away or paid nothing for it
+///     would be a price list with a hole in it, and free is not a price
+struct VendorEntry {
+  /// What is traded. Item ids are the registry's, appended and never inserted.
+  item_id: ushort;
+
+  /// Silver per unit. The direction is the vector this entry sits in, never a sign.
+  price: ushort;
+}
+
+/// The complete price list one vendor shows one recipient. Server -> client.
+///
+/// **Revisioned like `LootState`, and for the same reason**: the client acts against the
+/// list it is looking at, names that revision in its `TradeRequest`, and a request written
+/// against a list the server has since replaced is refused rather than applied to a
+/// different one. A later state for the same vendor supersedes the earlier revision
+/// wholesale — this is never a diff.
+///
+/// **It is not `LootState`, though, and the two must not be merged.** A corpse holds
+/// stacks with identities and durabilities and one direction of travel; a stall holds
+/// prices, two directions, and no identity but the item's. Reusing the loot tables here
+/// would have meant an `entry_id` nobody mints, a `count` that is always the whole world,
+/// and a price smuggled into a durability field.
+///
+/// **Both vectors are the player's view of the trade, not the vendor's.** `sells` is what
+/// the player may buy and the price they pay; `buys` is what the vendor accepts and the
+/// price it pays. An item may appear in both at different prices, and the spread is the
+/// server's business.
+///
+/// Decoder invariants:
+///   - `entity_id` is the non-zero `entity_id` of a `MobState` whose kind is
+///     `MobKind.Villager`
+///   - `revision` is non-zero
+///   - `sells` and `buys` are both present. Either may be empty: a vendor that only buys
+///     and one that only sells are both ordinary. Both empty is a vendor with nothing to
+///     say and is `VendorClosed` instead
+///   - every entry satisfies `VendorEntry`, and no item id appears twice within one vector
+table VendorState {
+  entity_id: ulong;
+  revision: uint;
+
+  /// What the player may buy, at the price they pay.
+  sells: [VendorEntry];
+
+  /// What the vendor buys, at the price it pays.
+  buys: [VendorEntry];
+}
+
+/// "Trade this with that vendor." Client -> server.
+///
+/// **Intent only: an item, a count, a direction, and the revision the player was looking
+/// at.** It carries no price and no total, deliberately and as a contract rule rather than
+/// an oversight. The price is the server's, the purse is the server's, and a request that
+/// named a total would be a client stating an outcome — the exact shape rule 4 exists to
+/// forbid. The client's own arithmetic is presentation; when it disagrees with the server
+/// the answer is `ActionRefused{Trade, NotEnoughSilver}` and a fresh `VendorState`.
+///
+/// **All or nothing.** A request for five that can only afford three buys none: partial
+/// fills would need a report of what actually moved, and the honest one already exists as
+/// the `InventoryState` and `VendorState` that follow a trade that happened.
+///
+/// Decoder invariants:
+///   - `entity_id` is non-zero
+///   - `item_id` is non-zero
+///   - `count` is non-zero. Zero is a trade that asks for nothing and is a defect in the
+///     sender rather than an empty request worth answering
+///   - `revision` is non-zero and names the `VendorState` the client is acting against
+///   - `buying` is true when the player is buying from `sells` and false when the player
+///     is selling into `buys`. A bool rather than a direction enum because there are
+///     exactly two directions and both are named by the two vectors of `VendorState`
+table TradeRequest {
+  entity_id: ulong;
+  item_id: ushort;
+  count: ushort;
+  buying: bool;
+  revision: uint;
+  client_tick: uint;
+}
+
+/// Explicitly ends an open stall. Server -> client.
+///
+/// Sent when the player walks out of range, the resident despawns, the session's
+/// character changes, or the server otherwise stops answering for this vendor. The client
+/// closes presentation and infers no reason from the message — the `LootClosed` shape,
+/// and the same silence about why.
+///
+/// Decoder invariant: `entity_id` is the non-zero entity id whose `VendorState` this
+/// message ends.
+table VendorClosed {
+  entity_id: ulong;
 }

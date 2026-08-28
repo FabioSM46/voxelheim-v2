@@ -20,20 +20,33 @@ const (
 	MobKindVargr   MobKind = 2
 	/// A passive animal that runs from nearby live players rather than attacking them.
 	MobKindDeer MobKind = 3
+	/// A settlement's resident. Never hostile, never lootable, never a `Corpse`: a
+	/// villager has no aggro, no `MobHit`, and no death that leaves a container behind.
+	/// What distinguishes it from `Deer` is that it can be addressed — see
+	/// `NpcInteractRequest` — and that its name and role arrive once in a
+	/// `ResidentAppearance` rather than being inferred from the kind.
+	///
+	/// Appended rather than inserted, and it is the one member of this enum that moved
+	/// `ProtocolVersion.Current` on its own: `MobState.kind` is refused when it is a
+	/// member the receiver cannot name, so a V24 client meeting one would drop the
+	/// session rather than the value. The argument is written out in `common.fbs`.
+	MobKindVillager MobKind = 4
 )
 
 var EnumNamesMobKind = map[MobKind]string{
-	MobKindUnknown: "Unknown",
-	MobKindDraugr:  "Draugr",
-	MobKindVargr:   "Vargr",
-	MobKindDeer:    "Deer",
+	MobKindUnknown:  "Unknown",
+	MobKindDraugr:   "Draugr",
+	MobKindVargr:    "Vargr",
+	MobKindDeer:     "Deer",
+	MobKindVillager: "Villager",
 }
 
 var EnumValuesMobKind = map[string]MobKind{
-	"Unknown": MobKindUnknown,
-	"Draugr":  MobKindDraugr,
-	"Vargr":   MobKindVargr,
-	"Deer":    MobKindDeer,
+	"Unknown":  MobKindUnknown,
+	"Draugr":   MobKindDraugr,
+	"Vargr":    MobKindVargr,
+	"Deer":     MobKindDeer,
+	"Villager": MobKindVillager,
 }
 
 func (v MobKind) String() string {

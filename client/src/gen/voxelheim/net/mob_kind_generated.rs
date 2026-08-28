@@ -11,17 +11,18 @@ pub const ENUM_MIN_MOB_KIND: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_KIND: u8 = 3;
+pub const ENUM_MAX_MOB_KIND: u8 = 4;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_KIND: [MobKind; 4] = [
+pub const ENUM_VALUES_MOB_KIND: [MobKind; 5] = [
     MobKind::Unknown,
     MobKind::Draugr,
     MobKind::Vargr,
     MobKind::Deer,
+    MobKind::Villager,
 ];
 
 /// What kind of creature a `MobState` describes.
@@ -42,11 +43,27 @@ impl MobKind {
     pub const Vargr: Self = Self(2);
     /// A passive animal that runs from nearby live players rather than attacking them.
     pub const Deer: Self = Self(3);
+    /// A settlement's resident. Never hostile, never lootable, never a `Corpse`: a
+    /// villager has no aggro, no `MobHit`, and no death that leaves a container behind.
+    /// What distinguishes it from `Deer` is that it can be addressed — see
+    /// `NpcInteractRequest` — and that its name and role arrive once in a
+    /// `ResidentAppearance` rather than being inferred from the kind.
+    ///
+    /// Appended rather than inserted, and it is the one member of this enum that moved
+    /// `ProtocolVersion.Current` on its own: `MobState.kind` is refused when it is a
+    /// member the receiver cannot name, so a V24 client meeting one would drop the
+    /// session rather than the value. The argument is written out in `common.fbs`.
+    pub const Villager: Self = Self(4);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 3;
-    pub const ENUM_VALUES: &'static [Self] =
-        &[Self::Unknown, Self::Draugr, Self::Vargr, Self::Deer];
+    pub const ENUM_MAX: u8 = 4;
+    pub const ENUM_VALUES: &'static [Self] = &[
+        Self::Unknown,
+        Self::Draugr,
+        Self::Vargr,
+        Self::Deer,
+        Self::Villager,
+    ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
         match self {
@@ -54,6 +71,7 @@ impl MobKind {
             Self::Draugr => Some("Draugr"),
             Self::Vargr => Some("Vargr"),
             Self::Deer => Some("Deer"),
+            Self::Villager => Some("Villager"),
             _ => None,
         }
     }

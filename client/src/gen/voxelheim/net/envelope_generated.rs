@@ -743,6 +743,81 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_resident_appearance(&self) -> Option<ResidentAppearance<'a>> {
+        if self.payload_type() == Payload::ResidentAppearance {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { ResidentAppearance::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_npc_interact_request(&self) -> Option<NpcInteractRequest<'a>> {
+        if self.payload_type() == Payload::NpcInteractRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { NpcInteractRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_vendor_state(&self) -> Option<VendorState<'a>> {
+        if self.payload_type() == Payload::VendorState {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { VendorState::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_trade_request(&self) -> Option<TradeRequest<'a>> {
+        if self.payload_type() == Payload::TradeRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { TradeRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_vendor_closed(&self) -> Option<VendorClosed<'a>> {
+        if self.payload_type() == Payload::VendorClosed {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { VendorClosed::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -799,6 +874,11 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::MarkerPlaceRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MarkerPlaceRequest>>("Payload::MarkerPlaceRequest", pos),
           Payload::MarkerRemoveRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MarkerRemoveRequest>>("Payload::MarkerRemoveRequest", pos),
           Payload::MarkerList => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MarkerList>>("Payload::MarkerList", pos),
+          Payload::ResidentAppearance => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ResidentAppearance>>("Payload::ResidentAppearance", pos),
+          Payload::NpcInteractRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<NpcInteractRequest>>("Payload::NpcInteractRequest", pos),
+          Payload::VendorState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VendorState>>("Payload::VendorState", pos),
+          Payload::TradeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TradeRequest>>("Payload::TradeRequest", pos),
+          Payload::VendorClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VendorClosed>>("Payload::VendorClosed", pos),
           _ => Ok(()),
         }
      })?
@@ -1302,6 +1382,56 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::MarkerList => {
                 if let Some(x) = self.payload_as_marker_list() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::ResidentAppearance => {
+                if let Some(x) = self.payload_as_resident_appearance() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::NpcInteractRequest => {
+                if let Some(x) = self.payload_as_npc_interact_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::VendorState => {
+                if let Some(x) = self.payload_as_vendor_state() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::TradeRequest => {
+                if let Some(x) = self.payload_as_trade_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::VendorClosed => {
+                if let Some(x) = self.payload_as_vendor_closed() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(
