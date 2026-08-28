@@ -1937,7 +1937,9 @@ const NAME_PLATE_SEPARATOR: &str = " | ";
 ///
 /// `…` is absent from the same font, so a name that had been shortened read as a name that
 /// simply ended there. The three characters come out of [`NAME_PLATE_CHARACTERS`] rather
-/// than being added to it, so the plate is no wider than it was.
+/// than being added to it, so the plate is no wider than it was — and if the level prefix
+/// ever left fewer than three characters for the name, the mark is what gives way, so the
+/// bound holds for every prefix rather than only for the ones a `u16` level can produce.
 const NAME_PLATE_TRUNCATION_MARK: &str = "...";
 
 /// What a control character in a hostile name is shown as.
@@ -1973,7 +1975,7 @@ fn name_plate_text(level: u16, name: &str) -> String {
     }
     let kept = name_characters.saturating_sub(NAME_PLATE_TRUNCATION_MARK.chars().count());
     shown.extend(head.into_iter().take(kept).map(displayable));
-    shown.push_str(NAME_PLATE_TRUNCATION_MARK);
+    shown.extend(NAME_PLATE_TRUNCATION_MARK.chars().take(name_characters));
     shown
 }
 

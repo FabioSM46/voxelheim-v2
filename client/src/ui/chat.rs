@@ -299,7 +299,8 @@ fn outgoing_frame(line: &str, log: &mut ChatLog, now: Duration) -> Option<Vec<u8
 ///
 /// It costs no width. [`bounded_display`] spends the mark's three characters out of
 /// `limit` rather than adding them to it, so what reaches Bevy's layout engine is still at
-/// most `limit` characters however hostile the value was.
+/// most `limit` characters however hostile the value was — and, when `limit` is too small
+/// to hold the whole mark, the mark is the part that gives way rather than the bound.
 const TRUNCATION_MARK: &str = "...";
 
 /// What a character Bevy's layout engine must not see is shown as.
@@ -323,6 +324,13 @@ fn displayable(character: char) -> char {
     }
 }
 
+/// `value`, cut to at most `limit` characters and safe for Bevy's layout engine.
+///
+/// The bound is unconditional. Every caller here passes a limit far larger than
+/// [`TRUNCATION_MARK`], but the mark is still only ever *taken from* `limit` — with a limit
+/// of two the output is `..`, with one it is `.`, with zero it is empty — because a helper
+/// whose contract holds only for the arguments it happens to be given today is a bound
+/// nobody can rely on tomorrow.
 fn bounded_display(value: &str, limit: usize) -> String {
     // One character past the bound is what makes this a truncation rather than a fit: a
     // value of exactly `limit` characters is shown whole, as it always was.
@@ -334,7 +342,7 @@ fn bounded_display(value: &str, limit: usize) -> String {
     }
     let kept = limit.saturating_sub(TRUNCATION_MARK.chars().count());
     shown.extend(head.into_iter().take(kept).map(displayable));
-    shown.push_str(TRUNCATION_MARK);
+    shown.extend(TRUNCATION_MARK.chars().take(limit));
     shown
 }
 
@@ -496,6 +504,16 @@ mod tests {
         assert_eq!(bounded_display("abcde", 5), "abcde");
         assert_eq!(bounded_display("abcdefghij", 5), "ab...");
         assert_eq!(bounded_display("abcdefghij", 5).chars().count(), 5);
+        // A limit too small to hold the mark cuts the mark, never the bound: the promise
+        // is that the layout engine sees at most `limit` characters, for every limit.
+        for limit in 0..=6 {
+            assert!(
+                bounded_display("abcdefghij", limit).chars().count() <= limit,
+                "a limit of {limit} produced more than {limit} characters"
+            );
+        }
+        assert_eq!(bounded_display("ab", 1), ".");
+        assert_eq!(bounded_display("ab", 0), "");
     }
 
     #[test]

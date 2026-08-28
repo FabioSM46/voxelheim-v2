@@ -613,6 +613,11 @@ mod ascii_guard {
     /// from a state no test visited — a party leader who is offline, a corpse window, a
     /// certificate that was substituted.
     ///
+    /// It reads the character a literal *produces*, not the bytes it is written with, so
+    /// `"\u{265b}"` fails exactly as a pasted `♛` does. Both compile to the same codepoint
+    /// and the font lays both out with zero advance; a guard that could be stepped around
+    /// by spelling the crown differently would be a habit rather than a rule.
+    ///
     /// Excluded: `src/gen/` (flatc output, which is never hand-edited) and `tests.rs`
     /// (test code, which may legitimately spell a hostile name in a script this font
     /// cannot draw, and does).
@@ -676,10 +681,51 @@ mod ascii_guard {
         Code,
         Comment,
         Literal,
+        /// The backslash that opens an escape sequence inside a literal.
+        ///
+        /// It is told apart from the rest of the literal for one reason: `"\u{265b}"` is
+        /// pure ASCII in the source and a crown in the compiled string, so a scan that
+        /// only reads source characters would pass it — and the character it produces is
+        /// laid out with zero advance exactly as a pasted `♛` would be. Knowing where an
+        /// escape genuinely *starts* is also the only way to tell that apart from
+        /// `"\\u{:04x}"`, the format string `net/json.rs` builds a JSON escape with,
+        /// where the `u{` follows a doubled backslash and opens nothing.
+        Escape,
+    }
+
+    /// The scalar a `\u{…}` escape beginning at `start` produces, if one begins there.
+    ///
+    /// `None` covers every other escape (`\n`, `\\`, `\x41`, `\"`), all of which are ASCII
+    /// by Rust's own rules — `\x` is refused above `0x7F` in a string literal — and covers
+    /// an escape the compiler would reject too, which is not this test's to report.
+    fn unicode_escape(text: &[char], start: usize) -> Option<char> {
+        if text.get(start + 1).copied()? != 'u' || text.get(start + 2).copied()? != '{' {
+            return None;
+        }
+        let mut digits = String::new();
+        for character in text.iter().copied().skip(start + 3) {
+            match character {
+                '}' => {
+                    return u32::from_str_radix(&digits, 16)
+                        .ok()
+                        .and_then(char::from_u32);
+                }
+                // Rust allows `\u{2_6_5_b}`, and it means the same thing.
+                '_' => {}
+                _ if character.is_ascii_hexdigit() => digits.push(character),
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Where `source` puts a non-ASCII character inside a string or character literal the
     /// production build compiles, as `(line number, character)`.
+    ///
+    /// Two spellings reach the same place and both are read: the character written as
+    /// itself, and the character written as a `\u{…}` escape. The escape is the one a
+    /// source-only scan would miss, and missing it would make this guard exactly as good
+    /// as the habit it exists to replace.
     ///
     /// Comments are skipped, because prose about the code is not drawn by it — this module
     /// is full of em dashes and every one of them is fine. `#[cfg(test)]` items are skipped
@@ -694,9 +740,21 @@ mod ascii_guard {
         for (index, character) in text.iter().copied().enumerate() {
             if character == '\n' {
                 line += 1;
-            } else if region[index] == Region::Literal && !excluded[index] && !character.is_ascii()
-            {
-                found.push((line, character));
+                continue;
+            }
+            if excluded[index] {
+                continue;
+            }
+            match region[index] {
+                Region::Literal if !character.is_ascii() => found.push((line, character)),
+                Region::Escape => {
+                    if let Some(escaped) = unicode_escape(&text, index)
+                        && !escaped.is_ascii()
+                    {
+                        found.push((line, escaped));
+                    }
+                }
+                _ => {}
             }
         }
         found
@@ -709,6 +767,10 @@ mod ascii_guard {
     /// in a regular expression over lines: a `"` inside a comment opens nothing, a `'`
     /// inside a string is not a character literal, and `r#"…"#` ends only at its own
     /// hash count.
+    ///
+    /// Escaped literals get [`Region::Escape`] on the opening backslash, which is what
+    /// lets a later pass read `\u{…}`. A raw string never gets one, because a raw string
+    /// processes no escapes: `r"\u{265b}"` really is nine ASCII characters.
     fn classify(text: &[char]) -> Vec<Region> {
         let mut region = vec![Region::Code; text.len()];
         let at = |index: usize| text.get(index).copied().unwrap_or('\0');
@@ -776,7 +838,7 @@ mod ascii_guard {
                     while index < text.len() {
                         match at(index) {
                             '\\' => {
-                                mark(&mut region, index, Region::Literal);
+                                mark(&mut region, index, Region::Escape);
                                 mark(&mut region, index + 1, Region::Literal);
                                 index += 2;
                             }
@@ -861,10 +923,49 @@ mod tests {
     const G: &str = "and ⚔ in here too";
 }
 const H: &str = "back in production ‽";
+const I: &str = "an escape \u{265b} is ASCII in the source and a crown on the screen";
+const J: &str = "\\u{265b} follows a doubled backslash and escapes nothing";
+const K: &str = "\u{41} is just an A";
+const L: &str = r"\u{265b} in a raw string is nine plain characters";
+#[cfg(test)]
+const M: char = '\u{2026}';
 "##;
         assert_eq!(
             non_ascii_in_literals(source),
-            vec![(5, '·'), (6, '…'), (9, '°'), (16, '‽')],
+            vec![(5, '·'), (6, '…'), (9, '°'), (16, '‽'), (17, '♛')],
+        );
+    }
+
+    /// The spelling a scan over source characters alone would have let through.
+    ///
+    /// `"\u{265b}"` is twelve ASCII characters in the file and one crown in the compiled
+    /// string, and the font draws that crown with zero advance exactly as it draws a pasted
+    /// one. The three cases below are the ones that make the difference readable: an escape
+    /// is decoded, a doubled backslash opens no escape, and a raw string has no escapes at
+    /// all.
+    #[test]
+    fn a_unicode_escape_is_read_as_the_character_it_produces() {
+        assert_eq!(
+            non_ascii_in_literals(r#"const A: &str = "\u{2014}";"#),
+            vec![(1, '—')],
+        );
+        assert_eq!(
+            non_ascii_in_literals(r#"const B: char = '\u{2_6_5_b}';"#),
+            vec![(1, '♛')],
+        );
+        // An escape that produces ASCII is not a hole, and neither is one that is not an
+        // escape at all.
+        assert_eq!(
+            non_ascii_in_literals(r#"const C: &str = "\u{7f}";"#),
+            vec![]
+        );
+        assert_eq!(
+            non_ascii_in_literals(r#"const D: &str = "\\u{2014}";"#),
+            vec![],
+        );
+        assert_eq!(
+            non_ascii_in_literals(r##"const E: &str = r"\u{2014}";"##),
+            vec![],
         );
     }
 }

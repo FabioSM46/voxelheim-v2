@@ -2031,6 +2031,17 @@ fn hostile_and_unicode_names_remain_bounded_valid_single_line_text() {
     let shown = name_plate_text(u16::MAX, &long);
     assert_eq!(shown.chars().count(), NAME_PLATE_CHARACTERS);
     assert!(shown.ends_with("..."), "{shown}");
+
+    // The mark is taken out of the bound, so the bound is what holds — for every level a
+    // `u16` can carry, not only for the short prefixes a test would think to write.
+    for level in [0, 9, 10, 99, 100, 9_999, 10_000, u16::MAX] {
+        let shown = name_plate_text(level, &long);
+        assert!(
+            shown.chars().count() <= NAME_PLATE_CHARACTERS,
+            "level {level} drew {} characters onto a {NAME_PLATE_CHARACTERS}-character plate: {shown}",
+            shown.chars().count()
+        );
+    }
 }
 
 #[test]
