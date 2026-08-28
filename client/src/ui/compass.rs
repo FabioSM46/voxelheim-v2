@@ -249,7 +249,11 @@ fn block_coordinate(value: f32) -> i32 {
 /// world's and the word is the player's — and because the world map, when it arrives,
 /// shows X and Z under its cursor and no third axis at all. Block coordinates and not
 /// chunk coordinates: this is the number one player reads out to another.
-fn coordinates_reading(position: Vec3) -> String {
+///
+/// **`pub(super)` so the map's side panel prints the same line from the same function.**
+/// Two copies of this format string would be two lines that agree until one of them is
+/// retouched, and the HUD and the map are read within a second of each other.
+pub(super) fn coordinates_reading(position: Vec3) -> String {
     format!(
         "X {} | Z {} | alt {}",
         block_coordinate(position.x),
