@@ -526,7 +526,7 @@ reading develop's copy, never the branch's.
 
 **Safety**: DeepSeek never creates commits, pushes code, or modifies files — it is
 review-only. The bot ignores its own comments (anti-loop guard, enforced at job level
-before a runner boots). Diffs over 90,000 characters are truncated with every dropped file
+before a runner boots). Diffs over 45,000 characters are truncated with every dropped file
 named in the log **and in the review itself**: a truncated pass cannot come back clean, because
 the skipped files are injected as a finding, so the pull request blocks until a human has
 acknowledged what nobody read (legacy PR 32 — on legacy PR 30 the budget ran out after the client files and the
@@ -561,23 +561,58 @@ verdict with nothing anywhere saying the size was the problem. PR #164 is where 
 124,711 characters, 1,481,442 characters of reasoning, `finish_reason=length`, 31 minutes, no
 review (#167).
 
-**90,000 is measured.** From #164, the model emitted 1,481,442 characters for 384,000 tokens —
-3.86 characters per token, so the budget is about 1,481,000 characters of output — and it reasons
-about 11.9 characters per character of diff. That puts the diff which exactly fills the budget at
-about 124,000 characters, which is where #164 landed and why it produced nothing. 90,000 spends
-roughly 277,000 of those tokens reasoning and leaves about 107,000 over. **Almost all of that is
-margin rather than verdict**: a verdict is small — #80 returned 1,060 final characters, about 275
-tokens, out of the 35,966 completion tokens that run spent in total — and what the headroom is for
-is a diff that reasons harder than the two this ratio was averaged over. Three diffs are known to
-fit whole: 50,963 (#80), 64,167 (#168, a verdict in 7m38s) and 72,350 (#169).
+**Then it was 90,000, and that number was measured — from a single sample of a quantity that
+varies by a factor of two.** From #164, the model emitted 1,481,442 characters for 384,000 tokens
+— 3.86 characters per token, so the output budget is about 1,481,000 characters — and that run
+reasoned about **11.9** characters per character of diff. The diff which exactly fills the budget
+at that ratio is about 124,000 characters, which is where #164 landed; 90,000 was set at 72% of it
+and left roughly 107,000 tokens over. Then PR #488 reasoned at **23.8** — twice as hard, on a diff
+half the size — and 60,863 characters exhausted the whole ceiling in 33 minutes with no verdict
+(#491).
+
+**45,000 is set from the worst observed ratio, not the average.** At 23.8 the budget is full at
+about 62,300 characters, and #488 is that point. Applying the margin 90,000 already used, 72% of
+62,300 is roughly 45,000: it spends about 277,500 tokens reasoning at the bad ratio and about
+138,700 at the good one. **The outcome is not monotonic in diff size, and that is the finding** —
+72,350 (#169) succeeded and 60,863 failed, so size is a proxy for the binding variable and the
+binding variable is how hard the model reasons about *that* content.
+
+| PR | Diff chars | Reasoning chars | Ratio | Outcome |
+|---|---|---|---|---|
+| #501 | 45,415 | — | — | verdict, two findings |
+| #80 | 50,963 | — | — | verdict, 35,966 completion tokens |
+| #488 | **60,863** | **1,448,213** | **23.8** | **no verdict, 33 min** |
+| #168 | 64,167 | — | — | verdict in 7m38s |
+| #169 | 72,350 | — | — | verdict |
+| #164 | 124,711 | 1,481,442 | 11.9 | no verdict, 31 min |
+
+**Set it from the tail, because the two failure directions are not symmetric.** Too high costs a
+33-minute run that produces nothing, a failing `review` check and a pull request nobody can merge
+until it is split by hand — and nothing says the size was the problem until you open the job. Too
+low is loud: the diff is truncated, every dropped file is named in the log and injected into the
+review as a finding, and the pull request blocks until a human acknowledges the gap. One costs
+half an hour and a manual split, the other costs a `DEEPSEEK_REVIEW_READ` click.
+
+**It costs review latency, and that was chosen rather than inherited.** Five of Iteration 29's
+seven issues already needed splitting at 90,000; at 45,000 most changes become two or three pull
+requests. What bounds the tightening is #501: 45,415 characters came back with a verdict and two
+substantive findings, so the safe ceiling is bracketed between a measured success at 45,415 and a
+measured failure at 60,863, and the cap sits just under the success.
+
+**Raising it again is what needs more samples; lowering it did not.** The ratio has exactly two
+observations, because only a run that *fails* prints its reasoning length — the four successes
+above bound it from one side and measure nothing. `measure_only: true` on the dispatch replays a
+real diff without posting a review or spending a round, and a third and fourth sample would say
+whether 23.8 is the tail or the new middle. Until somebody takes them, the asymmetry above decides
+the direction on its own.
 
 **The cap is a truncation threshold, not a promise.** A review that still exhausts the budget
 under it is a new measurement, and this number is what comes down. The ratio belongs to the model
-and to `DEEPSEEK_REASONING_EFFORT`; change either and it has to be measured again, which is what
-`measure_only: true` on the dispatch is for. The lesson is narrower than "caps should be
-generous": **a number defended by a claim about the world has to be re-checked when the world
-changes** — and twice now the claim was about the context window when the binding constraint was
-somewhere else entirely.
+and to `DEEPSEEK_REASONING_EFFORT`; change either and it has to be measured again. The lesson is
+narrower than "caps should be generous": **a number defended by a claim about the world has to be
+re-checked when the world changes** — twice the claim was about the context window when the
+binding constraint was somewhere else entirely, and the third time it was a real measurement of a
+quantity that had been observed once.
 
 **An unreadable diff fails the run**, and "unreadable" covers three shapes:
 

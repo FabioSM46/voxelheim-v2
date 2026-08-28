@@ -36,36 +36,68 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # into the same DEEPSEEK_MAX_OUTPUT_TOKENS the verdict has to fit in, and at
 # DEEPSEEK_REASONING_EFFORT=max the reasoning is what exhausts it. A 124,711-character diff
 # reasoned to the last token of a 384,000-token ceiling and had none left to write a
-# verdict with, after 31 minutes and a full spend (#167).
+# verdict with, after 31 minutes and a full spend (#167) — and then a 60,863-character one
+# did the same in 33 minutes, well inside the cap that run was supposed to be safe under
+# (#491).
 #
-# The arithmetic, from that run and from the two that succeeded:
+# The arithmetic, from the runs that reached the API:
 #
+#   *  45,415 chars (PR #501) — verdict, two findings, one of them a real defect
 #   *  50,963 chars (PR  #80) — 530,226 reasoning chars, passed at a 262,144 ceiling
+#   *  60,863 chars (PR #488) — 1,448,213 reasoning chars, finish_reason=length, no verdict
 #   *  64,167 chars (PR #168) — passed at 384,000 in 7m38s
 #   *  72,350 chars (PR #169) — passed at 384,000
 #   * 124,711 chars (PR #164) — 1,481,442 reasoning chars, finish_reason=length, no verdict
 #
 # 1,481,442 characters emitted for 384,000 tokens is 3.86 characters per token, so the
-# whole budget is about 1,481,000 characters of output; the model reasons about 11.9
-# characters per character of diff. The diff that exactly fills the budget is therefore
-# about 124,000 characters — which is where #164 landed, and why it produced nothing.
+# whole output budget is about 1,481,000 characters.
 #
-# 90,000 spends about 277,500 of those tokens reasoning — 90,000 x 11.9 / 3.86 — and leaves
-# roughly 107,000 against a 384,000-token ceiling.
+# **The outcome is not monotonic in diff size, and that is the finding.** 72,350 succeeded
+# and 60,863 did not. Size is only a proxy for the binding variable, and the binding
+# variable is how hard the model reasons about *that particular* content: #164 reasoned at
+# 11.9 characters per character of diff, #488 at 23.8 — twice as hard, on a diff half the
+# size. At 23.8 the budget is full at about 62,300 characters, which is exactly where #488
+# landed and why it produced nothing after 33 minutes (#491).
 #
-# **Almost all of that headroom is margin, not verdict.** The verdict is small: #80's
-# review returned 1,060 final characters, about 275 tokens at the ratio above, out of the
-# 35,966 completion tokens that run spent in total. The rest of those went on reasoning.
-# What the headroom is really for is a diff that reasons harder than the one this ratio was
-# measured on, and the ratio is an average over two observations.
+# 90,000 was derived from 11.9, which was the only sample of the ratio there was. A cap set
+# from one observation of a quantity that varies 2x keeps failing on the hard half of the
+# distribution, and this is the third time this number has had to come down.
+#
+# **45,000 is set from the worst observed ratio rather than the average, because the two
+# failure directions are not symmetric.** Too high costs a 33-minute run that produces
+# nothing, a failing `review` check and a pull request that cannot merge until somebody
+# splits it by hand — and nothing in the log says the size was the problem until you open
+# the job. Too low is loud: the diff is truncated, every dropped file is named in the log
+# *and* injected into the review as a finding, and the pull request blocks until a human
+# acknowledges the gap. One costs half an hour and a manual split; the other costs a
+# DEEPSEEK_REVIEW_READ click. Set the number from the tail.
+#
+# The margin is the one 90,000 already used — 72% of its 124,000 fill point — applied to
+# the 62,300 fill point of the worse ratio. 45,000 spends about 277,500 tokens reasoning at
+# 23.8 and leaves roughly 106,500 against the 384,000 ceiling; at 11.9 it spends about
+# 138,700 and is never close. PR #501 is the corroboration that this is not over-tightened:
+# 45,415 characters came back with a verdict and two substantive findings, so the safe
+# ceiling is bracketed between a measured success at 45,415 and a measured failure at
+# 60,863, and 45,000 sits just under the success.
+#
+# **It costs review latency, deliberately.** Five of Iteration 29's seven issues already
+# needed splitting at 90,000; at 45,000 most changes become two or three pull requests.
+# That is the price of a review that answers, and it is the reason this number should not
+# be lowered further without a measurement forcing it.
+#
+# **Raising it again is what needs more samples; lowering it did not.** The ratio has
+# exactly two observations, because only a run that *fails* prints its reasoning length —
+# the four successes above bound it from one side and measure nothing. A third and fourth
+# sample would say whether 23.8 is the tail or the new middle, and `measure_only: true` on
+# the workflow's dispatch is how to get them: it replays a real diff without posting a
+# review or spending a round. Until then the asymmetry decides the direction on its own.
 #
 # **It is a truncation threshold and not a promise** — a review that still exhausts the
 # budget under it is a new measurement, and this number is what has to come down.
 #
 # The ratio is a property of DEEPSEEK_REASONING_EFFORT and of the model. Change either and
-# this has to be measured again; `measure_only: true` on the workflow's dispatch replays a
-# real diff without posting or spending a round, which is the tool for it.
-DEEPSEEK_MAX_DIFF_CHARS = 90_000
+# every number above has to be measured again.
+DEEPSEEK_MAX_DIFF_CHARS = 45_000
 
 
 def _no_verdict_remedy(finish_reason):
