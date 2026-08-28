@@ -356,6 +356,14 @@ REVIEWABLE=$(git diff origin/develop...HEAD -- . \
 echo "reviewable diff: ${REVIEWABLE} characters (cap 45,000)"
 ```
 
+**When Step 5 split the issue, mind what the three-dot diff measures against.** The first half is
+measured against `origin/develop` like any other branch. The second half is branched from the
+first, so `origin/develop...HEAD` there still resolves to the first half's base as its merge base
+and the diff carries the first half's commits with it: measured before the first half has merged
+and the rebase replay below has been done, it reads as over the cap however correctly sized the
+half is. Measure the second half after that replay — until then the number is not the one the cap
+is about, and the paragraph that follows does not apply to it.
+
 **If it is over the cap, the estimate was wrong and the work still has to be split — before
 opening anything.** Not after: a PR that exists is a PR whose review has already been attempted,
 and unpicking one into two costs more than staging two in the first place. Split along the seam
