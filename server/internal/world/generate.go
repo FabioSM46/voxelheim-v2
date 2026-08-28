@@ -199,20 +199,44 @@ func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, s
 
 	// **The plateau comes before both water features, and that is the whole of "a
 	// settlement's ground does not move".** Inside the radius the surface is the
-	// plateau; out to the end of the blend band it eases back towards `base`, and
-	// neither a basin nor a channel is applied anywhere in that band — both of them
-	// lower ground, and the ground under a village is the one ground that must not.
-	if plateau, inside, near := settlementShapeAt(seed, worldX, worldZ, base); near {
+	// plateau; out to the end of the blend band it eases back towards the land, and
+	// no basin and no channel is *applied* anywhere in that band — both of them lower
+	// ground, and the ground under a village is the one ground that must not move.
+	//
+	// **What the band eases towards is the lowered height, not `base`, and the
+	// difference is a cliff.** Blending towards the unlowered land put the outer edge
+	// of the band at `base` while the column one block further out was already
+	// `base - basinAt(…)`, or a river bed twenty blocks down — so a settlement that
+	// happened to sit beside a channel was ringed by a wall at exactly
+	// `radius + settlementBlendBlocks`. Measured on the sample seed before the fix: six
+	// of twenty-three settlements had a step of four blocks or more there and the worst
+	// was twenty-two. The band still carries no channel of its own and is still marked
+	// `river = false`; it simply lands on the terrain that is actually there.
+	if plateau, inside, near := settlementShapeAt(seed, worldX, worldZ, base, climate); near {
 		return plateau, false, inside
 	}
 
-	// **The height test comes before the river field, and the order is the budget.**
-	// riverMaxSurface rejects high ground with one comparison; the fbm2D behind
-	// riverAt is only paid where a channel could actually be.
+	surface, river = loweredHeightAt(seed, worldX, worldZ, base, climate)
+	return surface, river, false
+}
+
+// loweredHeightAt is the land after the two features that cut down into it: a river bed
+// where a channel runs, and a basin everywhere else.
+//
+// **One definition, because two callers need the same answer and one of them is the
+// settlement blend.** [shapeAt] returns it for an ordinary column, and
+// [settlementShapeAt] eases its plateau towards it at the edge of a settlement — a
+// second copy of the arithmetic in either place is how the two ends of that blend stop
+// meeting.
+//
+// **The height test comes before the river field, and the order is the budget.**
+// riverMaxSurface rejects high ground with one comparison; the fbm2D behind riverAt is
+// only paid where a channel could actually be.
+func loweredHeightAt(seed, worldX, worldZ int64, base int, climate Climate) (surface int, river bool) {
 	if base <= riverMaxSurface && riverAt(seed, worldX, worldZ) {
-		return seaLevel - riverBedDrop, true, false
+		return seaLevel - riverBedDrop, true
 	}
-	return base - basinAt(seed, worldX, worldZ, climate), false, false
+	return base - basinAt(seed, worldX, worldZ, climate), false
 }
 
 // amplitudeAt is the peak-to-trough range in blocks at one column, in whole

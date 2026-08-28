@@ -497,8 +497,9 @@ func assertTheBlendIsSixteenBlocksOfSmoothstep(t *testing.T, s Settlement) {
 	bearing, drop := -1, 0
 	for b := range len(settlementBearings) {
 		dx, dz := ringOffset(s.Radius+settlementBlendBlocks, b)
-		natural := unloweredHeightAt(settlementTestSeed, s.CentreX+dx, s.CentreZ+dz)
-		if d := max(natural-s.Plateau, s.Plateau-natural); d > drop {
+		x, z := s.CentreX+dx, s.CentreZ+dz
+		land, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
+		if d := max(land-s.Plateau, s.Plateau-land); d > drop {
 			bearing, drop = b, d
 		}
 	}
@@ -512,7 +513,9 @@ func assertTheBlendIsSixteenBlocksOfSmoothstep(t *testing.T, s Settlement) {
 	}
 	natural := func(distance int) int {
 		dx, dz := ringOffset(distance, bearing)
-		return unloweredHeightAt(settlementTestSeed, s.CentreX+dx, s.CentreZ+dz)
+		x, z := s.CentreX+dx, s.CentreZ+dz
+		h, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
+		return h
 	}
 
 	// **The band is exactly this wide, read from the rule's own third answer.** `near`
@@ -524,7 +527,8 @@ func assertTheBlendIsSixteenBlocksOfSmoothstep(t *testing.T, s Settlement) {
 	nearAt := func(distance int) bool {
 		dx, dz := ringOffset(distance, bearing)
 		x, z := s.CentreX+dx, s.CentreZ+dz
-		_, _, near := settlementShapeAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z))
+		_, _, near := settlementShapeAt(settlementTestSeed, x, z,
+			unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
 		return near
 	}
 	// **Fifteen and sixteen, written out rather than derived from the constant.** A
@@ -555,9 +559,74 @@ func assertTheBlendIsSixteenBlocksOfSmoothstep(t *testing.T, s Settlement) {
 	// not moved at all" and "has already moved a block", which is what the rim of a
 	// village looks like from a distance.
 	rim := height(s.Radius)
-	if got := height(s.Radius + settlementBlendBlocks/8); got != rim {
-		t.Errorf("an eighth of the way through a %d-block fall the blend has already moved from %d to %d; a smoothstep leaves its rim flat and a ramp does not",
-			drop, rim, got)
+	moved := max(height(s.Radius+settlementBlendBlocks/8)-rim, rim-height(s.Radius+settlementBlendBlocks/8))
+	if moved > drop/16 {
+		t.Errorf("an eighth of the way through a %d-block fall the blend has already moved %d blocks; a smoothstep moves about a twenty-fourth of it there and a ramp moves an eighth",
+			drop, moved)
+	}
+}
+
+// TestABlendBandMeetsTheLandItEndsOn is the continuity of the plateau's outer edge, and
+// it is here because it was not there.
+//
+// **The band used to ease towards the *unlowered* land while the column one block past
+// it was already lowered by a basin, or twenty-two blocks down in a river bed.** So a
+// settlement that happened to sit beside water was ringed by a cliff at exactly
+// `radius + settlementBlendBlocks`: measured on this seed before the fix, six of the
+// twenty-three settlements within six cells of spawn had a step of four blocks or more
+// there and the worst was twenty-two. Every test in this file passed throughout. The
+// band's width was pinned, its shape was pinned, and what it *arrived at* was not.
+//
+// Two statements, and the second is the one that cannot be fooled by a quiet seed:
+//
+//   - By the last block of the band the surface is the land, within the one block
+//     integer rounding costs. That is what "eases back into the land" has to mean.
+//   - The step across the boundary is no bigger than the step the land itself takes
+//     between those same two columns. **This is deliberately relative**, because
+//     ordinary terrain in this world is not smooth — a river bank is a vertical drop of
+//     twenty-odd blocks in open country, 0.47% of columns step four or more — so an
+//     absolute smoothness bound would either fail on honest terrain or be too loose to
+//     catch anything. What a settlement must not do is add roughness of its own.
+func TestABlendBandMeetsTheLandItEndsOn(t *testing.T) {
+	t.Parallel()
+
+	land := func(x, z int64) int {
+		h, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
+		return h
+	}
+
+	checked := 0
+	for cz := int64(-6); cz <= 6; cz++ {
+		for cx := int64(-6); cx <= 6; cx++ {
+			s, ok := SettlementAt(settlementTestSeed, cx, cz)
+			if !ok {
+				continue
+			}
+			for bearing := range len(settlementBearings) {
+				inner, outer := s.Radius+settlementBlendBlocks-1, s.Radius+settlementBlendBlocks
+				dxi, dzi := ringOffset(inner, bearing)
+				dxo, dzo := ringOffset(outer, bearing)
+				xi, zi := s.CentreX+dxi, s.CentreZ+dzi
+				xo, zo := s.CentreX+dxo, s.CentreZ+dzo
+
+				checked++
+				gotInner := HeightAt(settlementTestSeed, xi, zi)
+				if d := max(gotInner-land(xi, zi), land(xi, zi)-gotInner); d > 1 {
+					t.Fatalf("the %v in cell (%d, %d), bearing %d: the last block of its blend is at %d and the land there is at %d",
+						s.Kind, cx, cz, bearing, gotInner, land(xi, zi))
+				}
+
+				step := HeightAt(settlementTestSeed, xo, zo) - gotInner
+				own := land(xo, zo) - land(xi, zi)
+				if max(step, -step) > max(own, -own)+1 {
+					t.Fatalf("the %v in cell (%d, %d), bearing %d: the ground steps %d blocks across the end of its blend where the land itself steps %d",
+						s.Kind, cx, cz, bearing, step, own)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no settlement within six cells of spawn; the assertion ran against nothing")
 	}
 }
 
@@ -579,13 +648,18 @@ func TestNothingGrowsCarvesOrFloodsInsideASettlement(t *testing.T) {
 			col := columnAt(settlementTestSeed, x, z)
 
 			// Inside the blend band, whether or not it is inside the radius: no
-			// channel and no basin, because both of them move ground this feature has
-			// just finished flattening.
+			// channel is *carried*, because a river bed is a hole and this feature has
+			// just finished flattening the ground.
+			//
+			// **What is not asserted here is that the band is never lowered, and that
+			// is the correction PR #511's review earned.** The band eases towards the
+			// land as it actually is — basin and channel included — so a settlement
+			// beside a river has a rim that slopes down into it. Insisting the band
+			// stay at or above the unlowered land is what produced the alternative: a
+			// wall at exactly radius + blend, twenty-two blocks tall at its worst on
+			// this seed. The flat ground is the radius; the band is a transition.
 			if col.river {
 				t.Fatalf("(%d, %d) is inside the capital's blend band and is a river bed", x, z)
-			}
-			if got := col.surface; got < min(s.Plateau, unloweredHeightAt(settlementTestSeed, x, z)) {
-				t.Fatalf("(%d, %d) has been lowered to %d inside the blend band", x, z, got)
 			}
 
 			if d2 > int64(s.Radius*s.Radius) {
