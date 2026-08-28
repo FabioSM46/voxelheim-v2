@@ -73,7 +73,7 @@ func testIdentities(t *testing.T, store *persist.Store, explored *persist.Explor
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
-	identities, err := session.NewIdentities(store, explored, verifier, discard())
+	identities, err := session.NewIdentities(store, explored, nil, verifier, discard())
 	if err != nil {
 		t.Fatalf("NewIdentities: %v", err)
 	}
