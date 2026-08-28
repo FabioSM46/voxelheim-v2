@@ -1634,6 +1634,22 @@ fn drain_session_events(
                 }
             }
 
+            // V25's three settlement payloads: fully decoded and fully validated one
+            // layer down, and dropped here because there is no inbox to put them in yet.
+            // #458 gives residents a name over their head and #459 gives a stall a
+            // window; each adds its own queue and its own arm. Dropped rather than
+            // logged, for the reason the map's three are queued rather than logged — a
+            // resident entering view is as ordinary as a tile arriving, and a line per
+            // one would be noise from the moment the first village exists.
+            //
+            // **The validation is the point of carrying them this far.** A malformed
+            // name, an unknown role or a duplicate price already ends the session at the
+            // decode boundary, which is where it should, and that is true now rather than
+            // when somebody writes the window.
+            Ok(SessionEvent::ResidentAppearance(_))
+            | Ok(SessionEvent::VendorState(_))
+            | Ok(SessionEvent::VendorClosed(_)) => {}
+
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
 

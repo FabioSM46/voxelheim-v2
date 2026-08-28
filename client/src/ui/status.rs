@@ -603,6 +603,12 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::TooManyMarkers
         | RefusalReason::NoteTooLong
         | RefusalReason::MarkerUnknown
+        // V25's three settlement refusals. None of them is about a placement either: a
+        // stall that would not open and a trade that did not happen are answered where
+        // the window is, in #458 and #459, and until then they reach nobody.
+        | RefusalReason::NotAVendor
+        | RefusalReason::NotEnoughSilver
+        | RefusalReason::VendorDoesNotWant
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing

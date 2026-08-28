@@ -241,6 +241,15 @@ pub(super) enum SessionEvent {
     MapExplored(codec::MapExplored),
     /// Every mark this character holds, **replacing** the client's copy wholesale.
     MarkerList(codec::MarkerList),
+    /// What one visible resident is called and what they do, sent once as the entity
+    /// enters view. Validated at the decode boundary; no ECS system reads it until #458,
+    /// exactly as `MapTile` was carried here before the map window existed.
+    ResidentAppearance(codec::ResidentAppearance),
+    /// The complete price list one vendor shows this session, **replacing** the previous
+    /// view of that vendor wholesale.
+    VendorState(codec::VendorState),
+    /// The authoritative end of one open stall.
+    VendorClosed(codec::VendorClosed),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1427,6 +1436,17 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::MarkerList(list)) => {
                     events.send(SessionEvent::MarkerList(list)).ok()?;
+                }
+                Ok(Transition::ResidentAppearance(resident)) => {
+                    events
+                        .send(SessionEvent::ResidentAppearance(resident))
+                        .ok()?;
+                }
+                Ok(Transition::VendorState(state)) => {
+                    events.send(SessionEvent::VendorState(state)).ok()?;
+                }
+                Ok(Transition::VendorClosed(closed)) => {
+                    events.send(SessionEvent::VendorClosed(closed)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;

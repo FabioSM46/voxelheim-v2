@@ -70,6 +70,12 @@ pub(super) const fn body(kind: MobKind) -> Body {
         MobKind::Draugr => DRAUGR_BODY,
         MobKind::Vargr => VARGR_BODY,
         MobKind::Deer => DEER_BODY,
+        // V25 names the kind; #458 gives it a body of its own. The draugr's box is the
+        // placeholder because a villager is the same shape of thing — humanoid, upright,
+        // roughly a person tall — so nothing downstream is asked to hold a number that is
+        // wrong in kind. Nothing sends this yet: the server has no villager to spawn until
+        // #458, so this arm exists to keep the match total rather than to draw anybody.
+        MobKind::Villager => DRAUGR_BODY,
     }
 }
 
@@ -239,6 +245,10 @@ impl MobVisuals {
             MobKind::Draugr => &self.draugr,
             MobKind::Vargr => &self.vargr,
             MobKind::Deer => &self.deer,
+            // The [`body`] placeholder's counterpart, and unreachable for the same
+            // reason: no villager reaches this module until #458 gives residents meshes
+            // and colours of their own.
+            MobKind::Villager => &self.draugr,
         }
     }
 }
@@ -801,7 +811,10 @@ fn fallen(elapsed: Duration) -> f32 {
 /// creature is dying or not.
 fn collapse(kind: MobKind, fallen: f32) -> Quat {
     match kind {
-        MobKind::Draugr => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
+        // A villager topples the way the other humanoid does. It is placeholder in the
+        // same sense as [`body`]'s arm and unreachable in the same way: a resident is
+        // never lootable and never a corpse, so nothing sends one a `Dying` action.
+        MobKind::Draugr | MobKind::Villager => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
     }
@@ -817,7 +830,7 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
 /// fight happens at, what reads is the splay.
 fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
-        MobKind::Draugr => Vec3::ONE,
+        MobKind::Draugr | MobKind::Villager => Vec3::ONE,
         MobKind::Vargr => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
             Vec3::new(out, 1.0, out)

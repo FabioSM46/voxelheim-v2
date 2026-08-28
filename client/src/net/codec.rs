@@ -420,6 +420,9 @@ pub enum MobKind {
     Draugr,
     Vargr,
     Deer,
+    /// A settlement's resident. Never hostile, never lootable, never a corpse — see
+    /// `MobKind.Villager` in `schemas/player.fbs`, which carries the argument.
+    Villager,
 }
 
 impl MobKind {
@@ -434,6 +437,7 @@ impl MobKind {
             fb::MobKind::Draugr => Some(Self::Draugr),
             fb::MobKind::Vargr => Some(Self::Vargr),
             fb::MobKind::Deer => Some(Self::Deer),
+            fb::MobKind::Villager => Some(Self::Villager),
             _ => None,
         }
     }
@@ -1243,6 +1247,8 @@ pub enum RefusedAction {
     RequestMapTile,
     PlaceMarker,
     RemoveMarker,
+    Interact,
+    Trade,
 }
 
 impl RefusedAction {
@@ -1263,6 +1269,8 @@ impl RefusedAction {
             fb::RefusedAction::RequestMapTile => Self::RequestMapTile,
             fb::RefusedAction::PlaceMarker => Self::PlaceMarker,
             fb::RefusedAction::RemoveMarker => Self::RemoveMarker,
+            fb::RefusedAction::Interact => Self::Interact,
+            fb::RefusedAction::Trade => Self::Trade,
             _ => Self::Unknown,
         }
     }
@@ -1311,6 +1319,9 @@ pub enum RefusalReason {
     TooManyMarkers,
     NoteTooLong,
     MarkerUnknown,
+    NotAVendor,
+    NotEnoughSilver,
+    VendorDoesNotWant,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1350,6 +1361,9 @@ impl RefusalReason {
             fb::RefusalReason::TooManyMarkers => Self::TooManyMarkers,
             fb::RefusalReason::NoteTooLong => Self::NoteTooLong,
             fb::RefusalReason::MarkerUnknown => Self::MarkerUnknown,
+            fb::RefusalReason::NotAVendor => Self::NotAVendor,
+            fb::RefusalReason::NotEnoughSilver => Self::NotEnoughSilver,
+            fb::RefusalReason::VendorDoesNotWant => Self::VendorDoesNotWant,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1663,6 +1677,10 @@ pub const MAX_MARKERS: usize = 64;
 /// encoding of characters.
 pub const MARKER_NOTE_MAX_BYTES: usize = 120;
 
+/// The most bytes a resident's name may carry. Bytes rather than characters, for the
+/// reason [`MARKER_NOTE_MAX_BYTES`] is counted in them.
+pub const RESIDENT_NAME_MAX_BYTES: usize = 32;
+
 /// The only blocks-per-pixel values this contract has.
 ///
 /// A scale is a member of a fixed set rather than a range, so the absent-field zero
@@ -1886,6 +1904,117 @@ pub struct MarkerList {
     pub markers: Vec<Marker>,
 }
 
+/// What a resident does in their settlement.
+///
+/// No `Unknown` variant, for the reason [`MobKind`] has none: the contract's zero is the
+/// absent field, and a resident whose role failed to arrive is refused rather than drawn
+/// as a generic villager.
+///
+/// **A role is not a capability.** `Trader` does not mean this entity has a stall. What
+/// opens when a resident is addressed is the server's answer and is never inferred here —
+/// see `ResidentRole` in `schemas/player.fbs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentRole {
+    Villager,
+    Smith,
+    Carpenter,
+    Cook,
+    Trader,
+    Guard,
+}
+
+impl ResidentRole {
+    /// `None` for the contract's zero and for a member this build has no name for, which
+    /// are the same refusal: [`decode`]'s caller ends the session over either.
+    fn from_wire(value: fb::ResidentRole) -> Option<Self> {
+        match value {
+            fb::ResidentRole::Villager => Some(Self::Villager),
+            fb::ResidentRole::Smith => Some(Self::Smith),
+            fb::ResidentRole::Carpenter => Some(Self::Carpenter),
+            fb::ResidentRole::Cook => Some(Self::Cook),
+            fb::ResidentRole::Trader => Some(Self::Trader),
+            fb::ResidentRole::Guard => Some(Self::Guard),
+            _ => None,
+        }
+    }
+}
+
+/// What one resident is called and what they do, sent once as the entity enters view.
+///
+/// The [`PlayerAppearance`] precedent exactly: static per entity, cached against the
+/// entity id, and not ordered against the snapshot stream — either may arrive first, and
+/// neither order is an error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentAppearance {
+    pub entity_id: u64,
+    /// Display text, at most [`RESIDENT_NAME_MAX_BYTES`] bytes. Never parsed and never
+    /// used as identity, which is what `entity_id` is for.
+    pub name: String,
+    pub role: ResidentRole,
+    pub appearance: Appearance,
+}
+
+/// One line of a stall's price list: what is traded and the silver it costs per unit.
+///
+/// There is no stock count, because stock is unlimited by contract. A client that showed
+/// one would be inventing a number the server never sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VendorEntry {
+    pub item_id: u16,
+    /// Silver per unit. The direction is the vector this entry came from, never a sign.
+    pub price: u16,
+}
+
+/// The complete price list one vendor shows this recipient, **replacing** the client's
+/// previous view of that vendor wholesale.
+///
+/// Revisioned like [`LootState`] and acted against the same way: a [`TradeRequest`] names
+/// the revision it was written for, and the server refuses one written against a list it
+/// has since replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VendorState {
+    pub entity_id: u64,
+    pub revision: u32,
+    /// What the player may buy, at the price they pay.
+    pub sells: Vec<VendorEntry>,
+    /// What the vendor buys, at the price it pays.
+    pub buys: Vec<VendorEntry>,
+}
+
+/// The named stall is no longer open. The client closes presentation and infers no
+/// reason — [`LootClosed`]'s shape, and the same silence about why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VendorClosed {
+    pub entity_id: u64,
+}
+
+/// "I address this resident." It states nothing: whether the player is close enough,
+/// whether that entity keeps a stall and whether anything opens are the server's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NpcInteractRequest {
+    pub entity_id: u64,
+    pub client_tick: u32,
+}
+
+/// One intent to trade with a vendor: an item, a count, a direction, and the revision the
+/// player was looking at.
+///
+/// **No price and no total**, deliberately. Both belong to the server, and a request that
+/// named either would be this client stating an outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TradeRequest {
+    pub entity_id: u64,
+    pub item_id: u16,
+    /// Never zero. All or nothing: a request for five that only three can be afforded of
+    /// buys none.
+    pub count: u16,
+    /// True when the player is buying from [`VendorState::sells`], false when they are
+    /// selling into [`VendorState::buys`].
+    pub buying: bool,
+    pub revision: u32,
+    pub client_tick: u32,
+}
+
 /// One authoritative monster blow that reduced this player's health.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobHit {
@@ -2020,6 +2149,14 @@ pub enum Message {
     MapExplored(MapExplored),
     /// Every mark this character holds, replacing the client's copy wholesale.
     MarkerList(MarkerList),
+    /// What one visible resident is called and what they do. Decoded and validated here;
+    /// no ECS system consumes it until the resident issue, exactly as `MineProgress` was
+    /// decoded from V2 and drawn later.
+    ResidentAppearance(ResidentAppearance),
+    /// The complete price list one vendor shows this recipient.
+    VendorState(VendorState),
+    /// The named stall is no longer open.
+    VendorClosed(VendorClosed),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -2423,6 +2560,42 @@ pub enum DecodeError {
     UnknownMarkerKind { marker_id: u64, value: u8 },
     /// A `Marker` note is longer than the contract allows, measured in bytes.
     MarkerNoteTooLong { marker_id: u64, len: usize },
+    /// A `ResidentAppearance` carries the reserved entity id 0.
+    ResidentWithoutEntity,
+    /// A `ResidentAppearance` omitted its server-owned name. Absence is refused; so is
+    /// empty, because a resident the server placed always has one.
+    ResidentWithoutName(u64),
+    /// A resident's name is longer than the contract allows, measured in bytes.
+    ResidentNameTooLong { entity_id: u64, len: usize },
+    /// A `ResidentAppearance` carries a role this build has no member for, the
+    /// absent-field `Unknown` included.
+    UnknownResidentRole { entity_id: u64, value: u8 },
+    /// A `VendorState` or `VendorClosed` carries the reserved entity id 0.
+    VendorWithoutEntity(&'static str),
+    /// A `VendorState` carries revision 0, which names no list.
+    VendorWithoutRevision,
+    /// A `VendorState` omitted one of its two price vectors. Empty is legal — a vendor
+    /// that only buys, or only sells — and absent is a message shape this contract does
+    /// not have.
+    VendorWithoutPrices { entity_id: u64, field: &'static str },
+    /// Both of a `VendorState`'s vectors are empty. A vendor with nothing to say is
+    /// `VendorClosed`, not a stall that opens onto nothing.
+    VendorWithNothingToTrade(u64),
+    /// A `VendorEntry` names item 0, which the registry never mints.
+    VendorEntryWithoutItem { entity_id: u64, field: &'static str },
+    /// A `VendorEntry` carries price 0. Free is not a price, in either direction.
+    VendorEntryWithoutPrice {
+        entity_id: u64,
+        field: &'static str,
+        item_id: u16,
+    },
+    /// One item id appears twice in one `VendorState` vector, which is two prices for one
+    /// thing and no way to tell which a `TradeRequest` meant.
+    DuplicateVendorEntry {
+        entity_id: u64,
+        field: &'static str,
+        item_id: u16,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -2846,6 +3019,43 @@ impl fmt::Display for DecodeError {
                 f,
                 "mark {marker_id} has a {len}-byte note, at most {MARKER_NOTE_MAX_BYTES}"
             ),
+            Self::ResidentWithoutEntity => {
+                write!(f, "a ResidentAppearance carries the reserved entity id 0")
+            }
+            Self::ResidentWithoutName(entity_id) => {
+                write!(f, "ResidentAppearance for entity {entity_id} has no name")
+            }
+            Self::ResidentNameTooLong { entity_id, len } => write!(
+                f,
+                "resident {entity_id} has a {len}-byte name, at most {RESIDENT_NAME_MAX_BYTES}"
+            ),
+            Self::UnknownResidentRole { entity_id, value } => {
+                write!(f, "resident {entity_id} has an unknown role: {value}")
+            }
+            Self::VendorWithoutEntity(message) => {
+                write!(f, "{message} carries the reserved entity id 0")
+            }
+            Self::VendorWithoutRevision => write!(f, "a VendorState carries revision 0"),
+            Self::VendorWithoutPrices { entity_id, field } => {
+                write!(f, "VendorState for vendor {entity_id} has no {field}")
+            }
+            Self::VendorWithNothingToTrade(entity_id) => write!(
+                f,
+                "VendorState for vendor {entity_id} neither buys nor sells anything"
+            ),
+            Self::VendorEntryWithoutItem { entity_id, field } => {
+                write!(f, "vendor {entity_id} {field} names item 0")
+            }
+            Self::VendorEntryWithoutPrice {
+                entity_id,
+                field,
+                item_id,
+            } => write!(f, "vendor {entity_id} {field} prices item {item_id} at 0"),
+            Self::DuplicateVendorEntry {
+                entity_id,
+                field,
+                item_id,
+            } => write!(f, "vendor {entity_id} {field} names item {item_id} twice"),
         }
     }
 }
@@ -3147,6 +3357,60 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::MarkerList(marker_list(&payload)?))
         }
+        fb::Payload::ResidentAppearance => {
+            let payload = envelope
+                .payload_as_resident_appearance()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let entity_id = payload.entity_id();
+            if entity_id == 0 {
+                return Err(DecodeError::ResidentWithoutEntity);
+            }
+            // Absent and empty are one refusal here, which is the opposite of the call
+            // `PlayerAppearance` makes: a player's stored name may legitimately be empty
+            // and the server copies it verbatim, whereas a resident is named by the world
+            // generator and an unnamed one is a defect rather than a choice.
+            let resident_name = payload
+                .name()
+                .filter(|text| !text.is_empty())
+                .ok_or(DecodeError::ResidentWithoutName(entity_id))?;
+            if resident_name.len() > RESIDENT_NAME_MAX_BYTES {
+                return Err(DecodeError::ResidentNameTooLong {
+                    entity_id,
+                    len: resident_name.len(),
+                });
+            }
+            let role = ResidentRole::from_wire(payload.role()).ok_or(
+                DecodeError::UnknownResidentRole {
+                    entity_id,
+                    value: payload.role().0,
+                },
+            )?;
+            // Nothing here asks whether the client knows this entity, and nothing may:
+            // the appearance stream and the snapshot stream are not ordered against each
+            // other, exactly as `PlayerAppearance` records.
+            Ok(Message::ResidentAppearance(ResidentAppearance {
+                entity_id,
+                name: resident_name.to_owned(),
+                role,
+                appearance: appearance(payload.appearance(), "ResidentAppearance")?,
+            }))
+        }
+        fb::Payload::VendorState => {
+            let payload = envelope
+                .payload_as_vendor_state()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::VendorState(vendor_state(&payload)?))
+        }
+        fb::Payload::VendorClosed => {
+            let payload = envelope
+                .payload_as_vendor_closed()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let entity_id = payload.entity_id();
+            if entity_id == 0 {
+                return Err(DecodeError::VendorWithoutEntity("VendorClosed"));
+            }
+            Ok(Message::VendorClosed(VendorClosed { entity_id }))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -3180,14 +3444,6 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::NpcInteractRequest
         | fb::Payload::TradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
-        // V25's three server→client payloads, carried by name until their decoders land.
-        // Named here rather than left to the fallback for the reason `NONE` is: the
-        // fallback answers `UNKNOWN_VARIANT`, and a member this build *can* name reaching
-        // it would report a contract gap that does not exist. The contract half of #457
-        // settles the tags; the decoders that copy and validate these three follow it.
-        fb::Payload::ResidentAppearance | fb::Payload::VendorState | fb::Payload::VendorClosed => {
-            Ok(Message::Deferred(name))
-        }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -3325,6 +3581,80 @@ fn marker_list(list: &fb::MarkerList<'_>) -> Result<MarkerList, DecodeError> {
         });
     }
     Ok(MarkerList { markers: decoded })
+}
+
+/// Copies and validates one complete price list.
+///
+/// Both vectors must be present and at least one must be non-empty: a vendor with nothing
+/// in either direction is `VendorClosed`, and reading an empty pair as an open-but-bare
+/// stall would draw a window the server never opened.
+///
+/// Item ids are checked for uniqueness *within* a vector rather than across both, because
+/// a vendor that sells iron at 12 and buys it at 5 is the ordinary case and the spread is
+/// the whole of what a stall is. Two rows for one item in the *same* vector are two prices
+/// with one address, and nothing downstream could tell which a `TradeRequest` meant.
+fn vendor_state(state: &fb::VendorState<'_>) -> Result<VendorState, DecodeError> {
+    let entity_id = state.entity_id();
+    if entity_id == 0 {
+        return Err(DecodeError::VendorWithoutEntity("VendorState"));
+    }
+    let revision = state.revision();
+    if revision == 0 {
+        return Err(DecodeError::VendorWithoutRevision);
+    }
+
+    let sells = vendor_entries(entity_id, state.sells(), "sells")?;
+    let buys = vendor_entries(entity_id, state.buys(), "buys")?;
+    if sells.is_empty() && buys.is_empty() {
+        return Err(DecodeError::VendorWithNothingToTrade(entity_id));
+    }
+
+    Ok(VendorState {
+        entity_id,
+        revision,
+        sells,
+        buys,
+    })
+}
+
+/// Copies and validates one direction of a price list.
+///
+/// `field` names the vector so that every refusal below says which of the two it came
+/// from — the same reason [`DecodeError::MapTileArrayLength`] carries its field name.
+fn vendor_entries(
+    entity_id: u64,
+    entries: Option<flatbuffers::Vector<'_, fb::VendorEntry>>,
+    field: &'static str,
+) -> Result<Vec<VendorEntry>, DecodeError> {
+    // Absent is refused rather than read as empty: the contract requires both vectors
+    // present, so an absent one is a message shape this contract does not have.
+    let entries = entries.ok_or(DecodeError::VendorWithoutPrices { entity_id, field })?;
+
+    let mut decoded = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::new();
+    for entry in &entries {
+        let item_id = entry.item_id();
+        if item_id == 0 {
+            return Err(DecodeError::VendorEntryWithoutItem { entity_id, field });
+        }
+        let price = entry.price();
+        if price == 0 {
+            return Err(DecodeError::VendorEntryWithoutPrice {
+                entity_id,
+                field,
+                item_id,
+            });
+        }
+        if !seen.insert(item_id) {
+            return Err(DecodeError::DuplicateVendorEntry {
+                entity_id,
+                field,
+                item_id,
+            });
+        }
+        decoded.push(VendorEntry { item_id, price });
+    }
+    Ok(decoded)
 }
 
 /// Copies and validates one complete per-recipient corpse container.
@@ -4561,6 +4891,53 @@ pub fn encode_marker_remove_request(request: &MarkerRemoveRequest) -> Vec<u8> {
         fb::Payload::MarkerRemoveRequest,
         payload.as_union_value(),
     )
+}
+
+/// Builds one intent to address a resident.
+///
+/// It carries the entity and the client's tick and nothing else — no distance, no shop,
+/// no outcome. Whether anything opens is the server's answer, arriving as a
+/// `VendorState` or an `ActionRefused`.
+// V25 establishes this outbound contract before the resident interaction lands.
+#[allow(dead_code)]
+pub fn encode_npc_interact_request(request: &NpcInteractRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::NpcInteractRequest::create(
+        &mut builder,
+        &fb::NpcInteractRequestArgs {
+            entity_id: request.entity_id,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::NpcInteractRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one trade intent, from the price list currently on screen.
+///
+/// The revision is what makes this safe to originate from a view one message old: a list
+/// that changed since is refused rather than applied to prices the player never saw. No
+/// price and no total are written, and there are no fields to write them into — the
+/// contract has none, deliberately.
+// V25 establishes this outbound contract before the vendor window lands.
+#[allow(dead_code)]
+pub fn encode_trade_request(request: &TradeRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::TradeRequest::create(
+        &mut builder,
+        &fb::TradeRequestArgs {
+            entity_id: request.entity_id,
+            item_id: request.item_id,
+            count: request.count,
+            buying: request.buying,
+            revision: request.revision,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(builder, fb::Payload::TradeRequest, payload.as_union_value())
 }
 
 /// Writes one appearance table and returns its offset.
@@ -6296,6 +6673,67 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::MarkerList, payload.as_union_value())
     }
 
+    pub fn encode_resident_appearance(
+        entity_id: u64,
+        name: Option<&str>,
+        role: u8,
+        appearance: Option<AppearanceWire>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
+        let name = name.map(|name| builder.create_string(name));
+        let payload = fb::ResidentAppearance::create(
+            &mut builder,
+            &fb::ResidentAppearanceArgs {
+                entity_id,
+                name,
+                role: fb::ResidentRole(role),
+                appearance,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::ResidentAppearance,
+            payload.as_union_value(),
+        )
+    }
+
+    /// A `VendorState` whose two vectors can each be absent, so a test can build the one
+    /// message shape this contract does not have.
+    pub fn encode_vendor_state(
+        entity_id: u64,
+        revision: u32,
+        sells: Option<&[(u16, u16)]>,
+        buys: Option<&[(u16, u16)]>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let lay_out = |builder: &mut FlatBufferBuilder<'static>, entries: &[(u16, u16)]| {
+            let laid_out: Vec<_> = entries
+                .iter()
+                .map(|(item_id, price)| fb::VendorEntry::new(*item_id, *price))
+                .collect();
+            builder.create_vector(&laid_out)
+        };
+        let sells = sells.map(|entries| lay_out(&mut builder, entries));
+        let buys = buys.map(|entries| lay_out(&mut builder, entries));
+        let payload = fb::VendorState::create(
+            &mut builder,
+            &fb::VendorStateArgs {
+                entity_id,
+                revision,
+                sells,
+                buys,
+            },
+        );
+        finish_envelope(builder, fb::Payload::VendorState, payload.as_union_value())
+    }
+
+    pub fn encode_vendor_closed(entity_id: u64) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let payload = fb::VendorClosed::create(&mut builder, &fb::VendorClosedArgs { entity_id });
+        finish_envelope(builder, fb::Payload::VendorClosed, payload.as_union_value())
+    }
+
     pub fn encode_loot_closed(corpse_id: u64) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let payload = fb::LootClosed::create(&mut builder, &fb::LootClosedArgs { corpse_id });
@@ -6415,8 +6853,9 @@ mod tests {
         encode_loot_closed, encode_loot_state, encode_map_explored, encode_map_tile,
         encode_marker_list, encode_mine_progress, encode_mob_hit, encode_party_invite,
         encode_player_appearance, encode_player_appearance_with_worn,
-        encode_player_appearance_without_level, encode_server_character_list, encode_server_reject,
-        encode_server_welcome,
+        encode_player_appearance_without_level, encode_resident_appearance,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
+        encode_vendor_closed, encode_vendor_state,
     };
     use super::*;
 
@@ -6712,15 +7151,11 @@ mod tests {
         (fb::Payload::MarkerPlaceRequest, Handling::ClientOnly),
         (fb::Payload::MarkerRemoveRequest, Handling::ClientOnly),
         (fb::Payload::MarkerList, Handling::Consumed),
-        // V25's five. The two requests are refused by direction here and now; the three
-        // that travel back are named as `Deferred` until the decoders land, which is the
-        // same staged shape V24's map payloads had between its two halves. `Deferred`
-        // means "this build has no arm yet", not "this contract has no member".
-        (fb::Payload::ResidentAppearance, Handling::Deferred),
+        (fb::Payload::ResidentAppearance, Handling::Consumed),
         (fb::Payload::NpcInteractRequest, Handling::ClientOnly),
-        (fb::Payload::VendorState, Handling::Deferred),
+        (fb::Payload::VendorState, Handling::Consumed),
         (fb::Payload::TradeRequest, Handling::ClientOnly),
-        (fb::Payload::VendorClosed, Handling::Deferred),
+        (fb::Payload::VendorClosed, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -7285,6 +7720,346 @@ mod tests {
         );
     }
 
+    /// A resident arrives named, roled and described, and every one of those is bounded
+    /// here rather than downstream.
+    ///
+    /// The name is refused *empty* as well as absent, which is where this differs from
+    /// [`PlayerAppearance`]: a player's stored name is copied verbatim from what the
+    /// server holds and may legitimately be empty, while a resident is named by the world
+    /// that placed them.
+    #[test]
+    fn a_resident_arrives_named_and_roled_and_is_bounded_at_the_decode_boundary() {
+        let frame = encode_resident_appearance(
+            900,
+            Some("Ingrid"),
+            fb::ResidentRole::Smith.0,
+            Some(AppearanceWire::default()),
+        );
+        let Ok(Message::ResidentAppearance(resident)) = decode(&frame) else {
+            panic!("a well-formed resident was refused");
+        };
+        assert_eq!(resident.entity_id, 900);
+        assert_eq!(resident.name, "Ingrid");
+        assert_eq!(resident.role, ResidentRole::Smith);
+
+        // Every member the contract names decodes, and the absent-field zero does not.
+        for (wire, want) in [
+            (fb::ResidentRole::Villager, ResidentRole::Villager),
+            (fb::ResidentRole::Smith, ResidentRole::Smith),
+            (fb::ResidentRole::Carpenter, ResidentRole::Carpenter),
+            (fb::ResidentRole::Cook, ResidentRole::Cook),
+            (fb::ResidentRole::Trader, ResidentRole::Trader),
+            (fb::ResidentRole::Guard, ResidentRole::Guard),
+        ] {
+            assert_eq!(ResidentRole::from_wire(wire), Some(want));
+        }
+        assert_eq!(ResidentRole::from_wire(fb::ResidentRole::Unknown), None);
+        assert_eq!(ResidentRole::from_wire(fb::ResidentRole(7)), None);
+
+        // Exactly at the bound is accepted. Bytes, not characters: eleven three-byte
+        // runes are 33 bytes and are refused, while a 32-character ASCII name is not.
+        let role = fb::ResidentRole::Guard.0;
+        let at_bound = "a".repeat(RESIDENT_NAME_MAX_BYTES);
+        assert!(
+            decode(&encode_resident_appearance(
+                900,
+                Some(&at_bound),
+                role,
+                Some(AppearanceWire::default())
+            ))
+            .is_ok(),
+            "a {RESIDENT_NAME_MAX_BYTES}-byte name was refused"
+        );
+
+        for (name, frame, want) in [
+            (
+                "no entity",
+                encode_resident_appearance(
+                    0,
+                    Some("Ingrid"),
+                    role,
+                    Some(AppearanceWire::default()),
+                ),
+                DecodeError::ResidentWithoutEntity,
+            ),
+            (
+                "absent name",
+                encode_resident_appearance(900, None, role, Some(AppearanceWire::default())),
+                DecodeError::ResidentWithoutName(900),
+            ),
+            (
+                "empty name",
+                encode_resident_appearance(900, Some(""), role, Some(AppearanceWire::default())),
+                DecodeError::ResidentWithoutName(900),
+            ),
+            (
+                "name one byte past the bound",
+                encode_resident_appearance(
+                    900,
+                    Some(&"a".repeat(RESIDENT_NAME_MAX_BYTES + 1)),
+                    role,
+                    Some(AppearanceWire::default()),
+                ),
+                DecodeError::ResidentNameTooLong {
+                    entity_id: 900,
+                    len: RESIDENT_NAME_MAX_BYTES + 1,
+                },
+            ),
+            (
+                "multibyte name past the bound",
+                encode_resident_appearance(
+                    900,
+                    Some(&"ᛗ".repeat(11)),
+                    role,
+                    Some(AppearanceWire::default()),
+                ),
+                DecodeError::ResidentNameTooLong {
+                    entity_id: 900,
+                    len: 33,
+                },
+            ),
+            (
+                "absent role",
+                encode_resident_appearance(
+                    900,
+                    Some("Ingrid"),
+                    fb::ResidentRole::Unknown.0,
+                    Some(AppearanceWire::default()),
+                ),
+                DecodeError::UnknownResidentRole {
+                    entity_id: 900,
+                    value: 0,
+                },
+            ),
+            (
+                "role from a newer contract",
+                encode_resident_appearance(
+                    900,
+                    Some("Ingrid"),
+                    200,
+                    Some(AppearanceWire::default()),
+                ),
+                DecodeError::UnknownResidentRole {
+                    entity_id: 900,
+                    value: 200,
+                },
+            ),
+        ] {
+            assert_eq!(decode(&frame), Err(want), "{name} was not refused");
+        }
+
+        // An appearance that is absent is refused by the shared helper, exactly as a
+        // player's is: a client may not invent what the server did not describe.
+        assert!(
+            decode(&encode_resident_appearance(900, Some("Ingrid"), role, None)).is_err(),
+            "a resident with no appearance was accepted"
+        );
+
+        // Ten three-byte runes are 30 bytes and fit, which is what makes the eleven-rune
+        // refusal above a statement about bytes rather than about that particular string.
+        assert!(
+            decode(&encode_resident_appearance(
+                900,
+                Some(&"ᛗ".repeat(10)),
+                role,
+                Some(AppearanceWire::default())
+            ))
+            .is_ok(),
+            "ten three-byte runes are 30 bytes and were refused"
+        );
+    }
+
+    /// A price list replaces the client's view of one vendor, so every bound it carries
+    /// is held here.
+    ///
+    /// **One item at two prices in the two directions is the ordinary case**, and the
+    /// uniqueness check is deliberately per vector for that reason: a stall that sells
+    /// iron at 12 and buys it at 5 is a stall, and the spread is the whole of what one is.
+    #[test]
+    fn a_vendor_state_replaces_the_prices_and_is_bounded_at_the_decode_boundary() {
+        let frame = encode_vendor_state(900, 3, Some(&[(31, 12), (8, 40)]), Some(&[(31, 5)]));
+        assert_eq!(
+            decode(&frame),
+            Ok(Message::VendorState(VendorState {
+                entity_id: 900,
+                revision: 3,
+                sells: vec![
+                    VendorEntry {
+                        item_id: 31,
+                        price: 12
+                    },
+                    VendorEntry {
+                        item_id: 8,
+                        price: 40
+                    },
+                ],
+                buys: vec![VendorEntry {
+                    item_id: 31,
+                    price: 5
+                }],
+            }))
+        );
+
+        // A vendor that only sells and one that only buys are both ordinary, and both
+        // carry the other vector present and empty.
+        assert_eq!(
+            decode(&encode_vendor_state(900, 1, Some(&[(31, 12)]), Some(&[]))),
+            Ok(Message::VendorState(VendorState {
+                entity_id: 900,
+                revision: 1,
+                sells: vec![VendorEntry {
+                    item_id: 31,
+                    price: 12
+                }],
+                buys: vec![],
+            }))
+        );
+
+        for (name, frame, want) in [
+            (
+                "no entity",
+                encode_vendor_state(0, 1, Some(&[(31, 12)]), Some(&[])),
+                DecodeError::VendorWithoutEntity("VendorState"),
+            ),
+            (
+                "no revision",
+                encode_vendor_state(900, 0, Some(&[(31, 12)]), Some(&[])),
+                DecodeError::VendorWithoutRevision,
+            ),
+            (
+                "absent sells",
+                encode_vendor_state(900, 1, None, Some(&[(31, 5)])),
+                DecodeError::VendorWithoutPrices {
+                    entity_id: 900,
+                    field: "sells",
+                },
+            ),
+            (
+                "absent buys",
+                encode_vendor_state(900, 1, Some(&[(31, 12)]), None),
+                DecodeError::VendorWithoutPrices {
+                    entity_id: 900,
+                    field: "buys",
+                },
+            ),
+            (
+                "nothing in either direction",
+                encode_vendor_state(900, 1, Some(&[]), Some(&[])),
+                DecodeError::VendorWithNothingToTrade(900),
+            ),
+            (
+                "item 0",
+                encode_vendor_state(900, 1, Some(&[(0, 12)]), Some(&[])),
+                DecodeError::VendorEntryWithoutItem {
+                    entity_id: 900,
+                    field: "sells",
+                },
+            ),
+            (
+                "free is not a price",
+                encode_vendor_state(900, 1, Some(&[]), Some(&[(31, 0)])),
+                DecodeError::VendorEntryWithoutPrice {
+                    entity_id: 900,
+                    field: "buys",
+                    item_id: 31,
+                },
+            ),
+            (
+                "one item at two prices in one direction",
+                encode_vendor_state(900, 1, Some(&[(31, 12), (31, 13)]), Some(&[])),
+                DecodeError::DuplicateVendorEntry {
+                    entity_id: 900,
+                    field: "sells",
+                    item_id: 31,
+                },
+            ),
+        ] {
+            assert_eq!(decode(&frame), Err(want), "{name} was not refused");
+        }
+
+        assert_eq!(
+            decode(&encode_vendor_closed(900)),
+            Ok(Message::VendorClosed(VendorClosed { entity_id: 900 }))
+        );
+        assert_eq!(
+            decode(&encode_vendor_closed(0)),
+            Err(DecodeError::VendorWithoutEntity("VendorClosed"))
+        );
+    }
+
+    /// The two client requests carry intent and nothing else.
+    ///
+    /// **The strongest statement about "no price and no total" is a negative one**: the
+    /// generated `TradeRequestArgs` has no field to put one in, so the guarantee lives in
+    /// the schema and in this round trip's field list rather than in an assertion. What is
+    /// checked here is that every field survives, both directions of `buying` included —
+    /// `false` is a sale, not an absent field standing in for one.
+    #[test]
+    fn the_settlement_requests_carry_intent_and_round_trip_every_field() {
+        let interact = NpcInteractRequest {
+            entity_id: 900,
+            client_tick: 21,
+        };
+        let frame = encode_npc_interact_request(&interact);
+        assert_eq!(
+            decode(&frame),
+            Ok(Message::ClientOnly("NpcInteractRequest")),
+            "a client's own request must be refused by direction, not decoded"
+        );
+        let envelope = fb::root_as_envelope(&frame).expect("the encoder produced a valid frame");
+        assert_eq!(envelope.payload_type(), fb::Payload::NpcInteractRequest);
+        let payload = envelope
+            .payload_as_npc_interact_request()
+            .expect("the union tag names the payload it carries");
+        assert_eq!(payload.entity_id(), interact.entity_id);
+        assert_eq!(payload.client_tick(), interact.client_tick);
+
+        for trade in [
+            TradeRequest {
+                entity_id: 900,
+                item_id: 31,
+                count: 4,
+                buying: true,
+                revision: 2,
+                client_tick: 22,
+            },
+            TradeRequest {
+                entity_id: 900,
+                item_id: 8,
+                count: 1,
+                buying: false,
+                revision: 2,
+                client_tick: 23,
+            },
+        ] {
+            let frame = encode_trade_request(&trade);
+            assert_eq!(decode(&frame), Ok(Message::ClientOnly("TradeRequest")));
+            let envelope =
+                fb::root_as_envelope(&frame).expect("the encoder produced a valid frame");
+            let payload = envelope
+                .payload_as_trade_request()
+                .expect("the union tag names the payload it carries");
+            assert_eq!(
+                (
+                    payload.entity_id(),
+                    payload.item_id(),
+                    payload.count(),
+                    payload.buying(),
+                    payload.revision(),
+                    payload.client_tick(),
+                ),
+                (
+                    trade.entity_id,
+                    trade.item_id,
+                    trade.count,
+                    trade.buying,
+                    trade.revision,
+                    trade.client_tick,
+                )
+            );
+        }
+    }
+
     /// The three outbound map payloads carry intent and nothing else.
     ///
     /// The request encoder writes a misaligned origin exactly as given, deliberately: it
@@ -7473,6 +8248,9 @@ mod tests {
             RefusalReason::TooManyMarkers,
             RefusalReason::NoteTooLong,
             RefusalReason::MarkerUnknown,
+            RefusalReason::NotAVendor,
+            RefusalReason::NotEnoughSilver,
+            RefusalReason::VendorDoesNotWant,
         ] {
             assert!(
                 !reason.is_client_defect(),
@@ -7712,7 +8490,15 @@ mod tests {
     #[test]
     fn a_kind_this_build_has_never_heard_of_is_still_refused() {
         assert_eq!(MobKind::from_wire(fb::MobKind::Unknown), None);
-        assert_eq!(MobKind::from_wire(fb::MobKind(4)), None);
+        // 4 was the first value past the end until V25 named it `Villager`. The test
+        // moved to 5 rather than being deleted, because what it pins is "one past the
+        // contract", not the literal — and this line is the only thing that would have
+        // noticed a member arriving without a decision.
+        assert_eq!(
+            MobKind::from_wire(fb::MobKind::Villager),
+            Some(MobKind::Villager)
+        );
+        assert_eq!(MobKind::from_wire(fb::MobKind(5)), None);
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);
