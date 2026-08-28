@@ -802,17 +802,20 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 	// A name is written exactly as given, over-long ones included: truncating here would
 	// hide a caller's defect from the decoder, which is where the bound belongs.
 	//
-	// **Nothing enforces that bound yet, and this test does not pretend otherwise.**
-	// ResidentAppearance travels server -> client only, so this package has no decode arm
-	// for it, and the client half of this branch carries the payload as
-	// `Handling::Deferred` — named, and then dropped. The decoder that will read it is
-	// part 2 of #457. ResidentNameMaxBytes therefore has no non-test reader
-	// anywhere in the tree today — it is schemas/player.fbs's "at most 32 bytes" written
-	// down where the decoder will reach for it, and the refusal arrives with that decoder.
-	// What the four cases below pin is the only rule that exists now, the encoder's:
-	// verbatim, whatever the caller handed it. They are the MarkerNoteMaxBytes cases in
-	// the same file, minus the refusal — that bound is enforced because MarkerPlaceRequest
-	// travels the other way and this package decodes it.
+	// **The bound is enforced, and not here.** ResidentAppearance travels server -> client
+	// only, so this package has no decode arm for it; the reader is the client's, and it
+	// refuses a 33-byte name as RESIDENT_NAME_MAX_BYTES in client/src/net/codec.rs. The two
+	// constants are one number written twice, once on each side of the wire, and
+	// schemas/player.fbs's "at most 32 bytes" is what both of them copy -- which is a claim
+	// about the world, so TestTheSharedBoundsAreOneNumberOnBothSidesOfTheWire is what
+	// re-checks it. It did not exist when this comment was first written and the sentence
+	// was true of nothing: ResidentNameMaxBytes = 33 left this whole package green while the
+	// client went on refusing at 32. What the four
+	// cases below pin is this side's only rule, the encoder's: verbatim, whatever the
+	// caller handed it — over-long, multibyte and not-even-UTF-8 alike, so that a caller's
+	// defect arrives at the decoder intact instead of being quietly made to look legal.
+	// They are the MarkerNoteMaxBytes cases in the same file, minus the refusal, which
+	// this package owns for MarkerPlaceRequest only because that one travels the other way.
 	for label, text := range map[string]string{
 		"exactly at the bound": strings.Repeat("a", ResidentNameMaxBytes),
 		"one byte past it":     strings.Repeat("a", ResidentNameMaxBytes+1),

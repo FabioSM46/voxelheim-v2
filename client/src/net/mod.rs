@@ -71,6 +71,14 @@ pub use codec::{
     RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
     WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
+// V25's settlement surface, ahead of the consumers that read it: the resident window is
+// #458 and the vendor window is #459. Named here for the reason the block above is —
+// so neither issue has to reopen `codec.rs` to find out what it is allowed to spell.
+#[allow(unused_imports)] // V25 protocol surface; ECS consumers land in #458 and #459.
+pub use codec::{
+    NpcInteractRequest, RESIDENT_NAME_MAX_BYTES, ResidentAppearance, ResidentRole, TradeRequest,
+    VendorClosed, VendorEntry, VendorState,
+};
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
@@ -88,6 +96,8 @@ pub use codec::{
     encode_party_request, encode_place_structure_request, encode_player_input,
     encode_remove_structure_request, encode_repair_request,
 };
+#[allow(unused_imports)] // V25 outbound encoders precede their UI controls (#458, #459).
+pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
 use servers::ServerListEvent;
 use session::{Choice, NetCommand, SessionEvent};
@@ -1633,6 +1643,22 @@ fn drain_session_events(
                     map.push_bounded(MapEvent::Markers(list));
                 }
             }
+
+            // V25's three settlement payloads: fully decoded and fully validated one
+            // layer down, and dropped here because there is no inbox to put them in yet.
+            // #458 gives residents a name over their head and #459 gives a stall a
+            // window; each adds its own queue and its own arm. Dropped rather than
+            // logged, for the reason the map's three are queued rather than logged — a
+            // resident entering view is as ordinary as a tile arriving, and a line per
+            // one would be noise from the moment the first village exists.
+            //
+            // **The validation is the point of carrying them this far.** A malformed
+            // name, an unknown role or a duplicate price already ends the session at the
+            // decode boundary, which is where it should, and that is true now rather than
+            // when somebody writes the window.
+            Ok(SessionEvent::ResidentAppearance(_))
+            | Ok(SessionEvent::VendorState(_))
+            | Ok(SessionEvent::VendorClosed(_)) => {}
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),

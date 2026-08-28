@@ -31,7 +31,8 @@ use std::fmt;
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
     LootState, MapExplored, MapTile, MarkerList, Message, MineProgress, MobHit, PartyInvite,
-    PlayerAppearance, Reject, SessionParams, Snapshot, WorldClock, WorldUpdate,
+    PlayerAppearance, Reject, ResidentAppearance, SessionParams, Snapshot, VendorClosed,
+    VendorState, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -120,6 +121,17 @@ pub enum Transition {
     /// properties of the list, held at the decode boundary, and a list is complete by
     /// definition so there is no earlier one for the welcome to check it against.
     MarkerList(MarkerList),
+    /// What one resident is called and what they do, admitted because a session exists.
+    ///
+    /// Nothing is checked here that the codec has not: the name's bound and the role's
+    /// membership are properties of the message. Whether the entity is known is checked
+    /// nowhere at all — the appearance stream and the snapshot stream are not ordered
+    /// against each other, exactly as `PlayerAppearance` is treated.
+    ResidentAppearance(ResidentAppearance),
+    /// The complete price list one vendor shows this session.
+    VendorState(VendorState),
+    /// The authoritative end of an open stall.
+    VendorClosed(VendorClosed),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -482,6 +494,16 @@ impl Handshake {
                 Ok(Transition::MapExplored(explored))
             }
             (Phase::Established, Message::MarkerList(list)) => Ok(Transition::MarkerList(list)),
+            // V25's three server payloads, carried by name for the same reason: each is
+            // fully validated at the decode boundary, and nothing about a session changes
+            // what any of them means.
+            (Phase::Established, Message::ResidentAppearance(resident)) => {
+                Ok(Transition::ResidentAppearance(resident))
+            }
+            (Phase::Established, Message::VendorState(state)) => Ok(Transition::VendorState(state)),
+            (Phase::Established, Message::VendorClosed(closed)) => {
+                Ok(Transition::VendorClosed(closed))
+            }
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -508,6 +530,11 @@ impl Handshake {
             (_, Message::MapTile(_)) => Err(HandshakeError::Premature("MapTile")),
             (_, Message::MapExplored(_)) => Err(HandshakeError::Premature("MapExplored")),
             (_, Message::MarkerList(_)) => Err(HandshakeError::Premature("MarkerList")),
+            (_, Message::ResidentAppearance(_)) => {
+                Err(HandshakeError::Premature("ResidentAppearance"))
+            }
+            (_, Message::VendorState(_)) => Err(HandshakeError::Premature("VendorState")),
+            (_, Message::VendorClosed(_)) => Err(HandshakeError::Premature("VendorClosed")),
         }
     }
 }
