@@ -71,6 +71,25 @@ pub(super) const ITEM_SAND: u16 = 31;
 pub(super) const ITEM_SANDSTONE: u16 = 32;
 pub(super) const ITEM_GRAVEL: u16 = 33;
 
+/// The lid a frozen lake is broken off, here for the reason the three above are: nothing on
+/// this side acts on it.
+///
+/// **It was the one item the server had issued that this table had never heard of.** The
+/// contiguity sweep below cannot see a *trailing* omission — it derives the expected block
+/// from the table's own length — so ice sat at wire id 34 with no row, drawing magenta and
+/// reading "unknown item", from the day the server appended it until the day a thirty-fifth
+/// item made the hole an interior one. Adding a row for it is what silver's own row costs.
+pub(super) const ITEM_ICE: u16 = 34;
+
+/// The coin a draugr carries.
+///
+/// Declared here rather than in a module that acts on it because nothing on this side does:
+/// the inventory window's readout *counts* it, which is reading what the server sent, and no
+/// click, key or request is routed on this number. `crate::ui` reaches it through
+/// `crate::player`'s re-export for the same reason it reaches [`item_label`] — one
+/// declaration read from several places cannot drift the way two of the same number can.
+pub(crate) const ITEM_SILVER: u16 = 35;
+
 /// The shapes an item is drawn in.
 ///
 /// Four variants and no "nothing": an empty hand is not an item's shape, so
@@ -122,6 +141,17 @@ pub(crate) enum ItemShape {
     Bow,
     /// A wooden shaft capped by a green healing focus.
     Sceptre,
+    /// A struck disc: one circle with a smaller darker one inset, which is what a coin reads
+    /// as at a cell's size and what nothing else in the vocabulary reads as.
+    ///
+    /// **Its own variant rather than a [`Self::Material`] in a pale colour**, because money
+    /// is the one thing in a pack a player counts rather than spends on a recipe, and a stub
+    /// among stubs is exactly what they would fail to find. #454 asked for the hand and the
+    /// drop to reuse the material stub; `every_shape_is_drawn_from_its_own_silhouette`
+    /// refuses two shapes that share a drop silhouette, so the disc is authored on all three
+    /// surfaces instead of on one — which is what `docs/ADDING_AN_ITEM.md` means by
+    /// budgeting three drawings for a new shape.
+    Coin,
 }
 
 impl ItemShape {
@@ -153,7 +183,7 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Block,
         Self::Material,
         Self::Blade,
@@ -163,6 +193,7 @@ impl ItemShape {
         Self::Shield,
         Self::Bow,
         Self::Sceptre,
+        Self::Coin,
     ];
 }
 
@@ -189,6 +220,9 @@ enum ItemColour {
     CookedMeat,
     /// Bone-white shaft and point, kept distinct from other material rows. sRGB `#D8C9A3`.
     Arrow,
+    /// Struck silver: paler and cooler than forged steel, so a coin is not a small ingot.
+    /// sRGB `#BFC7D2`.
+    Silver,
 }
 
 /// `#59636D`, converted from sRGB to the linear space vertex colours use.
@@ -203,6 +237,8 @@ const RAW_MEAT_LINEAR: [f32; 3] = [0.332_452, 0.078_187, 0.078_187];
 const COOKED_MEAT_LINEAR: [f32; 3] = [0.258_183, 0.102_242, 0.045_186];
 /// `#D8C9A3`, converted from sRGB to the linear space vertex colours use.
 const ARROW_LINEAR: [f32; 3] = [0.686_686, 0.584_078, 0.366_253];
+/// `#BFC7D2`, converted from sRGB to the linear space vertex colours use.
+const SILVER_LINEAR: [f32; 3] = [0.520_996, 0.571_125, 0.644_480];
 
 impl ItemColour {
     fn linear_rgba(self) -> [f32; 4] {
@@ -230,6 +266,10 @@ impl ItemColour {
             }
             Self::Arrow => {
                 let [r, g, b] = ARROW_LINEAR;
+                [r, g, b, 1.0]
+            }
+            Self::Silver => {
+                let [r, g, b] = SILVER_LINEAR;
                 [r, g, b, 1.0]
             }
         }
@@ -333,7 +373,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 33] = [
+pub(super) const ITEMS: [ItemDisplay; 35] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -612,6 +652,29 @@ pub(super) const ITEMS: [ItemDisplay; 33] = [
         colour: ItemColour::Block(palette::GRAVEL),
         livery: None,
     },
+    // The lid off a frozen lake, on exactly the terms the three above are held: it places
+    // the voxel it came out of, so it is a `Block` rather than a `Material`, and it names
+    // that voxel's own swatch.
+    ItemDisplay {
+        item_id: ITEM_ICE,
+        name: "ice",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::ICE),
+        livery: None,
+    },
+    // The coin. Its own shape and its own swatch, because it is the one item in a pack that
+    // is read as a *number* rather than as a material — and no livery, because a struck disc
+    // at this size is a colour and a rim, not a surface.
+    //
+    // **Nothing in this row says what silver is for.** There is nothing to buy yet (#459),
+    // and when there is, that will be the server's answer and not this table's.
+    ItemDisplay {
+        item_id: ITEM_SILVER,
+        name: "silver",
+        shape: ItemShape::Coin,
+        colour: ItemColour::Silver,
+        livery: None,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -828,6 +891,8 @@ mod tests {
             ITEM_SAND,
             ITEM_SANDSTONE,
             ITEM_GRAVEL,
+            ITEM_ICE,
+            ITEM_SILVER,
         ];
         for item_id in declared {
             assert!(
@@ -839,6 +904,52 @@ mod tests {
             ITEMS.len(),
             declared.len(),
             "the registry holds a row for an id nothing else declares, or this list is stale"
+        );
+    }
+
+    /// The coin, and the block that was missing when it arrived.
+    ///
+    /// **The ids are pinned by name**, for the reason every id in this table is: the server
+    /// appends and never renumbers, so 34 and 35 are the numbers a persisted pack already
+    /// holds and no others will do.
+    ///
+    /// Ice is here because silver could not be added without it. The contiguity sweep above
+    /// derives what it expects from this table's own length, so it cannot see a *trailing*
+    /// omission — ice sat at 34 with no row from the day the server issued it — and the
+    /// thirty-fifth item is what turned that hole into an interior one.
+    #[test]
+    fn the_coin_and_the_ice_beside_it_carry_their_pinned_ids() {
+        assert_eq!(ITEM_ICE, 34);
+        assert_eq!(ITEM_SILVER, 35);
+
+        let ice = display(ITEM_ICE).expect("ice is registered");
+        assert_eq!(ice.name, "ice");
+        assert_eq!(ice.shape, ItemShape::Block);
+        assert_eq!(ice.colour, ItemColour::Block(palette::ICE));
+
+        let silver = display(ITEM_SILVER).expect("silver is registered");
+        assert_eq!(silver.name, "silver");
+        assert_eq!(silver.shape, ItemShape::Coin);
+        assert_eq!(silver.colour, ItemColour::Silver);
+        // No livery: a struck disc at a cell's size is a colour and a rim, not a surface.
+        assert_eq!(silver.livery, None);
+
+        // **Nothing else is a coin**, which is the whole of what earns the shape its own
+        // variant: if a second item ever shares it they are told apart by colour, exactly as
+        // the three implements and the three armour pieces are, and that is a decision
+        // somebody has to make here rather than inherit.
+        let coins: Vec<u16> = ITEMS
+            .iter()
+            .filter(|row| row.shape == ItemShape::Coin)
+            .map(|row| row.item_id)
+            .collect();
+        assert_eq!(coins, vec![ITEM_SILVER]);
+
+        // And the coin's swatch is its own rather than a steel it would be mistaken for in a
+        // pack: pale and cool, but not the forged blade's colour.
+        assert_ne!(
+            item_linear_rgba(ITEM_SILVER),
+            item_linear_rgba(ITEM_IRON_SWORD)
         );
     }
 
@@ -895,6 +1006,7 @@ mod tests {
             ("worn steel", [0x59, 0x63, 0x6D], WORN_STEEL_LINEAR),
             ("forged steel", [0x89, 0x97, 0xA3], FORGED_STEEL_LINEAR),
             ("leather", [0x7A, 0x4E, 0x2D], LEATHER_LINEAR),
+            ("silver", [0xBF, 0xC7, 0xD2], SILVER_LINEAR),
         ] {
             for (channel, (got, byte)) in linear.iter().zip(srgb).enumerate() {
                 let want = srgb_to_linear(byte);

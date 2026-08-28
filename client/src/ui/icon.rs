@@ -161,6 +161,38 @@ const MATERIAL: [IconPart; 3] = [
     },
 ];
 
+/// A struck coin: one disc, with a smaller darker one inset for the device stamped into it.
+///
+/// Two circles and nothing else, which is what a coin can be at this size — and what keeps
+/// it from reading as the three-nugget heap [`MATERIAL`] draws. The inset is *darker* rather
+/// than lighter so it reads as struck into the face rather than sitting on it; the rim is
+/// lifted for the same reason.
+///
+/// **It is drawn at two sizes from one table.** The pack cell hangs it in a
+/// [`super::CELL_SIZE`] square and the inventory window's silver readout hangs it in an
+/// 18-pixel one, and because every part is a percentage of its host neither of them names a
+/// pixel — see [`IconPart`], which is why a second size costs a node and not a drawing.
+const COIN: [IconPart; 2] = [
+    IconPart {
+        left: 20.0,
+        top: 20.0,
+        width: 60.0,
+        height: 60.0,
+        radius: 50.0,
+        shade: 0.20,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 36.0,
+        top: 36.0,
+        width: 28.0,
+        height: 28.0,
+        radius: 50.0,
+        shade: -0.32,
+        ..IconPart::PLAIN
+    },
+];
+
 /// A sword: a bright bar on the cell's diagonal, a cross guard across it, a grip below.
 ///
 /// The guard is perpendicular *by construction* rather than by a second angle — it is a
@@ -439,6 +471,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Shield => &SHIELD,
         ItemShape::Bow => &BOW,
         ItemShape::Sceptre => &SCEPTRE,
+        ItemShape::Coin => &COIN,
     }
 }
 

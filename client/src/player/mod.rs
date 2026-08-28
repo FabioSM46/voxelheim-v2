@@ -90,7 +90,7 @@ pub use inventory::{
 pub use items::item_label;
 #[cfg(test)]
 pub(crate) use items::known_item_ids;
-pub(crate) use items::{ItemShape, Livery, item_linear_rgba, item_livery, item_shape};
+pub(crate) use items::{ITEM_SILVER, ItemShape, Livery, item_linear_rgba, item_livery, item_shape};
 pub(crate) use livery::{Liveries, field_rect};
 pub use loot::{LootTakeClick, LootWindow};
 pub(crate) use sky::Daylight;

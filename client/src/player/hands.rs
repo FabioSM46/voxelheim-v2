@@ -434,6 +434,15 @@ const BLOCK_EDGE: f32 = 0.055;
 const MATERIAL_RADIUS: f32 = 0.020;
 const MATERIAL_LENGTH: f32 = 0.050;
 
+/// A struck disc, carried face-on: the flat side turned toward the camera, so a coin in the
+/// hand reads as a coin rather than as an edge-on sliver.
+///
+/// Its radius is the material stub's, because a coin is a thing of that size in a fist and
+/// the stub is what already sits correctly above [`HAND_SIZE`]; only the depth is a coin's
+/// own. See [`item_translation`], which stands it on the top of the fist by that radius.
+const COIN_RADIUS: f32 = 0.022;
+const COIN_THICKNESS: f32 = 0.008;
+
 /// The mining loop's cadence, and how far one punch carries the view model.
 ///
 /// **All three are cosmetic, and the cadence in particular is not a clock.** How fast the
@@ -1732,6 +1741,11 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Shield => neutral(shield_mesh(0.065)),
         ItemShape::Bow => neutral(bow_mesh(BOW_LENGTH)),
         ItemShape::Sceptre => neutral(sceptre_mesh(SCEPTRE_LENGTH)),
+        // Turned a quarter about X so the struck face, not the rim, is what the camera sees.
+        ItemShape::Coin => neutral(
+            Mesh::from(Cylinder::new(COIN_RADIUS, COIN_THICKNESS))
+                .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        ),
     }
 }
 
@@ -1773,6 +1787,9 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Shield => hand_top + 0.024,
         ItemShape::Bow => HAND_SIZE.y * 0.20,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
+        // Stood on the top of the fist by its radius, which is the block's and the stub's
+        // arrangement: the coin is turned face-on, so its radius is its half height.
+        ItemShape::Coin => hand_top + COIN_RADIUS - HOLD_OVERLAP,
     };
     Vec3::new(0.0, y, 0.0)
 }
@@ -2709,6 +2726,7 @@ mod tests {
             (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
             (ItemShape::Bow, crafting::ITEM_BOW),
             (ItemShape::Sceptre, crafting::ITEM_WOODEN_SCEPTRE),
+            (ItemShape::Coin, items::ITEM_SILVER),
         ]
     }
 

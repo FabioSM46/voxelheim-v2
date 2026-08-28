@@ -103,6 +103,16 @@ const (
 	// insertion, and this number is in a client's inventory the moment somebody breaks
 	// ice — and pinned by a test.
 	ItemIce
+
+	// The first coin, and the first item whose whole purpose is to be spent on somebody
+	// else. Appended for the reason every id above was — iota renumbers everything after an
+	// insertion, and this number is in a client's pack the moment somebody cuts down a
+	// draugr — and pinned by a test.
+	//
+	// **It is an ordinary stackable item and not a currency slot**, which is the decision
+	// #454 records: silver occupies pack slots like everything else, so carrying money home
+	// costs the same room as carrying bones home.
+	ItemSilver
 )
 
 // What each blade is worth, and the only copy of it.
@@ -405,6 +415,19 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// the design rather than an omission**: water is never placeable, never breakable
 	// and drops nothing, so there is no object for a row to describe.
 	ItemIce: {places: world.Ice, maxStack: 64},
+
+	// Silver. Every column but the stack limit is the registry's documented zero, and each
+	// of those zeroes is the whole of what a coin is: it places no voxel, it cannot be worn,
+	// it wears out nothing, it does no damage, it mends nothing and it feeds nobody.
+	//
+	// **Two hundred to a stack, which is the largest limit in the table and deliberately
+	// so.** Every other stack limit prices *carrying* the thing — sixty-four bones against
+	// sixteen pelts, because a bone is small and a hide is not. A coin is smaller than
+	// either, and money that had to be left on the ground would make the pack the price of
+	// trading rather than the price of hauling. There are no vendors yet (#459); the limit
+	// is chosen for the game that is coming rather than for the one line of loot that
+	// exists.
+	ItemSilver: {places: world.Air, maxStack: 200},
 }
 
 // blockDrops is the authoritative answer to a successful break. ItemNone is an
