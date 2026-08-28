@@ -602,6 +602,32 @@ mod tests {
         assert_eq!(reloaded.bindings().key(Control::Menu), KeyCode::KeyG);
     }
 
+    /// [`Control::Map`] starts on `M`, moves like any other control, and the file carries
+    /// it under its own name.
+    ///
+    /// The render and the parse are both driven by `CONTROLS`, so this asserts the row is
+    /// really there rather than that a loop exists: a control missing from the file would
+    /// silently take its default again on every load.
+    #[test]
+    fn the_map_binding_is_written_down_and_read_back() {
+        let scratch = Scratch::new("settings-map-binding");
+        let path = scratch.join("settings");
+
+        let mut settings = Settings::default();
+        assert_eq!(settings.bindings().key(Control::Map), KeyCode::KeyM);
+        settings
+            .rebind(Control::Map, KeyCode::KeyN)
+            .expect("n is bindable and free");
+
+        assert_eq!(save(&path, &settings), Ok(()));
+        let written = fs::read_to_string(&path).expect("the file that was just written");
+        assert!(written.contains("bind map n"), "{written}");
+
+        let (reloaded, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(reloaded.bindings().key(Control::Map), KeyCode::KeyN);
+    }
+
     /// A settings file written before [`Control::Consume`] existed still loads, and the
     /// new control lands on its own default because nothing in that file is using it.
     ///

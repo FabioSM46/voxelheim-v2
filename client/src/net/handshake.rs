@@ -30,8 +30,8 @@ use std::fmt;
 
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
-    LootState, Message, MineProgress, MobHit, PartyInvite, PlayerAppearance, Reject, SessionParams,
-    Snapshot, WorldClock, WorldUpdate,
+    LootState, MapExplored, MapTile, Message, MineProgress, MobHit, PartyInvite, PlayerAppearance,
+    Reject, SessionParams, Snapshot, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -106,6 +106,14 @@ pub enum Transition {
     LootClosed(LootClosed),
     /// One authoritative monster hit, admitted because a session exists.
     MobHit(MobHit),
+    /// One square of the map, admitted because a session exists.
+    ///
+    /// Nothing is checked here that the codec has not already checked, and there is
+    /// nothing the welcome could add: a tile's grid alignment and its array lengths are
+    /// properties of the tile itself, held at the decode boundary.
+    MapTile(MapTile),
+    /// One page of the ledger of where this character has been.
+    MapExplored(MapExplored),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -461,14 +469,14 @@ impl Handshake {
             (Phase::Established, Message::LootState(state)) => Ok(Transition::LootState(state)),
             (Phase::Established, Message::LootClosed(closed)) => Ok(Transition::LootClosed(closed)),
             (Phase::Established, Message::MobHit(hit)) => Ok(Transition::MobHit(hit)),
-            // V24's three map payloads. The codec has already copied and validated each
-            // one — the contract's bounds are held at the decode boundary, which is what
-            // this issue owes them — and nothing consumes one until the map window lands,
-            // so they are admitted and dropped rather than carried into an event nobody
-            // reads. `Ignored` is the same answer `MineProgress` had between V2 and the
-            // issue that drew it.
-            (Phase::Established, Message::MapTile(_)) => Ok(Transition::Ignored("MapTile")),
-            (Phase::Established, Message::MapExplored(_)) => Ok(Transition::Ignored("MapExplored")),
+            // Two of V24's three map payloads are consumed now: the codec has already
+            // copied and validated each one, and the map window is what reads them.
+            // `MarkerList` is still admitted and dropped — marks are #453 — which is the
+            // same answer `MineProgress` had between V2 and the issue that drew it.
+            (Phase::Established, Message::MapTile(tile)) => Ok(Transition::MapTile(tile)),
+            (Phase::Established, Message::MapExplored(explored)) => {
+                Ok(Transition::MapExplored(explored))
+            }
             (Phase::Established, Message::MarkerList(_)) => Ok(Transition::Ignored("MarkerList")),
 
             // -- And the same payloads before there is a session --------------------
@@ -1498,6 +1506,46 @@ mod tests {
         assert!(
             admitted.established(),
             "leaving remains an established session until the server closes it"
+        );
+    }
+
+    /// The two map payloads a session consumes are carried rather than dropped, and
+    /// neither is admitted before there is a session to draw a map for.
+    #[test]
+    fn the_map_payloads_only_belong_to_an_established_session() {
+        let tile = MapTile {
+            origin_x: 0,
+            origin_z: -256,
+            scale: 4,
+            height: vec![64; super::super::codec::MAP_TILE_CELLS],
+            surface: vec![
+                super::super::codec::MapSurface::Grass;
+                super::super::codec::MAP_TILE_CELLS
+            ],
+            explored: vec![0xff; 8],
+        };
+        let explored = MapExplored {
+            columns: vec![super::super::codec::MapColumn { cx: 1, cz: -2 }],
+        };
+
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::MapTile(tile.clone())),
+            Err(HandshakeError::Premature("MapTile"))
+        );
+        assert_eq!(
+            early.apply(Message::MapExplored(explored.clone())),
+            Err(HandshakeError::Premature("MapExplored"))
+        );
+
+        let mut admitted = established();
+        assert_eq!(
+            admitted.apply(Message::MapTile(tile.clone())),
+            Ok(Transition::MapTile(tile))
+        );
+        assert_eq!(
+            admitted.apply(Message::MapExplored(explored.clone())),
+            Ok(Transition::MapExplored(explored))
         );
     }
 

@@ -57,16 +57,18 @@ use bevy::prelude::*;
 pub use codec::BlockRequest;
 #[allow(unused_imports)] // V20 protocol surface; ECS consumers land in later issues.
 pub use codec::{
-    ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CharacterSummary,
-    ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest, DropItemRequest,
-    EditAction, EntityState, Facing, HairModel, InventoryMoveRequest, InventoryStack,
-    InventoryState, ItemDropState, LifeState, LootClosed, LootEntry, LootOpenRequest, LootState,
-    LootTakeAllRequest, LootTakeRequest, MAX_VIEW_DISTANCE, MineProgress, MineRequest, MobAction,
-    MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState,
-    PartyRequest, PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput,
-    PlayerVitals, ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
-    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
-    WorldClock, WorldUpdate,
+    ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CHUNK_COLUMN_BLOCKS,
+    CharacterSummary, ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest,
+    DropItemRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
+    InventoryStack, InventoryState, ItemDropState, LifeState, LootClosed, LootEntry,
+    LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS, MAP_TILE_EDGE,
+    MAX_VIEW_DISTANCE, MapColumn, MapExplored, MapSurface, MapTile, MapTileRequest, MineProgress,
+    MineRequest, MobAction, MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction,
+    PartyInvite, PartyMemberState, PartyRequest, PartyRosterMember, PlaceStructureRequest,
+    PlayerAppearance, PlayerInput, PlayerVitals, ProjectileKind, ProjectileState, RecipeId,
+    RefusalReason, RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams,
+    Snapshot, StructureKind, StructureState, WorldClock, WorldUpdate, map_tile_explored_bytes,
+    map_tile_span,
 };
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
@@ -80,8 +82,8 @@ pub use codec::{
     encode_attack_request, encode_block_edit_request, encode_chat_request,
     encode_chunk_resend_request, encode_consume_request, encode_craft_request,
     encode_drop_item_request, encode_inventory_move_request, encode_loot_open_request,
-    encode_loot_take_all_request, encode_loot_take_request, encode_mine_request,
-    encode_party_request, encode_place_structure_request, encode_player_input,
+    encode_loot_take_all_request, encode_loot_take_request, encode_map_tile_request,
+    encode_mine_request, encode_party_request, encode_place_structure_request, encode_player_input,
     encode_remove_structure_request, encode_repair_request,
 };
 pub use servers::ListedServer;
@@ -492,6 +494,50 @@ impl LootInbox {
 
     #[cfg(test)]
     pub fn push(&mut self, event: LootEvent) {
+        self.0.push(event);
+    }
+}
+
+/// Map payloads waiting for the map screen, in wire order.
+///
+/// **Nothing reads it yet, and the bound below is why that is safe.** The screen that
+/// drains it is the second half of #452; until then a session that sends ledger pages
+/// after its welcome fills this to [`MAP_INBOX_CAPACITY`] and stops there. Queuing a
+/// payload the ECS does not consume yet is the shape this module already uses for the
+/// outbound encoders that precede their controls.
+///
+/// Order is what makes the two kinds one queue rather than two: a `MapExplored` that
+/// arrives after a tile evicts it, and one that arrives before it does not, so the two
+/// cannot be sorted into separate inboxes without losing which happened first.
+///
+/// It carries no session lifetime of its own, and no inbox in this module does: each is
+/// drained unconditionally every `Update` by its consumer, with no run condition, so an
+/// inbox is a one-frame queue and cannot hold anything across a boundary that takes many
+/// frames to cross. The map data that *does* outlive a frame is the tile cache the screen
+/// reads, and that is where the session rule belongs, because a tile is drawn for one
+/// character in one world.
+#[derive(Resource, Debug, Default)]
+pub struct MapInbox(Vec<MapEvent>);
+
+/// The two server-owned things the map screen receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapEvent {
+    /// One square, drawn for this character at the scale it was asked for.
+    Tile(MapTile),
+    /// One page of the ledger of where this character has been.
+    Explored(MapExplored),
+}
+
+/// Enough room for a full screen of tiles and the ledger pages a join sends, while an
+/// overload still discards the oldest rather than growing without limit. A dropped tile
+/// costs one re-request; a dropped page costs an eviction that the next page redoes.
+const MAP_INBOX_CAPACITY: usize = 256;
+
+impl MapInbox {
+    fn push_bounded(&mut self, event: MapEvent) {
+        if self.0.len() == MAP_INBOX_CAPACITY {
+            self.0.remove(0);
+        }
         self.0.push(event);
     }
 }
@@ -923,6 +969,7 @@ impl Plugin for NetPlugin {
             .init_resource::<InventoryInbox>()
             .init_resource::<LootInbox>()
             .init_resource::<MobHitInbox>()
+            .init_resource::<MapInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<RefusalInbox>()
@@ -1404,6 +1451,8 @@ struct Inboxes<'w> {
     loot: Option<ResMut<'w, LootInbox>>,
     // Optional only for focused boundary tests that install the drain directly.
     mob_hits: Option<ResMut<'w, MobHitInbox>>,
+    // Optional only for focused boundary tests that install the drain directly.
+    map: Option<ResMut<'w, MapInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
     refusals: ResMut<'w, RefusalInbox>,
@@ -1549,6 +1598,19 @@ fn drain_session_events(
             Ok(SessionEvent::MobHit(hit)) => {
                 if let Some(mob_hits) = inboxes.mob_hits.as_deref_mut() {
                     mob_hits.push_bounded(hit);
+                }
+            }
+
+            // Queued, not logged: a screenful of tiles is a burst of these, and the
+            // ledger arrives in pages. The map screen's cache is the visible signal.
+            Ok(SessionEvent::MapTile(tile)) => {
+                if let Some(map) = inboxes.map.as_deref_mut() {
+                    map.push_bounded(MapEvent::Tile(tile));
+                }
+            }
+            Ok(SessionEvent::MapExplored(explored)) => {
+                if let Some(map) = inboxes.map.as_deref_mut() {
+                    map.push_bounded(MapEvent::Explored(explored));
                 }
             }
 

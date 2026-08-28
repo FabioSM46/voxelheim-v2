@@ -293,7 +293,12 @@ fn choose_input_mode(
         return;
     };
 
-    if vitals.dead() && matches!(*mode, InputMode::Inventory | InputMode::Loot) {
+    if vitals.dead()
+        && matches!(
+            *mode,
+            InputMode::Inventory | InputMode::Loot | InputMode::Map
+        )
+    {
         set_mode(&mut mode, InputMode::Playing);
     }
 
@@ -325,7 +330,7 @@ fn choose_input_mode(
 
     if keys.just_pressed(bindings.key(Control::Menu)) {
         let next = match *mode {
-            InputMode::Menu | InputMode::Loot => InputMode::Playing,
+            InputMode::Menu | InputMode::Loot | InputMode::Map => InputMode::Playing,
             InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
         };
         set_mode(&mut mode, next);
@@ -344,6 +349,29 @@ fn choose_input_mode(
         let next = match *mode {
             InputMode::Playing => InputMode::Inventory,
             InputMode::Inventory => InputMode::Playing,
+            InputMode::Loot => return,
+            InputMode::Chat => return,
+            InputMode::Menu => return,
+            InputMode::Map => return,
+        };
+        set_mode(&mut mode, next);
+        return;
+    }
+
+    // The map is the inventory's rule with a different key, deliberately and not by
+    // coincidence: it is a full-screen overlay over a live session that the server would
+    // refuse every action from while dead, so it opens from play, closes onto play, is
+    // ignored while another screen owns the keyboard, and is forced shut by death. The
+    // one thing it does not do is replace another overlay — pressing `M` over the pack
+    // does nothing, exactly as pressing `E` over the loot window does.
+    if keys.just_pressed(bindings.key(Control::Map)) {
+        if vitals.dead() {
+            return;
+        }
+        let next = match *mode {
+            InputMode::Playing => InputMode::Map,
+            InputMode::Map => InputMode::Playing,
+            InputMode::Inventory => return,
             InputMode::Loot => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
@@ -1346,6 +1374,55 @@ mod tests {
             mode_after_key(InputMode::Menu, KeyCode::KeyE),
             InputMode::Menu,
             "inventory cannot replace an open pause menu"
+        );
+    }
+
+    /// `M` opens and closes the map, and every screen that already owns the keyboard
+    /// keeps it.
+    #[test]
+    fn the_map_key_toggles_the_map_and_is_ignored_by_every_other_screen() {
+        assert_eq!(
+            mode_after_key(InputMode::Playing, KeyCode::KeyM),
+            InputMode::Map
+        );
+        assert_eq!(
+            mode_after_key(InputMode::Map, KeyCode::KeyM),
+            InputMode::Playing
+        );
+        assert_eq!(
+            mode_after_key(InputMode::Map, KeyCode::Escape),
+            InputMode::Playing,
+            "escape closes the map onto play rather than opening the pause menu over it"
+        );
+        for mode in [
+            InputMode::Chat,
+            InputMode::Loot,
+            InputMode::Menu,
+            InputMode::Inventory,
+        ] {
+            assert_eq!(
+                mode_after_key(mode, KeyCode::KeyM),
+                mode,
+                "{mode:?} does not give the keyboard up to the map"
+            );
+        }
+        assert_eq!(
+            mode_after_key(InputMode::Map, KeyCode::KeyE),
+            InputMode::Map,
+            "the pack does not replace an open map either"
+        );
+    }
+
+    /// Death takes the map, exactly as it takes the pack.
+    #[test]
+    fn a_dead_player_cannot_open_the_map_and_does_not_keep_one() {
+        assert_eq!(
+            mode_after_key_while(InputMode::Playing, KeyCode::KeyM, LifeState::Dead),
+            InputMode::Playing
+        );
+        assert_eq!(
+            mode_after_key_while(InputMode::Map, KeyCode::KeyM, LifeState::Dead),
+            InputMode::Playing
         );
     }
 
