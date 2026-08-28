@@ -69,7 +69,7 @@ use bevy::window::PrimaryWindow;
 use super::compass::coordinates_reading;
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MapColumn, MapEvent, MapInbox, MapSurface, MapTile,
-    MapTileRequest, Outbound, Session, encode_map_tile_request, map_tile_span,
+    MapTileRequest, Marker, MarkerKind, Outbound, Session, encode_map_tile_request, map_tile_span,
 };
 use crate::player::{InputMode, LookState, PlayerStats};
 
@@ -881,6 +881,7 @@ impl Plugin for MapUiPlugin {
         app.init_resource::<MapScreen>()
             .init_resource::<MapTiles>()
             .init_resource::<MapInbox>()
+            .init_resource::<Markers>()
             .init_resource::<InputMode>()
             .init_resource::<PlayerStats>()
             // `FromWorld`, so the handle exists before the `Startup` system that spawns
@@ -912,6 +913,9 @@ impl Plugin for MapUiPlugin {
                     show_the_map,
                     refresh_the_panel,
                     place_the_player_dot,
+                    // After the dot, because both are children of the picture and the
+                    // picture is sized by the composition above them.
+                    draw_the_marks,
                 )
                     .chain(),
             )
@@ -1378,6 +1382,123 @@ fn place_the_player_dot(
     }
 }
 
+/// Every mark this character holds, as the server last listed them.
+///
+/// **Replaced wholesale, never merged.** `MarkerList` is the complete list by contract, so
+/// there is no revision to agree on and no delta to miss: the last list received *is* the
+/// state, and a mark that has stopped appearing in it has stopped existing. That is also
+/// what makes this the client's whole model of a mark -- nothing here is placed hopefully
+/// and reconciled later, because there is no shape a reconciliation could take.
+///
+/// Per session, for the reason [`MapTiles`] is: a mark belongs to one character on one
+/// world, and keeping it across a sign-in would draw the last character's finds over this
+/// one's ground.
+#[derive(Resource, Debug, Default, PartialEq, Eq)]
+struct Markers(Vec<Marker>);
+
+/// One mark drawn over the picture.
+///
+/// The kind is carried as well as the id so the reconcile below can tell a mark that moved
+/// from one that has to be redrawn, without looking the mark up to find out.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerPin {
+    marker_id: u64,
+    kind: MarkerKind,
+}
+
+/// One mark's icon, in logical pixels. Big enough to read a silhouette off and small enough
+/// that a cluster of marks is still ground rather than a wall of pictures.
+const MARKER_SIZE: f32 = 22.0;
+
+/// Where one mark's icon sits on the picture, given the point its block projects to.
+///
+/// Centred on the point rather than hung from it, so the picture a player clicked toward is
+/// the block the mark is on -- the dot beside it is centred the same way.
+fn pin_node(point: Vec2) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: Val::Px(point.x - MARKER_SIZE / 2.0),
+        top: Val::Px(point.y - MARKER_SIZE / 2.0),
+        width: Val::Px(MARKER_SIZE),
+        height: Val::Px(MARKER_SIZE),
+        ..default()
+    }
+}
+
+/// Keeps exactly the marks the projection can show on the screen, where the projection puts
+/// them.
+///
+/// **A mark outside the viewport is not spawned at all**, rather than spawned and hidden. A
+/// character may hold sixty-four of them and a close zoom shows two; the ones off the edge
+/// are not nodes waiting to be laid out, and the reconcile is what makes zooming out grow
+/// the set rather than reveal it.
+///
+/// It runs when the list changes or the view moves, and on no other frame: the pins are
+/// children of the picture, so a still map with an unchanged list has nothing to re-place.
+///
+/// **`Block`, unlike everything else drawn over the picture.** A pin has to take the pointer
+/// or the tooltip below has nothing to read; the player's dot and the picture itself pass it
+/// through, because a drag must begin anywhere on the map that is not a mark.
+fn draw_the_marks(
+    mut commands: Commands,
+    screen: Res<MapScreen>,
+    markers: Res<Markers>,
+    canvases: Query<Entity, With<MapCanvas>>,
+    mut pins: Query<(Entity, &MarkerPin, &mut Node)>,
+) {
+    if !screen.is_changed() && !markers.is_changed() {
+        return;
+    }
+    let Some(canvas) = canvases.iter().next() else {
+        return;
+    };
+
+    // A closed map draws none of them, which is also what empties the screen on a
+    // disconnect: the session takes the list and the mode takes the window.
+    let mut wanted: HashMap<u64, (MarkerKind, Vec2)> = HashMap::new();
+    if screen.is_open() {
+        for marker in &markers.0 {
+            // The middle of the block, so a mark at the closest zoom sits on the square it
+            // names rather than on its top-left corner.
+            let point = screen.point_of(Vec2::new(marker.x as f32 + 0.5, marker.z as f32 + 0.5));
+            if screen.shows(point) {
+                wanted.insert(marker.marker_id, (marker.kind, point));
+            }
+        }
+    }
+
+    for (entity, pin, mut node) in &mut pins {
+        // A kind that no longer matches is a redraw rather than a move. Unreachable while
+        // the server mints an id once and never again, and one arm rather than an
+        // assumption: the picture is the pin's, and nothing else here would notice.
+        match wanted.remove(&pin.marker_id) {
+            Some((kind, point)) if kind == pin.kind => {
+                let placed = pin_node(point);
+                if (node.left, node.top) != (placed.left, placed.top) {
+                    (node.left, node.top) = (placed.left, placed.top);
+                }
+            }
+            Some(again) => {
+                wanted.insert(pin.marker_id, again);
+                commands.entity(entity).despawn();
+            }
+            None => commands.entity(entity).despawn(),
+        }
+    }
+
+    for (marker_id, (kind, point)) in wanted {
+        commands
+            .spawn((
+                MarkerPin { marker_id, kind },
+                ChildOf(canvas),
+                Button,
+                pin_node(point),
+                FocusPolicy::Block,
+            ))
+            .with_children(|pin| super::icon::spawn_marker(pin, kind));
+    }
+}
+
 /// Opens and closes the map with [`InputMode::Map`], and drops the cache with the session.
 ///
 /// The mode is the single owner of *whether* the map is up — `ui/mod.rs` already refuses
@@ -1389,6 +1510,7 @@ fn follow_input_mode(
     stats: Res<PlayerStats>,
     mut screen: ResMut<MapScreen>,
     mut tiles: ResMut<MapTiles>,
+    mut markers: ResMut<Markers>,
 ) {
     if session.is_none() {
         if screen.is_open() {
@@ -1398,6 +1520,11 @@ fn follow_input_mode(
         // sessions would put the last character's ground under this one's fog.
         if !tiles.tiles.is_empty() || !tiles.in_flight.is_empty() {
             tiles.clear();
+        }
+        // And a mark belongs to one character, which is the stronger of the two: a tile is
+        // ground anybody could have walked over, and a mark is somebody's own note.
+        if !markers.0.is_empty() {
+            markers.0.clear();
         }
         return;
     }
@@ -1428,14 +1555,27 @@ fn block_of(value: f32) -> i32 {
         .clamp(-WORLD_EXTENT as f32, WORLD_EXTENT as f32) as i32
 }
 
-/// Files every drawn square and applies every ledger page, in wire order.
-fn ingest_map_payloads(mut inbox: ResMut<MapInbox>, mut tiles: ResMut<MapTiles>) {
+/// Files every drawn square, applies every ledger page and takes every mark list, in wire
+/// order.
+fn ingest_map_payloads(
+    mut inbox: ResMut<MapInbox>,
+    mut tiles: ResMut<MapTiles>,
+    mut markers: ResMut<Markers>,
+) {
     for event in inbox.take() {
         match event {
             MapEvent::Tile(tile) => tiles.insert(tile),
             MapEvent::Explored(explored) => {
                 for column in explored.columns {
                     tiles.evict(column);
+                }
+            }
+            // Assigned, never merged: the list is complete by contract, so the last one
+            // received is the state. Two lists in one frame therefore leave the second,
+            // which is the only reading of them that is not a guess about order.
+            MapEvent::Markers(list) => {
+                if markers.0 != list.markers {
+                    markers.0 = list.markers;
                 }
             }
         }
@@ -1496,7 +1636,7 @@ mod tests {
     use bevy::asset::AssetPlugin;
 
     use crate::net::{
-        ANY_TOKEN, MAP_TILE_CELLS, MapExplored, SessionParams, map_tile_explored_bytes,
+        ANY_TOKEN, MAP_TILE_CELLS, MapExplored, MarkerList, SessionParams, map_tile_explored_bytes,
     };
 
     fn session() -> Session {
@@ -2254,6 +2394,174 @@ mod tests {
             Some(Vec3::new(200_000.0, 70.0, 8.0));
         app.update();
         assert_eq!(dot(&mut app).0, Display::None);
+    }
+
+    fn mark(marker_id: u64, x: i32, z: i32, kind: MarkerKind, note: &str) -> Marker {
+        Marker {
+            marker_id,
+            x,
+            z,
+            kind,
+            note: note.to_owned(),
+        }
+    }
+
+    /// Hands the screen one complete list, the way the server does.
+    fn list(app: &mut App, markers: Vec<Marker>) {
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Markers(MarkerList { markers }));
+        app.update();
+    }
+
+    /// Every mark currently drawn, by id, with where its icon sits and how many rectangles
+    /// it drew.
+    fn drawn_marks(app: &mut App) -> Vec<(u64, MarkerKind, Val, Val, usize)> {
+        let mut drawn: Vec<_> = app
+            .world_mut()
+            .query::<(&MarkerPin, &Node, Option<&Children>)>()
+            .iter(app.world())
+            .map(|(pin, node, children)| {
+                (
+                    pin.marker_id,
+                    pin.kind,
+                    node.left,
+                    node.top,
+                    children.map_or(0, |children| children.iter().count()),
+                )
+            })
+            .collect();
+        drawn.sort_by_key(|drawn| drawn.0);
+        drawn
+    }
+
+    /// Where the picture puts the middle of one block.
+    fn pin_at(screen: &MapScreen, x: i32, z: i32) -> (Val, Val) {
+        let point = screen.point_of(Vec2::new(x as f32 + 0.5, z as f32 + 0.5));
+        (
+            Val::Px(point.x - MARKER_SIZE / 2.0),
+            Val::Px(point.y - MARKER_SIZE / 2.0),
+        )
+    }
+
+    #[test]
+    fn every_mark_in_the_list_is_drawn_where_the_projection_puts_it_and_no_others_are() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert!(drawn_marks(&mut app).is_empty(), "nothing has been listed");
+
+        list(
+            &mut app,
+            vec![
+                mark(1, 0, 0, MarkerKind::Cave, "cold"),
+                mark(2, 64, -32, MarkerKind::Boss, ""),
+                // Far outside a viewport that spans a couple of thousand blocks.
+                mark(3, 900_000, 0, MarkerKind::Note, "another day"),
+            ],
+        );
+
+        let screen = screen_of(&mut app);
+        let drawn = drawn_marks(&mut app);
+        assert_eq!(
+            drawn.len(),
+            2,
+            "a mark off the edge of the viewport is not a node, {drawn:?}"
+        );
+        assert_eq!(drawn[0].0, 1);
+        assert_eq!(drawn[0].1, MarkerKind::Cave);
+        assert_eq!((drawn[0].2, drawn[0].3), pin_at(&screen, 0, 0));
+        assert_eq!((drawn[1].2, drawn[1].3), pin_at(&screen, 64, -32));
+        for mark in &drawn {
+            assert!(
+                mark.4 > 0,
+                "a mark with no rectangles is not drawn: {mark:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_list_replaces_the_one_before_it_rather_than_adding_to_it() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+
+        list(
+            &mut app,
+            vec![
+                mark(1, 0, 0, MarkerKind::Cave, ""),
+                mark(2, 64, 64, MarkerKind::Camp, ""),
+            ],
+        );
+        assert_eq!(drawn_marks(&mut app).len(), 2);
+
+        // The second mark is gone and the first has moved: both are the same message, and
+        // neither is a delta this client had to work out.
+        list(&mut app, vec![mark(1, 128, 128, MarkerKind::Cave, "")]);
+        let screen = screen_of(&mut app);
+        let drawn = drawn_marks(&mut app);
+        assert_eq!(drawn.len(), 1, "the list is the whole state: {drawn:?}");
+        assert_eq!(drawn[0].0, 1);
+        assert_eq!((drawn[0].2, drawn[0].3), pin_at(&screen, 128, 128));
+    }
+
+    #[test]
+    fn a_mark_the_view_left_behind_stops_being_a_node_and_comes_back_when_it_returns() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        list(&mut app, vec![mark(1, 0, 0, MarkerKind::Village, "")]);
+        assert_eq!(drawn_marks(&mut app).len(), 1);
+
+        // Two screenfuls away, with the list untouched.
+        let span = screen_of(&mut app).span_blocks();
+        app.world_mut().resource_mut::<MapScreen>().centre.x += span.x * 2;
+        app.update();
+        assert!(
+            drawn_marks(&mut app).is_empty(),
+            "a mark off the picture is not held as a hidden node"
+        );
+
+        app.world_mut().resource_mut::<MapScreen>().centre.x -= span.x * 2;
+        app.update();
+        assert_eq!(drawn_marks(&mut app).len(), 1, "and it comes back");
+    }
+
+    #[test]
+    fn the_marks_do_not_outlive_the_session() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        list(&mut app, vec![mark(1, 0, 0, MarkerKind::Monster, "trolls")]);
+        assert_eq!(drawn_marks(&mut app).len(), 1);
+
+        app.world_mut().remove_resource::<Session>();
+        app.update();
+        app.update();
+        assert!(app.world().resource::<Markers>().0.is_empty());
+        assert!(
+            drawn_marks(&mut app).is_empty(),
+            "another character's finds do not survive the sign-out"
+        );
+    }
+
+    #[test]
+    fn a_closed_map_draws_no_marks() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        list(&mut app, vec![mark(1, 0, 0, MarkerKind::Resource, "iron")]);
+        assert_eq!(drawn_marks(&mut app).len(), 1);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        app.update();
+        assert!(drawn_marks(&mut app).is_empty());
+        assert_eq!(
+            app.world().resource::<Markers>().0.len(),
+            1,
+            "the list is the server's and outlives the window that draws it"
+        );
     }
 
     #[test]

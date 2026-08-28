@@ -1755,6 +1755,24 @@ pub enum MarkerKind {
 }
 
 impl MarkerKind {
+    /// Every kind, in the order `schemas/player.fbs` declares them.
+    ///
+    /// One list, so the row of kind buttons on the map is laid out from the contract rather
+    /// than from a second enumeration somebody has to remember to extend.
+    // The row of buttons is the control that places a mark, and it lands with the form that
+    // holds it; drawing the marks the server already sent needs no enumeration. Until then
+    // the sweep over every kind's picture is what reads this.
+    #[allow(dead_code)]
+    pub const ALL: [Self; 7] = [
+        Self::Resource,
+        Self::Cave,
+        Self::Monster,
+        Self::Boss,
+        Self::Camp,
+        Self::Village,
+        Self::Note,
+    ];
+
     fn from_wire(value: fb::MarkerKind) -> Option<Self> {
         match value {
             fb::MarkerKind::Resource => Some(Self::Resource),
