@@ -60,6 +60,7 @@ use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -67,9 +68,11 @@ use bevy::ui::{FocusPolicy, UiGlobalTransform, UiSystems};
 use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
+use super::text_input::{TextEdit, apply_key};
 use crate::net::{
-    CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MapColumn, MapEvent, MapInbox, MapSurface, MapTile,
-    MapTileRequest, Marker, MarkerKind, Outbound, Session, encode_map_tile_request, map_tile_span,
+    CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn, MapEvent, MapInbox,
+    MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerPlaceRequest, Outbound, Sent,
+    Session, encode_map_tile_request, encode_marker_place_request, map_tile_span,
 };
 use crate::player::{InputMode, LookState, PlayerStats};
 
@@ -882,6 +885,10 @@ impl Plugin for MapUiPlugin {
             .init_resource::<MapTiles>()
             .init_resource::<MapInbox>()
             .init_resource::<Markers>()
+            .init_resource::<MarkerForm>()
+            .init_resource::<MapPress>()
+            .init_resource::<MarkerTick>()
+            .add_message::<KeyboardInput>()
             .init_resource::<InputMode>()
             .init_resource::<PlayerStats>()
             // `FromWorld`, so the handle exists before the `Startup` system that spawns
@@ -904,6 +911,12 @@ impl Plugin for MapUiPlugin {
                     ingest_map_payloads.after(crate::net::DrainNetwork),
                     // Before the asking, so a frame that panned asks for the squares the
                     // view it ended on overlaps rather than the one it started from.
+                    // Before the pan, because the press this reads is the one that would
+                    // otherwise have begun a drag, and because a form that opened this frame
+                    // is what suspends the two below it.
+                    click_the_map,
+                    press_the_form,
+                    type_the_note,
                     drag_the_map,
                     zoom_the_map,
                     request_map_tiles,
@@ -917,6 +930,7 @@ impl Plugin for MapUiPlugin {
                     // picture is sized by the composition above them.
                     draw_the_marks,
                     hover_a_mark,
+                    refresh_the_form,
                 )
                     .chain(),
             )
@@ -1096,6 +1110,9 @@ fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
             // window's own corners, and a node inside the clipped viewport could not reach
             // them. `GlobalZIndex(31)` is the shared bundle's, one above this overlay, so a
             // mark's tooltip is over the marks without any of them being over the panel.
+            spawn_marker_form(overlay);
+
+            // Last, so it is over the form as well as over the marks.
             overlay.spawn(super::tooltip_bundle(MarkerTooltip));
         });
 }
@@ -1295,13 +1312,17 @@ fn follow_the_pointer(
 fn drag_the_map(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     pointer: Res<MapPointer>,
+    form: Res<MarkerForm>,
     mut drag: ResMut<MapDrag>,
     mut screen: ResMut<MapScreen>,
 ) {
     let held = buttons
         .as_deref()
         .is_some_and(|buttons| buttons.pressed(MouseButton::Left));
-    let grabbing = held && screen.is_open();
+    // **The view is still while the form is up**, and it has to be: the form is anchored
+    // where the click landed and the block it names was read from a picture that must not
+    // move under it.
+    let grabbing = held && screen.is_open() && !form.is_open();
     let Some(point) = pointer.0.filter(|_| grabbing) else {
         if drag.0.is_some() {
             drag.0 = None;
@@ -1329,9 +1350,10 @@ fn drag_the_map(
 fn zoom_the_map(
     scroll: Option<Res<AccumulatedMouseScroll>>,
     pointer: Res<MapPointer>,
+    form: Res<MarkerForm>,
     mut screen: ResMut<MapScreen>,
 ) {
-    if !screen.is_open() {
+    if !screen.is_open() || form.is_open() {
         return;
     }
     let Some(steps) = scroll
@@ -1597,6 +1619,433 @@ fn hover_a_mark(
     }
 }
 
+/// The mark a click is composing, or nothing while no click has asked for one.
+///
+/// **A draft, and never a mark.** Nothing on the screen is drawn from this but the form
+/// itself: the mark appears when the server's next `MarkerList` names it, which may be never.
+/// The block is already floored here because the wire carries a block and the pointer carries
+/// a fraction, and the one place that conversion may happen is the place the player chose.
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+pub(super) struct MarkerForm(Option<MarkerDraft>);
+
+impl MarkerForm {
+    /// Whether the note field is up.
+    ///
+    /// Read by `ui/mod.rs`, which has to know one thing about this form: while it is open,
+    /// `Escape` belongs to it. It is the same exception chat gets, for the same reason --
+    /// the press that discards a line must not also close the screen behind it.
+    pub(super) const fn is_open(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// One mark being composed.
+#[derive(Debug, Clone, PartialEq)]
+struct MarkerDraft {
+    /// The block the click named, floored.
+    block: IVec2,
+    /// Where in the window it was clicked, so the form is anchored where the player pointed.
+    cursor: Vec2,
+    kind: MarkerKind,
+    note: String,
+}
+
+/// How far the pointer may travel between press and release and still be a click.
+///
+/// The map's primary button does two things and this is the whole of what separates them: a
+/// press that moved the view is a pan, and one that did not is a place. Four pixels is the
+/// slack a hand has on a button, not a threshold anybody tunes.
+const CLICK_SLOP: f32 = 4.0;
+
+/// Where the pointer went down, while it is still down.
+///
+/// `None` once the release has been read, so one press cannot be read as two clicks -- and
+/// `None` from the start when the press landed while the form was already up, which is what
+/// keeps a press on `Place` from opening a second form when the first one closes under it.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct MapPress(Option<Vec2>);
+
+/// Ordering and staleness for the server, never a clock -- [`MapTiles::next_tick`]'s field,
+/// counted apart because these are a different conversation.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct MarkerTick(u32);
+
+/// The form's plate.
+#[derive(Component)]
+struct MarkerFormRoot;
+
+/// The line naming the block the form will mark.
+#[derive(Component)]
+struct MarkerFormTitle;
+
+/// One of the seven kind buttons.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkerKindButton(MarkerKind);
+
+/// The note as it has been typed.
+#[derive(Component)]
+struct MarkerNoteText;
+
+/// The two buttons that end the form.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkerFormAction {
+    Place,
+    Cancel,
+}
+
+/// The form's own sizes, in logical pixels.
+const FORM_WIDTH: f32 = 260.0;
+const KIND_BUTTON: f32 = 30.0;
+const NOTE_HEIGHT: f32 = 26.0;
+
+/// Builds the form once, hidden. [`refresh_the_form`] owns everything about it that moves.
+fn spawn_marker_form(overlay: &mut ChildSpawnerCommands<'_>) {
+    overlay
+        .spawn((
+            MarkerFormRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Px(FORM_WIDTH),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+            BorderColor::all(super::CELL_EDGE),
+            Visibility::Hidden,
+            // **The one node over the picture that must swallow the pointer.** A click that
+            // reached the viewport through the form would begin a pan under the control the
+            // player is pressing.
+            FocusPolicy::Block,
+        ))
+        .with_children(|form| {
+            form.spawn((
+                MarkerFormTitle,
+                Text::new(String::new()),
+                TextFont {
+                    font_size: FontSize::Px(READING_SIZE),
+                    ..default()
+                },
+                TextColor(READING),
+                FocusPolicy::Pass,
+            ));
+            form.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(4.0),
+                    ..default()
+                },
+                FocusPolicy::Pass,
+            ))
+            .with_children(|row| {
+                // From `MarkerKind::ALL`, so a kind the contract grows appears here rather
+                // than in a second list somebody has to remember.
+                for kind in MarkerKind::ALL {
+                    row.spawn((
+                        MarkerKindButton(kind),
+                        Button,
+                        Node {
+                            width: Val::Px(KIND_BUTTON),
+                            height: Val::Px(KIND_BUTTON),
+                            border: UiRect::all(Val::Px(2.0)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(super::BUTTON),
+                        BorderColor::all(super::CELL_EDGE),
+                    ))
+                    .with_children(|button| super::icon::spawn_marker(button, kind));
+                }
+            });
+            form.spawn((
+                Node {
+                    height: Val::Px(NOTE_HEIGHT),
+                    padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+                BackgroundColor(super::EMPTY_CELL),
+                BorderColor::all(super::CELL_EDGE),
+                FocusPolicy::Pass,
+            ))
+            .with_children(|field| {
+                field.spawn((
+                    MarkerNoteText,
+                    Text::new(String::new()),
+                    TextFont {
+                        font_size: FontSize::Px(READING_SIZE),
+                        ..default()
+                    },
+                    TextColor(READING),
+                    FocusPolicy::Pass,
+                ));
+            });
+            form.spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(6.0),
+                    ..default()
+                },
+                FocusPolicy::Pass,
+            ))
+            .with_children(|row| {
+                for (action, label) in [
+                    (MarkerFormAction::Place, "Place"),
+                    (MarkerFormAction::Cancel, "Cancel"),
+                ] {
+                    row.spawn((
+                        action,
+                        Button,
+                        Node {
+                            flex_grow: 1.0,
+                            padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                            justify_content: JustifyContent::Center,
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
+                            ..default()
+                        },
+                        BackgroundColor(super::BUTTON),
+                    ))
+                    .with_children(|button| {
+                        button.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font_size: FontSize::Px(READING_SIZE),
+                                ..default()
+                            },
+                            TextColor(READING),
+                            FocusPolicy::Pass,
+                        ));
+                    });
+                }
+            });
+        });
+}
+
+/// Opens the form where a click that was not a drag landed.
+///
+/// **The gesture is decided on the release, from where the press was.** A drag and a place
+/// begin identically, so nothing can be decided until the button comes up; [`CLICK_SLOP`] is
+/// the whole of the distinction. The block is the picture's answer for the release rather
+/// than for the press, which is the position the pointer is actually over.
+fn click_the_map(
+    buttons: Option<Res<ButtonInput<MouseButton>>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    pointer: Res<MapPointer>,
+    screen: Res<MapScreen>,
+    mut press: ResMut<MapPress>,
+    mut form: ResMut<MarkerForm>,
+) {
+    let Some(buttons) = buttons else {
+        return;
+    };
+    if !screen.is_open() {
+        if press.0.is_some() {
+            press.0 = None;
+        }
+        return;
+    }
+    if buttons.just_pressed(MouseButton::Left) {
+        // A press that landed while the form was up belongs to the form, whether or not it
+        // hit a control: the form closing under the release must not read as a click on the
+        // map behind it.
+        press.0 = pointer.0.filter(|_| form.0.is_none());
+    }
+    if !buttons.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(from) = press.0.take() else {
+        return;
+    };
+    let Some(to) = pointer.0.filter(|point| screen.shows(*point)) else {
+        return;
+    };
+    if from.distance(to) >= CLICK_SLOP {
+        return;
+    }
+    let Some(cursor) = windows.iter().next().and_then(Window::cursor_position) else {
+        return;
+    };
+    form.0 = Some(MarkerDraft {
+        block: screen.block_at(to),
+        cursor,
+        // The mark that is only its note, because it is the one a player can mean without
+        // having read the row of pictures first.
+        kind: MarkerKind::Note,
+        note: String::new(),
+    });
+}
+
+/// Types into the note, and answers `Enter` and `Escape`.
+///
+/// The reading is `ui/text_input.rs`'s, shared with chat; the bound is the server's, mirrored
+/// so a note that could not be stored is one the field would not take rather than one the
+/// server has to refuse.
+fn type_the_note(
+    mut typed: MessageReader<KeyboardInput>,
+    screen: Res<MapScreen>,
+    mut form: ResMut<MarkerForm>,
+    mut ticks: ResMut<MarkerTick>,
+    mut outbound: Option<ResMut<Outbound>>,
+) {
+    if form.0.is_none() || !screen.is_open() {
+        // Always drain, for the reason chat does: a key pressed while no field was open must
+        // not reach one that opens later.
+        typed.clear();
+        return;
+    }
+    for key in typed.read() {
+        let Some(draft) = form.0.as_mut() else {
+            break;
+        };
+        match apply_key(key, &mut draft.note, MARKER_NOTE_MAX_BYTES) {
+            Some(TextEdit::Cancelled) => {
+                form.0 = None;
+                return;
+            }
+            Some(TextEdit::Submitted) => {
+                ask_to_place(draft, &mut ticks, outbound.as_deref_mut());
+                form.0 = None;
+                return;
+            }
+            Some(TextEdit::Typed) | None => {}
+        }
+    }
+}
+
+/// Reads the form's own controls: the seven kinds, `Place` and `Cancel`.
+fn press_the_form(
+    mut form: ResMut<MarkerForm>,
+    kinds: Query<(&Interaction, &MarkerKindButton), Changed<Interaction>>,
+    actions: Query<(&Interaction, &MarkerFormAction), Changed<Interaction>>,
+    mut ticks: ResMut<MarkerTick>,
+    mut outbound: Option<ResMut<Outbound>>,
+) {
+    if form.0.is_none() {
+        return;
+    }
+    for (interaction, button) in &kinds {
+        if *interaction == Interaction::Pressed
+            && let Some(draft) = form.0.as_mut()
+            && draft.kind != button.0
+        {
+            draft.kind = button.0;
+        }
+    }
+    for (interaction, action) in &actions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if let (MarkerFormAction::Place, Some(draft)) = (action, form.0.as_ref()) {
+            ask_to_place(draft, &mut ticks, outbound.as_deref_mut());
+        }
+        form.0 = None;
+        return;
+    }
+}
+
+/// Asks the server to put one mark on this character's map.
+///
+/// **A request and nothing else.** Nothing is added to [`Markers`] here; the mark exists when
+/// the next `MarkerList` says so, which is also how a refusal needs no undo.
+fn ask_to_place(draft: &MarkerDraft, ticks: &mut MarkerTick, outbound: Option<&mut Outbound>) {
+    let Some(outbound) = outbound else {
+        return;
+    };
+    let client_tick = ticks.0;
+    ticks.0 = ticks.0.wrapping_add(1);
+    let sent = outbound.send(encode_marker_place_request(&MarkerPlaceRequest {
+        x: draft.block.x,
+        z: draft.block.y,
+        kind: draft.kind,
+        // Trimmed, because leading and trailing space is not a note and the tooltip would
+        // draw it as an indent.
+        note: draft.note.trim().to_owned(),
+        client_tick,
+    }));
+    if sent == Sent::Dropped {
+        warn!("the outbound queue was full; one mark placement was dropped");
+    }
+}
+
+/// Keeps the form where it was opened, saying what it is about.
+fn refresh_the_form(
+    form: Res<MarkerForm>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut roots: Query<(&mut Node, &mut Visibility), With<MarkerFormRoot>>,
+    mut titles: Query<&mut Text, (With<MarkerFormTitle>, Without<MarkerNoteText>)>,
+    mut notes: Query<&mut Text, With<MarkerNoteText>>,
+    mut kinds: Query<(
+        &MarkerKindButton,
+        &Interaction,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut actions: Query<(&Interaction, &mut BackgroundColor), Without<MarkerKindButton>>,
+) {
+    let window = windows
+        .iter()
+        .next()
+        .map(|window| Vec2::new(window.width(), window.height()));
+    for (mut node, mut visibility) in &mut roots {
+        let next = match form.0 {
+            // `Inherited`, so the overlay closing takes the form with it whatever else has
+            // happened -- which is what makes `Control::Map` discard a half-typed note.
+            Some(_) => Visibility::Inherited,
+            None => Visibility::Hidden,
+        };
+        if *visibility != next {
+            *visibility = next;
+        }
+        if let (Some(draft), Some(window)) = (form.0.as_ref(), window) {
+            // The tooltip's anchor, for the tooltip's reason: the form's height is a layout
+            // answer this system does not have, so it is pinned by the edges away from the
+            // nearer side of the window rather than clamped against a size nobody knows yet.
+            super::anchor_for(draft.cursor, window).apply_to(&mut node);
+        }
+    }
+    let Some(draft) = form.0.as_ref() else {
+        return;
+    };
+    let title = format!("Mark X {} | Z {}", draft.block.x, draft.block.y);
+    for mut text in &mut titles {
+        if text.0 != title {
+            text.0 = title.clone();
+        }
+    }
+    for mut text in &mut notes {
+        if text.0 != draft.note {
+            text.0.clone_from(&draft.note);
+        }
+    }
+    for (button, interaction, mut background, mut border) in &mut kinds {
+        let wanted = super::button_colour(interaction);
+        if background.0 != wanted {
+            background.0 = wanted;
+        }
+        // The selection is the border and not the plate, so a hovered kind and the chosen one
+        // are two different answers rather than the same lighter square.
+        let edge = if button.0 == draft.kind {
+            super::SELECTED_EDGE
+        } else {
+            super::CELL_EDGE
+        };
+        if *border != BorderColor::all(edge) {
+            *border = BorderColor::all(edge);
+        }
+    }
+    for (interaction, mut background) in &mut actions {
+        let wanted = super::button_colour(interaction);
+        if background.0 != wanted {
+            background.0 = wanted;
+        }
+    }
+}
+
 /// Opens and closes the map with [`InputMode::Map`], and drops the cache with the session.
 ///
 /// The mode is the single owner of *whether* the map is up — `ui/mod.rs` already refuses
@@ -1609,7 +2058,13 @@ fn follow_input_mode(
     mut screen: ResMut<MapScreen>,
     mut tiles: ResMut<MapTiles>,
     mut markers: ResMut<Markers>,
+    mut form: ResMut<MarkerForm>,
 ) {
+    // A half-typed note belongs to the window it was opened over. The mode closing the map
+    // discards it, and so does the session ending -- neither is a place to keep a draft.
+    if (session.is_none() || *mode != InputMode::Map) && form.0.is_some() {
+        form.0 = None;
+    }
     if session.is_none() {
         if screen.is_open() {
             screen.close();
@@ -1732,6 +2187,10 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     use bevy::asset::AssetPlugin;
+    use bevy::input::ButtonState;
+    use bevy::input::keyboard::Key;
+
+    use crate::wire::voxelheim::net as fb;
 
     use crate::net::{
         ANY_TOKEN, MAP_TILE_CELLS, MapExplored, MarkerList, SessionParams, map_tile_explored_bytes,
@@ -2767,6 +3226,286 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Puts the window's cursor somewhere and lets the layout pass answer for it.
+    ///
+    /// The cursor and not [`MapPointer`] directly: that resource is rewritten every
+    /// `PostUpdate` from the window, so a test that wrote it would have it overwritten before
+    /// the next frame read it. It is also why every gesture below is several frames -- the
+    /// pointer a frame reads was written at the end of the frame before it.
+    fn point_at(app: &mut App, at: Vec2) {
+        let window = app
+            .world_mut()
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .iter(app.world())
+            .next()
+            .expect("the test's window");
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .expect("the test's window")
+            .set_cursor_position(Some(at));
+        app.update();
+    }
+
+    /// One frame of the primary button in a given state.
+    fn mouse(app: &mut App, pressed: bool, just: bool) {
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Left);
+        if !just {
+            // Clears `just_pressed` and leaves `pressed`: the middle of a gesture.
+            buttons.clear();
+        }
+        if !pressed {
+            buttons.release(MouseButton::Left);
+        }
+        app.insert_resource(buttons);
+        app.update();
+    }
+
+    /// Presses at `from`, moves to `to` and lets go: a pan when the two differ by more than
+    /// the slop, and a click when they do not.
+    fn drag_pointer(app: &mut App, from: Vec2, to: Vec2) {
+        point_at(app, from);
+        mouse(app, true, true);
+        point_at(app, to);
+        mouse(app, true, false);
+        mouse(app, false, false);
+    }
+
+    /// A press and a release in the same place: a click rather than a pan.
+    fn click_pointer(app: &mut App, at: Vec2) {
+        drag_pointer(app, at, at);
+    }
+
+    /// How many of the frames this client sent are placements.
+    ///
+    /// The map asks for tiles the whole time it is open, so a bare count of the outbound
+    /// queue answers about the wrong conversation.
+    fn place_frames(frames: &Receiver<Vec<u8>>) -> usize {
+        frames
+            .try_iter()
+            .filter(|frame| {
+                let envelope =
+                    fb::root_as_envelope(frame).expect("the client's own bytes are valid");
+                envelope.payload_type() == fb::Payload::MarkerPlaceRequest
+            })
+            .count()
+    }
+
+    fn typing(app: &mut App, key: Key) {
+        app.world_mut().write_message(KeyboardInput {
+            key_code: KeyCode::KeyA,
+            logical_key: key,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+    }
+
+    fn draft(app: &mut App) -> Option<MarkerDraft> {
+        app.world().resource::<MarkerForm>().0.clone()
+    }
+
+    /// The one placement this client sent, read back off the wire.
+    ///
+    /// Read through the generated accessors rather than through `decode`, because `decode` is
+    /// the *inbound* half and refuses a client-to-server payload by construction -- these are
+    /// the client's own bytes, and what a test can assert about them is what the server will
+    /// read out of them.
+    fn one_place_request(frames: &Receiver<Vec<u8>>) -> (i32, i32, fb::MarkerKind, String) {
+        let sent: Vec<Vec<u8>> = frames
+            .try_iter()
+            .filter(|frame| {
+                let envelope =
+                    fb::root_as_envelope(frame).expect("the client's own bytes are valid");
+                envelope.payload_type() == fb::Payload::MarkerPlaceRequest
+            })
+            .collect();
+        assert_eq!(sent.len(), 1, "exactly one placement was sent");
+        let envelope = fb::root_as_envelope(&sent[0]).expect("the client's own bytes are valid");
+        let request = envelope
+            .payload_as_marker_place_request()
+            .expect("the payload the tag names");
+        (
+            request.x(),
+            request.z(),
+            request.kind(),
+            request.note().unwrap_or_default().to_owned(),
+        )
+    }
+
+    /// An app with a window, so the form has somewhere to anchor itself.
+    fn app_with_a_window() -> (App, Receiver<Vec<u8>>) {
+        let (mut app, frames) = app();
+        app.world_mut().spawn((
+            Window {
+                resolution: bevy::window::WindowResolution::new(800, 600),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        (app, frames)
+    }
+
+    #[test]
+    fn a_click_that_was_not_a_drag_opens_the_form_on_the_block_it_landed_on() {
+        let (mut app, _frames) = app_with_a_window();
+        let point = Vec2::new(300.0, 200.0);
+
+        // A press that travelled is a pan and asks for nothing.
+        drag_pointer(&mut app, point, point + Vec2::new(40.0, 0.0));
+        assert_eq!(draft(&mut app), None, "a pan is not a place");
+
+        click_pointer(&mut app, point);
+        // Read after the pan, which moved the view the click is projected through.
+        let screen = screen_of(&mut app);
+        let open = draft(&mut app).expect("a click opens the form");
+        assert_eq!(
+            open.block,
+            screen.block_at(point),
+            "floored, and the click's"
+        );
+        assert_eq!(open.kind, MarkerKind::Note);
+        assert!(open.note.is_empty());
+
+        // And the pointer beside the picture opens nothing: there is no block there to name.
+        app.world_mut().resource_mut::<MarkerForm>().0 = None;
+        app.update();
+        click_pointer(&mut app, Vec2::new(-20.0, -20.0));
+        assert_eq!(draft(&mut app), None);
+    }
+
+    #[test]
+    fn the_view_is_still_while_the_form_is_open() {
+        let (mut app, _frames) = app_with_a_window();
+        click_pointer(&mut app, Vec2::new(300.0, 200.0));
+        let held = screen_of(&mut app);
+
+        // A drag that would have moved the map by a screenful.
+        drag_pointer(&mut app, Vec2::new(300.0, 200.0), Vec2::new(900.0, 600.0));
+        assert_eq!(screen_of(&mut app), held, "the form pins the view under it");
+
+        app.insert_resource(AccumulatedMouseScroll {
+            delta: Vec2::new(0.0, 1.0),
+            ..default()
+        });
+        app.update();
+        assert_eq!(screen_of(&mut app), held, "and the wheel with it");
+    }
+
+    #[test]
+    fn the_note_is_typed_into_the_form_and_the_byte_past_the_bound_is_refused() {
+        let (mut app, _frames) = app_with_a_window();
+        click_pointer(&mut app, Vec2::new(300.0, 200.0));
+
+        typing(&mut app, Key::Character("cold".into()));
+        typing(&mut app, Key::Space);
+        typing(&mut app, Key::Character("here".into()));
+        assert_eq!(draft(&mut app).expect("open").note, "cold here");
+
+        for _ in 0..MARKER_NOTE_MAX_BYTES {
+            typing(&mut app, Key::Character("a".into()));
+        }
+        let note = draft(&mut app).expect("open").note;
+        assert_eq!(
+            note.len(),
+            MARKER_NOTE_MAX_BYTES,
+            "the field refuses the byte past the server's bound"
+        );
+
+        // And the drawn field says what the note is.
+        let drawn = app
+            .world_mut()
+            .query_filtered::<&Text, With<MarkerNoteText>>()
+            .iter(app.world())
+            .next()
+            .map(|text| text.0.clone())
+            .expect("the form has a note field");
+        assert_eq!(drawn, note);
+    }
+
+    #[test]
+    fn place_asks_for_the_block_that_was_clicked_with_the_kind_that_was_chosen() {
+        let (mut app, frames) = app_with_a_window();
+        let screen = screen_of(&mut app);
+        let point = Vec2::new(260.0, 180.0);
+        click_pointer(&mut app, point);
+        typing(&mut app, Key::Character(" a cave ".into()));
+
+        // The kind buttons are pressed the way every other button in this client is.
+        let boss = app
+            .world_mut()
+            .query::<(Entity, &MarkerKindButton)>()
+            .iter(app.world())
+            .find(|(_, button)| button.0 == MarkerKind::Boss)
+            .map(|(entity, _)| entity)
+            .expect("seven kind buttons");
+        *app.world_mut()
+            .get_mut::<Interaction>(boss)
+            .expect("a button takes the pointer") = Interaction::Pressed;
+        app.update();
+        assert_eq!(draft(&mut app).expect("open").kind, MarkerKind::Boss);
+
+        typing(&mut app, Key::Enter);
+        assert_eq!(draft(&mut app), None, "Enter closes the form");
+
+        let (x, z, kind, note) = one_place_request(&frames);
+        let block = screen.block_at(point);
+        assert_eq!((x, z), (block.x, block.y));
+        assert_eq!(kind, fb::MarkerKind::Boss);
+        assert_eq!(note, "a cave", "trimmed, and nothing else");
+
+        // And nothing was drawn for it: the mark exists when the server says so.
+        app.update();
+        assert!(
+            drawn_marks(&mut app).is_empty(),
+            "a request is not a mark on the map"
+        );
+    }
+
+    #[test]
+    fn cancel_and_escape_both_close_the_form_and_ask_for_nothing() {
+        let (mut app, frames) = app_with_a_window();
+        click_pointer(&mut app, Vec2::new(300.0, 200.0));
+        typing(&mut app, Key::Escape);
+        assert_eq!(draft(&mut app), None);
+
+        click_pointer(&mut app, Vec2::new(300.0, 200.0));
+        let cancel = app
+            .world_mut()
+            .query::<(Entity, &MarkerFormAction)>()
+            .iter(app.world())
+            .find(|(_, action)| **action == MarkerFormAction::Cancel)
+            .map(|(entity, _)| entity)
+            .expect("the form has a Cancel");
+        *app.world_mut()
+            .get_mut::<Interaction>(cancel)
+            .expect("a button takes the pointer") = Interaction::Pressed;
+        app.update();
+        assert_eq!(draft(&mut app), None);
+        assert_eq!(place_frames(&frames), 0, "neither ending sends anything");
+    }
+
+    #[test]
+    fn closing_the_map_discards_a_half_typed_note() {
+        let (mut app, frames) = app_with_a_window();
+        click_pointer(&mut app, Vec2::new(300.0, 200.0));
+        typing(&mut app, Key::Character("half".into()));
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert_eq!(draft(&mut app), None);
+        assert_eq!(place_frames(&frames), 0);
+
+        // And reopening the map does not bring it back.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert_eq!(draft(&mut app), None);
     }
 
     #[test]

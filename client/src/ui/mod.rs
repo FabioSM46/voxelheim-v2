@@ -212,6 +212,40 @@ fn add_input_mode_systems(app: &mut App) {
     );
 }
 
+/// The two surfaces that own the keyboard without owning the mode.
+///
+/// The settings screen sits inside `Menu` and the map's note field sits inside `Map`, so
+/// neither is a mode of its own -- and both need a key pressed over them to stop meaning what
+/// it means everywhere else. Grouped for the reason [`Overlays`] is: the list only grows, and
+/// the alternative is a signature that grows with it.
+///
+/// **They are not the same exception, and the difference is the whole of why there are two
+/// methods.** The settings screen takes every key, because the press that rebinds a control
+/// must not also fire the control it is taken from. The note field takes exactly one -- the
+/// `Escape` that discards it -- and deliberately lets `Control::Map` through, so a window a
+/// player has pressed `M` to leave still leaves.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Typing<'w> {
+    settings: Option<Res<'w, SettingsScreen>>,
+    marker_form: Option<Res<'w, map::MarkerForm>>,
+}
+
+impl Typing<'_> {
+    /// Whether the settings screen is up and every key belongs to it.
+    fn settings_own_every_key(&self) -> bool {
+        self.settings
+            .as_deref()
+            .is_some_and(SettingsScreen::is_open)
+    }
+
+    /// Whether a text field is up and `Escape` belongs to it.
+    fn a_field_owns_escape(&self) -> bool {
+        self.marker_form
+            .as_deref()
+            .is_some_and(map::MarkerForm::is_open)
+    }
+}
+
 /// Every resource that decides which screen owns the pointer, as one parameter.
 ///
 /// Grouped rather than listed, for the reason `net::Inboxes` is: there is one of these
@@ -271,7 +305,7 @@ fn choose_input_mode(
     overlays: Overlays<'_>,
     vitals: Res<SelfVitals>,
     settings: Option<Res<Settings>>,
-    screen: Option<Res<SettingsScreen>>,
+    typing: Typing<'_>,
     mut mode: ResMut<InputMode>,
 ) {
     // **A full-screen overlay owns the input while one is up.** The game is running
@@ -315,7 +349,7 @@ fn choose_input_mode(
     // the press that closes it must not also resume play, and the press that rebinds a
     // control must not also fire the control it is taken from. `ui/settings.rs` runs after
     // this system for the same reason.
-    if screen.is_some_and(|screen| screen.is_open()) {
+    if typing.settings_own_every_key() {
         return;
     }
 
@@ -332,7 +366,15 @@ fn choose_input_mode(
         .as_deref()
         .map_or_else(Default::default, |settings| *settings.bindings());
 
+    // **The map's note field owns `Escape` while it is up, and nothing else.** It is chat's
+    // exception, narrowed: chat is a whole mode and this is one field inside one, so only the
+    // one key it answers is taken. `Control::Map` deliberately still closes the map over an
+    // open form, discarding the note -- a window a player has pressed `M` to leave should
+    // leave, and the note was never sent anywhere.
     if keys.just_pressed(bindings.key(Control::Menu)) {
+        if typing.a_field_owns_escape() {
+            return;
+        }
         let next = match *mode {
             InputMode::Menu | InputMode::Loot | InputMode::Map => InputMode::Playing,
             InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
