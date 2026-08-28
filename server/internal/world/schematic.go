@@ -107,6 +107,13 @@ type Schematic struct {
 const keepTerrain Block = 1<<16 - 1
 
 // At reads one voxel of a schematic in its own frame.
+//
+// Unchecked, and panics on a coordinate outside the drawing — [Index] and this
+// package's other index helpers are the same, and the reason is the same: every caller
+// is inside this package and is already iterating a range derived from W, H and D. A
+// bounds check here would be dead code that reads as a promise to callers who do not
+// exist. [mustSchematic] is where a coordinate from outside that loop — an anchor — is
+// checked, once, at init.
 func (s *Schematic) At(x, y, z int) Block {
 	return s.Voxels[(y*s.D+z)*s.W+x]
 }
