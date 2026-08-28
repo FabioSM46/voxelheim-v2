@@ -141,7 +141,29 @@ union Payload {
   //    cannot name this payload and closes the session rather than dropping it, so the
   //    V23 protocol bump is owed. The answer reuses LootState, LootClosed and
   //    ActionRefused, so nothing server -> client is added here.
-  LootTakeAllRequest       // 39
+  LootTakeAllRequest,      // 39
+
+  // -- V24. Appended, so the tags of 1..39 are untouched.
+  //
+  //    The map, in one contract change rather than six. Three of these travel
+  //    client -> server and each owes the bump on its own: an older server cannot name
+  //    the tag and closes the session rather than dropping it, so a V24 client would
+  //    handshake cleanly and lose the connection the first time somebody opened the map
+  //    or put a pin in it. The other three travel back and would have owed nothing
+  //    alone — `MapTile` answers a request, `MapExplored` is a ledger page, `MarkerList`
+  //    is the complete list a place or a removal is answered with.
+  //
+  //    They are appended together because the alternative is three bumps for one
+  //    feature, and because the server and client issues that follow this one all read
+  //    these tags. See `world.fbs` for the tile and the ledger, `player.fbs` for the
+  //    marks.
+
+  MapTileRequest,          // 40  client -> server
+  MapTile,                 // 41  server -> client
+  MapExplored,             // 42  server -> client
+  MarkerPlaceRequest,      // 43  client -> server
+  MarkerRemoveRequest,     // 44  client -> server
+  MarkerList               // 45  server -> client
 }
 
 table Envelope {

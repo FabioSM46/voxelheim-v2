@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	flatbuffers "github.com/google/flatbuffers/go"
 
@@ -66,7 +67,72 @@ const (
 	// fact about the wire, and the package that names players no longer has a 32-byte
 	// anything.
 	PlayerTokenLen = 32
+
+	// MapTileEdge is the fixed pixel edge of every map tile, at every scale. Fixing
+	// the pixel count rather than the block span is what keeps a tile's arrays a
+	// constant size, so neither side ever allocates from a number a peer chose.
+	MapTileEdge = 64
+
+	// MapTileCells is the entry count of MapTile.height and MapTile.surface.
+	MapTileCells = MapTileEdge * MapTileEdge
+
+	// ChunkColumnBlocks is the block edge of one chunk column, which is the
+	// granularity the explored ledger records and therefore the granularity
+	// MapTile.explored is a bitmask over.
+	ChunkColumnBlocks = 32
+
+	// MaxExploredColumns bounds one MapExplored page. The ledger is streamed in
+	// pages precisely so that no single frame carries a long-lived character's
+	// whole history.
+	MaxExploredColumns = 4096
+
+	// MaxMarkers is the number of marks one character may hold. schemas/player.fbs
+	// carries the argument: a map nobody can read is not a map.
+	MaxMarkers = 64
+
+	// MarkerNoteMaxBytes bounds Marker.note and MarkerPlaceRequest.note. Bytes
+	// rather than characters, because a byte is what the wire and both decoders
+	// actually count.
+	MarkerNoteMaxBytes = 120
 )
+
+// MapTileScales are the only blocks-per-pixel values this contract has: one pixel
+// per block, one per 4, one per 16. A scale is a member of a fixed set rather than a
+// range, so the absent-field zero fails closed along with everything else.
+var MapTileScales = [3]uint8{1, 4, 16}
+
+// mapTileScaleOK reports whether scale is a member of [MapTileScales].
+func mapTileScaleOK(scale uint8) bool {
+	for _, valid := range MapTileScales {
+		if scale == valid {
+			return true
+		}
+	}
+	return false
+}
+
+// MapTileSpan is how many blocks a tile covers on each axis at scale, and therefore
+// the grid every tile origin sits on. Zero for a scale this contract has no member
+// for, which is why every caller checks the scale first.
+func MapTileSpan(scale uint8) int32 {
+	if !mapTileScaleOK(scale) {
+		return 0
+	}
+	return int32(MapTileEdge) * int32(scale)
+}
+
+// MapTileExploredBytes is the exact length of MapTile.explored at scale: the tile
+// covers (MapTileSpan/ChunkColumnBlocks)² chunk columns, one bit each, rounded up to
+// whole bytes. That is 1, 8 and 128 bytes — scale 1 is the one case that rounds, and
+// its four unused high bits are zero.
+func MapTileExploredBytes(scale uint8) int {
+	span := MapTileSpan(scale)
+	if span == 0 {
+		return 0
+	}
+	edge := int(span) / ChunkColumnBlocks
+	return (edge*edge + 7) / 8
+}
 
 // ErrMalformed marks a frame that is not a decodable Envelope. Every malformed
 // input funnels through it, so callers can log one class and close the
@@ -102,6 +168,9 @@ type Message struct {
 	LootOpen           *LootOpenRequest
 	LootTake           *LootTakeRequest
 	LootTakeAll        *LootTakeAllRequest
+	MapTileRequest     *MapTileRequest
+	MarkerPlace        *MarkerPlaceRequest
+	MarkerRemove       *MarkerRemoveRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -165,6 +234,74 @@ type LootState struct {
 // LootClosed explicitly ends presentation for one corpse container.
 type LootClosed struct {
 	CorpseID uint64
+}
+
+// MapTileRequest asks for one 64x64 square of the map. It states nothing about what
+// the ground holds or what this character has explored; the server owns both.
+type MapTileRequest struct {
+	OriginX    int32
+	OriginZ    int32
+	Scale      uint8
+	ClientTick uint32
+}
+
+// MapTile is one authoritative square of the map, drawn for one character.
+//
+// Height and Surface are MapTileCells entries each, row-major with z outer and x
+// inner. Explored is a bitmask over the chunk columns the tile covers, LSB first, and
+// a pixel inside a clear column carries zero in both arrays — the server never sends
+// the shape of the unexplored.
+type MapTile struct {
+	OriginX  int32
+	OriginZ  int32
+	Scale    uint8
+	Height   []byte
+	Surface  []byte
+	Explored []byte
+}
+
+// MapColumn is one chunk column's address on the horizontal plane. There is no cy:
+// a character who has been somewhere has been there at every height.
+type MapColumn struct {
+	CX int32
+	CZ int32
+}
+
+// MapExplored is one page of the additive ledger of where a character has been. A
+// column named once is explored for good, so pages need no ordering.
+type MapExplored struct {
+	Columns []MapColumn
+}
+
+// MarkerPlaceRequest asks to put one mark on this character's map. It names no marker
+// id, because identity is the server's to mint.
+type MarkerPlaceRequest struct {
+	X          int32
+	Z          int32
+	Kind       vnet.MarkerKind
+	Note       string
+	ClientTick uint32
+}
+
+// MarkerRemoveRequest asks to take one of this character's own marks off the map.
+type MarkerRemoveRequest struct {
+	MarkerID   uint64
+	ClientTick uint32
+}
+
+// Marker is one authoritative mark on one character's map.
+type Marker struct {
+	MarkerID uint64
+	X        int32
+	Z        int32
+	Kind     vnet.MarkerKind
+	Note     string
+}
+
+// MarkerList is every mark a character holds, and it replaces the client's copy
+// wholesale. An empty list is ordinary: a character who has marked nothing.
+type MarkerList struct {
+	Markers []Marker
 }
 
 // ChatMessage is one chat line the authoritative server accepted.
@@ -1392,9 +1529,93 @@ func Decode(frame []byte) (msg Message, err error) {
 			CorpseID: request.CorpseId(),
 			Revision: request.Revision(), ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadMapTileRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.MapTileRequest
+		request.Init(table.Bytes, table.Pos)
+		// The scale is checked before the origin because the grid is computed from it:
+		// there is no alignment to test against a scale this contract has no member for,
+		// and the absent-field zero is one of those. Both are refusals in the contract's
+		// vocabulary (RequestMapTile / TileMisaligned) and protocol errors here, which is
+		// the stricter of the two answers schemas/world.fbs allows.
+		scale := request.Scale()
+		if !mapTileScaleOK(scale) {
+			return Message{}, fmt.Errorf("%w: MapTileRequest scale %d is not 1, 4 or 16", ErrMalformed, scale)
+		}
+		span := MapTileSpan(scale)
+		originX, originZ := request.OriginX(), request.OriginZ()
+		if originX%span != 0 || originZ%span != 0 {
+			return Message{}, fmt.Errorf("%w: MapTileRequest origin (%d, %d) is not on the %d-block grid", ErrMalformed, originX, originZ, span)
+		}
+		msg.MapTileRequest = &MapTileRequest{
+			OriginX: originX, OriginZ: originZ,
+			Scale: scale, ClientTick: request.ClientTick(),
+		}
+
+	case vnet.PayloadMarkerPlaceRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.MarkerPlaceRequest
+		request.Init(table.Bytes, table.Pos)
+		kind := request.Kind()
+		if !markerKindOK(kind) {
+			return Message{}, fmt.Errorf("%w: MarkerPlaceRequest kind %d is unknown", ErrMalformed, kind)
+		}
+		// Note is copied verbatim, and its length is measured in bytes for the reason the
+		// contract states it in bytes: a byte is what the wire carries and what both
+		// decoders can count without agreeing on an encoding of characters. The UTF-8
+		// check is here rather than downstream because string() over invalid bytes
+		// succeeds silently in Go, so nothing later in the server could tell.
+		note := request.Note()
+		if len(note) > MarkerNoteMaxBytes {
+			return Message{}, fmt.Errorf("%w: MarkerPlaceRequest note is %d bytes, at most %d", ErrMalformed, len(note), MarkerNoteMaxBytes)
+		}
+		if !utf8.Valid(note) {
+			return Message{}, fmt.Errorf("%w: MarkerPlaceRequest note is not valid UTF-8", ErrMalformed)
+		}
+		msg.MarkerPlace = &MarkerPlaceRequest{
+			X: request.X(), Z: request.Z(), Kind: kind,
+			Note: string(note), ClientTick: request.ClientTick(),
+		}
+
+	case vnet.PayloadMarkerRemoveRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.MarkerRemoveRequest
+		request.Init(table.Bytes, table.Pos)
+		if request.MarkerId() == 0 {
+			return Message{}, fmt.Errorf("%w: MarkerRemoveRequest marker id is absent", ErrMalformed)
+		}
+		msg.MarkerRemove = &MarkerRemoveRequest{
+			MarkerID: request.MarkerId(), ClientTick: request.ClientTick(),
+		}
 	}
 
 	return msg, nil
+}
+
+// markerKindOK reports whether kind is a member this contract names, Unknown excluded.
+//
+// Unknown is excluded rather than mapped, because it is the absent-field zero: a
+// MarkerPlaceRequest that omits kind must be refused rather than given a meaning
+// nobody asked for. That is the same call BlockEditRequest's EditAction.Unknown gets.
+func markerKindOK(kind vnet.MarkerKind) bool {
+	switch kind {
+	case vnet.MarkerKindResource, vnet.MarkerKindCave, vnet.MarkerKindMonster,
+		vnet.MarkerKindBoss, vnet.MarkerKindCamp, vnet.MarkerKindVillage,
+		vnet.MarkerKindNote:
+		return true
+	default:
+		return false
+	}
 }
 
 // decodeAppearance copies one appearance out of the buffer.
@@ -2267,6 +2488,125 @@ func EncodeLootState(state LootState) []byte {
 	vnet.LootStateAddEntries(b, entries)
 	loot := vnet.LootStateEnd(b)
 	return finishEnvelope(b, vnet.PayloadLootState, loot)
+}
+
+// EncodeMapTileRequest builds one map-tile intent for protocol round-trip tests. The
+// values are written exactly as given, misaligned ones included, so that a test can
+// present the decode boundary with the frame a broken client would send.
+func EncodeMapTileRequest(r MapTileRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.MapTileRequestStart(b)
+	vnet.MapTileRequestAddOriginX(b, r.OriginX)
+	vnet.MapTileRequestAddOriginZ(b, r.OriginZ)
+	vnet.MapTileRequestAddScale(b, r.Scale)
+	vnet.MapTileRequestAddClientTick(b, r.ClientTick)
+	request := vnet.MapTileRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadMapTileRequest, request)
+}
+
+// EncodeMarkerPlaceRequest builds one mark-placement intent for protocol round-trip
+// tests. It carries no marker id: identity is the server's to mint.
+func EncodeMarkerPlaceRequest(r MarkerPlaceRequest) []byte {
+	b := flatbuffers.NewBuilder(256)
+	note := b.CreateString(r.Note)
+
+	vnet.MarkerPlaceRequestStart(b)
+	vnet.MarkerPlaceRequestAddX(b, r.X)
+	vnet.MarkerPlaceRequestAddZ(b, r.Z)
+	vnet.MarkerPlaceRequestAddKind(b, r.Kind)
+	vnet.MarkerPlaceRequestAddNote(b, note)
+	vnet.MarkerPlaceRequestAddClientTick(b, r.ClientTick)
+	request := vnet.MarkerPlaceRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadMarkerPlaceRequest, request)
+}
+
+// EncodeMarkerRemoveRequest builds one mark-removal intent for protocol round-trip tests.
+func EncodeMarkerRemoveRequest(r MarkerRemoveRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.MarkerRemoveRequestStart(b)
+	vnet.MarkerRemoveRequestAddMarkerId(b, r.MarkerID)
+	vnet.MarkerRemoveRequestAddClientTick(b, r.ClientTick)
+	request := vnet.MarkerRemoveRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadMarkerRemoveRequest, request)
+}
+
+// EncodeMapTile builds one authoritative square of the map.
+//
+// The three vectors are written exactly as given rather than padded or truncated to
+// the contract's lengths. A tile whose arrays are the wrong size is a defect in the
+// caller, and silently correcting one here would hide it from the client's decoder,
+// which is the only thing that checks.
+func EncodeMapTile(tile MapTile) []byte {
+	b := flatbuffers.NewBuilder(2*MapTileCells + 512)
+	// Vectors are created before the table opens, as FlatBuffers requires for any
+	// value the table reaches through an offset.
+	height := b.CreateByteVector(tile.Height)
+	surface := b.CreateByteVector(tile.Surface)
+	explored := b.CreateByteVector(tile.Explored)
+
+	vnet.MapTileStart(b)
+	vnet.MapTileAddOriginX(b, tile.OriginX)
+	vnet.MapTileAddOriginZ(b, tile.OriginZ)
+	vnet.MapTileAddScale(b, tile.Scale)
+	vnet.MapTileAddHeight(b, height)
+	vnet.MapTileAddSurface(b, surface)
+	vnet.MapTileAddExplored(b, explored)
+	payload := vnet.MapTileEnd(b)
+	return finishEnvelope(b, vnet.PayloadMapTile, payload)
+}
+
+// EncodeMapExplored builds one page of the additive exploration ledger.
+func EncodeMapExplored(explored MapExplored) []byte {
+	b := flatbuffers.NewBuilder(len(explored.Columns)*8 + 128)
+	vnet.MapExploredStartColumnsVector(b, len(explored.Columns))
+	// Backwards, because a FlatBuffers vector is written from its end: the same loop
+	// EncodeLootState runs, for the same reason.
+	for i := len(explored.Columns) - 1; i >= 0; i-- {
+		column := explored.Columns[i]
+		vnet.CreateMapColumn(b, column.CX, column.CZ)
+	}
+	columns := b.EndVector(len(explored.Columns))
+
+	vnet.MapExploredStart(b)
+	vnet.MapExploredAddColumns(b, columns)
+	payload := vnet.MapExploredEnd(b)
+	return finishEnvelope(b, vnet.PayloadMapExplored, payload)
+}
+
+// EncodeMarkerList builds the complete list of marks one character holds.
+//
+// Every note is created before any marker table opens, because a table may not be
+// under construction while a string is written. An empty list is a legal message: a
+// character who has marked nothing.
+func EncodeMarkerList(list MarkerList) []byte {
+	b := flatbuffers.NewBuilder(len(list.Markers)*(MarkerNoteMaxBytes+64) + 128)
+
+	notes := make([]flatbuffers.UOffsetT, len(list.Markers))
+	for i, marker := range list.Markers {
+		notes[i] = b.CreateString(marker.Note)
+	}
+
+	offsets := make([]flatbuffers.UOffsetT, len(list.Markers))
+	for i, marker := range list.Markers {
+		vnet.MarkerStart(b)
+		vnet.MarkerAddMarkerId(b, marker.MarkerID)
+		vnet.MarkerAddX(b, marker.X)
+		vnet.MarkerAddZ(b, marker.Z)
+		vnet.MarkerAddKind(b, marker.Kind)
+		vnet.MarkerAddNote(b, notes[i])
+		offsets[i] = vnet.MarkerEnd(b)
+	}
+
+	vnet.MarkerListStartMarkersVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	markers := b.EndVector(len(offsets))
+
+	vnet.MarkerListStart(b)
+	vnet.MarkerListAddMarkers(b, markers)
+	payload := vnet.MarkerListEnd(b)
+	return finishEnvelope(b, vnet.PayloadMarkerList, payload)
 }
 
 // EncodeLootClosed explicitly ends one open corpse container.

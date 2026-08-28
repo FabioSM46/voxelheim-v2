@@ -1240,6 +1240,9 @@ pub enum RefusedAction {
     OpenLoot,
     TakeLoot,
     Attack,
+    RequestMapTile,
+    PlaceMarker,
+    RemoveMarker,
 }
 
 impl RefusedAction {
@@ -1257,6 +1260,9 @@ impl RefusedAction {
             fb::RefusedAction::OpenLoot => Self::OpenLoot,
             fb::RefusedAction::TakeLoot => Self::TakeLoot,
             fb::RefusedAction::Attack => Self::Attack,
+            fb::RefusedAction::RequestMapTile => Self::RequestMapTile,
+            fb::RefusedAction::PlaceMarker => Self::PlaceMarker,
+            fb::RefusedAction::RemoveMarker => Self::RemoveMarker,
             _ => Self::Unknown,
         }
     }
@@ -1301,6 +1307,10 @@ pub enum RefusalReason {
     StaleRevision,
     InventoryFull,
     NoAmmunition,
+    TileMisaligned,
+    TooManyMarkers,
+    NoteTooLong,
+    MarkerUnknown,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1336,6 +1346,10 @@ impl RefusalReason {
             fb::RefusalReason::StaleRevision => Self::StaleRevision,
             fb::RefusalReason::InventoryFull => Self::InventoryFull,
             fb::RefusalReason::NoAmmunition => Self::NoAmmunition,
+            fb::RefusalReason::TileMisaligned => Self::TileMisaligned,
+            fb::RefusalReason::TooManyMarkers => Self::TooManyMarkers,
+            fb::RefusalReason::NoteTooLong => Self::NoteTooLong,
+            fb::RefusalReason::MarkerUnknown => Self::MarkerUnknown,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1623,6 +1637,79 @@ pub struct LootState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootClosed {
     pub corpse_id: u64,
+}
+
+/// What a mark on the map means.
+///
+/// The wire's `Unknown = 0` is deliberately **not** a variant, for the reason
+/// [`EditAction`]'s is not: it exists so a request that omits `kind` fails closed on the
+/// server, and having it here would only be a value every encoder had to promise never to
+/// send. It is refused in the other direction too — a `Marker` carrying it is a protocol
+/// error rather than a pin nobody can read.
+// V24 establishes the vocabulary before the map window that offers a player a choice of
+// kinds lands, so every member but the one the encoder test picks is constructed nowhere
+// yet. The alternative is a contract that grows a member per issue, which is the thing
+// `MapSurface::Settlement` is reserved to avoid.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerKind {
+    Resource,
+    Cave,
+    Monster,
+    Boss,
+    Camp,
+    Village,
+    /// A mark that is only its note.
+    Note,
+}
+
+impl MarkerKind {
+    /// The wire value. Total, and that is the point of the missing `Unknown`.
+    fn wire(self) -> fb::MarkerKind {
+        match self {
+            Self::Resource => fb::MarkerKind::Resource,
+            Self::Cave => fb::MarkerKind::Cave,
+            Self::Monster => fb::MarkerKind::Monster,
+            Self::Boss => fb::MarkerKind::Boss,
+            Self::Camp => fb::MarkerKind::Camp,
+            Self::Village => fb::MarkerKind::Village,
+            Self::Note => fb::MarkerKind::Note,
+        }
+    }
+}
+
+/// One square of the map this client is asking for. **A request for data, never an
+/// outcome**, exactly as `ChunkResendRequest` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapTileRequest {
+    /// Block x of the tile's minimum corner. A multiple of `64 * scale`.
+    pub origin_x: i32,
+    /// Block z of the tile's minimum corner.
+    pub origin_z: i32,
+    /// Blocks per pixel: 1, 4 or 16.
+    pub scale: u8,
+    /// Ordering and staleness only. The server never reads it as a clock.
+    pub client_tick: u32,
+}
+
+/// One mark this client asks to put on its map. It names no id, because identity is the
+/// server's to mint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerPlaceRequest {
+    pub x: i32,
+    pub z: i32,
+    pub kind: MarkerKind,
+    /// At most [`MARKER_NOTE_MAX_BYTES`] bytes. Empty is ordinary.
+    pub note: String,
+    pub client_tick: u32,
+}
+
+/// One of this character's own marks, asked to come off the map. There is no edit
+/// message: a change is a removal and a placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkerRemoveRequest {
+    pub marker_id: u64,
+    pub client_tick: u32,
 }
 
 /// One authoritative monster blow that reduced this player's health.
@@ -2769,6 +2856,14 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 attacker_pos,
             }))
         }
+        // V24's three server -> client map payloads. The contract for them is settled and
+        // both sides' bindings are generated; nothing on this side reads one yet, so they
+        // are carried by name exactly as `MineProgress` was between V2 and the issue that
+        // drew it. Named rather than left to the fallback, which stays reachable only for
+        // a tag this build cannot put a name to at all.
+        fb::Payload::MapTile | fb::Payload::MapExplored | fb::Payload::MarkerList => {
+            Ok(Message::Deferred(name))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -2796,6 +2891,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::LootOpenRequest
         | fb::Payload::LootTakeRequest
         | fb::Payload::LootTakeAllRequest
+        | fb::Payload::MapTileRequest
+        | fb::Payload::MarkerPlaceRequest
+        | fb::Payload::MarkerRemoveRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
@@ -3982,6 +4080,76 @@ pub fn encode_loot_take_all_request(request: &LootTakeAllRequest) -> Vec<u8> {
     finish_envelope(
         builder,
         fb::Payload::LootTakeAllRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one map-tile request. It states nothing about the ground or about what this
+/// character has explored; the server owns both.
+///
+/// The origin and scale are written exactly as given, misaligned ones included. This is
+/// an encoder, not a validator: the grid is the decode boundary's to hold, and a client
+/// that corrected its own request here would hide the bug that produced it.
+// V24 establishes this outbound contract before the map window lands.
+#[allow(dead_code)]
+pub fn encode_map_tile_request(request: &MapTileRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::MapTileRequest::create(
+        &mut builder,
+        &fb::MapTileRequestArgs {
+            origin_x: request.origin_x,
+            origin_z: request.origin_z,
+            scale: request.scale,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::MapTileRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one mark-placement intent. It carries no marker id, because identity is the
+/// server's to mint, and the note is copied verbatim for the server to bound.
+// V24 establishes this outbound contract before the map window lands.
+#[allow(dead_code)]
+pub fn encode_marker_place_request(request: &MarkerPlaceRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY * 2);
+    let note = builder.create_string(&request.note);
+    let payload = fb::MarkerPlaceRequest::create(
+        &mut builder,
+        &fb::MarkerPlaceRequestArgs {
+            x: request.x,
+            z: request.z,
+            kind: request.kind.wire(),
+            note: Some(note),
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::MarkerPlaceRequest,
+        payload.as_union_value(),
+    )
+}
+
+/// Builds one mark-removal intent. There is no edit message: a change is a removal and
+/// a placement, and both are answered by the same complete `MarkerList`.
+// V24 establishes this outbound contract before the map window lands.
+#[allow(dead_code)]
+pub fn encode_marker_remove_request(request: &MarkerRemoveRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::MarkerRemoveRequest::create(
+        &mut builder,
+        &fb::MarkerRemoveRequestArgs {
+            marker_id: request.marker_id,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::MarkerRemoveRequest,
         payload.as_union_value(),
     )
 }
@@ -5882,14 +6050,22 @@ mod tests {
     /// for it: the answer is the `LootState`, `LootClosed` and `TakeLoot`/`InventoryFull`
     /// refusal V21 already defined.
     ///
+    /// **V24 appends the map: six members, three of them client to server.** A V23 server
+    /// cannot name `MapTileRequest`, `MarkerPlaceRequest` or `MarkerRemoveRequest` and
+    /// closes the session rather than dropping any of them, so each owes the bump alone
+    /// and the three are taken together. The three that travel back would have owed
+    /// nothing. Both refusal enums also gain members and neither independently owes a
+    /// bump: `RefusedAction::from_wire` and `RefusalReason::from_wire` are total by
+    /// design, so an unreadable member costs one sentence rather than the session.
+    ///
     /// The rule that generalises, now that eight shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v23_names_take_all_loot() {
+    fn protocol_v24_names_the_map() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 23);
+        assert_eq!(fb::ProtocolVersion::Current.0, 24);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5930,6 +6106,12 @@ mod tests {
             (fb::Payload::MobHit, 37),
             (fb::Payload::BlockRequest, 38),
             (fb::Payload::LootTakeAllRequest, 39),
+            (fb::Payload::MapTileRequest, 40),
+            (fb::Payload::MapTile, 41),
+            (fb::Payload::MapExplored, 42),
+            (fb::Payload::MarkerPlaceRequest, 43),
+            (fb::Payload::MarkerRemoveRequest, 44),
+            (fb::Payload::MarkerList, 45),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -5945,7 +6127,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            40,
+            46,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -5975,7 +6157,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 40] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 46] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -6016,6 +6198,12 @@ mod tests {
         (fb::Payload::MobHit, Handling::Consumed),
         (fb::Payload::BlockRequest, Handling::ClientOnly),
         (fb::Payload::LootTakeAllRequest, Handling::ClientOnly),
+        (fb::Payload::MapTileRequest, Handling::ClientOnly),
+        (fb::Payload::MapTile, Handling::Deferred),
+        (fb::Payload::MapExplored, Handling::Deferred),
+        (fb::Payload::MarkerPlaceRequest, Handling::ClientOnly),
+        (fb::Payload::MarkerRemoveRequest, Handling::ClientOnly),
+        (fb::Payload::MarkerList, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -6216,6 +6404,85 @@ mod tests {
     /// side does with it is [`RefusalReason::is_client_defect`], which is a `match` rather
     /// than a comparison: an arithmetic test would classify a member appended in a contract
     /// this build has never read, which is a guess about a group it cannot see.
+    /// The three outbound map payloads carry intent and nothing else.
+    ///
+    /// The request encoder writes a misaligned origin exactly as given, deliberately: it
+    /// is an encoder, not a validator, and a client that corrected its own request here
+    /// would hide the bug that produced it from the only boundary that checks.
+    #[test]
+    fn the_map_requests_carry_intent_and_are_never_corrected_on_the_way_out() {
+        let frame = encode_map_tile_request(&MapTileRequest {
+            origin_x: 1024,
+            origin_z: -2048,
+            scale: 16,
+            client_tick: 9,
+        });
+        assert_eq!(decode(&frame), Ok(Message::ClientOnly("MapTileRequest")));
+        let envelope = fb::root_as_envelope(&frame).expect("a frame this client built");
+        let request = envelope
+            .payload_as_map_tile_request()
+            .expect("the tag names the payload");
+        assert_eq!(
+            (
+                request.origin_x(),
+                request.origin_z(),
+                request.scale(),
+                request.client_tick()
+            ),
+            (1024, -2048, 16, 9)
+        );
+
+        let off_grid = encode_map_tile_request(&MapTileRequest {
+            origin_x: 1,
+            origin_z: 0,
+            scale: 1,
+            client_tick: 0,
+        });
+        let envelope = fb::root_as_envelope(&off_grid).expect("a frame this client built");
+        assert_eq!(
+            envelope
+                .payload_as_map_tile_request()
+                .expect("the tag names the payload")
+                .origin_x(),
+            1,
+            "the encoder writes what it was given; the grid is the decoder's to hold"
+        );
+
+        let place = encode_marker_place_request(&MarkerPlaceRequest {
+            x: -900,
+            z: 1200,
+            kind: MarkerKind::Cave,
+            note: "cold air".to_owned(),
+            client_tick: 11,
+        });
+        assert_eq!(
+            decode(&place),
+            Ok(Message::ClientOnly("MarkerPlaceRequest"))
+        );
+        let envelope = fb::root_as_envelope(&place).expect("a frame this client built");
+        let request = envelope
+            .payload_as_marker_place_request()
+            .expect("the tag names the payload");
+        assert_eq!((request.x(), request.z()), (-900, 1200));
+        assert_eq!(request.kind(), fb::MarkerKind::Cave);
+        assert_eq!(request.note(), Some("cold air"));
+        assert_eq!(request.client_tick(), 11);
+
+        let remove = encode_marker_remove_request(&MarkerRemoveRequest {
+            marker_id: 12345,
+            client_tick: 13,
+        });
+        assert_eq!(
+            decode(&remove),
+            Ok(Message::ClientOnly("MarkerRemoveRequest"))
+        );
+        let envelope = fb::root_as_envelope(&remove).expect("a frame this client built");
+        let request = envelope
+            .payload_as_marker_remove_request()
+            .expect("the tag names the payload");
+        assert_eq!((request.marker_id(), request.client_tick()), (12345, 13));
+    }
+
     #[test]
     fn the_refusal_reasons_keep_their_two_groups() {
         assert_eq!(fb::RefusedAction::Unknown.0, 0);
@@ -6230,6 +6497,11 @@ mod tests {
         assert_eq!(fb::RefusedAction::OpenLoot.0, 9);
         assert_eq!(fb::RefusedAction::TakeLoot.0, 10);
         assert_eq!(fb::RefusedAction::Attack.0, 11);
+        // V24 reserves the map's three, on the same terms as the members above: the
+        // number is free now and will not be once anything depends on it.
+        assert_eq!(fb::RefusedAction::RequestMapTile.0, 12);
+        assert_eq!(fb::RefusedAction::PlaceMarker.0, 13);
+        assert_eq!(fb::RefusedAction::RemoveMarker.0, 14);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -6240,7 +6512,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            12,
+            15,
             "a removal is refused in silence by design"
         );
 
@@ -6268,6 +6540,10 @@ mod tests {
             (fb::RefusalReason::StaleRevision, 20),
             (fb::RefusalReason::InventoryFull, 21),
             (fb::RefusalReason::NoAmmunition, 22),
+            (fb::RefusalReason::TileMisaligned, 23),
+            (fb::RefusalReason::TooManyMarkers, 24),
+            (fb::RefusalReason::NoteTooLong, 25),
+            (fb::RefusalReason::MarkerUnknown, 26),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -6277,7 +6553,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            27,
+            31,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -6304,6 +6580,10 @@ mod tests {
             RefusalReason::LootNotOwned,
             RefusalReason::StaleRevision,
             RefusalReason::InventoryFull,
+            RefusalReason::TileMisaligned,
+            RefusalReason::TooManyMarkers,
+            RefusalReason::NoteTooLong,
+            RefusalReason::MarkerUnknown,
         ] {
             assert!(
                 !reason.is_client_defect(),

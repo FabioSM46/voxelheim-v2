@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 23;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 24;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -129,6 +129,25 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// That one union member is the whole of the break: nothing else in the contract moves,
 /// no enum gains a member, and the partial-fill report reuses the `TakeLoot` /
 /// `InventoryFull` pair `LootTakeRequest` already answers with.
+///
+/// **V24 adds the map: a tile of the explored world, the ledger of where a character has
+/// been, and the character's own marks.** Three of the six new union members travel
+/// client -> server — `MapTileRequest`, `MarkerPlaceRequest` and `MarkerRemoveRequest` —
+/// and each one is a bump owed on its own, for the reason `DropItemRequest` was: a V23
+/// server cannot name the tag and closes the session rather than dropping it, so a V24
+/// client would handshake cleanly and lose the connection the first time somebody opened
+/// the map. Three bumps owed are still one bump, and taking them together is what lets
+/// the server and client issues that follow consume one settled contract instead of
+/// moving this number three more times.
+///
+/// The other three travel the ordinary way and would have owed nothing alone. Two enums
+/// are appended rather than created — `RefusedAction` and `RefusalReason` — and their new
+/// members ride inside an `ActionRefused`, whose decoders on both sides are deliberately
+/// total: an unreadable action or reason reads as `Unknown` and costs the player one
+/// sentence, never the session. That is the `MobAction.Dying` argument answered the other
+/// way, and it is worth saying out loud so the next reader does not conclude that every
+/// appended enum member is a break. It is the receiver's behaviour that decides, and this
+/// receiver drops.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -139,10 +158,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(23);
+    pub const Current: Self = Self(24);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 23;
+    pub const ENUM_MAX: u16 = 24;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

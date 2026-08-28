@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,11 +262,18 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // schemas/AGENTS.md and the Rust half of this pin — this file is the copy that was missing
 // them, and a rule stated in three places out of four is a rule somebody will read the wrong
 // version of.
-func TestProtocolV23NamesTakeAllLoot(t *testing.T) {
+// **V24 appends the map: six members, three of them client -> server.** A V23 server
+// cannot name MapTileRequest, MarkerPlaceRequest or MarkerRemoveRequest and closes the
+// session rather than dropping any of them, so each owes the bump on its own and the three
+// are taken together. The three that travel back would have owed nothing alone. The two
+// refusal enums also gain members, and those do not independently owe a bump either: both
+// decoders are total by design and read an unrecognised member as Unknown, which costs a
+// player one sentence rather than the session.
+func TestProtocolV24NamesTheMap(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 23 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 23", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 24 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 24", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -307,6 +315,12 @@ func TestProtocolV23NamesTakeAllLoot(t *testing.T) {
 		vnet.PayloadMobHit,
 		vnet.PayloadBlockRequest,
 		vnet.PayloadLootTakeAllRequest,
+		vnet.PayloadMapTileRequest,
+		vnet.PayloadMapTile,
+		vnet.PayloadMapExplored,
+		vnet.PayloadMarkerPlaceRequest,
+		vnet.PayloadMarkerRemoveRequest,
+		vnet.PayloadMarkerList,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -368,6 +382,220 @@ func TestLootRequestsCarryOnlyIntentAndRejectAbsentIdentities(t *testing.T) {
 		}
 	}
 
+}
+
+// A map tile is asked for on the grid, and the decode boundary is where the grid is held.
+//
+// Scale first, origin second, and the order is the argument: alignment is computed *from*
+// the scale, so there is nothing to test a misaligned origin against until the scale is a
+// member this contract names. The absent-field zero is one of the values that is not.
+//
+// schemas/world.fbs states both as refusals — RequestMapTile with TileMisaligned — and
+// allows a decoder that can see the violation from the frame alone to close the session
+// instead. This is that decoder, and this is the stricter of the two answers.
+func TestMapTileRequestIsRefusedOffTheGridAndAtAnUnknownScale(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []MapTileRequest{
+		{OriginX: 0, OriginZ: 0, Scale: 1, ClientTick: 7},
+		{OriginX: 64, OriginZ: -128, Scale: 1, ClientTick: 8},
+		{OriginX: 256, OriginZ: -256, Scale: 4, ClientTick: 9},
+		{OriginX: -1024, OriginZ: 2048, Scale: 16, ClientTick: 10},
+	} {
+		msg, err := Decode(EncodeMapTileRequest(want))
+		if err != nil || msg.Kind != vnet.PayloadMapTileRequest ||
+			msg.MapTileRequest == nil || *msg.MapTileRequest != want {
+			t.Fatalf("map tile round trip = %+v, %v; want %+v", msg, err, want)
+		}
+	}
+
+	for name, request := range map[string]MapTileRequest{
+		"absent scale":        {OriginX: 0, OriginZ: 0},
+		"scale 2":             {OriginX: 0, OriginZ: 0, Scale: 2},
+		"scale 255":           {OriginX: 0, OriginZ: 0, Scale: 255},
+		"x off the grid":      {OriginX: 1, OriginZ: 0, Scale: 1},
+		"z off the grid":      {OriginX: 0, OriginZ: 63, Scale: 1},
+		"aligned for a finer": {OriginX: 64, OriginZ: 0, Scale: 4},
+		"negative off grid":   {OriginX: -1, OriginZ: 0, Scale: 16},
+	} {
+		if _, err := Decode(EncodeMapTileRequest(request)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s decoded with %v, want ErrMalformed", name, err)
+		}
+	}
+
+	// The three scales, their block spans and the exact size of the mask each one needs.
+	// Scale 1 is the case that rounds: 4 chunk columns do not fill a byte, and the
+	// contract says the four unused high bits are zero rather than that the vector is
+	// half a byte long.
+	for _, row := range []struct {
+		scale         uint8
+		span          int32
+		exploredBytes int
+	}{{1, 64, 1}, {4, 256, 8}, {16, 1024, 128}} {
+		if got := MapTileSpan(row.scale); got != row.span {
+			t.Errorf("MapTileSpan(%d) = %d, want %d", row.scale, got, row.span)
+		}
+		if got := MapTileExploredBytes(row.scale); got != row.exploredBytes {
+			t.Errorf("MapTileExploredBytes(%d) = %d, want %d", row.scale, got, row.exploredBytes)
+		}
+	}
+	if got := MapTileSpan(3); got != 0 {
+		t.Errorf("MapTileSpan(3) = %d, want 0 for a scale this contract has no member for", got)
+	}
+	if got := MapTileExploredBytes(3); got != 0 {
+		t.Errorf("MapTileExploredBytes(3) = %d, want 0", got)
+	}
+}
+
+// A mark is placed by kind, place and text, and never by id: identity is the server's.
+//
+// The note is bounded in bytes because that is what the wire carries, and it is checked
+// for valid UTF-8 here because string() over invalid bytes succeeds silently in Go — so
+// this is the only boundary that can tell.
+func TestMarkerRequestsCarryOnlyIntentAndAreBoundedAtTheDecodeBoundary(t *testing.T) {
+	t.Parallel()
+
+	placeWant := MarkerPlaceRequest{X: -900, Z: 1200, Kind: vnet.MarkerKindCave, Note: "cold air", ClientTick: 11}
+	place, err := Decode(EncodeMarkerPlaceRequest(placeWant))
+	if err != nil || place.Kind != vnet.PayloadMarkerPlaceRequest ||
+		place.MarkerPlace == nil || *place.MarkerPlace != placeWant {
+		t.Fatalf("marker place round trip = %+v, %v; want %+v", place, err, placeWant)
+	}
+
+	// An empty note is ordinary, and absent and empty are the same empty note.
+	emptyWant := MarkerPlaceRequest{X: 0, Z: 0, Kind: vnet.MarkerKindNote, ClientTick: 12}
+	empty, err := Decode(EncodeMarkerPlaceRequest(emptyWant))
+	if err != nil || empty.MarkerPlace == nil || *empty.MarkerPlace != emptyWant {
+		t.Fatalf("empty note round trip = %+v, %v; want %+v", empty, err, emptyWant)
+	}
+
+	// Exactly at the bound is accepted; one byte past it is not.
+	atBound := MarkerPlaceRequest{Kind: vnet.MarkerKindCamp, Note: strings.Repeat("a", MarkerNoteMaxBytes)}
+	if _, err := Decode(EncodeMarkerPlaceRequest(atBound)); err != nil {
+		t.Errorf("a %d-byte note was refused: %v", MarkerNoteMaxBytes, err)
+	}
+
+	removeWant := MarkerRemoveRequest{MarkerID: 12345, ClientTick: 13}
+	remove, err := Decode(EncodeMarkerRemoveRequest(removeWant))
+	if err != nil || remove.Kind != vnet.PayloadMarkerRemoveRequest ||
+		remove.MarkerRemove == nil || *remove.MarkerRemove != removeWant {
+		t.Fatalf("marker remove round trip = %+v, %v; want %+v", remove, err, removeWant)
+	}
+
+	for name, frame := range map[string][]byte{
+		"absent kind":     EncodeMarkerPlaceRequest(MarkerPlaceRequest{Note: "somewhere"}),
+		"unknown kind":    EncodeMarkerPlaceRequest(MarkerPlaceRequest{Kind: vnet.MarkerKind(200)}),
+		"note past bound": EncodeMarkerPlaceRequest(MarkerPlaceRequest{Kind: vnet.MarkerKindNote, Note: strings.Repeat("a", MarkerNoteMaxBytes+1)}),
+		// Bytes, not characters: 40 three-byte runes are 120 bytes and pass, 41 are 123
+		// and do not. A bound counted in characters would have accepted the second.
+		"multibyte past bound":   EncodeMarkerPlaceRequest(MarkerPlaceRequest{Kind: vnet.MarkerKindNote, Note: strings.Repeat("ᛗ", 41)}),
+		"note that is not utf-8": EncodeMarkerPlaceRequest(MarkerPlaceRequest{Kind: vnet.MarkerKindNote, Note: string([]byte{0xff, 0xfe})}),
+		"removal without an id":  EncodeMarkerRemoveRequest(MarkerRemoveRequest{ClientTick: 1}),
+	} {
+		if _, decodeErr := Decode(frame); !errors.Is(decodeErr, ErrMalformed) {
+			t.Errorf("%s decoded with %v, want ErrMalformed", name, decodeErr)
+		}
+	}
+	if _, err := Decode(EncodeMarkerPlaceRequest(MarkerPlaceRequest{Kind: vnet.MarkerKindNote, Note: strings.Repeat("ᛗ", 40)})); err != nil {
+		t.Errorf("40 three-byte runes are exactly %d bytes and were refused: %v", MarkerNoteMaxBytes, err)
+	}
+}
+
+// The three server-to-client map messages encode the shapes their decoders are held to.
+//
+// Written as the encoders' own round trip through the generated accessors, because this
+// side has no decode arm for a payload only a server sends — the client's decoder is what
+// enforces the lengths, and it is tested there.
+func TestMapServerMessagesCarryCompleteTilesLedgerPagesAndMarks(t *testing.T) {
+	t.Parallel()
+
+	tile := MapTile{
+		OriginX: 256, OriginZ: -512, Scale: 4,
+		Height:   make([]byte, MapTileCells),
+		Surface:  make([]byte, MapTileCells),
+		Explored: make([]byte, MapTileExploredBytes(4)),
+	}
+	tile.Height[0], tile.Height[MapTileCells-1] = 64, 255
+	tile.Surface[0] = byte(vnet.MapSurfaceForest)
+	tile.Surface[MapTileCells-1] = byte(vnet.MapSurfaceSettlement)
+	tile.Explored[0] = 0b0000_0011
+
+	env := vnet.GetRootAsEnvelope(EncodeMapTile(tile), 0)
+	if env.PayloadType() != vnet.PayloadMapTile {
+		t.Fatalf("payload = %s, want MapTile", env.PayloadType())
+	}
+	table := payloadTable(t, env)
+	decoded := new(vnet.MapTile)
+	decoded.Init(table.Bytes, table.Pos)
+	if decoded.OriginX() != tile.OriginX || decoded.OriginZ() != tile.OriginZ || decoded.Scale() != tile.Scale {
+		t.Fatalf("tile header = (%d, %d) scale %d", decoded.OriginX(), decoded.OriginZ(), decoded.Scale())
+	}
+	if !bytes.Equal(decoded.HeightBytes(), tile.Height) {
+		t.Error("height did not survive the round trip")
+	}
+	if !bytes.Equal(decoded.SurfaceBytes(), tile.Surface) {
+		t.Error("surface did not survive the round trip")
+	}
+	if !bytes.Equal(decoded.ExploredBytes(), tile.Explored) {
+		t.Error("explored mask did not survive the round trip")
+	}
+
+	ledger := MapExplored{Columns: []MapColumn{{CX: 0, CZ: 0}, {CX: -3, CZ: 91}}}
+	ledgerEnv := vnet.GetRootAsEnvelope(EncodeMapExplored(ledger), 0)
+	if ledgerEnv.PayloadType() != vnet.PayloadMapExplored {
+		t.Fatalf("payload = %s, want MapExplored", ledgerEnv.PayloadType())
+	}
+	ledgerTable := payloadTable(t, ledgerEnv)
+	explored := new(vnet.MapExplored)
+	explored.Init(ledgerTable.Bytes, ledgerTable.Pos)
+	if explored.ColumnsLength() != len(ledger.Columns) {
+		t.Fatalf("ledger page has %d columns, want %d", explored.ColumnsLength(), len(ledger.Columns))
+	}
+	for index, want := range ledger.Columns {
+		column := new(vnet.MapColumn)
+		if !explored.Columns(column, index) {
+			t.Fatalf("column %d absent", index)
+		}
+		if got := (MapColumn{CX: column.Cx(), CZ: column.Cz()}); got != want {
+			t.Errorf("column %d = %+v, want %+v", index, got, want)
+		}
+	}
+
+	marks := MarkerList{Markers: []Marker{
+		{MarkerID: 1, X: 10, Z: -10, Kind: vnet.MarkerKindBoss, Note: "the draugr"},
+		{MarkerID: 2, X: 0, Z: 0, Kind: vnet.MarkerKindNote},
+	}}
+	marksEnv := vnet.GetRootAsEnvelope(EncodeMarkerList(marks), 0)
+	if marksEnv.PayloadType() != vnet.PayloadMarkerList {
+		t.Fatalf("payload = %s, want MarkerList", marksEnv.PayloadType())
+	}
+	marksTable := payloadTable(t, marksEnv)
+	list := new(vnet.MarkerList)
+	list.Init(marksTable.Bytes, marksTable.Pos)
+	if list.MarkersLength() != len(marks.Markers) {
+		t.Fatalf("list has %d marks, want %d", list.MarkersLength(), len(marks.Markers))
+	}
+	for index, want := range marks.Markers {
+		marker := new(vnet.Marker)
+		if !list.Markers(marker, index) {
+			t.Fatalf("mark %d absent", index)
+		}
+		got := Marker{MarkerID: marker.MarkerId(), X: marker.X(), Z: marker.Z(),
+			Kind: marker.Kind(), Note: string(marker.Note())}
+		if got != want {
+			t.Errorf("mark %d = %+v, want %+v", index, got, want)
+		}
+	}
+
+	// An empty list is a legal message and the one a character who has marked nothing
+	// receives. It is MapExplored, the additive one, whose empty page states nothing.
+	emptyEnv := vnet.GetRootAsEnvelope(EncodeMarkerList(MarkerList{}), 0)
+	emptyTable := payloadTable(t, emptyEnv)
+	emptyList := new(vnet.MarkerList)
+	emptyList.Init(emptyTable.Bytes, emptyTable.Pos)
+	if emptyList.MarkersLength() != 0 {
+		t.Errorf("empty list has %d marks, want 0", emptyList.MarkersLength())
+	}
 }
 
 func TestLootServerMessagesCarryCompleteEntriesAndExplicitClosure(t *testing.T) {
@@ -1574,6 +1802,11 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.OpenLoot":  {byte(vnet.RefusedActionOpenLoot), 9},
 		"RefusedAction.TakeLoot":  {byte(vnet.RefusedActionTakeLoot), 10},
 		"RefusedAction.Attack":    {byte(vnet.RefusedActionAttack), 11},
+		// V24. Reserved on the same terms as the eight above: the map's three client
+		// requests all refuse, and none of them is answered by anything today.
+		"RefusedAction.RequestMapTile": {byte(vnet.RefusedActionRequestMapTile), 12},
+		"RefusedAction.PlaceMarker":    {byte(vnet.RefusedActionPlaceMarker), 13},
+		"RefusedAction.RemoveMarker":   {byte(vnet.RefusedActionRemoveMarker), 14},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1588,8 +1821,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// nine is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 12 {
-		t.Errorf("RefusedAction has %d members, want 12 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 15 {
+		t.Errorf("RefusedAction has %d members, want 15 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -1618,6 +1851,10 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"StaleRevision":      {byte(vnet.RefusalReasonStaleRevision), 20},
 		"InventoryFull":      {byte(vnet.RefusalReasonInventoryFull), 21},
 		"NoAmmunition":       {byte(vnet.RefusalReasonNoAmmunition), 22},
+		"TileMisaligned":     {byte(vnet.RefusalReasonTileMisaligned), 23},
+		"TooManyMarkers":     {byte(vnet.RefusalReasonTooManyMarkers), 24},
+		"NoteTooLong":        {byte(vnet.RefusalReasonNoteTooLong), 25},
+		"MarkerUnknown":      {byte(vnet.RefusalReasonMarkerUnknown), 26},
 		"MalformedNoAnchor":  {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":    {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":      {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -1627,8 +1864,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 27 {
-		t.Errorf("RefusalReason has %d members, want 27 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 31 {
+		t.Errorf("RefusalReason has %d members, want 31 — a new one needs a decision, not a test edit", got)
 	}
 }
 

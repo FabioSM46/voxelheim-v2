@@ -231,3 +231,207 @@ table ChunkResendRequest {
   /// The chunk the client has lost and wants again.
   coord: ChunkCoord;
 }
+
+// -----------------------------------------------------------------------------
+// The map: what the explored world looks like from above.
+//
+// A map tile is a picture of terrain the server already owns, sampled from the
+// same height field the world is generated from. Nothing here streams voxels and
+// nothing here is a second copy of the world: a tile is one byte of height and
+// one byte of surface kind per pixel, and the server decides which pixels a
+// character has earned the right to see.
+// -----------------------------------------------------------------------------
+
+/// The *kind* of what a map pixel shows from above. Deliberately not a block id.
+///
+/// A map does not draw blocks, it draws what a place is: `Forest` where a tree stands,
+/// `Cave` where the surface is carved open, `Settlement` where people live. None of those
+/// three is a block, and two of them are properties of a whole column rather than of the
+/// one voxel at the top of it. Keeping this vocabulary separate from the block palette is
+/// what lets a later issue add a block without touching the map — which is the same
+/// argument `RecipeID` makes for not being an item id.
+///
+/// `Settlement` is reserved now, before anything sends it. A new member in an existing
+/// enum is a version bump whenever the receiver refuses what it cannot name (the
+/// `MobAction.Dying` argument in `common.fbs`), and this enum's receiver does refuse: a
+/// surface byte arrives inside a frame the client has already committed to reading. The
+/// settlement iteration should not have to pay a protocol bump for a colour, so the
+/// member is agreed on here, where the number is still free.
+///
+/// Zero member for the reason every enum in this contract has one, and it carries an
+/// extra job here: an unexplored pixel is `Unknown`, so "this build cannot name it" and
+/// "the server is not telling you" are one value and a client draws nothing for both.
+enum MapSurface : ubyte {
+  /// Nothing is known about this pixel, or nothing may be said about it. Both an
+  /// absent-field zero and the value the server writes for a column the character has
+  /// never had streamed to it.
+  Unknown = 0,
+
+  Grass = 1,
+  Snow = 2,
+  Sand = 3,
+  Stone = 4,
+  Gravel = 5,
+  Water = 6,
+  Ice = 7,
+
+  /// A column with a tree canopy over it. A property of the column, not of its topmost
+  /// block, which is why this vocabulary is not the block palette.
+  Forest = 8,
+
+  /// A column the surface is carved open on — an entrance, not a ceiling.
+  Cave = 9,
+
+  /// Reserved for the settlement iteration. Nothing sends it yet; see the argument above
+  /// for why the number is agreed on before anything needs it.
+  Settlement = 10
+}
+
+/// A client asking for one square of the map. **A request for data, never for an
+/// outcome.**
+///
+/// The same shape of message `ChunkResendRequest` is, and the same argument licenses it:
+/// asking is not stating. Nothing here says what the terrain holds, what the character
+/// has explored, or which pixels may be answered. The server decides all three, and a
+/// request it will not serve is refused rather than answered with a smaller tile.
+///
+/// **A tile is always 64 x 64 pixels**, whatever the scale. `scale` is how many blocks
+/// one pixel covers, so a tile spans `64 * scale` blocks on each axis: 64, 256 or 1024.
+/// Fixing the pixel count rather than the block span is what keeps `MapTile`'s arrays a
+/// constant 4096 entries at every zoom level, so neither side ever sizes an allocation
+/// from a number a peer chose.
+///
+/// Invariants on this untrusted input:
+///   - `scale` is exactly 1, 4 or 16. The absent-field zero fails closed, and so does
+///     every other value: a scale is a member of a fixed set here, not a range
+///   - `origin_x` and `origin_z` are block coordinates of the tile's minimum corner and
+///     are exact multiples of `64 * scale`. The grid is what makes a tile cacheable and
+///     what lets two requests for the same ground be the same tile
+///   - `client_tick` is ordering and staleness only, exactly as in `PlayerInput`. The
+///     server never reads it as a clock
+///
+/// A request that breaks either of the first two is refused and never answered with a
+/// tile. The refusal vocabulary is `RefusedAction.RequestMapTile` with
+/// `RefusalReason.TileMisaligned`; a decoder that can see the violation from the frame
+/// alone may close the session on it instead, which is the stricter of the two answers
+/// and the one the Go server gives. Both are refusals, and neither produces a `MapTile`.
+table MapTileRequest {
+  /// Block x of the tile's minimum corner. A multiple of `64 * scale`.
+  origin_x: int;
+
+  /// Block z of the tile's minimum corner. A multiple of `64 * scale`.
+  origin_z: int;
+
+  /// Blocks per pixel: 1, 4 or 16.
+  scale: ubyte;
+
+  /// The client's own tick counter. Ordering and staleness only.
+  client_tick: uint;
+}
+
+/// One 64 x 64 square of the map, as the server draws it for one character.
+/// Server -> client, and authoritative.
+///
+/// **Tables, not a table per pixel.** `height` and `surface` are flat `[ubyte]` of
+/// exactly 4096 entries because 4096 tables would be a FlatBuffers pathology — an offset
+/// each, and a vtable each — where two flat vectors are 8 KiB that decode to slices. It
+/// is the argument `ChunkData.runs` makes, one dimension down. The message itself is a
+/// table rather than a struct for the opposite reason: it is not settled, and a colour,
+/// an icon or a biome name is exactly the sort of thing a later issue appends.
+///
+/// **Sampling.** Both arrays are row-major with z outer and x inner:
+///
+///     index = pz * 64 + px
+///
+/// and each entry samples the world column at that pixel's **centre**, at
+/// `origin_x + px * scale + scale / 2` and `origin_z + pz * scale + scale / 2`. Sampling
+/// one column rather than averaging `scale²` of them is what keeps a coarse tile as cheap
+/// as a fine one; the map is a picture, not a measurement.
+///
+/// **`height` is `clamp(y + 64, 0, 255)`** — the surface height biased so that sea level
+/// and the world's negative half both survive a single byte, and saturated at both ends
+/// rather than wrapped. A client reads it as shading, never as a coordinate.
+///
+/// **`explored` is a bitmask over chunk columns, not over pixels.** The server records
+/// exploration at the granularity it actually has one — a chunk column streamed to this
+/// character — and a chunk column is 32 blocks square. A tile covers
+/// `(64 * scale / 32)²` of them: 4 at scale 1, 64 at scale 4, 1024 at scale 16. The bits
+/// are row-major in the same order the pixels are, z outer and x inner, **LSB first
+/// within each byte**, so bit `i` lives in `explored[i / 8] >> (i % 8)`. Rounded up to
+/// whole bytes that is exactly 1, 8 or 128 bytes — scale 1 is the one case that rounds,
+/// and its four unused high bits are zero.
+///
+/// **The unexplored is blank, not shaped.** Every pixel inside a chunk column whose bit
+/// is clear carries `0` in `height` and `Unknown` in `surface`. The server never sends
+/// the real value with a "do not draw" flag beside it, because a client is not where a
+/// secret is kept: a build that ignored the mask would otherwise hold the terrain of a
+/// world nobody has walked.
+///
+/// Invariants a decoder must enforce:
+///   - `scale` is 1, 4 or 16, and `origin_x` / `origin_z` are multiples of `64 * scale` —
+///     the same grid the request is held to, checked again because this side is where a
+///     tile is placed on a canvas
+///   - `height` and `surface` are both present and both exactly 4096 entries. A short
+///     array is a protocol error, never a partially drawn tile
+///   - every `surface` entry is a member of `MapSurface`
+///   - `explored` is present and exactly 1, 8 or 128 bytes for scale 1, 4 or 16. Bits
+///     past the column count — only ever the four high bits of a scale-1 mask — are zero
+table MapTile {
+  /// Block x of the tile's minimum corner, echoing the request that earned it.
+  origin_x: int;
+
+  /// Block z of the tile's minimum corner.
+  origin_z: int;
+
+  /// Blocks per pixel: 1, 4 or 16.
+  scale: ubyte;
+
+  /// 4096 biased heights, row-major, z outer and x inner. `clamp(y + 64, 0, 255)`.
+  height: [ubyte];
+
+  /// 4096 `MapSurface` members, in the same order as `height`.
+  surface: [ubyte];
+
+  /// The chunk columns of this tile this character has explored, one bit each,
+  /// row-major and LSB first. 1, 8 or 128 bytes by scale.
+  explored: [ubyte];
+}
+
+/// One chunk column's address on the horizontal plane.
+///
+/// A struct, and this is the settled shape the rule asks for: two ints, always present
+/// wherever it appears, and a vector of thousands of them is exactly the case inlining
+/// exists for. There is no `cy` because exploration is a property of a column rather than
+/// of a chunk — a character who has been somewhere has been there at every height.
+struct MapColumn {
+  cx: int;
+  cz: int;
+}
+
+/// Chunk columns this character has now explored. Server -> client.
+///
+/// **Additive, and that is the whole of the protocol.** A column named once is explored
+/// for the rest of that character's life; there is no message that takes one back, and
+/// a client that receives the same column twice has learned nothing new rather than
+/// something contradictory. So the client's ledger is a union of every `MapExplored` it
+/// has ever received, and no revision number is needed to order two of them.
+///
+/// Sent in pages after the welcome — a character with a long history has more columns
+/// than one frame should carry — and then again as columns are newly revealed. The page
+/// size is the server's to choose under the bound below; a client must never assume that
+/// one message is the whole ledger, and must never treat the last page as an end marker,
+/// because there is no such thing: the stream simply continues for as long as the
+/// character keeps walking.
+///
+/// A `MapExplored` is what tells a client which tiles are worth re-requesting. A tile it
+/// already holds was drawn against the mask of the moment it arrived, and a column that
+/// has since been revealed changes that tile's picture without any `MapTile` being sent.
+///
+/// Invariants a decoder must enforce:
+///   - `columns` is present and non-empty. An empty page states nothing, and reading one
+///     as "the ledger is empty" would erase a client's map
+///   - at most 4096 entries. The bound is on the wire so the receiver sizes its work from
+///     the contract rather than from a number the peer chose
+table MapExplored {
+  columns: [MapColumn];
+}

@@ -653,6 +653,96 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_map_tile_request(&self) -> Option<MapTileRequest<'a>> {
+        if self.payload_type() == Payload::MapTileRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MapTileRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_map_tile(&self) -> Option<MapTile<'a>> {
+        if self.payload_type() == Payload::MapTile {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MapTile::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_map_explored(&self) -> Option<MapExplored<'a>> {
+        if self.payload_type() == Payload::MapExplored {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MapExplored::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_marker_place_request(&self) -> Option<MarkerPlaceRequest<'a>> {
+        if self.payload_type() == Payload::MarkerPlaceRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MarkerPlaceRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_marker_remove_request(&self) -> Option<MarkerRemoveRequest<'a>> {
+        if self.payload_type() == Payload::MarkerRemoveRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MarkerRemoveRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_marker_list(&self) -> Option<MarkerList<'a>> {
+        if self.payload_type() == Payload::MarkerList {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MarkerList::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -703,6 +793,12 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::MobHit => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MobHit>>("Payload::MobHit", pos),
           Payload::BlockRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockRequest>>("Payload::BlockRequest", pos),
           Payload::LootTakeAllRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootTakeAllRequest>>("Payload::LootTakeAllRequest", pos),
+          Payload::MapTileRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MapTileRequest>>("Payload::MapTileRequest", pos),
+          Payload::MapTile => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MapTile>>("Payload::MapTile", pos),
+          Payload::MapExplored => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MapExplored>>("Payload::MapExplored", pos),
+          Payload::MarkerPlaceRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MarkerPlaceRequest>>("Payload::MarkerPlaceRequest", pos),
+          Payload::MarkerRemoveRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MarkerRemoveRequest>>("Payload::MarkerRemoveRequest", pos),
+          Payload::MarkerList => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MarkerList>>("Payload::MarkerList", pos),
           _ => Ok(()),
         }
      })?
@@ -1146,6 +1242,66 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::LootTakeAllRequest => {
                 if let Some(x) = self.payload_as_loot_take_all_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MapTileRequest => {
+                if let Some(x) = self.payload_as_map_tile_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MapTile => {
+                if let Some(x) = self.payload_as_map_tile() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MapExplored => {
+                if let Some(x) = self.payload_as_map_explored() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MarkerPlaceRequest => {
+                if let Some(x) = self.payload_as_marker_place_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MarkerRemoveRequest => {
+                if let Some(x) = self.payload_as_marker_remove_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MarkerList => {
+                if let Some(x) = self.payload_as_marker_list() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(
