@@ -638,6 +638,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_loot_take_all_request(&self) -> Option<LootTakeAllRequest<'a>> {
+        if self.payload_type() == Payload::LootTakeAllRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LootTakeAllRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -687,6 +702,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::LootClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootClosed>>("Payload::LootClosed", pos),
           Payload::MobHit => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MobHit>>("Payload::MobHit", pos),
           Payload::BlockRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlockRequest>>("Payload::BlockRequest", pos),
+          Payload::LootTakeAllRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LootTakeAllRequest>>("Payload::LootTakeAllRequest", pos),
           _ => Ok(()),
         }
      })?
@@ -1120,6 +1136,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::BlockRequest => {
                 if let Some(x) = self.payload_as_block_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LootTakeAllRequest => {
+                if let Some(x) = self.payload_as_loot_take_all_request() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

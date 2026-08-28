@@ -2784,6 +2784,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::PartyRequest
         | fb::Payload::LootOpenRequest
         | fb::Payload::LootTakeRequest
+        | fb::Payload::LootTakeAllRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
@@ -5842,14 +5843,20 @@ mod tests {
     /// cannot name the client request, while a V22 client cannot accept snapshots that
     /// omit the matching blocking statements after a clean handshake.
     ///
-    /// The rule that generalises, now that seven shapes have been argued: **ask what the
+    /// **V23 appends `LootTakeAllRequest`.** A V22 server cannot name that tag and closes
+    /// the session rather than dropping it, so the mismatch has to be caught at admission
+    /// rather than on the first corpse a player empties. Nothing arrives server to client
+    /// for it: the answer is the `LootState`, `LootClosed` and `TakeLoot`/`InventoryFull`
+    /// refusal V21 already defined.
+    ///
+    /// The rule that generalises, now that eight shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v22_names_combat_roles() {
+    fn protocol_v23_names_take_all_loot() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 22);
+        assert_eq!(fb::ProtocolVersion::Current.0, 23);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -5889,6 +5896,7 @@ mod tests {
             (fb::Payload::LootClosed, 36),
             (fb::Payload::MobHit, 37),
             (fb::Payload::BlockRequest, 38),
+            (fb::Payload::LootTakeAllRequest, 39),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -5904,7 +5912,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            39,
+            40,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -5934,7 +5942,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 39] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 40] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -5974,6 +5982,7 @@ mod tests {
         (fb::Payload::LootClosed, Handling::Consumed),
         (fb::Payload::MobHit, Handling::Consumed),
         (fb::Payload::BlockRequest, Handling::ClientOnly),
+        (fb::Payload::LootTakeAllRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.

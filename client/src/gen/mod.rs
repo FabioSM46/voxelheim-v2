@@ -106,6 +106,8 @@ pub mod voxelheim {
         pub use self::loot_open_request_generated::*;
         mod loot_take_request_generated;
         pub use self::loot_take_request_generated::*;
+        mod loot_take_all_request_generated;
+        pub use self::loot_take_all_request_generated::*;
         mod loot_entry_generated;
         pub use self::loot_entry_generated::*;
         mod loot_state_generated;

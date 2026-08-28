@@ -521,6 +521,31 @@ table LootTakeRequest {
   client_tick: uint;
 }
 
+/// Ask to take every entry a corpse container holds, in entry order, for as long as the
+/// player's pack has room. Client -> server.
+///
+/// It names no entry, no count and no order of its own: the server owns the entry order
+/// and decides what fits, exactly as it does for `LootTakeRequest`. What it does carry is
+/// the `revision` the client is looking at, for the same reason the single take does — a
+/// request written against a window the server has since changed is refused
+/// `StaleRevision` rather than quietly emptying a different container.
+///
+/// The answer is the ordinary loot vocabulary and nothing new. Emptied, the server sends
+/// `LootClosed`; otherwise it sends a `LootState` of what remains, plus
+/// `ActionRefused{TakeLoot, InventoryFull}` naming the first entry that did not fit.
+/// **Partial success is success**: a request that moved anything advances the revision
+/// exactly once, and the refusal reports the stopping point rather than undoing the rest.
+/// A request that moved nothing at all is the refusal alone.
+///
+/// Decoder invariants:
+///   - `corpse_id` is non-zero and names the `entity_id` of the `MobState` in `Corpse`
+///   - `revision` is non-zero
+table LootTakeAllRequest {
+  corpse_id: ulong;
+  revision: uint;
+  client_tick: uint;
+}
+
 /// One authoritative stack in a corpse container.
 ///
 /// A fixed struct because the complete list is replaced as one value and every entry has
