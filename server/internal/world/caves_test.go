@@ -41,8 +41,9 @@ func TestCarvedFractionIsATunnelNetworkNotASponge(t *testing.T) {
 	carved, total, mouthColumns := 0, 0, 0
 	for z := int64(caveAreaOriginZ); z < caveAreaOriginZ+caveAreaSize; z++ {
 		for x := int64(caveAreaOriginX); x < caveAreaOriginX+caveAreaSize; x++ {
-			surface := columnAt(caveSeed, x, z).surface
-			if carvedColumnTop(caveSeed, x, z, surface) < surface {
+			col := columnAt(caveSeed, x, z)
+			surface := col.surface
+			if col.carvedTop(caveSeed, x, z) < surface {
 				mouthColumns++
 			}
 			for depth := range caveAreaDepth {
@@ -290,7 +291,7 @@ func TestGeneratedColumnTopFollowsACaveMouth(t *testing.T) {
 		}
 	}
 	if actualTop != top {
-		t.Fatalf("the generated column's top solid at (%d, %d) is y=%d, but carvedColumnTop said %d", x, z, actualTop, top)
+		t.Fatalf("the generated column's top solid at (%d, %d) is y=%d, but carvedTop said %d", x, z, actualTop, top)
 	}
 	if actualTop >= surface {
 		t.Fatalf("the selected column at (%d, %d) is not open: top %d, surface %d", x, z, actualTop, surface)
@@ -304,8 +305,9 @@ func findCarvedSurfaceColumn(t *testing.T) (x, z int64, surface, top int) {
 
 	for z = caveAreaOriginZ; z < caveAreaOriginZ+caveAreaSize; z++ {
 		for x = caveAreaOriginX; x < caveAreaOriginX+caveAreaSize; x++ {
-			surface = columnAt(caveSeed, x, z).surface
-			if top = carvedColumnTop(caveSeed, x, z, surface); top < surface {
+			col := columnAt(caveSeed, x, z)
+			surface = col.surface
+			if top = col.carvedTop(caveSeed, x, z); top < surface {
 				return x, z, surface, top
 			}
 		}

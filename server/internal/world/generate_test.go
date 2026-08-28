@@ -33,11 +33,27 @@ const (
 	// the richest palette: it holds eight distinct block ids, among them the sea fill,
 	// a lid of ice, a beach and 1104 voxels of water standing in carved cave.
 	goldenWaterPath = "testdata/chunk_golden_water.bin"
+
+	// The third fixture, added for the reason the second one was.
+	//
+	// **Worldgen 6 left both of the fixtures above byte-identical**, because
+	// settlements are a lattice rather than a field: only ground within seventy-two
+	// blocks of a settlement's centre moves, and neither of those two coordinates is.
+	// So the test that exists to make a generator change impossible to miss would once
+	// again have said nothing about the change — the same shape of failure the water
+	// fixture was added to fix, one iteration later.
+	//
+	// This one was chosen by sweeping the settlements around the origin for a chunk
+	// that holds a building *and* the ground it stands on: eight distinct block ids,
+	// among them 628 voxels of plank, cobble and thatch, the plateau's grass, the rock
+	// under it and a little standing water.
+	goldenSettlementPath = "testdata/chunk_golden_settlement.bin"
 )
 
 var (
-	goldenCoord      = Coord{X: 3, Y: 2, Z: -5}
-	goldenWaterCoord = Coord{X: 182, Y: 1, Z: -59}
+	goldenCoord           = Coord{X: 3, Y: 2, Z: -5}
+	goldenWaterCoord      = Coord{X: 182, Y: 1, Z: -59}
+	goldenSettlementCoord = Coord{X: -280, Y: 1, Z: -272}
 )
 
 // TestGenerateMatchesTheGoldenChunk is the determinism contract, and the reason
@@ -64,6 +80,7 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 	}{
 		{"dry", goldenCoord, goldenPath},
 		{"water", goldenWaterCoord, goldenWaterPath},
+		{"settlement", goldenSettlementCoord, goldenSettlementPath},
 	} {
 		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 
@@ -125,11 +142,44 @@ func TestTheWaterGoldenChunkActuallyHoldsWater(t *testing.T) {
 	}
 }
 
+// The settlement fixture has to keep being about a settlement, or it is a third copy of
+// the dry one and the reason it was added is gone.
+func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
+	t.Parallel()
+
+	chunk := Generate(goldenSeed, goldenSettlementCoord)
+	counts := map[Block]int{}
+	for _, block := range chunk.Blocks {
+		counts[block]++
+	}
+
+	for _, block := range []Block{Planks, Cobblestone, Thatch, Grass, Stone} {
+		if counts[block] == 0 {
+			t.Errorf("the settlement golden chunk holds no block %d; it no longer pins what it was chosen for", block)
+		}
+	}
+
+	// And the ground it stands on is a plateau, which is the half of this feature the
+	// building voxels alone would not pin.
+	originX, _, originZ := goldenSettlementCoord.Origin()
+	settled := 0
+	for z := range ChunkSize {
+		for x := range ChunkSize {
+			if columnAt(goldenSeed, originX+int64(x), originZ+int64(z)).settlement {
+				settled++
+			}
+		}
+	}
+	if settled == 0 {
+		t.Error("no column of the settlement golden chunk stands inside a settlement's radius")
+	}
+}
+
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 5 {
-		t.Fatalf("WorldgenVersion = %d, want 5 for water", WorldgenVersion)
+	if WorldgenVersion != 6 {
+		t.Fatalf("WorldgenVersion = %d, want 6 for settlements", WorldgenVersion)
 	}
 }
 
