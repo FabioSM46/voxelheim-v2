@@ -61,47 +61,102 @@ class DiffCapTests(unittest.TestCase):
     verdict needs, so a diff can be far inside the context and still leave no room to
     answer. Both were defended by a claim about the world and neither was pinned to an
     observation, so both went on being wrong after the world changed (#167).
+
+    **The third one was measured and was still wrong, which is why these tests changed
+    shape.** 90,000 was derived from #164's reasoning ratio, the only sample of it that
+    existed. #488 then reasoned at twice that rate and exhausted the whole ceiling on a
+    diff half the size (#491), which killed the assumption these tests were built on: that
+    a larger diff is a harder one. It is not. Size is a proxy for how hard the model
+    reasons about *that* content, and the proxy is loose enough that 72,350 came back with
+    a verdict while 60,863 came back with nothing.
+
+    So the pin is no longer "somewhere between the largest success and the smallest
+    failure" — there is no such interval any more. It is the arithmetic itself, bounded on
+    both sides: above, by the diff that exhausts the budget at the worst ratio yet seen;
+    below, by the derived number, so a future scare cannot quietly tighten the cap to
+    nothing.
     """
 
-    # Measured on deepseek-v4-flash at reasoning_effort=max. Characters of diff, and
-    # whether a verdict came back.
-    _OBSERVED_FAILURE = 124_711  # PR #164: 1,481,442 reasoning chars, finish_reason=length
-    _OBSERVED_SUCCESS = 72_350  # PR #169: the largest diff a verdict has come back for
+    # Measured on deepseek-v4-flash at reasoning_effort=max.
+    _OUTPUT_BUDGET_CHARS = 1_481_442  # PR #164 emitted this for a 384,000-token ceiling
+    _CEILING_TOKENS = 384_000
+    # Diffs that exhausted the budget and returned no verdict. The *smallest* is the one
+    # that binds: a cap above it admits a diff already measured to produce nothing.
+    _OBSERVED_FAILURES = (
+        60_863,  # PR #488: 1,448,213 reasoning chars — a ratio of 23.8
+        124_711,  # PR #164: 1,481,442 reasoning chars — a ratio of 11.9
+    )
+    _WORST_OBSERVED_RATIO = 1_448_213 / 60_863  # reasoning chars per char of diff
+    # The fraction 90,000 was of its own fill point (90,000 / 124,000). Reused rather than
+    # re-chosen: the margin was never the thing that was wrong, the ratio under it was.
+    _MARGIN = 0.72
 
-    def test_the_cap_is_below_the_diff_that_produced_no_verdict(self):
+    def _derived_cap(self):
+        fill_point = self._OUTPUT_BUDGET_CHARS / self._WORST_OBSERVED_RATIO
+        return fill_point * self._MARGIN
+
+    def test_the_cap_is_below_every_diff_that_produced_no_verdict(self):
+        smallest_failure = min(self._OBSERVED_FAILURES)
         self.assertLess(
             deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
-            self._OBSERVED_FAILURE,
-            "the cap must keep a diff smaller than one measured to exhaust the output "
-            "budget; above it the guard cannot fire before the API call does",
+            smallest_failure,
+            "the cap must keep every diff smaller than the smallest one measured to "
+            "exhaust the output budget; above it the guard cannot fire before the API "
+            "call does",
         )
 
-    def test_the_cap_is_not_below_a_diff_that_was_reviewed_whole(self):
+    def test_the_cap_is_below_the_worst_ratio_fill_point(self):
+        """Above this, exhaustion is not a risk — it is the arithmetic.
+
+        A diff this size reasons for the entire ceiling at the ratio #488 measured, so
+        there is nothing left to write a verdict with. #488 landed within 3% of it.
+        """
+        fill_point = self._OUTPUT_BUDGET_CHARS / self._WORST_OBSERVED_RATIO
+        self.assertLess(
+            deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
+            fill_point,
+            f"a diff of {fill_point:,.0f} characters spends the whole output budget "
+            f"reasoning at {self._WORST_OBSERVED_RATIO:.1f} characters per character of "
+            "diff; a cap at or above it admits a review that cannot answer",
+        )
+
+    def test_the_cap_is_not_tightened_far_below_its_derivation(self):
+        """The floor, and it exists because truncation is not free.
+
+        The old floor was the largest diff a verdict had come back for. That reading died
+        with #488: a success at 72,350 says nothing about a cap of 62,000 once a failure
+        at 60,863 is on the record. What is left to hold the number up is the derivation —
+        worst observed ratio, measured budget, the margin the previous cap already used —
+        and a cap far under it is somebody reacting to one bad run rather than measuring.
+        Five of Iteration 29's seven issues already needed splitting at 90,000; every
+        character taken off this number is more of that.
+        """
+        derived = self._derived_cap()
         self.assertGreaterEqual(
             deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
-            self._OBSERVED_SUCCESS,
-            "a cap under a diff the model has actually reviewed would truncate work "
-            "nothing measured says it cannot do",
+            0.9 * derived,
+            f"the derivation gives about {derived:,.0f} characters; a cap much under it "
+            "trades review latency for no measured reliability",
         )
 
     def test_the_cap_leaves_the_reasoning_room_to_finish(self):
         """The arithmetic the constant's comment states, checked rather than asserted.
 
         1,481,442 characters emitted for 384,000 tokens is 3.86 characters per token, and
-        the model reasons about 11.9 characters per character of diff.
+        the hardest-reasoning run measured emitted 23.8 characters per character of diff.
 
         **What the headroom is for is the reasoning, not the verdict.** A verdict is small
         — #80 returned 1,060 final characters, about 275 tokens — and a margin sized on it
         would be no margin at all. The number that has to fit with room to spare is the
-        reasoning itself, because the ratio above is an average over two observations and a
-        tangled diff reasons harder than a straightforward one. A quarter of the ceiling
-        left over is the margin this cap claims; anything less and the cap is a coin toss.
+        reasoning itself. It is checked at the *worst* ratio rather than the average
+        because the average is what 90,000 was sized on, and the average is not what turned
+        up on #488. A quarter of the ceiling left over is the margin this cap claims;
+        anything less and the cap is a coin toss.
         """
-        chars_per_token = 1_481_442 / 384_000
-        reasoning_per_diff_char = 1_481_442 / self._OBSERVED_FAILURE
+        chars_per_token = self._OUTPUT_BUDGET_CHARS / self._CEILING_TOKENS
         reasoning_tokens = (
             deepseek_review.DEEPSEEK_MAX_DIFF_CHARS
-            * reasoning_per_diff_char
+            * self._WORST_OBSERVED_RATIO
             / chars_per_token
         )
         ceiling = deepseek_review.DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS
@@ -109,8 +164,8 @@ class DiffCapTests(unittest.TestCase):
             reasoning_tokens,
             0.75 * ceiling,
             f"a diff at the cap reasons for about {reasoning_tokens:,.0f} of {ceiling:,} "
-            "tokens, which leaves too little for a diff that reasons harder than the "
-            "average this ratio was measured on",
+            "tokens at the worst ratio measured, which leaves too little for a diff that "
+            "reasons harder still",
         )
 
 

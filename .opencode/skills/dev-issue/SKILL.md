@@ -292,11 +292,13 @@ Formatting (`gofmt`, `cargo fmt`) is the gate most often skipped and the one tha
 
 **A pull request can be too big to review, and the reviewer cannot tell you so in advance.**
 DeepSeek emits its chain of thought into the same output budget the verdict has to fit in, so a
-diff past roughly 124,000 characters reasons until the budget is gone and returns nothing —
-half an hour, a full API spend, a red `review` job, and no statement anywhere that the size was
-the problem. `DEEPSEEK_MAX_DIFF_CHARS` is **90,000** characters, measured; over it the diff is
-truncated and every unread file is injected as a finding, which blocks the pull request until a
-human acknowledges the gap. Neither outcome is one to open a PR into deliberately.
+diff that reasons hard enough runs the budget out and returns nothing — half an hour, a full API
+spend, a red `review` job, and no statement anywhere that the size was the problem. **That is not
+monotonic in size**: 72,350 characters came back with a verdict and 60,863 did not (#491), because
+what binds is how hard the model reasons about *that* content. `DEEPSEEK_MAX_DIFF_CHARS` is
+**45,000** characters, set from the worst ratio yet measured; over it the diff is truncated and
+every unread file is injected as a finding, which blocks the pull request until a human
+acknowledges the gap. Neither outcome is one to open a PR into deliberately.
 
 **Commit first, then measure.** `git diff origin/develop...HEAD` compares *commits*: run it on an
 uncommitted tree and it answers for a branch that has not changed, which is `0` however much work
@@ -320,7 +322,7 @@ Implements #<issue-number>
 REVIEWABLE=$(git diff origin/develop...HEAD -- . \
   ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
   ':(exclude)Cargo.lock' ':(exclude)go.sum' | wc -m)
-echo "reviewable diff: ${REVIEWABLE} characters (cap 90,000)"
+echo "reviewable diff: ${REVIEWABLE} characters (cap 45,000)"
 ```
 
 **If it is over the cap, split the work before opening anything.** Not after: a PR that exists
