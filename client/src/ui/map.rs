@@ -1586,7 +1586,10 @@ fn place_the_player_dot(
         .filter(|point| screen.is_open() && screen.shows(*point));
     // The compass's own convention: a positive yaw turns west, so the bearing is the yaw
     // negated — and a `bevy_ui` rotation is applied in a space whose y grows downward, so
-    // that same bearing is the clockwise turn a map needs.
+    // that same bearing is the clockwise turn a map needs. A yaw that is not a number has
+    // no bearing to negate, so the arrowhead is turned back to north instead: a `Rot2`
+    // built from a NaN is neither equal to itself nor to anything else, so it would be
+    // rewritten every frame and drawn as nothing at all.
     let facing = Rot2::radians(if look.yaw.is_finite() { -look.yaw } else { 0.0 });
     for (mut node, mut transform) in &mut dots {
         let wanted = match placed {
@@ -3415,9 +3418,11 @@ mod tests {
         let south = tip(&mut app);
         assert!(south.y > 0.99, "and south: {south:?}");
 
-        // A yaw nothing can be turned by leaves the arrowhead where it was rather than
-        // taking the whole transform with it — the rule every float this client reads
-        // follows.
+        // A yaw that is not a number is not a bearing, so the arrowhead falls back to
+        // north rather than carrying the NaN into the transform — the rule every float
+        // this client reads follows. North and not the last good heading, deliberately:
+        // a stale bearing is a wrong one that looks measured, and this one is visibly
+        // the default.
         app.world_mut().resource_mut::<LookState>().yaw = f32::NAN;
         app.update();
         assert_eq!(arrow_facing(&mut app), Rot2::IDENTITY);
