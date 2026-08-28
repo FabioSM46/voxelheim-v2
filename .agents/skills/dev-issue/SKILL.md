@@ -147,6 +147,36 @@ Every file edit and every git command from here on runs inside `$WORKTREE_DIR`. 
 
 ### Step 5: Implement
 
+**Decide first whether this issue is one pull request or two — before any code exists, not after.**
+Step 7 measures the finished diff against `DEEPSEEK_MAX_DIFF_CHARS`, and a measurement is a check
+rather than a decision: an issue implemented whole and split afterwards is split at its most
+expensive moment, when every seam has to be cut back out of finished work. Estimate now, from what
+you have already read — the acceptance criteria and the Code Pointers between them name most of the
+files the change will touch — and if the finished change plausibly exceeds the cap, choose the seam
+now and implement the halves as separate branches from the start.
+
+**The seam is a boundary the code already draws**: the wire and its consumer, the mechanism and its
+callers, the description and its renderer. Never a character count — a split made to hit a number
+leaves two halves that each read as an excerpt of something else. Each half must build, pass its
+gates and stand as a reviewable change on its own; Step 7 says what to do when they cannot, and the
+answer there is to ask rather than to open pieces that do not compile.
+
+**The rule that actually catches people**: acceptance criteria that touch both a server workspace
+and a client one, or that name more than a handful of new files, are very likely two pull requests
+at this cap. Iteration 30 was the first iteration run entirely under 45,000 and four of its seven
+pull requests went over it anyway.
+
+**And know what the ordering costs, because it is the part nobody anticipates.** The second half
+cannot be opened until the first has merged — opened earlier it carries the first half's commits and
+its diff is straight back over the cap — and since `pr-merge` squashes, the second branch then needs
+a `git rebase --onto origin/develop <old-base>` replay before it will push a clean diff. Deciding up
+front does not remove that cost. It lets you spend it deliberately, on a seam chosen for how the two
+halves read rather than for damage control, instead of discovering it at the end of an issue that
+was planned as one pull request and had been scheduled as parallel work. Iteration 30 paid it that
+way twice, on #455 and #457.
+
+Then implement:
+
 1. **Honor Out of Scope strictly** — if a change touches anything listed in Out of Scope, stop and reassess
 2. Follow existing code patterns in the workspace
 3. Honor all workspace-specific rules from the local AGENTS.md
@@ -297,6 +327,10 @@ what binds is how hard the model reasons about *that* content. `DEEPSEEK_MAX_DIF
 every unread file is injected as a finding, which blocks the pull request until a human
 acknowledges the gap. Neither outcome is one to open a PR into deliberately.
 
+**This step verifies the decision Step 5 already took; it is not where that decision belongs.** If
+the estimate there was that this issue is a single pull request, this is where the estimate meets
+the actual bytes.
+
 **Commit first, then measure.** `git diff origin/develop...HEAD` compares *commits*: run it on an
 uncommitted tree and it answers for a branch that has not changed, which is `0` however much work
 is sitting in the working directory. A guard that reports `0` is not a guard, and it is silent —
@@ -322,13 +356,14 @@ REVIEWABLE=$(git diff origin/develop...HEAD -- . \
 echo "reviewable diff: ${REVIEWABLE} characters (cap 45,000)"
 ```
 
-**If it is over the cap, split the work before opening anything.** Not after: a PR that exists
-is a PR whose review has already been attempted, and unpicking one into two costs more than
-staging two in the first place. Split along a boundary the code already draws rather than by
-character count — the description and its renderer, the wire and its consumer, the mechanism and
-the callers — so each half is a change somebody can review as a whole and each stands on its
-own. Say which half is which in both descriptions, and open the second only once the first has
-merged: opened earlier it carries the first's commits and the diff is back over the cap.
+**If it is over the cap, the estimate was wrong and the work still has to be split — before
+opening anything.** Not after: a PR that exists is a PR whose review has already been attempted,
+and unpicking one into two costs more than staging two in the first place. Split along the seam
+Step 5 describes — a boundary the code already draws, never a character count — so each half is a
+change somebody can review as a whole and each stands on its own. Say which half is which in both
+descriptions, and open the second only once the first has merged: opened earlier it carries the
+first's commits and the diff is back over the cap, and after that squash merge the second branch
+needs the rebase replay Step 5 names.
 
 If the halves cannot each stand alone, say so and ask the user rather than splitting into pieces
 that do not compile. A branch that does not build is worse than a review that has to be split

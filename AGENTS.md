@@ -586,6 +586,7 @@ reasons about *that* content.
 
 | PR | Diff chars | Reasoning chars | Ratio | Outcome |
 |---|---|---|---|---|
+| #506 | **44,414** | **1,389,189** | **31.3** | **no verdict, 29m36s — then a clean verdict and a full review, on identical re-runs** |
 | #501 | 45,415 | — | — | verdict, two findings |
 | #80 (at 262,144) | 50,963 | — | ~2.7, from 35,966 completion tokens | verdict in 8m58s |
 | #80 (at 131,072) | 50,963 | 530,226 | ≥10.4 — a floor; the ceiling stopped it | no verdict |
@@ -593,6 +594,27 @@ reasons about *that* content.
 | #168 | 64,167 | — | — | verdict in 7m38s |
 | #169 | 72,350 | — | — | verdict |
 | #164 | 124,711 | 1,481,442 | 11.9 | no verdict, 31 min |
+
+**#506 measured a worse ratio than any of those, under the cap — and then the same diff succeeded
+twice.** Its review exhausted the full 384,000-token ceiling on a **44,414-character** diff:
+`finish_reason=length`, `reasoning_chars=1389189`, no verdict, 29m36s (run 33194680132). That is
+**31.3** characters of reasoning per character of diff, worse than the 23.8 the paragraph above
+sets 45,000 from, on a diff *under* 45,000. Then a forced re-run of the identical diff, minutes
+later, returned a clean verdict — and a second re-run returned a full review with one finding.
+**Taken together the three runs are the strongest evidence yet that the outcome is not a function
+of diff size**: the same bytes failed and then succeeded twice. That is #80's run-to-run variance
+again, observed this time *at* the cap rather than 40% above it, where it can no longer be read as
+a margin that a lower number would buy back.
+
+**The standing rule below is that a review exhausting the budget under the cap is a new measurement
+and this number is what comes down. It is not being applied here, and the reason is recorded rather
+than left to look like an oversight.** A failure that does not reproduce on the same input is weak
+evidence for a new number — one run is now known not to answer the question — and the arithmetic
+that produced 45,000 would put the next number near 33,000 (74% of 44,414), at which nearly every
+change in this repository becomes two or three pull requests. `DEEPSEEK_MAX_DIFF_CHARS` therefore
+stays at 45,000 and the decision is **deferred, not resolved**. What would settle it is several
+`measure_only: true` replays of a diff in the 40,000–46,000 band: one run is not a sample, and this
+row is why.
 
 **Set it from the tail, because the two failure directions are not symmetric.** Too high costs a
 33-minute run that produces nothing, a failing `review` check and a pull request nobody can merge
@@ -606,6 +628,29 @@ seven issues already needed splitting at 90,000; at 45,000 most changes become t
 requests. What bounds the tightening is #501: 45,415 characters came back with a verdict and two
 substantive findings, so the safe ceiling is bracketed between a measured success at 45,415 and a
 measured failure at 60,863, and the cap sits just under the success.
+
+**Iteration 30 is the first iteration run entirely under this cap, and it went over more often than
+not.** Seven pull requests were opened for five issues, and four exceeded 45,000: #509 at 48,249,
+#510 at 53,121, #508 at 57,362 and #511 at 109,441 — which reached 146,672 once its review fixes
+were in, 3.3× the cap. Two of the five issues, #455 and #457, were split only after being
+implemented whole, and the late split carries a cost the character count never shows: the second
+half cannot be opened until the first has merged, because opened earlier it carries the first
+half's commits and the diff goes straight back over the cap, and since `pr-merge` squashes, each
+second half then needed a `git rebase --onto origin/develop <old-base>` replay. That serialised
+what had been planned as parallel work, twice. The instruction it produced lives in `/dev-issue`
+Step 5 rather than here: decide whether an issue is one pull request or two **before** writing
+code, while the seam can still be chosen for how the two halves read.
+
+**And the four truncations were a quieter outcome, not a lesser one.** Each named files it had not
+read, and in every case an independent mutation review of exactly those files found something the
+automated review never saw: `NearestSettlement` returning a settlement that was not the nearest on
+109 of 268,960 sampled columns (#511, in the exported API two later issues consume); `EVERY_REASON`
+in `client/src/ui/status.rs` seven members short of its enum, behind a doc comment claiming the
+compiler would force it to grow, which a fixed-size array of enum values does not do (#510);
+sixteen of twenty mutations surviving a green suite in `schematic_test.go` (#509); a
+`ResidentAppearance` round trip that passed with the encoder mutated to send an empty appearance
+(#508). That a human backfilled them afterwards is not an argument that truncation is harmless —
+it is the measure of what the review nobody performed was worth.
 
 **Raising it again is what needs more samples; lowering it did not.** Two rows measure the ratio
 *at exhaustion* — #164 at 11.9 and #488 at 23.8 — and those two are what the cap is set from,
