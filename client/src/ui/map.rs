@@ -71,8 +71,9 @@ use super::compass::coordinates_reading;
 use super::text_input::{TextEdit, apply_key};
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn, MapEvent, MapInbox,
-    MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerPlaceRequest, Outbound, Sent,
-    Session, encode_map_tile_request, encode_marker_place_request, map_tile_span,
+    MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerPlaceRequest,
+    MarkerRemoveRequest, Outbound, Sent, Session, encode_map_tile_request,
+    encode_marker_place_request, encode_marker_remove_request, map_tile_span,
 };
 use crate::player::{InputMode, LookState, PlayerStats};
 
@@ -925,6 +926,7 @@ impl Plugin for MapUiPlugin {
                     // `follow_input_mode` above -- what this line adds is that the
                     // requirement stops being invisible if the chain is ever reordered.
                     type_the_note.after(crate::player::ApplyInputMode),
+                    remove_a_mark,
                     drag_the_map,
                     zoom_the_map,
                     request_map_tiles,
@@ -1977,6 +1979,55 @@ fn ask_to_place(draft: &MarkerDraft, ticks: &mut MarkerTick, outbound: Option<&m
     }));
     if sent == Sent::Dropped {
         warn!("the outbound queue was full; one mark placement was dropped");
+    }
+}
+
+/// Asks for the mark under the pointer to come off the map.
+///
+/// The secondary button, and only over a mark: a right click on bare ground names nothing, and
+/// there is no id to send for it. **There is no edit message and no confirmation**: a change
+/// to a mark is a removal and a placement, and the mark stays on the screen until the server's
+/// next `MarkerList` leaves it out -- the same rule the placement follows, in the other
+/// direction.
+fn remove_a_mark(
+    buttons: Option<Res<ButtonInput<MouseButton>>>,
+    screen: Res<MapScreen>,
+    form: Res<MarkerForm>,
+    pins: Query<(&Interaction, &MarkerPin)>,
+    mut ticks: ResMut<MarkerTick>,
+    mut outbound: Option<ResMut<Outbound>>,
+) {
+    // Suspended while the form is up, so the two gestures cannot be in flight at once -- and
+    // because the form is what the pointer is over.
+    if !screen.is_open() || form.is_open() {
+        return;
+    }
+    if !buttons
+        .as_deref()
+        .is_some_and(|buttons| buttons.just_pressed(MouseButton::Right))
+    {
+        return;
+    }
+    let Some(marker_id) = pins
+        .iter()
+        // The same "any interaction at all" the tooltip reads, so the mark named is the one
+        // the label is describing.
+        .find(|(interaction, _)| **interaction != Interaction::None)
+        .map(|(_, pin)| pin.marker_id)
+    else {
+        return;
+    };
+    let Some(outbound) = outbound.as_deref_mut() else {
+        return;
+    };
+    let client_tick = ticks.0;
+    ticks.0 = ticks.0.wrapping_add(1);
+    let sent = outbound.send(encode_marker_remove_request(&MarkerRemoveRequest {
+        marker_id,
+        client_tick,
+    }));
+    if sent == Sent::Dropped {
+        warn!("the outbound queue was full; one mark removal was dropped");
     }
 }
 
@@ -3288,17 +3339,20 @@ mod tests {
         drag_pointer(app, at, at);
     }
 
-    /// How many of the frames this client sent are placements.
+    /// How many of the frames this client sent are about a mark.
     ///
     /// The map asks for tiles the whole time it is open, so a bare count of the outbound
     /// queue answers about the wrong conversation.
-    fn place_frames(frames: &Receiver<Vec<u8>>) -> usize {
+    fn marker_frames(frames: &Receiver<Vec<u8>>) -> usize {
         frames
             .try_iter()
             .filter(|frame| {
                 let envelope =
                     fb::root_as_envelope(frame).expect("the client's own bytes are valid");
-                envelope.payload_type() == fb::Payload::MarkerPlaceRequest
+                matches!(
+                    envelope.payload_type(),
+                    fb::Payload::MarkerPlaceRequest | fb::Payload::MarkerRemoveRequest
+                )
             })
             .count()
     }
@@ -3498,7 +3552,7 @@ mod tests {
             .expect("a button takes the pointer") = Interaction::Pressed;
         app.update();
         assert_eq!(draft(&mut app), None);
-        assert_eq!(place_frames(&frames), 0, "neither ending sends anything");
+        assert_eq!(marker_frames(&frames), 0, "neither ending sends anything");
     }
 
     /// A map app running the real input-mode systems beside the real map systems.
@@ -3648,12 +3702,61 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
         app.update();
         assert_eq!(draft(&mut app), None);
-        assert_eq!(place_frames(&frames), 0);
+        assert_eq!(marker_frames(&frames), 0);
 
         // And reopening the map does not bring it back.
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
         app.update();
         assert_eq!(draft(&mut app), None);
+    }
+
+    #[test]
+    fn the_secondary_button_asks_for_the_mark_under_it_to_come_off() {
+        let (mut app, frames) = app_with_a_window();
+        list(&mut app, vec![mark(7, 0, 0, MarkerKind::Cave, "")]);
+        let pin = app
+            .world_mut()
+            .query_filtered::<Entity, With<MarkerPin>>()
+            .iter(app.world())
+            .next()
+            .expect("the mark is drawn");
+
+        // A right click over nothing names nothing: there is no id to send for bare ground.
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Right);
+        app.insert_resource(buttons);
+        app.update();
+        assert_eq!(marker_frames(&frames), 0);
+
+        *app.world_mut()
+            .get_mut::<Interaction>(pin)
+            .expect("a mark takes the pointer") = Interaction::Hovered;
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Right);
+        app.insert_resource(buttons);
+        app.update();
+
+        let sent: Vec<Vec<u8>> = frames
+            .try_iter()
+            .filter(|frame| {
+                let envelope =
+                    fb::root_as_envelope(frame).expect("the client's own bytes are valid");
+                envelope.payload_type() == fb::Payload::MarkerRemoveRequest
+            })
+            .collect();
+        assert_eq!(sent.len(), 1, "exactly one removal was sent");
+        let envelope = fb::root_as_envelope(&sent[0]).expect("the client's own bytes are valid");
+        assert_eq!(
+            envelope
+                .payload_as_marker_remove_request()
+                .expect("the payload the tag names")
+                .marker_id(),
+            7
+        );
+
+        // The mark is still on the screen: it comes off when the server's list says so.
+        app.update();
+        assert_eq!(drawn_marks(&mut app).len(), 1);
     }
 
     #[test]
