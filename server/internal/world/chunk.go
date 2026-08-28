@@ -121,6 +121,30 @@ type Coord struct {
 	X, Y, Z int32
 }
 
+// Column addresses a chunk column on the horizontal plane: every chunk that shares
+// one (x, z) pair, at every height.
+//
+// **There is no cy, and that is the whole of the type.** What a column names is a
+// place on the map rather than a cube of voxels, and the two questions this server
+// asks about a place — has this character been here, and what does the ground look
+// like from above — are both answered once per column and never once per height. A
+// [Coord] that carried a Y nobody read would be the same value with a field every
+// caller had to remember to zero.
+//
+// The field names are CX and CZ rather than X and Z, because a column is addressed in
+// chunk units and a two-field {X, Z} beside a three-field {X, Y, Z} is exactly the
+// pair a reader mistakes for block coordinates. schemas/world.fbs names the wire
+// struct's fields the same way, for the same reason.
+type Column struct {
+	CX, CZ int32
+}
+
+// Column is the column a chunk stands in: its horizontal address, with the height
+// dropped.
+func (c Coord) Column() Column {
+	return Column{CX: c.X, CZ: c.Z}
+}
+
 // Chunk is one cubic chunk of voxels.
 //
 // Blocks is always exactly ChunkVolume long and is indexed with Index: x fastest,
