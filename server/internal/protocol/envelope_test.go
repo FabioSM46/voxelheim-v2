@@ -269,11 +269,20 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // refusal enums also gain members, and those do not independently owe a bump either: both
 // decoders are total by design and read an unrecognised member as Unknown, which costs a
 // player one sentence rather than the session.
-func TestProtocolV24NamesTheMap(t *testing.T) {
+//
+// **V25 appends the settlement: five members, two of them client -> server.** A V24 server
+// cannot name NpcInteractRequest or TradeRequest and closes the session on either, so each
+// owes the bump alone. The bump is owed a third time from outside this union, and that one
+// is the argument worth keeping: MobKind.Villager is an enum member travelling
+// server -> client, and it moves the version where ActionRefused's new members do not,
+// because MobState.kind is *refused* when the receiver cannot name it while a refusal
+// reason is read as Unknown. Ask what the receiver does with the value it does not
+// recognise, not which way it travelled.
+func TestProtocolV25NamesTheSettlement(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 24 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 24", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 25 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 25", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -321,6 +330,11 @@ func TestProtocolV24NamesTheMap(t *testing.T) {
 		vnet.PayloadMarkerPlaceRequest,
 		vnet.PayloadMarkerRemoveRequest,
 		vnet.PayloadMarkerList,
+		vnet.PayloadResidentAppearance,
+		vnet.PayloadNpcInteractRequest,
+		vnet.PayloadVendorState,
+		vnet.PayloadTradeRequest,
+		vnet.PayloadVendorClosed,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -619,6 +633,183 @@ func TestMapServerMessagesCarryCompleteTilesLedgerPagesAndMarks(t *testing.T) {
 	emptyList.Init(emptyTable.Bytes, emptyTable.Pos)
 	if emptyList.MarkersLength() != 0 {
 		t.Errorf("empty list has %d marks, want 0", emptyList.MarkersLength())
+	}
+}
+
+// A resident is addressed by id, and a trade is asked for by item, count and direction.
+//
+// **Neither request may carry a price or a total, and the strongest statement this test
+// can make about that is a negative one**: the generated TradeRequest has no field to
+// put one in, so the assertion lives in the schema and in the field list below rather
+// than in an assertion here. What is tested is the four absent-field zeroes, each of
+// which is a frame no correct client sends.
+func TestSettlementRequestsCarryOnlyIntentAndRejectAbsentIdentities(t *testing.T) {
+	t.Parallel()
+
+	interactWant := NpcInteractRequest{EntityID: 4242, ClientTick: 21}
+	interact, err := Decode(EncodeNpcInteractRequest(interactWant))
+	if err != nil || interact.Kind != vnet.PayloadNpcInteractRequest ||
+		interact.NpcInteract == nil || *interact.NpcInteract != interactWant {
+		t.Fatalf("npc interact round trip = %+v, %v; want %+v", interact, err, interactWant)
+	}
+
+	// Both directions round trip, because `buying` is a bool and both of its values are
+	// legal: the false case is a sale into the vendor's `buys` vector, not an absent
+	// field standing in for one.
+	for name, want := range map[string]TradeRequest{
+		"buying":  {EntityID: 4242, ItemID: 31, Count: 4, Buying: true, Revision: 2, ClientTick: 22},
+		"selling": {EntityID: 4242, ItemID: 8, Count: 1, Buying: false, Revision: 2, ClientTick: 23},
+	} {
+		trade, tradeErr := Decode(EncodeTradeRequest(want))
+		if tradeErr != nil || trade.Kind != vnet.PayloadTradeRequest ||
+			trade.Trade == nil || *trade.Trade != want {
+			t.Fatalf("%s round trip = %+v, %v; want %+v", name, trade, tradeErr, want)
+		}
+	}
+
+	for name, frame := range map[string][]byte{
+		"interact without an entity": EncodeNpcInteractRequest(NpcInteractRequest{ClientTick: 1}),
+		"trade without an entity":    EncodeTradeRequest(TradeRequest{ItemID: 1, Count: 1, Revision: 1}),
+		"trade without an item":      EncodeTradeRequest(TradeRequest{EntityID: 1, Count: 1, Revision: 1}),
+		"trade for nothing":          EncodeTradeRequest(TradeRequest{EntityID: 1, ItemID: 1, Revision: 1}),
+		"trade without a revision":   EncodeTradeRequest(TradeRequest{EntityID: 1, ItemID: 1, Count: 1}),
+	} {
+		if _, decodeErr := Decode(frame); !errors.Is(decodeErr, ErrMalformed) {
+			t.Errorf("%s decoded with %v, want ErrMalformed", name, decodeErr)
+		}
+	}
+}
+
+// The three server-to-client settlement messages encode the shapes their decoders are
+// held to.
+//
+// Written as the encoders' own round trip through the generated accessors, for the reason
+// the map's three are: this side has no decode arm for a payload only a server sends, and
+// the client's decoder is where the name bound, the role vocabulary and the price
+// invariants are enforced.
+func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
+	t.Parallel()
+
+	resident := ResidentAppearance{
+		EntityID: 900, Name: "Ingrid", HasName: true,
+		Role:          vnet.ResidentRoleSmith,
+		Appearance:    Appearance{SkinColor: 0x00C8A0_80, HairColor: 0x00_3A2A_1A, HairModel: vnet.HairModelBraided},
+		HasAppearance: true,
+	}
+	env := vnet.GetRootAsEnvelope(EncodeResidentAppearance(resident), 0)
+	if env.PayloadType() != vnet.PayloadResidentAppearance {
+		t.Fatalf("payload = %s, want ResidentAppearance", env.PayloadType())
+	}
+	table := payloadTable(t, env)
+	decoded := new(vnet.ResidentAppearance)
+	decoded.Init(table.Bytes, table.Pos)
+	if decoded.EntityId() != resident.EntityID {
+		t.Errorf("entity = %d, want %d", decoded.EntityId(), resident.EntityID)
+	}
+	if got := string(decoded.Name()); got != resident.Name {
+		t.Errorf("name = %q, want %q", got, resident.Name)
+	}
+	if decoded.Role() != resident.Role {
+		t.Errorf("role = %s, want %s", decoded.Role(), resident.Role)
+	}
+	if decoded.Appearance(new(vnet.Appearance)) == nil {
+		t.Error("appearance did not survive the round trip")
+	}
+
+	// Every member the contract names is a role, and the absent-field zero is not.
+	for _, role := range []vnet.ResidentRole{
+		vnet.ResidentRoleVillager, vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader, vnet.ResidentRoleGuard,
+	} {
+		if !ResidentRoleOK(role) {
+			t.Errorf("ResidentRoleOK(%s) = false, want true", role)
+		}
+	}
+	for _, role := range []vnet.ResidentRole{vnet.ResidentRoleUnknown, vnet.ResidentRole(200)} {
+		if ResidentRoleOK(role) {
+			t.Errorf("ResidentRoleOK(%d) = true, want false", byte(role))
+		}
+	}
+
+	// A name is written exactly as given, over-long ones included: the bound belongs to
+	// the client's decoder, and truncating here would hide a caller's defect from the one
+	// thing that checks.
+	long := ResidentAppearance{EntityID: 901, Name: strings.Repeat("a", ResidentNameMaxBytes+1), HasName: true, Role: vnet.ResidentRoleGuard}
+	longEnv := vnet.GetRootAsEnvelope(EncodeResidentAppearance(long), 0)
+	longTable := payloadTable(t, longEnv)
+	longDecoded := new(vnet.ResidentAppearance)
+	longDecoded.Init(longTable.Bytes, longTable.Pos)
+	if got := len(longDecoded.Name()); got != ResidentNameMaxBytes+1 {
+		t.Errorf("over-long name arrived %d bytes, want %d written verbatim", got, ResidentNameMaxBytes+1)
+	}
+
+	state := VendorState{
+		EntityID: 900, Revision: 3,
+		Sells: []VendorEntry{{ItemID: 31, Price: 12}, {ItemID: 8, Price: 40}},
+		Buys:  []VendorEntry{{ItemID: 31, Price: 5}},
+	}
+	stateEnv := vnet.GetRootAsEnvelope(EncodeVendorState(state), 0)
+	if stateEnv.PayloadType() != vnet.PayloadVendorState {
+		t.Fatalf("payload = %s, want VendorState", stateEnv.PayloadType())
+	}
+	stateTable := payloadTable(t, stateEnv)
+	prices := new(vnet.VendorState)
+	prices.Init(stateTable.Bytes, stateTable.Pos)
+	if prices.EntityId() != state.EntityID || prices.Revision() != state.Revision {
+		t.Fatalf("vendor header = entity %d revision %d", prices.EntityId(), prices.Revision())
+	}
+	if prices.SellsLength() != len(state.Sells) || prices.BuysLength() != len(state.Buys) {
+		t.Fatalf("vendor has %d sells and %d buys, want %d and %d",
+			prices.SellsLength(), prices.BuysLength(), len(state.Sells), len(state.Buys))
+	}
+	// The same item at two prices in the two directions is the ordinary case: the spread
+	// is what a stall is, and nothing here collapses the two vectors into one.
+	for index, want := range state.Sells {
+		entry := new(vnet.VendorEntry)
+		if !prices.Sells(entry, index) {
+			t.Fatalf("sells[%d] absent", index)
+		}
+		if got := (VendorEntry{ItemID: entry.ItemId(), Price: entry.Price()}); got != want {
+			t.Errorf("sells[%d] = %+v, want %+v", index, got, want)
+		}
+	}
+	for index, want := range state.Buys {
+		entry := new(vnet.VendorEntry)
+		if !prices.Buys(entry, index) {
+			t.Fatalf("buys[%d] absent", index)
+		}
+		if got := (VendorEntry{ItemID: entry.ItemId(), Price: entry.Price()}); got != want {
+			t.Errorf("buys[%d] = %+v, want %+v", index, got, want)
+		}
+	}
+
+	// A vendor that only sells writes an empty `buys` rather than omitting it: the
+	// contract requires both vectors present, and the client refuses an absent one.
+	sellOnly := vnet.GetRootAsEnvelope(EncodeVendorState(VendorState{EntityID: 900, Revision: 4, Sells: []VendorEntry{{ItemID: 31, Price: 12}}}), 0)
+	sellOnlyTable := payloadTable(t, sellOnly)
+	sellOnlyState := new(vnet.VendorState)
+	sellOnlyState.Init(sellOnlyTable.Bytes, sellOnlyTable.Pos)
+	if sellOnlyState.BuysLength() != 0 {
+		t.Errorf("a sell-only vendor carries %d buys, want 0", sellOnlyState.BuysLength())
+	}
+	// Present-and-empty rather than absent, read off the vtable because that is the only
+	// place the two differ: BuysLength answers 0 for both, and the client refuses one of
+	// them. `buys` is the fourth field, so its vtable slot is 4 + 2*3.
+	const buysVTableSlot = flatbuffers.VOffsetT(10)
+	sellOnlyVendorTable := sellOnlyState.Table()
+	if sellOnlyVendorTable.Offset(buysVTableSlot) == 0 {
+		t.Error("a sell-only vendor omitted buys; the contract requires an empty vector")
+	}
+
+	closedEnv := vnet.GetRootAsEnvelope(EncodeVendorClosed(VendorClosed{EntityID: 900}), 0)
+	if closedEnv.PayloadType() != vnet.PayloadVendorClosed {
+		t.Fatalf("payload = %s, want VendorClosed", closedEnv.PayloadType())
+	}
+	closedTable := payloadTable(t, closedEnv)
+	closed := new(vnet.VendorClosed)
+	closed.Init(closedTable.Bytes, closedTable.Pos)
+	if closed.EntityId() != 900 {
+		t.Errorf("closed entity = %d, want 900", closed.EntityId())
 	}
 }
 
@@ -1831,6 +2022,10 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.RequestMapTile": {byte(vnet.RefusedActionRequestMapTile), 12},
 		"RefusedAction.PlaceMarker":    {byte(vnet.RefusedActionPlaceMarker), 13},
 		"RefusedAction.RemoveMarker":   {byte(vnet.RefusedActionRemoveMarker), 14},
+		// V25. The settlement's two client requests, reserved on the same terms: neither
+		// is answered by anything today, and the number is free only until it is not.
+		"RefusedAction.Interact": {byte(vnet.RefusedActionInteract), 15},
+		"RefusedAction.Trade":    {byte(vnet.RefusedActionTrade), 16},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -1845,8 +2040,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// nine is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 15 {
-		t.Errorf("RefusedAction has %d members, want 15 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 17 {
+		t.Errorf("RefusedAction has %d members, want 17 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -1879,17 +2074,22 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"TooManyMarkers":     {byte(vnet.RefusalReasonTooManyMarkers), 24},
 		"NoteTooLong":        {byte(vnet.RefusalReasonNoteTooLong), 25},
 		"MarkerUnknown":      {byte(vnet.RefusalReasonMarkerUnknown), 26},
-		"MalformedNoAnchor":  {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
-		"MalformedFacing":    {byte(vnet.RefusalReasonMalformedFacing), 65},
-		"MalformedSlot":      {byte(vnet.RefusalReasonMalformedSlot), 66},
-		"MalformedKind":      {byte(vnet.RefusalReasonMalformedKind), 67},
+		// V25's three, appended inside the low group: each is the world answering a legal
+		// question with no, which is the half a player is told about.
+		"NotAVendor":        {byte(vnet.RefusalReasonNotAVendor), 27},
+		"NotEnoughSilver":   {byte(vnet.RefusalReasonNotEnoughSilver), 28},
+		"VendorDoesNotWant": {byte(vnet.RefusalReasonVendorDoesNotWant), 29},
+		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
+		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
+		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
+		"MalformedKind":     {byte(vnet.RefusalReasonMalformedKind), 67},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 31 {
-		t.Errorf("RefusalReason has %d members, want 31 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 34 {
+		t.Errorf("RefusalReason has %d members, want 34 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -2302,6 +2502,10 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"MobKind.Vargr": {byte(vnet.MobKindVargr), 2},
 		// Appended in V14 after Vargr = 2.
 		"MobKind.Deer": {byte(vnet.MobKindDeer), 3},
+		// Appended in V25 after Deer = 3, and the one member of this enum that moved
+		// ProtocolVersion.Current by itself: MobState.kind is refused rather than
+		// dropped when the receiver cannot name it.
+		"MobKind.Villager": {byte(vnet.MobKindVillager), 4},
 		// Appended after Forge = 2.
 		"StructureKind.Campfire": {byte(vnet.StructureKindCampfire), 3},
 		// Appended after Tent = 4.
@@ -2334,7 +2538,9 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	// a decision fails here rather than reaching the wire. Each count includes the
 	// zero member every one of these enums carries to fail closed.
 	for name, pair := range map[string][2]int{
-		"MobKind":       {len(vnet.EnumNamesMobKind), 4},
+		// Five since V25's Villager, which is the one member of this enum whose arrival
+		// moved ProtocolVersion.Current on its own.
+		"MobKind":       {len(vnet.EnumNamesMobKind), 5},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
 		"RecipeID":      {len(vnet.EnumNamesRecipeID), 21},
 	} {

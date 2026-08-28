@@ -163,7 +163,31 @@ union Payload {
   MapExplored,             // 42  server -> client
   MarkerPlaceRequest,      // 43  client -> server
   MarkerRemoveRequest,     // 44  client -> server
-  MarkerList               // 45  server -> client
+  MarkerList,              // 45  server -> client
+
+  // -- V25. Appended, so the tags of 1..45 are untouched.
+  //
+  //    The settlement, in one contract change rather than three. Two of these travel
+  //    client -> server and each owes the bump on its own: an older server cannot name
+  //    the tag and closes the session rather than dropping it, so a V25 client would
+  //    handshake cleanly and lose the connection the first time somebody spoke to a
+  //    resident or bought anything. The other three travel back and would have owed
+  //    nothing alone — `ResidentAppearance` is a name and a role sent once as the entity
+  //    enters view, `VendorState` is the complete price list, `VendorClosed` its explicit
+  //    end marker.
+  //
+  //    The bump is owed a third time from outside this union: `MobKind.Villager` is an
+  //    enum member both decoders refuse rather than drop. See `common.fbs`.
+  //
+  //    They are appended together because the alternative is three bumps for one feature,
+  //    and because the server and client issues that follow this one all read these tags.
+  //    See `player.fbs` for every table named here.
+
+  ResidentAppearance,      // 46  server -> client
+  NpcInteractRequest,      // 47  client -> server
+  VendorState,             // 48  server -> client
+  TradeRequest,            // 49  client -> server
+  VendorClosed             // 50  server -> client
 }
 
 table Envelope {

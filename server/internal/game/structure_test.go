@@ -1328,6 +1328,15 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonTooManyMarkers,
 		vnet.RefusalReasonNoteTooLong,
 		vnet.RefusalReasonMarkerUnknown,
+		// V25 reserves the settlement's three for the dependent server issues, and all
+		// three are the world answering a legal question no: a resident who keeps no
+		// stall, a purse that is short, an item this vendor does not deal in. The first
+		// is the one worth naming — nothing on the wire says which residents trade until
+		// one is addressed, so a client cannot compute that answer for itself and it is
+		// not a defect that it asked.
+		vnet.RefusalReasonNotAVendor,
+		vnet.RefusalReasonNotEnoughSilver,
+		vnet.RefusalReasonVendorDoesNotWant,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1349,8 +1358,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// vocabulary now and receive producers in the dependent authoritative loot issue;
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 31 {
-		t.Errorf("RefusalReason has %d members, want 31 — a new one needs a producer and client handling, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 34 {
+		t.Errorf("RefusalReason has %d members, want 34 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

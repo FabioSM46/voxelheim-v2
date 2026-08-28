@@ -72,6 +72,11 @@ const (
 	PayloadMarkerPlaceRequest     Payload = 43
 	PayloadMarkerRemoveRequest    Payload = 44
 	PayloadMarkerList             Payload = 45
+	PayloadResidentAppearance     Payload = 46
+	PayloadNpcInteractRequest     Payload = 47
+	PayloadVendorState            Payload = 48
+	PayloadTradeRequest           Payload = 49
+	PayloadVendorClosed           Payload = 50
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -121,6 +126,11 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadMarkerPlaceRequest:     "MarkerPlaceRequest",
 	PayloadMarkerRemoveRequest:    "MarkerRemoveRequest",
 	PayloadMarkerList:             "MarkerList",
+	PayloadResidentAppearance:     "ResidentAppearance",
+	PayloadNpcInteractRequest:     "NpcInteractRequest",
+	PayloadVendorState:            "VendorState",
+	PayloadTradeRequest:           "TradeRequest",
+	PayloadVendorClosed:           "VendorClosed",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -170,6 +180,11 @@ var EnumValuesPayload = map[string]Payload{
 	"MarkerPlaceRequest":     PayloadMarkerPlaceRequest,
 	"MarkerRemoveRequest":    PayloadMarkerRemoveRequest,
 	"MarkerList":             PayloadMarkerList,
+	"ResidentAppearance":     PayloadResidentAppearance,
+	"NpcInteractRequest":     PayloadNpcInteractRequest,
+	"VendorState":            PayloadVendorState,
+	"TradeRequest":           PayloadTradeRequest,
+	"VendorClosed":           PayloadVendorClosed,
 }
 
 func (v Payload) String() string {

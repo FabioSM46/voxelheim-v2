@@ -49,6 +49,14 @@ const (
 	RefusedActionPlaceMarker RefusedAction = 13
 	/// A `MarkerRemoveRequest` that took no mark off it.
 	RefusedActionRemoveMarker RefusedAction = 14
+	/// An `NpcInteractRequest` that opened nothing. The player addressed a resident and
+	/// the server had no answer to give them — the resident is not a vendor, is out of
+	/// reach, or the player is dead.
+	RefusedActionInteract RefusedAction = 15
+	/// A `TradeRequest` that moved no item and no silver. Trade is all-or-nothing: a
+	/// refusal means the vendor's stock, the player's pack and the player's purse are
+	/// exactly as they were.
+	RefusedActionTrade RefusedAction = 16
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -67,6 +75,8 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionRequestMapTile: "RequestMapTile",
 	RefusedActionPlaceMarker:    "PlaceMarker",
 	RefusedActionRemoveMarker:   "RemoveMarker",
+	RefusedActionInteract:       "Interact",
+	RefusedActionTrade:          "Trade",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -85,6 +95,8 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"RequestMapTile": RefusedActionRequestMapTile,
 	"PlaceMarker":    RefusedActionPlaceMarker,
 	"RemoveMarker":   RefusedActionRemoveMarker,
+	"Interact":       RefusedActionInteract,
+	"Trade":          RefusedActionTrade,
 }
 
 func (v RefusedAction) String() string {

@@ -154,25 +154,43 @@ func TestTheDeerRowIsPassivePrey(t *testing.T) {
 	}
 }
 
-// Every kind the wire can carry is either registered or the fail-closed zero.
+// Every kind the wire can carry is either registered, the fail-closed zero, or a
+// resident.
 //
 // The enum is the contract and the registry is what this server can actually make, so a
 // member of one and not the other is a creature the schema promises and nothing can
 // produce. It is checked from the generated names rather than from a list here, which is
 // what makes the next `MobKind` fail this test instead of quietly existing.
+//
+// **`Villager` is exempt, and the exemption is narrower than it looks.** This registry is
+// the *director's* table: what it holds is health, damage, reach, telegraph timings,
+// aggro radius, a rank, a nocturnal flag and a loot roll, and every one of those is a
+// number about hunting or being hunted. A resident has none of them — never hostile,
+// never lootable, never a corpse, and placed by the settlement rather than chosen by the
+// spawner — so a row here would be six zeroes and a lie, and `spawnableSpecies` would
+// then have to learn to skip it. #458 gives residents whatever server-side representation
+// they turn out to need, which is not this one.
+//
+// The guard this weakens is real, so it is replaced rather than removed: the exemption is
+// one named member, and any *other* new kind still fails here.
 func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 	t.Parallel()
 
 	for kind := range vnet.EnumNamesMobKind {
 		_, registered := mobByKind(kind)
-		if kind == vnet.MobKindUnknown {
+		switch kind {
+		case vnet.MobKindUnknown:
 			if registered {
 				t.Error("MobKind.Unknown is registered, and it is the value an absent field decodes to")
 			}
-			continue
-		}
-		if !registered {
-			t.Errorf("the wire can carry %s and this server has no row for it", kind)
+		case vnet.MobKindVillager:
+			if registered {
+				t.Error("MobKind.Villager has a director row; a resident is not spawned, hunted or looted")
+			}
+		default:
+			if !registered {
+				t.Errorf("the wire can carry %s and this server has no row for it", kind)
+			}
 		}
 	}
 }

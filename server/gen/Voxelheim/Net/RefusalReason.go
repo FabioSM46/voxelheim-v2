@@ -115,6 +115,20 @@ const (
 	/// mark exists by naming ids it was never given — the argument `RefusedAction` records
 	/// for having no member for a refused structure removal at all.
 	RefusalReasonMarkerUnknown RefusalReason = 26
+	/// The addressed entity exists and sells nothing. In the low group deliberately: the
+	/// request was legal and the answer is about the world, not about the build that
+	/// asked — a resident who is a guard rather than a trader is an ordinary thing to
+	/// walk up to. It is also the one answer a client cannot compute for itself, because
+	/// nothing on the wire says which residents keep a stall until one is opened.
+	RefusalReasonNotAVendor RefusalReason = 27
+	/// The player's purse holds less silver than the authoritative total for this
+	/// purchase. The server owns the price and the purse both; the client's arithmetic is
+	/// presentation and this is what corrects it.
+	RefusalReasonNotEnoughSilver RefusalReason = 28
+	/// The vendor does not buy the offered item at all. Distinct from `NotEnoughSilver`,
+	/// which is the purchase direction, and from `NotAVendor`, which is about the
+	/// resident rather than the item: this vendor trades, and not in that.
+	RefusalReasonVendorDoesNotWant RefusalReason = 29
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -157,6 +171,9 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonTooManyMarkers:     "TooManyMarkers",
 	RefusalReasonNoteTooLong:        "NoteTooLong",
 	RefusalReasonMarkerUnknown:      "MarkerUnknown",
+	RefusalReasonNotAVendor:         "NotAVendor",
+	RefusalReasonNotEnoughSilver:    "NotEnoughSilver",
+	RefusalReasonVendorDoesNotWant:  "VendorDoesNotWant",
 	RefusalReasonMalformedNoAnchor:  "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:    "MalformedFacing",
 	RefusalReasonMalformedSlot:      "MalformedSlot",
@@ -191,6 +208,9 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"TooManyMarkers":     RefusalReasonTooManyMarkers,
 	"NoteTooLong":        RefusalReasonNoteTooLong,
 	"MarkerUnknown":      RefusalReasonMarkerUnknown,
+	"NotAVendor":         RefusalReasonNotAVendor,
+	"NotEnoughSilver":    RefusalReasonNotEnoughSilver,
+	"VendorDoesNotWant":  RefusalReasonVendorDoesNotWant,
 	"MalformedNoAnchor":  RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":    RefusalReasonMalformedFacing,
 	"MalformedSlot":      RefusalReasonMalformedSlot,

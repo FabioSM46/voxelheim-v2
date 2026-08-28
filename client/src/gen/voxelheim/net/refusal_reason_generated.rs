@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 31] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 34] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -45,6 +45,9 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 31] = [
     RefusalReason::TooManyMarkers,
     RefusalReason::NoteTooLong,
     RefusalReason::MarkerUnknown,
+    RefusalReason::NotAVendor,
+    RefusalReason::NotEnoughSilver,
+    RefusalReason::VendorDoesNotWant,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -164,6 +167,20 @@ impl RefusalReason {
     /// mark exists by naming ids it was never given — the argument `RefusedAction` records
     /// for having no member for a refused structure removal at all.
     pub const MarkerUnknown: Self = Self(26);
+    /// The addressed entity exists and sells nothing. In the low group deliberately: the
+    /// request was legal and the answer is about the world, not about the build that
+    /// asked — a resident who is a guard rather than a trader is an ordinary thing to
+    /// walk up to. It is also the one answer a client cannot compute for itself, because
+    /// nothing on the wire says which residents keep a stall until one is opened.
+    pub const NotAVendor: Self = Self(27);
+    /// The player's purse holds less silver than the authoritative total for this
+    /// purchase. The server owns the price and the purse both; the client's arithmetic is
+    /// presentation and this is what corrects it.
+    pub const NotEnoughSilver: Self = Self(28);
+    /// The vendor does not buy the offered item at all. Distinct from `NotEnoughSilver`,
+    /// which is the purchase direction, and from `NotAVendor`, which is about the
+    /// resident rather than the item: this vendor trades, and not in that.
+    pub const VendorDoesNotWant: Self = Self(29);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -207,6 +224,9 @@ impl RefusalReason {
         Self::TooManyMarkers,
         Self::NoteTooLong,
         Self::MarkerUnknown,
+        Self::NotAVendor,
+        Self::NotEnoughSilver,
+        Self::VendorDoesNotWant,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -242,6 +262,9 @@ impl RefusalReason {
             Self::TooManyMarkers => Some("TooManyMarkers"),
             Self::NoteTooLong => Some("NoteTooLong"),
             Self::MarkerUnknown => Some("MarkerUnknown"),
+            Self::NotAVendor => Some("NotAVendor"),
+            Self::NotEnoughSilver => Some("NotEnoughSilver"),
+            Self::VendorDoesNotWant => Some("VendorDoesNotWant"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

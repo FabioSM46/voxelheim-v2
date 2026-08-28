@@ -94,6 +94,12 @@ const (
 	// rather than characters, because a byte is what the wire and both decoders
 	// actually count.
 	MarkerNoteMaxBytes = 120
+
+	// ResidentNameMaxBytes bounds ResidentAppearance.name. Bytes rather than
+	// characters, for the reason MarkerNoteMaxBytes is measured in them. A resident's
+	// name is short by design: it is drawn over their head, and a name that needs a
+	// scroll bar is not a name.
+	ResidentNameMaxBytes = 32
 )
 
 // MapTileScales are the only blocks-per-pixel values this contract has: one pixel
@@ -198,6 +204,8 @@ type Message struct {
 	MapTileRequest     *MapTileRequest
 	MarkerPlace        *MarkerPlaceRequest
 	MarkerRemove       *MarkerRemoveRequest
+	NpcInteract        *NpcInteractRequest
+	Trade              *TradeRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -329,6 +337,62 @@ type Marker struct {
 // wholesale. An empty list is ordinary: a character who has marked nothing.
 type MarkerList struct {
 	Markers []Marker
+}
+
+// NpcInteractRequest is one intent to address a resident. It names the entity and
+// nothing else: whether the player is close enough, whether that entity keeps a stall
+// and whether anything opens are all the server's to decide.
+type NpcInteractRequest struct {
+	EntityID   uint64
+	ClientTick uint32
+}
+
+// TradeRequest is one intent to trade with a vendor. It carries an item, a count, a
+// direction and the price-list revision the client was looking at — never a price and
+// never a total, because both belong to the server.
+type TradeRequest struct {
+	EntityID   uint64
+	ItemID     uint16
+	Count      uint16
+	Buying     bool
+	Revision   uint32
+	ClientTick uint32
+}
+
+// ResidentAppearance is what one resident is called and what they do, sent once as the
+// entity enters view. HasName and HasAppearance are honoured rather than assumed, for
+// the reason PlayerAppearance's are: a message missing either is one a client has to
+// refuse, and there would otherwise be no way to build one for a test.
+type ResidentAppearance struct {
+	EntityID      uint64
+	Name          string
+	HasName       bool
+	Role          vnet.ResidentRole
+	Appearance    Appearance
+	HasAppearance bool
+}
+
+// VendorEntry is one line of a stall's price list: what is traded and the silver it
+// costs per unit. There is no stock count — stock is unlimited by contract.
+type VendorEntry struct {
+	ItemID uint16
+	Price  uint16
+}
+
+// VendorState is the complete price list one vendor shows one recipient, and it
+// replaces the recipient's previous view wholesale. Sells is what the player may buy;
+// Buys is what the vendor pays for.
+type VendorState struct {
+	EntityID uint64
+	Revision uint32
+	Sells    []VendorEntry
+	Buys     []VendorEntry
+}
+
+// VendorClosed explicitly ends one open stall. It carries no reason, exactly as
+// LootClosed does not.
+type VendorClosed struct {
+	EntityID uint64
 }
 
 // ChatMessage is one chat line the authoritative server accepted.
@@ -1624,9 +1688,73 @@ func Decode(frame []byte) (msg Message, err error) {
 		msg.MarkerRemove = &MarkerRemoveRequest{
 			MarkerID: request.MarkerId(), ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadNpcInteractRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.NpcInteractRequest
+		request.Init(table.Bytes, table.Pos)
+		if request.EntityId() == 0 {
+			return Message{}, fmt.Errorf("%w: NpcInteractRequest entity id is absent", ErrMalformed)
+		}
+		msg.NpcInteract = &NpcInteractRequest{
+			EntityID: request.EntityId(), ClientTick: request.ClientTick(),
+		}
+
+	case vnet.PayloadTradeRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.TradeRequest
+		request.Init(table.Bytes, table.Pos)
+		// Four absent-field zeroes, refused separately so the log names which one. None
+		// of them is a refusal in the contract's vocabulary: a trade for nothing, from
+		// nobody, of no item, against no revision is not a legal question answered no —
+		// it is a frame no correct client produces, which is where this boundary closes
+		// the session rather than sending an ActionRefused. The direction is deliberately
+		// not checked: `buying` is a bool, so both of its values are legal.
+		switch {
+		case request.EntityId() == 0:
+			return Message{}, fmt.Errorf("%w: TradeRequest entity id is absent", ErrMalformed)
+		case request.ItemId() == 0:
+			return Message{}, fmt.Errorf("%w: TradeRequest item id is absent", ErrMalformed)
+		case request.Count() == 0:
+			return Message{}, fmt.Errorf("%w: TradeRequest count is absent", ErrMalformed)
+		case request.Revision() == 0:
+			return Message{}, fmt.Errorf("%w: TradeRequest revision is absent", ErrMalformed)
+		}
+		msg.Trade = &TradeRequest{
+			EntityID: request.EntityId(), ItemID: request.ItemId(),
+			Count: request.Count(), Buying: request.Buying(),
+			Revision: request.Revision(), ClientTick: request.ClientTick(),
+		}
 	}
 
 	return msg, nil
+}
+
+// ResidentRoleOK reports whether role is a member this contract names, Unknown
+// excluded.
+//
+// Unknown is excluded rather than mapped, for the reason MarkerKindOK excludes its
+// own: it is the absent-field zero, and a resident whose role failed to arrive must be
+// refused rather than drawn as a generic villager. The server always knows what a
+// resident is, so there is nothing here to be tolerant of.
+//
+// Exported because a resident's role reaches the wire from the world's own tables as
+// well as from a test, and a build that cannot name the role it is about to send must
+// find that out before the frame leaves.
+func ResidentRoleOK(role vnet.ResidentRole) bool {
+	switch role {
+	case vnet.ResidentRoleVillager, vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader, vnet.ResidentRoleGuard:
+		return true
+	default:
+		return false
+	}
 }
 
 // MarkerKindOK reports whether kind is a member this contract names, Unknown excluded.
@@ -2641,6 +2769,110 @@ func EncodeMarkerList(list MarkerList) []byte {
 	vnet.MarkerListAddMarkers(b, markers)
 	payload := vnet.MarkerListEnd(b)
 	return finishEnvelope(b, vnet.PayloadMarkerList, payload)
+}
+
+// EncodeNpcInteractRequest builds one intent to address a resident. The server never
+// sends one; this exists for the reason EncodeAttackRequest does — the tests need the
+// bytes a client produces, and a second encoder written by hand would drift from this
+// one. Values are written verbatim, the absent-field zero included, so a test can
+// present the decode boundary with the frame a broken client would send.
+func EncodeNpcInteractRequest(r NpcInteractRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.NpcInteractRequestStart(b)
+	vnet.NpcInteractRequestAddEntityId(b, r.EntityID)
+	vnet.NpcInteractRequestAddClientTick(b, r.ClientTick)
+	request := vnet.NpcInteractRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadNpcInteractRequest, request)
+}
+
+// EncodeTradeRequest builds one trade intent, verbatim, for the same reason. It carries
+// no price and no total: the contract forbids both, and an encoder that offered a field
+// for them would be the first place that stopped being true.
+func EncodeTradeRequest(r TradeRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.TradeRequestStart(b)
+	vnet.TradeRequestAddEntityId(b, r.EntityID)
+	vnet.TradeRequestAddItemId(b, r.ItemID)
+	vnet.TradeRequestAddCount(b, r.Count)
+	vnet.TradeRequestAddBuying(b, r.Buying)
+	vnet.TradeRequestAddRevision(b, r.Revision)
+	vnet.TradeRequestAddClientTick(b, r.ClientTick)
+	request := vnet.TradeRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadTradeRequest, request)
+}
+
+// EncodeResidentAppearance builds the message that tells a session what one resident is
+// called and what they do. Sent once, as the entity enters view.
+//
+// The name is written exactly as given, over-long ones included, for the reason
+// EncodeMapTile writes its vectors as given: a name past the contract's bound is a
+// defect in the caller, and truncating it here would hide it from the client's decoder,
+// which is the only thing that checks.
+func EncodeResidentAppearance(r ResidentAppearance) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	// A nested table must be finished before the table that references it opens —
+	// unlike a struct, which is written inline while its parent is open.
+	var appearanceOffset flatbuffers.UOffsetT
+	if r.HasAppearance {
+		appearanceOffset = encodeAppearance(b, r.Appearance)
+	}
+	var nameOffset flatbuffers.UOffsetT
+	if r.HasName {
+		nameOffset = b.CreateString(r.Name)
+	}
+
+	vnet.ResidentAppearanceStart(b)
+	vnet.ResidentAppearanceAddEntityId(b, r.EntityID)
+	if r.HasName {
+		vnet.ResidentAppearanceAddName(b, nameOffset)
+	}
+	vnet.ResidentAppearanceAddRole(b, r.Role)
+	if r.HasAppearance {
+		vnet.ResidentAppearanceAddAppearance(b, appearanceOffset)
+	}
+	built := vnet.ResidentAppearanceEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadResidentAppearance, built)
+}
+
+// EncodeVendorState builds one complete price list for one recipient.
+//
+// Both vectors are always written, empty ones included: the contract requires them
+// present, and a vendor that only buys or only sells is ordinary. Each vector is written
+// backwards because a FlatBuffers vector is built from its end — the loop EncodeLootState
+// runs, for the same reason.
+func EncodeVendorState(state VendorState) []byte {
+	b := flatbuffers.NewBuilder((len(state.Sells)+len(state.Buys))*4 + 128)
+
+	vnet.VendorStateStartBuysVector(b, len(state.Buys))
+	for i := len(state.Buys) - 1; i >= 0; i-- {
+		vnet.CreateVendorEntry(b, state.Buys[i].ItemID, state.Buys[i].Price)
+	}
+	buys := b.EndVector(len(state.Buys))
+
+	vnet.VendorStateStartSellsVector(b, len(state.Sells))
+	for i := len(state.Sells) - 1; i >= 0; i-- {
+		vnet.CreateVendorEntry(b, state.Sells[i].ItemID, state.Sells[i].Price)
+	}
+	sells := b.EndVector(len(state.Sells))
+
+	vnet.VendorStateStart(b)
+	vnet.VendorStateAddEntityId(b, state.EntityID)
+	vnet.VendorStateAddRevision(b, state.Revision)
+	vnet.VendorStateAddSells(b, sells)
+	vnet.VendorStateAddBuys(b, buys)
+	payload := vnet.VendorStateEnd(b)
+	return finishEnvelope(b, vnet.PayloadVendorState, payload)
+}
+
+// EncodeVendorClosed explicitly ends one open stall.
+func EncodeVendorClosed(closed VendorClosed) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.VendorClosedStart(b)
+	vnet.VendorClosedAddEntityId(b, closed.EntityID)
+	payload := vnet.VendorClosedEnd(b)
+	return finishEnvelope(b, vnet.PayloadVendorClosed, payload)
 }
 
 // EncodeLootClosed explicitly ends one open corpse container.
