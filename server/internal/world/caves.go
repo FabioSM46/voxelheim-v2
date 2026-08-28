@@ -161,22 +161,6 @@ func caveMouthAt(seed, worldX, worldZ int64) bool {
 	return climateField(seed+caveMouthSeedOffset, worldX, worldZ, caveMouthScaleBlocks) >= caveMouthThreshold
 }
 
-// carvedColumnTop is the highest solid voxel of a column once carving is applied:
-// the surface, unless a mouth has opened it, in which case the first voxel below
-// that survives.
-//
-// The loop needs no bound of its own — caveAt answers false once depth passes
-// caveMaxDepth, so it terminates after at most caveMaxDepth+1 steps — and in the
-// overwhelming majority of columns it takes exactly one, because carving at depth 0
-// requires a mouth.
-func carvedColumnTop(seed, worldX, worldZ int64, surface int) int {
-	top := surface
-	for caveAt(seed, worldX, int64(top), worldZ, surface) {
-		top--
-	}
-	return top
-}
-
 func absInt64(v int64) int64 {
 	if v < 0 {
 		return -v
