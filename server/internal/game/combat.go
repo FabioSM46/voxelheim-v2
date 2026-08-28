@@ -136,9 +136,9 @@ func (p *Player) launcherHasAmmunitionLocked(slot uint8) bool {
 // whole of the ordering guarantee: a swing is judged against the positions this tick
 // produced, and a draugr killed by one cannot land an attack later in the same tick.
 //
-// **It returns nothing, and it used to return the loot.** A blow that kills only starts
-// the creature Dying. Sim.advanceMobsLocked later creates the owned corpse and rolls its
-// container under the authoritative simulation lock; the ground-drop path is not involved.
+// **It returns nothing, and it used to return the loot.** A blow that kills produces the
+// owned corpse and rolls its container inside Sim.damageMobLocked, under the authoritative
+// simulation lock and on this same tick; the ground-drop path is not involved.
 //
 // The caller holds Sim.mu.
 func (p *Player) resolveAttackLocked() {
@@ -371,12 +371,14 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 // hardcoded box would have given it a draugr's reach in both directions — reaching a
 // vargr that was too far away and missing one standing at its own edge.
 //
-// **A body that is already going down is not a target.** damageMobLocked would refuse the
-// blow anyway — zero health is its first guard — but the swing would have been *spent* on
-// it: the search returns the nearest candidate, so a corpse lying between a player and the
-// draugr behind it would absorb every swing until it stopped existing. A dying creature is
-// therefore skipped here rather than merely being immune, which is the same distinction
-// `huntable` draws for a player who has died.
+// **A body is not a target, and it is now structurally not one.** A corpse is not in
+// Sim.mobs at all — the killing blow moves it to the corpse collection in the same call —
+// so the search below cannot return one. The zero-health guard stays as the invariant
+// rather than as a live case: what it protects against is a swing being *spent* on a body,
+// since the search returns the nearest candidate and a corpse lying between a player and
+// the draugr behind it would otherwise absorb every swing. This used to be the only thing
+// standing between a player and that, because a killed creature spent two and a half
+// seconds in Sim.mobs before it stopped being one.
 //
 // O(mobs) per swing, on the same explicit trade the mob's own target selection records.
 // The caller holds Sim.mu.
@@ -391,7 +393,7 @@ func (s *Sim) swingTargetLocked(p *Player) *mob {
 	// Sorted, so two mobs at the same distance resolve by identity rather than by
 	// whichever the map happened to yield first.
 	for _, m := range s.sortedMobsLocked() {
-		if m.dying() {
+		if m.health == 0 {
 			continue
 		}
 		body := m.species().body.boxAt(m.pos)

@@ -115,20 +115,27 @@ const RECOVERY_LEAN: f32 = 0.22;
 /// How quickly a pose settles towards its target lean, per second.
 const LEAN_RESPONSE: f32 = 12.0;
 
-/// How long a body takes to go down, once the server has said it is dying.
+/// How long a body takes to go down, once the server has said the creature is dead.
 ///
-/// **Deliberately not a mirror of the server's `MobDeathDuration`, and shorter than it.**
-/// This side is never told how long a death lasts and does not need to be: the fall is a
-/// curve that *finishes*, and the body then lies where it landed for as long as the
-/// snapshots keep naming it. What ends a death is the server no longer sending the
-/// creature, which despawns the body through the same path a creature that walked out of
-/// view takes — so there is no second clock here and nothing to keep in step. A server
-/// configured with a shorter death would cut a fall off part way, which is a pose being
-/// interrupted rather than a disagreement about a fact.
+/// **There is no server number this mirrors, and there is no longer one it could.** This
+/// side is never told how long a death lasts and does not need to be: the fall is a curve
+/// that *finishes*, and the body then lies where it landed for as long as the snapshots
+/// keep naming it. What ends a death is the server no longer sending the creature, which
+/// despawns the body through the same path a creature that walked out of view takes — so
+/// there is no second clock here and nothing to keep in step.
+///
+/// It used to be argued against `MobDeathDuration`, which was two and a half seconds the
+/// *server* spent between the killing blow and the corpse existing, and this number was
+/// deliberately shorter than it so that most of the wait was the body already lying still.
+/// That constant is gone (#441): a killing blow now produces the lootable corpse on the
+/// tick it lands, and the fall is presentation with nothing waiting behind it. So this is
+/// the only number in the game that describes how long a body takes to go over, and
+/// changing it changes what a death looks like and nothing else — a player who presses F
+/// while the draugr is still tipping gets the loot window, because nothing here is
+/// consulted about that.
 ///
 /// Seven hundred milliseconds is about what a body of that size takes to go over under
-/// this game's gravity, and short enough that most of the wait before the drop is the body
-/// already lying still — which is the bit that makes the drop read as coming *from* it.
+/// this game's gravity, and short enough to read as a fall rather than as a slump.
 const FALL_TIME: Duration = Duration::from_millis(700);
 
 /// How far a humanoid ends up tipped, in radians, and which way.
@@ -267,10 +274,13 @@ pub(super) struct Mob {
     /// How long this body has been going down, or `None` while the server is not saying
     /// it is.
     ///
-    /// **It exists while the newest snapshot says [`MobAction::Dying`] or
-    /// [`MobAction::Corpse`]** and is recomputed from that every time one arrives, which keeps the fall a
+    /// **It exists while the newest snapshot says [`MobAction::Corpse`]** — or
+    /// [`MobAction::Dying`], which this server no longer sends and the contract still
+    /// carries — and is recomputed from that every time one arrives, which keeps the fall a
     /// consequence of an authoritative transition rather than a state this side entered on
-    /// its own. Local time advances it; nothing reads it back as a fact.
+    /// its own. Local time advances it; nothing reads it back as a fact, and in particular
+    /// nothing gates looting on it: whether a corpse can be opened is a question the
+    /// snapshot answers, in `accessible_loot_corpses`.
     ///
     /// **It is not a clock the body is counted out on.** What ends a death is the server
     /// dropping the creature from its snapshots, which despawns the body through the same
@@ -283,6 +293,12 @@ pub(super) struct Mob {
     /// was not told about. The visible cost is a body that streams into view part way
     /// through its death and then falls from upright — rarer than the case it would take to
     /// fix, which is a field on `MobState`.
+    ///
+    /// A body first seen already a *corpse* is the other half of that and goes the other
+    /// way: it lands flat, at [`FALL_TIME`], because a corpse that has been lying there
+    /// since before this client could see it should not stand up in order to fall over.
+    /// The two are told apart by where they are decided — [`spawn_mob`] has no previous
+    /// snapshot and the update path does — and never by a remembered action.
     falling: Option<Duration>,
 }
 
@@ -552,11 +568,24 @@ pub(super) fn apply_snapshots(
         // **The fall exists while the server says dying or corpse**, and it
         // is recomputed from the action every time a snapshot lands rather than started by
         // an edge this side detected. Written this way round so there is no transition to
-        // miss: any other action has no fall, whatever the previous one was. Corpse
-        // preserves an in-progress fall and starts already landed when first seen.
+        // miss: any other action has no fall, whatever the previous one was.
+        //
+        // **`unwrap_or` is where "was it alive last snapshot?" is answered**, and it is
+        // answered without remembering the previous action anywhere. A body that was alive
+        // has no fall — every living action clears it, one line above, every snapshot — so
+        // `None` here *is* the alive-to-dead edge, and it starts the fall from upright at
+        // zero. `Some` is a fall already in progress, which is preserved. The only body
+        // that starts already landed is one first *seen* as a corpse, and that case never
+        // reaches this arm at all: it is [`spawn_mob`], which has no previous snapshot to
+        // have been alive in.
+        //
+        // Corpse used to start at [`FALL_TIME`] here as well as there, because the server
+        // sent `Dying` for two and a half seconds first and a creature only ever became a
+        // corpse *after* its fall had run. It no longer does — a killing blow produces the
+        // corpse on the tick it lands (#441) — so the snapshot that says Corpse is the one
+        // that used to say Dying, and it is the one the fall now starts on.
         mob.falling = match state.action {
-            MobAction::Dying => Some(mob.falling.unwrap_or(Duration::ZERO)),
-            MobAction::Corpse => Some(mob.falling.unwrap_or(FALL_TIME)),
+            MobAction::Dying | MobAction::Corpse => Some(mob.falling.unwrap_or(Duration::ZERO)),
             _ => None,
         };
 
@@ -607,7 +636,10 @@ fn spawn_mob(
                 flash: None,
                 yaw: state.yaw,
                 lean: lean_for(state.action),
-                // A body first seen already dying falls from upright — see the field.
+                // A body first seen already dying falls from upright, and one first seen
+                // already a corpse is left lying flat — see the field. This is the *only*
+                // place a corpse starts at FALL_TIME: reaching here means there was no
+                // previous snapshot, so there was no fall to have watched.
                 falling: match state.action {
                     MobAction::Dying => Some(Duration::ZERO),
                     MobAction::Corpse => Some(FALL_TIME),
@@ -1470,6 +1502,22 @@ mod tests {
             .map(|(_, transform)| transform.scale)
     }
 
+    /// One frame of local time, short enough that a fall barely moves in it.
+    ///
+    /// The same millisecond [`let_the_body_land`] leaves the clock on, so a test that lands
+    /// a body and then asserts about the next frame is reading one unit either way.
+    const ONE_FRAME: Duration = Duration::from_millis(1);
+
+    /// How far through its fall the one body in the world is, or `None` if it is not going
+    /// down. Read off the component rather than inferred from the drawn rotation, because
+    /// what is being asserted is where the fall *started* and two different starts can draw
+    /// the same first frame.
+    fn falling(app: &mut App) -> Option<Duration> {
+        let world = app.world_mut();
+        let mut query = world.query::<&Mob>();
+        query.single(world).expect("one body").falling
+    }
+
     /// How long each step of a manual fall takes.
     ///
     /// **Comfortably under `Time<Virtual>`'s default `max_delta` of 250 ms**, which is the
@@ -1631,10 +1679,10 @@ mod tests {
     /// A fall is a pose and never a clock: the body goes when the *server* stops sending
     /// it, however long it has been lying there.
     ///
-    /// This is what keeps `MobDeathDuration` a number with no mirror on this side. A fall
-    /// that finished and then despawned its own body would be this client deciding when a
-    /// creature stopped existing — and it would be visibly wrong the moment an operator ran
-    /// a server with a longer death.
+    /// This is what keeps `FALL_TIME` presentation with nothing resting on it. A fall that
+    /// finished and then despawned its own body would be this client deciding when a
+    /// creature stopped existing — and it would be visibly wrong against any corpse lifetime
+    /// but the one it happened to be tuned against.
     #[test]
     fn a_body_lies_where_it_landed_until_the_server_stops_sending_it() {
         let mut app = headless();
@@ -1664,6 +1712,111 @@ mod tests {
         assert!(
             bodies(&mut app).is_empty(),
             "the body outlived the snapshot"
+        );
+    }
+
+    /// **A creature that was alive in the last snapshot starts its fall from upright, on
+    /// the snapshot that first calls it a corpse.**
+    ///
+    /// This is the client half of #441. The server used to send `Dying` for two and a half
+    /// seconds and only then `Corpse`, so by the time a body was called a corpse its fall
+    /// had long finished and the `Corpse` arm was right to start it already landed. The
+    /// killing blow now produces the corpse directly: the snapshot that says `Corpse` is
+    /// the one that used to say `Dying`, and a body that carried on standing upright and
+    /// then snapped flat would be the visible cost of not moving with it.
+    ///
+    /// The lootable flag is asserted on the same frame rather than in a test of its own,
+    /// because "the body is going down" and "the body can be looted" are now one transition
+    /// and the whole point is that a player does not have to wait out the first to get the
+    /// second. The *material* is the impact flash for the first [`FLASH_TIME`], because the
+    /// killing blow is a health decrease like any other and this is the frame it lands on;
+    /// the amber is asserted once that has run out, which is what a player sees.
+    #[test]
+    fn a_body_that_was_alive_starts_its_fall_on_the_snapshot_that_says_corpse() {
+        let mut app = headless();
+        // A frame of known length, because the system that reads the snapshot is the one
+        // that advances the pose: whatever the fall starts at, one frame of it has already
+        // been spent by the time the assertion below can see it. A millisecond makes the
+        // difference between the two possible starts — zero and FALL_TIME — unmistakable.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(ONE_FRAME));
+
+        deliver(&mut app, 1, vec![draugr(900, 0.0, 60, MobAction::Chase)]);
+        app.update();
+        assert_eq!(falling(&mut app), None, "a living draugr is going down");
+
+        deliver_lootable(&mut app, 2, draugr(900, 0.0, 0, MobAction::Corpse), true);
+        app.update();
+        assert_eq!(
+            falling(&mut app),
+            Some(ONE_FRAME),
+            "the fall did not start from upright on the tick of the kill"
+        );
+        let upright = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            upright.dot(Vec3::Y) > 0.99,
+            "the body was already over on the tick it died: {upright}"
+        );
+
+        assert!(
+            {
+                let world = app.world_mut();
+                let mut query = world.query::<&Mob>();
+                query.single(world).expect("one body").lootable
+            },
+            "the body is not lootable on the tick it died"
+        );
+
+        // And it is a fall rather than a value that sits at zero: local time carries it,
+        // and it finishes flat, tinted, with the impact flash long over.
+        let_the_body_land(&mut app);
+        assert!(
+            falling(&mut app).is_some_and(|elapsed| elapsed >= FALL_TIME),
+            "the fall did not advance"
+        );
+        let fallen = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            fallen.z > 0.99,
+            "the body did not finish its fall: its up axis is {fallen}"
+        );
+        let highlight = app
+            .world()
+            .resource::<MobVisuals>()
+            .lootable_material
+            .clone();
+        assert!(
+            parts(&mut app)
+                .iter()
+                .all(|(_, material)| *material == highlight),
+            "the fallen body is not tinted as lootable"
+        );
+    }
+
+    /// **A body first *seen* as a corpse is already lying flat**, and it is the only one.
+    ///
+    /// A corpse that has been there since before this client could draw it must not stand
+    /// up in order to fall over, and the wire carries no elapsed time to tell it how far
+    /// through it should be. The two cases are told apart by which code path reaches them —
+    /// `spawn_mob` has no previous snapshot — rather than by a remembered action, so this
+    /// pins the half that has no `Mob` to have been alive in.
+    #[test]
+    fn a_body_first_seen_as_a_corpse_is_already_lying_flat() {
+        let mut app = headless();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(ONE_FRAME));
+        deliver_lootable(&mut app, 1, draugr(900, 0.0, 0, MobAction::Corpse), true);
+        app.update();
+
+        // Exactly FALL_TIME rather than a frame past it: spawning is a deferred command,
+        // so the pose system does not see this body until the frame after the one that
+        // created it. What is asserted is the value spawn_mob chose.
+        assert_eq!(
+            falling(&mut app),
+            Some(FALL_TIME),
+            "a corpse streamed into view stood back up to fall over"
+        );
+        let lying = drawn_rotation(&mut app) * Vec3::Y;
+        assert!(
+            lying.z > 0.99,
+            "a corpse streamed into view is drawn upright: {lying}"
         );
     }
 

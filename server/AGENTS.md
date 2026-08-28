@@ -1171,43 +1171,48 @@ projection clients receive. Passive species stay on `stepPassive` and never allo
 kill. A draugr leaves 1..2 bones, a vargr leaves exactly one pelt, and two pelts are a
 `RecipeIDLeatherPatch` away from a field repair.
 
-- **A kill, and only a kill.** The reap in `advanceMobsLocked` is the single caller of
-  `rollLootLocked`, and only a creature that was *killed* ever reaches it: the director's two
-  removals — dawn, and "outside every streamed cube for five seconds" — `delete` from
-  `Sim.mobs` without going near it, so a mob that despawns leaves nothing. Loot is the reward
-  for the kill, and a world that paid it out for having existed would be a world where
-  waiting is a strategy.
-- **A blow no longer removes anything, and that is the whole of #176's server half.**
-  `damageMobLocked` puts the creature into `vnet.MobActionDying` with a countdown of
-  `mobDeathTicks` and returns nothing; the body stays in `Sim.mobs` and in every snapshot for
-  `MobDeathDuration`, and `advanceMobsLocked` takes it away and rolls the loot when the
-  countdown runs out. The body used to vanish on the tick of the blow, on the argument that
-  "a corpse with a timer would be a second kind of thing for every consumer to know about" —
-  which was true, and the cost of not having one was that nothing could show a creature
-  falling over and the drop had to appear on the instant of death. The extra state is
-  therefore exactly what that comment refused, deliberately, and the wire says so
-  (`MobAction.Dying`) rather than leaving it to be inferred from a health of zero.
-- **The delay is the server's, and that is the point rather than an implementation
-  detail.** When an item begins to exist is a gameplay outcome. A client that draws no
-  animation at all waits the same two and a half seconds as one that does, because the wait
-  is not the animation's — the animation only fills it. `MobDeathDuration` lives in
-  `constants.go`, is converted per server like every other duration, and is the only
-  countdown loot waits on.
-- **Three consequences that had to be handled rather than discovered.** A dying creature is
-  skipped by `swingTargetLocked`, or a corpse would absorb every swing aimed past it — being
-  immune is not the same as not being chosen. Its `target` is cleared at the blow, so nothing
-  reads a body as still hunting. And `removeSpentMobsLocked` skips it outright: the dawn rule
-  matches a nocturnal creature that hunts nobody, which is what a dying draugr is on every
-  tick of its death, and removing it there would delete loot a player had already earned.
-  `MobDespawnGrace` is twice `MobDeathDuration`, so the distance rule could not reach it
-  either way — it is guarded regardless, because that is a property of two constants rather
-  than of the loop.
-- **The roll happens at the reap, not at the blow.** Two reasons, and the second is the one
-  that shows: the answer should not be decided two and a half seconds before it exists, and
-  the voxel comes from the creature's position when it is rolled — a draugr killed on a ledge
-  falls off it while it is dying, and its bones belong at the bottom rather than in the air it
-  was hit in. `Sim.loot` is advanced only inside the locked tick either way, so determinism is
-  untouched.
+- **A kill, and only a kill.** `makeCorpseLocked` is the single caller of `rollLootLocked`,
+  and only a creature that was *killed* ever reaches it: the director's two removals — dawn,
+  and "outside every streamed cube for five seconds" — `delete` from `Sim.mobs` without going
+  near it, so a mob that despawns leaves nothing. Loot is the reward for the kill, and a world
+  that paid it out for having existed would be a world where waiting is a strategy.
+- **The blow is the whole of the death, and that is #441.** `damageMobLocked` takes the
+  creature out of `Sim.mobs`, calls `makeCorpseLocked` and rolls the container, all inside the
+  call that empties its health. The rest of the tick — `advanceMobsLocked`, the director, the
+  snapshot projection, `offerLootLocked` — therefore already sees a corpse, so the first
+  snapshot that draws a body draws it as `MobAction.Corpse` and lists it in that recipient's
+  `accessible_loot_corpses` if they own it and are in reach. Pressing F while the body is
+  still visibly going over opens the loot window, because the fall is the client's and the
+  server has nothing to wait for.
+- **There was a two-and-a-half-second wait here and it is gone. What was given up is worth
+  naming.** From #176 to #441 a kill put the creature into `vnet.MobActionDying` with a
+  countdown of `mobDeathTicks`, left it in `Sim.mobs` and in every snapshot for
+  `MobDeathDuration`, and `advanceMobsLocked` reaped it and rolled the loot when the countdown
+  ran out. The argument for it was sound and its premise was not: when an item begins to exist
+  is a gameplay outcome, so a client that draws no animation must not get its loot sooner —
+  true, and irrelevant, because the wait was never deciding *whether* the drop was earned.
+  What it decided was how long a player who had already earned it had to stand there. Two
+  things went with it. **A body killed on a ledge no longer slides off before the loot is
+  placed**: the corpse is at the position the blow landed on, which is one tick's movement
+  from where it would have come to rest. And **the server never emits `MobAction.Dying`**;
+  the value stays in the contract, because a wire enumeration is not narrowed because one
+  server stopped sending one of its members, and `TestNoSnapshotEverCarriesDying` is what
+  says the server has.
+- **Three guards went with it, and none of them was deleted for being wrong.** A dying
+  creature had to be skipped by `swingTargetLocked`, or a corpse would absorb every swing
+  aimed past it — being immune is not the same as not being chosen. `removeSpentMobsLocked`
+  had to skip it outright, because the dawn rule matches a nocturnal creature that hunts
+  nobody, which is exactly what a dying draugr was on every tick of its death. Both are now
+  structural: a killed creature is not in `Sim.mobs`, so neither loop can reach one. What
+  remains is the `health == 0` check in each, kept as an invariant rather than as a live case,
+  and the `target` still cleared at the blow — the projectile pass captures its mob slice
+  *before* the first arrow moves, so a creature the first arrow killed is still in that slice
+  when the second one looks, and `firstProjectileTargetLocked`'s zero-health guard is the one
+  that genuinely fires.
+- **The roll happens at the blow, and the position it uses is the blow's.** `Sim.loot` is
+  advanced only inside the locked tick either way, so determinism is untouched — and the roll
+  is still exactly once per corpse, at creation, which is what makes opening a container a
+  projection rather than a draw.
 - **The lock is the whole design, and it is why `Step` is two functions.** The reap runs
   inside the tick, under `Sim.mu`; `spawnDrop` takes `Sim.mu` itself, because its other
   callers are session goroutines. Spawning there therefore deadlocks the server on the first

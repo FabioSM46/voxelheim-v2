@@ -331,6 +331,6 @@ func TestMobDeathClearsItsLedger(t *testing.T) {
 	left := len(m.threat)
 	h.sim.mu.Unlock()
 	if left != 0 {
-		t.Errorf("dying mob retained %d threat entries", left)
+		t.Errorf("a killed mob retained %d threat entries", left)
 	}
 }

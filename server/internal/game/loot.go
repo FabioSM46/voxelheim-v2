@@ -13,9 +13,9 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-// Normal-mob loot belongs to the corpse, never to the ground. The roll happens once,
-// when Dying completes, and is stored with stable owner and entry identities. Opening
-// only projects that settled state and therefore consumes no random numbers.
+// Normal-mob loot belongs to the corpse, never to the ground. The roll happens once, on
+// the tick the killing blow lands, and is stored with stable owner and entry identities.
+// Opening only projects that settled state and therefore consumes no random numbers.
 
 const mobLootStream = 0x766F78656C6C6F74 // "voxellot"
 
@@ -142,8 +142,8 @@ type mobSnapshot struct {
 	corpse *corpse
 }
 
-// mobSnapshotsLocked merges living/dying mobs and corpses in entity-id order. The
-// collection boundary stays internal: a receiver sees one continuous MobState stream.
+// mobSnapshotsLocked merges living mobs and corpses in entity-id order. The collection
+// boundary stays internal: a receiver sees one continuous MobState stream.
 func (s *Sim) mobSnapshotsLocked(mobs []*mob) []mobSnapshot {
 	shown := make([]mobSnapshot, 0, len(mobs)+len(s.corpses))
 	states := mobStates(mobs)
@@ -252,7 +252,8 @@ func standingDistanceSquared(a, b [3]float64) float64 {
 	return distance
 }
 
-// rollLootLocked rolls the species table exactly once, at the Corpse transition.
+// rollLootLocked rolls the species table exactly once, at the Corpse transition — which is
+// the tick of the killing blow, and the only tick on which it is ever called.
 func (s *Sim) rollLootLocked(m *mob) []corpseEntry {
 	table := m.species().loot
 	entries := make([]corpseEntry, 0, len(table))

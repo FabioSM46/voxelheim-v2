@@ -92,15 +92,16 @@ func TestThreeSwingsKillADraugr(t *testing.T) {
 		h.advance(int(h.sim.attackCooldown))
 	}
 
-	// Killed, which is now a state rather than an absence: the body stays in the world
-	// until MobDeathDuration is up. Three blows is what this test is about, so the
-	// question it asks is whether the third one killed it.
-	struck, live := h.mobState(id)
-	if !live {
-		t.Fatal("the draugr left the world on the tick of the blow, with no death to watch")
-	}
-	if !struck.dying() || struck.health != 0 {
+	// Killed, which is an absence from Sim.mobs and a corpse under the same identity on
+	// the same tick. Three blows is what this test is about, so the question it asks is
+	// whether the third one killed it.
+	if struck, live := h.mobState(id); live {
 		t.Errorf("the draugr survived three blows: %s with %d health", struck.action, struck.health)
+	}
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	if h.sim.corpses[id] == nil {
+		t.Error("three blows left no corpse under the draugr's identity")
 	}
 }
 
@@ -1109,8 +1110,7 @@ func TestADraugrKilledBySwingLandsNoBlowThatTick(t *testing.T) {
 	if got := h.vitals(player).Health; got != PlayerMaxHealth {
 		t.Errorf("a draugr killed this tick still cost %d health", PlayerMaxHealth-got)
 	}
-	struck, live := h.mobState(id)
-	if !live || !struck.dying() {
+	if _, live := h.mobState(id); live {
 		t.Errorf("the draugr survived a blow that should have killed it: %d health", h.mobHealth(id))
 	}
 }

@@ -459,6 +459,58 @@ mod tests {
         );
     }
 
+    /// **Interact opens the corpse on the tick the creature died, while the body is still
+    /// falling over.**
+    ///
+    /// The rhythm #441 is about, pinned from the side that decides it. The snapshot pair
+    /// here is exactly what the server now produces — the creature alive and hunting in one
+    /// tick, a corpse in `accessible_loot_corpses` in the very next — and this frame is the
+    /// first one that has ever seen the corpse, so on the client the body has not begun to
+    /// tip yet. It still opens, because there is nothing on this path that could ask: the
+    /// intent is originated from `SnapshotBuffer::nearest_accessible_corpse`, which reads
+    /// the newest snapshot's mobs and its accessible-corpse vector and nothing else. No
+    /// `Mob` component, no `falling`, no `FALL_TIME`.
+    ///
+    /// A regression here would not look like a bug. It would look like somebody making the
+    /// window wait for the animation to finish "so it reads better", which is this client
+    /// deciding a gameplay outcome — and the server would open the corpse anyway.
+    #[test]
+    fn interact_opens_a_corpse_on_the_tick_it_died_while_the_body_is_still_falling() {
+        let mut buffer = SnapshotBuffer::default();
+        // The tick before the blow: the same entity, alive, hunting, and lootable by
+        // nobody.
+        let mut alive = snapshot();
+        alive.mobs[0].health = 60;
+        alive.mobs[0].action = MobAction::Chase;
+        alive.mobs[0].target_entity_id = PLAYER;
+        alive.accessible_loot_corpses.clear();
+        assert!(buffer.accept(alive, Instant::now()));
+        // The tick of the blow, which is the tick the corpse exists on.
+        let mut killed = snapshot();
+        killed.server_tick = 2;
+        assert!(buffer.accept(killed, Instant::now()));
+
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(4);
+        app.insert_resource(outbound)
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(buffer);
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.update();
+        assert_eq!(
+            frames.try_recv().unwrap(),
+            encode_loot_open_request(&LootOpenRequest {
+                corpse_id: CORPSE,
+                client_tick: 0,
+            }),
+            "the loot window waited for an animation this side is not told the length of"
+        );
+    }
+
     #[test]
     fn interact_and_take_send_only_intent_and_keep_the_authoritative_entries() {
         let mut app = app();
