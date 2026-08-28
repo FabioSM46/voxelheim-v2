@@ -447,6 +447,30 @@ func TestMapTileRequestIsRefusedOffTheGridAndAtAnUnknownScale(t *testing.T) {
 	}
 }
 
+// A map height is a byte of shading that saturates at both ends.
+//
+// **The saturation is the half worth pinning.** Terrain here ranges over roughly
+// [-11, 139] and nothing bounds it on either side, so an encoding that wrapped would draw
+// the tallest peak in the world as a trench — a plausible picture of somewhere else. The
+// bias is what makes the world's negative half survive one byte at all, and it is
+// asserted at the exact block it puts at zero.
+func TestAMapHeightIsBiasedAndSaturates(t *testing.T) {
+	t.Parallel()
+
+	for _, row := range []struct {
+		y    int
+		want byte
+	}{
+		{-1000, 0}, {-65, 0}, {-64, 0}, {-63, 1}, {-11, 53},
+		{0, 64}, {47, 111}, {64, 128}, {139, 203},
+		{191, 255}, {192, 255}, {1000, 255},
+	} {
+		if got := MapTileHeight(row.y); got != row.want {
+			t.Errorf("MapTileHeight(%d) = %d, want %d", row.y, got, row.want)
+		}
+	}
+}
+
 // A mark is placed by kind, place and text, and never by id: identity is the server's.
 //
 // The note is bounded in bytes because that is what the wire carries, and it is checked
