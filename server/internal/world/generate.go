@@ -2,13 +2,15 @@ package world
 
 // Terrain shape for a Fimbulvetr world of climates: tundra, taiga, plains and
 // desert, with mountains wherever the land folds hard, ore below, conifers at a
-// density each climate decides and caves winding under all of it. Water and ruins
-// arrive in their own issues; every feature here remains a pure integer function
-// of the seed and world coordinate.
+// density each climate decides, caves winding under all of it and water standing in
+// everything the sea line reaches. Ruins arrive in their own issue; every feature
+// here remains a pure integer function of the seed and world coordinate.
 //
-// Climate itself lives in climate.go and caves in caves.go. This file reads both:
-// HeightAt for shape, blockAt for material, treeAtColumn for density, caveAt for
-// what is hollow.
+// Climate itself lives in climate.go, caves in caves.go and water in water.go. This
+// file reads all three: HeightAt for shape — which basins and river channels are
+// part of, because every consumer has to agree about where the ground is — blockAt
+// for material, treeAtColumn for density, caveAt for what is hollow and fillAt for
+// what stands in the hollows the sea line reaches.
 const (
 	// terrainScaleBlocks is how many blocks span one noise lattice cell. Larger is
 	// smoother; 96 gives ridges a few chunks wide rather than per-chunk static.
@@ -138,6 +140,21 @@ const _ = uint8(ironMinDepth - coalMaxDepth - 1)
 // range to end at. Climate is deliberately absent — where the land is high is not
 // the same question as what grows on it.
 func HeightAt(seed int64, worldX, worldZ int64) int {
+	surface, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
+	return surface
+}
+
+// shapeAt is [HeightAt] for a caller that already knows the column's climate, and it
+// also reports whether the height it returned is a river bed.
+//
+// **Two things are folded into one function because they are one decision.** Basins
+// are absent from desert, so the height field now needs the classification — and
+// columnAt has already computed it, so an exported-only form would make every
+// generated column sample temperature and humidity twice. And "is this a river"
+// cannot be asked again afterwards without paying a second fbm2D for an answer this
+// function already had; worse, a second reading could disagree with the ground,
+// because a column near spawn passes the river field and has no channel.
+func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river bool) {
 	// Position in Q16.16 lattice units. Integer division truncates toward zero,
 	// which for negative coordinates would mirror the terrain across the origin;
 	// floorDiv keeps the field continuous through x = 0.
@@ -145,7 +162,22 @@ func HeightAt(seed int64, worldX, worldZ int64) int {
 	nz := floorDiv(worldZ<<fracBits, terrainScaleBlocks)
 
 	n := fbm2D(seed, nx, nz) // [0, one]
-	return baseHeight + int((amplitudeAt(seed, worldX, worldZ)*(n-one/2))>>fracBits)
+	base := baseHeight + int((amplitudeAt(seed, worldX, worldZ)*(n-one/2))>>fracBits)
+
+	// The square around spawn keeps the terrain it would have had. See
+	// spawnWaterClearance, and spawnCaveClearance beside it: the two exemptions are
+	// the same shape and are checked the same way, before any noise is paid for.
+	if nearSpawnColumn(worldX, worldZ) {
+		return base, false
+	}
+
+	// **The height test comes before the river field, and the order is the budget.**
+	// riverMaxSurface rejects high ground with one comparison; the fbm2D behind
+	// riverAt is only paid where a channel could actually be.
+	if base <= riverMaxSurface && riverAt(seed, worldX, worldZ) {
+		return seaLevel - riverBedDrop, true
+	}
+	return base - basinAt(seed, worldX, worldZ, climate), false
 }
 
 // amplitudeAt is the peak-to-trough range in blocks at one column, in whole
@@ -195,7 +227,13 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // now lie inside a band a tunnel can cut. Nothing above ground moves *except*
 // where a mouth removes a surface — but the interior of every hill does, so this
 // is the same total break the last bump was.
-const WorldgenVersion uint32 = 4
+// 4 → 5: water. A sea line at 60 fills every air voxel above a lower surface,
+// basins dig lakes under it, river channels cut a fixed bed across the low ground,
+// tundra wears a lid of ice and the deep of the cave system stands in water. Two
+// of those change [HeightAt] itself, so the *shape* of the land moves and not only
+// what fills it — every column outside the spawn square is a candidate, which
+// makes this the same total break the last two bumps were.
+const WorldgenVersion uint32 = 5
 
 // Generate builds the chunk at coord for seed.
 //
@@ -239,32 +277,59 @@ type column struct {
 	surface int
 	climate Climate
 	gravel  bool
+	river   bool
+	beach   bool
 }
 
 // columnAt resolves one world column. Pure in (seed, x, z), like everything else
 // here — a neighbouring chunk reaches the same answer for a shared column by
 // calling this rather than by reading anything.
+//
+// The climate is computed first and handed down, because both of the fields under
+// it need it: heightAt to know whether this column may hold a basin, and blockAt to
+// know what its ground is made of.
 func columnAt(seed, worldX, worldZ int64) column {
 	climate := ClimateAt(seed, worldX, worldZ)
-	surface := HeightAt(seed, worldX, worldZ)
-	return column{surface: surface, climate: climate, gravel: gravelAt(seed, worldX, worldZ, surface, climate)}
+	surface, river := shapeAt(seed, worldX, worldZ, climate)
+	return column{
+		surface: surface,
+		climate: climate,
+		gravel:  gravelAt(seed, worldX, worldZ, surface, climate),
+		river:   river,
+		beach:   beachAt(surface, climate),
+	}
 }
 
-// blockAt is [blockAt] with this column's gravel patch layered over it.
+// blockAt is [blockAt] with this column's own surfaces layered over it: a river
+// bed, a beach, or a gravel patch.
 //
-// The patch is a property of the *column*, so it cannot live in blockAt: that
-// function takes a height, a surface and a climate, and deliberately takes no seed
-// or coordinate. Keeping the two apart is what lets blockAt stay the one statement
-// of "what a climate's ground is made of".
+// All three are properties of the *column*, so none of them can live in blockAt:
+// that function takes a height, a surface and a climate, and deliberately takes no
+// seed or coordinate. Keeping the two apart is what lets blockAt stay the one
+// statement of "what a climate's ground is made of".
+//
+// **The order is a precedence and each pair of it is a decision.** A river bed is
+// gravel and is one block deep, so it wins over everything: a channel reads as a
+// channel. A beach wins over a gravel patch, because sand at the water's edge is
+// what says "this is a shore" and a bar of gravel there says nothing. Neither can
+// reach an altitude override — both bands sit near the sea line, forty blocks under
+// stoneLine — so nothing here can put sand on a mountain.
 func (c column) blockAt(worldY int) Block {
 	block := blockAt(worldY, c.surface, c.climate)
-	if !c.gravel {
-		return block
+	depth := c.surface - worldY
+	if depth < 0 {
+		return block // air above the surface; nothing below layers onto it
 	}
-	if depth := c.surface - worldY; depth < 0 || depth >= gravelDepth {
-		return block
+
+	switch {
+	case c.river && depth == 0:
+		return Gravel
+	case c.beach && depth < beachDepth:
+		return Sand
+	case c.gravel && depth < gravelDepth:
+		return Gravel
 	}
-	return Gravel
+	return block
 }
 
 // voxelAt composes one voxel of a column: the terrain block, then carving, then
@@ -282,9 +347,16 @@ func (c column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
 	block := c.blockAt(int(worldY))
 	switch {
 	case block == Air:
-		return Air
+		// Above the ground, so this is the sea line's to fill. Water, or the ice on
+		// top of it in a tundra, or air above both.
+		return c.fillAt(int(worldY))
 	case caveAt(seed, worldX, worldY, worldZ, c.surface):
-		return Air
+		// **Carving is asked before the fill, and the two fills are separate rules.**
+		// A carved voxel is below the surface by construction, so the sea line above
+		// can never reach it — an air pocket under a lake bed stays an air pocket,
+		// which is what "no flow" means when the two features meet. What stands in a
+		// tunnel is decided by depth alone, by caveFillAt.
+		return caveFillAt(int(worldY))
 	case block == Stone:
 		return oreAt(seed, worldX, worldY, worldZ, c.surface)
 	default:
@@ -449,6 +521,16 @@ func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok b
 		return 0, false
 	}
 
+	// Nothing roots under water either, and this one is cheap enough to sit above
+	// the carve test. The grass test cannot answer it: a submerged plains column is
+	// grass at its surface with ten blocks of lake standing on it, and a conifer
+	// rooted there would put its trunk through the water and its canopy in the air —
+	// setTreeBlock only ever fills air, so what a player would see is a crown
+	// floating over a lake with nothing under it.
+	if col.surface < seaLevel {
+		return 0, false
+	}
+
 	// Nothing roots in a hole. The carve test is last on purpose: it is the most
 	// expensive question here by an order of magnitude, and the density check above
 	// has already rejected all but one candidate column in ninety-six.
@@ -549,9 +631,17 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 // It starts from the *carved* top rather than from the height field, because a
 // cave mouth removes the surface voxel and a caller that stood a player on
 // HeightAt there would put them inside the hillside.
+//
+// **Water is not a top and ice is.** The only fill in this world that stops movement
+// is the lid a tundra wears at the sea line, so a submerged column's top is still
+// its ground — and a frozen one's is the ice, which is a floor a body stands on and
+// therefore the highest generated solid in the column.
 func generatedColumnTop(seed, worldX, worldZ int64) int {
 	col := columnAt(seed, worldX, worldZ)
 	top := carvedColumnTop(seed, worldX, worldZ, col.surface)
+	if col.surface < seaLevel && col.fillAt(seaLevel) == Ice {
+		top = max(top, seaLevel)
+	}
 
 	for rootZ := worldZ - treeCanopyRadius; rootZ <= worldZ+treeCanopyRadius; rootZ++ {
 		for rootX := worldX - treeCanopyRadius; rootX <= worldX+treeCanopyRadius; rootX++ {
@@ -598,6 +688,19 @@ const (
 // players who expect to come back to the same place.
 func SpawnAt(seed int64) [3]float32 {
 	top := generatedColumnTop(seed, spawnColumnX, spawnColumnZ)
+
+	// **A session never begins under water.** spawnWaterClearance keeps basins and
+	// river channels off this column, but it cannot keep the ordinary height field
+	// above the sea line — the terrain is concentrated around 64 and the sea is at
+	// 60, so a sizeable minority of seeds put spawn on a lake bed. Lifting the
+	// reference to the sea line puts the player on the surface of the water instead
+	// of inside it: they swim rather than drown, which is the fail-safe direction and
+	// the only one the swim rules make sense in.
+	//
+	// Deliberately not a lowering: a column that stands above the sea line is
+	// untouched, so this is the sea line acting as a floor under the clearance rather
+	// than a second placement rule.
+	top = max(top, seaLevel)
 
 	return [3]float32{
 		spawnColumnX + 0.5, // centred in the column rather than on its corner
