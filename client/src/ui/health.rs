@@ -60,7 +60,7 @@ pub(super) const BAR_LABEL_SIZE: f32 = 14.0;
 const BAR_LABEL_MIN_SIZE: f32 = 14.0;
 
 /// The longest reading any of the three bars can be asked to draw, in characters:
-/// `Lv 65535 · 4294967295 / 4294967295`, a `u16` level and two `u32` progression values
+/// `Lv 65535 | 4294967295 / 4294967295`, a `u16` level and two `u32` progression values
 /// at their wire maxima. Health and hunger top out at `65535 / 65535`, thirteen.
 const LONGEST_READING_CHARS: f32 = 34.0;
 
@@ -87,11 +87,11 @@ const TRACK_INNER_HEIGHT: f32 = BAR_HEIGHT - 2.0 * BAR_BORDER;
 /// track would wrap, clip or spill over the world, and nothing at runtime would say so.
 const _: () = assert!(
     LONGEST_READING_CHARS * DEFAULT_FONT_ADVANCE_EM * BAR_LABEL_SIZE <= TRACK_INNER_WIDTH,
-    "the longest wire-valid reading must fit across the track — widen BAR_WIDTH"
+    "the longest wire-valid reading must fit across the track - widen BAR_WIDTH"
 );
 const _: () = assert!(
     BAR_LABEL_SIZE * LINE_HEIGHT_RATIO <= TRACK_INNER_HEIGHT,
-    "the reading's line must fit down the track — raise BAR_HEIGHT"
+    "the reading's line must fit down the track - raise BAR_HEIGHT"
 );
 const _: () = assert!(
     BAR_LABEL_SIZE >= BAR_LABEL_MIN_SIZE,
@@ -1289,7 +1289,7 @@ mod tests {
                 );
                 assert!(
                     *line_height <= TRACK_INNER_HEIGHT,
-                    "the reading's line must fit down the track — raise BAR_HEIGHT"
+                    "the reading's line must fit down the track - raise BAR_HEIGHT"
                 );
                 let (label_top, label_bottom) =
                     label_vertical_edges(label, transform, *line_height);
@@ -1327,7 +1327,7 @@ mod tests {
                 let mut query = world.query_filtered::<&Text, With<ExperienceLabel>>();
                 query.single(world).expect("one experience label").0.clone()
             },
-            "Lv 65535 · 4294967295 / 4294967295"
+            "Lv 65535 | 4294967295 / 4294967295"
         );
         assert_eq!(
             geometry_before,

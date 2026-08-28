@@ -584,6 +584,392 @@ pub(crate) fn drawn_cell(world: &World, cell: Entity) -> DrawnCell {
     drawn
 }
 
+/// The one rule that keeps every string this client composes drawable.
+///
+/// Bevy's `default_font` is the whole font stack here: `FiraMono-subset.ttf`, embedded in
+/// `bevy_text`, whose `cmap` holds exactly 95 glyphs — every printable ASCII codepoint and
+/// nothing else. A codepoint the font does not have is not drawn as a box and not logged as
+/// a warning; it is laid out with **zero advance**, so the string on the screen is simply
+/// shorter than the string in the source and nothing anywhere says so. That is how six
+/// characters — `°` `·` `—` `…` `♛` `⚔` — reached twenty-one on-screen sites across eleven
+/// modules without anybody seeing a hole, from the compass onward (#481): every test
+/// compared a formatted string against the same literal, so the tests agreed with the
+/// source, and neither knew what the font could draw.
+#[cfg(test)]
+mod ascii_guard {
+    use std::path::{Path, PathBuf};
+
+    /// **Every string and character literal the production build compiles is ASCII.**
+    ///
+    /// The scan is the whole crate rather than a list of the modules that draw, for the
+    /// reason a list kept in step with a directory by hand falls behind it. Text reaches
+    /// the screen from further away than `ui/`: the level on a name plate is composed in
+    /// `player/`, the field of view in `settings/`, and the line under the login control is
+    /// a `tls::ConnectError` message written in `net/`. A rule with no exceptions needs
+    /// nothing kept current.
+    ///
+    /// It reads literals rather than rendered text on purpose. What a screen shows depends
+    /// on the state a test drives it into, and several of the twenty-one were reachable only
+    /// from a state no test visited — a party leader who is offline, a corpse window, a
+    /// certificate that was substituted.
+    ///
+    /// It reads the character a literal *produces*, not the bytes it is written with, so
+    /// `"\u{265b}"` fails exactly as a pasted `♛` does. Both compile to the same codepoint
+    /// and the font lays both out with zero advance; a guard that could be stepped around
+    /// by spelling the crown differently would be a habit rather than a rule.
+    ///
+    /// Excluded: `src/gen/` (flatc output, which is never hand-edited) and `tests.rs`
+    /// (test code, which may legitimately spell a hostile name in a script this font
+    /// cannot draw, and does).
+    #[test]
+    fn every_string_the_client_composes_is_ascii() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources = Vec::new();
+        collect_sources(&root, &mut sources);
+        assert!(
+            sources.len() > 20,
+            "the walk found {} files under {}, which is not this crate",
+            sources.len(),
+            root.display()
+        );
+
+        let mut holes = Vec::new();
+        for path in &sources {
+            let source = std::fs::read_to_string(path).expect("a source file this crate compiles");
+            for (line, character) in non_ascii_in_literals(&source) {
+                holes.push(format!(
+                    "{}:{line}: U+{:04X} `{character}`",
+                    path.strip_prefix(&root).unwrap_or(path).display(),
+                    character as u32,
+                ));
+            }
+        }
+        assert!(
+            holes.is_empty(),
+            "these characters are absent from the only font this client has, so each would \
+             be laid out with zero advance and drawn as nothing:\n  {}\n\
+             Spell them in ASCII, or draw them as `bevy_ui` nodes the way `ui/party.rs` \
+             draws the crown and the crossed swords.",
+            holes.join("\n  ")
+        );
+    }
+
+    /// Every `.rs` file the guard reads: this crate's own source, minus generated code and
+    /// minus whole test files.
+    fn collect_sources(directory: &Path, into: &mut Vec<PathBuf>) {
+        let entries = std::fs::read_dir(directory).expect("a readable source directory");
+        for entry in entries {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "gen") {
+                    continue;
+                }
+                collect_sources(&path, into);
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.ends_with(".rs") && name != "tests.rs" {
+                into.push(path);
+            }
+        }
+        into.sort();
+    }
+
+    /// Which part of the source one character belongs to.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Region {
+        Code,
+        Comment,
+        Literal,
+        /// The backslash that opens an escape sequence inside a literal.
+        ///
+        /// It is told apart from the rest of the literal for one reason: `"\u{265b}"` is
+        /// pure ASCII in the source and a crown in the compiled string, so a scan that
+        /// only reads source characters would pass it — and the character it produces is
+        /// laid out with zero advance exactly as a pasted `♛` would be. Knowing where an
+        /// escape genuinely *starts* is also the only way to tell that apart from
+        /// `"\\u{:04x}"`, the format string `net/json.rs` builds a JSON escape with,
+        /// where the `u{` follows a doubled backslash and opens nothing.
+        Escape,
+    }
+
+    /// The scalar a `\u{…}` escape beginning at `start` produces, if one begins there.
+    ///
+    /// `None` covers every other escape (`\n`, `\\`, `\x41`, `\"`), all of which are ASCII
+    /// by Rust's own rules — `\x` is refused above `0x7F` in a string literal — and covers
+    /// an escape the compiler would reject too, which is not this test's to report.
+    fn unicode_escape(text: &[char], start: usize) -> Option<char> {
+        if text.get(start + 1).copied()? != 'u' || text.get(start + 2).copied()? != '{' {
+            return None;
+        }
+        let mut digits = String::new();
+        for character in text.iter().copied().skip(start + 3) {
+            match character {
+                '}' => {
+                    return u32::from_str_radix(&digits, 16)
+                        .ok()
+                        .and_then(char::from_u32);
+                }
+                // Rust allows `\u{2_6_5_b}`, and it means the same thing.
+                '_' => {}
+                _ if character.is_ascii_hexdigit() => digits.push(character),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Where `source` puts a non-ASCII character inside a string or character literal the
+    /// production build compiles, as `(line number, character)`.
+    ///
+    /// Two spellings reach the same place and both are read: the character written as
+    /// itself, and the character written as a `\u{…}` escape. The escape is the one a
+    /// source-only scan would miss, and missing it would make this guard exactly as good
+    /// as the habit it exists to replace.
+    ///
+    /// Comments are skipped, because prose about the code is not drawn by it — this module
+    /// is full of em dashes and every one of them is fine. `#[cfg(test)]` items are skipped
+    /// for the same reason: a test may name a hostile string deliberately, and several do.
+    fn non_ascii_in_literals(source: &str) -> Vec<(usize, char)> {
+        let text: Vec<char> = source.chars().collect();
+        let region = classify(&text);
+        let excluded = test_only(&text, &region);
+
+        let mut line = 1;
+        let mut found = Vec::new();
+        for (index, character) in text.iter().copied().enumerate() {
+            if character == '\n' {
+                line += 1;
+                continue;
+            }
+            if excluded[index] {
+                continue;
+            }
+            match region[index] {
+                Region::Literal if !character.is_ascii() => found.push((line, character)),
+                Region::Escape => {
+                    if let Some(escaped) = unicode_escape(&text, index)
+                        && !escaped.is_ascii()
+                    {
+                        found.push((line, escaped));
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// One pass over the source deciding, for each character, whether it is code, comment
+    /// or the inside of a literal.
+    ///
+    /// The three kinds of literal Rust spells differently all have to be here rather than
+    /// in a regular expression over lines: a `"` inside a comment opens nothing, a `'`
+    /// inside a string is not a character literal, and `r#"…"#` ends only at its own
+    /// hash count.
+    ///
+    /// Escaped literals get [`Region::Escape`] on the opening backslash, which is what
+    /// lets a later pass read `\u{…}`. A raw string never gets one, because a raw string
+    /// processes no escapes: `r"\u{265b}"` really is nine ASCII characters.
+    fn classify(text: &[char]) -> Vec<Region> {
+        let mut region = vec![Region::Code; text.len()];
+        let at = |index: usize| text.get(index).copied().unwrap_or('\0');
+        /// Classifies one character, ignoring an index one past the end — which an
+        /// escape at the very end of a truncated file would reach.
+        fn mark(region: &mut [Region], index: usize, kind: Region) {
+            if let Some(slot) = region.get_mut(index) {
+                *slot = kind;
+            }
+        }
+        let mut index = 0;
+        while index < text.len() {
+            match at(index) {
+                '/' if at(index + 1) == '/' => {
+                    while index < text.len() && at(index) != '\n' {
+                        mark(&mut region, index, Region::Comment);
+                        index += 1;
+                    }
+                }
+                '/' if at(index + 1) == '*' => {
+                    let mut depth = 0usize;
+                    while index < text.len() {
+                        if at(index) == '/' && at(index + 1) == '*' {
+                            depth += 1;
+                        } else if at(index) == '*' && at(index + 1) == '/' {
+                            depth -= 1;
+                            mark(&mut region, index, Region::Comment);
+                            mark(&mut region, index + 1, Region::Comment);
+                            index += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        mark(&mut region, index, Region::Comment);
+                        index += 1;
+                    }
+                }
+                'r' if at(index + 1) == '"' || at(index + 1) == '#' => {
+                    // A raw string, or an identifier that happens to start with `r`.
+                    let hashes = (1..).take_while(|step| at(index + step) == '#').count();
+                    if at(index + 1 + hashes) != '"' {
+                        index += 1;
+                        continue;
+                    }
+                    index += hashes + 2;
+                    while index < text.len() {
+                        if at(index) == '"' && (1..=hashes).all(|step| at(index + step) == '#') {
+                            index += hashes + 1;
+                            break;
+                        }
+                        mark(&mut region, index, Region::Literal);
+                        index += 1;
+                    }
+                }
+                quote @ ('"' | '\'') => {
+                    // A single quote is a character literal only when a close quote follows
+                    // one character or one escape. `'a` in `&'a str` and `'_` in
+                    // `Mut<'_, T>` are lifetimes, and neither opens anything.
+                    if quote == '\'' && at(index + 1) != '\\' && at(index + 2) != '\'' {
+                        index += 1;
+                        continue;
+                    }
+                    index += 1;
+                    while index < text.len() {
+                        match at(index) {
+                            '\\' => {
+                                mark(&mut region, index, Region::Escape);
+                                mark(&mut region, index + 1, Region::Literal);
+                                index += 2;
+                            }
+                            character if character == quote => {
+                                index += 1;
+                                break;
+                            }
+                            _ => {
+                                mark(&mut region, index, Region::Literal);
+                                index += 1;
+                            }
+                        }
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        region
+    }
+
+    /// Which characters belong to a `#[cfg(test)]` item.
+    ///
+    /// The attribute runs either to the `;` that ends a `use` or a `mod tests;`, or to the
+    /// `}` that closes a block. It reads the classification rather than the raw text
+    /// because a brace inside a string or a comment is not a brace.
+    fn test_only(text: &[char], region: &[Region]) -> Vec<bool> {
+        let attribute: Vec<char> = "#[cfg(test)]".chars().collect();
+        let at = |index: usize| text.get(index).copied().unwrap_or('\0');
+        let mut excluded = vec![false; text.len()];
+        let mut index = 0;
+        while index < text.len() {
+            let here = region[index] == Region::Code
+                && attribute
+                    .iter()
+                    .enumerate()
+                    .all(|(step, wanted)| at(index + step) == *wanted);
+            if !here {
+                index += 1;
+                continue;
+            }
+            let mut cursor = index + attribute.len();
+            let mut depth = 0usize;
+            while cursor < text.len() {
+                excluded[cursor] = true;
+                if region[cursor] == Region::Code {
+                    match at(cursor) {
+                        '{' => depth += 1,
+                        '}' if depth > 0 => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        ';' if depth == 0 => break,
+                        _ => {}
+                    }
+                }
+                cursor += 1;
+            }
+            index = cursor.max(index + 1);
+        }
+        excluded
+    }
+
+    #[test]
+    fn the_scan_reads_literals_and_nothing_else() {
+        // Two hashes on the outside, because the fixture below contains a raw string
+        // of its own and `"#` would close this one at it.
+        let source = r##"
+//! A doc comment with — an em dash in it.
+/* a block /* nested */ comment with … in it */
+const A: &str = "plain";
+const B: &str = "hole·here";
+const C: char = '…';
+fn f<'a>(x: &'a str) -> &'a str { x }
+const D: &str = "a quote ' and a slash \\ inside";
+const E: &str = r#"raw " with ° in it"#;
+#[cfg(test)]
+const F: &str = "tests may say ♛";
+#[cfg(test)]
+mod tests {
+    const G: &str = "and ⚔ in here too";
+}
+const H: &str = "back in production ‽";
+const I: &str = "an escape \u{265b} is ASCII in the source and a crown on the screen";
+const J: &str = "\\u{265b} follows a doubled backslash and escapes nothing";
+const K: &str = "\u{41} is just an A";
+const L: &str = r"\u{265b} in a raw string is nine plain characters";
+#[cfg(test)]
+const M: char = '\u{2026}';
+"##;
+        assert_eq!(
+            non_ascii_in_literals(source),
+            vec![(5, '·'), (6, '…'), (9, '°'), (16, '‽'), (17, '♛')],
+        );
+    }
+
+    /// The spelling a scan over source characters alone would have let through.
+    ///
+    /// `"\u{265b}"` is twelve ASCII characters in the file and one crown in the compiled
+    /// string, and the font draws that crown with zero advance exactly as it draws a pasted
+    /// one. The three cases below are the ones that make the difference readable: an escape
+    /// is decoded, a doubled backslash opens no escape, and a raw string has no escapes at
+    /// all.
+    #[test]
+    fn a_unicode_escape_is_read_as_the_character_it_produces() {
+        assert_eq!(
+            non_ascii_in_literals(r#"const A: &str = "\u{2014}";"#),
+            vec![(1, '—')],
+        );
+        assert_eq!(
+            non_ascii_in_literals(r#"const B: char = '\u{2_6_5_b}';"#),
+            vec![(1, '♛')],
+        );
+        // An escape that produces ASCII is not a hole, and neither is one that is not an
+        // escape at all.
+        assert_eq!(
+            non_ascii_in_literals(r#"const C: &str = "\u{7f}";"#),
+            vec![]
+        );
+        assert_eq!(
+            non_ascii_in_literals(r#"const D: &str = "\\u{2014}";"#),
+            vec![],
+        );
+        assert_eq!(
+            non_ascii_in_literals(r##"const E: &str = r"\u{2014}";"##),
+            vec![],
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};

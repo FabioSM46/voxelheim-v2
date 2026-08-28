@@ -81,7 +81,7 @@ keeps meaning "everything the client is".
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
-| `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache | infer membership, health, leadership, invitation state or any party outcome from local intent |
+| `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — and the frame-rate readout in whichever of the four corners the setting names | reach into another module's internals, grow a health bar, or call the snapshot age a round trip |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
@@ -2060,6 +2060,31 @@ Recorded here so the next reader does not mistake them for oversights:
   border culling put them in the mesher's hands. What to *do* with them is still a rendering
   decision rather than a plumbing one, and greedy merging works against per-vertex occlusion —
   which is exactly the design that issue owes.
+- **No font asset either, and that is a constraint on what the UI may write.** Bevy's
+  `default_font` is the whole font stack: `FiraMono-subset.ttf`, embedded in `bevy_text`, whose
+  `cmap` holds exactly 95 glyphs — every printable ASCII codepoint and nothing else. **A codepoint
+  it does not have is laid out with zero advance**, not drawn as a box and not logged, so a string
+  containing one is silently shorter on the screen than it is in the source. Six characters —
+  `°` `·` `—` `…` `♛` `⚔` — reached twenty-one sites across eleven modules that way, from the
+  compass onward, and every test agreed with them because every test compared the formatted string
+  against the same literal (#481).
+
+  So **every string this client composes is ASCII**, and
+  `ui::ascii_guard::every_string_the_client_composes_is_ascii` is what keeps it that way: it walks
+  the crate's own source and fails on a non-ASCII character in any string or character literal the
+  production build compiles. The scan is the whole crate rather than a list of the modules that
+  draw, because text reaches the screen from further away than `ui/` — a name plate's level is
+  composed in `player/`, the field of view in `settings/`, and the line under the login control is
+  a `tls::ConnectError` message written in `net/` — and a list kept in step with a directory by
+  hand falls behind it. Generated code and `tests.rs` are outside it; a test may name a hostile
+  string in a script this font cannot draw, and several do.
+
+  A pictograph with no ASCII spelling becomes **geometry**, in the style `ui/icon.rs` established:
+  `ui/party.rs` draws the crown and the crossed swords as a handful of `bevy_ui` rectangles in the
+  row's own colour, which is what the characters got from `TextColor` for free. Shipping a real
+  font is the other answer and a larger change — a file, its licence, an asset load path the
+  headless tests must tolerate, and a decision about which font — and it is the one to reach for
+  if the UI ever wants typographic characters generally.
 - **No texture atlas, and no art assets — but there is one generated image, and the meshes that
   sample it carry real UVs.** `palette.rs` is still the whole *terrain* material system: a colour
   per block id, carried as vertex colours, on chunk meshes whose texture coordinates nothing reads.

@@ -215,11 +215,15 @@ fn is_cardinal(degrees: u16) -> bool {
 ///
 /// Degrees rather than a cardinal word, because the strip above it already spells the
 /// cardinal out and this is the half that is still readable between two of them. Rounded
-/// to a whole degree and taken modulo 360, so a heading a hair under North reads `000°`
-/// rather than `360°`.
+/// to a whole degree and taken modulo 360, so a heading a hair under North reads `000 deg`
+/// rather than `360 deg`.
+///
+/// `deg` spelled out, because `°` is U+00B0 and Bevy's `default_font` is a 95-glyph ASCII
+/// subset of FiraMono: the degree sign draws as nothing at all, and a reading that silently
+/// loses its unit is worse than one that spends three more columns saying it.
 fn center_reading(yaw: f32) -> String {
     let rounded = heading_degrees(yaw).round() as u16 % 360;
-    format!("{rounded:03}°")
+    format!("{rounded:03} deg")
 }
 
 /// The block the player is standing in, on the axis `value` measures.
@@ -247,7 +251,7 @@ fn block_coordinate(value: f32) -> i32 {
 /// chunk coordinates: this is the number one player reads out to another.
 fn coordinates_reading(position: Vec3) -> String {
     format!(
-        "X {} · Z {} · alt {}",
+        "X {} | Z {} | alt {}",
         block_coordinate(position.x),
         block_coordinate(position.z),
         block_coordinate(position.y),
@@ -699,17 +703,17 @@ mod tests {
     fn the_centre_reading_is_the_heading_the_look_state_names() {
         let mut app = compass_app();
         for (yaw, expected) in [
-            (0.0, "000°"),
-            (-FRAC_PI_2, "090°"),
-            (PI, "180°"),
-            (FRAC_PI_2, "270°"),
+            (0.0, "000 deg"),
+            (-FRAC_PI_2, "090 deg"),
+            (PI, "180 deg"),
+            (FRAC_PI_2, "270 deg"),
         ] {
             face(&mut app, yaw);
             assert_eq!(reading(&mut app), expected, "yaw {yaw}");
         }
         // A hair west of North reads as North rather than as a full turn.
         face(&mut app, 0.001);
-        assert_eq!(reading(&mut app), "000°");
+        assert_eq!(reading(&mut app), "000 deg");
     }
 
     #[test]
@@ -771,24 +775,24 @@ mod tests {
     fn a_position_reads_as_the_block_it_is_standing_in() {
         assert_eq!(
             coordinates_reading(Vec3::new(0.0, 64.9, -0.5)),
-            "X 0 · Z -1 · alt 64"
+            "X 0 | Z -1 | alt 64"
         );
         // Whole numbers, positive on every axis.
         assert_eq!(
             coordinates_reading(Vec3::new(123.0, 67.0, 45.0)),
-            "X 123 · Z 45 · alt 67"
+            "X 123 | Z 45 | alt 67"
         );
         // The one the issue writes out, and the one that says `alt` is the Y axis and Z
         // is the middle field: a reading that transposed them would pass every symmetric
         // case above and fail here.
         assert_eq!(
             coordinates_reading(Vec3::new(123.4, 67.8, -45.6)),
-            "X 123 · Z -46 · alt 67"
+            "X 123 | Z -46 | alt 67"
         );
         // Far out and far down, with no zero padding and no thousands separator.
         assert_eq!(
             coordinates_reading(Vec3::new(-4096.0, -12.25, 8192.75)),
-            "X -4096 · Z 8192 · alt -13"
+            "X -4096 | Z 8192 | alt -13"
         );
         // `floor`, not a cast toward zero: every one of these is inside block -1, and a
         // truncating cast would name three of them 0.
@@ -808,12 +812,12 @@ mod tests {
     fn the_coordinates_are_empty_until_the_server_has_placed_the_player() {
         let mut app = compass_app();
         // `PlayerStats::position` is `None` before the first snapshot names this session's
-        // own entity, and an empty line is the only honest reading of that. `X 0 · Z 0 ·
+        // own entity, and an empty line is the only honest reading of that. `X 0 | Z 0 |
         // alt 0` would be a place, and it is the one place a player might actually be.
         assert_eq!(coordinates(&mut app), "");
 
         stand(&mut app, Some(Vec3::new(123.4, 67.8, -45.6)));
-        assert_eq!(coordinates(&mut app), "X 123 · Z -46 · alt 67");
+        assert_eq!(coordinates(&mut app), "X 123 | Z -46 | alt 67");
 
         // And back: a session that ends takes the position with it.
         stand(&mut app, None);
@@ -845,7 +849,7 @@ mod tests {
         // text is asserted here: the change flag on this frame is the tick-zero artefact
         // above, not a measurement.
         stand(&mut app, Some(Vec3::new(12.1, 64.1, -3.9)));
-        assert_eq!(coordinates(&mut app), "X 12 · Z -4 · alt 64");
+        assert_eq!(coordinates(&mut app), "X 12 | Z -4 | alt 64");
 
         // A stride inside the same block. The interpolated position moves every frame the
         // player does; the three integers it floors to do not, and neither may the text.
@@ -854,7 +858,7 @@ mod tests {
             !app.world().resource::<Rewritten>().0,
             "a step inside one block rewrote the coordinates"
         );
-        assert_eq!(coordinates(&mut app), "X 12 · Z -4 · alt 64");
+        assert_eq!(coordinates(&mut app), "X 12 | Z -4 | alt 64");
 
         // One block east, and the line moves again — the check above is not simply
         // asserting that nothing ever writes.
@@ -863,7 +867,7 @@ mod tests {
             app.world().resource::<Rewritten>().0,
             "crossing into the next block left the coordinates behind"
         );
-        assert_eq!(coordinates(&mut app), "X 13 · Z -4 · alt 64");
+        assert_eq!(coordinates(&mut app), "X 13 | Z -4 | alt 64");
     }
 
     #[test]
