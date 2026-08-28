@@ -43,6 +43,7 @@ func (w *structureWorld) Block(x, y, z int64) (world.Block, bool) {
 	defer w.mu.Unlock()
 	return w.blockAtLocked([3]int64{x, y, z})
 }
+func (w *structureWorld) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w *structureWorld) blockAtLocked(voxel [3]int64) (world.Block, bool) {
 	if w.absent[voxel] {

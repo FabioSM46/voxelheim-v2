@@ -38,6 +38,7 @@ func (w stepTerrain) Block(x, y, _ int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w stepTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w stepTerrain) Solid(x, y, z int64) bool {
 	block, resident := w.Block(x, y, z)
@@ -1194,6 +1195,7 @@ func (w lowCeilingStep) Block(x, y, _ int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w lowCeilingStep) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w lowCeilingStep) Solid(x, y, z int64) bool {
 	block, resident := w.Block(x, y, z)

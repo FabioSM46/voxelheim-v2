@@ -339,18 +339,25 @@ func (s *Sim) candidateSpotLocked(p *Player, kind vnet.MobKind) ([3]float64, boo
 	// chunk that has not been composed — that is what keeps a player from falling out
 	// of a world that is merely still loading — so without this a column of chunks
 	// nobody has generated reads as perfectly good ground under a perfectly clear sky.
-	if block, resident := s.terrain.Block(x, ground, z); !resident || block == world.Air {
+	//
+	// **And it has to be ground rather than merely not-air.** The scan stops at the
+	// first [Terrain.Solid] voxel, and ice is solid — so the lid on a frozen lake is
+	// a perfectly good surface under a perfectly clear sky, and nothing but this
+	// names it. Water cannot reach here (the scan walks straight through it), but it
+	// is refused by name beside the ice, because the two are one rule: a creature is
+	// not stood on water and not stood on the thing floating on top of it.
+	if block, resident := s.terrain.Block(x, ground, z); !resident || !standableFloor(block) {
 		return [3]float64{}, false
 	}
 	// And the two cells the body stands in have to be air, asked of the blocks rather
-	// than inferred from the scan that found the surface. `surfaceUnderSky` stopped at
-	// the first *solid* voxel, and [Terrain.Solid] is `!resident || block != Air`, so
-	// today "not solid" is exactly "resident air" and this reads as a check that cannot
-	// fail. **The equivalence belongs to the palette, not to the rule**: it holds only
-	// while nothing in the world is passable, and the first fluid a body can wade into
-	// ends it — the scan would walk straight down through the water and hand back the
-	// lake bed with the whole lake still on top of it. The criterion is two blocks of
-	// air, so this asks for two blocks of air.
+	// than inferred from the scan that found the surface.
+	//
+	// **This check was written before there was anything for it to catch, and water
+	// is what it was written for.** `surfaceUnderSky` stops at the first *solid*
+	// voxel, and until worldgen 5 "not solid" was exactly "resident air", so the loop
+	// read as a check that could not fail. It can now: the scan walks straight down
+	// through a lake and hands back the bed with the whole lake still on top of it,
+	// and this is the only thing between that and a draugr standing on the bottom.
 	for _, y := range [2]int64{ground + 1, ground + 2} {
 		if block, resident := s.terrain.Block(x, y, z); !resident || block != world.Air {
 			return [3]float64{}, false
@@ -402,6 +409,19 @@ func (s *Sim) ringOffsetLocked() (dx, dz int64, inRing bool) {
 		return 0, 0, false
 	}
 	return dx, dz, true
+}
+
+// standableFloor reports whether a surface voxel is ground a creature may be put on.
+//
+// **A whitelist would be wrong here and a blacklist is right**, which is the
+// opposite of the rule the item registry follows, because the two questions differ:
+// the registry decides what a *player* may do with a named thing, and this decides
+// what the *world* is. A block nobody has classified is ordinary ground, and
+// refusing to spawn on it would silently empty a region every time the palette grew.
+// The two exceptions are the two the world has: water, which is not a floor, and the
+// ice on top of it, which is a lid over water and not a place to stand.
+func standableFloor(block world.Block) bool {
+	return world.Solid(block) && block != world.Ice
 }
 
 // surfaceUnderSky is the highest solid voxel in a column with nothing above it, or

@@ -37,19 +37,22 @@ type spawnGround struct {
 	// there is no surface in it at all.
 	carved *[2]int64
 
-	// flooded is the surface of a fluid lying on the ground: every cell from groundTop+1
-	// up to it holds a block that is not air and does not stop movement. Zero means dry.
+	// flooded is the surface of the water lying on the ground: every cell from
+	// groundTop+1 up to it holds [world.Water]. Zero means dry.
 	//
-	// **There is no such block in the palette, and that is the point.** It is the shape
-	// the first one will have, and the only terrain that can tell "the headroom is not
-	// solid" apart from "the headroom is air".
+	// **This used to be a block id past the end of the palette, because there was no
+	// such block yet.** The synthetic stand-in existed so that the director's headroom
+	// rule could be tested before anything in the world was passable; worldgen 5 made
+	// it real, and a fixture holding a shape the palette now has is a fixture that can
+	// drift away from what it stands for.
 	flooded int64
-}
 
-// spawnTestFluid stands in for the first block a body can move through that is not air.
-// Deliberately past the end of the palette: this is a shape to test against, not a
-// proposal to add a block id.
-const spawnTestFluid = world.Block(0xFFFF)
+	// iced puts a lid of [world.Ice] on the water at flooded+1, which is what a tundra
+	// lake actually looks like. Ice is *solid*, so the surface scan stops on it and
+	// every other check in the director passes — it is the one case the headroom rule
+	// below cannot catch, and the reason the floor is asked about by name.
+	iced bool
+}
 
 func (w spawnGround) Block(x, y, z int64) (world.Block, bool) {
 	if w.legalTo != 0 && (abs64(x) > w.legalTo || abs64(z) > w.legalTo) {
@@ -62,17 +65,22 @@ func (w spawnGround) Block(x, y, z int64) (world.Block, bool) {
 		return world.Stone, true
 	}
 	if w.flooded != 0 && y <= w.flooded {
-		return spawnTestFluid, true
+		return world.Water, true
+	}
+	if w.iced && w.flooded != 0 && y == w.flooded+1 {
+		return world.Ice, true
 	}
 	return world.Air, true
 }
+func (w spawnGround) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
-// Solid is the production rule with one block added to the passable side, which is what
-// makes this terrain worth having: everywhere else in these tests "not solid" and "air"
-// are the same answer, and a director that relies on that cannot be caught doing it.
+// Solid is the production rule, unchanged and read from the palette — which is what
+// makes this terrain worth having: everywhere else in these tests "not solid" and
+// "air" are the same answer, and a director that relies on that cannot be caught
+// doing it.
 func (w spawnGround) Solid(x, y, z int64) bool {
 	block, resident := w.Block(x, y, z)
-	return !resident || (block != world.Air && block != spawnTestFluid)
+	return !resident || world.Solid(block)
 }
 
 func abs64(v int64) int64 {
@@ -526,8 +534,8 @@ func TestADugOutColumnIsNotSomewhereToStand(t *testing.T) {
 
 // A creature is not stood in a fluid, however happily the collision would let it wade in.
 //
-// The criterion is "the two blocks above it are air", and until something in this world is
-// passable, air is indistinguishable from what the surface scan already guarantees. This
+// The criterion is "the two blocks above it are air", and while nothing in this world was
+// passable, air was indistinguishable from what the surface scan already guarantees. This
 // terrain is the distinction: two blocks of water over ground that is otherwise perfectly
 // legal, on which the scan finds the lake bed, the headroom is not solid, the spot is in
 // the ring, in view, clear of bodies and nowhere near a fire — and every one of those
@@ -541,6 +549,53 @@ func TestNothingSpawnsInsideAFluid(t *testing.T) {
 
 	for id, seen := range h.spawnLog(120 * DefaultTickRate) {
 		t.Errorf("creature %d was stood in the water at %v", id, seen.pos)
+	}
+}
+
+// And not stood on the lid of one either.
+//
+// **Ice is the case the headroom rule cannot answer**, which is what makes this a
+// second test rather than a variant of the one above. It is solid, so the downward
+// scan stops on it and calls it the surface; the two cells above it are honest air;
+// the spot is in the ring, in view and nowhere near a fire. Every check the director
+// makes says yes except the one that reads what the floor is made of.
+func TestNothingSpawnsOnTheIceOverAFluid(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, spawnGround{groundTop: 63, flooded: 65, iced: true})
+	h.keepNight()
+	h.join(1, [3]float32{0.5, 68, 0.5})
+
+	for id, seen := range h.spawnLog(120 * DefaultTickRate) {
+		t.Errorf("creature %d was stood on the ice at %v", id, seen.pos)
+	}
+}
+
+// The ice terrain has to be a world the director would otherwise accept, or the test
+// above passes because the spot was illegal for some other reason entirely.
+func TestTheIcedGroundIsOtherwiseLegalGround(t *testing.T) {
+	t.Parallel()
+
+	iced := spawnGround{groundTop: 63, flooded: 65, iced: true}
+	if block, resident := iced.Block(40, 66, 0); !resident || block != world.Ice {
+		t.Fatalf("the lid is block %d (resident %t), want Ice", block, resident)
+	}
+	if !iced.Solid(40, 66, 0) {
+		t.Fatal("the ice lid is not solid, so the surface scan would never stop on it")
+	}
+	for _, y := range [2]int64{67, 68} {
+		if block, resident := iced.Block(40, y, 0); !resident || block != world.Air {
+			t.Fatalf("the cell at y=%d over the ice is block %d (resident %t), want Air", y, block, resident)
+		}
+	}
+	// Which leaves exactly one reason to refuse it, and the same terrain without the
+	// lid has none: a spot on the stone floor of a dry column is legal.
+	dry := spawnGround{groundTop: 63}
+	if block, resident := dry.Block(40, 63, 0); !resident || !standableFloor(block) {
+		t.Fatalf("the dry floor is block %d (resident %t), which the director would refuse", block, resident)
+	}
+	if standableFloor(world.Ice) {
+		t.Fatal("standableFloor accepts ice, so the test above proves nothing")
 	}
 }
 

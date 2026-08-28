@@ -21,6 +21,7 @@ func (emptyTerrain) Solid(int64, int64, int64) bool { return false }
 func (emptyTerrain) Block(int64, int64, int64) (world.Block, bool) {
 	return world.Air, true
 }
+func (w emptyTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 // stagedEditor is an Editor a test can stop between the phases Cache.ApplyGuarded
 // runs: generation, then the caller's guard, then the write the legality test happens

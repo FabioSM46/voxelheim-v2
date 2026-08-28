@@ -24,6 +24,7 @@ func (projectileBoundaryTerrain) Block(x, _, _ int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w projectileBoundaryTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w projectileBoundaryTerrain) Solid(x, y, z int64) bool {
 	block, resident := w.Block(x, y, z)
@@ -39,6 +40,7 @@ func (w projectileTerrain) Block(_, y, z int64) (world.Block, bool) {
 	}
 	return world.Air, true
 }
+func (w projectileTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func (w projectileTerrain) Solid(x, y, z int64) bool {
 	block, resident := w.Block(x, y, z)
@@ -165,6 +167,7 @@ func (emptyProjectileTerrain) Solid(_, _, _ int64) bool { return false }
 func (emptyProjectileTerrain) Block(_, _, _ int64) (world.Block, bool) {
 	return world.Air, true
 }
+func (w emptyProjectileTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
 
 func TestAOneBlockWallStopsEveryArrowOffset(t *testing.T) {
 	t.Parallel()
