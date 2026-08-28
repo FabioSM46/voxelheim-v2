@@ -23,15 +23,41 @@
 //! names a column inside a cached tile therefore means that tile was drawn before the
 //! player had been there, so the cached copy is thrown away and asked for again. The
 //! client never fills the column in itself — it has no idea what is under it.
+//!
+//! ## The picture is composed, never rendered
+//!
+//! There is no second camera and no render target here. The window is `bevy_ui` nodes and
+//! the map inside it is **one `Image` the size of the viewport**, rewritten from the cache
+//! whenever the view or the cache moves — a few hundred KiB of texels, which is cheaper
+//! than the pipeline a render-to-texture would need and, more to the point, is a plain
+//! array a headless test can read one pixel out of. [`compose`] is that rewrite, and it is
+//! pure: a viewport, a cache, and the bytes that fall out.
+//!
+//! **Fog answers two different questions and deliberately looks like one.** A pixel whose
+//! chunk column is clear in its tile's own mask is somewhere this character has not been;
+//! a pixel in a square the server has not drawn yet is somewhere this client has not been
+//! told about. Both are *nothing is known here*, and inventing a difference would put a
+//! second kind of emptiness on the map that means nothing to the player.
+//!
+//! **An unnamed surface is not drawn as stone.** [`MapSurface::Unknown`] on an explored
+//! pixel means this build has no name for what the server put there — a contract that has
+//! grown a member since this binary was compiled. Painting it as the nearest thing would
+//! be a guess the player could not tell from a measurement, so it gets a colour of its own
+//! that belongs to nothing in the world.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::ui::{FocusPolicy, UiSystems};
 
+use super::compass::coordinates_reading;
 use crate::net::{
-    CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MapColumn, MapEvent, MapInbox, MapTile, MapTileRequest,
-    Outbound, Session, encode_map_tile_request, map_tile_span,
+    CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MapColumn, MapEvent, MapInbox, MapSurface, MapTile,
+    MapTileRequest, Outbound, Session, encode_map_tile_request, map_tile_span,
 };
 use crate::player::{InputMode, PlayerStats};
 
@@ -133,6 +159,16 @@ pub(super) struct TileKey {
 }
 
 impl TileKey {
+    /// Whether `block` lies inside this square.
+    ///
+    /// The composition's memo asks this of the square it drew the last pixel from, which
+    /// is what keeps a row of pixels to one lookup per square rather than one per pixel.
+    fn holds(self, block: IVec2) -> bool {
+        let span = self.scale.span();
+        (self.origin_x..self.origin_x + span).contains(&block.x)
+            && (self.origin_z..self.origin_z + span).contains(&block.y)
+    }
+
     /// Whether `column` lies inside this square.
     ///
     /// Chunk columns are the granularity the server records exploration at, so this is
@@ -223,6 +259,32 @@ impl MapScreen {
         IVec2::new(image.x as i32 * blocks, image.y as i32 * blocks)
     }
 
+    /// The size of the drawn picture in logical screen pixels.
+    ///
+    /// [`Self::image_size`] rounded back up by the zoom, which is not the viewport: a
+    /// viewport 1023 pixels wide at a zoom of two draws 511 tile pixels and is 1022 wide
+    /// once they are magnified. **The leftover pixel is the reason every projection below
+    /// is written against this rather than against the node**: the picture is centred in
+    /// the viewport, so a coordinate measured from the node's edge is off by half of
+    /// whatever the division threw away.
+    fn drawn_size(&self) -> UVec2 {
+        self.image_size() * u32::from(self.zoom).max(1)
+    }
+
+    /// The block the picture's top-left pixel shows.
+    ///
+    /// Every coordinate on the map is this plus an offset, so it is the one place the
+    /// centre becomes a corner. The arithmetic cannot overflow: a centre is clamped to
+    /// [`WORLD_EXTENT`] and the widest span is [`MapScale::S16`] over a picture clamped to
+    /// `1 << 14` pixels, which is eighteen bits.
+    fn origin_block(&self) -> IVec2 {
+        let extent = self.span_blocks();
+        IVec2::new(
+            self.centre.x.saturating_sub(extent.x / 2),
+            self.centre.y.saturating_sub(extent.y / 2),
+        )
+    }
+
     /// Every square the viewport overlaps, nearest the centre first.
     ///
     /// The order is what makes [`MAX_IN_FLIGHT`] a useful bound rather than an arbitrary
@@ -294,6 +356,14 @@ pub(super) struct MapTiles {
     in_flight: HashMap<TileKey, InFlight>,
     /// Ordering and staleness for the server, never a clock. See `MapTileRequest`.
     next_tick: u32,
+    /// Bumped whenever the *drawn* squares change, and by nothing else.
+    ///
+    /// Bevy's own change detection cannot stand in for this: `request_map_tiles` retires
+    /// expired notes through a `ResMut` every frame, so this resource is "changed" on
+    /// every frame the map is open whether or not a single pixel moved. Composing the
+    /// picture from that would rewrite a few hundred KiB sixty times a second to draw
+    /// exactly what was already on the screen.
+    revision: u64,
 }
 
 /// One request that has gone out and not been answered.
@@ -326,6 +396,7 @@ impl MapTiles {
             return;
         }
         self.tiles.insert(key, tile);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Throws away every square `column` falls inside, so each is asked for again.
@@ -338,7 +409,11 @@ impl MapTiles {
     /// Dropping the note would ask a second time for a square whose first answer is
     /// still coming, and would cache that answer whichever it was.
     fn evict(&mut self, column: MapColumn) {
+        let held = self.tiles.len();
         self.tiles.retain(|key, _| !key.contains(column));
+        if self.tiles.len() != held {
+            self.revision = self.revision.wrapping_add(1);
+        }
         for (key, note) in &mut self.in_flight {
             if key.contains(column) {
                 note.overtaken = Some(column);
@@ -350,6 +425,18 @@ impl MapTiles {
     fn clear(&mut self) {
         self.tiles.clear();
         self.in_flight.clear();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// The square holding `block` at `scale`, if this client is holding it.
+    fn holding(&self, block: IVec2, scale: MapScale) -> Option<(TileKey, &MapTile)> {
+        let span = scale.span();
+        let key = TileKey {
+            origin_x: block.x.div_euclid(span) * span,
+            origin_z: block.y.div_euclid(span) * span,
+            scale,
+        };
+        self.tiles.get(&key).map(|tile| (key, tile))
     }
 }
 
@@ -395,6 +482,227 @@ fn key_of(tile: &MapTile) -> Option<TileKey> {
     })
 }
 
+/// What a pixel nobody knows anything about reads as.
+///
+/// Dark enough that the drawn world is unmistakably the lit part of the picture, and not
+/// black, so the map still reads as a sheet with something on it rather than as a hole in
+/// the window.
+const FOG: [f32; 3] = [0.03, 0.035, 0.05];
+
+/// The colour every surface is drawn from, before the ground's height shades it.
+///
+/// **Linear, not sRGB, and the texture format is what decides that.** These triples go
+/// into an `Rgba8Unorm` image, whose texels the renderer reads as linear values — the same
+/// reason `player/livery.rs` gives for its own generated image. Spelling them as
+/// `Color::srgb` numbers here would have them come out lighter than they read.
+///
+/// Total over [`MapSurface`] with no wildcard arm, so a surface the contract grows is a
+/// build failure in this function rather than a colour somebody has to notice is wrong.
+const fn surface_tint(surface: MapSurface) -> [f32; 3] {
+    match surface {
+        // Nothing in the world is this colour, which is the point: it says *this build
+        // cannot name what is here*, and it must not be mistakable for a measurement.
+        MapSurface::Unknown => [0.42, 0.10, 0.40],
+        MapSurface::Grass => [0.13, 0.30, 0.11],
+        MapSurface::Snow => [0.88, 0.90, 0.94],
+        MapSurface::Sand => [0.66, 0.55, 0.28],
+        MapSurface::Stone => [0.34, 0.35, 0.37],
+        MapSurface::Gravel => [0.33, 0.29, 0.24],
+        MapSurface::Water => [0.04, 0.09, 0.34],
+        MapSurface::Ice => [0.66, 0.78, 0.88],
+        MapSurface::Forest => [0.06, 0.17, 0.07],
+        MapSurface::Cave => [0.03, 0.03, 0.04],
+        MapSurface::Settlement => [0.72, 0.36, 0.10],
+    }
+}
+
+/// What the lowest ground multiplies its colour by, and what the highest does.
+///
+/// One rule for every surface rather than a table with an exception per member: relief is
+/// what turns a green rectangle into a coastline, and a shading that some surfaces obeyed
+/// and others did not would read as an error in the map rather than as a decision. The
+/// span is deliberately narrow — a map is read for *where*, and a slope dark enough to be
+/// mistaken for another surface would be answering a different question.
+const SHADE_LOW: f32 = 0.62;
+const SHADE_HIGH: f32 = 1.28;
+
+/// One explored pixel, as bytes.
+///
+/// `height` is the server's biased byte — `clamp(y + 64, 0, 255)` — and it is used as a
+/// shade and never as a coordinate, which is what lets this be a multiply with no idea
+/// where sea level is.
+fn shaded(surface: MapSurface, height: u8) -> [u8; 3] {
+    let lift = SHADE_LOW + (SHADE_HIGH - SHADE_LOW) * (f32::from(height) / 255.0);
+    surface_tint(surface).map(|channel| ((channel * lift).clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// The colour one block reads as inside the square that holds it, or `None` where that
+/// square says the character's ledger had not reached it.
+///
+/// `None` is fog, and it is the same `None` a square nobody holds produces — see the
+/// module comment on why the two are one colour.
+fn painted(tile: &MapTile, block: IVec2) -> Option<[u8; 3]> {
+    let blocks = i32::from(tile.scale).max(1);
+    let cell_x = (block.x - tile.origin_x).div_euclid(blocks);
+    let cell_z = (block.y - tile.origin_z).div_euclid(blocks);
+    let edge = MAP_TILE_EDGE as i32;
+    if !(0..edge).contains(&cell_x) || !(0..edge).contains(&cell_z) {
+        return None;
+    }
+    // The mask the tile was drawn from, read through the same helper the eviction rule
+    // uses. A pixel is explored exactly when its chunk column is, because that is the
+    // granularity the server's ledger has.
+    let column = MapColumn {
+        cx: block.x.div_euclid(CHUNK_COLUMN_BLOCKS),
+        cz: block.y.div_euclid(CHUNK_COLUMN_BLOCKS),
+    };
+    if drawn_with(tile, column) != Some(true) {
+        return None;
+    }
+    let index = (cell_z * edge + cell_x) as usize;
+    Some(shaded(*tile.surface.get(index)?, *tile.height.get(index)?))
+}
+
+/// Draws the viewport into a fresh image, reading only squares this client is holding.
+///
+/// Pure, and the whole of what "the map is composed" means: every pixel is one lookup into
+/// the cache and one colour, with no state of its own to fall out of step. The one piece
+/// of cleverness is the memo — a row of pixels walks left to right through a square 64
+/// wide, so the lookup it needs is nearly always the one it just did.
+fn compose(screen: &MapScreen, tiles: &MapTiles) -> Image {
+    let size = screen.image_size();
+    let origin = screen.origin_block();
+    let blocks = screen.scale.blocks();
+    let fog = FOG.map(|channel| (channel * 255.0).round() as u8);
+
+    let mut data = Vec::with_capacity((size.x as usize * size.y as usize) * 4);
+    let mut held: Option<(TileKey, &MapTile)> = None;
+    for row in 0..size.y {
+        let block_z = origin.y.saturating_add(row as i32 * blocks);
+        for column in 0..size.x {
+            let block = IVec2::new(origin.x.saturating_add(column as i32 * blocks), block_z);
+            if !held.is_some_and(|(key, _)| key.holds(block)) {
+                held = tiles.holding(block, screen.scale);
+            }
+            let colour = held
+                .and_then(|(_, tile)| painted(tile, block))
+                .unwrap_or(fog);
+            data.extend_from_slice(&colour);
+            data.push(u8::MAX);
+        }
+    }
+
+    // A viewport with no pixels in it is a layout that has not run yet rather than a
+    // picture of nothing. `Image` requires the extent and the data to agree, so one fog
+    // texel stands in; the node it is drawn into is zero-sized anyway.
+    let (extent, data) = if data.is_empty() {
+        (UVec2::ONE, vec![fog[0], fog[1], fog[2], u8::MAX])
+    } else {
+        (size, data)
+    };
+
+    let mut image = Image::new(
+        Extent3d {
+            width: extent.x,
+            height: extent.y,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        // Both worlds, so a headless test can read the texels back out of the main-world
+        // store — the same reason `player/livery.rs` keeps its field readable.
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        // **Nearest, and not a taste.** A map pixel is a measurement of a square of world,
+        // and a zoom of four is four screen pixels showing that one measurement. Blending
+        // them would draw a coastline the server never sent.
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        ..default()
+    });
+    image
+}
+
+/// The picture every map viewport draws, as one asset rewritten in place.
+///
+/// One handle for the life of the app rather than one per composition: the `ImageNode` is
+/// spawned once and never learns about a new handle, and an asset store that grew an entry
+/// every time the player panned would be a leak with a scroll wheel on it.
+#[derive(Resource, Debug, Clone)]
+struct MapPicture(Handle<Image>);
+
+impl FromWorld for MapPicture {
+    fn from_world(world: &mut World) -> Self {
+        let mut images = world.resource_mut::<Assets<Image>>();
+        // A viewport of nothing, so the app starts with one texel rather than the third
+        // of a megabyte a default-sized picture of fog would be. The first frame the map
+        // is open composes the real thing.
+        let empty = MapScreen {
+            viewport: UVec2::ZERO,
+            ..MapScreen::default()
+        };
+        Self(images.add(compose(&empty, &MapTiles::default())))
+    }
+}
+
+/// What the last composition was of, so the next frame can tell whether there is anything
+/// new to draw.
+///
+/// The view and the cache's revision together: panning changes the first, a tile arriving
+/// changes the second, and nothing else is a reason to rewrite a few hundred KiB.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Painted(Option<(MapScreen, u64)>);
+
+/// The full-screen overlay the map lives in.
+#[derive(Component)]
+struct MapRoot;
+
+/// The node the picture is drawn inside, and the one the pointer is measured against.
+#[derive(Component)]
+struct MapViewport;
+
+/// The `ImageNode` itself, sized to the picture in logical screen pixels.
+#[derive(Component)]
+struct MapCanvas;
+
+/// One line of the side panel, named by what it reads out.
+///
+/// One component with a variant rather than a marker each: the refresh below is then a
+/// single query with a total match in it, so a readout added here without a line to fill
+/// it is a build failure rather than a label that never changes.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum MapReading {
+    /// Where the player stands, from the server's own answer.
+    You,
+    /// How much world one map pixel covers.
+    Scale,
+}
+
+/// The overlay's backdrop, shared with the inventory: one dimming for every full-screen
+/// window, so a player never has to learn which screen dims how much.
+const BACKDROP: Color = Color::srgba(0.012, 0.016, 0.024, 0.96);
+
+/// Behind the picture, and visible only where the picture does not reach — the viewport is
+/// not a whole number of map pixels wide. Darker than the fog so the edge of the drawn
+/// sheet is a boundary rather than more nothing.
+const VIEWPORT_BACKDROP: Color = Color::srgb(0.015, 0.018, 0.024);
+
+/// The side panel's plate, the inventory window's colour.
+const PANEL: Color = Color::srgb(0.075, 0.085, 0.105);
+
+/// The side panel's width in logical pixels: wide enough for the longest readout a
+/// six-figure coordinate can produce, and no wider.
+const PANEL_WIDTH: f32 = 250.0;
+
+/// The panel's readouts, and the heading over them.
+const READING_SIZE: f32 = 16.0;
+const TITLE_SIZE: f32 = 22.0;
+
+/// A readout, dimmer than the heading.
+const READING: Color = Color::srgb(0.78, 0.80, 0.84);
+
 /// Keeps the map's viewport and its tile cache in step with the server.
 pub(super) struct MapUiPlugin;
 
@@ -402,11 +710,25 @@ impl Plugin for MapUiPlugin {
     fn build(&self, app: &mut App) {
         // Initialised here as well as by their producers, which is what keeps this module
         // headlessly testable on its own — the same reason every other panel does it.
+        // **`init_asset` is not idempotent**, and calling it after `ImagePlugin` replaces
+        // the whole image store — `player/livery.rs` records what that cost and why the
+        // guard is a guard rather than defensive programming. The real app has the store
+        // from `DefaultPlugins`; a focused headless test brings its own `AssetPlugin`.
+        if !app.world().contains_resource::<Assets<Image>>() {
+            app.init_asset::<Image>();
+        }
+        // Initialised here as well as by their producers, which is what keeps this module
+        // headlessly testable on its own — the same reason every other panel does it.
         app.init_resource::<MapScreen>()
             .init_resource::<MapTiles>()
             .init_resource::<MapInbox>()
             .init_resource::<InputMode>()
             .init_resource::<PlayerStats>()
+            // `FromWorld`, so the handle exists before the `Startup` system that spawns
+            // the node holding it — there is no ordering here for anybody to get wrong.
+            .init_resource::<MapPicture>()
+            .init_resource::<Painted>()
+            .add_systems(Startup, spawn_map_screen)
             .add_systems(
                 Update,
                 (
@@ -418,9 +740,247 @@ impl Plugin for MapUiPlugin {
                     // cache before the request pass decides it is missing.
                     ingest_map_payloads.after(crate::net::DrainNetwork),
                     request_map_tiles,
+                    // Last, so the picture drawn this frame is composed from the cache
+                    // this frame ended with rather than the one it started on.
+                    paint_the_map,
+                    show_the_map,
+                    refresh_the_panel,
                 )
                     .chain(),
-            );
+            )
+            // The viewport's size is a layout answer, so it can only be read after taffy
+            // has written one — the same `PostUpdate` placement the crafting scrollbar
+            // uses, and for the same reason.
+            .add_systems(PostUpdate, measure_the_viewport.after(UiSystems::Layout));
+    }
+}
+
+/// Builds the overlay once: a backdrop, the viewport the picture is drawn in, and the
+/// panel that reads out what the view is of.
+fn spawn_map_screen(mut commands: Commands, picture: Res<MapPicture>) {
+    commands
+        .spawn((
+            MapRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Stretch,
+                column_gap: Val::Px(12.0),
+                padding: UiRect::all(Val::Px(18.0)),
+                ..default()
+            },
+            BackgroundColor(BACKDROP),
+            Visibility::Hidden,
+            GlobalZIndex(30),
+        ))
+        .with_children(|overlay| {
+            overlay
+                .spawn((
+                    MapViewport,
+                    Node {
+                        // The viewport takes whatever the panel leaves, which is what
+                        // makes its size a layout answer rather than a constant this
+                        // module would have to keep in step with the window.
+                        flex_grow: 1.0,
+                        height: Val::Percent(100.0),
+                        overflow: Overflow::clip(),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(VIEWPORT_BACKDROP),
+                    // **Block, and it is the one node here that does.** This is the
+                    // surface a drag begins on; a `Pass` here would send the gesture to
+                    // whatever is behind a full-screen overlay, which is the world.
+                    FocusPolicy::Block,
+                ))
+                .with_children(|viewport| {
+                    viewport.spawn((
+                        MapCanvas,
+                        ImageNode::new(picture.0.clone()),
+                        Node {
+                            width: Val::Px(0.0),
+                            height: Val::Px(0.0),
+                            ..default()
+                        },
+                        // The picture is drawn on top of the viewport and must not take
+                        // the pointer off it, or a drag would begin only in the margin the
+                        // rounding leaves.
+                        FocusPolicy::Pass,
+                    ));
+                });
+
+            overlay
+                .spawn((
+                    Node {
+                        width: Val::Px(PANEL_WIDTH),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(10.0),
+                        padding: UiRect::all(Val::Px(14.0)),
+                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                        ..default()
+                    },
+                    BackgroundColor(PANEL),
+                    FocusPolicy::Pass,
+                ))
+                .with_children(|panel| {
+                    panel.spawn((
+                        Text::new("World map"),
+                        TextFont {
+                            font_size: FontSize::Px(TITLE_SIZE),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                        FocusPolicy::Pass,
+                    ));
+                    panel.spawn((
+                        MapReading::You,
+                        Text::new(you_reading(None)),
+                        TextFont {
+                            font_size: FontSize::Px(READING_SIZE),
+                            ..default()
+                        },
+                        TextColor(READING),
+                        FocusPolicy::Pass,
+                    ));
+                    panel.spawn((
+                        MapReading::Scale,
+                        Text::new(scale_reading(MapScale::default())),
+                        TextFont {
+                            font_size: FontSize::Px(READING_SIZE),
+                            ..default()
+                        },
+                        TextColor(READING),
+                        FocusPolicy::Pass,
+                    ));
+                });
+        });
+}
+
+/// Puts the overlay up exactly while the map is open.
+fn show_the_map(screen: Res<MapScreen>, mut roots: Query<&mut Visibility, With<MapRoot>>) {
+    let wanted = if screen.is_open() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in &mut roots {
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
+}
+
+/// Tells the viewport how big it turned out to be.
+///
+/// The window is the only thing that knows: the node grows into whatever the panel leaves,
+/// and that number exists only after a layout pass. Until then [`DEFAULT_VIEWPORT`] stands,
+/// which is what lets the asking half work on the first frame instead of waiting to be
+/// drawn.
+fn measure_the_viewport(
+    viewports: Query<&ComputedNode, With<MapViewport>>,
+    mut screen: ResMut<MapScreen>,
+) {
+    let Some(node) = viewports.iter().next() else {
+        return;
+    };
+    // Logical pixels, because everything else on this screen is: `ComputedNode::size` is
+    // physical, and its own inverse scale factor is what takes it back.
+    let size = node.size() * node.inverse_scale_factor;
+    if !size.x.is_finite() || !size.y.is_finite() || size.x < 1.0 || size.y < 1.0 {
+        // A hidden overlay lays out at zero, and a viewport of nothing is not a view. The
+        // last measurement stands, so closing the map does not throw away the size it will
+        // reopen at.
+        return;
+    }
+    let measured = size.as_uvec2();
+    if screen.viewport != measured {
+        screen.viewport = measured;
+    }
+}
+
+/// Composes the picture whenever the view or the cache has moved, and never otherwise.
+fn paint_the_map(
+    screen: Res<MapScreen>,
+    tiles: Res<MapTiles>,
+    picture: Res<MapPicture>,
+    mut painted: ResMut<Painted>,
+    mut images: ResMut<Assets<Image>>,
+    mut canvases: Query<&mut Node, With<MapCanvas>>,
+) {
+    if !screen.is_open() {
+        return;
+    }
+    let wanted = Some((*screen, tiles.revision));
+    if painted.0 == wanted {
+        return;
+    }
+    let Some(mut slot) = images.get_mut(&picture.0) else {
+        // The handle is this resource's own and the store is the one it was minted from,
+        // so an absent asset is a store that has been replaced under the app. Nothing is
+        // recorded as painted, so the next frame composes again rather than leaving the
+        // last picture on the screen for good.
+        return;
+    };
+    *slot = compose(&screen, &tiles);
+    painted.0 = wanted;
+
+    // The node is sized in logical screen pixels and the image in map pixels: the zoom is
+    // the whole of the difference, and it is applied here rather than in the composition
+    // so that magnifying costs no texels.
+    let drawn = screen.drawn_size().as_vec2();
+    for mut canvas in &mut canvases {
+        let (width, height) = (Val::Px(drawn.x), Val::Px(drawn.y));
+        if canvas.width != width {
+            canvas.width = width;
+        }
+        if canvas.height != height {
+            canvas.height = height;
+        }
+    }
+}
+
+/// What the panel says about where the player is.
+///
+/// The same three numbers in the same order as the compass, from the same function, so the
+/// line a player reads on the HUD and the line they read on the map cannot disagree. A
+/// position the server has not sent yet says so rather than printing zeroes, which are a
+/// real place and the one place somebody might actually be standing.
+fn you_reading(position: Option<Vec3>) -> String {
+    match position {
+        Some(position) => format!("You {}", coordinates_reading(position)),
+        None => "You not placed yet".to_owned(),
+    }
+}
+
+/// What the panel says about how much world one map pixel covers.
+fn scale_reading(scale: MapScale) -> String {
+    match scale.blocks() {
+        1 => "1 px = 1 block".to_owned(),
+        blocks => format!("1 px = {blocks} blocks"),
+    }
+}
+
+/// Keeps the two readouts in step with the view and the server's answer.
+fn refresh_the_panel(
+    screen: Res<MapScreen>,
+    stats: Res<PlayerStats>,
+    mut readings: Query<(&MapReading, &mut Text)>,
+) {
+    if !screen.is_open() {
+        return;
+    }
+    for (reading, mut text) in &mut readings {
+        let next = match reading {
+            MapReading::You => you_reading(stats.position),
+            MapReading::Scale => scale_reading(screen.scale),
+        };
+        if text.0 != next {
+            text.0 = next;
+        }
     }
 }
 
@@ -539,8 +1099,10 @@ mod tests {
 
     use std::sync::mpsc::Receiver;
 
+    use bevy::asset::AssetPlugin;
+
     use crate::net::{
-        ANY_TOKEN, MAP_TILE_CELLS, MapExplored, MapSurface, SessionParams, map_tile_explored_bytes,
+        ANY_TOKEN, MAP_TILE_CELLS, MapExplored, SessionParams, map_tile_explored_bytes,
     };
 
     fn session() -> Session {
@@ -574,7 +1136,10 @@ mod tests {
     fn app() -> (App, Receiver<Vec<u8>>) {
         let (outbound, frames) = Outbound::to_a_test(64);
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        // `AssetPlugin` because the picture is an `Image` in a real store: `MapUiPlugin`
+        // brings the store itself when nothing else has, but `init_asset` needs the
+        // `AssetServer` this plugin is what supplies.
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .add_plugins(MapUiPlugin)
             .insert_resource(outbound)
             .insert_resource(session());
@@ -587,6 +1152,24 @@ mod tests {
 
     fn requested(frames: &Receiver<Vec<u8>>) -> usize {
         frames.try_iter().count()
+    }
+
+    fn root_visibility(app: &mut App) -> Visibility {
+        *app.world_mut()
+            .query_filtered::<&Visibility, With<MapRoot>>()
+            .iter(app.world())
+            .next()
+            .expect("the map overlay is spawned once at startup")
+    }
+
+    /// What one of the side panel's readouts currently says.
+    fn reading(app: &mut App, wanted: MapReading) -> String {
+        app.world_mut()
+            .query::<(&MapReading, &Text)>()
+            .iter(app.world())
+            .find(|(reading, _)| **reading == wanted)
+            .map(|(_, text)| text.0.clone())
+            .expect("a readout in the side panel")
     }
 
     #[test]
@@ -862,6 +1445,153 @@ mod tests {
         app.update();
         assert!(app.world().resource::<MapTiles>().tiles.is_empty());
         assert!(!screen_of(&mut app).is_open());
+    }
+
+    /// The bytes one texel of the composed picture carries.
+    fn texel(image: &Image, column: u32, row: u32) -> [u8; 4] {
+        let width = image.texture_descriptor.size.width;
+        let data = image
+            .data
+            .as_ref()
+            .expect("a composed picture carries data");
+        let at = ((row * width + column) * 4) as usize;
+        [data[at], data[at + 1], data[at + 2], data[at + 3]]
+    }
+
+    /// One colour as the picture stores it: opaque, because a map has nothing behind it.
+    fn opaque(colour: [u8; 3]) -> [u8; 4] {
+        [colour[0], colour[1], colour[2], u8::MAX]
+    }
+
+    fn fog() -> [u8; 4] {
+        opaque(FOG.map(|channel| (channel * 255.0).round() as u8))
+    }
+
+    /// A sixteen-pixel view whose top-left pixel is block `(0, 0)`.
+    fn tiny_view() -> MapScreen {
+        MapScreen {
+            open: true,
+            // 16 pixels at four blocks each is 64 blocks, so a centre of 32 puts the
+            // picture's corner on the origin.
+            centre: IVec2::splat(32),
+            scale: MapScale::S4,
+            zoom: 1,
+            viewport: UVec2::splat(16),
+        }
+    }
+
+    #[test]
+    fn a_square_nobody_holds_is_drawn_as_fog() {
+        let picture = compose(&tiny_view(), &MapTiles::default());
+        assert_eq!(picture.texture_descriptor.size.width, 16);
+        assert_eq!(picture.texture_descriptor.size.height, 16);
+        for (column, row) in [(0, 0), (15, 15), (7, 3)] {
+            assert_eq!(texel(&picture, column, row), fog(), "at {column},{row}");
+        }
+    }
+
+    #[test]
+    fn an_explored_pixel_wears_its_surface_and_the_rest_is_fog() {
+        let mut drawn = tile(0, 0, 4);
+        drawn.explored = vec![0; map_tile_explored_bytes(4).unwrap_or(1)];
+        // Only chunk column (0, 0) — blocks 0..31 on both axes, which is the first eight
+        // pixels of the first eight rows at four blocks a pixel.
+        drawn.explored[0] = 0b0000_0001;
+        drawn.surface[0] = MapSurface::Water;
+        let mut tiles = MapTiles::default();
+        tiles.insert(drawn);
+
+        let picture = compose(&tiny_view(), &tiles);
+        assert_eq!(texel(&picture, 0, 0), opaque(shaded(MapSurface::Water, 64)));
+        assert_eq!(texel(&picture, 1, 0), opaque(shaded(MapSurface::Grass, 64)));
+        assert_eq!(texel(&picture, 7, 7), opaque(shaded(MapSurface::Grass, 64)));
+        // Block 32 across and block 32 down are the next chunk column each way, and the
+        // ledger this tile was drawn from had not reached either.
+        assert_eq!(texel(&picture, 8, 0), fog(), "one column east");
+        assert_eq!(texel(&picture, 0, 8), fog(), "one column south");
+    }
+
+    #[test]
+    fn higher_ground_is_lighter_and_the_unnamed_wears_a_colour_of_its_own() {
+        let low = shaded(MapSurface::Grass, 20);
+        let high = shaded(MapSurface::Grass, 220);
+        assert!(high[1] > low[1], "{high:?} is not lighter than {low:?}");
+
+        let named = [
+            MapSurface::Grass,
+            MapSurface::Snow,
+            MapSurface::Sand,
+            MapSurface::Stone,
+            MapSurface::Gravel,
+            MapSurface::Water,
+            MapSurface::Ice,
+            MapSurface::Forest,
+            MapSurface::Cave,
+            MapSurface::Settlement,
+        ];
+        for surface in named {
+            assert_ne!(
+                surface_tint(MapSurface::Unknown),
+                surface_tint(surface),
+                "a surface this build cannot name would be read as {surface:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_overlay_and_its_readouts_follow_the_open_map() {
+        let (mut app, _frames) = app();
+        app.world_mut().resource_mut::<PlayerStats>().position = Some(Vec3::new(12.5, 64.0, -3.5));
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Visible);
+        assert_eq!(
+            reading(&mut app, MapReading::You),
+            "You X 12 | Z -4 | alt 64"
+        );
+        assert_eq!(reading(&mut app, MapReading::Scale), "1 px = 4 blocks");
+
+        // The picture is the viewport divided by the zoom, and the node it is drawn into
+        // is that many pixels magnified by the zoom again.
+        let screen = screen_of(&mut app);
+        assert_eq!(screen.image_size(), UVec2::new(512, 384));
+        assert_eq!(screen.drawn_size(), UVec2::new(1024, 768));
+        let handle = app.world().resource::<MapPicture>().0.clone();
+        let images = app.world().resource::<Assets<Image>>();
+        let picture = images.get(&handle).expect("the map's own picture");
+        assert_eq!(picture.texture_descriptor.size.width, 512);
+        assert_eq!(picture.texture_descriptor.size.height, 384);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
+    }
+
+    #[test]
+    fn the_picture_is_composed_when_something_moves_and_not_every_frame() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        let first = *app.world().resource::<Painted>();
+        assert!(first.0.is_some(), "an open map composes its picture");
+
+        // A frame in which nothing arrived: `request_map_tiles` retires notes through a
+        // `ResMut` every frame, so Bevy's change detection would say the cache moved.
+        app.update();
+        assert_eq!(*app.world().resource::<Painted>(), first, "nothing moved");
+
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Tile(tile(0, 0, 4)));
+        app.update();
+        assert_ne!(
+            *app.world().resource::<Painted>(),
+            first,
+            "a drawn square is something new to draw"
+        );
     }
 
     #[test]
