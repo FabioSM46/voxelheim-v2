@@ -1,13 +1,14 @@
 package world
 
 // Terrain shape for a Fimbulvetr world of climates: tundra, taiga, plains and
-// desert, with mountains wherever the land folds hard, ore below and conifers at
-// a density each climate decides. Caves, water and ruins arrive in their own
-// issues; every feature here remains a pure integer function of the seed and
-// world coordinate.
+// desert, with mountains wherever the land folds hard, ore below, conifers at a
+// density each climate decides and caves winding under all of it. Water and ruins
+// arrive in their own issues; every feature here remains a pure integer function
+// of the seed and world coordinate.
 //
-// Climate itself lives in climate.go. This file reads it: HeightAt for shape,
-// blockAt for material, treeAtColumn for density.
+// Climate itself lives in climate.go and caves in caves.go. This file reads both:
+// HeightAt for shape, blockAt for material, treeAtColumn for density, caveAt for
+// what is hollow.
 const (
 	// terrainScaleBlocks is how many blocks span one noise lattice cell. Larger is
 	// smoother; 96 gives ridges a few chunks wide rather than per-chunk static.
@@ -188,7 +189,13 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // every existing world moves; ErrWorldgenMismatch refuses those directories
 // rather than serving one landscape wearing another world's digging, and the
 // development worlds that costs are accepted losses.
-const WorldgenVersion uint32 = 3
+// 3 → 4: caves. Voxels between two and ninety-six blocks under the surface are
+// hollowed where two decorrelated 3D fields both sit near their midpoint, mouths
+// open that band to daylight in about a twentieth of columns, and both ore bands
+// now lie inside a band a tunnel can cut. Nothing above ground moves *except*
+// where a mouth removes a surface — but the interior of every hill does, so this
+// is the same total break the last bump was.
+const WorldgenVersion uint32 = 4
 
 // Generate builds the chunk at coord for seed.
 //
@@ -212,11 +219,7 @@ func Generate(seed int64, coord Coord) *Chunk {
 
 			for y := range ChunkSize {
 				worldY := originY + int64(y)
-				block := col.blockAt(int(worldY))
-				if block == Stone {
-					block = oreAt(seed, worldX, worldY, worldZ, col.surface)
-				}
-				chunk.Set(x, y, z, block)
+				chunk.Set(x, y, z, col.voxelAt(seed, worldX, worldY, worldZ))
 			}
 		}
 	}
@@ -262,6 +265,31 @@ func (c column) blockAt(worldY int) Block {
 		return block
 	}
 	return Gravel
+}
+
+// voxelAt composes one voxel of a column: the terrain block, then carving, then
+// ore.
+//
+// **The order is the whole of the interaction between caves and ore, and it is the
+// reason ore is never left floating in a tunnel.** A carved voxel is Air before
+// oreAt is ever asked, and oreAt only ever replaces Stone — so a vein that a
+// passage runs through is cut by it rather than hanging in it, and the ore that
+// survives is the ore in the wall, which is exactly what a miner is meant to find.
+//
+// Trees are not here: they are placed over the finished terrain by placeTrees,
+// after every column in the chunk has been composed.
+func (c column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
+	block := c.blockAt(int(worldY))
+	switch {
+	case block == Air:
+		return Air
+	case caveAt(seed, worldX, worldY, worldZ, c.surface):
+		return Air
+	case block == Stone:
+		return oreAt(seed, worldX, worldY, worldZ, c.surface)
+	default:
+		return block
+	}
 }
 
 // gravelAt reports whether a column's top blocks are gravel rather than soil.
@@ -402,6 +430,11 @@ func treeAt(seed, worldX, worldZ int64) (surface, trunkHeight int, ok bool) {
 // sand, a mountain's is stone or snow above the altitude lines, and a gravel patch
 // is gravel. The density check is second because the surface is cheaper to reject
 // on than a hash is to interpret.
+//
+// **A carved surface is the one case the grass test cannot answer**, because
+// blockAt describes the terrain and carving happens after it: a cave mouth leaves
+// the column's top voxel air while blockAt still calls it grass. That check is
+// therefore explicit, and it is last — see the comment at it.
 func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok bool) {
 	denominator := treeChanceDenominator(col.climate)
 	if denominator == 0 {
@@ -413,6 +446,13 @@ func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok b
 
 	h := hashLattice(seed+treeSeedOffset, worldX, worldZ)
 	if h%denominator != 0 {
+		return 0, false
+	}
+
+	// Nothing roots in a hole. The carve test is last on purpose: it is the most
+	// expensive question here by an order of magnitude, and the density check above
+	// has already rejected all but one candidate column in ninety-six.
+	if caveAt(seed, worldX, int64(col.surface), worldZ, col.surface) {
 		return 0, false
 	}
 
@@ -505,9 +545,13 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 // generatedColumnTop returns the highest generated solid in a column, including
 // a canopy rooted in a neighbouring column. It mirrors the same footprint scan as
 // placeTrees but never generates a chunk or consults mutable state.
+//
+// It starts from the *carved* top rather than from the height field, because a
+// cave mouth removes the surface voxel and a caller that stood a player on
+// HeightAt there would put them inside the hillside.
 func generatedColumnTop(seed, worldX, worldZ int64) int {
 	col := columnAt(seed, worldX, worldZ)
-	top := col.surface
+	top := carvedColumnTop(seed, worldX, worldZ, col.surface)
 
 	for rootZ := worldZ - treeCanopyRadius; rootZ <= worldZ+treeCanopyRadius; rootZ++ {
 		for rootX := worldX - treeCanopyRadius; rootX <= worldX+treeCanopyRadius; rootX++ {

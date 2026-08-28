@@ -427,6 +427,17 @@ func TestClimateThresholdsClassifyInOrder(t *testing.T) {
 // coordinates: 1.27 ms/op before, 1.68 ms/op after — 1.31×, against the 2× the
 // issue allows.
 //
+// **Worldgen 4 paid the rest of that budget for caves: 1.66 ms/op before, 3.26 after
+// — 1.96×, against the same 2×.** Caves are the first feature here that costs per
+// *voxel* rather than per column, and the arithmetic is the whole story: the carved
+// band is 97 blocks deep where the ore bands together are 52, and caveAt spends 1.3
+// fbm3D sums on average in it (two fields, the second one short-circuited away by
+// the first about seven times in ten). Everything that keeps it under the ceiling is
+// a rejection ahead of those sums — the depth band, the spawn square, the mouth
+// field — and a change that moves one of them is a change to this number. There is
+// no headroom left above it: the next feature that wants per-voxel noise has to buy
+// it back somewhere first.
+//
 // **Sweep the vertical coordinate, and do not measure one chunk layer.** The first
 // attempt pinned Y=2 and reported 2.9×, which was not the climate fields at all: the
 // old terrain topped out at 84, so a chunk at y 64..95 was mostly air and almost
