@@ -640,7 +640,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     };
 
     match (refused.action, refused.reason) {
-        (RefusedAction::PlaceMarker, _) => marker_reason,
+        (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
         (RefusedAction::PlaceStructure, _) => {
             placement_reason.map(|reason| format!("Cannot build here: {reason}"))
@@ -1351,27 +1351,30 @@ mod tests {
         }
     }
 
-    /// The two refusals a placement can draw, and the reason it cannot.
+    /// The three refusals a mark can draw, and the one it cannot.
     ///
     /// `NoteTooLong` is in the list and cannot arrive over the wire -- the decoder closes the
     /// session over an over-long note before the store ever answers -- so what is pinned here
     /// is that the sentence exists rather than that a player will read it. A reason the server
     /// names and this client has no line for is a refusal that reaches nobody.
     #[test]
-    fn a_refused_placement_says_which_of_the_two_things_went_wrong() {
+    fn a_refused_mark_says_which_of_the_three_things_went_wrong() {
         for (reason, want) in [
             (
                 RefusalReason::TooManyMarkers,
                 "The map holds no more marks (64)",
             ),
             (RefusalReason::NoteTooLong, "That note is too long"),
+            (RefusalReason::MarkerUnknown, "That mark is already gone"),
         ] {
-            let line = describe_refusal(&ActionRefused {
-                action: RefusedAction::PlaceMarker,
-                reason,
-                anchor: None,
-            });
-            assert_eq!(line.as_deref(), Some(want), "{reason:?}");
+            for action in [RefusedAction::PlaceMarker, RefusedAction::RemoveMarker] {
+                let line = describe_refusal(&ActionRefused {
+                    action,
+                    reason,
+                    anchor: None,
+                });
+                assert_eq!(line.as_deref(), Some(want), "{action:?}/{reason:?}");
+            }
         }
 
         // A reason that is about a tile rather than a mark still says nothing: a misaligned

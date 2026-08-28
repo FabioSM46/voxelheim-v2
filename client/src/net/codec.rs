@@ -4537,8 +4537,6 @@ pub fn encode_marker_place_request(request: &MarkerPlaceRequest) -> Vec<u8> {
 
 /// Builds one mark-removal intent. There is no edit message: a change is a removal and
 /// a placement, and both are answered by the same complete `MarkerList`.
-// V24 establishes this outbound contract before the map window lands.
-#[allow(dead_code)]
 pub fn encode_marker_remove_request(request: &MarkerRemoveRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let payload = fb::MarkerRemoveRequest::create(
