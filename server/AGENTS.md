@@ -490,6 +490,25 @@ package can avoid the import would create two truths to keep in step for no bene
   deliberate deviation from the issue's `player.go` field pointer in favour of its behavioural
   requirement that reconnecting does not refill. Invalid text and a body that cannot act spend
   nothing; an accepted line spends one token even when every outbound queue drops it.
+- **The map tile bucket is the third, and the first that bounds work a client can ask for
+  *twice over*: the request is throttled, and the answer is drawn rather than looked up.** The
+  burst is 32 tiles — more than one opening of the map costs at any scale, since a tile is 64×64
+  pixels however coarse — and the refill is 8 a second, which is comfortably above a client
+  panning across a continent. Both numbers are generous where `resendRefillPerSecond` could not
+  be, and the reason is what the work touches rather than how much of it there is: a resend can
+  regenerate a chunk under the semaphore every session shares, while a tile is 4096 evaluations
+  of a pure function on the session's own goroutine, so a client spending its whole bucket
+  delays nobody's terrain but its own. An empty bucket drops the request in silence, which is
+  the resend precedent: the contract's one refusal here is `TileMisaligned`, and that names a
+  malformed request rather than an impatient one.
+- **A map tile is arithmetic, and the mask is applied before the arithmetic rather than after
+  it.** `world.SurfaceAt` reads the same `columnAt` the generator does, so a pixel and the chunk
+  under it cannot disagree; nothing on the tile path opens a chunk, the cache or the delta
+  store, which is why there is no server-side tile cache and why a dug-out hill still draws as a
+  hill. A pixel inside a chunk column this character has not been streamed is left at zero in
+  both arrays *and its terrain is never computed* — the unexplored is not withheld from the
+  frame, it is never a value in the process. A client is not where a secret is kept, and the
+  cheapest way to be sure of that is to have nothing to withhold.
 - **A party is live simulation state, never a client claim.** `Sim.parties` owns ordered
   membership and leadership, while `byName` exists only to resolve Invite and Kick against the
   stored character name. Invitations expire on the authoritative tick and disappear with the
