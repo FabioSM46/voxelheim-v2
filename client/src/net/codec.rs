@@ -7176,6 +7176,71 @@ mod tests {
         );
     }
 
+    /// A note that is not UTF-8 is refused before the accessor that would read it runs.
+    ///
+    /// The same property as
+    /// [`a_character_name_that_is_not_utf8_is_refused_before_the_accessor_runs`], pinned
+    /// again for the one string this protocol version adds. `Marker::note()` is
+    /// `from_utf8_unchecked` like every other generated string accessor, so what stands
+    /// between a hostile frame and undefined behaviour is that [`decode`] goes through
+    /// `root_as_envelope`: the generated verifier visits `note` as
+    /// `ForwardsUOffset<&str>`, and that impl runs `core::str::from_utf8` and returns
+    /// `InvalidFlatbuffer::Utf8Error`. The bound in [`marker_list`] is a *length* check
+    /// and is reached only afterwards — it is not what makes the read safe, and reading
+    /// the code cannot show that it does not have to be.
+    ///
+    /// So this is pinned for the same reason #117's review asked for the first one:
+    /// the guarantee is library behaviour plus the "never `root_as_envelope_unchecked`"
+    /// convention plus a pinned `Cargo.lock`, and a convention is what a regression walks
+    /// through. The bytes are patched into a finished frame rather than built through
+    /// `from_utf8_unchecked`, because `client/Cargo.toml` records that hand-written client
+    /// code contains no `unsafe` and a safety test is a poor place to write the first.
+    #[test]
+    fn a_marker_note_that_is_not_utf8_is_refused_before_the_accessor_runs() {
+        // Distinctive enough to appear once in a frame, and checked below rather than
+        // assumed. 0xC3 opens a two-byte sequence and 0x28 is not a continuation byte.
+        const NOTE: &[u8] = b"Qxvz";
+        const NOT_UTF8: &[u8] = &[0xC3, 0x28];
+
+        let mut frame = encode_marker_list(Some(&[MarkerWire {
+            marker_id: 7,
+            x: 0,
+            z: 0,
+            kind: fb::MarkerKind::Note.0,
+            note: Some(core::str::from_utf8(NOTE).expect("the fixture note is ascii")),
+        }]));
+
+        // The frame this patches is a good one, which is what makes the refusal below a
+        // statement about the bytes rather than about the fixture.
+        assert!(
+            decode(&frame).is_ok(),
+            "the unpatched fixture is not a decodable frame"
+        );
+
+        let occurrences = frame.windows(NOTE.len()).filter(|w| *w == NOTE).count();
+        assert_eq!(occurrences, 1, "the fixture note is not uniquely locatable");
+        let at = frame
+            .windows(NOTE.len())
+            .position(|window| window == NOTE)
+            .expect("the note is in the frame it was encoded into");
+        // The replacement is the same length as what it replaces, so no offset moves.
+        frame[at..at + NOT_UTF8.len()].copy_from_slice(NOT_UTF8);
+
+        // The reason is pinned, not just the refusal: a patched buffer could in principle
+        // be refused for something that has nothing to do with UTF-8, which would leave
+        // this test passing while the property it exists for went unchecked. It must also
+        // not be `MarkerNoteTooLong` — that would mean the length check had run first, on
+        // a `&str` the accessor had already fabricated.
+        let refusal = decode(&frame);
+        let Err(DecodeError::Malformed(reason)) = &refusal else {
+            panic!("invalid UTF-8 in a note was not refused: {refusal:?}");
+        };
+        assert!(
+            reason.contains("Utf8") && reason.contains("note"),
+            "the frame was refused for something other than the note's encoding: {reason}"
+        );
+    }
+
     /// The three outbound map payloads carry intent and nothing else.
     ///
     /// The request encoder writes a misaligned origin exactly as given, deliberately: it
