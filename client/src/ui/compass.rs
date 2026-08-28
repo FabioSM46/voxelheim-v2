@@ -36,7 +36,7 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 use crate::net::Session;
-use crate::player::{AimCamera, InputMode, LookState};
+use crate::player::{AimCamera, InputMode, LookState, PlayerStats};
 
 /// Distance from the top of the window, in logical pixels.
 const TOP: f32 = 12.0;
@@ -107,6 +107,10 @@ impl Plugin for CompassUiPlugin {
         // reasoning `CrosshairPlugin` states for `ViewMode`.
         app.init_resource::<InputMode>()
             .init_resource::<LookState>()
+            // `PlayerPlugin` owns this one too, and for the same reason: the coordinates
+            // under the reading are a readout of what the server said, so this module has
+            // to be buildable on its own without the plugin that fills it in.
+            .init_resource::<PlayerStats>()
             .add_systems(Startup, spawn_compass)
             .add_systems(
                 Update,
@@ -118,6 +122,12 @@ impl Plugin for CompassUiPlugin {
                     // it is supposed to describe. Ordering against a set no headless test
                     // builds is a no-op, so this costs those tests nothing.
                     refresh_compass.after(AimCamera),
+                    // Unordered against `refresh_player_stats`, deliberately: the
+                    // position it reads is the server's answer interpolated for display,
+                    // so a frame of lag in a three-integer readout is invisible, and an
+                    // ordering against a system this module's headless tests never build
+                    // would be a no-op there anyway.
+                    refresh_coordinates,
                     show_compass,
                 ),
             );
@@ -143,6 +153,10 @@ struct CompassPointer;
 /// The numeric heading under the pointer.
 #[derive(Component)]
 struct CompassReading;
+
+/// Where the player stands, in blocks, under the heading.
+#[derive(Component)]
+struct CoordinatesReading;
 
 /// The bearing the player faces, in degrees clockwise from North, in `[0, 360)`.
 ///
@@ -206,6 +220,38 @@ fn is_cardinal(degrees: u16) -> bool {
 fn center_reading(yaw: f32) -> String {
     let rounded = heading_degrees(yaw).round() as u16 % 360;
     format!("{rounded:03}°")
+}
+
+/// The block the player is standing in, on the axis `value` measures.
+///
+/// `floor` and not a truncating cast, because the two disagree over exactly the half of
+/// the world that is negative: block `-1` spans `-1.0..0.0`, so `-0.5` is in it, and a
+/// cast toward zero would put it in block `0` — two adjacent blocks sharing a name, and
+/// only west and south of the origin. A yaw that is not finite reads as due North a few
+/// lines above, and this is the same guard for the same reason: `net/codec.rs` refuses a
+/// non-finite coordinate before one can reach a `Transform`, so this is a guard rather
+/// than a case.
+fn block_coordinate(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.floor() as i32
+}
+
+/// What the coordinates line reads for a position.
+///
+/// Three integers in the order a player says them: the two that name a place on the map
+/// first, and the altitude last. `alt` rather than `Y`, because the axis letters are the
+/// world's and the word is the player's — and because the world map, when it arrives,
+/// shows X and Z under its cursor and no third axis at all. Block coordinates and not
+/// chunk coordinates: this is the number one player reads out to another.
+fn coordinates_reading(position: Vec3) -> String {
+    format!(
+        "X {} · Z {} · alt {}",
+        block_coordinate(position.x),
+        block_coordinate(position.z),
+        block_coordinate(position.y),
+    )
 }
 
 fn spawn_compass(mut commands: Commands) {
@@ -332,6 +378,27 @@ fn spawn_compass(mut commands: Commands) {
                 TextShadow::default(),
                 FocusPolicy::Pass,
             ));
+
+            // A third child of the same column rather than a second root: `TOP`, the
+            // `HUD_LAYER` ordering, the one `Visibility` `show_compass` writes and the
+            // pointer-pass guarantee are then stated once, and the column's `row_gap`
+            // already puts this a `READING_GAP` under the heading.
+            //
+            // Empty, not a position. Nothing has said where this player is until the
+            // first snapshot names them, and `0, 0, 0` would be an answer — the same
+            // distinction `ui/status.rs` draws when it writes `player -`.
+            root.spawn((
+                CoordinatesReading,
+                Text::default(),
+                TextFont {
+                    font_size: FontSize::Px(READING_SIZE),
+                    ..default()
+                },
+                TextColor(POINTER),
+                TextLayout::no_wrap(),
+                TextShadow::default(),
+                FocusPolicy::Pass,
+            ));
         });
 }
 
@@ -356,6 +423,25 @@ fn refresh_compass(
     for mut text in &mut readings {
         if text.0 != reading {
             text.0 = reading.clone();
+        }
+    }
+}
+
+/// Rewrites the coordinates line when the player crosses into another block.
+///
+/// The same discipline `refresh_compass` keeps, and here the saving is larger: the
+/// position underneath is interpolated, so it moves every frame the player does, while
+/// the three integers it floors to change a couple of times a second at a walk. Comparing
+/// the rendered string is comparing the triple — it is a pure function of nothing else
+/// — so one comparison serves for both.
+fn refresh_coordinates(
+    stats: Res<PlayerStats>,
+    mut readings: Query<&mut Text, With<CoordinatesReading>>,
+) {
+    let next = stats.position.map(coordinates_reading).unwrap_or_default();
+    for mut text in &mut readings {
+        if text.0 != next {
+            text.0 = next.clone();
         }
     }
 }
@@ -425,6 +511,21 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Text, With<CompassReading>>();
         query.single(world).expect("one reading").0.clone()
+    }
+
+    fn coordinates(app: &mut App) -> String {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Text, With<CoordinatesReading>>();
+        query
+            .single(world)
+            .expect("one coordinates reading")
+            .0
+            .clone()
+    }
+
+    fn stand(app: &mut App, position: Option<Vec3>) {
+        app.world_mut().resource_mut::<PlayerStats>().position = position;
+        app.update();
     }
 
     fn root_visibility(app: &mut App) -> Visibility {
@@ -623,13 +724,25 @@ mod tests {
             .map(|(entity, _, policy)| (entity, policy.copied()))
             .collect();
         assert!(!found.is_empty(), "the compass spawned no nodes");
-        for (entity, policy) in found {
+        for &(entity, policy) in &found {
             assert_eq!(
                 policy,
                 Some(FocusPolicy::Pass),
                 "{entity} blocks the pointer"
             );
         }
+
+        // The walk above is over `&Node`, so a new text child is covered by it only while
+        // `Text` still brings a `Node` with it. Naming the coordinates node here is what
+        // turns that structural fact into an assertion rather than a silently narrower
+        // sweep: drop the node and this fails, instead of the walk quietly skipping it.
+        let world = app.world_mut();
+        let mut named = world.query_filtered::<Entity, With<CoordinatesReading>>();
+        let coordinates = named.single(world).expect("one coordinates reading");
+        assert!(
+            found.iter().any(|&(entity, _)| entity == coordinates),
+            "the coordinates reading was not among the nodes walked"
+        );
     }
 
     #[test]
@@ -637,7 +750,7 @@ mod tests {
         let mut app = compass_app();
         assert_eq!(root_visibility(&mut app), Visibility::Visible);
 
-        for mode in [InputMode::Inventory, InputMode::Menu] {
+        for mode in [InputMode::Inventory, InputMode::Loot, InputMode::Menu] {
             *app.world_mut().resource_mut::<InputMode>() = mode;
             app.update();
             assert_eq!(
@@ -652,6 +765,129 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
         app.update();
         assert_eq!(root_visibility(&mut app), Visibility::Visible);
+    }
+
+    #[test]
+    fn a_position_reads_as_the_block_it_is_standing_in() {
+        assert_eq!(
+            coordinates_reading(Vec3::new(0.0, 64.9, -0.5)),
+            "X 0 · Z -1 · alt 64"
+        );
+        // Whole numbers, positive on every axis.
+        assert_eq!(
+            coordinates_reading(Vec3::new(123.0, 67.0, 45.0)),
+            "X 123 · Z 45 · alt 67"
+        );
+        // The one the issue writes out, and the one that says `alt` is the Y axis and Z
+        // is the middle field: a reading that transposed them would pass every symmetric
+        // case above and fail here.
+        assert_eq!(
+            coordinates_reading(Vec3::new(123.4, 67.8, -45.6)),
+            "X 123 · Z -46 · alt 67"
+        );
+        // Far out and far down, with no zero padding and no thousands separator.
+        assert_eq!(
+            coordinates_reading(Vec3::new(-4096.0, -12.25, 8192.75)),
+            "X -4096 · Z 8192 · alt -13"
+        );
+        // `floor`, not a cast toward zero: every one of these is inside block -1, and a
+        // truncating cast would name three of them 0.
+        for value in [-0.001_f32, -0.5, -0.999] {
+            assert_eq!(block_coordinate(value), -1, "{value} left block -1");
+        }
+        assert_eq!(block_coordinate(-1.0), -1);
+        assert_eq!(block_coordinate(0.0), 0);
+        // The guard `heading_degrees` keeps, for the same reason and against the same
+        // unreachable input: a saturating cast would otherwise print 2147483647 blocks.
+        assert_eq!(block_coordinate(f32::NAN), 0);
+        assert_eq!(block_coordinate(f32::INFINITY), 0);
+        assert_eq!(block_coordinate(f32::NEG_INFINITY), 0);
+    }
+
+    #[test]
+    fn the_coordinates_are_empty_until_the_server_has_placed_the_player() {
+        let mut app = compass_app();
+        // `PlayerStats::position` is `None` before the first snapshot names this session's
+        // own entity, and an empty line is the only honest reading of that. `X 0 · Z 0 ·
+        // alt 0` would be a place, and it is the one place a player might actually be.
+        assert_eq!(coordinates(&mut app), "");
+
+        stand(&mut app, Some(Vec3::new(123.4, 67.8, -45.6)));
+        assert_eq!(coordinates(&mut app), "X 123 · Z -46 · alt 67");
+
+        // And back: a session that ends takes the position with it.
+        stand(&mut app, None);
+        assert_eq!(coordinates(&mut app), "");
+    }
+
+    #[test]
+    fn moving_inside_one_block_does_not_rewrite_the_line() {
+        // Observed from inside a system, because `App::update` ends with `clear_trackers`
+        // and a check from outside is always false. A system's first run compares against
+        // a last-run tick of zero, so everything in the world reads as changed to it —
+        // the probe's first frame is therefore spent, and the assertion that matters is
+        // the one on the frame after.
+        #[derive(Resource, Default)]
+        struct Rewritten(bool);
+
+        let mut app = compass_app();
+        app.init_resource::<Rewritten>();
+        app.add_systems(
+            Update,
+            (|texts: Query<Ref<'_, Text>, With<CoordinatesReading>>,
+              mut seen: ResMut<Rewritten>| {
+                seen.0 = texts.iter().any(|text| text.is_changed());
+            })
+            .after(refresh_coordinates),
+        );
+
+        // The probe's spent frame, and the one that puts the player somewhere. Only the
+        // text is asserted here: the change flag on this frame is the tick-zero artefact
+        // above, not a measurement.
+        stand(&mut app, Some(Vec3::new(12.1, 64.1, -3.9)));
+        assert_eq!(coordinates(&mut app), "X 12 · Z -4 · alt 64");
+
+        // A stride inside the same block. The interpolated position moves every frame the
+        // player does; the three integers it floors to do not, and neither may the text.
+        stand(&mut app, Some(Vec3::new(12.9, 64.9, -3.1)));
+        assert!(
+            !app.world().resource::<Rewritten>().0,
+            "a step inside one block rewrote the coordinates"
+        );
+        assert_eq!(coordinates(&mut app), "X 12 · Z -4 · alt 64");
+
+        // One block east, and the line moves again — the check above is not simply
+        // asserting that nothing ever writes.
+        stand(&mut app, Some(Vec3::new(13.0, 64.9, -3.1)));
+        assert!(
+            app.world().resource::<Rewritten>().0,
+            "crossing into the next block left the coordinates behind"
+        );
+        assert_eq!(coordinates(&mut app), "X 13 · Z -4 · alt 64");
+    }
+
+    #[test]
+    fn the_coordinates_are_hidden_and_shown_with_the_compass() {
+        // Not a second gate: the reading inherits, so `show_compass` writing the root is
+        // the whole mechanism. What is asserted is that it is still a child of that root
+        // and still inherits — a `Visibility::Visible` on it would draw over a menu,
+        // unconditionally, which is the trap the module comment already names for marks.
+        let mut app = compass_app();
+        let world = app.world_mut();
+        let mut roots = world.query_filtered::<Entity, With<CompassRoot>>();
+        let root = roots.single(world).expect("one compass root");
+
+        let mut query = world.query_filtered::<(&ChildOf, &Visibility), With<CoordinatesReading>>();
+        let (parent, visibility) = query.single(world).expect("one coordinates reading");
+        assert_eq!(parent.parent(), root, "the reading hangs off another node");
+        assert_eq!(*visibility, Visibility::Inherited);
+
+        // And the root does go down over a panel and with no session, which is what it
+        // then inherits. The two existing tests below say the same for the compass; this
+        // one is here so the coordinates are named in it.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
     }
 
     #[test]
