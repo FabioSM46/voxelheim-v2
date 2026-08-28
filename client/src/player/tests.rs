@@ -3457,6 +3457,146 @@ fn fog(app: &mut App) -> DistanceFog {
     found[0].clone()
 }
 
+/// Puts the one camera's eye at `at`. Nothing overwrites it in these tests: with no local
+/// body in the snapshot, `follow_the_player` returns before it places anything.
+fn put_the_eye_at(app: &mut App, at: Vec3) {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<&mut Transform, With<camera::WorldCamera>>();
+    let mut placed = 0;
+    for mut transform in query.iter_mut(world) {
+        transform.translation = at;
+        placed += 1;
+    }
+    assert_eq!(placed, 1, "exactly one camera owns the window");
+}
+
+/// A store holding one voxel of water at world block (2, 3, 4), and air everywhere else.
+fn a_puddle() -> crate::world::ChunkStore {
+    let mut chunk = crate::world::VoxelChunk::all_air(32);
+    chunk.set(2, 3, 4, crate::world::palette::WATER);
+    let mut store = crate::world::ChunkStore::default();
+    store.insert(
+        crate::net::ChunkCoord {
+            cx: 0,
+            cy: 0,
+            cz: 0,
+        },
+        chunk,
+    );
+    store
+}
+
+/// Two colours as the eye would see them, to within a hair.
+fn same_colour(left: Color, right: Color) -> bool {
+    let (a, b) = (Srgba::from(left), Srgba::from(right));
+    [(a.red, b.red), (a.green, b.green), (a.blue, b.blue)]
+        .iter()
+        .all(|(x, y)| (x - y).abs() < 1e-3)
+}
+
+#[test]
+fn the_sky_goes_blue_green_when_the_eye_is_under_water() {
+    // The one thing in the sky that is a function of where the player is, against a
+    // day-clock server so the comparison is with a sky that is genuinely computed.
+    let mut app = headless_player_with_a_clock();
+    app.insert_resource(a_puddle());
+    deliver_at_tick_of_day(&mut app, 1, 4_800, Instant::now());
+    app.update();
+
+    let above = sky_and_ambient(&mut app).0;
+    let above_fog = fog(&mut app);
+    assert!(
+        !same_colour(above, Color::srgb(0.05, 0.22, 0.35)),
+        "the day sky must not already be the underwater one"
+    );
+
+    // Into the water. The voxel at (2, 3, 4) spans [2, 3) x [3, 4) x [4, 5).
+    put_the_eye_at(&mut app, Vec3::new(2.5, 3.5, 4.5));
+    app.update();
+
+    let under = sky_and_ambient(&mut app).0;
+    let under_fog = fog(&mut app);
+    assert!(
+        same_colour(under, Color::srgb(0.05, 0.22, 0.35)),
+        "under water the sky is the water, not the hour: got {under:?}"
+    );
+    assert!(same_colour(under_fog.color, under), "the fog fades into it");
+    let FogFalloff::Linear { start, end } = under_fog.falloff else {
+        panic!("the fog stays a linear fade under water");
+    };
+    assert_eq!(
+        end, 10.0,
+        "ten blocks of visibility, not the render distance"
+    );
+    assert!(start < end && start > 0.0);
+
+    let FogFalloff::Linear { end: above_end, .. } = above_fog.falloff else {
+        panic!("the fog above the surface is a linear fade too");
+    };
+    assert!(
+        above_end > end,
+        "the world above water is visible further than ten blocks"
+    );
+
+    // And back out, which is what the `Local` flag exists for: nothing compares
+    // `ClearColorConfig`, so the restoring write is triggered by the transition.
+    put_the_eye_at(&mut app, Vec3::new(2.5, 9.5, 4.5));
+    app.update();
+
+    let after = sky_and_ambient(&mut app).0;
+    assert!(
+        !same_colour(after, Color::srgb(0.05, 0.22, 0.35)),
+        "leaving the water restores the day-clock sky"
+    );
+    assert!(same_colour(after, above), "and restores that exact sky");
+    assert!(same_colour(fog(&mut app).color, after));
+}
+
+#[test]
+fn a_server_with_no_clock_still_shows_the_water_it_streams() {
+    // Not a time of day, so it overrides the fixed sky too — and a server with no clock
+    // is every server in this repository today.
+    let mut app = headless_player();
+    app.insert_resource(a_puddle());
+    app.update();
+
+    assert!(same_colour(
+        sky_and_ambient(&mut app).0,
+        sky::Daylight::FIXED.sky
+    ));
+
+    put_the_eye_at(&mut app, Vec3::new(2.5, 3.5, 4.5));
+    app.update();
+    assert!(same_colour(
+        sky_and_ambient(&mut app).0,
+        Color::srgb(0.05, 0.22, 0.35)
+    ));
+
+    put_the_eye_at(&mut app, Vec3::new(2.5, 9.5, 4.5));
+    app.update();
+    assert!(
+        same_colour(sky_and_ambient(&mut app).0, sky::Daylight::FIXED.sky),
+        "and the clockless sky comes back exactly as it was"
+    );
+}
+
+#[test]
+fn the_sky_never_asks_a_store_it_has_not_been_given() {
+    // `PlayerPlugin` does not add `WorldPlugin`, so every other test here runs with no
+    // store at all. That is the pre-handshake frame, and it must do nothing.
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 4_800, Instant::now());
+    // The camera is spawned on `Startup`, which is this first update.
+    app.update();
+    put_the_eye_at(&mut app, Vec3::new(2.5, 3.5, 4.5));
+    app.update();
+
+    assert!(
+        !same_colour(sky_and_ambient(&mut app).0, Color::srgb(0.05, 0.22, 0.35)),
+        "with no streamed world there is no water to be inside"
+    );
+}
+
 #[test]
 fn a_server_with_no_clock_leaves_the_sky_exactly_where_it_was() {
     // The path every server in this repository takes today, and the one that keeps taking
