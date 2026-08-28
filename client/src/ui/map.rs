@@ -2166,6 +2166,68 @@ mod tests {
         assert_eq!(reading(&mut app, MapReading::Cursor), "Cursor off the map");
     }
 
+    /// The pointer is measured in the picture's own logical pixels, on a display where a
+    /// logical pixel is not a physical one.
+    ///
+    /// **The test the review of this pull request earned.** `bevy_ui` lays out in physical
+    /// pixels: `ComputedNode::size` says so in its own doc, `UiGlobalTransform` is built
+    /// from the same taffy answer, and `ComputedNode::inverse_scale_factor` is documented
+    /// as what multiplies one back to logical -- which is what `bevy_ui`'s own
+    /// `widget::viewport` does to put a cursor inside a node. `Window::cursor_position` is
+    /// logical, and `measure_the_viewport` measures the viewport logically too, so the
+    /// conversion is what makes the two ends the same units. Dropping it reads as correct
+    /// at scale factor 1 and is wrong at every other, which is why the case is pinned at 2.
+    #[test]
+    fn the_pointer_is_logical_where_a_logical_pixel_is_not_a_physical_one() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+
+        // 1600x1200 physical at scale factor 2 is 800x600 logical.
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: bevy::window::WindowResolution::new(1600, 1200)
+                        .with_scale_factor_override(2.0),
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        app.update();
+
+        // A canvas 512x384 logical, centred at (400, 300) logical. Every number the layout
+        // writes is twice that, and it is the layout's numbers that go in.
+        let canvas = app
+            .world_mut()
+            .query_filtered::<Entity, With<MapCanvas>>()
+            .iter(app.world())
+            .next()
+            .expect("the map canvas is spawned once at startup");
+        app.world_mut().entity_mut(canvas).insert((
+            ComputedNode {
+                size: Vec2::new(1024.0, 768.0),
+                inverse_scale_factor: 0.5,
+                ..ComputedNode::DEFAULT
+            },
+            UiGlobalTransform::from_xy(800.0, 600.0),
+        ));
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .expect("the window this test spawned")
+            .set_cursor_position(Some(Vec2::new(500.0, 400.0)));
+        app.update();
+
+        // The canvas's logical top-left corner is (400 - 256, 300 - 192) = (144, 108).
+        // Reading the layout as logical instead would put the corner at (288, 216) and the
+        // pointer a quarter of the canvas away from where it is.
+        assert_eq!(
+            app.world().resource::<MapPointer>().0,
+            Some(Vec2::new(356.0, 292.0)),
+            "the pointer is not in the picture's own pixels"
+        );
+    }
+
     #[test]
     fn the_dot_waits_for_the_server_to_say_where_the_player_is() {
         let (mut app, _frames) = app();
