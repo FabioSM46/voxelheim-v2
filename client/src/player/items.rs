@@ -987,6 +987,39 @@ mod tests {
         );
     }
 
+    /// The three a settlement is built out of.
+    ///
+    /// **The sibling of the test above, and the ids it pins moved once already.** This
+    /// branch first wrote them as 35, 36 and 37; silver landed on `develop` at 35 and
+    /// pushed all three up by one. An id that can move without a test noticing is a
+    /// persisted pack that a later build reads as something else, so the numbers are
+    /// written out here rather than derived from the table's order.
+    ///
+    /// Planks carry the wood livery for the reason the log does — sawn timber is still
+    /// timber — and the other two carry none: dressed rubble and straw have no grain to
+    /// draw at a cell's size.
+    #[test]
+    fn the_three_a_settlement_is_built_from_carry_their_pinned_ids() {
+        assert_eq!(ITEM_PLANKS, 36);
+        assert_eq!(ITEM_COBBLESTONE, 37);
+        assert_eq!(ITEM_THATCH, 38);
+
+        for (item_id, name, swatch, livery) in [
+            (ITEM_PLANKS, "planks", palette::PLANKS, Some(Livery::Wood)),
+            (ITEM_COBBLESTONE, "cobblestone", palette::COBBLESTONE, None),
+            (ITEM_THATCH, "thatch", palette::THATCH, None),
+        ] {
+            let row = display(item_id).expect("a settlement block is registered");
+            assert_eq!(row.name, name);
+            // `Block` rather than `Material`: the server's registry gives each of these
+            // a voxel to place, and a shape that said otherwise would be telling a
+            // player there is no place press behind what they are holding.
+            assert_eq!(row.shape, ItemShape::Block);
+            assert_eq!(row.colour, ItemColour::Block(swatch));
+            assert_eq!(row.livery, livery);
+        }
+    }
+
     /// The three the recipe-driven name table could never have covered.
     ///
     /// Dirt and snow are placeable blocks no recipe mentions; the rusty sword is the item
