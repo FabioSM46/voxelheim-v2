@@ -101,6 +101,7 @@ type Message struct {
 	Party              *PartyRequest
 	LootOpen           *LootOpenRequest
 	LootTake           *LootTakeRequest
+	LootTakeAll        *LootTakeAllRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -131,6 +132,16 @@ type LootOpenRequest struct {
 type LootTakeRequest struct {
 	CorpseID   uint64
 	EntryID    uint64
+	Revision   uint32
+	ClientTick uint32
+}
+
+// LootTakeAllRequest asks for every entry of one known container revision that fits
+// the player's pack, in entry order. It names no entry and carries no count: the
+// server owns the order and the fit, and answers with LootClosed when the corpse is
+// emptied or a LootState of the remainder beside a TakeLoot/InventoryFull refusal.
+type LootTakeAllRequest struct {
+	CorpseID   uint64
 	Revision   uint32
 	ClientTick uint32
 }
@@ -1363,6 +1374,24 @@ func Decode(frame []byte) (msg Message, err error) {
 			CorpseID: request.CorpseId(), EntryID: request.EntryId(),
 			Revision: request.Revision(), ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadLootTakeAllRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.LootTakeAllRequest
+		request.Init(table.Bytes, table.Pos)
+		switch {
+		case request.CorpseId() == 0:
+			return Message{}, fmt.Errorf("%w: LootTakeAllRequest corpse id is absent", ErrMalformed)
+		case request.Revision() == 0:
+			return Message{}, fmt.Errorf("%w: LootTakeAllRequest revision is absent", ErrMalformed)
+		}
+		msg.LootTakeAll = &LootTakeAllRequest{
+			CorpseID: request.CorpseId(),
+			Revision: request.Revision(), ClientTick: request.ClientTick(),
+		}
 	}
 
 	return msg, nil
@@ -2209,6 +2238,18 @@ func EncodeLootTakeRequest(r LootTakeRequest) []byte {
 	vnet.LootTakeRequestAddClientTick(b, r.ClientTick)
 	request := vnet.LootTakeRequestEnd(b)
 	return finishEnvelope(b, vnet.PayloadLootTakeRequest, request)
+}
+
+// EncodeLootTakeAllRequest builds one take-everything intent for protocol round-trip
+// tests. It carries no entry list for the same reason the single take carries no count.
+func EncodeLootTakeAllRequest(r LootTakeAllRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.LootTakeAllRequestStart(b)
+	vnet.LootTakeAllRequestAddCorpseId(b, r.CorpseID)
+	vnet.LootTakeAllRequestAddRevision(b, r.Revision)
+	vnet.LootTakeAllRequestAddClientTick(b, r.ClientTick)
+	request := vnet.LootTakeAllRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadLootTakeAllRequest, request)
 }
 
 // EncodeLootState builds one complete, per-recipient authoritative container state.

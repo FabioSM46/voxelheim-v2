@@ -110,6 +110,13 @@ namespace Voxelheim.Net;
 /// The projectile, target, off-hand and paired blocking fields are append-only additions:
 /// older peers see their absent defaults, so those fields do not independently owe a bump.
 /// They share V22 so every dependent consumer builds from one settled contract.
+///
+/// **V23 adds one request that empties a corpse.** `LootTakeAllRequest` travels
+/// client -> server, so a V22 server cannot name the tag and closes the session rather
+/// than dropping it — the exact mid-session failure a clean handshake must not hide.
+/// That one union member is the whole of the break: nothing else in the contract moves,
+/// no enum gains a member, and the partial-fill report reuses the `TakeLoot` /
+/// `InventoryFull` pair `LootTakeRequest` already answers with.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -117,7 +124,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 22
+  Current = 23
 }
 
 /// A position, velocity or direction in world space, measured in blocks.
