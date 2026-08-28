@@ -182,6 +182,10 @@ pub enum InputMode {
     Loot,
     /// Pointer released and the pause menu visible.
     Menu,
+    /// Pointer released and the world map visible. Movement is closed, as it is for
+    /// [`Self::Menu`] and unlike [`Self::Inventory`]: reading a map is not something a
+    /// player does while walking, and a drag that panned the map would also be steering.
+    Map,
 }
 
 /// Orders gameplay input after UI keys have chosen this frame's [`InputMode`].

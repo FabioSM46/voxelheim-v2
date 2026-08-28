@@ -161,7 +161,8 @@ const WIDE_BUTTON: f32 = 40.0;
 /// describes. `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails rather than the
 /// panel jumping, and #399 is what made it fail: adding `Control::Consume` grew Controls to
 /// eleven rows, so this number moved with it rather than the area silently overflowing.
-const CONTENT_ROWS: usize = 11;
+/// #452 moved it again, to twelve, for `Control::Map`.
+const CONTENT_ROWS: usize = 12;
 
 /// The height of the area a tab's contents are drawn in, in logical pixels.
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
@@ -1011,16 +1012,18 @@ mod tests {
         assert!(notice.contains("unreachable"), "{notice}");
         assert!(app.world().resource::<SettingsScreen>().is_open());
 
-        // Moving the menu off `Escape` is what frees it.
+        // Moving the menu off `Escape` is what frees it. `G` and not `M`, which
+        // `Control::Map` has held since #452 — a taken key is refused, which is the
+        // other half of this test rather than the half it is trying to set up.
         release_keys(&mut app);
         press(&mut app, SettingsAction::Capture(Control::Menu));
-        press_key(&mut app, KeyCode::KeyM);
+        press_key(&mut app, KeyCode::KeyG);
         assert_eq!(
             app.world()
                 .resource::<Settings>()
                 .bindings()
                 .key(Control::Menu),
-            KeyCode::KeyM
+            KeyCode::KeyG
         );
 
         // And now the key this screen used to swallow reaches the control that asked for it.

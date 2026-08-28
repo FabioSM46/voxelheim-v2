@@ -186,6 +186,7 @@ pub enum Control {
     Inventory,
     Consume,
     Menu,
+    Map,
 }
 
 /// Every control, in the order the settings screen lists them.
@@ -194,7 +195,7 @@ pub enum Control {
 /// [`Bindings`] indexes its keys by `control as usize` while [`Bindings::default`] builds
 /// that array with `CONTROLS.map`, so a control listed here out of its declaration order
 /// would silently hand every control below it somebody else's key.
-pub const CONTROLS: [Control; 10] = [
+pub const CONTROLS: [Control; 11] = [
     Control::Forward,
     Control::Back,
     Control::Left,
@@ -205,6 +206,7 @@ pub const CONTROLS: [Control; 10] = [
     Control::Inventory,
     Control::Consume,
     Control::Menu,
+    Control::Map,
 ];
 
 impl Control {
@@ -221,6 +223,7 @@ impl Control {
             Self::Inventory => "inventory",
             Self::Consume => "consume",
             Self::Menu => "menu",
+            Self::Map => "map",
         }
     }
 
@@ -237,6 +240,7 @@ impl Control {
             Self::Inventory => "Inventory",
             Self::Consume => "Consume item",
             Self::Menu => "Pause menu",
+            Self::Map => "World map",
         }
     }
 
@@ -258,6 +262,7 @@ impl Control {
             Self::Inventory => KeyCode::KeyE,
             Self::Consume => KeyCode::KeyC,
             Self::Menu => KeyCode::Escape,
+            Self::Map => KeyCode::KeyM,
         }
     }
 }
