@@ -53,7 +53,7 @@ func internalIdentitiesExploring(t *testing.T, store *persist.Store, explored *p
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
-	identities, err := NewIdentities(store, explored, verifier, nil)
+	identities, err := NewIdentities(store, explored, nil, verifier, nil)
 	if err != nil {
 		t.Fatalf("NewIdentities: %v", err)
 	}
@@ -128,7 +128,7 @@ func play(t *testing.T, identities *Identities, hello *protocol.ClientHello, wan
 func TestAClaimSetRefusesToExistWithoutAVerifier(t *testing.T) {
 	t.Parallel()
 
-	identities, err := NewIdentities(nil, nil, nil, nil)
+	identities, err := NewIdentities(nil, nil, nil, nil, nil)
 	if err == nil {
 		t.Fatal("a claim set was built with no way to check a ticket")
 	}

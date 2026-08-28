@@ -763,6 +763,16 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return fmt.Errorf("session: send the explored ledger on join: %w", eErr)
 			}
 
+			// The character's own marks, once, **empty list included** — which is the one
+			// place this differs from the ledger above it. A MarkerList replaces the
+			// client's copy wholesale, so an empty one is a statement rather than the
+			// absence of one: a character who removed their last mark on another machine
+			// must see it gone here, and silence would leave the previous session's list
+			// standing. MapExplored is additive and therefore has the opposite rule.
+			if mErr := enqueue(protocol.EncodeMarkerList(self.Marks.List())); mErr != nil {
+				return fmt.Errorf("session: send the character's marks on join: %w", mErr)
+			}
+
 			// Built here rather than beside enqueue because it needs the player: a repair
 			// has to be able to ask for a view diff, and the only thing that can ask is
 			// the doorbell the tick loop rings — game.Player.WakeStreaming. Assigned to
@@ -807,7 +817,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			continue
 		}
 
-		if hErr := handlePostHandshake(ctx, msg, player, streamer, peers, enqueue, log); hErr != nil {
+		if hErr := handlePostHandshake(ctx, msg, player, streamer, self.Marks, peers, enqueue, log); hErr != nil {
 			if errors.Is(hErr, errLeaveRequested) {
 				// Inert before the acknowledgement is queued: once the server accepts the
 				// request, no input already behind it can become one last action.
@@ -941,7 +951,7 @@ func followMining(ctx context.Context, player *game.Player, peers *Registry, sen
 // Direction is a protocol rule rather than a type rule — both sides share one
 // union — so a client sending a server-only payload is a protocol violation and
 // the connection ends.
-func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game.Player, streamer *Streamer, peers *Registry, send func([]byte) error, log *slog.Logger) error {
+func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game.Player, streamer *Streamer, marks *Markers, peers *Registry, send func([]byte) error, log *slog.Logger) error {
 	switch msg.Kind {
 	case vnet.PayloadPlayerInput:
 		if player == nil || msg.PlayerInput == nil {
@@ -1471,6 +1481,86 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		if sendErr := send(protocol.EncodeActionRefused(refusal)); sendErr != nil {
 			return fmt.Errorf("session: send loot-take-all refusal: %w", sendErr)
 		}
+		return nil
+
+	case vnet.PayloadMarkerPlaceRequest:
+		if msg.MarkerPlace == nil {
+			// Unreachable for the reason the cases above are: Decode sets the payload for
+			// this kind or fails the frame. No player check, deliberately — a mark is not
+			// gameplay and asks the simulation nothing, so the one thing this needs is the
+			// character's own map, which every admitted session has.
+			log.Debug("marker placement arrived with no intent; discarding")
+			return nil
+		}
+
+		request := *msg.MarkerPlace
+		list, reason, pErr := marks.Place(request)
+		if pErr != nil {
+			// **The note is never logged**, and that is the one thing this refusal does
+			// differently from every other one in this function. It is text a player
+			// typed, an operator has no use for it, and a log line carrying it would put
+			// it in a file the privacy boundary says nothing a player wrote belongs in.
+			// Its length is the fact that decides the outcome, so its length is what is
+			// reported.
+			log.Debug("refusing marker placement",
+				"reason", pErr.Error(),
+				"code", reason.String(),
+				"x", request.X, "z", request.Z,
+				"kind", request.Kind.String(),
+				"note_bytes", len(request.Note),
+				"client_tick", request.ClientTick,
+			)
+			if reason == vnet.RefusalReasonUnknown {
+				return nil
+			}
+			refusal := protocol.ActionRefused{Action: vnet.RefusedActionPlaceMarker, Reason: reason}
+			if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+				return fmt.Errorf("session: send marker placement refusal: %w", sErr)
+			}
+			return nil
+		}
+
+		// The whole list rather than the one mark, which is the contract's own choice:
+		// a MarkerList replaces the client's copy, so there is no revision to agree on
+		// and no delta a client can have missed. The blocking send, for the reason an
+		// inventory state uses it — it is not superseded by the next tick, and a dropped
+		// one leaves the player looking at a mark that never appeared.
+		if sErr := send(protocol.EncodeMarkerList(list)); sErr != nil {
+			return fmt.Errorf("session: send the marks after a placement: %w", sErr)
+		}
+		log.Debug("mark placed", "x", request.X, "z", request.Z,
+			"kind", request.Kind.String(), "marks", len(list.Markers))
+		return nil
+
+	case vnet.PayloadMarkerRemoveRequest:
+		if msg.MarkerRemove == nil {
+			log.Debug("marker removal arrived with no intent; discarding")
+			return nil
+		}
+
+		request := *msg.MarkerRemove
+		list, reason, rErr := marks.Remove(request.MarkerID)
+		if rErr != nil {
+			log.Debug("refusing marker removal",
+				"reason", rErr.Error(),
+				"code", reason.String(),
+				"marker_id", request.MarkerID,
+				"client_tick", request.ClientTick,
+			)
+			if reason == vnet.RefusalReasonUnknown {
+				return nil
+			}
+			refusal := protocol.ActionRefused{Action: vnet.RefusedActionRemoveMarker, Reason: reason}
+			if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+				return fmt.Errorf("session: send marker removal refusal: %w", sErr)
+			}
+			return nil
+		}
+
+		if sErr := send(protocol.EncodeMarkerList(list)); sErr != nil {
+			return fmt.Errorf("session: send the marks after a removal: %w", sErr)
+		}
+		log.Debug("mark removed", "marker_id", request.MarkerID, "marks", len(list.Markers))
 		return nil
 
 	case vnet.PayloadLeaveRequest:

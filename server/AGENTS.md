@@ -1515,6 +1515,38 @@ flush are wired in `cmd/voxelheimd/main.go`.
   switch would be a second answer to keep in step.
 - **An unreadable marker file is kept and never written over**, through the same `setAside` a
   player record and an exploration ledger both use, timestamp included.
+- **Every mutation is answered with the whole list, and a refusal with none of it.**
+  `MarkerList` replaces the client's copy wholesale, which is `InventoryState`'s argument: sixty-four
+  marks are small, a delta needs a revision and an ordering to be applied safely, and a client that
+  missed one delta holds a map that is quietly wrong. Replacing is the only operation with no
+  history to get right — so a refused placement or removal sends nothing at all, because the
+  client's copy did not change.
+- **The list follows `ServerWelcome` once, empty included**, and that is the one place this differs
+  from the ledger beside it. An empty `MarkerList` is a statement — a character who removed their
+  last mark on another machine must see it gone here — where an empty `MapExplored` is the absence
+  of one, which is why the contract forbids that and not this.
+- **`session.Markers` owns the live list and `Identities.write` saves it**, beside the record and
+  the ledger and on the same two occasions: the teardown and the autosave, both off the tick
+  goroutine, both under the write lock. An unchanged map costs no write, and the dirty flag is
+  cleared *before* the write for the reason the ledger's is. Three files, and a failure of one never
+  skips the others.
+- **An unreadable marker file never refuses the connection**, and if it can be neither read nor
+  moved aside the map is **sealed**: the character plays unmarked and this session writes nothing,
+  so the ordinary autosave cannot destroy the evidence. The ledger's rule exactly, one file along.
+- **Two of the three placement checks are second opinions, deliberately.** `protocol.Decode` already
+  refuses a note over 120 bytes, a note that is not valid UTF-8 and an unknown `kind` — at the
+  decode boundary, by closing the session, which `schemas/player.fbs` names as the stricter of the
+  two answers it allows. So `NoteTooLong` is declared and never sent, and `Markers.Place` checks
+  both anyway: it is the authority on what may enter the file, and an authority that trusts its
+  caller is not one.
+- **A mark outside the world is refused in silence**, because the contract has no member for it:
+  `TileMisaligned`, `TooManyMarkers`, `NoteTooLong` and `MarkerUnknown` are the four the map has,
+  and none of them says "that is not a place". A `RefusalReason` of `Unknown` is what tells the
+  session to send no frame at all, which is the vocabulary every other silent admission refusal in
+  this server already uses.
+- **A mark's note is never logged.** It is text a player typed, an operator has no use for it, and
+  a log line carrying it would put it in a file the privacy boundary says nothing a player wrote
+  belongs in. Its *length* decides the outcome, so its length is what the debug line reports.
 
 ### `world.BlockLimit` — the world has an edge, and now it has a name
 
