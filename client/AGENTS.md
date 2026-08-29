@@ -81,6 +81,7 @@ keeps meaning "everything the client is".
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
+| `ui/storm.rs` | the last server-sent storm warning, its receive instant, and the one routing that repeats its milestone sentence in the notice and highlighted chat | infer a storm from weather, advance a phase locally, or let a hidden panel spend the notice lifetime |
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — and the frame-rate readout in whichever of the four corners the setting names | reach into another module's internals, grow a health bar, or call the snapshot age a round trip |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
@@ -178,6 +179,11 @@ Rules that hold on this boundary:
   **The punch is the one of the three that could have been written from local input**, and
   deliberately was not: a hand that swung on the button press would be animating a break the
   server had not granted, which is advancing progress locally wearing a different hat.
+- **A `StormWarning` crosses with the instant it was decoded.** The ECS queues the pair in
+  `StormInbox`; `ui/storm.rs` keeps the newest pair in `Storm` and the compass subtracts wall
+  time from the exact seconds the server stated. It never changes the stored phase or seconds,
+  never infers one from `Snapshot.weather`, and clears the pair when the session ends. The
+  receive instant is presentation's anchor, not a second world clock.
 - **No Bevy type appears below `net/mod.rs`.** That is what makes `frame`, `codec`, `handshake`
   and `session` testable as plain Rust, with no app to build and no display to open.
 - **The thread is stopped by dropping the ECS end of the channels**, not by an atomic flag: the

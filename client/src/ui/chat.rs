@@ -43,7 +43,7 @@ struct LogLine {
 }
 
 #[derive(Resource, Debug, Default)]
-struct ChatLog(VecDeque<LogLine>);
+pub(super) struct ChatLog(VecDeque<LogLine>);
 
 impl ChatLog {
     fn push(&mut self, text: String, now: Duration) {
@@ -57,7 +57,7 @@ impl ChatLog {
         });
     }
 
-    fn push_highlighted(&mut self, text: String, now: Duration) {
+    pub(super) fn push_highlighted(&mut self, text: String, now: Duration) {
         if self.0.len() == LINE_COUNT {
             self.0.pop_front();
         }
@@ -66,6 +66,13 @@ impl ChatLog {
             added: now,
             highlighted: true,
         });
+    }
+
+    #[cfg(test)]
+    pub(super) fn newest(&self) -> Option<(&str, bool)> {
+        self.0
+            .back()
+            .map(|line| (line.text.as_str(), line.highlighted))
     }
 }
 
@@ -76,6 +83,9 @@ struct ChatText(usize);
 struct ChatInput;
 
 pub(super) struct ChatUiPlugin;
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct RenderChat;
 
 impl Plugin for ChatUiPlugin {
     fn build(&self, app: &mut App) {
@@ -91,7 +101,7 @@ impl Plugin for ChatUiPlugin {
                     ingest_server_lines.after(DrainNetwork),
                     ingest_party_lines.after(ApplySnapshots),
                     capture_chat.after(ApplyInputMode),
-                    render_chat,
+                    render_chat.in_set(RenderChat),
                 )
                     .chain(),
             );
