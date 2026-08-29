@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -367,6 +368,11 @@ func (s *Sim) runestonesOfLocked(owner identity.PlayerID) int {
 //
 // The caller holds Sim.mu.
 func (s *Sim) rebuildWardsLocked() {
+	// Spend the revision at the rebuild itself, including a rebuild that produces the
+	// same set. The number says that the source registry changed and was recomputed; it
+	// is not a hash of the resulting map.
+	s.wardsRevision++
+
 	stones := make([]*structure, 0, len(s.structures))
 	for _, held := range s.structures {
 		if held.kind == vnet.StructureKindRunestone {
@@ -409,6 +415,59 @@ func (s *Sim) rebuildWardsLocked() {
 	} else {
 		s.wards = wards
 	}
+}
+
+// WardsNear is every warded chunk column inside radius of col, in (CZ, CX) order.
+//
+// The answer comes from wardOf, the same index every edit, mine and structure refusal
+// consults. A settlement is the zero owner and a runestone every non-zero owner; Mine is
+// consequently meaningful only for runestones. The int64 loop bounds keep an arbitrary
+// caller-provided radius from overflowing a column coordinate before it is narrowed.
+func (s *Sim) WardsNear(playerID identity.PlayerID, col world.Column, radius int32) []protocol.WardedColumn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if radius < 0 {
+		return nil
+	}
+
+	minX, maxX := int64(col.CX)-int64(radius), int64(col.CX)+int64(radius)
+	minZ, maxZ := int64(col.CZ)-int64(radius), int64(col.CZ)+int64(radius)
+	columns := make([]protocol.WardedColumn, 0)
+	for z := minZ; z <= maxZ; z++ {
+		if z < math.MinInt32 || z > math.MaxInt32 {
+			continue
+		}
+		for x := minX; x <= maxX; x++ {
+			if x < math.MinInt32 || x > math.MaxInt32 {
+				continue
+			}
+			column := world.Column{CX: int32(x), CZ: int32(z)}
+			owner, warded := s.wardOf(column)
+			if !warded {
+				continue
+			}
+
+			kind := vnet.WardKindRunestone
+			mine := owner == playerID
+			if owner == (identity.PlayerID{}) {
+				kind = vnet.WardKindSettlement
+				mine = false
+			}
+			columns = append(columns, protocol.WardedColumn{
+				CX: column.CX, CZ: column.CZ, Kind: kind, Mine: mine,
+			})
+		}
+	}
+	return columns
+}
+
+// WardsRevision is the generation of the runestone ward map. Settlement wards never
+// change it: they are a pure function of the world seed and are queried through wardOf.
+func (s *Sim) WardsRevision() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wardsRevision
 }
 
 // wardClaim is one cached answer in the shared settlement-and-runestone index.
