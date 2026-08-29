@@ -89,10 +89,37 @@ const (
 	ironMinDepth = coalMaxDepth + 1
 	ironMaxDepth = 56
 
-	// The fBm sum is concentrated around its midpoint; these thresholds leave
-	// narrow connected ridges instead of replacing most of a depth band.
-	coalThreshold = one * 90 / 100
-	ironThreshold = one * 90 / 100
+	// **A threshold on fbm3D is not the share of the band it selects, and reading it
+	// as one is what emptied the world of ore.** Both numbers were `one * 90 / 100`,
+	// written as "the top ten percent of the field's range". fbm3D averages four
+	// octaves, so its distribution is bell-shaped and almost nothing reaches either
+	// extreme: 0.90 selects 0.0016% of the eligible band, four orders of magnitude
+	// less than the ten percent it read as. Coal came out at one voxel per twenty
+	// chunks — present, connected, and unfindable by playing (#540).
+	//
+	// So the threshold has to be chosen from the field's measured distribution rather
+	// than from its range. Sampled over 1.8M coal-band and 2.9M iron-band voxels that
+	// are stone, uncarved and inside their band, at oreScaleBlocks = 12 and seed 1234,
+	// the share each threshold actually selects:
+	//
+	//	threshold  0.90     0.85    0.80    0.79    0.78    0.77    0.75    0.70
+	//	coal       0.0016%  0.027%  0.27%   0.38%   0.53%   0.72%   1.26%   4.03%
+	//	iron       0.0014%  0.029%  0.28%   0.39%   0.55%   0.74%   1.31%   4.21%
+	//
+	// **Coal is deliberately the more common of the two.** It gates the campfire and
+	// the forge, and the forge gates every iron tool and every piece of iron armour,
+	// so a player who cannot find coal is stopped at stone; iron sits below it and is
+	// meant to be the thing you go down for. The two thresholds were identical before
+	// and only the band depths differed, which stated no design call at all.
+	//
+	// Coal takes 0.77 and iron 0.80. Across the eight seeds TestOreIsDenseEnoughToFind
+	// sweeps, that is 0.55% of the coal band and 0.22% of the iron band — about 100
+	// coal and 65 iron voxels under one chunk's 32×32 footprint, gathered into a
+	// handful of veins rather than scattered, because the field is smooth at twelve
+	// blocks. Scarce enough that a shaft is not enough and a tunnel is; not so scarce
+	// that the crafting tree is unreachable.
+	coalThreshold = one * 77 / 100
+	ironThreshold = one * 80 / 100
 
 	coalSeedOffset int64 = 0x243F6A88
 	ironSeedOffset int64 = 0x13198A2E
@@ -300,7 +327,13 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // blocks of a settlement's centre moves, which makes this the narrowest of the five
 // breaks; it is a break all the same, because a stored world's deltas would resolve
 // onto a landscape that no longer has a village in it.
-const WorldgenVersion uint32 = 6
+// 6 → 7: ore density. [coalThreshold] drops from 0.90 to 0.77 and [ironThreshold] to
+// 0.80, which is the whole of the change — the bands, the scale and the two seed
+// offsets are untouched. Nothing above the dirt line moves and no column changes
+// height, so this is by far the narrowest break of the six: it repaints stone inside
+// two depth bands and nothing else. It is a break all the same, because the voxel a
+// stored delta was recorded against can now be ore rather than the stone it was.
+const WorldgenVersion uint32 = 7
 
 // Generate builds the chunk at coord for seed.
 //
