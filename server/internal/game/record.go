@@ -162,9 +162,9 @@ func validateStoredSlot(stack protocol.InventoryStack) error {
 // **It always describes a living player, and that is the whole of what makes quitting
 // neither a way out of a death nor a way to pay for one twice.** A player who is dead
 // when this runs is captured as their respawn would have left them: alive, at
-// their per-level maximum, at [Player.respawnPositionLocked] — their tent if one stands, the
-// join spawn otherwise — with the death penalty charged if the tick had not managed it
-// yet. Charged through the same one-shot the tick uses, so a death already paid for is
+// their per-level maximum, at [Player.respawnPositionLocked] — their tent if one stands,
+// the nearest settlement to where they fell if not, and the join spawn otherwise — with
+// the death penalty charged if the tick had not managed it yet. Charged through the same one-shot the tick uses, so a death already paid for is
 // not paid for again.
 //
 // # Locks, and the order they are taken in
