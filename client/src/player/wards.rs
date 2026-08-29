@@ -154,7 +154,11 @@ fn spawn_walls(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let handles = WardClass::ALL.map(|class| {
-        let mesh = meshes.add(empty_mesh());
+        // Bevy 0.19's mesh allocator reports an apparent use-after-free when a
+        // `Mesh3d` references a zero-vertex mesh. Visibility does not prevent the
+        // asset upload, so hidden walls keep one degenerate triangle until they have
+        // real edges rather than ever publishing an empty asset.
+        let mesh = meshes.add(hidden_mesh());
         let material = materials.add(StandardMaterial {
             // White is load-bearing: tint and alpha live in the vertex colour.
             base_color: Color::WHITE,
@@ -264,7 +268,11 @@ fn rebuild_walls(
             .filter(|edge| edge.class == class)
             .collect();
         drawn[class.index()] = !class_edges.is_empty();
-        let mesh = wall_mesh(&class_edges, highlighted, class, chunk_size, centre_y);
+        let mesh = if class_edges.is_empty() {
+            hidden_mesh()
+        } else {
+            wall_mesh(&class_edges, highlighted, class, chunk_size, centre_y)
+        };
         replace_mesh(&mut meshes, &visuals.meshes[class.index()], mesh);
     }
     state.eye_step = Some(eye_step);
@@ -284,7 +292,7 @@ fn clear_geometry_if_needed(
         return;
     }
     for handle in &visuals.meshes {
-        replace_mesh(meshes, handle, empty_mesh());
+        replace_mesh(meshes, handle, hidden_mesh());
     }
     state.eye_step = None;
     state.chunk_size = None;
@@ -490,14 +498,17 @@ fn wall_mesh(
     .with_inserted_indices(Indices::U32(indices))
 }
 
-fn empty_mesh() -> Mesh {
-    wall_mesh(
-        &[],
-        HighlightedEdges::default(),
-        WardClass::Settlement,
-        1.0,
-        0.0,
+fn hidden_mesh() -> Mesh {
+    // A non-empty GPU allocation with zero rasterised area. The entity is hidden as
+    // well; the degeneracy is what makes the asset safe before visibility propagation.
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
     )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0, 0.0, 0.0]; 3])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 3])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0, 0.0, 0.0, 0.0]; 3])
+    .with_inserted_indices(Indices::U32(vec![0, 1, 2]))
 }
 
 #[cfg(test)]
@@ -604,6 +615,26 @@ mod tests {
             .collect()
     }
 
+    fn wall_mesh_sizes(app: &mut App) -> Vec<(usize, usize)> {
+        let world = app.world_mut();
+        let handles: Vec<_> = world
+            .query_filtered::<&Mesh3d, With<WardWall>>()
+            .iter(world)
+            .map(|mesh| mesh.0.clone())
+            .collect();
+        let meshes = world.resource::<Assets<Mesh>>();
+        handles
+            .iter()
+            .map(|handle| {
+                let mesh = meshes.get(handle).expect("ward mesh exists");
+                (
+                    mesh.count_vertices(),
+                    mesh.indices().map_or(0, Indices::len),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn a_three_by_three_ward_has_only_twelve_outer_edges() {
         let mut columns = Vec::new();
@@ -653,6 +684,34 @@ mod tests {
         assert_eq!(wall_quads(&mut app), 0);
         assert!(all_hidden(&mut app));
         assert!(app.world().resource::<Wards>().0.is_empty());
+    }
+
+    #[test]
+    fn hidden_walls_never_publish_a_zero_vertex_mesh_to_the_renderer() {
+        let mut app = app(true);
+        app.update();
+        assert!(
+            wall_mesh_sizes(&mut app)
+                .into_iter()
+                .all(|(vertices, indices)| vertices > 0 && indices > 0),
+            "Bevy 0.19 reports a slab-allocator use-after-free for a zero-vertex Mesh3d"
+        );
+
+        deliver(&mut app, vec![column(0, 0, WardKind::Settlement, false)]);
+        assert!(
+            wall_mesh_sizes(&mut app)
+                .into_iter()
+                .all(|(vertices, indices)| vertices > 0 && indices > 0),
+            "classes with no current edges regressed to empty meshes"
+        );
+
+        deliver(&mut app, Vec::new());
+        assert!(
+            wall_mesh_sizes(&mut app)
+                .into_iter()
+                .all(|(vertices, indices)| vertices > 0 && indices > 0),
+            "clearing the ward set regressed to empty meshes"
+        );
     }
 
     #[test]

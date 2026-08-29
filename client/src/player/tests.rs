@@ -510,6 +510,41 @@ fn the_local_player_is_drawn_like_everybody_else_and_hidden_while_it_is_the_eye(
     );
 }
 
+#[test]
+fn every_body_root_carries_visibility_for_its_rendered_children() {
+    let mut app = headless_player();
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let world = app.world_mut();
+    let mut roots = world.query::<(&Body, &Visibility, &Children)>();
+    let mut visibility: Vec<_> = roots
+        .iter(world)
+        .map(|(body, visibility, children)| {
+            assert!(
+                !children.is_empty(),
+                "body {} has no rendered children",
+                body.0
+            );
+            (body.0, *visibility)
+        })
+        .collect();
+    visibility.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        visibility,
+        vec![(LOCAL_ID, Visibility::Hidden), (99, Visibility::Inherited),],
+        "a rendered child under a root without visibility triggers Bevy B0004"
+    );
+}
+
 /// What the local body's own `Visibility` says. Its own, not the computed one: there is no
 /// render app here to propagate inheritance, and the value this client writes is the thing
 /// under test.
