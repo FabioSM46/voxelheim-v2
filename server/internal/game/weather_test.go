@@ -1,13 +1,312 @@
 package game
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
+	"os"
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
+
+// The threshold is one line shared by all three effects. This table pins both sides of
+// that line and the kinds each effect belongs to: 159 is still scenery, 160 bites, and a
+// blizzard is snow for movement without becoming rain or sand for either other rule.
+func TestHeavyWeatherHasOneThresholdAndThreeEffects(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		weather    protocol.WeatherState
+		sand, snow bool
+		rain       bool
+	}{
+		{"light sandstorm", protocol.WeatherState{Kind: vnet.WeatherKindSandstorm, Intensity: WeatherHeavy - 1}, false, false, false},
+		{"heavy sandstorm", protocol.WeatherState{Kind: vnet.WeatherKindSandstorm, Intensity: WeatherHeavy}, true, false, false},
+		{"light snow", protocol.WeatherState{Kind: vnet.WeatherKindSnow, Intensity: WeatherHeavy - 1}, false, false, false},
+		{"heavy snow", protocol.WeatherState{Kind: vnet.WeatherKindSnow, Intensity: WeatherHeavy}, false, true, false},
+		{"heavy blizzard", protocol.WeatherState{Kind: vnet.WeatherKindBlizzard, Intensity: WeatherHeavy}, false, true, false},
+		{"light rain", protocol.WeatherState{Kind: vnet.WeatherKindRain, Intensity: WeatherHeavy - 1}, false, false, false},
+		{"heavy rain", protocol.WeatherState{Kind: vnet.WeatherKindRain, Intensity: WeatherHeavy}, false, false, true},
+		{"clear at full intensity", protocol.WeatherState{Kind: vnet.WeatherKindClear, Intensity: 255}, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sandstormBites(tc.weather); got != tc.sand {
+				t.Errorf("sandstormBites = %t, want %t", got, tc.sand)
+			}
+			if got := snowBites(tc.weather); got != tc.snow {
+				t.Errorf("snowBites = %t, want %t", got, tc.snow)
+			}
+			if got := rainDouses(tc.weather); got != tc.rain {
+				t.Errorf("rainDouses = %t, want %t", got, tc.rain)
+			}
+		})
+	}
+}
+
+// Every authoritative reach decision goes through Player.reachLocked. The first half
+// exercises the balance rule; the second walks the package syntax so a future call site
+// cannot quietly use EditReach and leave one interaction longer than all the others.
+func TestEveryReachDecisionUsesTheWeatherAwareReach(t *testing.T) {
+	t.Parallel()
+
+	h := newDropHarness(t, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	for _, tc := range []struct {
+		name    string
+		weather protocol.WeatherState
+		want    float64
+	}{
+		{"light sandstorm", protocol.WeatherState{Kind: vnet.WeatherKindSandstorm, Intensity: WeatherHeavy - 1}, EditReach},
+		{"heavy sandstorm", protocol.WeatherState{Kind: vnet.WeatherKindSandstorm, Intensity: WeatherHeavy}, EditReach * SandstormReachScale},
+		{"heavy rain", protocol.WeatherState{Kind: vnet.WeatherKindRain, Intensity: 255}, EditReach},
+	} {
+		player.weather = tc.weather
+		if got := player.reachLocked(); got != tc.want {
+			t.Errorf("%s reach = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	wantCallers := map[string]int{
+		"edit.go:Edit":                    1,
+		"loot.go:accessibleCorpseLocked":  1,
+		"loot.go:canOpenCorpseLocked":     1,
+		"mining.go:Mine":                  1,
+		"mining.go:advanceMining":         1,
+		"resident.go:InteractNPC":         1,
+		"structure.go:PlaceStructure":     1,
+		"structure.go:removeOwnStructure": 1,
+		"vendor.go:tradeableLocked":       1,
+	}
+	gotCallers := make(map[string]int)
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read game package: %v", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || len(name) < 3 || name[len(name)-3:] != ".go" || len(name) >= 8 && name[len(name)-8:] == "_test.go" {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				identifier, ok := node.(*ast.Ident)
+				if ok && identifier.Name == "EditReach" && function.Name.Name != "reachLocked" {
+					t.Errorf("%s:%s reads EditReach directly", name, function.Name.Name)
+				}
+				selector, ok := node.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == "reachLocked" {
+					gotCallers[name+":"+function.Name.Name]++
+				}
+				return true
+			})
+		}
+	}
+	if len(gotCallers) != len(wantCallers) {
+		t.Errorf("reachLocked has callers %v, want %v", gotCallers, wantCallers)
+	}
+	for caller, want := range wantCallers {
+		if got := gotCallers[caller]; got != want {
+			t.Errorf("%s calls reachLocked %d times, want %d", caller, got, want)
+		}
+	}
+}
+
+// Snow is a walking scale, composed after hunger and skipped for swimming. A diagonal
+// intent makes the assertion independent of either horizontal axis, while the direct
+// step keeps client prediction and network timing out of an authoritative speed rule.
+func TestHeavySnowSlowsWalkingAndComposesWithStarvation(t *testing.T) {
+	t.Parallel()
+
+	velocityAt := func(weather protocol.WeatherState, hunger uint16, terrain Terrain, pos [3]float32) float64 {
+		h := newDropHarness(t, terrain)
+		player, _ := h.join(1, pos)
+		h.sim.mu.Lock()
+		defer h.sim.mu.Unlock()
+		player.weather = weather
+		player.hunger = hunger
+		player.current = intent{moveX: 0.6, moveZ: 0.8}
+		player.step(1/float64(DefaultTickRate), terrain)
+		return math.Hypot(player.vel[0], player.vel[2])
+	}
+
+	ground := dropTerrain{groundTop: 63}
+	for _, tc := range []struct {
+		name    string
+		weather protocol.WeatherState
+		hunger  uint16
+		terrain Terrain
+		pos     [3]float32
+		want    float64
+	}{
+		{"light snow", protocol.WeatherState{Kind: vnet.WeatherKindSnow, Intensity: WeatherHeavy - 1}, 1, ground, [3]float32{0.5, 64, 0.5}, WalkSpeed},
+		{"heavy snow", protocol.WeatherState{Kind: vnet.WeatherKindSnow, Intensity: WeatherHeavy}, 1, ground, [3]float32{0.5, 64, 0.5}, WalkSpeed * SnowSpeedScale},
+		{"blizzard", protocol.WeatherState{Kind: vnet.WeatherKindBlizzard, Intensity: WeatherHeavy}, 1, ground, [3]float32{0.5, 64, 0.5}, WalkSpeed * SnowSpeedScale},
+		{"starving in heavy snow", protocol.WeatherState{Kind: vnet.WeatherKindSnow, Intensity: 255}, 0, ground, [3]float32{0.5, 64, 0.5}, WalkSpeed * StarvingSpeedScale * SnowSpeedScale},
+		{"swimming in heavy snow", protocol.WeatherState{Kind: vnet.WeatherKindSnow, Intensity: 255}, 1, lakeWorld{bedTop: 57, waterTop: 65}, [3]float32{0.5, 60, 0.5}, SwimSpeed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := velocityAt(tc.weather, tc.hunger, tc.terrain, tc.pos); math.Abs(got-tc.want) > 1e-12 {
+				t.Errorf("horizontal speed = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The rain is sampled at the fire before every reader in the tick. While it is heavy the
+// station neither cooks nor keeps mobs away and says lit=false on the wire; at 159 the
+// same persisted fire relights without an action from its owner.
+func TestHeavyRainDousesACampfireAndLightRainRelightsIt(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+	fire := h.plantCampfire(player, 0, [3]int32{0, 63, 0})
+	h.stockPack(player, ingredient{item: ItemRawMeat, count: 1})
+
+	rain := protocol.WeatherState{Kind: vnet.WeatherKindRain, Intensity: WeatherHeavy}
+	h.sim.mu.Lock()
+	h.sim.weatherOverride = &rain
+	h.sim.mu.Unlock()
+	h.step()
+
+	h.sim.mu.Lock()
+	doused := fire.doused
+	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	safe := h.sim.nearACampfireLocked(player.pos)
+	h.sim.mu.Unlock()
+	if !doused || station || safe {
+		t.Errorf("under heavy rain doused=%t station=%t safe=%t, want true false false", doused, station, safe)
+	}
+	states := snapshotStructures(t, out)
+	if len(states) != 1 || states[0].StructureId() != fire.structureID || states[0].Lit() {
+		t.Fatalf("heavy-rain snapshot = %d structures, lit=%t; want the one fire unlit", len(states), len(states) == 1 && states[0].Lit())
+	}
+	if _, err := h.craft(player, vnet.RecipeIDCookedMeat); err == nil {
+		t.Error("raw meat cooked beside a doused campfire")
+	}
+
+	rain.Intensity = WeatherHeavy - 1
+	h.step()
+	h.sim.mu.Lock()
+	doused = fire.doused
+	station = h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	safe = h.sim.nearACampfireLocked(player.pos)
+	h.sim.mu.Unlock()
+	if doused || !station || !safe {
+		t.Errorf("under light rain doused=%t station=%t safe=%t, want false true true", doused, station, safe)
+	}
+	states = snapshotStructures(t, out)
+	if len(states) != 1 || !states[0].Lit() {
+		t.Fatalf("light-rain snapshot carries lit=%t, want true", len(states) == 1 && states[0].Lit())
+	}
+	if _, err := h.craft(player, vnet.RecipeIDCookedMeat); err != nil {
+		t.Errorf("cooking beside the relit campfire: %v", err)
+	}
+}
+
+// Placement can happen after the tick's fire pass. A new fire must therefore sample
+// its own weather before it enters the registry, or requests arriving before the next
+// tick could cook on it and the spawn director could count its cold ground as safe.
+func TestCampfirePlacedAfterTheWeatherPassIsDousedImmediately(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.stockPack(player, ingredient{item: ItemRawMeat, count: 1})
+
+	rain := protocol.WeatherState{Kind: vnet.WeatherKindRain, Intensity: WeatherHeavy}
+	h.sim.mu.Lock()
+	h.sim.weatherOverride = &rain
+	h.sim.mu.Unlock()
+
+	fire := h.plantCampfire(player, 1, [3]int32{0, 63, 0})
+	h.sim.mu.Lock()
+	doused := fire.doused
+	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	safe := h.sim.nearACampfireLocked(player.pos)
+	h.sim.mu.Unlock()
+	if !doused || station || safe {
+		t.Errorf("new fire under heavy rain doused=%t station=%t safe=%t, want true false false", doused, station, safe)
+	}
+	if _, err := h.craft(player, vnet.RecipeIDCookedMeat); err == nil {
+		t.Error("raw meat cooked on a campfire placed under heavy rain before the next tick")
+	}
+}
+
+// Two fires can disagree in one tick because the sample belongs to each anchor, not to
+// an owner or to the simulation as a whole. The search derives stable columns from the
+// deterministic field instead of pinning coordinates that would turn a weather retune
+// into an unrelated fixture failure.
+func TestEachCampfireReadsTheWeatherAtItsOwnColumn(t *testing.T) {
+	t.Parallel()
+
+	var rainy, dry [3]int32
+	var sampledTick uint64
+	var foundPair bool
+	for tick := uint64(1); tick < 100_000 && !foundPair; tick += 997 {
+		var foundRain, foundDry bool
+		for i := int64(0); i < 64; i++ {
+			x := i*8192 - 262_144
+			z := ((i*37)%64)*8192 - 262_144
+			kind, intensity := world.WeatherAt(testWorldSeed, tick, x, z)
+			switch {
+			case kind == world.WeatherRain && intensity >= WeatherHeavy && !foundRain:
+				rainy, foundRain = [3]int32{int32(x), 63, int32(z)}, true
+			case (kind != world.WeatherRain || intensity < WeatherHeavy) && !foundDry:
+				dry, foundDry = [3]int32{int32(x), 63, int32(z)}, true
+			}
+		}
+		if foundRain && foundDry {
+			sampledTick, foundPair = tick, true
+		}
+	}
+	if !foundPair {
+		t.Fatal("the deterministic sample found no heavy-rain and dry pair")
+	}
+
+	h := newStructureHarness(t)
+	if err := h.sim.RestoreStructures([]Structure{
+		{Kind: vnet.StructureKindCampfire, Anchor: rainy, Facing: vnet.FacingNorth, Owner: testPlayerID(1)},
+		{Kind: vnet.StructureKindCampfire, Anchor: dry, Facing: vnet.FacingNorth, Owner: testPlayerID(1)},
+	}); err != nil {
+		t.Fatalf("restore fires: %v", err)
+	}
+	h.sim.mu.Lock()
+	h.sim.douseFiresLocked(sampledTick)
+	standing := h.sim.sortedStructuresLocked()
+	h.sim.mu.Unlock()
+	if len(standing) != 2 {
+		t.Fatalf("%d fires stand, want 2", len(standing))
+	}
+	for _, fire := range standing {
+		switch fire.anchor {
+		case rainy:
+			if !fire.doused {
+				t.Error("the fire in the heavy-rain column stayed lit")
+			}
+		case dry:
+			if fire.doused {
+				t.Error("the fire in the dry column was doused by weather elsewhere")
+			}
+		default:
+			t.Errorf("unexpected fire at %v", fire.anchor)
+		}
+	}
+}
 
 // The weather vocabulary, read back member by member.
 //
