@@ -548,6 +548,22 @@ type Player struct {
 	lootDirty    bool
 	lootClosures []uint64
 
+	// One open stall per session, and the same three-part shape for the same three
+	// reasons. openVendorID is the resident this session is trading with and is zero
+	// when none is; vendorRevision is the list the client is looking at, starting at 1
+	// on open and bumped by every accepted trade; vendorDirty is the complete
+	// VendorState still owed; vendorClosures are VendorClosed frames still owed after
+	// switching stalls, walking away, dying or the resident leaving view.
+	//
+	// **Unlike loot, none of this lives on the thing being opened.** A corpse holds a
+	// container per looter; a vendor holds nothing at all, because stock is unlimited by
+	// contract and the price list is a function of the role. So the whole session is
+	// here, which is also what makes two players at one smith independent.
+	openVendorID   uint64
+	vendorRevision uint32
+	vendorDirty    bool
+	vendorClosures []uint64
+
 	// The newest landed monster blows this session has not been told about yet. Unlike a
 	// snapshot, an event is not superseded by the next tick, so a full outbound queue
 	// leaves these pending until offerMobHitsLocked gets one through. The bounded queue
@@ -1084,6 +1100,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	for _, p := range players {
 		p.offerInventoryLocked()
 		p.offerLootLocked()
+		p.offerVendorLocked()
 		p.offerMobHitsLocked()
 	}
 
