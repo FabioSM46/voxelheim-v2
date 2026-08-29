@@ -2040,20 +2040,40 @@ fn worn_appearance(app: &mut App, entity_id: u64) -> Option<Appearance> {
         .map(|(_, worn)| worn.appearance)
 }
 
-/// A villager in the snapshot is drawn as a person rather than as a creature.
+/// Queues a resident description as the net thread would.
+fn describe_resident(
+    app: &mut App,
+    entity_id: u64,
+    name: &str,
+    role: ResidentRole,
+    appearance: Appearance,
+) {
+    app.world_mut()
+        .resource_mut::<crate::net::ResidentInbox>()
+        .push(crate::net::ResidentAppearance {
+            entity_id,
+            name: name.to_owned(),
+            role,
+            appearance,
+        });
+}
+
+/// A villager in the snapshot is a person, with a face and a trade over their head.
 ///
-/// The acceptance criterion this part carries: the resident arrives in the `MobState`
-/// vector beside the draugrs, and what comes out is a body on the humanoid rig — the same
-/// path a remote player takes — wearing the neutral grey `schemas/player.fbs` documents.
+/// The acceptance criterion end to end: the resident arrives in the `MobState` vector, is
+/// drawn on the humanoid rig rather than as a creature, wears the appearance the server
+/// chose, and carries a plate reading `Name | Role`.
 ///
-/// **No plate, and that is this part's boundary rather than an omission.** Nothing here
-/// consumes `ResidentAppearance`, so this client has no name and no trade for that entity
-/// yet; part 4b adds the queue that carries them and the label that reads `Name | Role`.
-/// A resident is dressed in place when a description arrives, exactly as a remote player
-/// is, so nothing about that later part respawns anything drawn here.
+/// **The separator is an ASCII pipe, and #458's own text is wrong about it.** `·` is not
+/// among the ninety-five glyphs of the embedded font, so it lays out with zero advance and
+/// the two fields run together with nothing between them. `|` is what this client already
+/// separates fields with (`X 12 | Z -4`), chosen over a hyphen because a hyphen collides
+/// with a negative coordinate.
 #[test]
-fn a_villager_is_drawn_as_a_person_rather_than_as_a_creature() {
+fn a_villager_is_drawn_as_a_person_with_a_name_and_a_trade() {
     let mut app = headless_player();
+    let looks = an_appearance(HairModel::Braided);
+    describe_resident(&mut app, 400, "Bjorn", ResidentRole::Smith, looks);
     deliver_with_residents(
         &mut app,
         1,
@@ -2068,22 +2088,50 @@ fn a_villager_is_drawn_as_a_person_rather_than_as_a_creature() {
         "a resident was not drawn on the rig every other person is drawn on"
     );
     assert_eq!(
-        worn_appearance(&mut app, 400),
-        Some(PLACEHOLDER_APPEARANCE),
-        "an undescribed resident is not wearing the documented placeholder"
+        name_plate_of(&mut app, 400).map(|(_, text)| text),
+        Some("Bjorn | Smith".to_owned())
     );
-    assert!(
-        name_plate_of(&mut app, 400).is_none(),
-        "a plate was drawn before there was a name to put on it"
+    assert_eq!(
+        worn_appearance(&mut app, 400),
+        Some(looks),
+        "a resident is not wearing the appearance the server chose for them"
     );
 }
 
-/// A resident who leaves the view takes their body with them.
+/// Every role reaches the plate as its own word, beside the same name.
 ///
-/// The newest snapshot is the existence set for a resident exactly as it is for everybody
-/// else, and this client does not guess why one stopped being sent.
+/// The sweep the single case above cannot be: a plate reading `Bjorn | Smith` whichever
+/// role arrived would satisfy that test exactly.
 #[test]
-fn a_resident_who_leaves_the_view_takes_their_body_with_them() {
+fn a_residents_plate_names_the_trade_the_settlement_gave_them() {
+    for (index, role) in EVERY_ROLE.into_iter().enumerate() {
+        let mut app = headless_player();
+        let entity_id = 400 + index as u64;
+        describe_resident(&mut app, entity_id, "Bjorn", role, PLACEHOLDER_APPEARANCE);
+        deliver_with_residents(
+            &mut app,
+            1,
+            vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+            vec![resident_state(entity_id, [4.0, 64.0, 0.0], 0.0)],
+            Instant::now(),
+        );
+        app.update();
+
+        assert_eq!(
+            name_plate_of(&mut app, entity_id).map(|(_, text)| text),
+            Some(format!("Bjorn | {}", role_label(role))),
+            "{role:?} did not reach the plate as its own word"
+        );
+    }
+}
+
+/// A resident is drawn before their description arrives, and the plate follows.
+///
+/// The two streams are not ordered against each other — a remote player's body follows the
+/// same rule — so the body is drawn in the placeholder grey and dressed in place when the
+/// description lands. Nothing pops out and respawns.
+#[test]
+fn a_resident_stands_in_the_placeholder_until_their_description_arrives() {
     let mut app = headless_player();
     let start = Instant::now();
     deliver_with_residents(
@@ -2094,26 +2142,44 @@ fn a_resident_who_leaves_the_view_takes_their_body_with_them() {
         start,
     );
     app.update();
-    assert!(body_of(&mut app, 400).is_some());
 
+    let body = body_of(&mut app, 400).expect("an undescribed resident is still drawn");
+    assert_eq!(worn_appearance(&mut app, 400), Some(PLACEHOLDER_APPEARANCE));
+    assert!(
+        name_plate_of(&mut app, 400).is_none(),
+        "a plate was drawn before there was a name to put on it"
+    );
+
+    let looks = an_appearance(HairModel::Topknot);
+    describe_resident(&mut app, 400, "Sigrun", ResidentRole::Cook, looks);
     deliver_with_residents(
         &mut app,
         2,
         vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
-        vec![],
+        vec![resident_state(400, [4.0, 64.0, 0.0], 0.0)],
         start + INTERVAL,
     );
     app.update();
-    assert!(body_of(&mut app, 400).is_none());
+
+    assert_eq!(
+        body_of(&mut app, 400),
+        Some(body),
+        "the late description replaced the body instead of dressing it"
+    );
+    assert_eq!(worn_appearance(&mut app, 400), Some(looks));
+    assert_eq!(
+        name_plate_of(&mut app, 400).map(|(_, text)| text),
+        Some("Sigrun | Cook".to_owned())
+    );
 }
 
 /// A resident never goes over, not even on the frame this session's own body does.
 ///
-/// The criterion says never a fall pose, and what makes it true is structural:
-/// `dead_players` is a list of *players*, and a resident's id is derived with bit 62 set
-/// where a player's is minted from a counter, so it can never appear there. Asserted on the
-/// same frame the local body is falling, because a test where nobody is dead would pass
-/// against a build with no such rule at all.
+/// The criterion says never a fall pose, and what makes it true is structural: `dead_players`
+/// is a list of *players*, and a resident's id is derived with bit 62 set where a player's
+/// is minted from a counter, so it can never appear there. Asserted on the same frame the
+/// local body is falling, because a test where nobody is dead would pass against a build
+/// with no such rule at all.
 #[test]
 fn a_resident_never_falls_over() {
     let mut app = headless_player();
@@ -2174,6 +2240,49 @@ fn a_resident_never_falls_over() {
     );
 }
 
+/// A resident who leaves the view takes their body and their plate with them.
+///
+/// The newest snapshot is the existence set for a resident exactly as it is for everybody
+/// else, and this client does not guess why one stopped being sent. Part 4a pinned the
+/// body half; the plate is a UI root rather than a body child, so it has to be removed
+/// explicitly and is the half a shared despawn path would not cover.
+#[test]
+fn a_resident_who_leaves_the_view_takes_their_plate_with_them() {
+    let mut app = headless_player();
+    let start = Instant::now();
+    describe_resident(
+        &mut app,
+        400,
+        "Ivar",
+        ResidentRole::Guard,
+        PLACEHOLDER_APPEARANCE,
+    );
+    deliver_with_residents(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![resident_state(400, [4.0, 64.0, 0.0], 0.0)],
+        start,
+    );
+    app.update();
+    assert!(name_plate_of(&mut app, 400).is_some());
+
+    deliver_with_residents(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![],
+        start + INTERVAL,
+    );
+    app.update();
+
+    assert!(body_of(&mut app, 400).is_none());
+    assert!(
+        name_plate_of(&mut app, 400).is_none(),
+        "a screen-space root cannot outlive the body it labels"
+    );
+}
+
 #[test]
 fn a_player_who_leaves_takes_their_name_plate_with_them() {
     let mut app = headless_player();
@@ -2208,23 +2317,89 @@ fn a_player_who_leaves_takes_their_name_plate_with_them() {
 
 #[test]
 fn hostile_and_unicode_names_remain_bounded_valid_single_line_text() {
-    assert_eq!(name_plate_text(7, ""), "Lv 7 | ");
-    assert_eq!(name_plate_text(7, "Sigrid\nJarl"), "Lv 7 | Sigrid?Jarl");
-    assert_eq!(name_plate_text(7, "石のᚠe\u{301}"), "Lv 7 | 石のᚠe\u{301}");
+    assert_eq!(name_plate_text(PlateLabel::Level(7), ""), "Lv 7 | ");
+    assert_eq!(
+        name_plate_text(PlateLabel::Level(7), "Sigrid\nJarl"),
+        "Lv 7 | Sigrid?Jarl"
+    );
+    assert_eq!(
+        name_plate_text(PlateLabel::Level(7), "石のᚠe\u{301}"),
+        "Lv 7 | 石のᚠe\u{301}"
+    );
 
     let long = "界".repeat(NAME_PLATE_CHARACTERS + 20);
-    let shown = name_plate_text(u16::MAX, &long);
+    let shown = name_plate_text(PlateLabel::Level(u16::MAX), &long);
     assert_eq!(shown.chars().count(), NAME_PLATE_CHARACTERS);
     assert!(shown.ends_with("..."), "{shown}");
 
     // The mark is taken out of the bound, so the bound is what holds — for every level a
     // `u16` can carry, not only for the short prefixes a test would think to write.
     for level in [0, 9, 10, 99, 100, 9_999, 10_000, u16::MAX] {
-        let shown = name_plate_text(level, &long);
+        let shown = name_plate_text(PlateLabel::Level(level), &long);
         assert!(
             shown.chars().count() <= NAME_PLATE_CHARACTERS,
             "level {level} drew {} characters onto a {NAME_PLATE_CHARACTERS}-character plate: {shown}",
             shown.chars().count()
+        );
+    }
+
+    // And the same bound with the fixed half on the other side of the name. A resident's
+    // name is server-chosen and short, but nothing in this function knows that, and the
+    // half that gives way must still be the name rather than the role.
+    for role in EVERY_ROLE {
+        let shown = name_plate_text(PlateLabel::Role(role), &long);
+        assert!(
+            shown.chars().count() <= NAME_PLATE_CHARACTERS,
+            "{role:?} drew {} characters onto a {NAME_PLATE_CHARACTERS}-character plate: {shown}",
+            shown.chars().count()
+        );
+        assert!(
+            shown.ends_with(&format!(" | {}", role_label(role))),
+            "the role was truncated off the plate instead of the name: {shown}"
+        );
+    }
+}
+
+/// Every role the contract names, so the sweeps below run over all of them.
+///
+/// Written out rather than derived, for the reason every list like it here is: one derived
+/// from the same `match` it checks would agree with every hole in that `match`. Its length
+/// is pinned to the contract's own count below, because a fixed-size array of enum values
+/// does not stop compiling when the enum grows — the mistake `EVERY_REASON` cost twice.
+const EVERY_ROLE: [ResidentRole; 6] = [
+    ResidentRole::Villager,
+    ResidentRole::Smith,
+    ResidentRole::Carpenter,
+    ResidentRole::Cook,
+    ResidentRole::Trader,
+    ResidentRole::Guard,
+];
+
+/// The list is complete, and every role reads as its own ASCII word.
+///
+/// `Unknown` is the contract's zero rather than a role — `ResidentRole::from_wire` answers
+/// `None` for it and the session ends — so no plate is ever drawn from it.
+///
+/// ASCII is what `client/src/ui/mod.rs` fails the build over, asserted again here because
+/// that scan reads *source* and would not catch a word composed at runtime. Distinctness is
+/// the point of drawing the role at all: a plate reading the same over the smith and the
+/// guard would say nothing.
+#[test]
+fn every_role_is_in_the_sweep_as_its_own_ascii_word() {
+    assert_eq!(
+        EVERY_ROLE.len(),
+        crate::wire::voxelheim::net::ResidentRole::ENUM_VALUES.len() - 1,
+        "a role the contract names is missing from EVERY_ROLE, so every sweep over it is \
+         reporting on a subset while reading as if it swept them all"
+    );
+    for (seen, role) in EVERY_ROLE.iter().enumerate() {
+        let word = role_label(*role);
+        assert!(word.is_ascii() && !word.is_empty(), "{role:?} -> {word:?}");
+        assert!(
+            !EVERY_ROLE[..seen]
+                .iter()
+                .any(|other| *other == *role || role_label(*other) == word),
+            "{role:?} is a duplicate of an earlier role or of its word"
         );
     }
 }
