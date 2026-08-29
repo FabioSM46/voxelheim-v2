@@ -48,12 +48,19 @@ const (
 	// among them 628 voxels of plank, cobble and thatch, the plateau's grass, the rock
 	// under it and a little standing water.
 	goldenSettlementPath = "testdata/chunk_golden_settlement.bin"
+
+	// Tundra conifers deliberately leave the existing taiga fixture unchanged.
+	// Plains trees are sparse enough that none of the three original fixtures pins
+	// one, so this fourth fixture names a plains chunk that contains a conifer. The
+	// two fixtures together make "outside tundra is byte-identical" executable.
+	goldenPlainsPath = "testdata/chunk_golden_plains.bin"
 )
 
 var (
 	goldenCoord           = Coord{X: 3, Y: 2, Z: -5}
 	goldenWaterCoord      = Coord{X: 182, Y: 1, Z: -59}
 	goldenSettlementCoord = Coord{X: -280, Y: 1, Z: -272}
+	goldenPlainsCoord     = Coord{X: 3, Y: 2, Z: 64}
 )
 
 // TestGenerateMatchesTheGoldenChunk is the determinism contract, and the reason
@@ -81,6 +88,7 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 		{"dry", goldenCoord, goldenPath},
 		{"water", goldenWaterCoord, goldenWaterPath},
 		{"settlement", goldenSettlementCoord, goldenSettlementPath},
+		{"plains-conifer", goldenPlainsCoord, goldenPlainsPath},
 	} {
 		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 
@@ -102,6 +110,44 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("chunk %+v for seed %#x no longer matches the %s golden fixture: %d bytes now, %d before",
 				fixture.coord, goldenSeed, fixture.name, len(got), len(want))
+		}
+	}
+}
+
+// The two non-tundra conifer fixtures make the compatibility half of the snow-cap
+// rule explicit. A fixture that stopped containing the climate and feature named
+// here would still compare equal to itself after an update while pinning nothing.
+func TestTheNonTundraGoldenChunksContainConifers(t *testing.T) {
+	t.Parallel()
+
+	for _, fixture := range []struct {
+		name    string
+		coord   Coord
+		climate Climate
+	}{
+		{"taiga", goldenCoord, Taiga},
+		{"plains", goldenPlainsCoord, Plains},
+	} {
+		originX, _, originZ := fixture.coord.Origin()
+		for z := range ChunkSize {
+			for x := range ChunkSize {
+				if got := ClimateAt(goldenSeed, originX+int64(x), originZ+int64(z)); got != fixture.climate {
+					t.Fatalf("%s golden column (%d, %d) is %v, want %v", fixture.name, x, z, got, fixture.climate)
+				}
+			}
+		}
+
+		logs := 0
+		for _, block := range Generate(goldenSeed, fixture.coord).Blocks {
+			if block == Log {
+				logs++
+			}
+			if block == Snow {
+				t.Fatalf("%s conifer golden contains a snow block in its feature chunk", fixture.name)
+			}
+		}
+		if logs == 0 {
+			t.Fatalf("%s golden contains no conifer log", fixture.name)
 		}
 	}
 }
@@ -178,8 +224,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 10 {
-		t.Fatalf("WorldgenVersion = %d, want 10 for palms and scrub on desert sand", WorldgenVersion)
+	if WorldgenVersion != 11 {
+		t.Fatalf("WorldgenVersion = %d, want 11 after desert plants and tundra conifers", WorldgenVersion)
 	}
 }
 
@@ -214,6 +260,60 @@ func TestGenerateIsDeterministicUnderConcurrency(t *testing.T) {
 		if !slices.Equal(results[0], results[i]) {
 			t.Fatalf("goroutine %d generated different blocks", i)
 		}
+	}
+}
+
+func TestATundraConiferChunkIsDeterministicUnderConcurrency(t *testing.T) {
+	t.Parallel()
+
+	x, z, col, h := findTundraConifer(t)
+	coord := ChunkOf(x, int64(col.surface+1), z)
+	const goroutines = 8
+	results := make([][]Block, goroutines)
+
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = Generate(climateSeed, coord).Blocks
+		}()
+	}
+	wg.Wait()
+
+	for i := 1; i < goroutines; i++ {
+		if !slices.Equal(results[0], results[i]) {
+			t.Fatalf("goroutine %d generated different tundra conifer bytes", i)
+		}
+	}
+	if got := results[0][Index(Local(x), Local(int64(col.surface+1)), Local(z))]; got != Log {
+		t.Fatalf("selected tundra root generated %d above its surface, want Log", got)
+	}
+
+	capY := int64(col.surface + coniferTrunkHeight(h) + treeCanopyAboveCrown + 1)
+	capCoord := ChunkOf(x, capY, z)
+	cap := Generate(climateSeed, capCoord)
+	if got := cap.At(Local(x), Local(capY), Local(z)); got != Snow {
+		t.Fatalf("selected tundra crown generated cap %d, want Snow", got)
+	}
+	if terrain := col.blockAt(int(capY)); terrain != Air {
+		t.Fatalf("snow cap replaced terrain block %d rather than filling air", terrain)
+	}
+}
+
+func TestAPlantSnowVoxelOnlyFillsAir(t *testing.T) {
+	t.Parallel()
+
+	chunk := NewChunk(Coord{})
+	chunk.Set(1, 2, 3, Stone)
+	setTreeBlock(chunk, 1, 2, 3, Snow)
+	if got := chunk.At(1, 2, 3); got != Stone {
+		t.Fatalf("snow plant voxel replaced block %d, want Stone preserved", got)
+	}
+
+	setTreeBlock(chunk, 4, 5, 6, Snow)
+	if got := chunk.At(4, 5, 6); got != Snow {
+		t.Fatalf("snow plant voxel placed %d into air, want Snow", got)
 	}
 }
 
@@ -319,6 +419,14 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 			if terrain != Air || !plantCanPlace(seed, worldX, worldY, worldZ, got) {
 				t.Fatalf("desert plant block %d at (%d, %d, %d) is not part of a deterministic species shape",
 					got, worldX, worldY, worldZ)
+			}
+		case Snow:
+			if terrain == Snow {
+				break
+			}
+			featured = true
+			if terrain != Air || !treeCanPlace(seed, worldX, worldY, worldZ, Snow) {
+				t.Fatalf("snow at (%d, %d, %d) is neither terrain nor a deterministic tundra cap", worldX, worldY, worldZ)
 			}
 		case Water, Ice:
 			// Two fills, and which one applies is decided by whether the terrain
@@ -499,8 +607,10 @@ func TestSurfaceBlocksFollowTheirClimateAndAltitude(t *testing.T) {
 	treeSeed, rootZ, treeSurface, _ := findIsolatedEastBorderPlant(t, &plantSpeciesTable[0])
 	treeCoord := ChunkOf(ChunkSize-1, int64(treeSurface), rootZ)
 	treeChunk := Generate(treeSeed, treeCoord)
-	if got := treeChunk.At(Local(ChunkSize-1), Local(int64(treeSurface)), Local(rootZ)); got != Grass {
-		t.Fatalf("tree-bearing surface at (%d, %d) is block %d, want Grass", ChunkSize-1, rootZ, got)
+	wantTreeSurface := columnAt(treeSeed, ChunkSize-1, rootZ).blockAt(treeSurface)
+	if got := treeChunk.At(Local(ChunkSize-1), Local(int64(treeSurface)), Local(rootZ)); got != wantTreeSurface {
+		t.Fatalf("tree-bearing surface at (%d, %d) is block %d, want its unchanged ground %d",
+			ChunkSize-1, rootZ, got, wantTreeSurface)
 	}
 	if generatedColumnTop(treeSeed, ChunkSize-1, rootZ) <= treeSurface {
 		t.Fatal("the selected feature-bearing column has no tree above its grass surface")
@@ -858,7 +968,7 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 		// **Water is not a top and ice is**, which is the same rule generatedColumnTop
 		// follows: the only fill in this world that stops movement is the lid a tundra
 		// wears at the sea line, and a body stands on that.
-		searchTop := baseHeight + mountainAmplitude/2 + treeMinTrunkHeight + treeHeightVariants - 1 + treeCanopyAboveCrown
+		searchTop := baseHeight + mountainAmplitude/2 + treeMinTrunkHeight + treeHeightVariants + treeCanopyAboveCrown
 		actualTop := surface
 		for worldY := surface + 1; worldY <= searchTop; worldY++ {
 			if Solid(at(worldY)) {
