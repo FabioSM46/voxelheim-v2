@@ -215,37 +215,45 @@ func assertColumnMaterials(t *testing.T, col column, worldX, worldZ int64, want 
 	}
 }
 
-// Nothing grows in a tundra or a desert, and nothing grows on rock or snow.
+// Conifers never leave grass climates, while desert plants never leave desert
+// sand. Bare rock, snow and sandstone are roots for no species.
 //
 // Asserted through the generator's own predicate rather than by counting logs in a
 // chunk, because the claim is about every column rather than about the ones that
 // happened to be sampled.
-func TestNoTreeStandsInATundraADesertOrOnBareRock(t *testing.T) {
+func TestNoConiferStandsInTundraDesertOrBareRockAndDesertPlantsStayOnSand(t *testing.T) {
 	t.Parallel()
 
-	tundra, desert, high := 0, 0, 0
+	tundra, desert, high, desertPlants := 0, 0, 0, 0
 	for i := range climateLatticeSteps {
 		for j := range climateLatticeSteps {
 			x, z := int64(i)*climateLatticeStep, int64(j)*climateLatticeStep
 			col := columnAt(climateSeed, x, z)
-			_, rooted := treeAtColumn(climateSeed, x, z, col)
+			species, _, rooted := plantAtColumn(climateSeed, x, z, col)
 
 			switch col.climate {
 			case Tundra:
 				tundra++
-				if rooted {
-					t.Fatalf("a conifer is rooted in the tundra at (%d, %d)", x, z)
+				if rooted && species == &plantSpeciesTable[0] {
+					t.Fatalf("a conifer is rooted in tundra at (%d, %d)", x, z)
 				}
 			case Desert:
 				desert++
-				if rooted {
+				if rooted && species == &plantSpeciesTable[0] {
 					t.Fatalf("a conifer is rooted in the desert at (%d, %d)", x, z)
 				}
 			}
 			if col.surface >= stoneLine {
 				high++
 				if rooted {
-					t.Fatalf("a conifer is rooted on bare rock at (%d, %d), height %d", x, z, col.surface)
+					t.Fatalf("%s is rooted on bare rock at (%d, %d), height %d", species.name, x, z, col.surface)
+				}
+			}
+			if rooted && (species == &plantSpeciesTable[1] || species == &plantSpeciesTable[2]) {
+				desertPlants++
+				if col.climate != Desert || col.blockAt(col.surface) != Sand {
+					t.Fatalf("%s at (%d, %d) roots in %v block %d, want desert sand",
+						species.name, x, z, col.climate, col.blockAt(col.surface))
 				}
 			}
 		}
@@ -255,6 +263,9 @@ func TestNoTreeStandsInATundraADesertOrOnBareRock(t *testing.T) {
 	}
 	if high == 0 {
 		t.Log("no lattice sample reached the stone line; the bare-rock clause was not exercised here")
+	}
+	if desertPlants == 0 {
+		t.Fatal("the climate lattice selected no desert plant")
 	}
 }
 
@@ -304,6 +315,51 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 		if ratio := float64(roots) / want; ratio < 0.7 || ratio > 1.3 {
 			t.Errorf("%s square has %d roots over %d eligible columns; one in %d predicts %.0f (ratio %.2f, want within ±30%%)",
 				tc.name, roots, eligible, tc.denominator, want, ratio)
+		}
+	}
+
+	// Desert is a thin intersection of two climate-field tails, so its fixed
+	// sample is a broad lattice rather than one contiguous walk. That yields enough
+	// eligible sand columns to measure a one-in-640 palm without averaging seeds.
+	const (
+		desertSteps = 1024
+		desertStep  = int64(61)
+	)
+	eligible, palms, shrubs := 0, 0, 0
+	for i := range desertSteps {
+		for j := range desertSteps {
+			x, z := int64(i)*desertStep, int64(j)*desertStep
+			col := columnAt(climateSeed, x, z)
+			if col.climate != Desert || col.blockAt(col.surface) != Sand || col.surface < seaLevel || col.settlement ||
+				col.carvedAt(climateSeed, x, int64(col.surface), z) {
+				continue
+			}
+			eligible++
+			species, _, rooted := plantAtColumn(climateSeed, x, z, col)
+			if !rooted {
+				continue
+			}
+			switch species {
+			case &plantSpeciesTable[1]:
+				palms++
+			case &plantSpeciesTable[2]:
+				shrubs++
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name        string
+		roots       int
+		denominator int
+	}{
+		{"palm", palms, palmChanceDenominator},
+		{"shrub", shrubs, shrubChanceDenominator},
+	} {
+		want := float64(eligible) / float64(tc.denominator)
+		ratio := float64(tc.roots) / want
+		if tc.roots == 0 || want == 0 || ratio < 0.75 || ratio > 1.25 {
+			t.Errorf("desert %s count is %d over %d eligible sand columns; one in %d predicts %.1f (ratio %.2f, want within ±25%%)",
+				tc.name, tc.roots, eligible, tc.denominator, want, ratio)
 		}
 	}
 }

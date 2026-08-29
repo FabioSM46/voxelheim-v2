@@ -133,6 +133,11 @@ const (
 	// is what the *placed* structure does to the ground, which is structure.go's ward and
 	// is said nowhere here.
 	ItemRunestone
+
+	// Palm wood is the one desert plant a player may carry. Appended because item
+	// ids cross the wire and are persisted in inventories; fronds and scrub have
+	// explicit no-drop outcomes and therefore no item ids of their own.
+	ItemPalmLog
 )
 
 // What each blade is worth, and the only copy of it.
@@ -343,6 +348,7 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// carried one, so — exactly as with the campfire's suppression radius — no column
 	// here says anything about it.
 	ItemRunestone: {places: world.Air, maxStack: 1},
+	ItemPalmLog:   {places: world.PalmLog, maxStack: 64},
 
 	// The forge's own products. The blade is equipment on the same terms the rusty one
 	// is: one to a slot, its own wear, its own damage.
@@ -484,6 +490,9 @@ var blockDrops = map[world.Block]ItemID{
 	world.Planks:      ItemPlanks,
 	world.Cobblestone: ItemCobblestone,
 	world.Thatch:      ItemThatch,
+	world.PalmLog:     ItemPalmLog,
+	world.PalmFronds:  ItemNone,
+	world.DesertShrub: ItemNone,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -515,6 +524,12 @@ var blockExperience = map[world.Block]uint16{
 	world.Planks:      0,
 	world.Cobblestone: 0,
 	world.Thatch:      0,
+
+	// Palm trunks teach the same lesson as ordinary timber. Fronds and scrub are
+	// deliberate zeroes: they are breakable worldgen foliage, not progression.
+	world.PalmLog:     2,
+	world.PalmFronds:  0,
+	world.DesertShrub: 0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {
