@@ -11,6 +11,35 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
+// snapshotAt couples a complete snapshot to the authoritative column used to build it.
+// The session may stream behind the simulation; carrying the column is what prevents a
+// newer position from being released under the ward list for an older view.
+type snapshotAt struct {
+	frame  []byte
+	center world.Column
+}
+
+// offerLatestSnapshot replaces an older buffered tick without blocking. The simulation
+// tick is the sole producer and the ward worker the sole consumer, so after discarding a
+// stale value the one remaining frame is always the newest one offered.
+func offerLatestSnapshot(snapshots chan snapshotAt, latest snapshotAt) bool {
+	select {
+	case snapshots <- latest:
+		return true
+	default:
+	}
+	select {
+	case <-snapshots:
+	default:
+	}
+	select {
+	case snapshots <- latest:
+		return true
+	default:
+		return false
+	}
+}
+
 // followSnapshotsAndWards is the ordered, session-goroutine boundary between the
 // simulation's bounded snapshot handoff and the connection writer.
 //
@@ -26,7 +55,7 @@ func followSnapshotsAndWards(
 	sim *game.Sim,
 	radius int32,
 	centers <-chan world.Column,
-	snapshots <-chan []byte,
+	snapshots <-chan snapshotAt,
 	send func([]byte) error,
 	offerSnapshot func([]byte) bool,
 	log *slog.Logger,
@@ -37,14 +66,23 @@ func followSnapshotsAndWards(
 		lastCenter   world.Column
 		lastRevision uint64
 		sentWards    bool
-		pending      []byte
+		pending      *snapshotAt
 	)
 
 	for {
 		// A snapshot is released only after the initial centre exists and any changed
 		// runestone map has replaced the client's copy. It remains non-blocking at the
 		// outbound queue; the next tick supersedes it if the writer is behind.
-		if haveCenter && pending != nil {
+		if haveCenter && pending != nil && pending.center == center {
+			// Prefer the newest buffered tick before doing any work. The same drain is
+			// repeated after sendWards because that ordered send may wait behind a full
+			// writer queue while the tick continues replacing the one-entry handoff.
+			select {
+			case next := <-snapshots:
+				pending = &next
+				continue
+			default:
+			}
 			revision := sim.WardsRevision()
 			if !sentWards || center != lastCenter || revision != lastRevision {
 				if err := sendWards(playerID, sim, center, radius, send); err != nil {
@@ -55,7 +93,13 @@ func followSnapshotsAndWards(
 				}
 				lastCenter, lastRevision, sentWards = center, revision, true
 			}
-			if !offerSnapshot(pending) {
+			select {
+			case next := <-snapshots:
+				pending = &next
+				continue
+			default:
+			}
+			if !offerSnapshot(pending.frame) {
 				log.Debug("snapshot dropped: the session's outbound queue is full")
 			}
 			pending = nil
@@ -76,7 +120,8 @@ func followSnapshotsAndWards(
 				}
 				lastCenter, lastRevision, sentWards = center, revision, true
 			}
-		case pending = <-snapshots:
+		case next := <-snapshots:
+			pending = &next
 		}
 	}
 }

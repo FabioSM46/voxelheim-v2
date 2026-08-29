@@ -507,10 +507,11 @@ type Player struct {
 	// being saved knows what it is being saved as.
 	playerID identity.PlayerID
 
-	deliver   func(frame []byte) bool
-	chunks    *chunkFeed
-	mineReady chan MiningCompletion
-	inventory inventory
+	deliver         func(frame []byte) bool
+	deliverSnapshot func(frame []byte, center world.Column) bool
+	chunks          *chunkFeed
+	mineReady       chan MiningCompletion
+	inventory       inventory
 
 	// appearance is what this player looks like: the character's own, handed in at Join
 	// and never changed afterwards. **It is read from the stored character and from
@@ -742,6 +743,42 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 // is the stable identity minted by persistence; session is the production caller.
 // Join remains a compact helper for game tests whose entity ids stand in for it.
 func (s *Sim) JoinCharacter(entityID uint64, playerID identity.PlayerID, characterID uint64, name string, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
+	return s.joinCharacter(entityID, playerID, characterID, name, spawn, appearance, resume, deliver,
+		func(frame []byte, _ world.Column) bool { return deliver(frame) })
+}
+
+// JoinCharacterWithSnapshotDelivery admits one stored character while preserving the
+// authoritative column beside each snapshot. Session uses that column to hold a snapshot
+// until its stream has reached the same centre; game-only callers use JoinCharacter and
+// keep the single delivery seam.
+func (s *Sim) JoinCharacterWithSnapshotDelivery(
+	entityID uint64,
+	playerID identity.PlayerID,
+	characterID uint64,
+	name string,
+	spawn [3]float32,
+	appearance protocol.Appearance,
+	resume *Life,
+	deliver func(frame []byte) bool,
+	deliverSnapshot func(frame []byte, center world.Column) bool,
+) (*Player, error) {
+	if deliverSnapshot == nil {
+		return nil, errors.New("game: snapshot delivery must not be nil")
+	}
+	return s.joinCharacter(entityID, playerID, characterID, name, spawn, appearance, resume, deliver, deliverSnapshot)
+}
+
+func (s *Sim) joinCharacter(
+	entityID uint64,
+	playerID identity.PlayerID,
+	characterID uint64,
+	name string,
+	spawn [3]float32,
+	appearance protocol.Appearance,
+	resume *Life,
+	deliver func(frame []byte) bool,
+	deliverSnapshot func(frame []byte, center world.Column) bool,
+) (*Player, error) {
 	if characterID == 0 {
 		return nil, errors.New("game: character id 0 is reserved")
 	}
@@ -791,10 +828,11 @@ func (s *Sim) JoinCharacter(entityID uint64, playerID identity.PlayerID, charact
 		// Empty, and that is the reconnect rule rather than an initialisation detail: a
 		// new session has described nobody to this client, so everything it can see is
 		// described again — including the players it was already looking at a moment ago.
-		described: make(map[uint64]uint64),
-		deliver:   deliver,
-		chunks:    newChunkFeed(),
-		mineReady: make(chan MiningCompletion, 1),
+		described:       make(map[uint64]uint64),
+		deliver:         deliver,
+		deliverSnapshot: deliverSnapshot,
+		chunks:          newChunkFeed(),
+		mineReady:       make(chan MiningCompletion, 1),
 
 		// A composite literal for the reason newStarterInventory returns one: the struct
 		// carries a mutex, which `go vet`'s copylocks check refuses to see assigned from
@@ -1468,7 +1506,7 @@ func (s *Sim) stepWorld(tick uint64) {
 			Weather:    viewer.weather,
 			HasWeather: true,
 		}
-		if !viewer.deliver(protocol.EncodeEntitySnapshot(snapshot)) {
+		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column()) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
 			// server, and one line per tick per slow client would bury whatever else
 			// the log was needed for.

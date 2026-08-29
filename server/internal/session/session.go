@@ -353,10 +353,11 @@ func placementSpawn(cfg Config, self Resolved) [3]float32 {
 // noticed, which is how a warning stops being read.
 func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeouts, chunks *world.Cache, sim *game.Sim, peers *Registry, identities *Identities, entityID uint64, log *slog.Logger) (err error) {
 	out := make(chan []byte, outboundQueue)
-	// Snapshots cross a session-owned bounded handoff instead of entering out on
-	// the tick goroutine. That lets the session put a changed WardsNearby immediately
-	// before the snapshot it belongs to without ever making the authoritative tick wait.
-	snapshots := make(chan []byte, outboundQueue)
+	// Snapshots cross a one-entry, newest-wins handoff instead of entering out on the
+	// tick goroutine. The authoritative column travels beside each frame, so the session
+	// can wait for streaming to reach that centre and put WardsNearby immediately before
+	// the snapshot without ever making the tick wait.
+	snapshots := make(chan snapshotAt, 1)
 
 	// A session-scoped context, so teardown can stop the streamer without waiting
 	// for the server to shut down.
@@ -538,25 +539,18 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// mask the exact reordering that TestSnapshotsStopBeforeTheOutboundQueueIsClosed
 	// exists to catch, turning a panic into a test that passes.
 	trySend := func(frame []byte) bool {
-		// Entity snapshots are the heartbeat on which a stationary player's ward
-		// revision is checked. Hand them to the session worker so it can put any owed
-		// WardsNearby ahead of them on the ordered send path.
-		envelope := vnet.GetRootAsEnvelope(frame, 0)
-		if envelope.PayloadType() == vnet.PayloadEntitySnapshot {
-			select {
-			case snapshots <- frame:
-				return true
-			default:
-				return false
-			}
-		}
-
 		select {
 		case out <- frame:
 			return true
 		default:
 			return false
 		}
+	}
+	// offerLatestSnapshot is the snapshot-only half of the simulation delivery seam.
+	// One tick goroutine is the sole producer. Replacing the buffered value is therefore
+	// non-blocking and bounded, while retaining the only frame still worth sending.
+	deliverLatestSnapshot := func(frame []byte, center world.Column) bool {
+		return offerLatestSnapshot(snapshots, snapshotAt{frame: frame, center: center})
 	}
 
 	// offerSnapshot is the worker-side half of the handoff above. It keeps the old
@@ -764,7 +758,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// stored character. Nothing the client said at any point in this handshake
 			// reaches it, and a creation's appearance reaches it only by having been
 			// written down first.
-			admitted, jErr := sim.JoinCharacter(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend)
+			admitted, jErr := sim.JoinCharacterWithSnapshotDelivery(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend, deliverLatestSnapshot)
 			if jErr != nil {
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}

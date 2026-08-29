@@ -810,10 +810,12 @@ never on whether the returned owner is non-zero.
 inside the streamer's horizontal radius, sorted `(CZ, CX)`, and an empty vector clears the last
 claim the client drew. A session sends one after its initial `MoveTo` has materialised the
 settlement structures and before releasing its first snapshot, again after a column crossing, and
-again when `Sim.WardsRevision` says the runestone map was rebuilt. Snapshots cross a bounded
-session-owned handoff so that last comparison and the ordered send happen off the tick goroutine;
-the tick remains non-blocking and is still the heartbeat that makes a stationary player learn a
-stone was raised or removed.
+again when `Sim.WardsRevision` says the runestone map was rebuilt. Each snapshot crosses a
+one-entry, newest-wins session handoff beside the authoritative column it was built for; the worker
+holds it until `MoveTo` has completed for that same centre, so asynchronous streaming cannot release
+new-position state under an old ward list. The comparison and ordered send stay off the tick
+goroutine; the tick remains non-blocking and is still the heartbeat that makes a stationary player
+learn a stone was raised or removed.
 
 ### The residents — the third entity class
 

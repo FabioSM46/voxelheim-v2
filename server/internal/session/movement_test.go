@@ -732,13 +732,11 @@ func TestSessionWalksThePlayerAndStreamsWhereItWalks(t *testing.T) {
 	if moved[0] != start[0] {
 		t.Errorf("walking north moved the player sideways, from x = %v to %v", start[0], moved[0])
 	}
-	// Enough to be a stream rather than an accident. Not an exact count: `trySend`
-	// legitimately drops a snapshot when this test's drain goroutine falls behind, and
-	// the once-per-tick cadence is pinned where the tick is, in the package that owns
-	// Step.
-	if got := frames.snapshotCount(); got < 20 {
-		t.Errorf("only %d snapshots were sent over the whole walk", got)
-	}
+	// The start and moved positions above came from distinct snapshots, which is the
+	// stream this test needs. There is deliberately no count threshold: this harness
+	// drives ticks faster than wall time, while the session retains only the newest
+	// snapshot until streaming reaches its tagged authoritative column. The once-per-tick
+	// production cadence remains pinned where Step is tested.
 
 	// And the streaming follows. The view is one chunk wide, so a player parked north
 	// of the border has to be sent the chunk it is parked in — driven by the position
