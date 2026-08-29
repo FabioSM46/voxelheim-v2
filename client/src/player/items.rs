@@ -26,7 +26,7 @@ use super::crafting::{
     ITEM_IRON_HELM, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
     ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL, ITEM_WOODEN_SCEPTRE,
 };
-use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
+use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_RUNESTONE, ITEM_TENT};
 use crate::world::{BlockId, palette};
 
 // Presentation-only item ids. The server registry remains the sole authority on whether
@@ -34,7 +34,7 @@ use crate::world::{BlockId, palette};
 //
 // These twelve live here because no module *acts* on them — they are ids this client only
 // ever draws. Items that a module does act on stay where that module declares them:
-// the blade in `super::combat`, the three bundles in `super::structures`, the forge's two
+// the blade in `super::combat`, the four bundles in `super::structures`, the forge's two
 // products and the patch beside them in `super::crafting`. The table below names them from
 // there, because one declaration read from several places cannot drift the way two
 // declarations of the same number can.
@@ -379,7 +379,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 38] = [
+pub(super) const ITEMS: [ItemDisplay; 39] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -706,6 +706,16 @@ pub(super) const ITEMS: [ItemDisplay; 38] = [
         colour: ItemColour::Block(palette::THATCH),
         livery: None,
     },
+    // The fourth carried structure. A Bundle rather than a new shape because the item is
+    // the packed stone a place press plants; the dedicated monolith and its rune are the
+    // standing structure's drawing in `super::structures`.
+    ItemDisplay {
+        item_id: ITEM_RUNESTONE,
+        name: "runestone",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::STONE),
+        livery: None,
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -927,6 +937,7 @@ mod tests {
             ITEM_PLANKS,
             ITEM_COBBLESTONE,
             ITEM_THATCH,
+            ITEM_RUNESTONE,
         ];
         for item_id in declared {
             assert!(
@@ -1018,6 +1029,17 @@ mod tests {
             assert_eq!(row.colour, ItemColour::Block(swatch));
             assert_eq!(row.livery, livery);
         }
+    }
+
+    #[test]
+    fn the_runestone_has_its_appended_id_label_and_bundle_icon() {
+        assert_eq!(ITEM_RUNESTONE, 39);
+        assert_eq!(item_label(ITEM_RUNESTONE), "runestone");
+        assert_eq!(item_shape(ITEM_RUNESTONE), ItemShape::Bundle);
+        assert_eq!(
+            item_linear_rgba(ITEM_RUNESTONE),
+            palette::linear_rgba(palette::STONE)
+        );
     }
 
     /// The three the recipe-driven name table could never have covered.

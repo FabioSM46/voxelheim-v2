@@ -26,7 +26,7 @@ use super::inventory::{ApplyInventory, Inventory};
 use super::items::{
     ITEM_BONE, ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_RAW_MEAT, ITEM_STONE, ITEM_VARGR_PELT,
 };
-use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
+use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_RUNESTONE, ITEM_TENT};
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
 };
@@ -147,7 +147,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 20] = [
+pub const RECIPES: [Recipe; 21] = [
     Recipe {
         id: RecipeId::Forge,
         category: RecipeCategory::Survival,
@@ -483,6 +483,27 @@ pub const RECIPES: [Recipe; 20] = [
         },
         station: None,
     },
+    // The authoritative row is the server's: this copy lets the panel show the same eight
+    // stone and two raw iron, and sends only the recipe identity when pressed.
+    Recipe {
+        id: RecipeId::Runestone,
+        category: RecipeCategory::Survival,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_STONE,
+                count: 8,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_IRON,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_RUNESTONE,
+            count: 1,
+        },
+        station: Some(StructureKind::Forge),
+    },
 ];
 
 /// What each of the three implements costs, spelled once.
@@ -617,24 +638,6 @@ mod tests {
     use crate::player::items::item_label;
     use crate::wire::voxelheim::net as fb;
 
-    /// Members the contract names that this mirror deliberately holds no row for.
-    ///
-    /// **An exemption, written down, with the issue that empties it.** The sweep below
-    /// exists because a hand-written mirror of an appended-to contract fails in exactly
-    /// one direction — a member arrives and nobody adds the row — so the exemption has to
-    /// be at least as visible as the omission it permits, and a named list of one that a
-    /// reader has to justify is that.
-    ///
-    /// `Runestone` is here because a `RECIPES` row is not the identity, which is all the
-    /// wire carries: it is a cost, a product and a station, and those are the server's
-    /// authoritative table. The contract half of #463 has no business inventing them, and
-    /// a row of plausible-looking numbers would be a display this client could not honour.
-    /// The issue that makes a runestone craftable deletes this entry, and the sweep turns
-    /// red until it does — which is the whole reason this is a constant rather than a
-    /// skipped member. `a_craft_request_carries_one_recipe_member_and_a_tick` in
-    /// `net::codec` records the same exemption for the outbound vocabulary.
-    const NOT_YET_CRAFTABLE: &[fb::RecipeID] = &[fb::RecipeID::Runestone];
-
     /// One stack of `count` of `item_id`, as a server state carries it.
     fn stack(item_id: u16, count: u16) -> InventoryStack {
         InventoryStack {
@@ -759,6 +762,10 @@ mod tests {
             cost(RecipeId::WoodenSceptre),
             vec![(ITEM_LOG, 3), (ITEM_BONE, 2), (ITEM_RAW_COAL, 1)]
         );
+        assert_eq!(
+            cost(RecipeId::Runestone),
+            vec![(ITEM_STONE, 8), (ITEM_RAW_IRON, 2)]
+        );
 
         for (id, product, station) in [
             (RecipeId::Forge, ITEM_FORGE, None),
@@ -801,6 +808,11 @@ mod tests {
             (RecipeId::WoodenShield, ITEM_WOODEN_SHIELD, None),
             (RecipeId::Bow, ITEM_BOW, None),
             (RecipeId::WoodenSceptre, ITEM_WOODEN_SCEPTRE, None),
+            (
+                RecipeId::Runestone,
+                ITEM_RUNESTONE,
+                Some(StructureKind::Forge),
+            ),
         ] {
             let row = recipe(id).expect("every member has a row");
             assert_eq!(
@@ -841,7 +853,7 @@ mod tests {
     #[test]
     fn every_recipe_the_contract_names_has_exactly_one_row() {
         for member in fb::RecipeID::ENUM_VALUES {
-            if *member == fb::RecipeID::Unknown || NOT_YET_CRAFTABLE.contains(member) {
+            if *member == fb::RecipeID::Unknown {
                 continue;
             }
             let rows = RECIPES
@@ -862,7 +874,7 @@ mod tests {
         // than against a number typed here, for the reason the loop is.
         assert_eq!(
             RECIPES.len(),
-            fb::RecipeID::ENUM_VALUES.len() - 1 - NOT_YET_CRAFTABLE.len(),
+            fb::RecipeID::ENUM_VALUES.len() - 1,
             "the mirror holds a row the contract does not name, or two rows for one member"
         );
     }
