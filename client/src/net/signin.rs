@@ -304,6 +304,34 @@ pub(super) enum Browser {
     Captured(Sender<String>),
 }
 
+/// Where the loopback listener comes from.
+///
+/// **`Bind` is the only variant a shipped client can name**, and it is the whole of
+/// what production does: the redirect's port is bound here, from the `redirect_uri`
+/// the account service registered, exactly as the module comment describes.
+///
+/// `Prebound` exists under `cfg(test)` and nowhere else, for the same reason
+/// [`Browser::Captured`] does — and it closes a race the tests cannot close from
+/// outside. A test has to name a concrete port before the sign-in starts, because
+/// the redirect URI is built from it and a kernel-chosen port is one nothing was
+/// told about. The only way to learn a free port is to bind one, and a helper that
+/// binds, reads the number and *drops* the listener hands out a port that belongs
+/// to nobody from that moment until the code under test binds it — so any sibling
+/// test in the same binary asking the kernel for an ephemeral port can be given it,
+/// and the sign-in then fails to bind, the worker returns, and the test sees its
+/// channel `Disconnected`. That is #557, and it turned `develop` red on a commit
+/// that touched no networking at all.
+///
+/// So the test keeps the listener it bound and hands *it* over instead of a bare
+/// number: the port is owned continuously, by the test and then by the attempt, and
+/// there is no instant at which the kernel may reissue it.
+#[derive(Debug)]
+pub(super) enum Loopback {
+    Bind,
+    #[cfg(test)]
+    Prebound(TcpListener),
+}
+
 /// Runs one attempt from `start` to a cached ticket.
 ///
 /// `world` is which ticket this attempt is asking for, and the two values are two
@@ -323,6 +351,7 @@ pub(super) fn run(
     service: AccountService,
     world: Option<String>,
     ticket_path: Option<PathBuf>,
+    loopback: Loopback,
     browser: Browser,
     events: Sender<SignInEvent>,
     commands: Receiver<SignInCommand>,
@@ -331,6 +360,7 @@ pub(super) fn run(
         &service,
         world.as_deref(),
         ticket_path.as_deref(),
+        loopback,
         &browser,
         &events,
         &commands,
@@ -347,6 +377,7 @@ fn attempt(
     service: &AccountService,
     world: Option<&str>,
     ticket_path: Option<&Path>,
+    loopback: Loopback,
     browser: &Browser,
     events: &Sender<SignInEvent>,
     commands: &Receiver<SignInCommand>,
@@ -355,7 +386,21 @@ fn attempt(
     let redirect = loopback_redirect(&started.authorize_url)?;
     // Bound **before** the browser is opened. The other order is a race the player
     // loses: a fast redirect would arrive at a port nothing is listening on.
-    let listener = bind(&redirect)?;
+    let listener = match loopback {
+        Loopback::Bind => bind(&redirect)?,
+        // A listener a test bound before it built the redirect URI, so the port was
+        // never unowned. It has to be *that* port: a seam that quietly accepted any
+        // listener would let a test pass while the browser was sent somewhere else.
+        #[cfg(test)]
+        Loopback::Prebound(listener) => {
+            let bound = listener.local_addr().expect("a bound address").port();
+            assert_eq!(
+                bound, redirect.port,
+                "the handed-in listener is not on the redirect's port"
+            );
+            listener
+        }
+    };
 
     let mut child = open_browser(browser, &started.authorize_url)?;
     let caught = wait_for_redirect(
@@ -1070,12 +1115,44 @@ mod tests {
         answer
     }
 
-    /// A loopback port nothing is listening on, for a redirect URI to name.
-    fn free_loopback_port() -> u16 {
+    /// A loopback port for a redirect URI to name — **and the listener that holds
+    /// it**, which is the whole point of the pair.
+    ///
+    /// The listener is returned rather than dropped because dropping it is #557:
+    /// between the drop and the moment the attempt binds, the port belongs to
+    /// nobody, and every other test in this binary that asks for an ephemeral port
+    /// — nine more sign-ins, `FakeService::spawn`, `net/mod.rs`, `net/tls.rs` — is
+    /// asking the kernel for exactly the number just released. Hand this listener
+    /// to [`Loopback::Prebound`] and the port passes from the test to the attempt
+    /// without ever being free.
+    fn reserved_loopback_port() -> (TcpListener, u16) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let port = listener.local_addr().expect("an address").port();
-        drop(listener);
-        port
+        (listener, port)
+    }
+
+    /// **The production path, which every driven attempt now steps around.** Ten
+    /// tests below hand `run` a listener they bound themselves, so without this one
+    /// nothing would exercise [`bind`] at all.
+    ///
+    /// The collision is the assertion: a second listener on an address another
+    /// socket is actively listening on is refused by the kernel (`SO_REUSEADDR`,
+    /// which Rust sets, relaxes `TIME_WAIT` and not this), so the refusal is proof
+    /// `bind` aimed at exactly the port the redirect named and at no other. Written
+    /// as a collision rather than as a success because the success direction would
+    /// need a port known to be free, and learning one by releasing it is the bug
+    /// this whole change is about.
+    #[test]
+    fn bind_refuses_the_redirects_port_when_something_already_holds_it() {
+        let (held, port) = reserved_loopback_port();
+        let redirect = http::parse_url(&format!("http://127.0.0.1:{port}/discord/callback"))
+            .expect("a redirect URL");
+
+        let refusal = bind(&redirect).expect_err("the port is held by this test");
+        assert!(refusal.contains(&format!("127.0.0.1:{port}")), "{refusal}");
+        assert!(refusal.contains("may already be signing in"), "{refusal}");
+
+        drop(held);
     }
 
     struct Attempt {
@@ -1085,17 +1162,22 @@ mod tests {
     }
 
     /// Drives one whole attempt against the fake service, playing the browser.
+    ///
+    /// `listener` is the redirect port's own, still bound — see
+    /// [`reserved_loopback_port`].
     fn drive(
         service: &FakeService,
+        listener: TcpListener,
         ticket_path: Option<PathBuf>,
         query: impl Fn(&str) -> String,
     ) -> Attempt {
-        drive_for_world(service, None, ticket_path, query)
+        drive_for_world(service, listener, None, ticket_path, query)
     }
 
     /// The same, asking for a ticket scoped to `world` when there is one.
     fn drive_for_world(
         service: &FakeService,
+        listener: TcpListener,
         world: Option<&str>,
         ticket_path: Option<PathBuf>,
         query: impl Fn(&str) -> String,
@@ -1111,6 +1193,7 @@ mod tests {
                 account,
                 world,
                 ticket_path,
+                Loopback::Prebound(listener),
                 Browser::Captured(browser_tx),
                 event_tx,
                 command_rx,
@@ -1147,7 +1230,7 @@ mod tests {
 
     #[test]
     fn a_whole_sign_in_ends_with_a_ticket_on_disk() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let redirect = format!("http://127.0.0.1:{port}/discord/callback");
         let service = FakeService::spawn(
             &redirect,
@@ -1161,7 +1244,7 @@ mod tests {
         let scratch = Scratch::new("signin-happy");
         let path = scratch.join("service");
 
-        let attempt = drive(&service, Some(path.clone()), |url| {
+        let attempt = drive(&service, listener, Some(path.clone()), |url| {
             format!("code=the-code&state={}", state_from(url))
         });
 
@@ -1181,7 +1264,7 @@ mod tests {
         // An *account* ticket is what a sign-in produces before a world has been
         // chosen, and the contract's encoding of "no world" is an absent field —
         // the same choice `encode_client_hello` makes for an absent token.
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1192,7 +1275,7 @@ mod tests {
             "sec",
         );
         let scratch = Scratch::new("signin-world");
-        let attempt = drive(&service, Some(scratch.join("service")), |url| {
+        let attempt = drive(&service, listener, Some(scratch.join("service")), |url| {
             format!("code=c&state={}", state_from(url))
         });
 
@@ -1211,7 +1294,7 @@ mod tests {
     /// world-scoped ticket is minted.
     #[test]
     fn a_sign_in_for_a_world_names_it_in_the_finish_body() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1224,6 +1307,7 @@ mod tests {
         let scratch = Scratch::new("signin-for-world");
         let attempt = drive_for_world(
             &service,
+            listener,
             Some("midgard"),
             Some(scratch.join("service")),
             |url| format!("code=c&state={}", state_from(url)),
@@ -1242,7 +1326,7 @@ mod tests {
     fn nothing_a_sign_in_produces_carries_the_code_the_secret_or_the_ticket() {
         // The criterion this test exists for: a whole sign-in is captured and each
         // of the three credentials is looked for in raw, hex and base64 form.
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let code = "authcodeAUTHCODE";
         let secret = "finishsecretFINISH";
         let ticket = encoded_ticket(0x7e);
@@ -1256,7 +1340,7 @@ mod tests {
             secret,
         );
         let scratch = Scratch::new("signin-quiet");
-        let attempt = drive(&service, Some(scratch.join("service")), |url| {
+        let attempt = drive(&service, listener, Some(scratch.join("service")), |url| {
             format!("code={code}&state={}", state_from(url))
         });
 
@@ -1319,7 +1403,7 @@ mod tests {
         // The redirect port and path are registered configuration, so any page on
         // this machine can knock. None of these may end the wait, and the real
         // redirect arriving afterwards must still work.
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1342,6 +1426,7 @@ mod tests {
                 account,
                 None,
                 Some(ticket_path),
+                Loopback::Prebound(listener),
                 Browser::Captured(browser_tx),
                 event_tx,
                 command_rx,
@@ -1412,7 +1497,7 @@ mod tests {
 
     #[test]
     fn a_provider_refusal_arriving_through_the_browser_is_reported_as_one() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1426,7 +1511,7 @@ mod tests {
         // A real refusal echoes the `state` (RFC 6749 §4.1.2.1), which is what
         // distinguishes "the player pressed Cancel" from a page on this machine
         // shouting `error=access_denied` at the loopback port.
-        let attempt = drive(&service, Some(scratch.join("service")), |url| {
+        let attempt = drive(&service, listener, Some(scratch.join("service")), |url| {
             format!("error=access_denied&state={}", state_from(url))
         });
 
@@ -1438,7 +1523,7 @@ mod tests {
 
     #[test]
     fn a_service_that_will_not_sign_for_an_unnamed_world_says_so_in_words() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Refusal {
@@ -1450,7 +1535,7 @@ mod tests {
         );
         let scratch = Scratch::new("signin-noworld");
         let path = scratch.join("service");
-        let attempt = drive(&service, Some(path.clone()), |url| {
+        let attempt = drive(&service, listener, Some(path.clone()), |url| {
             format!("code=c&state={}", state_from(url))
         });
 
@@ -1465,7 +1550,7 @@ mod tests {
 
     #[test]
     fn the_browser_tab_is_told_what_happened() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1487,6 +1572,7 @@ mod tests {
                 account,
                 None,
                 Some(path),
+                Loopback::Prebound(listener),
                 Browser::Captured(browser_tx),
                 event_tx,
                 command_rx,
@@ -1509,7 +1595,7 @@ mod tests {
 
     #[test]
     fn the_listener_answers_only_the_redirect_and_stops_after_it() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1530,6 +1616,7 @@ mod tests {
                 account,
                 None,
                 Some(path),
+                Loopback::Prebound(listener),
                 Browser::Captured(browser_tx),
                 event_tx,
                 command_rx,
@@ -1567,7 +1654,7 @@ mod tests {
 
     #[test]
     fn a_sign_in_that_cannot_be_saved_still_says_it_happened() {
-        let port = free_loopback_port();
+        let (listener, port) = reserved_loopback_port();
         let service = FakeService::spawn(
             &format!("http://127.0.0.1:{port}/discord/callback"),
             FinishAnswer::Ticket {
@@ -1577,7 +1664,7 @@ mod tests {
             "s",
             "sec",
         );
-        let attempt = drive(&service, None, |url| {
+        let attempt = drive(&service, listener, None, |url| {
             format!("code=c&state={}", state_from(url))
         });
 

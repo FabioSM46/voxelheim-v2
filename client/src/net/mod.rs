@@ -2284,8 +2284,19 @@ fn start_sign_in(
 
     match thread::Builder::new()
         .name("voxelheim-signin".to_owned())
-        .spawn(move || signin::run(service, world, ticket_path, browser, event_tx, command_rx))
-    {
+        .spawn(move || {
+            signin::run(
+                service,
+                world,
+                ticket_path,
+                // A shipped client has exactly one way to get the listener: bind
+                // the port the account service registered. See `signin::Loopback`.
+                signin::Loopback::Bind,
+                browser,
+                event_tx,
+                command_rx,
+            );
+        }) {
         // Detached, as the session thread is: the app must never wait on a socket
         // to shut down, and dropping the ECS end of the channels is what stops it.
         Ok(_detached) => {
