@@ -167,6 +167,41 @@ impl SnapshotBuffer {
         })
     }
 
+    /// The nearest resident the newest server answer puts within reach of this player.
+    ///
+    /// [`Self::nearest_accessible_corpse`] one entity class over, and deliberately the
+    /// same shape: **distance only decides which intent this client originates**, never
+    /// whether anything happens. The server re-measures the reach against its own boxes
+    /// and refuses what is too far, so a disagreement here costs a refusal rather than an
+    /// outcome.
+    ///
+    /// Ties are broken by the lower entity id, exactly as the corpse search breaks them,
+    /// so two people standing at the same distance produce one stable answer rather than
+    /// whichever the snapshot happened to list first.
+    pub(super) fn nearest_resident(&self, player_id: u64, max_distance: f32) -> Option<u64> {
+        let latest = &self.latest.as_ref()?.snapshot;
+        let player = latest
+            .entities
+            .iter()
+            .find(|entity| entity.entity_id == player_id)
+            .map(|entity| Vec3::from_array(entity.pos))?;
+
+        latest
+            .mobs
+            .iter()
+            .filter(|mob| mob.kind == MobKind::Villager)
+            .filter_map(|mob| {
+                let distance = player.distance_squared(Vec3::from_array(mob.pos));
+                (distance <= max_distance * max_distance).then_some((distance, mob.entity_id))
+            })
+            .min_by(|left, right| {
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+            })
+            .map(|(_, entity_id)| entity_id)
+    }
+
     pub(super) fn accessible_loot_corpses(&self) -> &[u64] {
         self.latest
             .as_ref()
