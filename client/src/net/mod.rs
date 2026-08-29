@@ -79,11 +79,15 @@ pub use codec::{
     NpcInteractRequest, RESIDENT_NAME_MAX_BYTES, ResidentAppearance, ResidentRole, TradeRequest,
     VendorClosed, VendorEntry, VendorState,
 };
-// V26's weather, ahead of the consumers that read it: the precipitation volume is #466 and
-// the storm's countdown is #470. Named here for the reason the two blocks above are — so
-// neither issue has to reopen `codec.rs` to find out what it is allowed to spell.
-#[allow(unused_imports)] // V26 protocol surface; ECS consumers land in #466 and #470.
-pub use codec::{WeatherKind, WeatherState};
+// V26's Fimbulvetr surface, ahead of the consumers that read it: the precipitation volume
+// is #466, the storm's countdown is #470 and the ward boundary is its own issue. Named
+// here for the reason the two blocks above are — so none of those issues has to reopen
+// `codec.rs` to find out what it is allowed to spell.
+#[allow(unused_imports)] // V26 protocol surface; ECS consumers land in #466, #470 and later.
+pub use codec::{
+    MAX_WARDED_COLUMNS, StormPhase, StormWarning, WardKind, WardedColumn, WardsNearby, WeatherKind,
+    WeatherState,
+};
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
@@ -1737,6 +1741,21 @@ fn drain_session_events(
                     vendor.0.push(VendorEvent::Closed(closed));
                 }
             }
+
+            // V26's two Fimbulvetr payloads: fully decoded and fully validated one layer
+            // down, and dropped here because there is no inbox to put them in yet. #466
+            // gives the sky its precipitation, #470 gives the storm a countdown on screen
+            // and the ward boundary is its own issue; each adds its own queue and its own
+            // arm. Dropped rather than logged, for the reason V25's three were — a
+            // warning arrives when a phase changes and a ward set whenever the player
+            // walks, and a line per one would be noise from the first winter.
+            //
+            // **The validation is the point of carrying them this far.** An unnameable
+            // storm phase, a passed storm that still counts down, a ward list past the
+            // contract's bound or a column named twice all end the session at the decode
+            // boundary — which is where they should, and that is true now rather than
+            // when somebody writes the renderer.
+            Ok(SessionEvent::StormWarning(_)) | Ok(SessionEvent::WardsNearby(_)) => {}
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),

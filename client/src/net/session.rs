@@ -250,6 +250,13 @@ pub(super) enum SessionEvent {
     VendorState(codec::VendorState),
     /// The authoritative end of one open stall.
     VendorClosed(codec::VendorClosed),
+    /// Where the blizzard is in its life. Validated at the decode boundary; no ECS system
+    /// reads it until #470, exactly as `MapTile` was carried here before the map window
+    /// existed.
+    StormWarning(codec::StormWarning),
+    /// Every warded chunk column in view, **replacing** the client's previous set
+    /// wholesale. Validated at the decode boundary; nothing draws it yet.
+    WardsNearby(codec::WardsNearby),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1447,6 +1454,12 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::VendorClosed(closed)) => {
                     events.send(SessionEvent::VendorClosed(closed)).ok()?;
+                }
+                Ok(Transition::StormWarning(warning)) => {
+                    events.send(SessionEvent::StormWarning(warning)).ok()?;
+                }
+                Ok(Transition::WardsNearby(wards)) => {
+                    events.send(SessionEvent::WardsNearby(wards)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;
