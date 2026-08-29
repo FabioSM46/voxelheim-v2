@@ -247,6 +247,7 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	}
 
 	state := p.inventory.stateLocked()
+	p.sim.scheduleWaterAroundLocked(waterVoxel{x: target[0], y: target[1], z: target[2]}, p.sim.worldTick)
 	p.inventory.mu.Unlock()
 	p.sim.mu.Unlock()
 	p.sim.invalidateMining(req.Pos)
@@ -287,6 +288,7 @@ func (p *Player) breakMined(ctx context.Context, pos [3]int32, expected world.Bl
 	if applyErr != nil {
 		return EditResult{}, applyErr
 	}
+	p.sim.scheduleWaterEdit(waterVoxel{x: target[0], y: target[1], z: target[2]})
 
 	// ItemNone is Leaves' explicit yield and an unlisted block's implicit one: both
 	// mean the world keeps nothing, so nothing is spawned. spawnDrop refuses it too;
