@@ -892,6 +892,10 @@ pub(super) struct Structure {
     anchor: IVec3,
     facing: Facing,
     owner_entity_id: u64,
+    /// The server's answer to whether a campfire burns. Meaningless for every other kind,
+    /// as the contract says; kept here so a changed answer replaces the drawing just as a
+    /// changed kind, facing or owner does.
+    lit: bool,
     /// Whether `ServerWelcome` named this session's own entity as the owner. Derived once
     /// where the identity is known, so nothing downstream has to carry the session around
     /// to ask.
@@ -913,6 +917,9 @@ impl Structure {
             anchor: IVec3::new(state.anchor.x, state.anchor.y, state.anchor.z),
             facing: state.facing,
             owner_entity_id: state.owner_entity_id,
+            // The contract says the bit is meaningless for every other kind. Normalising
+            // it there prevents an irrelevant toggle from respawning a tent or forge.
+            lit: state.kind != StructureKind::Campfire || state.lit,
             own: state.owner_entity_id == local_entity_id,
         }
     }
@@ -1176,7 +1183,8 @@ fn fire_light_height() -> f32 {
 ///
 /// The newest snapshot is the existence set, exactly as it is for mobs and drops. A
 /// structure whose description *changed* is despawned and drawn again rather than edited
-/// in place: kind, facing and ownership each choose a different mesh or material, and
+/// in place: kind, facing, ownership and a campfire's `lit` answer each choose a different
+/// mesh or material, and
 /// rebuilding a handful of children is cheaper than a patch path that has to stay
 /// exhaustive as kinds are added.
 pub(super) fn apply_snapshots(
@@ -1258,8 +1266,10 @@ fn spawn_structure(
             StructureKind::Campfire => {
                 part(visuals.fire_ring.clone(), visuals.stone[own].clone());
                 part(visuals.fire_logs.clone(), visuals.charred.clone());
-                part(visuals.fire_flame.clone(), visuals.ember.clone());
-                true
+                if structure.lit {
+                    part(visuals.fire_flame.clone(), visuals.ember.clone());
+                }
+                structure.lit
             }
         };
 
@@ -2268,6 +2278,52 @@ mod tests {
             lights(&mut app).is_empty(),
             "the light outlived the fire it belonged to"
         );
+    }
+
+    /// `lit` is the server's answer, and both visible consequences follow it together:
+    /// no flame mesh and no point light while the rain has doused the fire, both restored
+    /// when a later snapshot says it burns again.
+    #[test]
+    fn the_servers_lit_toggle_hides_and_restores_the_flame_and_light() {
+        let mut app = aiming_app(store_with(&[]));
+        let burning = campfire_at(900, [3, 80, 0], LOCAL_ID);
+        deliver(&mut app, 1, vec![burning]);
+        app.update();
+
+        let flame = app
+            .world()
+            .resource::<StructureVisuals>()
+            .fire_flame
+            .clone();
+        assert!(parts(&mut app).iter().any(|(mesh, _)| *mesh == flame));
+        assert_eq!(lights(&mut app).len(), 1);
+
+        deliver(
+            &mut app,
+            2,
+            vec![StructureState {
+                lit: false,
+                ..burning
+            }],
+        );
+        app.update();
+        assert_eq!(drawn(&mut app), vec![(900, StructureKind::Campfire, true)]);
+        assert!(
+            parts(&mut app).iter().all(|(mesh, _)| *mesh != flame),
+            "a doused campfire kept its flame mesh"
+        );
+        assert!(
+            lights(&mut app).is_empty(),
+            "a doused campfire kept its light"
+        );
+
+        deliver(&mut app, 3, vec![burning]);
+        app.update();
+        assert!(
+            parts(&mut app).iter().any(|(mesh, _)| *mesh == flame),
+            "a relit campfire did not restore its flame"
+        );
+        assert_eq!(lights(&mut app).len(), 1, "a relit campfire stayed dark");
     }
 
     /// The campfire draws from its own meshes, and its ring is the fieldstone a forge's

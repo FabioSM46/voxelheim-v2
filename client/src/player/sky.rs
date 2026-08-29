@@ -51,8 +51,9 @@ use std::time::Instant;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::Weather;
 use super::camera::WorldCamera;
-use crate::net::{BlockCoord, Session, WorldClock};
+use crate::net::{BlockCoord, Session, WeatherKind, WeatherState, WorldClock};
 use crate::settings::Settings;
 use crate::world::{ChunkStore, palette};
 
@@ -164,6 +165,17 @@ const NIGHT_AMBIENT_BRIGHTNESS: f32 = 480.0;
 /// across the far half. Earlier and the world feels like a room; later and the fade is too
 /// abrupt to hide the edge it exists to hide.
 const FOG_START_FRACTION: f32 = 0.5;
+
+/// The weather colours the server's kind moves the day/night sky towards, as sRGB.
+///
+/// These are presentation colours, not climate data. The sand tint is the issue's stated
+/// ochre exactly; the other three are chosen around the existing winter sky: rain closes
+/// it down to charcoal grey, snow fills it with pale overcast and a blizzard takes that
+/// all the way to near-white.
+const RAIN_TINT: [f32; 3] = [0.032, 0.036, 0.042];
+const SNOW_TINT: [f32; 3] = [0.72, 0.75, 0.79];
+const SAND_TINT: [f32; 3] = [0.45, 0.33, 0.14];
+const BLIZZARD_TINT: [f32; 3] = [0.92, 0.95, 0.98];
 
 /// The sky and the fog seen from inside water, as sRGB.
 ///
@@ -414,11 +426,20 @@ pub(super) fn spawn_sun(mut commands: Commands) {
 pub(super) struct SkyInputs<'w> {
     session: Option<Res<'w, Session>>,
     clock: Res<'w, SkyClock>,
+    weather: Res<'w, Weather>,
     /// Read for exactly one question — is the eye inside a voxel of water — and read
     /// only. This is the fourth edge from `player` to `world`, and `client/AGENTS.md`
     /// enumerates it beside the other three.
     store: Option<Res<'w, ChunkStore>>,
     settings: Option<Res<'w, Settings>>,
+}
+
+/// The three previous-frame facts needed only to avoid redundant writes.
+#[derive(Default)]
+pub(super) struct SkyMemory {
+    announced: bool,
+    submerged: bool,
+    weather: Option<WeatherState>,
 }
 
 /// Puts the sun, the sky, the ambient term and the fog where the server's clock says they
@@ -459,12 +480,12 @@ pub(super) fn drive_the_sky(
     // refuses the system rather than risk aliasing them.
     eyes: Query<&Transform, (With<WorldCamera>, Without<Sun>)>,
     mut commands: Commands,
-    mut announced: Local<bool>,
-    mut was_submerged: Local<bool>,
+    mut memory: Local<SkyMemory>,
 ) {
     let SkyInputs {
         session,
         clock,
+        weather,
         store,
         settings,
     } = read;
@@ -474,8 +495,8 @@ pub(super) fn drive_the_sky(
     let params = session.0;
     let declared = params.clock.declared();
 
-    if !*announced {
-        *announced = true;
+    if !memory.announced {
+        memory.announced = true;
         if declared {
             info!(
                 "the server keeps a clock: a day is {} ticks, night runs {}..{}",
@@ -533,12 +554,15 @@ pub(super) fn drive_the_sky(
         ),
         None => (params.view_distance, FOG_START_FRACTION, 1.0),
     };
-    let (start, end) = fog_span(
+    let base_span = fog_span(
         chosen_distance,
         params.view_distance,
         params.chunk_size,
         fog_start,
     );
+    let current_weather = weather.get();
+    let (start, end) = weather_fog_span(base_span, current_weather);
+    let weather_sky = weather_tint(light.sky, current_weather);
     let ambient_brightness = light.ambient_brightness * brightness_scale;
 
     // **The one thing in this module that is a function of where the player is.** `AimCamera`
@@ -555,8 +579,9 @@ pub(super) fn drive_the_sky(
     let (sky, start, end) = if submerged {
         (submerged_sky(), UNDERWATER_START, UNDERWATER_VISIBILITY)
     } else {
-        (light.sky, start, end)
+        (weather_sky, start, end)
     };
+    let weather_changed = memory.weather != current_weather;
 
     for (entity, mut camera, mut ambient, fog) in &mut cameras {
         // Written on the frame the player goes under and on the frame they come back
@@ -565,7 +590,7 @@ pub(super) fn drive_the_sky(
         // what carries the second of those: `ClearColorConfig` has no `PartialEq` to
         // compare against, so the restoring write is triggered by the transition rather
         // than by a difference.
-        if declared || submerged || *was_submerged {
+        if declared || submerged || memory.submerged || weather_changed {
             camera.clear_color = ClearColorConfig::Custom(sky);
         }
         // Outside the `declared` gate and guarded instead, because the brightness setting
@@ -581,7 +606,7 @@ pub(super) fn drive_the_sky(
             // ever moves — an unconditional write would re-extract the fog into the render
             // world on every frame of a session whose sky is a constant.
             Some(mut fog) => {
-                if fog.color != sky || !fades_between(&fog.falloff, start, end) {
+                if weather_changed || fog.color != sky || !fades_between(&fog.falloff, start, end) {
                     fog.color = sky;
                     fog.falloff = FogFalloff::Linear { start, end };
                 }
@@ -596,7 +621,8 @@ pub(super) fn drive_the_sky(
         }
     }
 
-    *was_submerged = submerged;
+    memory.submerged = submerged;
+    memory.weather = current_weather;
 }
 
 /// Whether the voxel holding `eye` is water.
@@ -608,7 +634,11 @@ pub(super) fn drive_the_sky(
 ///
 /// A store this session has no chunk for answers air, which is [`ChunkStore::block_at`]'s
 /// own rule: a lake nobody has been sent is not one the player is inside.
-fn submerged_at(store: Option<&ChunkStore>, eye: Vec3, chunk_size: usize) -> bool {
+///
+/// **Read by `player/precipitation.rs` as well**, because water overrides the precipitation
+/// volume for the same reason it overrides the fog, and two copies of "is the eye under
+/// water" would be two answers the moment either moved.
+pub(super) fn submerged_at(store: Option<&ChunkStore>, eye: Vec3, chunk_size: usize) -> bool {
     let Some(store) = store else {
         return false;
     };
@@ -648,6 +678,58 @@ fn submerged_sky() -> Color {
 fn fog_span(chosen: u8, streamed: u8, chunk_size: u16, fog_start: f32) -> (f32, f32) {
     let end = (f32::from(chosen.min(streamed)) * f32::from(chunk_size)).max(1.0);
     (end * fog_start, end)
+}
+
+/// Pulls both ends of the horizon towards the eye by the weather's visibility scale.
+///
+/// A clear sky and absent weather are the identity. Blizzard uses the snow scale at full
+/// strength whatever intensity the field happens to carry, matching the full volume and
+/// full tint it draws elsewhere.
+fn weather_fog_span(span: (f32, f32), weather: Option<WeatherState>) -> (f32, f32) {
+    let scale = weather.map_or(1.0, |weather| {
+        let intensity = weather_intensity(weather);
+        match weather.kind {
+            WeatherKind::Clear => 1.0,
+            WeatherKind::Rain => 1.0 - 0.4 * intensity,
+            WeatherKind::Snow | WeatherKind::Sandstorm | WeatherKind::Blizzard => {
+                1.0 - 0.75 * intensity
+            }
+        }
+    });
+    (span.0 * scale, span.1 * scale)
+}
+
+/// Blends the day/night sky underneath towards this weather's tint.
+fn weather_tint(sky: Color, weather: Option<WeatherState>) -> Color {
+    let Some(weather) = weather else {
+        return sky;
+    };
+    let tint = match weather.kind {
+        WeatherKind::Clear => return sky,
+        WeatherKind::Rain => RAIN_TINT,
+        WeatherKind::Snow => SNOW_TINT,
+        WeatherKind::Sandstorm => SAND_TINT,
+        WeatherKind::Blizzard => BLIZZARD_TINT,
+    };
+    let amount = weather_intensity(weather);
+    let from = Srgba::from(sky);
+    Color::srgb(
+        lerp(from.red, tint[0], amount),
+        lerp(from.green, tint[1], amount),
+        lerp(from.blue, tint[2], amount),
+    )
+}
+
+/// Intensity as the unit fraction the presentation paths consume.
+///
+/// Blizzard is full by definition on this side: the server's storm override names the
+/// kind, and the volume, fog and tint all have to present the same severity.
+fn weather_intensity(weather: WeatherState) -> f32 {
+    if weather.kind == WeatherKind::Blizzard {
+        1.0
+    } else {
+        f32::from(weather.intensity) / f32::from(u8::MAX)
+    }
 }
 
 /// Whether a falloff is already the linear fade this module would write.
@@ -702,6 +784,115 @@ mod tests {
         // One chunk still leaves `start` strictly below `end`.
         let (start, end) = fog_span(1, 1, 1, 0.5);
         assert!(start < end, "{start} is not below {end}");
+    }
+
+    #[test]
+    fn weather_scales_both_ends_of_the_fog_span() {
+        let span = (64.0, 128.0);
+        assert_eq!(weather_fog_span(span, None), span);
+        assert_eq!(
+            weather_fog_span(
+                span,
+                Some(WeatherState {
+                    kind: WeatherKind::Clear,
+                    intensity: 0,
+                })
+            ),
+            span
+        );
+
+        let rain = weather_fog_span(
+            span,
+            Some(WeatherState {
+                kind: WeatherKind::Rain,
+                intensity: 128,
+            }),
+        );
+        let rain_scale = 1.0 - 0.4 * (128.0 / 255.0);
+        assert!((rain.0 - span.0 * rain_scale).abs() < 1e-5);
+        assert!((rain.1 - span.1 * rain_scale).abs() < 1e-5);
+
+        for kind in [
+            WeatherKind::Snow,
+            WeatherKind::Sandstorm,
+            WeatherKind::Blizzard,
+        ] {
+            assert_eq!(
+                weather_fog_span(
+                    span,
+                    Some(WeatherState {
+                        kind,
+                        // A blizzard ignores this on purpose; the other two use full.
+                        intensity: if kind == WeatherKind::Blizzard {
+                            1
+                        } else {
+                            255
+                        },
+                    })
+                ),
+                (16.0, 32.0),
+                "{kind:?} did not close the horizon to one quarter"
+            );
+        }
+    }
+
+    #[test]
+    fn weather_tint_blends_from_the_day_night_sky_to_the_kinds_colour() {
+        let same_colour = |left: Color, right: Color| {
+            let (left, right) = (Srgba::from(left), Srgba::from(right));
+            (left.red - right.red).abs() < 1e-6
+                && (left.green - right.green).abs() < 1e-6
+                && (left.blue - right.blue).abs() < 1e-6
+        };
+        let underneath = Color::srgb(0.11, 0.22, 0.33);
+        for (kind, tint) in [
+            (WeatherKind::Rain, RAIN_TINT),
+            (WeatherKind::Snow, SNOW_TINT),
+            (WeatherKind::Sandstorm, SAND_TINT),
+        ] {
+            assert_eq!(
+                weather_tint(underneath, Some(WeatherState { kind, intensity: 0 })),
+                underneath,
+                "zero-strength {kind:?} moved the underlying sky"
+            );
+            assert!(
+                same_colour(
+                    weather_tint(
+                        underneath,
+                        Some(WeatherState {
+                            kind,
+                            intensity: 255,
+                        })
+                    ),
+                    Color::srgb(tint[0], tint[1], tint[2])
+                ),
+                "full-strength {kind:?} did not reach its tint"
+            );
+        }
+
+        assert!(
+            same_colour(
+                weather_tint(
+                    underneath,
+                    Some(WeatherState {
+                        kind: WeatherKind::Blizzard,
+                        intensity: 1,
+                    })
+                ),
+                Color::srgb(BLIZZARD_TINT[0], BLIZZARD_TINT[1], BLIZZARD_TINT[2])
+            ),
+            "a blizzard is full tint whatever its intensity byte says"
+        );
+        assert_eq!(
+            weather_tint(
+                underneath,
+                Some(WeatherState {
+                    kind: WeatherKind::Clear,
+                    intensity: 0,
+                })
+            ),
+            underneath
+        );
     }
 
     /// The acceptance criterion that matters most today, because it is the only path any
