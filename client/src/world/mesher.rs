@@ -177,7 +177,6 @@ impl Neighbours {
         [0, 0, 1],
     ];
 
-    /// Above `-x, +x, -z, +z`, for falling water at a horizontal border.
     pub const ABOVE_HORIZONTAL_OFFSETS: [[i32; 3]; 4] =
         [[-1, 1, 0], [1, 1, 0], [0, 1, -1], [0, 1, 1]];
 
@@ -317,9 +316,6 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
 ///
 /// - `opaque_mask` gets a face wherever exactly one side is opaque, so an opaque block
 ///   draws against air *and* against water — that is what makes a lake bed visible.
-/// - `water_mask` gets an exposed face against transparent non-water, or the higher
-///   water voxel's skirt between unequal levels. Water against an opaque block is a
-///   sheet that block has already drawn from the other side of the plane.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sweep's coordinate frame plus the two masks it fills; the frame is \
@@ -402,7 +398,6 @@ fn build_masks(
     }
 }
 
-/// Water against air, or the higher water level's exposed skirt.
 fn water_face(
     axis: usize,
     negative: BlockId,
@@ -465,7 +460,6 @@ fn water_face(
     }
 }
 
-/// Encoded height, promoted to full when any water is directly above.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sweep coordinate frame is the same one `sample` takes"
@@ -506,7 +500,6 @@ fn effective_water_level(
         .across(1, false, chunk.size())
         .is_some_and(|below| std::ptr::eq(source_chunk, below))
     {
-        // The top layer of the chunk below this one looks directly at our floor.
         cell[1] = 0;
         chunk.block(cell)
     } else {
@@ -566,7 +559,6 @@ fn merge_mask(
                 continue;
             };
 
-            // Partial strips cannot merge vertically across the gap to the next voxel.
             let partial_vertical = matches!(
                 face.geometry,
                 FaceGeometry::WaterSide { bottom, top } if bottom != 0 || top != 8
@@ -795,7 +787,6 @@ mod tests {
         (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
     }
 
-    /// The minimum and maximum coordinate of one quad along `axis`.
     fn quad_extent(mesh: &SurfaceMesh, quad: usize, axis: usize) -> (f32, f32) {
         let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
         corners.iter().fold(
@@ -804,7 +795,6 @@ mod tests {
         )
     }
 
-    /// Quad indices whose stored normal is exactly `wanted`.
     fn quads_facing(mesh: &SurfaceMesh, wanted: [f32; 3]) -> Vec<usize> {
         (0..mesh.quad_count())
             .filter(|quad| mesh.normals[quad * VERTICES_PER_QUAD] == wanted)

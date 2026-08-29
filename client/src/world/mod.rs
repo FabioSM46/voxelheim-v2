@@ -365,11 +365,8 @@ impl ChunkStore {
     /// Logs the mesh of every neighbour that will now draw `coord`'s border layer
     /// differently from the way it has been drawing it.
     ///
-    /// A neighbour's mesh depends on one geometry key for each voxel on the shared
-    /// face: whether it is opaque and whether it is water on a vertical face, plus
-    /// water's effective height on a horizontal face where a side skirt reads it. Not
-    /// *which blocks* they are — colour belongs to the chunk that owns the voxel — and
-    /// not the other layers. So the shared layer is what is compared, and a revision
+    /// The key is opacity and vertical water presence, plus horizontal effective height.
+    /// Block identity and inner layers belong only here. A revision
     /// that does not exist compares as all air, which is precisely what the mesher reads
     /// a missing neighbour as. That makes three events one: a chunk arriving (`before` is
     /// `None`), a chunk being replaced, and a chunk going away (`after` is `None`).
@@ -469,22 +466,22 @@ impl ChunkStore {
         // runs is the answer to a question this path can answer exactly, from the voxel
         // that moved. Taking both would remesh all six neighbours of every edit made in
         // the middle of a chunk.
-        // Read before the store takes the chunk. Opaque blocks still share one key,
-        // so stone becoming grass on a border does not remesh a neighbour into a
-        // byte-identical mesh. Water adds its effective height: air becoming flow, or
-        // one level becoming another, moves the top or exposed skirt across the seam.
-        // `above` makes a voxel directly below water full-height on both paths.
-        let geometry_moved = border_geometry(Some(held), local, above.as_deref())
-            != border_geometry(Some(&edited), local, above.as_deref());
+        // Read before the store takes the chunk; `above` resolves falling height.
+        let before_geometry = border_geometry(Some(held), local, above.as_deref());
+        let after_geometry = border_geometry(Some(&edited), local, above.as_deref());
         let falling_neighbours = if local[1] == 0 {
             shift(coord, [0, -1, 0])
                 .and_then(|below_coord| {
                     self.chunks.get(&below_coord).map(|below| {
-                        let below_local = [local[0], size - 1, local[2]];
+                        let below_size = below.size();
+                        if below_size == 0 || local[0] >= below_size || local[2] >= below_size {
+                            return Vec::new();
+                        }
+                        let below_local = [local[0], below_size - 1, local[2]];
                         let moved = border_geometry(Some(below), below_local, Some(held))
                             != border_geometry(Some(below), below_local, Some(&edited));
                         if moved {
-                            border_neighbours(below_coord, below_local, size)
+                            border_neighbours(below_coord, below_local, below_size)
                                 .into_iter()
                                 .filter(|neighbour| neighbour.cy == below_coord.cy)
                                 .collect()
@@ -503,12 +500,19 @@ impl ChunkStore {
         // The edited chunk always remeshes: colour is its own, and changes even when
         // solidity does not.
         let mut remeshed = 1;
-        if geometry_moved {
-            let neighbours = border_neighbours(coord, local, size);
-            remeshed += neighbours.len();
-            for neighbour in neighbours {
-                self.changes.push(ChunkChange::NeighbourChanged(neighbour));
-            }
+        for neighbour in border_neighbours(coord, local, size)
+            .into_iter()
+            .filter(|neighbour| {
+                let axis = if neighbour.cx != coord.cx {
+                    0
+                } else {
+                    1 + usize::from(neighbour.cy == coord.cy)
+                };
+                before_geometry.differs_for_face(after_geometry, axis)
+            })
+        {
+            remeshed += 1;
+            self.changes.push(ChunkChange::NeighbourChanged(neighbour));
         }
         remeshed += falling_neighbours.len();
         for neighbour in falling_neighbours {
@@ -662,14 +666,10 @@ struct BorderGeometry {
 }
 
 impl BorderGeometry {
-    /// Vertical faces read water presence; horizontal skirts also read its level.
     fn differs_for_face(self, other: Self, axis: usize) -> bool {
         self.opaque != other.opaque
-            || if axis == 1 {
-                (self.water_level != 0) != (other.water_level != 0)
-            } else {
-                self.water_level != other.water_level
-            }
+            || (self.water_level != other.water_level
+                && (axis != 1 || self.water_level == 0 || other.water_level == 0))
     }
 }
 
@@ -2059,6 +2059,46 @@ mod tests {
     }
 
     #[test]
+    fn a_level_only_corner_edit_marks_horizontal_but_not_vertical_neighbours() {
+        let mut store = ChunkStore::default();
+        store.insert(coord(0, 0, 0), air());
+        store.take_changes();
+        store.apply_block(at(31, 31, 5), palette::WATER_FLOW3, SIZE);
+        store.take_changes();
+
+        store.apply_block(at(31, 31, 5), palette::WATER_FLOW4, SIZE);
+        assert_eq!(
+            store.take_changes(),
+            vec![
+                ChunkChange::Loaded(coord(0, 0, 0)),
+                ChunkChange::NeighbourChanged(coord(1, 0, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mismatched_below_chunk_does_not_panic_or_mark_a_diagonal() {
+        let here = coord(0, 0, 0);
+        let below = coord(0, -1, 0);
+        let mut below_chunk = VoxelChunk::from_runs(&[palette::AIR, 4096], 16).expect("valid");
+        below_chunk.set(15, 15, 5, palette::WATER_FLOW3);
+        let mut store = ChunkStore::default();
+        store.insert(below, below_chunk);
+        store.insert(coord(1, -1, 0), air());
+        store.insert(here, air());
+        store.take_changes();
+
+        store.apply_block(at(15, 0, 5), palette::WATER_FLOW1, SIZE);
+        assert_eq!(
+            store.take_changes(),
+            vec![
+                ChunkChange::Loaded(here),
+                ChunkChange::NeighbourChanged(below),
+            ]
+        );
+    }
+
+    #[test]
     fn an_edit_in_a_corner_marks_the_three_chunks_that_share_a_face_with_it() {
         // Three, not seven: this non-water edit changes only shared-face geometry.
         let mut store = store_with_stone_at(coord(0, 0, 0));
@@ -2332,33 +2372,13 @@ mod tests {
 
     #[test]
     fn a_vertical_re_sent_water_border_reads_presence_not_level() {
-        let below = coord(0, 0, 0);
-        let above = coord(0, 1, 0);
-        let mut store = ChunkStore::default();
-        store.insert(below, air());
         let mut flow3 = air();
         flow3.set(5, 0, 5, palette::WATER_FLOW3);
-        store.insert(above, flow3);
-        store.take_changes();
-
-        let mut flow4 = air();
+        let mut flow4 = flow3.clone();
         flow4.set(5, 0, 5, palette::WATER_FLOW4);
-        store.insert(above, flow4);
-
-        assert_eq!(
-            store.take_changes(),
-            vec![ChunkChange::Loaded(above)],
-            "a vertical neighbour cannot see a water level change"
-        );
-
-        store.insert(above, air());
-        assert_eq!(
-            store.take_changes(),
-            vec![
-                ChunkChange::Loaded(above),
-                ChunkChange::NeighbourChanged(below),
-            ]
-        );
+        let differs = |after| border_layer_differs(Some(&flow3), Some(after), 1, false, None);
+        assert!(!differs(&flow4));
+        assert!(differs(&air()));
     }
 
     #[test]
@@ -2367,17 +2387,12 @@ mod tests {
         below.set(SIZE - 1, SIZE - 1, SIZE - 1, palette::WATER_FLOW3);
         let one_block_above = VoxelChunk::from_runs(&[palette::WATER, 1], 1).expect("valid");
 
-        assert_eq!(
-            border_geometry(
-                Some(&below),
-                [SIZE - 1, SIZE - 1, SIZE - 1],
-                Some(&one_block_above),
-            ),
-            BorderGeometry {
-                opaque: false,
-                water_level: 3,
-            }
+        let geometry = border_geometry(
+            Some(&below),
+            [SIZE - 1, SIZE - 1, SIZE - 1],
+            Some(&one_block_above),
         );
+        assert_eq!(geometry.water_level, 3);
     }
 
     #[test]

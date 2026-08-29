@@ -355,20 +355,12 @@ main schedule, and become one entity each. These rules hold that pipeline togeth
   same question at different costs. An **edit** knows the voxel that moved, so
   `border_neighbours` names the chunks sharing a *face* with it from its coordinate alone —
   up to three for a corner voxel, six at `chunk_size` 1, and never a diagonal, which shares
-  no face and ordinarily cannot depend on it — and it names them **only when geometry moved**,
-  because stone becoming grass on a shared wall changes nothing across it. Falling water is
-  the narrow exception: water at the floor of an upper chunk can make a top-layer voxel in
-  the chunk below full-height, so the horizontal neighbours of that lower chunk also depend
-  on the upper chunk. That edge-diagonal dependency is gathered and invalidated explicitly.
+  no face and ordinarily cannot depend on it — and it names them **only when geometry moved**;
+  falling water can additionally invalidate horizontal neighbours below.
   The edited chunk still remeshes: colour is its own. A **payload off the
   wire** could have moved any of the six border layers, so `ChunkStore::note_neighbours_stale`
-  compares them: a neighbour's mesh depends on whether each boundary voxel is opaque and,
-  across a vertical face, whether it is water; only a horizontal face additionally reads
-  water's effective level for its side skirt. A revision that does not exist compares as all
-  air — which is what the mesher reads a missing neighbour as, so "arrived", "replaced" and
-  "went away" are one comparison. **Both paths apply the same criterion**, and that is not a
-  coincidence to be maintained by hand: the edit path was written without it and remeshed up
-  to three neighbours into byte-identical meshes until the review on legacy PR 66 said so.
+  compares them: vertical faces read opacity and water presence, horizontal faces also read
+  level, and missing revisions compare as air.
 
   **That comparison is what keeps a join affordable, and it is not an optimisation to trade
   away.** Most of what the server streams is sky, and a chunk of air arriving beside a chunk
