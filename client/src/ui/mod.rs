@@ -25,6 +25,7 @@ mod party;
 mod servers;
 mod settings;
 mod status;
+mod storm;
 mod text_input;
 mod vendor;
 
@@ -169,7 +170,11 @@ impl Plugin for UiPlugin {
                 // Nested rather than flat, because `add_plugins` accepts a tuple of at
                 // most fifteen and this list is at that ceiling. A tuple of plugins is
                 // itself `Plugins`, so the nesting changes nothing but the shape.
-                (compass::CompassUiPlugin, crosshair::CrosshairPlugin),
+                (
+                    storm::StormUiPlugin,
+                    compass::CompassUiPlugin,
+                    crosshair::CrosshairPlugin,
+                ),
                 // Nested for the reason the compass and the crosshair are: the tuple is
                 // at `add_plugins`' fifteen-plugin ceiling. The leave countdown is beside
                 // health because it is the same kind of surface -- permanent game UI a

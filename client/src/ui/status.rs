@@ -167,7 +167,7 @@ pub struct Notice {
 
 impl Notice {
     /// What is on screen right now, or the empty string.
-    fn line(&self) -> &str {
+    pub(super) fn line(&self) -> &str {
         if self.until.is_some() { &self.line } else { "" }
     }
 
@@ -176,7 +176,7 @@ impl Notice {
     /// Replaces rather than queues, for the reason the inbox keeps the newest: two
     /// refusals are two different answers, and the older one is about a press the player
     /// has already stopped thinking about.
-    fn show(&mut self, line: String, now: Duration) {
+    pub(super) fn show(&mut self, line: String, now: Duration) {
         self.line = line;
         self.until = Some(now + NOTICE_LIFETIME);
     }
