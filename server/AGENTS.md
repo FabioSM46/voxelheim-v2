@@ -819,9 +819,23 @@ the cost either of them would pay alone.
   `world.PlacedAnchor` names a building's floor, which is air — so a structure takes the voxel
   below and a person's feet sit at the bottom of that cell. It is the one place the two
   materialisers differ, and it is why they file a resident under the slot's own chunk.
-- **Nothing about one is on the wire yet.** They are created, they are named, and no session is
-  told: the `MobState` projection, the once-per-view `ResidentAppearance` and the
-  `NpcInteractRequest` refusal are #458's second half.
+- **The wire has no third vector and needs none.** A resident is appended to the `MobState`
+  stream by `mobSnapshotsLocked` alongside the mobs and the corpses, always `Villager` / `Idle`
+  / full health / no target; the role travels once in `ResidentAppearance`, on the same
+  once-per-view bookkeeping (`Player.described`) a `PlayerAppearance` uses. **The sweep of that
+  map therefore runs after the resident pass**, not after the players — stamped later than the
+  sweep, an entry would be swept every tick and the description re-sent every tick.
+- **The one behaviour is a yaw.** `advanceResidentsLocked` turns whoever has a live player
+  inside `ResidentNoticeRadius` toward the nearest of them at `ResidentTurnRate`, and turns
+  everyone else back toward their anchor's bearing at the same rate. Nothing walks, paths,
+  schedules or speaks. The pass iterates the map rather than a sorted slice because it reads
+  only players and writes only its own field — there is no order for a result to depend on.
+- **No session may address one yet, and until one can this is a live edge.**
+  `NpcInteractRequest` has decoded at the protocol boundary since V25, but the router still has
+  no case for it — so such a frame falls through the default and closes the session as
+  malformed. The refusal that answers it instead (`ActionRefused{Interact, NotAVendor}` on every
+  path, a vendor role included, so a client learns nothing by probing) is #458's remaining
+  server half.
 
 ## Crafting, and how a transaction is made out of an array
 
