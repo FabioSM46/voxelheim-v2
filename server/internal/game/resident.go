@@ -38,10 +38,10 @@ const (
 	// Bit 62 for [worldOwnedStructureBit]'s reason and with its arithmetic: every minted
 	// id comes from session.Registry.NextID, a counter from zero, so nothing minted will
 	// reach 2^62 and the two derived spaces cannot reach each other's. Disjointness is
-	// load-bearing rather than tidy — schemas/player.fbs requires one id to name one
-	// entity across everything a snapshot carries, and a client that meets a collision
-	// closes the connection rather than dropping the frame. It also makes the id
-	// non-zero, which the same contract requires.
+	// load-bearing rather than tidy — a resident travels in the same `MobState` vector as
+	// the mobs and the corpses, schemas/player.fbs requires one id to name one entity in
+	// one snapshot, and a client that meets a collision closes the connection. It also
+	// makes the id non-zero, which the same contract requires.
 	//
 	// A hash whose own bit 63 happens to be set therefore produces an id with both top
 	// bits set, which is inside the *structure* space. That is a 2^-62 coincidence away
@@ -56,7 +56,27 @@ const (
 	residentSeedOffset           int64 = 0x6F1B7A53
 	residentNameSeedOffset       int64 = 0x2C9E4D17
 	residentAppearanceSeedOffset int64 = 0x51A3F80B
+
+	// residentHealth is the number the health bar over a resident carries.
+	//
+	// **A wire requirement rather than a simulation quantity.** `MobState.health` and
+	// `MobState.max_health` are not optional, and nothing in this world can take a point
+	// off a resident, so there is no state here that changes — the field is a constant
+	// equal to its own maximum, which is what a client draws as a full bar or as no bar
+	// at all. The player's hundred rather than an invented number, so a reader who wonders
+	// what scale it is on has an answer.
+	residentHealth uint16 = PlayerMaxHealth
 )
+
+// residentBody is the box a resident occupies.
+//
+// The player's dimensions, because a resident is a person — but written out rather than
+// aliased to [playerBody], which is the argument species.go makes for stating the
+// draugr's box in full: narrowing a corridor for players must not silently narrow
+// somebody standing in one. It is used for exactly two distances, the notice radius and
+// the interaction reach, and for no collision at all: nothing collides with a resident,
+// because a resident is not in any collection the integrator reads.
+var residentBody = body{width: PlayerWidth, height: PlayerHeight}
 
 // resident is one person standing where the settlement drawing put them.
 //
@@ -80,16 +100,15 @@ type resident struct {
 	// does not walk, and there is no integrator that could move one.
 	pos [3]float64
 
-	// yaw is where this person is looking, and the only field a tick will ever be
-	// allowed to change. It arrives equal to restYaw below and stays there until
-	// somebody teaches a resident to notice a player.
+	// yaw is the only thing about a resident that a tick may change. See
+	// [Sim.advanceResidentsLocked].
 	yaw float64
 
 	// home is the centre of the settlement this person belongs to, and restYaw is the
 	// bearing derived from it: the way the anchor faces, which is the way they look when
 	// nobody is near. Both are kept because they answer different questions — the centre
-	// is the settlement's identity, and the bearing is a number rather than a compass
-	// member because it is what a yaw is compared against.
+	// is the settlement's identity, the bearing is a number the turn arithmetic uses
+	// twenty times a second.
 	home    [2]int64
 	restYaw float64
 	chunk   world.Coord
@@ -287,4 +306,119 @@ func (s *Sim) materialiseResidentLocked(coord world.Coord, settled world.Settlem
 
 	s.log.Debug("resident materialised", "entity_id", id, "role", role.String(),
 		"name", s.residents[id].name, "pos", s.residents[id].pos)
+}
+
+// advanceResidentsLocked turns whoever has somebody near them.
+//
+// **The entire behaviour of this entity class, and it is one number per tick.** A
+// resident with a live player inside [ResidentNoticeRadius] turns toward the nearest of
+// them at [ResidentTurnRate]; with nobody near, it turns back to the bearing its anchor
+// faces at the same rate. Turning back rather than snapping, because a body that changed
+// heading in one frame reads as a glitch rather than as somebody losing interest — and
+// the same arithmetic serves both, so there is one rate to reason about instead of two.
+//
+// **Order-independent on purpose**, which is why it iterates the map rather than a sorted
+// slice: each resident reads only its own state and the players, writes only its own yaw,
+// and draws no random number. Nothing here can depend on which person is stepped first,
+// so the determinism the rest of this package buys with a sort is already free.
+//
+// The caller holds Sim.mu.
+func (s *Sim) advanceResidentsLocked(players []*Player) {
+	if len(s.residents) == 0 {
+		return
+	}
+	step := ResidentTurnRate * s.dt
+
+	for _, r := range s.residents {
+		want := r.restYaw
+		if noticed := r.nearestNoticedLocked(players); noticed != nil {
+			want = wrapAngle(math.Atan2(r.pos[0]-noticed.pos[0], r.pos[2]-noticed.pos[2]))
+		}
+		r.yaw = turnToward(r.yaw, want, step)
+	}
+}
+
+// nearestNoticedLocked is the closest live player this resident can see, or nil.
+//
+// Body to body and in three dimensions, which is [mob]'s aggro measurement rather than a
+// second one: a person is noticed at the distance between the two boxes, so standing on
+// somebody's doorstep is inside the radius whatever the two positions round to.
+//
+// **A dead player is not noticed**, and that is the one condition worth stating: a corpse
+// on the ground is not somebody walking past, and a resident staring at it until the
+// respawn timer runs out is the wrong picture. It is also the only place this class reads
+// a player's life state at all.
+//
+// The caller holds Sim.mu.
+func (r *resident) nearestNoticedLocked(players []*Player) *Player {
+	var nearest *Player
+	best := math.Inf(1)
+	for _, p := range players {
+		if !p.alive() {
+			continue
+		}
+		distance := boxDistance(residentBody.boxAt(r.pos), playerBox(p.pos))
+		if distance > ResidentNoticeRadius || distance >= best {
+			continue
+		}
+		best, nearest = distance, p
+	}
+	return nearest
+}
+
+// turnToward rotates `from` toward `to` by at most `step` radians, the short way round.
+//
+// The wrap is what makes "the short way" true: a resident at 3.1 radians asked to face
+// -3.1 turns a twenty-fifth of a turn rather than very nearly a whole one. Landing inside
+// one step of the target snaps to it exactly, so a heading that is being held cannot
+// oscillate by a step forever.
+func turnToward(from, to, step float64) float64 {
+	delta := wrapAngle(to - from)
+	if math.Abs(delta) <= step {
+		return wrapAngle(to)
+	}
+	if delta > 0 {
+		return wrapAngle(from + step)
+	}
+	return wrapAngle(from - step)
+}
+
+// state is the wire form of one resident.
+//
+// **Idle, full health and no target, and every one of those is a constant rather than a
+// field**: a resident has no action state machine, cannot be damaged and cannot choose
+// somebody, so a struct field for any of them would be a value nothing writes. The kind
+// is `MobKind.Villager` for every role — the role travels in [protocol.ResidentAppearance]
+// instead — because `MobState.kind` is what sizes the body a client draws and every
+// resident is the same body.
+func (r *resident) state() protocol.MobState {
+	return protocol.MobState{
+		EntityID:       r.entityID,
+		Kind:           vnet.MobKindVillager,
+		Pos:            toWire(r.pos),
+		Yaw:            float32(r.yaw),
+		Health:         residentHealth,
+		MaxHealth:      residentHealth,
+		Action:         vnet.MobActionIdle,
+		TargetEntityID: 0,
+	}
+}
+
+// appearanceFrame is the once-per-viewer description of one resident.
+//
+// The counterpart of the PlayerAppearance the snapshot loop builds beside it, and it is
+// built for the same reason at the same moment: a client needs a name and a face for an
+// entity a snapshot is about to draw, and neither belongs in a frame sent twenty times a
+// second. Unlike a player's, nothing about it can change while the session lasts — a
+// resident does not level up, change clothes or rename itself — so the encoding is worth
+// caching for the whole tick and would be worth caching for longer.
+func (r *resident) appearanceFrame() []byte {
+	return protocol.EncodeResidentAppearance(protocol.ResidentAppearance{
+		EntityID:      r.entityID,
+		Name:          r.name,
+		HasName:       true,
+		Role:          r.role,
+		Appearance:    r.appearance,
+		HasAppearance: true,
+	})
 }
