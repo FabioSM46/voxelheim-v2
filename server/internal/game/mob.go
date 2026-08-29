@@ -19,9 +19,15 @@ import (
 //
 // **The intelligence here is a bounded state machine and nothing more.** It steers at
 // one target, collides with the same voxels a player does, and may hop a single block.
-// It is allowed to get stuck behind a wall. A*, navmeshes and line of sight are separate
-// systems, and a creature that already knew how to walk round a corner would make each
-// of them impossible to evaluate on its own.
+// It is allowed to get stuck behind a wall. A*, navmeshes and pathing line of sight are
+// separate systems, and a creature that already knew how to walk round a corner would
+// make each of them impossible to evaluate on its own.
+//
+// **The one voxel the state machine does read between itself and its target is the one
+// its blow would have to cross** — see [mob.inReach]. That is not the beginning of
+// navigation: nothing steers around what it finds, and a creature walled out of hitting
+// still walks into the wall for as long as its target stands behind it. It is the wall
+// finally being worth the same to a swing as it has always been worth to a step.
 //
 // **One state machine, many species, and every number it reads comes from the
 // registry.** A vargr is a draugr's brain with different numbers in front of it — see
@@ -495,7 +501,7 @@ func (m *mob) stepPursuit(s *Sim, target *Player) {
 	}
 
 	m.action = vnet.MobActionChase
-	if m.inReach(target) {
+	if m.inReach(s.terrain, target) {
 		m.beginWindup(s)
 		return
 	}
@@ -508,9 +514,10 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 	// closing the distance it is measured against.
 	m.vel[0], m.vel[2] = 0, 0
 
-	if target == nil || !m.inReach(target) {
-		// Lost before it landed. No damage, and no recovery either — recovery is what an
-		// attack costs, and this was not one.
+	if target == nil || !m.inReach(s.terrain, target) {
+		// Lost before it landed — walked out of range, gone from the world, or gone
+		// behind a block somebody placed while the telegraph played out. No damage, and
+		// no recovery either: recovery is what an attack costs, and this was not one.
 		m.action = vnet.MobActionIdle
 		m.actionTicks = 0
 		if target == nil {
@@ -621,10 +628,30 @@ func (m *mob) beginWindup(s *Sim) {
 	m.vel[0], m.vel[2] = 0, 0
 }
 
-// inReach reports whether a target is close enough to be hit.
-func (m *mob) inReach(target *Player) bool {
+// inReach reports whether a target is close enough to be hit and whether the blow has
+// anywhere to travel.
+//
+// **Two questions in one function because there is no caller for either half alone.**
+// A swing is committed on this answer and landed on it again a few ticks later, and a
+// caller that could ask only the distance is a caller that hits through a wall — which
+// is exactly what this used to be. Distance first: it is arithmetic on two boxes, and
+// the traversal below is the one that reads voxels.
+//
+// **Centre to centre, one line.** It is the segment a blow would have to cross, and a
+// single line is the whole of the claim being made — a creature whose centre can see a
+// player's centre swings, and one whose cannot does not. Sampling a body's corners as
+// well would be a different rule (a shoulder past a doorframe is a hit), and the
+// navigation this shares a file with is straight-line for the same reason: see
+// [mob.steerToward], where a creature is allowed to be walled out by a corner. It is
+// now walled out of hitting by the same corner, which is the outcome the wall was
+// already producing for movement and never produced for damage.
+func (m *mob) inReach(t Terrain, target *Player) bool {
 	def := m.species()
-	return boxDistance(def.body.boxAt(m.pos), playerBox(target.pos)) <= def.attackRange
+	body := def.body.boxAt(m.pos)
+	if boxDistance(body, playerBox(target.pos)) > def.attackRange {
+		return false
+	}
+	return clearLineOfSight(t, boxCentre(body), boxCentre(playerBox(target.pos)))
 }
 
 // steerToward walks straight at a target and faces it.

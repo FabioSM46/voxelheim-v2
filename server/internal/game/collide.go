@@ -383,13 +383,107 @@ func anyVoxel(b box, want func(x, y, z int64) bool) bool {
 
 // beyondTheWorld reports whether any face has left the range the voxel arithmetic
 // can address.
+//
+// Both corners are asked the whole question rather than one bound each, and the
+// answer is the same one: a box is ordered, so a minimum past the far edge drags its
+// maximum with it. Sharing the point test with the sight line below is what that
+// buys — one definition of where the world stops, read by the two things that have
+// to stop there.
 func (b box) beyondTheWorld() bool {
+	return pointBeyondTheWorld(b.min) || pointBeyondTheWorld(b.max)
+}
+
+// pointBeyondTheWorld reports whether a point has left the addressable world.
+func pointBeyondTheWorld(p [3]float64) bool {
 	for axis := range 3 {
-		if b.min[axis] < -worldLimit || b.max[axis] > worldLimit {
+		if p[axis] < -worldLimit || p[axis] > worldLimit {
 			return true
 		}
 	}
 	return false
+}
+
+// clearLineOfSight reports whether the straight segment from one point to another
+// crosses no solid voxel.
+//
+// **The voxels the segment enters, in order — not samples taken along it.** A wall
+// one block thick fits between two samples at any spacing a caller picks, and the
+// spacing fine enough to catch it costs more than walking the line properly does.
+// This is the standard grid traversal: for each axis, how far along the segment the
+// next block boundary lies (tMax) and how far apart consecutive boundaries are
+// (tDelta), advancing whichever axis reaches its boundary first. The parameter runs
+// 0 at from to 1 at to, so the segment's own length is what bounds the walk.
+//
+// **Both endpoints' own voxels are tested, and a body whose centre is inside a solid
+// therefore has no line to anywhere.** That is the direction [Terrain.Solid] already
+// fails in for a chunk that has not arrived: terrain the tick cannot see through is
+// terrain it does not let a blow through either. Out past [worldLimit] the same
+// answer, for both of that constant's reasons — everything there is solid, and the
+// int64 voxel arithmetic below has stopped meaning anything.
+//
+// Non-generating, like every other terrain read on the tick.
+func clearLineOfSight(t Terrain, from, to [3]float64) bool {
+	if pointBeyondTheWorld(from) || pointBeyondTheWorld(to) {
+		return false
+	}
+
+	voxel := [3]int64{
+		int64(math.Floor(from[0])),
+		int64(math.Floor(from[1])),
+		int64(math.Floor(from[2])),
+	}
+	last := [3]int64{
+		int64(math.Floor(to[0])),
+		int64(math.Floor(to[1])),
+		int64(math.Floor(to[2])),
+	}
+
+	var step [3]int64
+	var tMax, tDelta [3]float64
+	for axis := range 3 {
+		delta := to[axis] - from[axis]
+		switch {
+		case delta > 0:
+			step[axis] = 1
+			tMax[axis] = (float64(voxel[axis]+1) - from[axis]) / delta
+			tDelta[axis] = 1 / delta
+		case delta < 0:
+			step[axis] = -1
+			tMax[axis] = (float64(voxel[axis]) - from[axis]) / delta
+			tDelta[axis] = -1 / delta
+		default:
+			// Never crosses a boundary on this axis, so it is never the next one to.
+			tMax[axis] = math.Inf(1)
+			tDelta[axis] = math.Inf(1)
+		}
+	}
+
+	for {
+		if t.Solid(voxel[0], voxel[1], voxel[2]) {
+			return false
+		}
+		if voxel == last {
+			return true
+		}
+
+		axis := 0
+		if tMax[1] < tMax[axis] {
+			axis = 1
+		}
+		if tMax[2] < tMax[axis] {
+			axis = 2
+		}
+		// Past the far end. The loop terminates here even when rounding leaves the
+		// destination voxel one boundary off the segment's arithmetic end, and it
+		// terminates at all because tMax only ever grows: every iteration that does
+		// not return adds a strictly positive tDelta to the axis it advances, and an
+		// axis that stands still holds an infinity no comparison ever selects.
+		if tMax[axis] > 1 {
+			return true
+		}
+		voxel[axis] += step[axis]
+		tMax[axis] += tDelta[axis]
+	}
 }
 
 // voxelSpan returns the first and last voxel index a half-open [lo, hi) extent
