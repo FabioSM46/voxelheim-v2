@@ -1617,6 +1617,40 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		log.Debug("mark removed", "marker_id", request.MarkerID, "marks", len(list.Markers))
 		return nil
 
+	case vnet.PayloadNpcInteractRequest:
+		if player == nil || msg.NpcInteract == nil {
+			// Unreachable for the reason the cases above are, and stated for the same
+			// one: the alternative to a log line is a nil dereference in the goroutine
+			// holding a socket.
+			log.Debug("npc interaction arrived with no player to attribute it to; discarding")
+			return nil
+		}
+
+		request := *msg.NpcInteract
+
+		// **Every one of these is refused today, and the refusal is the feature.** The
+		// server has no price list to open until #459 teaches it what a vendor role sells,
+		// so a request naming a smith is answered exactly as one naming a guard, an entity
+		// out of reach, or an id that names nothing at all — see game.Player.InteractNPC,
+		// where the four sentences that distinguish them for an operator live.
+		reason, iErr := player.InteractNPC(request)
+		if iErr != nil {
+			log.Debug("refusing npc interaction",
+				"reason", iErr.Error(),
+				"code", reason.String(),
+				"entity_id", request.EntityID,
+				"client_tick", request.ClientTick,
+			)
+			if reason == vnet.RefusalReasonUnknown {
+				return nil
+			}
+			refusal := protocol.ActionRefused{Action: vnet.RefusedActionInteract, Reason: reason}
+			if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+				return fmt.Errorf("session: send npc interaction refusal: %w", sErr)
+			}
+		}
+		return nil
+
 	case vnet.PayloadLeaveRequest:
 		if player == nil || msg.LeaveRequest == nil {
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)

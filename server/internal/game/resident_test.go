@@ -756,3 +756,86 @@ func TestAResidentOutsideTheViewCubeIsNeitherSentNorDescribed(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Nothing opens
 // ---------------------------------------------------------------------------
+
+// **Every interaction is refused, and every one of them is refused the same way.** A role
+// that could keep a stall, a role that never could, somebody out of reach and an id that
+// names nothing at all: four different sentences for an operator, one frame for the
+// player. The uniformity is the fail-closed default — until #459 the server has no price
+// list to open, so answering anything else would be the client deciding an outcome.
+func TestEveryInteractionIsRefusedNotAVendor(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	roles := []vnet.ResidentRole{
+		vnet.ResidentRoleVillager, vnet.ResidentRoleGuard,
+		vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader,
+	}
+	for index, role := range roles {
+		// A separate column per role, because the id is a function of the column.
+		r := h.standResidentAt(role, [3]float64{float64(index) + 0.5, 64, 1.5}, 0)
+
+		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: 1})
+		if err == nil {
+			t.Errorf("addressing a %s opened something", role)
+		}
+		if reason != vnet.RefusalReasonNotAVendor {
+			t.Errorf("addressing a %s is refused %s, want NotAVendor", role, reason)
+		}
+	}
+
+	// And the two that are not residents at all.
+	for name, id := range map[string]uint64{
+		"an id nobody holds": 0xDEAD_BEEF,
+		"the player's own":   player.entityID,
+	} {
+		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: id, ClientTick: 1})
+		if err == nil {
+			t.Errorf("addressing %s opened something", name)
+		}
+		if reason != vnet.RefusalReasonNotAVendor {
+			t.Errorf("addressing %s is refused %s, want NotAVendor — a probe must learn nothing", name, reason)
+		}
+	}
+}
+
+// Reach is measured body to body against [EditReach], the same distance every other
+// interaction in this package uses — and the refusal is still NotAVendor, so a client
+// cannot map the answers to a rangefinder.
+func TestAddressingSomebodyOutOfReachIsRefusedTheSameWay(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	far := h.standResidentAt(vnet.ResidentRoleTrader, [3]float64{0.5, 64, EditReach + 4.5}, 0)
+
+	reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: far.entityID, ClientTick: 1})
+	if err == nil {
+		t.Fatal("a resident across the village answered")
+	}
+	if reason != vnet.RefusalReasonNotAVendor {
+		t.Errorf("somebody out of reach is refused %s, want NotAVendor", reason)
+	}
+}
+
+// The vendor roles are named in one place, so #459 changes what happens on a true rather
+// than having to rediscover which roles it applies to.
+func TestOnlyTheTradesCouldEverKeepAStall(t *testing.T) {
+	t.Parallel()
+
+	for role, could := range map[vnet.ResidentRole]bool{
+		vnet.ResidentRoleUnknown:   false,
+		vnet.ResidentRoleVillager:  false,
+		vnet.ResidentRoleGuard:     false,
+		vnet.ResidentRoleSmith:     true,
+		vnet.ResidentRoleCarpenter: true,
+		vnet.ResidentRoleCook:      true,
+		vnet.ResidentRoleTrader:    true,
+	} {
+		if got := vendorRole(role); got != could {
+			t.Errorf("vendorRole(%s) = %v, want %v", role, got, could)
+		}
+	}
+}
