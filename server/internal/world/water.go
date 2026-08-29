@@ -240,7 +240,7 @@ const _ = uint8(seaLevel - caveWaterLevel)
 //
 // Desert is absent by name. A desert with lakes in it is not a desert, and the
 // statement being made is that there is no water there rather than that there is
-// very little — the same shape as treeChanceDenominator's absent case.
+// very little — the same shape as coniferChanceDenominator's absent case.
 func basinAt(seed, worldX, worldZ int64, climate Climate) int {
 	if climate == Desert {
 		return 0

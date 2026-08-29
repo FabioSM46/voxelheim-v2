@@ -6,7 +6,7 @@ package world
 // **This is a second reading of the terrain, never a second definition of it.**
 // Everything here goes through [columnAt] and the rules layered on it —
 // [column.blockAt] for the material, [column.fillAt] for the sea line, [caveAt] for
-// what is hollow, [treeAtColumn] for what grows — so a map pixel and the chunk under
+// what is hollow, [plantAtColumn] for what grows — so a map pixel and the chunk under
 // it cannot disagree. A "map" that reimplemented the climate switch would be a second
 // generator wearing the first one's seed, and it would drift on the first retune.
 //
@@ -49,7 +49,7 @@ const (
 	SurfaceWater  SurfaceKind = 6
 	SurfaceIce    SurfaceKind = 7
 
-	// SurfaceForest is a column with a conifer rooted in it.
+	// SurfaceForest is a column rooted by a species whose table row marks a forest.
 	SurfaceForest SurfaceKind = 8
 
 	// SurfaceCave is a column a tunnel has opened in the daylight — an entrance, not
@@ -78,7 +78,7 @@ const (
 // lid comes back as [SurfaceIce] by the same rule that puts it in a chunk.
 //
 // Then the opening, then what grows, then the ground. A tree never roots in a hole —
-// [treeAtColumn] checks exactly that — so the middle two cannot both be true and their
+// [plantAtColumn] checks exactly that — so the middle two cannot both be true and their
 // order changes no answer; it is written this way because a carved column can be
 // rejected before the tree rules are asked at all.
 //
@@ -86,7 +86,7 @@ const (
 //
 // One [columnAt], which is one climate, one height field and one gravel field, and
 // then at most one [caveAt] for the column's own top voxel plus whatever
-// [treeAtColumn] spends rejecting a candidate. [HeightAt] itself is never called: the
+// [plantAtColumn] spends rejecting a candidate. [HeightAt] itself is never called: the
 // column already holds its answer, and calling it would pay for the height and the
 // climate a second time. That matters here more than anywhere else in this package,
 // because the one caller evaluates this 4096 times for a single map tile.
@@ -128,7 +128,7 @@ func SurfaceAt(seed int64, x, z int64) (height int, kind SurfaceKind) {
 		return col.surface, SurfaceCave
 	}
 
-	if _, rooted := treeAtColumn(seed, x, z, col); rooted {
+	if species, _, rooted := plantAtColumn(seed, x, z, col); rooted && species.forest {
 		return col.surface, SurfaceForest
 	}
 
