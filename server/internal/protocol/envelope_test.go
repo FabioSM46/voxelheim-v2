@@ -4117,3 +4117,255 @@ func TestV26AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		t.Errorf("WardBound.MaxWardedColumns = %d, want 2048", got)
 	}
 }
+
+// A storm warning round trips through the generated reader in all three phases, and the
+// envelope names it as its own payload rather than as anything already on the wire.
+//
+// Both fields are read in every phase, because the pair is the message: `seconds_until`
+// is a countdown under Approaching, a remaining duration under Raging and a zero under
+// Passed, and a phase that decoded to the wrong member would leave the number reading as
+// somebody else's storm.
+func TestAStormWarningCarriesItsPhaseAndTheSecondsThatBelongToIt(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]StormWarning{
+		"approaching": {SecondsUntil: 900, Phase: vnet.StormPhaseApproaching},
+		"raging":      {SecondsUntil: 120, Phase: vnet.StormPhaseRaging},
+		"passed":      {SecondsUntil: 0, Phase: vnet.StormPhasePassed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			frame := EncodeStormWarning(want)
+
+			msg, err := Decode(frame)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if msg.Kind != vnet.PayloadStormWarning {
+				t.Fatalf("Kind = %s, want %s", msg.Kind, vnet.PayloadStormWarning)
+			}
+
+			env := vnet.GetRootAsEnvelope(frame, 0)
+			tbl := payloadTable(t, env)
+			warning := new(vnet.StormWarning)
+			warning.Init(tbl.Bytes, tbl.Pos)
+
+			got := StormWarning{SecondsUntil: warning.SecondsUntil(), Phase: warning.Phase()}
+			if got != want {
+				t.Errorf("decoded as %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// The encoder builds the two frames the contract tells a client to refuse: a phase that
+// is the enum's zero, and a `Passed` that still carries a countdown.
+//
+// **Refusing them is the client's job and not this package's**, for the reason
+// EncodeCreateCharacterRequest builds names the handshake must reject: a decoder test
+// needs the bytes, and an encoder that could not produce them would leave the refusal
+// path with nothing to prove itself against. What this pins is only that the values
+// survive the encoder verbatim.
+func TestAStormWarningCarriesTheTwoShapesAClientMustRefuse(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]StormWarning{
+		"a phase with no name":     {SecondsUntil: 30, Phase: vnet.StormPhaseUnknown},
+		"a passed storm still due": {SecondsUntil: 45, Phase: vnet.StormPhasePassed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := vnet.GetRootAsEnvelope(EncodeStormWarning(want), 0)
+			tbl := payloadTable(t, env)
+			warning := new(vnet.StormWarning)
+			warning.Init(tbl.Bytes, tbl.Pos)
+
+			got := StormWarning{SecondsUntil: warning.SecondsUntil(), Phase: warning.Phase()}
+			if got != want {
+				t.Errorf("decoded as %+v, want %+v — the encoder repaired a value it was given", got, want)
+			}
+		})
+	}
+}
+
+// The weather rides in the snapshot, at the recipient's own position, with nothing else
+// displaced. The second half matters as much as the first: an appended field that moved
+// an existing one would satisfy every assertion about itself while breaking every frame
+// already on the wire.
+func TestASnapshotCarriesTheWeatherWhereTheRecipientStands(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string]WeatherState{
+		"clear carries nothing": {Kind: vnet.WeatherKindClear, Intensity: 0},
+		"drizzle":               {Kind: vnet.WeatherKindRain, Intensity: 1},
+		"snow at its hardest":   {Kind: vnet.WeatherKindSnow, Intensity: 255},
+		"a sandstorm":           {Kind: vnet.WeatherKindSandstorm, Intensity: 200},
+		"the storm's own kind":  {Kind: vnet.WeatherKindBlizzard, Intensity: 240},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+				Tick:       9,
+				TickOfDay:  4321,
+				Weather:    want,
+				HasWeather: true,
+			}), 0)
+			tbl := payloadTable(t, env)
+			snapshot := new(vnet.EntitySnapshot)
+			snapshot.Init(tbl.Bytes, tbl.Pos)
+
+			held := snapshot.Weather(nil)
+			if held == nil {
+				t.Fatal("a snapshot that states its weather carries no weather struct")
+			}
+			got := WeatherState{Kind: held.Kind(), Intensity: held.Intensity()}
+			if got != want {
+				t.Errorf("weather decoded as %+v, want %+v", got, want)
+			}
+
+			if got := snapshot.ServerTick(); got != 9 {
+				t.Errorf("ServerTick = %d, want 9 — weather was appended, not inserted", got)
+			}
+			if got := snapshot.TickOfDay(); got != 4321 {
+				t.Errorf("TickOfDay = %d, want 4321 — weather was appended, not inserted", got)
+			}
+		})
+	}
+}
+
+// A server that keeps no weather sends no struct, and it is HasWeather that decides —
+// never the value beside it.
+//
+// **The two absences are not the same absence, which is the whole reason the flag
+// exists.** An omitted struct field decodes as null, and the contract reads that as "this
+// server keeps no weather"; the Go zero value written in its place would be a *present*
+// struct carrying WeatherKindUnknown, which is a protocol error a client closes the
+// session over. The second case here is the one that would catch an encoder that decided
+// from the value: a fully populated WeatherState with the flag clear must still put
+// nothing on the wire.
+func TestASnapshotWithNoWeatherCarriesNoStructAtAll(t *testing.T) {
+	t.Parallel()
+
+	for name, snapshot := range map[string]EntitySnapshot{
+		"a caller that said nothing about weather": {Tick: 1},
+		"a value the flag does not authorise": {
+			Tick:    1,
+			Weather: WeatherState{Kind: vnet.WeatherKindBlizzard, Intensity: 255},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(snapshot), 0)
+			tbl := payloadTable(t, env)
+			decoded := new(vnet.EntitySnapshot)
+			decoded.Init(tbl.Bytes, tbl.Pos)
+
+			if held := decoded.Weather(nil); held != nil {
+				t.Errorf("a weatherless snapshot carries %s at intensity %d, want no struct at all",
+					vnet.EnumNamesWeatherKind[held.Kind()], held.Intensity())
+			}
+		})
+	}
+}
+
+// A doused campfire is the only structure that says anything about fire, and every other
+// structure in the same snapshot still reads as burning.
+//
+// The inversion in [StructureState.Doused] is what makes that true for a caller as well
+// as for the wire: `lit` defaults to true, Go zeroes a bool to false, and naming the
+// absence is what keeps a literal that mentions no fire from encoding a doused one.
+func TestADousedCampfireIsTheOnlyStructureThatSaysAnythingAboutFire(t *testing.T) {
+	t.Parallel()
+
+	structures := []StructureState{
+		{StructureID: 1, Kind: vnet.StructureKindCampfire, Anchor: [3]int32{2, 64, 3}, Facing: vnet.FacingNorth, OwnerEntityID: 7, Doused: true},
+		{StructureID: 2, Kind: vnet.StructureKindCampfire, Anchor: [3]int32{9, 64, 3}, Facing: vnet.FacingEast, OwnerEntityID: 7},
+		{StructureID: 3, Kind: vnet.StructureKindTent, Anchor: [3]int32{0, 64, 0}, Facing: vnet.FacingSouth, OwnerEntityID: 8},
+	}
+
+	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{Tick: 3, Structures: structures}), 0)
+	tbl := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(tbl.Bytes, tbl.Pos)
+
+	if got := snapshot.StructuresLength(); got != len(structures) {
+		t.Fatalf("StructuresLength = %d, want %d", got, len(structures))
+	}
+	for i, want := range structures {
+		var held vnet.StructureState
+		if !snapshot.Structures(&held, i) {
+			t.Fatalf("structure %d is missing from a snapshot that claims to hold it", i)
+		}
+		if got := held.Lit(); got != !want.Doused {
+			t.Errorf("structure %d has Lit = %t, want %t", i, got, !want.Doused)
+		}
+		// Read beside it: `lit` was appended to StructureState, and a field that
+		// displaced one of these would pass the assertion above on its own.
+		anchor := held.Anchor(nil)
+		if anchor == nil {
+			t.Fatalf("structure %d carries no anchor", i)
+		}
+		got := StructureState{
+			StructureID:   held.StructureId(),
+			Kind:          held.Kind(),
+			Anchor:        [3]int32{anchor.X(), anchor.Y(), anchor.Z()},
+			Facing:        held.Facing(),
+			OwnerEntityID: held.OwnerEntityId(),
+			Doused:        !held.Lit(),
+		}
+		if got != want {
+			t.Errorf("structure %d decoded as %+v, want %+v", i, got, want)
+		}
+	}
+}
+
+// The burning fire writes no byte and the doused one does, which is the claim the
+// schema's `lit = true` default was chosen for and the only place anything measures it.
+//
+// **It reads the vtable rather than the frame's length, and that is the whole point.**
+// The obvious version of this test — encode both and compare sizes — passes vacuously:
+// both frames come to the same number of bytes, because the one byte a doused fire adds
+// lands in padding the table was already carrying. What is actually being claimed is
+// narrower and is visible only here: a burning fire occupies **no vtable slot** for `lit`,
+// so its value is the schema's default showing through rather than anything this encoder
+// wrote, and that is what makes a pre-V26 server's silence and a burning fire the same
+// bytes.
+//
+// `lit` is StructureState's sixth field, so its vtable slot is 4 + 2*5 — the same number
+// flatc's own accessor reads, and the same arithmetic the vendor vectors above use.
+func TestABurningFireOccupiesNoSlotAndADousedOneDoes(t *testing.T) {
+	t.Parallel()
+
+	const litVTableSlot = flatbuffers.VOffsetT(14)
+
+	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+		Tick: 3,
+		Structures: []StructureState{
+			{StructureID: 1, Kind: vnet.StructureKindCampfire, Anchor: [3]int32{2, 64, 3}, Facing: vnet.FacingNorth, OwnerEntityID: 7},
+			{StructureID: 2, Kind: vnet.StructureKindCampfire, Anchor: [3]int32{9, 64, 3}, Facing: vnet.FacingEast, OwnerEntityID: 7, Doused: true},
+		},
+	}), 0)
+	tbl := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(tbl.Bytes, tbl.Pos)
+
+	for i, wantWritten := range []bool{false, true} {
+		var held vnet.StructureState
+		if !snapshot.Structures(&held, i) {
+			t.Fatalf("structure %d is missing from a snapshot that claims to hold it", i)
+		}
+		structure := held.Table()
+		if written := structure.Offset(litVTableSlot) != 0; written != wantWritten {
+			t.Errorf("structure %d wrote a lit byte = %t, want %t — a burning fire is supposed to "+
+				"cost nothing and ride the schema's default, and a doused one is the case that pays",
+				i, written, wantWritten)
+		}
+		if got := held.Lit(); got == wantWritten {
+			t.Errorf("structure %d reads Lit = %t, which is not what the slot above says", i, got)
+		}
+	}
+}
