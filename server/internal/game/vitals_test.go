@@ -44,8 +44,19 @@ func newVitalsHarness(t *testing.T, tickRate uint8, terrain Terrain) *vitalsHarn
 // that need the cube to be small enough to stand outside of.
 func newVitalsHarnessAt(t *testing.T, tickRate uint8, terrain Terrain, viewDistance uint8) *vitalsHarness {
 	t.Helper()
+	return newVitalsHarnessOver(t, tickRate, terrain, viewDistance, testWorldSeed)
+}
 
-	sim, err := NewSim(tickRate, viewDistance, testWorldSeed, terrain, refusedEdits{}, testEntityIDs(),
+// newVitalsHarnessOver is the same over a chosen world.
+//
+// The seed is a parameter for exactly one reason, and [testWorldSeed] stays the answer
+// everywhere else: a respawn now asks the *world* where the nearest settlement is, and
+// "there is no settlement anywhere near here" is a property no single seed can be relied
+// on to have at a convenient column. See the respawn tests at the foot of this file.
+func newVitalsHarnessOver(t *testing.T, tickRate uint8, terrain Terrain, viewDistance uint8, seed int64) *vitalsHarness {
+	t.Helper()
+
+	sim, err := NewSim(tickRate, viewDistance, seed, terrain, refusedEdits{}, testEntityIDs(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
@@ -1460,5 +1471,366 @@ func TestRegenerationIsTheSameDurationAtEveryTickRate(t *testing.T) {
 					c.name, got, rate, c.want, drift)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Respawn — the settlement tier (#460)
+// ---------------------------------------------------------------------------
+
+// The capital of [testWorldSeed], stated here rather than looked up, so a change to the
+// lattice that moves it turns these tests red instead of quietly re-aiming them.
+const (
+	testCapitalX       = 71
+	testCapitalZ       = -142
+	testCapitalPlateau = 75
+)
+
+// settlementRespawnGround is flat terrain to `top` with the two ways a column can be
+// unusable spelled separately: voxels the server has not composed, and voxels something
+// stands in.
+//
+// Both are needed because the respawn tier answers them the same way and for different
+// reasons — a tick may not wait for a chunk, and a body may not start inside a solid —
+// and a fixture that could only express one of them would let the other go untested.
+type settlementRespawnGround struct {
+	top     int64
+	absent  map[[3]int64]bool
+	blocked map[[3]int64]bool
+}
+
+func (w settlementRespawnGround) Block(x, y, z int64) (world.Block, bool) {
+	at := [3]int64{x, y, z}
+	if w.absent[at] {
+		return world.Air, false
+	}
+	if w.blocked[at] {
+		return world.Cobblestone, true
+	}
+	if y <= w.top {
+		return world.Stone, true
+	}
+	return world.Air, true
+}
+
+// Solid is the production rule read from the palette, for the reason spawnGround's is.
+func (w settlementRespawnGround) Solid(x, y, z int64) bool {
+	block, resident := w.Block(x, y, z)
+	return !resident || world.Solid(block)
+}
+
+func (w settlementRespawnGround) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
+
+// capitalGround is terrain whose surface is the capital's plateau, which is what the
+// settlement tier is about to read.
+func capitalGround() settlementRespawnGround {
+	return settlementRespawnGround{
+		top:     testCapitalPlateau,
+		absent:  map[[3]int64]bool{},
+		blocked: map[[3]int64]bool{},
+	}
+}
+
+// respawnPositionOf is the policy under test, asked directly rather than through a
+// death.
+//
+// Directly because the *height* is half of what the tier decides and a death does not
+// preserve it: respawnLocked puts the body down with onGround false and the next tick
+// settles it, so an end-to-end read answers where the fall stopped. The full cycle is
+// exercised once, at the foot of this file.
+func respawnPositionOf(h *vitalsHarness, p *Player, death [3]float64) [3]float64 {
+	h.t.Helper()
+
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	p.pos = death
+	return p.respawnPositionLocked()
+}
+
+// The tier this issue adds: no tent, so the body wakes at the nearest settlement rather
+// than back at the world spawn a whole journey away.
+//
+// Three hundred blocks due south-east of the capital, because a bearing is what the
+// offset is made of — see the diagonal note in the blocked-bearing test below.
+func TestWithNoTentAPlayerWakesAtTheNearestSettlement(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 20, capitalGround())
+	player, _ := h.join(1, [3]float32{0.5, testCapitalPlateau + 1, 0.5})
+
+	centreX, centreZ := float64(testCapitalX)+0.5, float64(testCapitalZ)+0.5
+	// Exactly on the diagonal, so the offset is respawnSettlementOffset/√2 on each axis.
+	death := [3]float64{centreX + 300, testCapitalPlateau + 1, centreZ + 300}
+
+	got := respawnPositionOf(h, player, death)
+
+	step := respawnSettlementOffset / math.Sqrt2
+	want := [3]float64{centreX + step, testCapitalPlateau + world.SpawnClearance, centreZ + step}
+	for axis, w := range want {
+		if math.Abs(got[axis]-w) > 1e-9 {
+			t.Fatalf("respawn put the player at %v, want the capital's plateau at %v", got, want)
+		}
+	}
+	if got == player.spawn {
+		t.Fatalf("respawn used the world spawn %v, which is the tier this issue replaces", player.spawn)
+	}
+}
+
+// The offset is what keeps two deaths off one voxel, and it is a bearing rather than a
+// constant: the same settlement answers a different column for every direction somebody
+// died in.
+func TestTheSettlementRespawnPushesOutAlongTheBearingOfTheDeath(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 20, capitalGround())
+	player, _ := h.join(1, [3]float32{0.5, testCapitalPlateau + 1, 0.5})
+
+	centreX, centreZ := float64(testCapitalX)+0.5, float64(testCapitalZ)+0.5
+	seen := map[[2]float64]bool{}
+	for _, bearing := range [][2]float64{{400, 400}, {-400, 400}, {400, -400}, {-260, 900}} {
+		got := respawnPositionOf(h, player,
+			[3]float64{centreX + bearing[0], testCapitalPlateau + 1, centreZ + bearing[1]})
+
+		if reach := math.Hypot(got[0]-centreX, got[2]-centreZ); math.Abs(reach-respawnSettlementOffset) > 1e-9 {
+			t.Errorf("dying at bearing %v woke the player %v blocks from the centre, want %d",
+				bearing, reach, respawnSettlementOffset)
+		}
+		key := [2]float64{got[0], got[2]}
+		if seen[key] {
+			t.Errorf("bearing %v stacked on a column another death already used: %v", bearing, key)
+		}
+		seen[key] = true
+	}
+
+	// Dying on the centre column itself has no bearing to push out along, and the answer
+	// is the centre rather than a division by zero.
+	got := respawnPositionOf(h, player, [3]float64{centreX, testCapitalPlateau + 1, centreZ})
+	if got[0] != centreX || got[2] != centreZ {
+		t.Errorf("a death on the centre woke the player at %v, want the centre column", got)
+	}
+}
+
+// A tent still wins, and the settlement tier is genuinely underneath it rather than
+// beside it: this is the same world the test above wakes at the capital in.
+func TestATentStillOutranksTheNearestSettlement(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 20, capitalGround())
+	player, _ := h.join(1, [3]float32{0.5, testCapitalPlateau + 1, 0.5})
+
+	h.sim.mu.Lock()
+	tent := &structure{
+		structureID: 900,
+		kind:        vnet.StructureKindTent,
+		owner:       player.playerID,
+		anchor:      [3]int32{20, testCapitalPlateau, 20},
+	}
+	h.sim.structures = map[uint64]*structure{tent.structureID: tent}
+	h.sim.mu.Unlock()
+
+	got := respawnPositionOf(h, player,
+		[3]float64{float64(testCapitalX) + 300.5, testCapitalPlateau + 1, float64(testCapitalZ) + 300.5})
+
+	want := [3]float64{20.5, testCapitalPlateau + 1, 20.5}
+	if got != want {
+		t.Fatalf("with a tent standing the player woke at %v, want the tent at %v", got, want)
+	}
+}
+
+// The world spawn is still the floor under both tiers, and this is the case that reaches
+// it honestly: a column in a world whose lattice holds no settlement within the bound
+// [world.NearestSettlement] searches.
+//
+// Its own seed, because "nowhere near a settlement" is a property of a world rather than
+// of a position — every seed puts a capital at spawn — and this pair was found by
+// sweeping rather than asserted from the placement rules.
+func TestWithNoSettlementInRangeTheWorldSpawnIsStillTheAnswer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		emptySeed = 318
+		emptyX    = 40000
+		emptyZ    = 40000
+	)
+	if _, found := world.NearestSettlement(emptySeed, emptyX, emptyZ); found {
+		t.Fatalf("seed %d now holds a settlement near (%d, %d); this test needs a column that has none",
+			emptySeed, emptyX, emptyZ)
+	}
+
+	h := newVitalsHarnessOver(t, 20, capitalGround(), 8, emptySeed)
+	joined := [3]float32{emptyX + 0.5, testCapitalPlateau + 1, emptyZ + 0.5}
+	player, _ := h.join(1, joined)
+
+	got := respawnPositionOf(h, player,
+		[3]float64{emptyX + 40.5, testCapitalPlateau + 1, emptyZ + 40.5})
+
+	if got != player.spawn {
+		t.Fatalf("with no settlement in range the player woke at %v, want the world spawn %v", got, player.spawn)
+	}
+}
+
+// The verification the tier does on the column it picked, in both directions the
+// non-generating read can refuse it.
+func TestASettlementColumnTheTickCannotUseFallsThroughToTheWorldSpawn(t *testing.T) {
+	t.Parallel()
+
+	centreX, centreZ := float64(testCapitalX)+0.5, float64(testCapitalZ)+0.5
+	// Due east, so the body stands in the single column at x = centre + 3. That is also
+	// the bearing the capital's keep really blocks — see the schematic test below.
+	death := [3]float64{centreX + 300, testCapitalPlateau + 1, centreZ}
+	bed := [3]int64{testCapitalX + respawnSettlementOffset, 0, testCapitalZ}
+
+	for _, tc := range []struct {
+		name   string
+		ground func() settlementRespawnGround
+	}{
+		{
+			// The chunk has not been composed. A tick may not wait for one, and an
+			// absent chunk is not somewhere to put a body.
+			name: "the column is not loaded",
+			ground: func() settlementRespawnGround {
+				w := capitalGround()
+				w.absent[[3]int64{bed[0], testCapitalPlateau + world.SpawnClearance, bed[2]}] = true
+				return w
+			},
+		},
+		{
+			// Something stands in it. moveAndCollide refuses to move a body that starts
+			// inside a solid, so this is the case where waking in the village would mean
+			// waking inside its masonry.
+			name: "something stands in the column",
+			ground: func() settlementRespawnGround {
+				w := capitalGround()
+				w.blocked[[3]int64{bed[0], testCapitalPlateau + world.SpawnClearance, bed[2]}] = true
+				return w
+			},
+		},
+		{
+			// The floor voxel itself has not been composed.
+			name: "the plateau under it is not loaded",
+			ground: func() settlementRespawnGround {
+				w := capitalGround()
+				w.absent[[3]int64{bed[0], testCapitalPlateau, bed[2]}] = true
+				return w
+			},
+		},
+		{
+			// The floor is loaded and is air: the lattice says there is a plateau here
+			// and the terrain does not have one. Answered like the rest, because a body
+			// put down over nothing is a body that falls out of the village.
+			name: "there is no plateau under it at all",
+			ground: func() settlementRespawnGround {
+				w := capitalGround()
+				w.top = testCapitalPlateau - 1
+				return w
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newVitalsHarness(t, 20, tc.ground())
+			player, _ := h.join(1, [3]float32{0.5, testCapitalPlateau + 1, 0.5})
+
+			// The same world with the same column left alone wakes them at the capital,
+			// so the fallback below is this one voxel and not the fixture.
+			clear := newVitalsHarness(t, 20, capitalGround())
+			reference, _ := clear.join(1, [3]float32{0.5, testCapitalPlateau + 1, 0.5})
+			if at := respawnPositionOf(clear, reference, death); at == reference.spawn {
+				t.Fatalf("the unmodified fixture already fell through to the world spawn at %v", at)
+			}
+
+			if got := respawnPositionOf(h, player, death); got != player.spawn {
+				t.Fatalf("the player woke at %v, want the world spawn %v", got, player.spawn)
+			}
+		})
+	}
+}
+
+// The paragraph in settlementRespawnLocked that says a capital blocks three of its four
+// cardinal bearings is a claim about a drawing, and a decision was made from it — that
+// the offset stays at three blocks and the fallback absorbs the keep. So the drawing is
+// asked.
+//
+// The keep stands unrotated on the settlement's centre and its floor is one above the
+// plateau, so a body put down at Plateau + [world.SpawnClearance] occupies the drawing's
+// y = 1 and y = 2.
+func TestTheKeepStandsWhereThisRespawnRuleSaysItDoes(t *testing.T) {
+	t.Parallel()
+
+	keep := world.SchematicFor(world.BuildingKeep)
+	midX, midZ := keep.W/2, keep.D/2
+
+	for _, tc := range []struct {
+		name        string
+		dx, dz      int
+		wantBlocked bool
+	}{
+		{"east", respawnSettlementOffset, 0, true},
+		{"west", -respawnSettlementOffset, 0, true},
+		{"north", 0, -respawnSettlementOffset, true},
+		{"south — the tower's doorway", 0, respawnSettlementOffset, false},
+	} {
+		blocked := false
+		for _, y := range []int{1, 2} {
+			if keep.At(midX+tc.dx, y, midZ+tc.dz) != world.Air {
+				blocked = true
+			}
+		}
+		if blocked != tc.wantBlocked {
+			t.Errorf("%s of the keep's middle is blocked=%v at body height, want %v",
+				tc.name, blocked, tc.wantBlocked)
+		}
+	}
+
+	// The two smaller public buildings are the ones a village puts at its centre, and
+	// the tier works on every bearing there because they are hollow this far out.
+	for _, kind := range []world.BuildingKind{world.BuildingHall, world.BuildingSmithy} {
+		drawing := world.SchematicFor(kind)
+		midX, midZ := drawing.W/2, drawing.D/2
+		for _, off := range [][2]int{
+			{respawnSettlementOffset, 0}, {-respawnSettlementOffset, 0},
+			{0, respawnSettlementOffset}, {0, -respawnSettlementOffset},
+		} {
+			for _, y := range []int{1, 2} {
+				if got := drawing.At(midX+off[0], y, midZ+off[1]); got != world.Air {
+					t.Errorf("%v holds %v at %v, y=%d — a village centre must be clear this far out",
+						kind, got, off, y)
+				}
+			}
+		}
+	}
+}
+
+// Once through the real thing: a death, the countdown, and the tick that settles the
+// body — so the tier is reached from where the simulation actually calls it and not only
+// from a test's direct call.
+func TestADeathWithNoTentEndsAtTheNearestSettlement(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, 20, capitalGround())
+	centreX, centreZ := float64(testCapitalX)+0.5, float64(testCapitalZ)+0.5
+	player, _ := h.join(1, [3]float32{float32(centreX + 300), testCapitalPlateau + 1, float32(centreZ + 300)})
+
+	h.sim.mu.Lock()
+	player.damageLocked(PlayerMaxHealth)
+	h.sim.mu.Unlock()
+	h.advance(int(h.sim.deathTicks) + 1)
+
+	step := respawnSettlementOffset / math.Sqrt2
+	h.sim.mu.Lock()
+	got := player.pos
+	alive := player.alive()
+	h.sim.mu.Unlock()
+
+	if !alive {
+		t.Fatalf("the player is still dead after the countdown")
+	}
+	// The column rather than the exact position: the respawn puts the body above the
+	// ground with onGround false and the tick settles it, so the height that survives is
+	// the collision skin's answer and the policy is what this test is about.
+	if math.Abs(got[0]-(centreX+step)) > 1e-9 || math.Abs(got[2]-(centreZ+step)) > 1e-9 {
+		t.Fatalf("the player came back at %v, want the capital's column near (%v, %v)",
+			got, centreX+step, centreZ+step)
 	}
 }

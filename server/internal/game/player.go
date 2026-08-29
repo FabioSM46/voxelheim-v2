@@ -218,10 +218,17 @@ type Sim struct {
 	loot *rand.Rand
 
 	// worldSeed is the number this world is, kept rather than only spent on the two
-	// generators above. **Still not a licence to generate terrain**: the simulation does
-	// not call world.Generate, cannot, and reads chunks through a seam that carries no
-	// seed. What it reads with this is world.SettlementsNear, which opens no chunk and no
-	// cache. See station.go.
+	// generators above, because two of the answers below are properties of the *world*
+	// rather than of the process: station.go derives a settlement's stations from it,
+	// and a respawn with no tent asks [world.NearestSettlement] where the nearest
+	// village stands.
+	//
+	// **Still not a licence to generate terrain**: the simulation does not call
+	// world.Generate, cannot, and reads chunks through a seam that carries no seed. Both
+	// lattice queries it reads with this — world.SettlementsNear and
+	// world.NearestSettlement — are a handful of hashes over the seed that open no chunk
+	// and no cache, which is what lets them answer on the tick without going anywhere
+	// near that seam. See station.go.
 	worldSeed int64
 
 	// structures is every placed tent and forge, keyed by identity for the reason the
@@ -269,14 +276,18 @@ type Sim struct {
 //
 // mintEntityID is the identity source shared with the sessions; see the field.
 //
-// **worldSeed is here to derive from, not to generate anything.** The simulation still
-// knows nothing about terrain: it does not call world.Generate, it cannot, and the seam
-// it reads chunks through has no seed on it. What the number buys is that the spawn
-// director's choices and a kill's yield are properties of the *world* rather than of the
-// process — two runs of the same world, given the same ticks, place the same creatures in
-// the same places and roll the same corpse entries — and, since #456, that a village
-// smithy's forge is the same forge with the same id on every server that runs this world
-// without a byte of it being written down.
+// **worldSeed is here to derive from and to answer questions about the world, not to
+// generate anything.** The simulation still knows nothing about terrain: it does not call
+// world.Generate, it cannot, and the seam it reads chunks through has no seed on it. What
+// the number buys is that the spawn director's choices and a kill's yield are properties
+// of the *world* rather than of the process — two runs of the same world, given the same
+// ticks, place the same creatures in the same places and roll the same corpse entries —
+// and, since #456, that a village smithy's forge is the same forge with the same id on
+// every server that runs this world without a byte of it being written down.
+//
+// It is also what a respawn hands [world.NearestSettlement], which is a pure function of
+// the seed and a column: it says where a village *is* without building one, and the
+// voxels it names are still read through the terrain seam like every other voxel here.
 // Each generator gets its own PCG stream off this one seed, so neither is a function of
 // what the other has drawn. Any value is accepted, including zero: a seed is a starting
 // point and there is no such thing as a wrong one.
