@@ -820,6 +820,17 @@ func generatedColumnTop(seed, worldX, worldZ int64) int {
 	return top
 }
 
+// GeneratedColumnTop returns the highest solid voxel the procedural world places in
+// one block column, including ice, caves and a neighbouring tree canopy.
+//
+// It is the vertical half of regeneration's safety rule: after player edits are
+// forgotten, a body that the restored terrain encloses is lifted above the same base
+// Generate composes. Pure in seed and column, so callers do not open or generate a
+// chunk to ask it.
+func GeneratedColumnTop(seed, worldX, worldZ int64) int {
+	return generatedColumnTop(seed, worldX, worldZ)
+}
+
 // Spawn placement. The column is fixed; the height is not, because it cannot be.
 const (
 	// spawnColumnX and spawnColumnZ are the world column every session starts in.

@@ -808,7 +808,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// what this session holds is exactly what the streamer has managed to send, so
 			// there is one copy of that set and no second one to fall out of step. Before
 			// this point the session holds nothing, so there is nothing to send it.
-			peers.Subscribe(entityID, streamer.View(), trySend)
+			peers.Subscribe(entityID, streamer.View(), admitted.WakeStreaming, trySend)
 
 			// Mining completion may wait on Editor and therefore cannot run on Step. One
 			// session-scoped worker consumes the tick's bounded handoff, applies the shared
@@ -1725,6 +1725,7 @@ type Registry struct {
 // peer is an admitted session as a broadcast sees it: what it holds, and how to reach it.
 type peer struct {
 	view *View
+	wake func()
 	send func(frame []byte) bool
 }
 
@@ -1769,17 +1770,17 @@ func (r *Registry) Remove(id uint64) {
 	delete(r.peers, id)
 }
 
-// Subscribe makes an admitted session a broadcast target: view is what it holds, and send
-// is how a frame reaches it.
+// Subscribe makes an admitted session a broadcast target: view is what it holds, wake asks
+// its streamer for a diff at the current centre, and send is how a frame reaches it.
 //
 // send must be the non-blocking path. It is called with this registry's lock held, from
 // whichever session's goroutine resolved an edit, so a send that waited for room in
 // somebody else's queue would stall an unrelated player's connection until a client that
 // had stopped reading started again.
-func (r *Registry) Subscribe(id uint64, view *View, send func(frame []byte) bool) {
+func (r *Registry) Subscribe(id uint64, view *View, wake func(), send func(frame []byte) bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.peers[id] = peer{view: view, send: send}
+	r.peers[id] = peer{view: view, wake: wake, send: send}
 }
 
 // Unsubscribe stops broadcasts to a session.
@@ -1826,6 +1827,32 @@ func (r *Registry) BroadcastChunk(coord world.Coord, frame []byte) int {
 		p.view.Forget(coord)
 	}
 	return sent
+}
+
+// ResendChunk schedules a complete ChunkData repair for every session that currently
+// holds coord, and reports how many sessions were scheduled.
+//
+// The view is forgotten before its streamer is woken. That ordering is the repair:
+// MoveTo at an unchanged centre diffs what the view is missing, so the next pass sends
+// the regenerated chunk whole instead of trying to describe the reset as a sequence of
+// BlockUpdates. Sessions that have not received coord are untouched; their ordinary
+// in-flight send will already read the regenerated composition.
+func (r *Registry) ResendChunk(coord world.Coord) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	scheduled := 0
+	for _, p := range r.peers {
+		if !p.view.Holds(coord) {
+			continue
+		}
+		p.view.Forget(coord)
+		if p.wake != nil {
+			p.wake()
+		}
+		scheduled++
+	}
+	return scheduled
 }
 
 // Count reports how many sessions are live.
