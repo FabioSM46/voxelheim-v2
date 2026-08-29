@@ -131,7 +131,7 @@ func TestEverySchematicIsTheSizeItsIssueAsksFor(t *testing.T) {
 		BuildingHut:    {7, 5, 7},
 		BuildingSmithy: {9, 6, 9},
 		BuildingHall:   {13, 8, 13},
-		BuildingKeep:   {15, 14, 15},
+		BuildingKeep:   {21, 20, 21},
 	}
 	for _, drawing := range everySchematic() {
 		got := [3]int{drawing.s.W, drawing.s.H, drawing.s.D}
@@ -184,11 +184,20 @@ func TestTheDrawingsSayWhatTheirCommentsSayTheySay(t *testing.T) {
 		{BuildingHall, 1, 7, 2, Air, "the ridge is inset by two on x"},
 		{BuildingHall, 2, 7, 1, Air, "and by two on z"},
 
-		{BuildingKeep, 7, 0, 7, Air, "the courtyard's tower room"},
-		{BuildingKeep, 4, 0, 4, Cobblestone, "the tower's own wall"},
-		{BuildingKeep, 0, 5, 0, Air, "the wall ring stops below the tower"},
-		{BuildingKeep, 7, 12, 7, Planks, "the tower's roof"},
-		{BuildingKeep, 2, 12, 3, Air, "the roof overhangs the tower by one and stops well short of the wall"},
+		{BuildingKeep, 1, 0, 1, Cobblestone, "the curtain wall is two courses thick"},
+		{BuildingKeep, 2, 0, 2, Air, "and the courtyard begins at the third"},
+		{BuildingKeep, 10, 0, 20, Air, "the gate"},
+		{BuildingKeep, 10, 3, 20, Cobblestone, "the lintel that closes it"},
+		{BuildingKeep, 0, 6, 10, Cobblestone, "the parapet"},
+		{BuildingKeep, 1, 6, 10, Air, "and the wall walk inside it"},
+		{BuildingKeep, 10, 6, 10, Cobblestone, "the second floor's slab"},
+		{BuildingKeep, 6, 6, 10, Air, "the stairwell through it"},
+		{BuildingKeep, 6, 3, 9, Cobblestone, "a tread of the first flight"},
+		{BuildingKeep, 10, 12, 10, Cobblestone, "the third floor's slab"},
+		{BuildingKeep, 14, 9, 10, Cobblestone, "a tread of the second flight"},
+		{BuildingKeep, 10, 16, 5, Planks, "the string course under the eaves"},
+		{BuildingKeep, 4, 17, 4, Planks, "the eaves, oversailing the keep by one"},
+		{BuildingKeep, 10, 19, 10, Thatch, "the cap"},
 	} {
 		s := SchematicFor(tc.kind)
 		if got := s.At(tc.x, tc.y, tc.z); got != tc.want {
@@ -293,9 +302,9 @@ func TestEveryAnchorIsWhereItsBuildingPutsIt(t *testing.T) {
 			{X: 3, Y: 0, Z: 9, Kind: AnchorTrader},
 		},
 		BuildingKeep: {
-			{X: 5, Y: 0, Z: 13, Kind: AnchorGuard},
-			{X: 9, Y: 0, Z: 13, Kind: AnchorGuard},
-			{X: 7, Y: 0, Z: 6, Kind: AnchorCarpenter},
+			{X: 8, Y: 0, Z: 18, Kind: AnchorGuard},
+			{X: 12, Y: 0, Z: 18, Kind: AnchorGuard},
+			{X: 10, Y: 0, Z: 13, Kind: AnchorCarpenter},
 		},
 	}
 
@@ -619,6 +628,162 @@ func TestAPlacedBuildingIsItsDrawingMovedAndTurned(t *testing.T) {
 						drawing.kind, facing, a.Kind, a.X, a.Y, a.Z)
 				}
 			}
+		}
+	}
+}
+
+// The helpers below and the two tests after them are the machine-checked half of #555's
+// "no room a player can see into but never stand in".
+//
+// **Nothing here ever asked whether a body could get from one voxel to another.** Every
+// other test in this file counts, classifies, permutes or reads a named cell, and a
+// castle with three floors and no stairs between them satisfies all of them.
+//
+// The movement model is internal/game's rather than a convenience: a body is under two
+// blocks tall, so standing takes two clear cells and a floor; the jump impulse clears one
+// block and not two, so a step up is one block; falling is free. Below y=0 is the plateau
+// the building stands on — solid, because [settlementSite.building] puts the floor course
+// at `plateau + 1` — and outside the drawing is open air.
+func schematicBlockAt(s *Schematic, x, y, z int) Block {
+	if y < 0 {
+		return Cobblestone
+	}
+	if y >= s.H || x < 0 || x >= s.W || z < 0 || z >= s.D {
+		return Air
+	}
+	return s.At(x, y, z)
+}
+
+func passableCell(s *Schematic, x, y, z int) bool {
+	block := schematicBlockAt(s, x, y, z)
+	return block == Air || block == keepTerrain
+}
+
+func standableCell(s *Schematic, x, y, z int) bool {
+	return passableCell(s, x, y, z) && passableCell(s, x, y+1, z) && !passableCell(s, x, y-1, z)
+}
+
+// walkSchematic is every cell reachable on foot from one standing cell.
+func walkSchematic(s *Schematic, from [3]int) map[[3]int]bool {
+	reached := map[[3]int]bool{from: true}
+	queue := [][3]int{from}
+	for len(queue) > 0 {
+		c := queue[0]
+		queue = queue[1:]
+		for _, step := range [][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+			for _, dy := range []int{1, 0, -1} {
+				next := [3]int{c[0] + step[0], c[1] + dy, c[2] + step[1]}
+				if next[0] < 0 || next[0] >= s.W || next[2] < 0 || next[2] >= s.D ||
+					next[1] < 0 || next[1] >= s.H {
+					continue
+				}
+				if reached[next] || !standableCell(s, next[0], next[1], next[2]) {
+					continue
+				}
+				// A step up needs room over the head it is taken from; across and down
+				// need nothing beyond the destination.
+				if dy == 1 && !passableCell(s, c[0], c[1]+2, c[2]) {
+					continue
+				}
+				reached[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return reached
+}
+
+// TestEveryRoomADrawingHasIsReachableFromItsDoorway walks each drawing from its door.
+//
+// **"Interior" is `roofed and off the outer face`, and both halves earn their place.**
+// Roofed is what makes a cell a room: one with nothing solid above it is a rampart or a
+// rooftop, and neither is a space a player is promised a way into — the castle's parapet
+// is deliberately two blocks above its wall walk and deliberately not reachable. Off the
+// outer face excludes a window sill, standable from outside and roofed by the course
+// above it in every drawing here since the smithy was first drawn.
+//
+// The anchors come along because they are this file's output: a slot two other issues
+// build an entity from is worth nothing if nothing can walk to it.
+func TestEveryRoomADrawingHasIsReachableFromItsDoorway(t *testing.T) {
+	t.Parallel()
+
+	for _, drawing := range everySchematic() {
+		s := drawing.s
+		door := [3]int{s.W / 2, 0, s.D - 1}
+		if !standableCell(s, door[0], door[1], door[2]) {
+			t.Errorf("%v's doorway at %v is not somewhere a body can stand", drawing.kind, door)
+			continue
+		}
+		reached := walkSchematic(s, door)
+
+		for _, a := range s.Anchors {
+			if !reached[[3]int{a.X, a.Y, a.Z}] {
+				t.Errorf("%v's %v slot at (%d, %d, %d) cannot be walked to from the doorway",
+					drawing.kind, a.Kind, a.X, a.Y, a.Z)
+			}
+		}
+
+		sealed := 0
+		for y := range s.H {
+			for z := 1; z < s.D-1; z++ {
+				for x := 1; x < s.W-1; x++ {
+					if !standableCell(s, x, y, z) || reached[[3]int{x, y, z}] {
+						continue
+					}
+					roofed := false
+					for above := y + 2; above < s.H; above++ {
+						if !passableCell(s, x, above, z) {
+							roofed = true
+							break
+						}
+					}
+					if !roofed {
+						continue
+					}
+					if sealed++; sealed <= 3 {
+						t.Errorf("%v has a roofed floor cell at (%d, %d, %d) that nothing can walk to",
+							drawing.kind, x, y, z)
+					}
+				}
+			}
+		}
+		if sealed > 3 {
+			t.Errorf("%v has %d sealed floor cells in all", drawing.kind, sealed)
+		}
+	}
+}
+
+// TestTheCastleHasThreeFloorsAndAWallWalkAndYouCanWalkToAllOfThem is the other half:
+// the test above says nothing is sealed, and a castle with no upper floors at all
+// satisfies that perfectly. So the landmarks are named — each a coordinate the drawing's
+// own comment promises, each standable and reachable on foot from outside the gate.
+func TestTheCastleHasThreeFloorsAndAWallWalkAndYouCanWalkToAllOfThem(t *testing.T) {
+	t.Parallel()
+
+	s := SchematicFor(BuildingKeep)
+	reached := walkSchematic(s, [3]int{10, 0, 20})
+
+	for _, tc := range []struct {
+		x, y, z int
+		what    string
+	}{
+		{10, 0, 10, "the keep's ground floor"},
+		{10, 7, 10, "the keep's second floor"},
+		{10, 13, 10, "the keep's third floor"},
+		{6, 4, 9, "the first flight of stairs"},
+		{14, 10, 10, "the second flight of stairs"},
+		{2, 4, 9, "the courtyard stair to the wall walk"},
+		{1, 6, 10, "the wall walk, west side"},
+		{19, 6, 10, "the wall walk, east side"},
+		{10, 6, 1, "the wall walk, back"},
+		{10, 6, 19, "the wall walk, front"},
+	} {
+		if !standableCell(s, tc.x, tc.y, tc.z) {
+			t.Errorf("%s at (%d, %d, %d) is not somewhere a body can stand", tc.what, tc.x, tc.y, tc.z)
+			continue
+		}
+		if !reached[[3]int{tc.x, tc.y, tc.z}] {
+			t.Errorf("%s at (%d, %d, %d) cannot be walked to from outside the gate", tc.what, tc.x, tc.y, tc.z)
 		}
 	}
 }
