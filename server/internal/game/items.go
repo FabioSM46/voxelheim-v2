@@ -443,9 +443,10 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemSandstone: {places: world.Sandstone, maxStack: 64},
 	ItemGravel:    {places: world.Gravel, maxStack: 64},
 
-	// Ice, on the same terms. **There is no ItemWater beside it, and that absence is
-	// the design rather than an omission**: water is never placeable, never breakable
-	// and drops nothing, so there is no object for a row to describe.
+	// Ice, on the same terms. **There is no item for any water-family member beside
+	// it, and that absence is the design rather than an omission**: water is never
+	// placeable, never breakable and drops nothing, so there is no object for a row to
+	// describe.
 	ItemIce: {places: world.Ice, maxStack: 64},
 
 	// Silver. Every column but the stack limit is the registry's documented zero, and each

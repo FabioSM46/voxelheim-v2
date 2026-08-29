@@ -359,11 +359,10 @@ func itemToPlaceLocked(inventory *inventory, slot uint8) (ItemID, world.Block, e
 // Pure, and it has to be: it runs inside the chunk cache's composition lock, where
 // anything that blocks would stall every chunk being composed anywhere in the server.
 //
-// **Water is displaced, not obstructed.** A voxel of water is not a thing anybody is
-// holding — it has no item and nothing but the generator ever writes one — so a
-// block put into it replaces it, and the result is one delta like any other edit.
-// That is the whole of what "water is static" costs the edit path: no flow to
-// recompute, no neighbours to notify, and no source to remember.
+// **Water is displaced, not obstructed.** A water voxel is not a thing anybody is
+// holding — no member of the family has an item — so a block put into one replaces
+// it, and the result is one delta like any other edit. Runtime flow observes that
+// changed world separately; placement does not duplicate its scheduling rules.
 func allowPlacement(current world.Block) error {
 	if current != world.Air && !world.Fluid(current) {
 		return fmt.Errorf("the target voxel already holds block %d", uint16(current))

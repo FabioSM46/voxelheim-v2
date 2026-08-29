@@ -418,10 +418,10 @@ func (s *Sim) ringOffsetLocked() (dx, dz int64, inRing bool) {
 // the registry decides what a *player* may do with a named thing, and this decides
 // what the *world* is. A block nobody has classified is ordinary ground, and
 // refusing to spawn on it would silently empty a region every time the palette grew.
-// The two exceptions are the two the world has: water, which is not a floor, and the
-// ice on top of it, which is a lid over water and not a place to stand.
+// The exceptions are the water family, which is not a floor, and the ice on top of
+// it, which is a lid over water and not a place to stand.
 func standableFloor(block world.Block) bool {
-	return world.Solid(block) && block != world.Ice
+	return !world.IsWater(block) && block != world.Ice && world.Solid(block)
 }
 
 // surfaceUnderSky is the highest solid voxel in a column with nothing above it, or

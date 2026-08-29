@@ -143,6 +143,71 @@ func TestThePlainsPlantBlocksCarryAppendedIDsAndFailClosedPlacement(t *testing.T
 	}
 }
 
+func TestTheWaterFamilyCarriesAppendedIDsAndOneExhaustiveClassification(t *testing.T) {
+	t.Parallel()
+
+	type waterFacts struct {
+		level  int
+		dx, dz int
+	}
+	wantWater := map[Block]waterFacts{
+		Water:            {level: 8},
+		WaterFlow1:       {level: 1},
+		WaterFlow2:       {level: 2},
+		WaterFlow3:       {level: 3},
+		WaterFlow4:       {level: 4},
+		WaterFlow5:       {level: 5},
+		WaterFlow6:       {level: 6},
+		WaterFlow7:       {level: 7},
+		WaterCurrentXPos: {level: 8, dx: 1},
+		WaterCurrentXNeg: {level: 8, dx: -1},
+		WaterCurrentZPos: {level: 8, dz: 1},
+		WaterCurrentZNeg: {level: 8, dz: -1},
+	}
+
+	for block := Air; block <= WaterCurrentZNeg; block++ {
+		facts, water := wantWater[block]
+		if got := IsWater(block); got != water {
+			t.Errorf("IsWater(%d) = %t, want %t", block, got, water)
+		}
+		if got := Fluid(block); got != water {
+			t.Errorf("Fluid(%d) = %t, want %t", block, got, water)
+		}
+		if got := WaterLevel(block); got != facts.level {
+			t.Errorf("WaterLevel(%d) = %d, want %d", block, got, facts.level)
+		}
+		dx, dz := CurrentOf(block)
+		if dx != facts.dx || dz != facts.dz {
+			t.Errorf("CurrentOf(%d) = (%d, %d), want (%d, %d)", block, dx, dz, facts.dx, facts.dz)
+		}
+		if water {
+			if Solid(block) {
+				t.Errorf("Solid(%d) = true, want false for water", block)
+			}
+			if Placeable(block) {
+				t.Errorf("Placeable(%d) = true, want false for water", block)
+			}
+		}
+	}
+
+	appended := []Block{
+		WaterFlow1, WaterFlow2, WaterFlow3, WaterFlow4, WaterFlow5, WaterFlow6, WaterFlow7,
+		WaterCurrentXPos, WaterCurrentXNeg, WaterCurrentZPos, WaterCurrentZNeg,
+	}
+	for i, block := range appended {
+		if want := Block(22 + i); block != want {
+			t.Errorf("water family member %d has id %d, want appended id %d", i, block, want)
+		}
+	}
+	unknown := Block(65535)
+	if IsWater(unknown) || Fluid(unknown) || WaterLevel(unknown) != 0 {
+		t.Errorf("unknown block %d was classified as water", unknown)
+	}
+	if dx, dz := CurrentOf(unknown); dx != 0 || dz != 0 {
+		t.Errorf("CurrentOf(unknown) = (%d, %d), want (0, 0)", dx, dz)
+	}
+}
+
 // The index order is wire contract: schemas/world.fbs documents it and the
 // client's mesher indexes in it, so these four values are part of the protocol.
 func TestIndexOrderIsXFastestThenZThenY(t *testing.T) {

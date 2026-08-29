@@ -224,8 +224,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 12 {
-		t.Fatalf("WorldgenVersion = %d, want 12 after plains broadleaf trees and bushes", WorldgenVersion)
+	if WorldgenVersion != 13 {
+		t.Fatalf("WorldgenVersion = %d, want 13 after hydrostatic cave fill beneath standing water", WorldgenVersion)
 	}
 }
 
@@ -384,9 +384,9 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 		worldY := originY + int64(y)
 		got, terrain := c.At(x, y, z), col.blockAt(int(worldY))
 		carved := caveAt(seed, worldX, worldY, worldZ, surface)
-		if carved && got != caveFillAt(int(worldY)) && got != Log && got != Leaves {
+		if carved && got != col.caveFillAt(int(worldY)) && got != Log && got != Leaves {
 			t.Fatalf("carved voxel (%d, %d, %d) is block %d rather than the %d the cave fill puts there",
-				worldX, worldY, worldZ, got, caveFillAt(int(worldY)))
+				worldX, worldY, worldZ, got, col.caveFillAt(int(worldY)))
 		}
 		switch got {
 		case CoalOre:
@@ -440,7 +440,7 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 						worldX, worldY, worldZ, got, want, surface)
 				}
 			case carved:
-				if want := caveFillAt(int(worldY)); got != want {
+				if want := col.caveFillAt(int(worldY)); got != want {
 					t.Fatalf("cave fill at (%d, %d, %d) is %d, want %d", worldX, worldY, worldZ, got, want)
 				}
 			default:
