@@ -210,6 +210,10 @@ func TestARiverBedIsCutToOneHeightUnderTheSeaLine(t *testing.T) {
 			if col.surface != seaLevel-riverBedDrop {
 				t.Fatalf("river bed at (%d, %d) is at %d, want %d", x, z, col.surface, seaLevel-riverBedDrop)
 			}
+			if !col.standingWater || col.waterSurface != seaLevel {
+				t.Fatalf("river at (%d, %d) has standing water %t at %d, want true at sea line %d",
+					x, z, col.standingWater, col.waterSurface, seaLevel)
+			}
 			if got := col.blockAt(col.surface); got != Gravel {
 				t.Fatalf("river bed at (%d, %d) is block %d, want Gravel", x, z, got)
 			}
@@ -394,7 +398,7 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 	t.Parallel()
 
 	const scanSize = 256
-	wetColumns, carvedInBand := 0, 0
+	wetColumns, riverColumns, carvedInBand, riverCarvedInBand := 0, 0, 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
 			col := columnAt(waterSeed, x, z)
@@ -402,11 +406,17 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 				continue
 			}
 			wetColumns++
+			if col.river {
+				riverColumns++
+			}
 			for y := int64(caveWaterLevel + 1); y <= seaLevel; y++ {
 				if !col.carvedAt(waterSeed, x, y, z) {
 					continue
 				}
 				carvedInBand++
+				if col.river {
+					riverCarvedInBand++
+				}
 				if got := col.voxelAt(waterSeed, x, y, z); got == Air {
 					t.Fatalf("standing-water column (%d, %d), surface %d, leaves carved Air at y=%d",
 						x, z, col.waterSurface, y)
@@ -420,6 +430,12 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 	if carvedInBand == 0 {
 		t.Fatal("the 256x256 sample contains no standing-water column carved between caveWaterLevel and seaLevel")
 	}
+	if riverColumns == 0 || riverCarvedInBand == 0 {
+		t.Fatalf("the 256x256 sample contains %d river columns and %d carved river voxels in the hydrostatic band; both must be non-zero",
+			riverColumns, riverCarvedInBand)
+	}
+	t.Logf("measured %d wet columns, including %d river columns, and %d carved river voxels in the hydrostatic band",
+		wetColumns, riverColumns, riverCarvedInBand)
 }
 
 // A shore is sand, on both sides of the water line, and only where a climate has
