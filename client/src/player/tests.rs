@@ -17,7 +17,9 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::time::TimeUpdateStrategy;
 
 use super::*;
-use crate::net::{EntityState, PlayerAppearance, SessionParams, Snapshot, WorldClock};
+use crate::net::{
+    EntityState, PlayerAppearance, SessionParams, Snapshot, WeatherKind, WeatherState, WorldClock,
+};
 
 const TICK_RATE: u8 = 20;
 const INTERVAL: Duration = Duration::from_millis(50);
@@ -72,6 +74,64 @@ fn deliver(app: &mut App, tick: u32, entities: Vec<EntityState>, at: Instant) {
         },
         at,
     );
+}
+
+#[test]
+fn weather_mirrors_only_the_newest_accepted_snapshot() {
+    let mut app = headless_player();
+    let deliver_weather = |app: &mut App, tick, kind, intensity| {
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: tick,
+                weather: Some(WeatherState { kind, intensity }),
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+    };
+
+    deliver_weather(&mut app, 10, WeatherKind::Rain, 128);
+    app.update();
+    assert_eq!(
+        app.world().resource::<Weather>().get(),
+        Some(WeatherState {
+            kind: WeatherKind::Rain,
+            intensity: 128,
+        })
+    );
+
+    deliver_weather(&mut app, 9, WeatherKind::Sandstorm, 255);
+    app.update();
+    assert_eq!(
+        app.world().resource::<Weather>().get(),
+        Some(WeatherState {
+            kind: WeatherKind::Rain,
+            intensity: 128,
+        }),
+        "a snapshot the buffer refused changed the weather"
+    );
+}
+
+#[test]
+fn an_ended_session_takes_its_weather_with_it() {
+    let mut app = headless_player();
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            weather: Some(WeatherState {
+                kind: WeatherKind::Snow,
+                intensity: 200,
+            }),
+            ..Default::default()
+        },
+        Instant::now(),
+    );
+    app.update();
+    assert!(app.world().resource::<Weather>().get().is_some());
+
+    app.world_mut().remove_resource::<Session>();
+    app.update();
+    assert_eq!(app.world().resource::<Weather>().get(), None);
 }
 
 fn deliver_party(
