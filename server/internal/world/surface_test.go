@@ -199,7 +199,7 @@ func TestSurfaceAtNamesWhatTheGeneratorBuilt(t *testing.T) {
 	}
 }
 
-func TestPalmColumnsAreForestAndShrubColumnsRemainSand(t *testing.T) {
+func TestForestSpeciesAndGroundCoverKeepTheirSurfaceKinds(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
@@ -208,6 +208,8 @@ func TestPalmColumnsAreForestAndShrubColumnsRemainSand(t *testing.T) {
 	}{
 		{&plantSpeciesTable[1], SurfaceForest},
 		{&plantSpeciesTable[2], SurfaceSand},
+		{&plantSpeciesTable[3], SurfaceForest},
+		{&plantSpeciesTable[4], SurfaceGrass},
 	} {
 		x, z, found := int64(0), int64(0), false
 		for i := 0; i < 1024 && !found; i++ {

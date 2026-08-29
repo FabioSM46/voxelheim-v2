@@ -111,6 +111,13 @@ const (
 	PalmLog     Block = 17
 	PalmFronds  Block = 18
 	DesertShrub Block = 19
+
+	// Two plains silhouettes. BroadLeaves belongs to the round-crowned tree and
+	// may be carried and rebuilt like ordinary Leaves; Bush is worldgen cover with
+	// no item, on the same terms as DesertShrub. Both ids are appended because the
+	// desert ids above already cross the wire and live in world deltas.
+	BroadLeaves Block = 20
+	Bush        Block = 21
 )
 
 // Solid reports whether a block stops movement.
@@ -156,7 +163,7 @@ func Fluid(b Block) bool {
 func Placeable(b Block) bool {
 	switch b {
 	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice,
-		Planks, Cobblestone, Thatch, PalmLog, PalmFronds:
+		Planks, Cobblestone, Thatch, PalmLog, PalmFronds, BroadLeaves:
 		return true
 	default:
 		return false

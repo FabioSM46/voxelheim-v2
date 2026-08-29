@@ -224,8 +224,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 11 {
-		t.Fatalf("WorldgenVersion = %d, want 11 after desert plants and tundra conifers", WorldgenVersion)
+	if WorldgenVersion != 12 {
+		t.Fatalf("WorldgenVersion = %d, want 12 after plains broadleaf trees and bushes", WorldgenVersion)
 	}
 }
 
@@ -903,11 +903,13 @@ func findIsolatedEastBorderPlant(t *testing.T, target *plantSpecies) (seed, root
 			}
 
 			minY, maxY := int64(1<<62), int64(-(1 << 62))
-			target.visit(seed, rootX, rootZ, col.surface, candidateHash, func(_, y, _ int64, _ Block) {
+			crossesEast := false
+			target.visit(seed, rootX, rootZ, col.surface, candidateHash, func(x, y, _ int64, _ Block) {
 				minY = min(minY, y)
 				maxY = max(maxY, y)
+				crossesEast = crossesEast || x >= ChunkSize
 			})
-			if minY > maxY || ChunkOf(rootX, minY, rootZ).Y != ChunkOf(rootX, maxY, rootZ).Y {
+			if !crossesEast || minY > maxY || ChunkOf(rootX, minY, rootZ).Y != ChunkOf(rootX, maxY, rootZ).Y {
 				continue
 			}
 

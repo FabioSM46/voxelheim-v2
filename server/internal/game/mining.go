@@ -106,6 +106,8 @@ var handMiningTimes = map[world.Block]time.Duration{
 	world.PalmLog:     2400 * time.Millisecond,
 	world.PalmFronds:  400 * time.Millisecond,
 	world.DesertShrub: 400 * time.Millisecond,
+	world.BroadLeaves: 400 * time.Millisecond,
+	world.Bush:        400 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -175,6 +177,8 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		world.PalmLog:     {},
 		world.PalmFronds:  {},
 		world.DesertShrub: {},
+		world.BroadLeaves: {},
+		world.Bush:        {},
 	},
 }
 

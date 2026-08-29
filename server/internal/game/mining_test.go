@@ -277,6 +277,22 @@ func TestDesertPlantsCarryTheirHandTimesAndAxeClass(t *testing.T) {
 	}
 }
 
+func TestPlainsFoliageCarriesItsHandTimesAndAxeClass(t *testing.T) {
+	t.Parallel()
+
+	for _, block := range []world.Block{world.BroadLeaves, world.Bush} {
+		if got := handMiningTimes[block]; got != 400*time.Millisecond {
+			t.Errorf("block %d hand time = %v, want 400ms", block, got)
+		}
+		if !helpsWith(ItemAxe, block) {
+			t.Errorf("the axe does not help with block %d", block)
+		}
+		if helpsWith(ItemShovel, block) || helpsWith(ItemPickaxe, block) {
+			t.Errorf("block %d is assigned to more than the axe", block)
+		}
+	}
+}
+
 // Nothing is breakable by hand in under a quarter of a second, which is the complaint this
 // table was retuned to answer: dirt used to go in three tenths and a log in six.
 //
