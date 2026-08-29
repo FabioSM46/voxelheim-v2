@@ -104,11 +104,15 @@ pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 
 use crate::net::{
-    Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
-    PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals, ResidentInbox, ResidentRole,
-    Sent, Session, SnapshotInbox, encode_player_input,
+    Appearance, AppearanceInbox, BlockCoord, HairModel, LifeState, Outbound,
+    PLACEHOLDER_APPEARANCE, PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals,
+    ResidentInbox, ResidentRole, Sent, Session, SnapshotInbox, encode_player_input,
 };
 use crate::settings::{Bindings, Control, DEFAULT_LOOK_SENSITIVITY, Settings};
+// The only edge from this file into the world module, and it is a read: a name plate asks
+// what stands between the camera and a head, and tells the store nothing. `camera.rs` has
+// the same one for the same reason, and `target.rs` says why the question lives there.
+use crate::world::ChunkStore;
 // `pub use` rather than `use` for the pitch limit: it is a build invariant rather than a
 // preference, so it did not move to `crate::settings` with the sensitivity — and that
 // module's test that no sensitivity this client offers can reach past it needs the limit
@@ -145,13 +149,54 @@ const ANY_HAIR: HairModel = HairModel::Shaved;
 /// than the gap it exists to cover and still a bound.
 const APPEARANCE_GRACE: Duration = Duration::from_secs(2);
 
-/// A fixed screen-space size keeps labels legible at every streamed distance.
+/// A fixed screen-space size keeps labels legible everywhere one is drawn at all.
 const NAME_PLATE_WIDTH: f32 = 240.0;
 const NAME_PLATE_HEIGHT: f32 = 28.0;
 const NAME_PLATE_FONT_SIZE: f32 = 16.0;
 const NAME_PLATE_GAP: f32 = 0.14;
 /// Bound text layout on Unicode scalar boundaries without adding a grapheme crate.
 const NAME_PLATE_CHARACTERS: usize = 48;
+
+/// The furthest from the camera a name plate is drawn, in blocks.
+///
+/// **The number is chosen against the smallest world this client will ever draw, not
+/// against the largest.** `crate::settings` will not take the render distance below two
+/// chunks and a chunk is 32 blocks, so the nearest the fog can ever be brought in is 64
+/// blocks; `ServerWelcome.view_distance` is a *ceiling* on that, and a server that streams
+/// less simply has nothing further out to name. Half of that floor leaves the limit
+/// comfortably inside the drawn world on every configuration there is, which is the
+/// property that matters here: a plate must never be the thing that tells a player an
+/// entity exists. The name arrives with the body or after it, never before it.
+///
+/// Thirty-two blocks is also about where a body stops being a person and becomes a
+/// silhouette, so it is the distance at which a name stops labelling something the player
+/// can see and starts tracking something they cannot.
+const NAME_PLATE_DISTANCE: f32 = 32.0;
+
+/// How far back inside [`NAME_PLATE_DISTANCE`] a hidden plate has to come before it is
+/// drawn again, in blocks.
+///
+/// The distance half of the anti-flicker rule, and it is geometric rather than temporal
+/// because the boundary is geometric: two players walking apart at the limit cross it
+/// repeatedly on the noise in their interpolated positions alone, and a plate that answered
+/// every crossing would strobe. Two blocks is wider than any one frame of that noise and
+/// narrow enough that nobody can tell where the band is.
+const NAME_PLATE_DISTANCE_MARGIN: f32 = 2.0;
+
+/// How many consecutive frames a changed sight answer must hold before the plate follows
+/// it.
+///
+/// The occlusion half of the anti-flicker rule, and this one has to be temporal because
+/// occlusion has no band to widen: a fence post is either between the camera and the head
+/// or it is not, and through a slow pan the answer alternates frame to frame. Requiring the
+/// new answer four frames running turns that into nothing, and costs four frames of latency
+/// on a plate that genuinely appears or disappears, comfortably under the tenth of a
+/// second at which a player reads a change as a change rather than as a pop.
+///
+/// Symmetric on purpose. Appearing fast and fading slowly is the usual asymmetry and it is
+/// the wrong one here, because the failure being prevented is a name flashing back on from
+/// behind a wall.
+const NAME_PLATE_SIGHT_DWELL: u8 = 4;
 
 const DEFAULT_PLATE_COLOUR: Color = Color::WHITE;
 pub(crate) const PARTY_PLATE_COLOUR: Color = Color::srgb(0.45, 0.82, 1.0);
@@ -959,6 +1004,23 @@ struct Body(u64);
 /// One screen-space label tied to the authoritative entity id, never to its text.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct NamePlate(u64);
+
+/// Whether one plate's owner is somewhere the player could see it, and how long the raw
+/// answer has been disagreeing.
+///
+/// Presentation state and nothing else. It decides what this client draws over its own
+/// view; the server has already decided which entities this session is told about, and
+/// nothing here is sent anywhere or read back as a rule.
+///
+/// `shown` is the settled answer, `dwell` is how many consecutive frames the unsettled one
+/// has differed from it. Keeping the counter beside the answer rather than in a resource is
+/// what makes the two rules per-plate: a name plate strobing behind a fence post must not be
+/// steadied or disturbed by what any other plate is doing.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PlateSight {
+    shown: bool,
+    dwell: u8,
+}
 
 /// Marks the body belonging to this session. Exactly one entity ever has it.
 #[derive(Component)]
@@ -2116,6 +2178,7 @@ fn name_plate_name(name: &str) -> String {
 fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, label: PlateLabel) {
     commands.spawn((
         NamePlate(entity_id),
+        PlateSight::default(),
         Node {
             position_type: PositionType::Absolute,
             width: Val::Px(NAME_PLATE_WIDTH),
@@ -2208,31 +2271,158 @@ fn name_plate_anchor(body: &Transform) -> Vec3 {
     body.transform_point(Vec3::Y * top)
 }
 
-/// Projects each head anchor into the UI viewport.
+/// The limit this plate is currently judged against, in blocks.
+///
+/// The band that makes the distance rule stable: a drawn plate keeps its full
+/// [`NAME_PLATE_DISTANCE`], a hidden one has to come [`NAME_PLATE_DISTANCE_MARGIN`] further
+/// in before it comes back. Reading the current answer to pick the threshold is the whole
+/// of the hysteresis; there is no state here beyond the `shown` flag the caller already
+/// holds.
+fn name_plate_reach(shown: bool) -> f32 {
+    if shown {
+        NAME_PLATE_DISTANCE
+    } else {
+        NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN
+    }
+}
+
+/// Whether nothing solid stands between the camera and the point a plate is drawn above.
+///
+/// **A drawing decision, not a gameplay one.** The server decided long before this what
+/// this session may know: it streams chunks and entities by its own visibility rule, and
+/// the names are legitimately in the snapshot. All that is chosen here is whether to paint
+/// a label over the player's own view, exactly as the failed projection below already
+/// chooses. Nothing is sent, and no outcome depends on the answer.
+///
+/// It reuses [`target::raycast`] rather than restating a traversal. That is the point: the
+/// server's `clearLineOfSight` is authoritative for gameplay and this is not, so the client
+/// half must not become a second hand-written walk that can disagree with the one already
+/// driving the aiming outline and the camera boom. `solid` is a predicate for the same
+/// reason `camera::boom_length` takes one — what this needs to know is whether a voxel
+/// stops light, and a test that has to assemble a chunk store to put a wall somewhere is a
+/// test about chunk stores.
+///
+/// The anchor's own voxel is excluded, and that is a correctness fix rather than a
+/// tolerance. The anchor sits a hand's width above the head, so for anybody standing under
+/// a ceiling it is often *inside* the ceiling block; a ray that counted the voxel it
+/// terminates in would hide the plate of somebody standing plainly in front of you indoors.
+/// Anything genuinely between the two endpoints is hit first and still wins.
+fn name_plate_line_is_clear(eye: Vec3, anchor: Vec3, mut solid: impl FnMut(IVec3) -> bool) -> bool {
+    let to_anchor = anchor - eye;
+    let anchor_voxel = anchor.floor().as_ivec3();
+    target::raycast(eye, to_anchor, to_anchor.length(), |voxel| {
+        voxel != anchor_voxel && solid(voxel)
+    })
+    .is_none()
+}
+
+/// Whether the player could see the owner of a plate that is currently `shown`.
+///
+/// The two rules, in the order they have to run and nowhere else in the file. They are
+/// independent: a plate near enough but behind rock fails on the second, a plate on a
+/// perfectly clear line but too far away fails on the first, and neither can mask the other
+/// because `&&` is the only thing joining them.
+///
+/// **Distance first, and the ordering is load-bearing rather than tidy.** This runs per
+/// plate per frame, the traversal is the expensive half, and the rejection is a subtraction
+/// and a comparison. So the ray only ever walks for the handful of plates that are near
+/// enough to be drawn at all.
+fn name_plate_is_in_sight(
+    eye: Vec3,
+    anchor: Vec3,
+    shown: bool,
+    solid: impl FnMut(IVec3) -> bool,
+) -> bool {
+    eye.distance(anchor) <= name_plate_reach(shown) && name_plate_line_is_clear(eye, anchor, solid)
+}
+
+/// Advances one plate's hysteresis by a frame and answers what it should now do.
+///
+/// Pure, and takes the state by value, so the caller can write it back only when it moved
+/// and the boundary behaviour can be tested a frame at a time without an app.
+fn settle_plate_sight(sight: PlateSight, wanted: bool) -> PlateSight {
+    if wanted == sight.shown {
+        return PlateSight { dwell: 0, ..sight };
+    }
+    let dwell = sight.dwell.saturating_add(1);
+    if dwell >= NAME_PLATE_SIGHT_DWELL {
+        PlateSight {
+            shown: wanted,
+            dwell: 0,
+        }
+    } else {
+        PlateSight { dwell, ..sight }
+    }
+}
+
+/// Projects each head anchor into the UI viewport, for the plates the player could see.
 ///
 /// Screen-space text is the deliberate choice over world text: its pixel size remains
-/// legible across the entire streamed view and the existing Bevy feature set already owns
-/// the font and UI renderer. A failed projection means behind the camera, off-screen, or
-/// not ready yet, and hides rather than clamps the plate to an unrelated screen edge.
+/// legible everywhere a plate is drawn and the existing Bevy feature set already owns the
+/// font and UI renderer. A failed projection means behind the camera, off-screen, or not
+/// ready yet, and hides rather than clamps the plate to an unrelated screen edge.
+///
+/// Three rules hide a plate and they are independent. Beyond [`NAME_PLATE_DISTANCE`] it is
+/// hidden however clear the line; with solid terrain between the camera and the anchor it
+/// is hidden however close; and a projection that fails hides it as it always has. The
+/// first two settle through [`settle_plate_sight`] so neither boundary can strobe; the
+/// third stays immediate, because it is not a boundary a player stands on — it is the
+/// anchor leaving the frame.
 fn position_name_plates(
+    session: Option<Res<Session>>,
+    store: Option<Res<ChunkStore>>,
     cameras: Query<(&Camera, &Transform), With<WorldCamera>>,
     bodies: Query<(&Body, &Transform)>,
-    mut plates: Query<(&NamePlate, &mut Node, &mut Visibility)>,
+    mut plates: Query<(&NamePlate, &mut PlateSight, &mut Node, &mut Visibility)>,
 ) {
     let Ok((camera, camera_transform)) = cameras.single() else {
-        for (_, _, mut visibility) in &mut plates {
+        for (_, _, _, mut visibility) in &mut plates {
             *visibility = Visibility::Hidden;
         }
         return;
     };
+    let eye = camera_transform.translation;
     let camera_transform = GlobalTransform::from(*camera_transform);
 
-    for (plate, mut node, mut visibility) in &mut plates {
+    // Both or neither, and an absent pair stops no light: the chunk size is what turns a
+    // voxel coordinate into a chunk, so a store with no session to size it cannot be looked
+    // up in at all. A chunk that has not arrived is not solid — the same answer
+    // `ChunkStore::solid_at` gives the aiming ray and the camera boom, and honest for the
+    // same reason: this client knows nothing about it.
+    let voxels = session
+        .as_deref()
+        .zip(store.as_deref())
+        .map(|(session, store)| (store, usize::from(session.0.chunk_size)));
+
+    for (plate, mut sight, mut node, mut visibility) in &mut plates {
         let Some((_, body)) = bodies.iter().find(|(body, _)| body.0 == plate.0) else {
             *visibility = Visibility::Hidden;
             continue;
         };
-        match camera.world_to_viewport(&camera_transform, name_plate_anchor(body)) {
+        let anchor = name_plate_anchor(body);
+        let wanted = name_plate_is_in_sight(eye, anchor, sight.shown, |voxel| {
+            voxels.is_some_and(|(store, size)| {
+                store.solid_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            })
+        });
+
+        let next = settle_plate_sight(*sight, wanted);
+        if *sight != next {
+            *sight = next;
+        }
+        if !next.shown {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+
+        match camera.world_to_viewport(&camera_transform, anchor) {
             Ok(screen) => {
                 node.left = Val::Px(screen.x - NAME_PLATE_WIDTH / 2.0);
                 node.top = Val::Px(screen.y - NAME_PLATE_HEIGHT);

@@ -2414,6 +2414,281 @@ fn a_name_plate_anchor_follows_the_body_transform() {
     );
 }
 
+/// What `position_name_plates` decided about one plate, before the projection has any say.
+fn plate_sight_of(app: &mut App, entity_id: u64) -> Option<PlateSight> {
+    let world = app.world_mut();
+    let mut query = world.query::<(&NamePlate, &PlateSight)>();
+    query
+        .iter(world)
+        .find(|(plate, _)| plate.0 == entity_id)
+        .map(|(_, sight)| *sight)
+}
+
+/// A stone wall filling the plane z = 3 across the chunk the session spawns in.
+///
+/// Solid for the whole height of the chunk, so nothing about the test rests on where the
+/// eye and the anchor sit relative to each other on the vertical.
+fn a_wall_at_z3() -> crate::world::ChunkStore {
+    let mut chunk = crate::world::VoxelChunk::all_air(32);
+    for x in 0..32 {
+        for y in 0..32 {
+            chunk.set(x, y, 3, crate::world::palette::STONE);
+        }
+    }
+    let mut store = crate::world::ChunkStore::default();
+    store.insert(
+        crate::net::ChunkCoord {
+            cx: 0,
+            cy: 2,
+            cz: 0,
+        },
+        chunk,
+    );
+    store
+}
+
+/// A session, a described remote and enough frames for the hysteresis to settle.
+///
+/// `remote_z` is where the other body stands; the local body stays at the spawn, which is
+/// where the first-person camera therefore is.
+fn plates_after_settling(store: Option<crate::world::ChunkStore>, remote_z: f32) -> App {
+    let mut app = headless_player();
+    if let Some(store) = store {
+        app.insert_resource(store);
+    }
+    describe_as(&mut app, 99, "Astrid", an_appearance(HairModel::Topknot));
+    let mut at = Instant::now();
+    for tick in 1..=(u32::from(NAME_PLATE_SIGHT_DWELL) + 3) {
+        deliver(
+            &mut app,
+            tick,
+            vec![
+                state(LOCAL_ID, [0.5, 64.0, 0.5], 0.0),
+                state(99, [0.5, 64.0, remote_z], 0.0),
+            ],
+            at,
+        );
+        app.update();
+        at += INTERVAL;
+    }
+    app
+}
+
+#[test]
+fn solid_terrain_between_the_camera_and_a_head_hides_the_name() {
+    // The control is the half that matters. Without it this test passes for a plate that
+    // was never going to be drawn — the same two points with the wall taken away have to
+    // come back clear, or the geometry proved nothing.
+    let eye = Vec3::new(0.5, 65.5, 0.5);
+    let anchor = Vec3::new(0.5, 65.9, 8.5);
+
+    assert!(
+        !name_plate_line_is_clear(eye, anchor, |voxel| voxel.z == 4),
+        "a name was readable through a wall"
+    );
+    assert!(
+        name_plate_line_is_clear(eye, anchor, |_| false),
+        "the control failed: these two points do not see each other in an empty world"
+    );
+}
+
+#[test]
+fn the_block_the_anchor_reaches_into_is_not_what_hides_the_name() {
+    // Two people under one roof. The anchor is a hand's width above the head, so it is
+    // routinely inside the ceiling block; a ray that counted the voxel it ends in would hide
+    // the plate of somebody standing plainly in front of the camera, indoors.
+    let eye = Vec3::new(0.5, 65.5, 0.5);
+    let anchor = Vec3::new(0.5, 66.2, 4.5);
+    let ceiling = anchor.floor().as_ivec3();
+
+    assert!(
+        name_plate_line_is_clear(eye, anchor, |voxel| voxel == ceiling),
+        "the anchor's own voxel hid the plate it belongs to"
+    );
+    assert!(
+        !name_plate_line_is_clear(eye, anchor, |voxel| voxel == ceiling || voxel.z == 2),
+        "excluding the anchor's voxel also excused a wall in front of it"
+    );
+}
+
+#[test]
+fn the_two_name_plate_rules_are_independent() {
+    // One test, four corners, because the criterion is that neither rule can stand in for
+    // the other: near and occluded is hidden, far and clear is hidden, and only near and
+    // clear is drawn.
+    let eye = Vec3::new(0.5, 65.5, 0.5);
+    let near = eye + Vec3::Z * 6.0;
+    let far = eye + Vec3::Z * (NAME_PLATE_DISTANCE + 6.0);
+    let clear = |_: IVec3| false;
+    let wall = |voxel: IVec3| voxel.z == 4;
+
+    assert!(
+        name_plate_is_in_sight(eye, near, false, clear),
+        "a body six blocks away in the open has no plate"
+    );
+    assert!(
+        !name_plate_is_in_sight(eye, near, false, wall),
+        "the occlusion rule did not fire on a body well inside the distance limit"
+    );
+    assert!(
+        !name_plate_is_in_sight(eye, far, true, clear),
+        "the distance rule did not fire on a completely clear line"
+    );
+    assert!(
+        !name_plate_is_in_sight(eye, far, true, wall),
+        "neither rule fired when both should have"
+    );
+}
+
+#[test]
+fn the_distance_limit_stays_inside_the_smallest_world_this_client_draws() {
+    // The criterion the constant exists for: a plate must never be the thing that tells a
+    // player an entity is there. Two chunks is the floor `crate::settings` puts under the
+    // render distance and a chunk is 32 blocks, so 64 blocks is the nearest the fog can ever
+    // be brought in — and the limit has to sit comfortably inside that, not merely under it.
+    // `const`, so this one is not a test that has to be run: both are compile-time
+    // invariants of the two numbers, and a build that breaks either never links.
+    const {
+        assert!(
+            NAME_PLATE_DISTANCE <= 64.0 / 2.0,
+            "the name plate limit reaches into the fog on the tightest render distance"
+        );
+        assert!(
+            NAME_PLATE_DISTANCE_MARGIN > 0.0 && NAME_PLATE_DISTANCE_MARGIN < NAME_PLATE_DISTANCE,
+            "the hysteresis band is not a band"
+        );
+    }
+    assert_eq!(name_plate_reach(true), NAME_PLATE_DISTANCE);
+    assert_eq!(
+        name_plate_reach(false),
+        NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN,
+        "a hidden plate has to come further in than the limit it went out at"
+    );
+}
+
+#[test]
+fn a_name_plate_behind_a_fence_post_does_not_strobe() {
+    // The occlusion boundary has no width to widen, so its stability is temporal: an answer
+    // that alternates every frame — which is what a slow pan across a fence post produces --
+    // must reach the screen as no change at all.
+    let mut sight = PlateSight {
+        shown: true,
+        dwell: 0,
+    };
+    for frame in 0..40 {
+        sight = settle_plate_sight(sight, frame % 2 == 0);
+        assert!(
+            sight.shown,
+            "the plate went out on an alternating answer at frame {frame}"
+        );
+    }
+
+    // And a change that genuinely holds still lands, on the frame the dwell names and not
+    // before it. A filter that never let anything through would pass the assertion above.
+    let mut sight = PlateSight {
+        shown: true,
+        dwell: 0,
+    };
+    for frame in 1..NAME_PLATE_SIGHT_DWELL {
+        sight = settle_plate_sight(sight, false);
+        assert!(sight.shown, "the plate gave up after {frame} frames");
+    }
+    sight = settle_plate_sight(sight, false);
+    assert!(!sight.shown, "a settled answer never landed");
+    assert_eq!(sight.dwell, 0, "the counter was not reset by the flip");
+}
+
+#[test]
+fn a_name_plate_sitting_on_the_distance_limit_settles_once_and_stays() {
+    // The other boundary and the other mechanism. A body standing exactly on the limit
+    // crosses it every frame on the noise in its interpolated position alone; the band is
+    // what turns that into one transition instead of one per frame.
+    let eye = Vec3::ZERO;
+    let mut sight = PlateSight {
+        shown: true,
+        dwell: 0,
+    };
+    let mut history = Vec::new();
+    for frame in 0..60 {
+        let jitter = if frame % 2 == 0 { -0.2 } else { 0.2 };
+        let anchor = Vec3::Z * (NAME_PLATE_DISTANCE + jitter);
+        let wanted = name_plate_is_in_sight(eye, anchor, sight.shown, |_| false);
+        sight = settle_plate_sight(sight, wanted);
+        history.push(sight.shown);
+    }
+
+    let flips = history.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert_eq!(
+        flips, 0,
+        "the plate changed {flips} times sitting on the limit"
+    );
+    assert!(
+        history.iter().all(|shown| *shown),
+        "and the answer it held was not the one it started on"
+    );
+
+    // The other half, without which a filter that never let anything through would pass:
+    // a body that actually walks out of range does lose its name, and does not get it back
+    // inside the band.
+    for step in 0..20u32 {
+        let anchor = Vec3::Z * (NAME_PLATE_DISTANCE + 4.0);
+        let wanted = name_plate_is_in_sight(eye, anchor, sight.shown, |_| false);
+        sight = settle_plate_sight(sight, wanted);
+        assert!(
+            step < u32::from(NAME_PLATE_SIGHT_DWELL) || !sight.shown,
+            "a body four blocks past the limit kept its name at step {step}"
+        );
+    }
+    let inside_the_band = Vec3::Z * (NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN / 2.0);
+    for _ in 0..20 {
+        let wanted = name_plate_is_in_sight(eye, inside_the_band, sight.shown, |_| false);
+        sight = settle_plate_sight(sight, wanted);
+    }
+    assert!(
+        !sight.shown,
+        "a hidden plate came back before it was all the way inside the band"
+    );
+}
+
+#[test]
+fn a_wall_hides_a_name_plate_and_an_empty_world_does_not() {
+    // End to end through the real system, camera included, and again with the control: the
+    // same two bodies with nothing between them have to keep the name.
+    let mut behind_a_wall = plates_after_settling(Some(a_wall_at_z3()), 8.5);
+    assert!(
+        name_plate_of(&mut behind_a_wall, 99).is_some(),
+        "the plate has to exist for its visibility to mean anything"
+    );
+    assert_eq!(
+        plate_sight_of(&mut behind_a_wall, 99).map(|sight| sight.shown),
+        Some(false),
+        "a name was readable through a wall the server had streamed"
+    );
+
+    let mut in_the_open = plates_after_settling(None, 8.5);
+    assert_eq!(
+        plate_sight_of(&mut in_the_open, 99).map(|sight| sight.shown),
+        Some(true),
+        "the control failed: the same body is not visible with nothing in the way"
+    );
+}
+
+#[test]
+fn a_name_plate_past_the_limit_is_hidden_on_a_completely_clear_line() {
+    // The second rule on its own: no store at all, so nothing anywhere is solid, and the
+    // only thing that can hide this plate is how far away it is.
+    let mut far = plates_after_settling(None, 0.5 + NAME_PLATE_DISTANCE + 8.0);
+    assert!(
+        name_plate_of(&mut far, 99).is_some(),
+        "the plate has to exist for its visibility to mean anything"
+    );
+    assert_eq!(
+        plate_sight_of(&mut far, 99).map(|sight| sight.shown),
+        Some(false),
+        "a name was legible across open ground the player cannot make anybody out over"
+    );
+}
+
 #[test]
 fn the_hair_a_player_chose_is_the_mesh_their_body_wears() {
     // The one part whose *shape* is chosen rather than only its colour, so it is the one
