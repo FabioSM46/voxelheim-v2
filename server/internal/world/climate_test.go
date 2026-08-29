@@ -302,6 +302,8 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	t.Parallel()
 
 	densities := make(map[Climate]float64, 3)
+	plainsEligible, broadleaves, bushes := 0, 0, 0
+	bushSingles, bushPairs := 0, 0
 	for _, tc := range []struct {
 		name        string
 		originX     int64
@@ -325,8 +327,30 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				// A column under the sea line grows nothing however green its bed is,
 				// so it is not a candidate the density is measured against. See
 				// treeAtColumn, which refuses it for the same reason.
-				if col.blockAt(col.surface) == tc.rootBlock && col.surface >= seaLevel {
+				candidate := col.blockAt(col.surface) == tc.rootBlock && col.surface >= seaLevel && !col.settlement &&
+					!col.carvedAt(climateSeed, x, int64(col.surface), z)
+				if candidate {
 					eligible++
+					if tc.climate == Plains {
+						plainsEligible++
+					}
+				}
+				species, h, rooted := plantAtColumn(climateSeed, x, z, col)
+				if tc.climate == Taiga && rooted && (species == &plantSpeciesTable[3] || species == &plantSpeciesTable[4]) {
+					t.Fatalf("%s is rooted in taiga at (%d, %d)", species.name, x, z)
+				}
+				if tc.climate == Plains && rooted {
+					switch species {
+					case &plantSpeciesTable[3]:
+						broadleaves++
+					case &plantSpeciesTable[4]:
+						bushes++
+						if (h>>40)&1 == 0 {
+							bushSingles++
+						} else {
+							bushPairs++
+						}
+					}
 				}
 				if _, ok := treeAtColumn(climateSeed, x, z, col); ok {
 					roots++
@@ -346,6 +370,24 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	if densities[Taiga] <= densities[Tundra] || densities[Tundra] <= densities[Plains] {
 		t.Errorf("root densities taiga=%f, tundra=%f, plains=%f; want taiga > tundra > plains",
 			densities[Taiga], densities[Tundra], densities[Plains])
+	}
+	for _, tc := range []struct {
+		name        string
+		roots       int
+		denominator int
+	}{
+		{"broadleaf", broadleaves, broadleafChanceDenominator},
+		{"bush", bushes, bushChanceDenominator},
+	} {
+		want := float64(plainsEligible) / float64(tc.denominator)
+		ratio := float64(tc.roots) / want
+		if tc.roots == 0 || want == 0 || ratio < 0.75 || ratio > 1.25 {
+			t.Errorf("plains %s count is %d over %d eligible grass columns; one in %d predicts %.1f (ratio %.2f, want within ±25%%)",
+				tc.name, tc.roots, plainsEligible, tc.denominator, want, ratio)
+		}
+	}
+	if bushSingles == 0 || bushPairs == 0 {
+		t.Errorf("plains bush roots chose %d single and %d paired clumps, want both sizes", bushSingles, bushPairs)
 	}
 
 	// Desert is a thin intersection of two climate-field tails, so its fixed

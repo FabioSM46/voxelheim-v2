@@ -154,6 +154,16 @@ const (
 	palmSeedOffset         int64 = 0xA54FF53A
 	shrubSeedOffset        int64 = 0x510E527F
 
+	// Plains plants use their own lattices. A broadleaf is four times as common
+	// there as the conifer that precedes it in the table, while bushes are the
+	// ground cover a player should see from anywhere on open grass.
+	broadleafChanceDenominator       = 384
+	bushChanceDenominator            = 64
+	broadleafMinTrunkHeight          = 3
+	broadleafCanopyRadius            = 2
+	broadleafSeedOffset        int64 = 0x9B05688C
+	bushSeedOffset             int64 = 0x1F83D9AB
+
 	// gravelSeedOffset decorrelates the gravel field from every other 2D field. A
 	// patch that always sat on the same side of a climate boundary would be a
 	// shared lattice showing through, not a decision.
@@ -366,7 +376,12 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // snow block above the crown; every terrain column and every conifer outside tundra
 // stays byte-identical. A stored delta in one of the newly wooded columns nevertheless
 // resolves against a different base, so the narrow break still needs its own version.
-const WorldgenVersion uint32 = 11
+// 11 → 12: broadleaf trees and bushes on plains grass. Heights and underground
+// materials stay byte-identical, as do every non-plains column, but selected plains
+// columns gain one of two appended foliage blocks above the surface. A stored delta
+// there may now resolve against a tree or bush instead of air, so this is a feature
+// break even though no terrain height moved.
+const WorldgenVersion uint32 = 12
 
 // Generate builds the chunk at coord for seed.
 //
@@ -678,6 +693,15 @@ func desertChanceDenominator(denominator uint64) func(Climate) uint64 {
 	}
 }
 
+func plainsChanceDenominator(denominator uint64) func(Climate) uint64 {
+	return func(climate Climate) uint64 {
+		if climate == Plains {
+			return denominator
+		}
+		return 0
+	}
+}
+
 // plantSpecies is one complete answer to what may grow in a column. Table order is
 // priority: the first row whose refusals all pass owns the root.
 type plantSpecies struct {
@@ -726,7 +750,31 @@ var shrub = plantSpecies{
 	visit:       visitShrub,
 }
 
-var plantSpeciesTable = []plantSpecies{conifer, palm, shrub}
+var broadleaf = plantSpecies{
+	name:       "broadleaf",
+	seedOffset: broadleafSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Grass
+	},
+	denominator: plainsChanceDenominator(broadleafChanceDenominator),
+	footprint:   broadleafCanopyRadius,
+	forest:      true,
+	visit:       visitBroadleaf,
+}
+
+var bush = plantSpecies{
+	name:       "bush",
+	seedOffset: bushSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Grass
+	},
+	denominator: plainsChanceDenominator(bushChanceDenominator),
+	footprint:   1,
+	forest:      false,
+	visit:       visitBush,
+}
+
+var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush}
 
 // plantAtColumn reports the first species rooted at one resolved column and the
 // hash that row uses for its shape.
@@ -869,12 +917,54 @@ func visitShrub(_ int64, rootX, rootZ int64, surface int, _ uint64, visit func(x
 	visit(rootX, int64(surface+1), rootZ, DesertShrub)
 }
 
+// visitBroadleaf yields its crown before its trunk, as visitConifer does. The
+// three equally wide lower layers and clipped corners make a round crown rather
+// than a point; the fourth layer closes it with a one-block radius.
+func visitBroadleaf(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+	trunkHeight := broadleafTrunkHeight(h)
+	crownY := int64(surface + trunkHeight)
+	for dy := -1; dy <= 2; dy++ {
+		radius := broadleafCanopyRadius
+		if dy == 2 {
+			radius = 1
+		}
+		for dz := -radius; dz <= radius; dz++ {
+			for dx := -radius; dx <= radius; dx++ {
+				if absInt(dx)+absInt(dz) > radius+1 {
+					continue
+				}
+				visit(rootX+int64(dx), crownY+int64(dy), rootZ+int64(dz), BroadLeaves)
+			}
+		}
+	}
+	for y := int64(surface + 1); y <= crownY; y++ {
+		visit(rootX, y, rootZ, Log)
+	}
+}
+
+func visitBush(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+	y := int64(surface + 1)
+	visit(rootX, y, rootZ, Bush)
+	if (h>>40)&1 == 0 {
+		return
+	}
+	if (h>>41)&1 == 0 {
+		visit(rootX+1, y, rootZ, Bush)
+		return
+	}
+	visit(rootX, y, rootZ+1, Bush)
+}
+
 func coniferTrunkHeight(h uint64) int {
 	return treeMinTrunkHeight + int((h>>32)%treeHeightVariants)
 }
 
 func palmTrunkHeight(h uint64) int {
 	return palmMinTrunkHeight + int((h>>32)%palmHeightVariants)
+}
+
+func broadleafTrunkHeight(h uint64) int {
+	return broadleafMinTrunkHeight + int((h>>32)%2)
 }
 
 // The tree-named helpers keep the existing conifer tests readable. They are
@@ -951,7 +1041,7 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 
 	x, y, z := int(localX), int(localY), int(localZ)
 	current := chunk.At(x, y, z)
-	if current == Air || (block == Log && current == Leaves) || (block == PalmLog && current == PalmFronds) {
+	if current == Air || (block == Log && (current == Leaves || current == BroadLeaves)) || (block == PalmLog && current == PalmFronds) {
 		chunk.Set(x, y, z, block)
 	}
 }
