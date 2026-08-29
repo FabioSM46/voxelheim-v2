@@ -272,10 +272,17 @@ func (t *slotTable) craft(r recipe) bool {
 // handful of entries at a frequency measured in seconds, on the same explicit trade the
 // drops, the mobs and the tent lookup already record.
 //
+// **A doused station is not a station**, and the skip lives here rather than in either
+// caller so that the two of them cannot disagree. A campfire the rain has put out is a
+// ring of cold stones: nothing cooks on it, and [Sim.nearACampfireLocked] — which is this
+// same scan asked by the spawn director — stops finding it, so the dark comes back to the
+// ground it was keeping. Only a campfire is ever doused (see [Sim.douseFiresLocked]), so
+// this costs every other kind one already-loaded bool.
+//
 // The caller holds Sim.mu.
 func (s *Sim) stationWithinLocked(kind vnet.StructureKind, pos [3]float64, radius float64) bool {
 	for _, held := range s.structures {
-		if held.kind != kind {
+		if held.kind != kind || held.doused {
 			continue
 		}
 		if distanceToVoxel(pos, held.anchorVoxel()) <= radius {

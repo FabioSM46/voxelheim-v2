@@ -470,8 +470,9 @@ func (p *Player) InteractNPC(request protocol.NpcInteractRequest) (vnet.RefusalR
 	if !standing {
 		return vnet.RefusalReasonNotAVendor, fmt.Errorf("entity %d is not a resident of this world", request.EntityID)
 	}
-	if distance := boxDistance(playerBox(p.pos), residentBody.boxAt(r.pos)); math.IsNaN(distance) || distance > EditReach {
-		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is %.2f blocks away, past the reach of %.1f", r.name, distance, EditReach)
+	reach := p.reachLocked()
+	if distance := boxDistance(playerBox(p.pos), residentBody.boxAt(r.pos)); math.IsNaN(distance) || distance > reach {
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is %.2f blocks away, past the reach of %.1f", r.name, distance, reach)
 	}
 	if !vendorRole(r.role) {
 		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is a %s and keeps no stall", r.name, r.role.String())

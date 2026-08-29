@@ -126,6 +126,11 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 
 	p.sim.mu.Lock()
 	origin := p.pos
+	// The reach is read in the same critical section as the position it is measured
+	// from, and for the same reason: both are answers about this player at one instant,
+	// and a sky sampled after the lock was dropped could belong to a later tick than the
+	// position it was about to be compared against.
+	reach := p.reachLocked()
 	actErr := p.cannotActLocked()
 	p.sim.mu.Unlock()
 
@@ -136,8 +141,8 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 		return EditResult{}, actErr
 	}
 
-	if distance := distanceToVoxel(origin, target); distance > EditReach {
-		return EditResult{}, fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, EditReach)
+	if distance := distanceToVoxel(origin, target); distance > reach {
+		return EditResult{}, fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
 
 	// Last thing before the write, and it is a check rather than a guarantee: a tick

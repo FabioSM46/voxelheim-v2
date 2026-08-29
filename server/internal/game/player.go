@@ -1064,6 +1064,12 @@ func (s *Sim) stepWorld(tick uint64) {
 	// property of the code rather than of the lock's scope.
 	worldTick := s.worldTick
 
+	// The fires, before anything that reads one. A campfire the rain has put out cooks
+	// nothing and keeps nothing away for the whole of this tick, so the pass that decides
+	// which are burning has to run ahead of the craft requests, the director and the
+	// snapshot alike rather than somewhere in the middle of them.
+	s.douseFiresLocked(worldTick)
+
 	for _, p := range players {
 		// Vitals first, and the order is load-bearing. A player who died on tick N has
 		// their countdown decremented from N+1, so the three seconds are three seconds
@@ -1529,10 +1535,17 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	if p.hunger == 0 {
 		speed *= StarvingSpeedScale
 	}
-	if inWater {
+	switch {
+	case inWater:
 		// A cap rather than a scale, so it composes with starvation the only way that
 		// makes sense: a starving swimmer is a swimmer, not eight tenths of one.
 		speed = min(speed, SwimSpeed)
+	case snowBites(p.weather):
+		// Deep snow is something to wade through, and a swimmer is not in it — which is
+		// what the `switch` says that two `if`s would not. Read as a scale rather than a
+		// cap, so it multiplies with starvation instead of replacing it: being starved in
+		// a blizzard is worse than either, and SnowSpeedScale is where that is argued.
+		speed *= SnowSpeedScale
 	}
 	p.vel[0] = (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * speed
 	p.vel[2] = (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * speed
