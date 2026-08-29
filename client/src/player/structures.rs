@@ -8,9 +8,11 @@
 //!
 //! **Nothing appears locally when a placement is asked for.** A `PlaceStructureRequest`
 //! leaves and that is all: the server owns reach, whether the footprint is clear and
-//! supported, whether the slot really holds a tent, and whether this player is allowed
-//! another one. A refusal is silence, exactly as it is for a block edit, so there is no
-//! ghost to withdraw and no deadline to withdraw it on.
+//! supported, whether the slot really holds a structure item, and whether this player is
+//! allowed another one. A refusal may update the status line through `ActionRefused` —
+//! including `Warded` for placement, edit and mine — but it changes no local world state,
+//! so there is no ghost to withdraw and no deadline to withdraw it on. Removal refusals
+//! stay silent.
 //!
 //! **Structures never move**, so they are not on the entity-motion path at all. There is
 //! no position and no velocity in `StructureState` — an anchor cell and a `Facing` say
@@ -63,8 +65,7 @@ const REMOVE_BUTTON: MouseButton = MouseButton::Left;
 /// Presentation and routing only, exactly as [`combat::ITEM_RUSTY_SWORD`] is. They cannot
 /// make another item plantable and they cannot make these four legal: the server reads
 /// its own registry, and a placement naming a slot of stone is refused there whatever
-/// these constants say. The runestone is appended after every ordinary block and material
-/// already on the wire; it is declared here because this module routes its place press.
+/// these constants say.
 pub(super) const ITEM_FORGE: u16 = 8;
 pub(super) const ITEM_TENT: u16 = 9;
 pub(super) const ITEM_CAMPFIRE: u16 = 12;
@@ -111,7 +112,6 @@ const FORGE_FOOTPRINT: [[i32; 2]; 2] = [[0, 0], [0, -1]];
 /// cells the same way whether or not the answer moves.
 const CAMPFIRE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
 
-/// The one ground cell a runestone stands on, mirroring `runestoneFootprint`.
 const RUNESTONE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
 
 /// How many cells of air each kind needs above every cell of its footprint.
@@ -859,16 +859,13 @@ const FIRE_FLAME_TIP_HEIGHT: f32 = 0.30;
 /// Charred wood: what is left of a log that has been burning a while.
 const CHARRED_WOOD: Color = Color::linear_rgb(0.10, 0.07, 0.05);
 
-/// The runestone's exact occupied volume inside its one-cell, three-headroom envelope.
-/// The top is narrower than the 0.8 x 0.5 base, which gives the monolith its taper without
-/// making the server validate any ground beyond the anchor cell.
+/// A tapered 0.8 x 3 x 0.5 monolith inside its validated envelope.
 const RUNESTONE_BASE: Vec2 = Vec2::new(0.8, 0.5);
 const RUNESTONE_TOP: Vec2 = Vec2::new(0.58, 0.34);
 const RUNESTONE_HEIGHT: f32 = 3.0;
 const RUNE_STROKE: f32 = 0.065;
 
-/// Cold stone and the paler cut on its front. The two ownership shades follow the rest of
-/// this module's structures; neither colour represents or exposes the ward boundary.
+/// Ownership shades only; neither colour exposes the ward boundary.
 const RUNESTONE_OTHER: Color = Color::linear_rgb(0.20, 0.22, 0.24);
 const RUNESTONE_OWN: Color = Color::linear_rgb(0.38, 0.41, 0.44);
 const RUNE_OTHER: Color = Color::linear_rgb(0.54, 0.58, 0.61);
@@ -1215,11 +1212,7 @@ fn fire_flame_mesh() -> Mesh {
     flame
 }
 
-/// The 0.8 x 3 x 0.5 monolith, tapered on both horizontal axes toward its crown.
-///
-/// Twenty-four vertices rather than eight so every face carries its own normal. A shared
-/// corner normal would round the silhouette, while this is cut stone and should keep a
-/// hard edge under the scene light.
+/// Twenty-four vertices give each cut-stone face its own normal.
 fn runestone_mesh() -> Mesh {
     let bottom = RUNESTONE_BASE / 2.0;
     let top = RUNESTONE_TOP / 2.0;
@@ -1266,11 +1259,7 @@ fn runestone_mesh() -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
-/// The front-facing Fehu-shaped rune, written as three thin quads rather than a glyph.
-///
-/// This client ships an ASCII-only fallback font, so the rune belongs in geometry. Each
-/// point is projected onto the monolith's sloping front and lifted six millimetres toward
-/// North, which prevents z-fighting without floating the cut visibly off the stone.
+/// A front-facing Fehu rune: three quads projected onto the slope, clear of z-fighting.
 fn rune_mesh() -> Mesh {
     let front_z = |y: f32| {
         let half_depth = RUNESTONE_BASE.y / 2.0
@@ -3303,8 +3292,7 @@ mod tests {
         }
     }
 
-    /// The standing stone is the dimensions the issue names, and the symbol on its North
-    /// face is geometry this client's ASCII-only font never has to render.
+    /// The standing stone has the named dimensions, taper and three-quad front rune.
     #[test]
     fn the_runestone_is_a_tapered_monolith_with_three_front_quads() {
         let monolith = runestone_mesh();

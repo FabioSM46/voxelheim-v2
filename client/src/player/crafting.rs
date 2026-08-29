@@ -483,8 +483,6 @@ pub const RECIPES: [Recipe; 21] = [
         },
         station: None,
     },
-    // The authoritative row is the server's: this copy lets the panel show the same eight
-    // stone and two raw iron, and sends only the recipe identity when pressed.
     Recipe {
         id: RecipeId::Runestone,
         category: RecipeCategory::Survival,

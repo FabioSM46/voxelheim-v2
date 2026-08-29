@@ -143,7 +143,7 @@ fn mesh_varies_with_livery(shape: ItemShape) -> bool {
 /// What is true is narrower and belongs to the shape: only the blade's mesh is built against
 /// a livery at all — see [`mesh_varies_with_livery`]. That still fixes what the collapse was
 /// for. Giving the campfire a wood livery split the bundle roll the forge and the tent share
-/// — four structures, one silhouette, byte-identical meshes — because `create_visuals`
+/// — three structures, one silhouette, two byte-identical meshes — because `create_visuals`
 /// builds a bundle from `rolled_bundle_parts` and never looks at the livery.
 ///
 /// The one place this rule is applied, so `create_visuals` and `mesh_for` cannot disagree
@@ -608,7 +608,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::super::items::{ITEM_DIRT, ITEM_STONE, ITEM_VARGR_PELT};
-    use super::super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_RUNESTONE, ITEM_TENT};
+    use super::super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_TENT};
     use super::*;
     use crate::net::{EntityState, ItemDropState, SessionParams, Snapshot, SnapshotInbox};
     use crate::player::PlayerPlugin;
@@ -1439,7 +1439,7 @@ mod tests {
         }
     }
 
-    /// Every carried structure shares the roll and straps, while keeping its own colour.
+    /// Tent, forge and campfire share the roll and straps, while keeping their own colour.
     #[test]
     fn bundled_structures_share_roll_and_brown_straps() {
         let mut app = headless_player();
@@ -1452,14 +1452,13 @@ mod tests {
                     drop(10, [0.0, 64.0, 0.0], ITEM_TENT),
                     drop(11, [1.0, 64.0, 0.0], ITEM_FORGE),
                     drop(12, [2.0, 64.0, 0.0], ITEM_CAMPFIRE),
-                    drop(13, [3.0, 64.0, 0.0], ITEM_RUNESTONE),
                 ],
             ),
             Instant::now(),
         );
         app.update();
 
-        for item_id in [ITEM_TENT, ITEM_FORGE, ITEM_CAMPFIRE, ITEM_RUNESTONE] {
+        for item_id in [ITEM_TENT, ITEM_FORGE, ITEM_CAMPFIRE] {
             assert_eq!(item_shape(item_id), ItemShape::Bundle, "item {item_id}");
         }
 
@@ -1478,7 +1477,7 @@ mod tests {
             .collect();
         assert_eq!(
             presentations.len(),
-            8,
+            6,
             "each bundle is a roll and its straps"
         );
 
@@ -1490,15 +1489,15 @@ mod tests {
             .iter()
             .filter(|(_, item_coloured, _, _)| !*item_coloured)
             .collect();
-        assert_eq!(rolls.len(), 4);
-        assert_eq!(straps.len(), 4);
+        assert_eq!(rolls.len(), 3);
+        assert_eq!(straps.len(), 3);
         assert!(
             rolls.iter().all(|(_, _, mesh, _)| *mesh == rolls[0].2),
-            "the four bundles did not share one roll mesh"
+            "the three bundles did not share one roll mesh"
         );
         assert!(
             straps.iter().all(|(_, _, mesh, _)| *mesh == straps[0].2),
-            "the four bundles did not share one strap mesh"
+            "the three bundles did not share one strap mesh"
         );
         for (index, (_, _, _, material)) in rolls.iter().enumerate() {
             for (_, _, _, other) in &rolls[index + 1..] {

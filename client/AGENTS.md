@@ -20,9 +20,10 @@ answer.
 
 **The same rule governs changing the world, and there it is stricter.** A click sends a
 `BlockEditRequest` and nothing else; the voxel changes when the server's `BlockUpdate` arrives,
-through `ChunkStore::apply_block`, which is the only writer of a voxel there is. So **a refused
-edit looks exactly like nothing happening, and that is correct** — `schemas/world.fbs` is
-explicit that a refusal produces no reply of any kind, not even an error payload.
+through `ChunkStore::apply_block`, which is the only writer of a voxel there is. A refused edit
+normally looks exactly like nothing happening. `Warded` is the one exception: the server sends
+`ActionRefused{EditBlock, Warded}` so the status line can explain the silence without changing
+the world locally.
 
 Prediction is not merely absent here, it is harder than for movement and deserves the same
 separate treatment. A predicted position is corrected by the next snapshot, which always
@@ -496,12 +497,11 @@ The client samples the controls, sends what the player is *trying* to do at the 
   view are one fact on the wire, and this client does not distinguish them.
 
   **The footprint arithmetic is mirrored from the server and must stay in step with it.**
-  `TENT_FOOTPRINT`, `FORGE_FOOTPRINT`, `CAMPFIRE_FOOTPRINT`, the three headrooms and
-  `rotate_offset` in `player/structures.rs` are copies of `tentFootprint`,
-  `forgeFootprint`, `campfireFootprint`, `tentHeadroom`, `forgeHeadroom`,
-  `campfireHeadroom` and `rotateOffset` in `server/internal/game/structure.go`. The server
-  validates the footprint and this side draws it, so a mismatch is a tent that visibly does
-  not cover the ground the server says it covers. **The anchor is the ground cell** on both
+  `TENT_FOOTPRINT`, `FORGE_FOOTPRINT`, `CAMPFIRE_FOOTPRINT`, `RUNESTONE_FOOTPRINT`, their
+  four headrooms and `rotate_offset` in `player/structures.rs` mirror the tables and
+  `rotateOffset` in `server/internal/game/structure.go`. The server validates the footprint
+  and this side draws it, so a mismatch is a structure that visibly does not cover the ground
+  the server says it covers. **The anchor is the ground cell** on both
   sides, and the structure stands in the air above it. The compass is the movement basis —
   North is -Z, East is +X, South is +Z, West is -X — so a yaw of 0 is North, and
   `quantize_facing` resolves the camera's angle once, on the side that has the camera,
@@ -512,8 +512,8 @@ The client samples the controls, sends what the player is *trying* to do at the 
   between mining and a swing, `HeldItem::structure` routes the place press between a block
   edit and a placement, and `StructureTarget` — which can only ever hold a structure *this
   session owns* — takes the break press away from both mining and the swing. A refused
-  placement or removal is silence and nothing appears locally, the same rule a block edit
-  already follows.
+  placement changes only the status line through `ActionRefused`; a refused removal stays
+  silent. `Warded` is additionally the one edit or mine refusal the server answers.
 - **The recipe list is a mirror, and a mirror decides nothing.** `player/crafting.rs`
   carries a display-only copy of `recipeTable` in `server/internal/game/craft.go`, for the
   reason `schemas/player.fbs` gives: the wire carries a `RecipeID` and nothing else — no

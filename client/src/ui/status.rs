@@ -615,7 +615,9 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         }
         RefusalReason::SlotUnusable => Some("what you are holding does not build anything"),
         RefusalReason::InventoryBusy => Some("your pack was busy; try again"),
-        RefusalReason::TentAlreadyPlaced => Some("you already have a tent standing"),
+        RefusalReason::TentAlreadyPlaced => {
+            Some("you already have as many of these standing as allowed")
+        }
         // V26's ward has its own whole sentence below for edit, mine and structure place.
         RefusalReason::Warded => None,
         RefusalReason::TooFast
@@ -1972,7 +1974,8 @@ mod tests {
         assert_eq!(notice_line(&mut app), "", "the notice expired");
     }
 
-    /// The newest refusal wins, rather than the oldest holding the line.
+    /// The newest refusal wins. The cap sentence fits both a second tent and a third
+    /// runestone because the server shares one reason and sends no structure kind.
     ///
     /// Two refusals are two different answers and there is one line to show them in. The
     /// one worth reading is the one about the press the player just made.
@@ -1990,7 +1993,7 @@ mod tests {
 
         assert_eq!(
             notice_line(&mut app),
-            "Cannot build here: you already have a tent standing"
+            "Cannot build here: you already have as many of these standing as allowed"
         );
     }
 

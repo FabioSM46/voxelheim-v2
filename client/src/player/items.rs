@@ -706,9 +706,6 @@ pub(super) const ITEMS: [ItemDisplay; 39] = [
         colour: ItemColour::Block(palette::THATCH),
         livery: None,
     },
-    // The fourth carried structure. A Bundle rather than a new shape because the item is
-    // the packed stone a place press plants; the dedicated monolith and its rune are the
-    // standing structure's drawing in `super::structures`.
     ItemDisplay {
         item_id: ITEM_RUNESTONE,
         name: "runestone",
