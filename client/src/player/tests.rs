@@ -16,6 +16,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::mesh::VertexAttributeValues;
 use bevy::time::TimeUpdateStrategy;
 
+use super::ambience::GroundLook;
 use super::*;
 use crate::net::{
     EntityState, PlayerAppearance, SessionParams, Snapshot, WeatherKind, WeatherState, WorldClock,
@@ -4296,6 +4297,186 @@ fn a_puddle() -> crate::world::ChunkStore {
         chunk,
     );
     store
+}
+
+const AMBIENCE_EYE: Vec3 = Vec3::new(32.5, 64.5, 32.5);
+const AMBIENCE_GROUND_Y: i32 = 48;
+
+/// A fully loaded sampling span whose 64 lattice columns take their surface from
+/// `surface`. Trees stand two blocks over the surface in every Nth column.
+fn an_ambience_landscape(
+    mut surface: impl FnMut(usize) -> crate::world::BlockId,
+    tree_every: Option<usize>,
+) -> crate::world::ChunkStore {
+    use std::collections::HashMap;
+
+    const SIZE: usize = 32;
+    let mut chunks = HashMap::new();
+    for cx in 0..=1 {
+        for cy in 1..=2 {
+            for cz in 0..=1 {
+                chunks.insert(
+                    crate::net::ChunkCoord { cx, cy, cz },
+                    crate::world::VoxelChunk::all_air(SIZE),
+                );
+            }
+        }
+    }
+
+    let centre = AMBIENCE_EYE.floor().as_ivec3();
+    for index in 0..ambience::AMBIENCE_SAMPLES {
+        let lattice_x = index % 8;
+        let lattice_z = index / 8;
+        let offset = |slot: usize| {
+            slot as i32 * ambience::AMBIENCE_SPACING - 7 * ambience::AMBIENCE_SPACING / 2
+        };
+        let x = centre.x + offset(lattice_x);
+        let z = centre.z + offset(lattice_z);
+        set_ambience_block(&mut chunks, x, AMBIENCE_GROUND_Y, z, surface(index));
+        if tree_every.is_some_and(|stride| index % stride == 0) {
+            set_ambience_block(
+                &mut chunks,
+                x,
+                AMBIENCE_GROUND_Y + 2,
+                z,
+                crate::world::palette::LOG,
+            );
+        }
+    }
+
+    let mut store = crate::world::ChunkStore::default();
+    for (coord, chunk) in chunks {
+        store.insert(coord, chunk);
+    }
+    store
+}
+
+fn set_ambience_block(
+    chunks: &mut std::collections::HashMap<crate::net::ChunkCoord, crate::world::VoxelChunk>,
+    x: i32,
+    y: i32,
+    z: i32,
+    block: crate::world::BlockId,
+) {
+    const SIZE: i32 = 32;
+    let coord = crate::net::ChunkCoord {
+        cx: x.div_euclid(SIZE),
+        cy: y.div_euclid(SIZE),
+        cz: z.div_euclid(SIZE),
+    };
+    chunks
+        .get_mut(&coord)
+        .expect("the complete sampling span is loaded")
+        .set(
+            x.rem_euclid(SIZE) as usize,
+            y.rem_euclid(SIZE) as usize,
+            z.rem_euclid(SIZE) as usize,
+            block,
+        );
+}
+
+fn settled_ambience(store: crate::world::ChunkStore) -> Ambience {
+    let direct = ambience::samples_at(&store, AMBIENCE_EYE, 32);
+    assert!(direct.len() <= ambience::AMBIENCE_SAMPLES);
+    let mut app = headless_player();
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)))
+        .insert_resource(store);
+    // Startup spawns and initially places the camera. The following four readings
+    // establish a changed candidate and then hold it for the three-second dwell.
+    // Bevy caps virtual time at 250 ms per frame, so four frames make each reading.
+    app.update();
+    put_the_eye_at(&mut app, AMBIENCE_EYE);
+    for _ in 0..16 {
+        app.update();
+    }
+    *app.world().resource::<Ambience>()
+}
+
+#[test]
+fn sand_columns_look_like_sand() {
+    assert_eq!(
+        settled_ambience(an_ambience_landscape(|_| crate::world::palette::SAND, None)),
+        Ambience {
+            ground: GroundLook::Sand,
+            wooded: false,
+        }
+    );
+}
+
+#[test]
+fn snow_columns_look_like_snow() {
+    assert_eq!(
+        settled_ambience(an_ambience_landscape(|_| crate::world::palette::SNOW, None)),
+        Ambience {
+            ground: GroundLook::Snow,
+            wooded: false,
+        }
+    );
+}
+
+#[test]
+fn grass_with_a_tree_in_every_six_columns_looks_wooded() {
+    assert_eq!(
+        settled_ambience(an_ambience_landscape(
+            |_| crate::world::palette::GRASS,
+            Some(6)
+        )),
+        Ambience {
+            ground: GroundLook::Grass,
+            wooded: true,
+        }
+    );
+}
+
+#[test]
+fn a_checkerboard_of_sand_and_grass_has_no_ground_winner() {
+    assert_eq!(
+        settled_ambience(an_ambience_landscape(
+            |index| if index % 2 == 0 {
+                crate::world::palette::SAND
+            } else {
+                crate::world::palette::GRASS
+            },
+            None,
+        )),
+        Ambience::default()
+    );
+}
+
+#[test]
+fn an_empty_store_has_no_ground_look() {
+    assert_eq!(
+        settled_ambience(crate::world::ChunkStore::default()),
+        Ambience::default()
+    );
+}
+
+#[test]
+fn water_on_every_column_top_has_no_ground_look() {
+    assert_eq!(
+        settled_ambience(an_ambience_landscape(
+            |_| crate::world::palette::WATER,
+            None
+        )),
+        Ambience::default()
+    );
+}
+
+#[test]
+fn losing_the_session_forgets_the_ground_look() {
+    let mut app = headless_player();
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)))
+        .insert_resource(an_ambience_landscape(|_| crate::world::palette::SAND, None));
+    app.update();
+    put_the_eye_at(&mut app, AMBIENCE_EYE);
+    for _ in 0..16 {
+        app.update();
+    }
+    assert_eq!(app.world().resource::<Ambience>().ground, GroundLook::Sand);
+
+    app.world_mut().remove_resource::<Session>();
+    app.update();
+    assert_eq!(*app.world().resource::<Ambience>(), Ambience::default());
 }
 
 /// Two colours as the eye would see them, to within a hair.

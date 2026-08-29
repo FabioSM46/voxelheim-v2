@@ -30,6 +30,7 @@
 //! | Module | Owns |
 //! | ------ | ---- |
 //! | `mod.rs` | input sampling, the send cadence, the bodies the snapshots drive |
+//! | `ambience.rs` | the cosmetic ground look read from loaded voxels around the eye |
 //! | `interpolate.rs` | the two-snapshot buffer and the interpolation — pure, no Bevy world |
 //! | `drops.rs` | authoritative drop spawn/despawn and cosmetic cube motion |
 //! | `hands.rs` | the camera-space held item and its cosmetic swing |
@@ -44,6 +45,7 @@
 //! | `constants.rs` | the numbers, and which of them mirror the server |
 //! | `appearance.rs` | the rig: which box each appearance colour covers, and where it sits |
 
+mod ambience;
 mod appearance;
 mod camera;
 mod combat;
@@ -79,6 +81,7 @@ pub(crate) use appearance::{
     placed as placed_box, placed_armour,
 };
 
+pub use ambience::Ambience;
 pub(crate) use camera::{AimCamera, DeathFall};
 pub use camera::{Orbit, ViewMode, WorldCamera};
 // The character screen's preview is the same rig with no server entity behind it, so it
@@ -278,6 +281,8 @@ impl Plugin for PlayerPlugin {
             .init_resource::<PartyLogInbox>()
             .init_resource::<sky::SkyClock>()
             .init_resource::<Weather>()
+            .init_resource::<Ambience>()
+            .init_resource::<ambience::AmbienceState>()
             .init_resource::<PlayerStats>()
             // `init_resource` rather than `insert_resource`, and `NetPlugin` does the same:
             // whichever plugin is built first creates the inbox and the other finds it.
@@ -363,6 +368,7 @@ impl Plugin for PlayerPlugin {
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
                     forget_weather_without_a_session.after(ApplySnapshots),
+                    ambience::forget_ambience_without_a_session.after(ApplySnapshots),
                     forget_party_without_a_session.after(ApplySnapshots),
                     forget_snapshots_without_a_session.after(ApplySnapshots),
                     forget_bodies_without_a_session.after(ApplySnapshots),
@@ -377,6 +383,9 @@ impl Plugin for PlayerPlugin {
             )
             .add_plugins(projectiles::ProjectilesPlugin)
             .add_plugins(camera::PlayerCameraPlugin)
+            // A look is read only after the camera owns this frame's eye, beside the
+            // sky and the other presentation systems that consume no gameplay rule.
+            .add_systems(Update, ambience::sample_the_ground.after(camera::AimCamera))
             // After the camera plugin, because the walls follow the eye's coarse height
             // step and WardBoundaryPlugin orders its rebuild after AimCamera.
             .add_plugins(wards::WardBoundaryPlugin)
