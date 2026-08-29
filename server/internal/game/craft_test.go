@@ -198,9 +198,9 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 	}
 }
 
-// The recipe table is the nineteen this branch owns, with the costs they agreed on. A
+// The recipe table is the twenty-one this branch owns, with the costs they agreed on. A
 // balance pass edits this test and the table together; a typo edits only one of them.
-func TestTheRecipeTableIsTheTwentyAgreedRecipes(t *testing.T) {
+func TestTheRecipeTableIsTheTwentyOneAgreedRecipes(t *testing.T) {
 	t.Parallel()
 
 	want := map[vnet.RecipeID]recipe{
@@ -282,6 +282,14 @@ func TestTheRecipeTableIsTheTwentyAgreedRecipes(t *testing.T) {
 		vnet.RecipeIDWoodenSceptre: {
 			ingredients: []ingredient{{ItemLog, 3}, {ItemBone, 2}, {ItemRawCoal, 1}},
 			product:     ItemWoodenSceptre, productCount: 1,
+		},
+
+		// The runestone, added by #467. The forge's own eight stone with the coal
+		// replaced by two raw iron, which makes it the priciest non-weapon on the table —
+		// deliberately, because what it buys is ground rather than an object.
+		vnet.RecipeIDRunestone: {
+			ingredients: []ingredient{{ItemStone, 8}, {ItemRawIron, 2}}, product: ItemRunestone, productCount: 1,
+			station: vnet.StructureKindForge, experience: 10,
 		},
 	}
 

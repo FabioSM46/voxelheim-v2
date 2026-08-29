@@ -39,7 +39,22 @@ const (
 	tentHeadroom     = 2
 	forgeHeadroom    = 1
 	campfireHeadroom = 1
+
+	// Three for a runestone, because it is the first structure whose point is that you
+	// can see it from somewhere else. A monolith one cell wide and three cells tall
+	// stands a head above a player and is the only thing in a camp that is taller than
+	// the tent — which is what makes "whose ground is this" a question you can answer by
+	// looking rather than by digging and finding out.
+	runestoneHeadroom = 3
 )
+
+// MaxRunestonesPerPlayer permits a camp and an outpost per identity. The cap shares
+// the tent's existing "you already have one" refusal as required by the wire contract.
+const MaxRunestonesPerPlayer = 2
+
+// WardChunkRadius is a Chebyshev radius in chunk columns. One produces a 3x3,
+// 96x96-block claim at every height and makes storm protection a map lookup.
+const WardChunkRadius = 1
 
 // The ground cells each kind rests on, as offsets from the anchor in the canonical North
 // orientation.
@@ -69,6 +84,12 @@ var (
 	// single block: the radius it keeps clear is measured from the anchor and owes
 	// nothing to how much ground the structure itself covers.
 	campfireFootprint = [][2]int64{{0, 0}}
+
+	// One cell, like the campfire's, and facing is a no-op on it for the same reason —
+	// and still computed rather than special-cased. A monolith is one block of ground
+	// with three cells of nothing above it; the ward it casts is measured from the chunk
+	// column the anchor falls in and owes nothing to how much ground the stone covers.
+	runestoneFootprint = [][2]int64{{0, 0}}
 )
 
 // structure is one placed tent, forge or campfire.
@@ -155,6 +176,8 @@ func knownStructureKind(item ItemID) (vnet.StructureKind, bool) {
 		return vnet.StructureKindForge, true
 	case ItemCampfire:
 		return vnet.StructureKindCampfire, true
+	case ItemRunestone:
+		return vnet.StructureKindRunestone, true
 	default:
 		return vnet.StructureKindUnknown, false
 	}
@@ -174,6 +197,8 @@ func structureItem(kind vnet.StructureKind) (ItemID, bool) {
 		return ItemForge, true
 	case vnet.StructureKindCampfire:
 		return ItemCampfire, true
+	case vnet.StructureKindRunestone:
+		return ItemRunestone, true
 	default:
 		return ItemNone, false
 	}
@@ -237,6 +262,8 @@ func footprintOf(kind vnet.StructureKind, facing vnet.Facing, anchor [3]int64) (
 		offsets, clear = forgeFootprint, forgeHeadroom
 	case vnet.StructureKindCampfire:
 		offsets, clear = campfireFootprint, campfireHeadroom
+	case vnet.StructureKindRunestone:
+		offsets, clear = runestoneFootprint, runestoneHeadroom
 	default:
 		return nil, 0, false
 	}
@@ -309,6 +336,108 @@ func (s *Sim) tentOfLocked(owner identity.PlayerID) (*structure, bool) {
 		}
 	}
 	return best, best != nil
+}
+
+// runestonesOfLocked counts one identity's stones in O(structures). Only placement
+// enforces the cap; restore keeps every stone an older file already holds. Sim.mu is held.
+func (s *Sim) runestonesOfLocked(owner identity.PlayerID) int {
+	standing := 0
+	for _, candidate := range s.structures {
+		if candidate.kind == vnet.StructureKindRunestone && candidate.owner == owner {
+			standing++
+		}
+	}
+	return standing
+}
+
+// rebuildWardsLocked recomputes the whole ward map from the standing runestones.
+//
+// **Rebuilt rather than patched, and the overlap is why.** A ward is the union of squares
+// that may overlap, so removing one stone cannot be expressed as "delete its columns" —
+// some of those columns belong to a neighbour's stone as well, and a deletion would drop
+// a claim nobody gave up. Recomputing is O(runestones) with a constant of nine columns,
+// runs only when a runestone is placed, removed, collapsed or restored, and is by
+// construction the same answer whichever order those happened in.
+//
+// **Where two wards overlap, the earlier stone wins**, and "earlier" is the lower
+// structure id because ids only increase. The pass therefore walks the stones in id order
+// and never overwrites a column that is already claimed. It is a rule rather than an
+// accident of map iteration: without the sort, whose ground the overlap is would be
+// decided by a hash seed and could change on a restart.
+//
+// The caller holds Sim.mu.
+func (s *Sim) rebuildWardsLocked() {
+	stones := make([]*structure, 0, len(s.structures))
+	for _, held := range s.structures {
+		if held.kind == vnet.StructureKindRunestone {
+			stones = append(stones, held)
+		}
+	}
+	if len(stones) == 0 {
+		// nil rather than an empty map: wardOf reads a nil map correctly, and a world
+		// nobody has claimed any ground in carries no allocation for the fact.
+		s.wards = nil
+		return
+	}
+	slices.SortFunc(stones, func(a, b *structure) int {
+		return compareEntityIDs(a.structureID, b.structureID)
+	})
+
+	wards := make(map[world.Column]identity.PlayerID, len(stones)*(2*WardChunkRadius+1)*(2*WardChunkRadius+1))
+	for _, stone := range stones {
+		centre := stone.chunk.Column()
+		for dx := int32(-WardChunkRadius); dx <= WardChunkRadius; dx++ {
+			for dz := int32(-WardChunkRadius); dz <= WardChunkRadius; dz++ {
+				col := world.Column{CX: centre.CX + dx, CZ: centre.CZ + dz}
+				if _, claimed := wards[col]; claimed {
+					continue
+				}
+				wards[col] = stone.owner
+			}
+		}
+	}
+	s.wards = wards
+}
+
+// wardOf is who owns the ground in one chunk column, if anybody does.
+//
+// A map hit and nothing else, which is the whole reason the radius is measured in chunk
+// columns: this is asked on the edit path, on the mining path, on the placement path and,
+// once the storm lands, once per chunk it is about to scour.
+//
+// The caller holds Sim.mu.
+func (s *Sim) wardOf(col world.Column) (identity.PlayerID, bool) {
+	owner, warded := s.wards[col]
+	return owner, warded
+}
+
+// wardedAgainstLocked reports whether this voxel stands on ground somebody other than the
+// actor has claimed.
+//
+// **The one predicate every refusal below asks**, so that "the owner is exempt" is one
+// sentence in one place rather than four copies of an inequality. Unclaimed ground and
+// the actor's own ground are the same answer, deliberately: neither is a refusal, and a
+// caller that had to tell them apart would be a caller that could get the exemption
+// wrong.
+//
+// The caller holds Sim.mu.
+func (s *Sim) wardedAgainstLocked(voxel [3]int64, actor identity.PlayerID) bool {
+	owner, warded := s.wardOf(world.ChunkOf(voxel[0], voxel[1], voxel[2]).Column())
+	return warded && owner != actor
+}
+
+// wardedFootprintAgainstLocked names the first ground cell in a structure footprint
+// claimed by somebody other than the actor. A structure occupies its whole footprint,
+// so an unclaimed anchor cannot make a tent or forge legal across a ward boundary.
+//
+// The caller holds Sim.mu.
+func (s *Sim) wardedFootprintAgainstLocked(cells [][3]int64, actor identity.PlayerID) ([3]int64, bool) {
+	for _, cell := range cells {
+		if s.wardedAgainstLocked(cell, actor) {
+			return cell, true
+		}
+	}
+	return [3]int64{}, false
 }
 
 // PlaceStructure resolves one PlaceStructureRequest and plants the structure if it is
@@ -398,6 +527,19 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, anchor); distance > reach {
 		return protocol.InventoryState{}, vnet.RefusalReasonOutOfReach, fmt.Errorf("the anchor is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
+	// Beside the reach check and under this lock, which is where every ward check in this
+	// server sits. The alternative — pushing it into the placement cache's `allow`
+	// predicate, where the edit path's legality already lives — is not available: that
+	// predicate must stay pure and non-blocking because every chunk being composed
+	// anywhere in the server waits behind the lock it runs under, and a ward is
+	// simulation state guarded by a different one.
+	//
+	// It names no owner, deliberately. The refusal a player is shown says the ground is
+	// claimed and not by whom, because an answer that named one would let a client learn
+	// who has claimed which ground by walking around poking at it.
+	if cell, warded := p.sim.wardedFootprintAgainstLocked(cells, p.playerID); warded {
+		return protocol.InventoryState{}, vnet.RefusalReasonWarded, fmt.Errorf("the structure footprint at %v is warded by another player", cell)
+	}
 	if reason, err := p.sim.footprintFitsLocked(cells, headroom); err != nil {
 		return protocol.InventoryState{}, reason, err
 	}
@@ -411,6 +553,18 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 		// nobody asked for.
 		if existing, standing := p.sim.tentOfLocked(p.playerID); standing {
 			return protocol.InventoryState{}, vnet.RefusalReasonTentAlreadyPlaced, fmt.Errorf("structure %d is already this player's tent", existing.structureID)
+		}
+	}
+	if kind == vnet.StructureKindRunestone {
+		// The tent's rule with a budget in place of a singleton, keyed by the same
+		// identity for the same reason: a claim outlives every session that made it, so
+		// counting by entity id would refill the allowance on every reconnect. It shares
+		// the tent's refusal reason — see MaxRunestonesPerPlayer, where that is argued —
+		// so the client renders one sentence for "you already have as many as you may
+		// have" whichever structure asked.
+		if standing := p.sim.runestonesOfLocked(p.playerID); standing >= MaxRunestonesPerPlayer {
+			return protocol.InventoryState{}, vnet.RefusalReasonTentAlreadyPlaced,
+				fmt.Errorf("this player already has %d runestones standing, which is the limit of %d", standing, MaxRunestonesPerPlayer)
 		}
 	}
 
@@ -442,6 +596,12 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	}
 	p.sim.structures[placed.structureID] = placed
 	p.sim.structuresDirty = true
+	if placed.kind == vnet.StructureKindRunestone {
+		// Inside the same critical section that inserted it, so no reader can see a
+		// standing stone with no ward — and only for the kind that casts one, so a camp
+		// full of fires costs nothing.
+		p.sim.rebuildWardsLocked()
+	}
 
 	p.sim.log.Debug("structure placed",
 		"structure_id", placed.structureID, "kind", placed.kind.String(),
@@ -505,6 +665,19 @@ func (p *Player) removeOwnStructure(structureID uint64) (structure, [3]int64, er
 	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, held.anchorVoxel()); distance > reach {
 		return structure{}, [3]int64{}, fmt.Errorf("structure %d is %.2f blocks away, past the reach of %.1f", structureID, distance, reach)
 	}
+	// Beside the reach check, like every other ward check. Removal is the one refused
+	// action that stays *silent*, and it stays silent for the reason every other removal
+	// refusal does: a client that could tell "not yours", "too far" and "warded" apart
+	// could map somebody else's camp by asking. The check is still worth making — the
+	// structure this refuses is the actor's own, standing inside ground a neighbour has
+	// since claimed, which the owner check above would have let through.
+	cells, _, known := footprintOf(held.kind, held.facing, held.anchorVoxel())
+	if !known {
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d has unknown kind %s", structureID, held.kind)
+	}
+	if cell, warded := p.sim.wardedFootprintAgainstLocked(cells, p.playerID); warded {
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d stands on ground warded by another player at %v", structureID, cell)
+	}
 
 	spawn, clear := p.sim.firstFreeVoxelAboveLocked(held.anchorVoxel())
 	if !clear {
@@ -513,6 +686,12 @@ func (p *Player) removeOwnStructure(structureID uint64) (structure, [3]int64, er
 
 	delete(p.sim.structures, structureID)
 	p.sim.structuresDirty = true
+	if held.kind == vnet.StructureKindRunestone {
+		// Under the same lock the removal happened in, which is what makes "the ward
+		// goes on the tick the stone does" true rather than eventual: no reader can
+		// observe the world between the two statements.
+		p.sim.rebuildWardsLocked()
+	}
 	return *held, spawn, nil
 }
 
@@ -560,7 +739,10 @@ func (s *Sim) collapseStructuresAt(voxel [3]int64) []structure {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var collapsed []structure
+	var (
+		collapsed []structure
+		claimed   bool
+	)
 	for id, held := range s.structures {
 		if held.worldOwned() {
 			continue
@@ -571,7 +753,16 @@ func (s *Sim) collapseStructuresAt(voxel [3]int64) []structure {
 		}
 		delete(s.structures, id)
 		s.structuresDirty = true
+		if held.kind == vnet.StructureKindRunestone {
+			claimed = true
+		}
 		collapsed = append(collapsed, *held)
+	}
+	if claimed {
+		// After the loop rather than inside it: a single break can bring down more than
+		// one stone, and rebuilding per removal would compute an intermediate ward map
+		// nothing is allowed to see anyway.
+		s.rebuildWardsLocked()
 	}
 
 	// Ordered by identity, so a break that brings down two structures spawns their drops
@@ -818,6 +1009,10 @@ func (s *Sim) RestoreStructures(stored []Structure) error {
 		restored[held.structureID] = held
 	}
 	s.structures = restored
+	// The wards a stored camp brings back with it. Derived rather than stored, for the
+	// reason the ids are: a ward is a function of where the stones are, and a second copy
+	// on disk is a second thing that has to stay in step with the first.
+	s.rebuildWardsLocked()
 
 	// Deliberately not marked dirty. What was just loaded is what the file already
 	// holds, and marking it would make every restart rewrite a byte-identical file —

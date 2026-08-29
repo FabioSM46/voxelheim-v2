@@ -1006,6 +1006,25 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 				"action", msg.BlockEditRequest.Action.String(),
 				"client_tick", msg.BlockEditRequest.ClientTick,
 			)
+
+			// **The one exception, and it is one reason rather than a change of policy.**
+			// Every other refused edit is a click the player can repeat somewhere else
+			// and get right; a ward is a rule about a place, which a player who is told
+			// nothing can only read as a broken server. Routed on the error's identity
+			// and not on its text — the sentence above is for the operator, this code is
+			// for the player, and the two are separate outputs. The blocking send, for
+			// the reason a placement refusal uses it: nothing later supersedes it.
+			if errors.Is(eErr, game.ErrWarded) {
+				refusal := protocol.ActionRefused{
+					Action:    vnet.RefusedActionEdit,
+					Reason:    vnet.RefusalReasonWarded,
+					Anchor:    msg.BlockEditRequest.Pos,
+					HasAnchor: msg.BlockEditRequest.HasPos,
+				}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send warded edit refusal: %w", sErr)
+				}
+			}
 			return nil
 		}
 
@@ -1087,6 +1106,23 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 				"active", request.Active,
 				"client_tick", request.ClientTick,
 			)
+
+			// The edit path's exception, on this path for the same reason and with the
+			// same narrowness: a ward is the only mining refusal a player is told about,
+			// because it is the only one they cannot work out by looking at the block
+			// they aimed at. The silence of every other one is what keeps a forged client
+			// from probing unloaded chunks and Air beyond its view.
+			if errors.Is(mErr, game.ErrWarded) {
+				refusal := protocol.ActionRefused{
+					Action:    vnet.RefusedActionMine,
+					Reason:    vnet.RefusalReasonWarded,
+					Anchor:    request.Pos,
+					HasAnchor: request.HasPos,
+				}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send warded mine refusal: %w", sErr)
+				}
+			}
 		}
 		return nil
 

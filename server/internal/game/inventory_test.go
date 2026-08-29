@@ -465,6 +465,10 @@ func TestPlacingLocksTheInventoryOnlyAfterGenerationAndThroughTheWrite(t *testin
 
 	close(editor.finishGeneration)
 	awaitSignal(t, "the post-generation guard", editor.guardAcquired)
+	if sim.mu.TryLock() {
+		sim.mu.Unlock()
+		t.Fatal("the simulation lock did not protect the authoritative world write")
+	}
 	if player.inventory.mu.TryLock() {
 		player.inventory.mu.Unlock()
 		t.Fatal("inventory was not locked across the authoritative world write")
@@ -482,6 +486,10 @@ func TestPlacingLocksTheInventoryOnlyAfterGenerationAndThroughTheWrite(t *testin
 		t.Fatal("inventory remained locked after the edit")
 	}
 	player.inventory.mu.Unlock()
+	if !sim.mu.TryLock() {
+		t.Fatal("simulation remained locked after the edit")
+	}
+	sim.mu.Unlock()
 	if got := player.InventoryState().Stacks[0]; got != (protocol.InventoryStack{}) {
 		t.Errorf("placing left slot 0 %+v, want the stack spent", got)
 	}
