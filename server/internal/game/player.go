@@ -240,8 +240,8 @@ type Sim struct {
 	structures map[uint64]*structure
 
 	// residents is every person a settlement holds, keyed by identity for the reason
-	// every other collection here is: an id is how one of them is found without scanning,
-	// and here it is what makes materialising a chunk twice produce one person.
+	// every other collection here is: a snapshot names them by id, and an interaction has
+	// to find one without scanning.
 	//
 	// **Deliberately not [Sim.mobs], and that is the design rather than a filing
 	// decision.** Combat, the projectiles, the spawn director and the corpse maker all
@@ -1052,6 +1052,13 @@ func (s *Sim) stepWorld(tick uint64) {
 		mobs = s.sortedMobsLocked()
 	}
 
+	// And the residents, who are none of the above: nothing spawns, removes or damages
+	// one, so this is a single pass that turns whoever has somebody standing near them.
+	// After the players have moved, for the reason the mobs are — a head turns toward the
+	// position this tick produced rather than the last one's — and after the director,
+	// which has nothing to say about them.
+	s.advanceResidentsLocked(players)
+
 	states := make([]protocol.EntityState, len(players))
 	for i, p := range players {
 		states[i] = protocol.EntityState{
@@ -1105,6 +1112,17 @@ func (s *Sim) stepWorld(tick uint64) {
 	// where nobody's view changed — which is almost all of them, because the answer is
 	// only ever built when somebody has just come into somebody else's cube.
 	faces := make([][]byte, len(players))
+
+	// The same cache for the residents, on the same terms and for the same reason: at
+	// most one encoded description per resident per tick, built the first time a viewer
+	// turns out not to have been told about them. Keyed rather than indexed because the
+	// residents are a map and there is no per-tick slice of them to index into — the
+	// snapshot projection below is where they are put in order, and that order is by
+	// entity id rather than by anything this loop could count.
+	//
+	// Nil until somebody walks into a village, so a world nobody has visited allocates
+	// nothing at all.
+	var residentFaces map[uint64][]byte
 
 	for _, viewer := range players {
 		visible = visible[:0]
@@ -1184,16 +1202,6 @@ func (s *Sim) stepWorld(tick uint64) {
 			}
 		}
 
-		// What is no longer in view is forgotten, which is what keeps this map the size
-		// of a view rather than of a session's whole history — and what makes an entity
-		// that comes back described again. Deleting during a range is defined; the map is
-		// this viewer's own and nothing else touches it.
-		for id, at := range viewer.described {
-			if at != tick {
-				delete(viewer.described, id)
-			}
-		}
-
 		// The same visibility rule, unchanged: a drop lying on a chunk this session
 		// holds is one it can draw, and a drop beyond that cube would be an entity
 		// standing on terrain the client has never been sent.
@@ -1215,6 +1223,51 @@ func (s *Sim) stepWorld(tick uint64) {
 				if viewer.canOpenCorpseLocked(shown.corpse) {
 					visibleLootCorpses = append(visibleLootCorpses, shown.corpse.entityID)
 				}
+				if shown.resident != nil {
+					// **The resident's description, on exactly the players' terms**: once
+					// per entity per time it enters this viewer's cube, ahead of the
+					// snapshot that first carries it, recorded only once the frame is in
+					// the queue so a dropped one is retried next tick. It shares
+					// `described` with the players rather than keeping a map of its own —
+					// entity ids name one thing across every class, so one map is one
+					// answer to "has this session been told about that id", and a second
+					// would be a second answer to keep in step.
+					if _, told := viewer.described[shown.resident.entityID]; told {
+						viewer.described[shown.resident.entityID] = tick
+					} else {
+						if residentFaces == nil {
+							residentFaces = make(map[uint64][]byte)
+						}
+						face, built := residentFaces[shown.resident.entityID]
+						if !built {
+							// No inventory to wait on and nothing that changes with a
+							// tick, unlike a player's: a resident's name, role and face
+							// are fixed the moment the seed placed them, so this encoding
+							// can never fail to be available.
+							face = shown.resident.appearanceFrame()
+							residentFaces[shown.resident.entityID] = face
+						}
+						if viewer.deliver(face) {
+							viewer.described[shown.resident.entityID] = tick
+						}
+					}
+				}
+			}
+		}
+
+		// What is no longer in view is forgotten, which is what keeps this map the size
+		// of a view rather than of a session's whole history — and what makes an entity
+		// that comes back described again. Deleting during a range is defined; the map is
+		// this viewer's own and nothing else touches it.
+		//
+		// **After every pass that stamps the map, which is why it sits here rather than
+		// beside the players it used to follow.** A resident stamped after this ran would
+		// be swept on the next tick and described again on the one after, for as long as
+		// it stayed in view — a permanent frame per resident per tick, which is precisely
+		// what once-per-view bookkeeping exists to avoid.
+		for id, at := range viewer.described {
+			if at != tick {
+				delete(viewer.described, id)
 			}
 		}
 

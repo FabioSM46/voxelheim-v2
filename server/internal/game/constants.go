@@ -397,6 +397,30 @@ const (
 	// empty server is empty five seconds later.
 	MobDespawnGrace = 5 * time.Second
 
+	// --- The residents -----------------------------------------------------------
+	//
+	// The two numbers a village's people have. Neither is a fight and neither is on the
+	// wire: a resident's yaw is computed here and echoed in the snapshot like every other
+	// entity's, so a client that disagreed about either would gain nothing.
+
+	// ResidentNoticeRadius is how close somebody has to be for a resident to look at
+	// them, in blocks between bodies.
+	//
+	// Six, which is deliberately far short of the draugr's sixteen: this is the distance
+	// at which a person walking past is *company*, not the distance at which something
+	// has seen you. Inside a hut it is the whole room; outside it is about a doorway and
+	// the path in front of it, so walking down a village street turns each of them in
+	// turn rather than all of them at once.
+	ResidentNoticeRadius = 6.0
+
+	// ResidentTurnRate is how fast a resident turns, in radians per second.
+	//
+	// Three, so half a turn takes about a second: fast enough to read as somebody
+	// noticing you and slow enough that a player circling one does not make it spin.
+	// A rate rather than a snap is also what makes the return to rest cost nothing extra
+	// — the same arithmetic turns a resident back once you have gone.
+	ResidentTurnRate = 3.0
+
 	// --- The swing --------------------------------------------------------------
 	//
 	// What a swing is worth, and the only copy of it. The client sends the intent and
