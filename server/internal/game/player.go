@@ -328,6 +328,10 @@ type Sim struct {
 	resendChunk      func(world.Coord) int
 	regeneration     []chunkRegenerationPass
 
+	waterWorld    WaterWorld
+	pendingWater  map[waterVoxel]uint64
+	unstableWater chan unstableWaterBatch
+
 	// byIdentity is the live player behind each identity, and it exists for exactly one
 	// question: what entity id does this structure's owner hold *right now*.
 	//
@@ -443,6 +447,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		residents:            make(map[uint64]*resident),
 		byIdentity:           make(map[identity.PlayerID]*Player),
 		minersByPos:          make(map[[3]int32]map[*Player]struct{}),
+		pendingWater:         make(map[waterVoxel]uint64),
+		unstableWater:        make(chan unstableWaterBatch, waterScanQueueDepth),
 	}, nil
 }
 
@@ -1093,8 +1099,8 @@ func (p *Player) WakeStreaming() { p.chunks.ring() }
 // Step advances the authoritative world by one tick. Normal-mob loot remains inside
 // Sim.mu because the kill-to-corpse transition only mutates simulation-owned state;
 // ordinary world drops retain their separate session-safe spawn path.
-func (s *Sim) Step(tick uint64) {
-	s.stepWorld(tick)
+func (s *Sim) Step(tick uint64) []WaterChange {
+	return s.stepWorld(tick)
 }
 
 // stepWorld advances every player, drop, creature, corpse and clock by one tick and
@@ -1110,7 +1116,7 @@ func (s *Sim) Step(tick uint64) {
 // snapshot describes one tick and is worthless by the time a full queue drains, so
 // waiting for room would stall every other player's tick in order to deliver something
 // already stale. Inventory and loot-container states instead retain dirty flags and retry.
-func (s *Sim) stepWorld(tick uint64) {
+func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1132,6 +1138,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	// it here is what says so, and it is what makes "the same sky for everyone" a
 	// property of the code rather than of the lock's scope.
 	worldTick := s.worldTick
+	waterChanges := s.advanceWaterLocked(worldTick)
 
 	// The fires, before anything that reads one. A campfire the rain has put out cooks
 	// nothing and keeps nothing away for the whole of this tick, so the pass that decides
@@ -1517,6 +1524,7 @@ func (s *Sim) stepWorld(tick uint64) {
 		}
 	}
 
+	return waterChanges
 }
 
 // sortedPlayersLocked is every connected player in identity order.

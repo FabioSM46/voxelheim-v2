@@ -2,6 +2,14 @@ package game
 
 import "time"
 
+const (
+	// WaterTickDelay is the flow settling delay.
+	WaterTickDelay uint64 = 5
+
+	// WaterChangesPerTick is 32 decodes/frame * 60 fps / 20 ticks/s.
+	WaterChangesPerTick = 32 * 60 / 20
+)
+
 // Movement constants — the authoritative numbers, and the only copy on this side.
 //
 // **They must stay in sync with `client/src/player/constants.rs`.** The client

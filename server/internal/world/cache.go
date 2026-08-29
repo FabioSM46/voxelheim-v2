@@ -88,6 +88,10 @@ type Cache struct {
 	saveMu  sync.Mutex // serialises Flush against Flush, so no stale snapshot lands late
 	dirtyMu sync.Mutex
 	dirty   map[Coord]struct{}
+
+	waterMu      sync.Mutex
+	waterPending map[Coord]struct{}
+	waterWake    chan struct{}
 }
 
 // composition is a composed chunk and its encoded payload, published as one value.
@@ -137,14 +141,16 @@ func newCache(seed int64, store *Store, workers, capacity int) *Cache {
 	}
 
 	return &Cache{
-		seed:     seed,
-		capacity: capacity,
-		slots:    make(chan struct{}, workers),
-		deltas:   NewDeltas(),
-		entries:  make(map[Coord]*list.Element),
-		lru:      list.New(),
-		store:    store,
-		dirty:    make(map[Coord]struct{}),
+		seed:         seed,
+		capacity:     capacity,
+		slots:        make(chan struct{}, workers),
+		deltas:       NewDeltas(),
+		entries:      make(map[Coord]*list.Element),
+		lru:          list.New(),
+		store:        store,
+		dirty:        make(map[Coord]struct{}),
+		waterPending: make(map[Coord]struct{}),
+		waterWake:    make(chan struct{}, 1),
 	}
 }
 
@@ -250,8 +256,48 @@ func (c *Cache) Get(ctx context.Context, coord Coord) (*Chunk, []uint16, error) 
 	// treat "the composition is not there yet" as "the generator will compose my delta".
 	composed := c.compose(entry, Generate(c.seed, coord))
 	close(entry.ready)
+	c.markWaterComposition(coord)
 
 	return composed.chunk, composed.encoded, nil
+}
+
+// WaterCompositions rings for pending scans.
+func (c *Cache) WaterCompositions() <-chan struct{} { return c.waterWake }
+
+// TakeWaterCompositions takes latest pending compositions in coordinate order.
+func (c *Cache) TakeWaterCompositions() []*Chunk {
+	c.waterMu.Lock()
+	coords := make([]Coord, 0, len(c.waterPending))
+	for coord := range c.waterPending {
+		coords = append(coords, coord)
+	}
+	clear(c.waterPending)
+	c.waterMu.Unlock()
+
+	slices.SortFunc(coords, compareCoords)
+	chunks := make([]*Chunk, 0, len(coords))
+	for _, coord := range coords {
+		entry := c.resident(coord)
+		if entry == nil {
+			continue
+		}
+		composed := entry.composed.Load()
+		if composed != nil {
+			chunks = append(chunks, composed.chunk)
+		}
+	}
+	return chunks
+}
+
+func (c *Cache) markWaterComposition(coord Coord) {
+	c.waterMu.Lock()
+	c.waterPending[coord] = struct{}{}
+	c.waterMu.Unlock()
+
+	select {
+	case c.waterWake <- struct{}{}:
+	default:
+	}
 }
 
 // compose applies the edit layer to a freshly generated base and publishes the result.
@@ -467,6 +513,11 @@ func (c *Cache) ApplyGuarded(ctx context.Context, x, y, z int64, block Block, gu
 	return c.apply(ctx, x, y, z, block, guard, allow)
 }
 
+// ApplyResidentGuarded writes an existing composition without generation or I/O.
+func (c *Cache) ApplyResidentGuarded(x, y, z int64, block Block, allow func(current Block) error) error {
+	return c.applyResidentGuarded(x, y, z, block, allow)
+}
+
 func (c *Cache) apply(ctx context.Context, x, y, z int64, block Block, guard func() error, allow func(current Block) error) error {
 	coord := ChunkOf(x, y, z)
 	if _, _, err := c.Get(ctx, coord); err != nil {
@@ -477,6 +528,11 @@ func (c *Cache) apply(ctx context.Context, x, y, z int64, block Block, guard fun
 			return err
 		}
 	}
+	return c.applyResidentGuarded(x, y, z, block, allow)
+}
+
+func (c *Cache) applyResidentGuarded(x, y, z int64, block Block, allow func(current Block) error) error {
+	coord := ChunkOf(x, y, z)
 	index := Index(Local(x), Local(y), Local(z))
 
 	c.composeMu.Lock()
@@ -598,6 +654,7 @@ func (c *Cache) Regenerate(coord Coord) error {
 		if live := c.resident(coord); live == entry && entry.composed.Load() != nil {
 			entry.composed.Store(regenerated)
 			c.revision.Add(1)
+			c.markWaterComposition(coord)
 		}
 	}
 	c.clearDirty(coord)
