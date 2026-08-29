@@ -32,7 +32,7 @@ use crate::world::{BlockId, palette};
 // Presentation-only item ids. The server registry remains the sole authority on whether
 // any of these can be placed and which block an action actually creates.
 //
-// These twelve live here because no module *acts* on them — they are ids this client only
+// These ids live here because no module *acts* on them — they are ids this client only
 // ever draws. Items that a module does act on stay where that module declares them:
 // the blade in `super::combat`, the four bundles in `super::structures`, the forge's two
 // products and the patch beside them in `super::crafting`. The table below names them from
@@ -95,6 +95,10 @@ pub(crate) const ITEM_SILVER: u16 = 35;
 pub(super) const ITEM_PLANKS: u16 = 36;
 pub(super) const ITEM_COBBLESTONE: u16 = 37;
 pub(super) const ITEM_THATCH: u16 = 38;
+
+/// Palm wood, appended as `ItemPalmLog` in the server registry. Nothing on this side
+/// acts on the id; this module only draws and names it.
+pub(super) const ITEM_PALM_LOG: u16 = 40;
 
 /// The shapes an item is drawn in.
 ///
@@ -379,7 +383,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 39] = [
+pub(super) const ITEMS: [ItemDisplay; 40] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -713,6 +717,13 @@ pub(super) const ITEMS: [ItemDisplay; 39] = [
         colour: ItemColour::Block(palette::STONE),
         livery: None,
     },
+    ItemDisplay {
+        item_id: ITEM_PALM_LOG,
+        name: "palm log",
+        shape: ItemShape::Block,
+        colour: ItemColour::Block(palette::PALM_LOG),
+        livery: Some(Livery::Wood),
+    },
 ];
 
 /// The row one item id has, when this build has one.
@@ -935,6 +946,7 @@ mod tests {
             ITEM_COBBLESTONE,
             ITEM_THATCH,
             ITEM_RUNESTONE,
+            ITEM_PALM_LOG,
         ];
         for item_id in declared {
             assert!(
@@ -1037,6 +1049,17 @@ mod tests {
             item_linear_rgba(ITEM_RUNESTONE),
             palette::linear_rgba(palette::STONE)
         );
+    }
+
+    #[test]
+    fn palm_wood_has_its_appended_id_and_log_presentation() {
+        assert_eq!(ITEM_PALM_LOG, 40);
+
+        let palm_log = display(ITEM_PALM_LOG).expect("palm log is registered");
+        assert_eq!(palm_log.name, "palm log");
+        assert_eq!(palm_log.shape, ItemShape::Block);
+        assert_eq!(palm_log.colour, ItemColour::Block(palette::PALM_LOG));
+        assert_eq!(palm_log.livery, Some(Livery::Wood));
     }
 
     /// The three the recipe-driven name table could never have covered.
