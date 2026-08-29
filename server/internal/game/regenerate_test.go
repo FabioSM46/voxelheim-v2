@@ -8,6 +8,7 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -94,17 +95,17 @@ func TestRegenerationClearsPlayerStateKeepsTheWorldAndLiftsAnEnclosedPlayer(t *t
 
 	playerOwnedID := identity.PlayerID{1}
 	sim.mu.Lock()
-	sim.structures[10] = &structure{structureID: 10, kind: vnet.StructureKindTent, owner: playerOwnedID, chunk: target}
-	sim.structures[11] = &structure{structureID: 11, kind: vnet.StructureKindForge, chunk: target}
-	sim.structures[12] = &structure{structureID: 12, kind: vnet.StructureKindTent, owner: playerOwnedID, chunk: kept}
-	sim.structures[13] = &structure{structureID: 13, kind: vnet.StructureKindTent, owner: playerOwnedID, chunk: other}
+	sim.structures[10] = &structure{structureID: 10, kind: vnet.StructureKindTent, anchor: [3]int32{10, 64, 10}, owner: playerOwnedID, chunk: target}
+	sim.structures[11] = &structure{structureID: 11, kind: vnet.StructureKindForge, anchor: [3]int32{12, 64, 12}, chunk: target}
+	sim.structures[12] = &structure{structureID: 12, kind: vnet.StructureKindTent, anchor: [3]int32{42, 64, 10}, owner: playerOwnedID, chunk: kept}
+	sim.structures[13] = &structure{structureID: 13, kind: vnet.StructureKindTent, anchor: [3]int32{74, 64, 10}, owner: playerOwnedID, chunk: other}
 
-	sim.drops[20] = &itemDrop{entityID: 20, chunk: target}
-	sim.drops[21] = &itemDrop{entityID: 21, chunk: kept}
-	sim.corpses[30] = &corpse{entityID: 30, chunk: target}
-	sim.corpses[31] = &corpse{entityID: 31, chunk: kept}
-	sim.mobs[40] = &mob{entityID: 40, chunk: target}
-	sim.mobs[41] = &mob{entityID: 41, chunk: kept}
+	sim.drops[20] = &itemDrop{entityID: 20, pos: [3]float64{10.5, 64, 10.5}, chunk: target}
+	sim.drops[21] = &itemDrop{entityID: 21, pos: [3]float64{42.5, 64, 10.5}, chunk: kept}
+	sim.corpses[30] = &corpse{entityID: 30, kind: vnet.MobKindDraugr, pos: [3]float64{10.5, 64, 10.5}, chunk: target}
+	sim.corpses[31] = &corpse{entityID: 31, kind: vnet.MobKindDraugr, pos: [3]float64{42.5, 64, 10.5}, chunk: kept}
+	sim.mobs[40] = &mob{entityID: 40, kind: vnet.MobKindDraugr, pos: [3]float64{10.5, 64, 10.5}, chunk: target}
+	sim.mobs[41] = &mob{entityID: 41, kind: vnet.MobKindDraugr, pos: [3]float64{42.5, 64, 10.5}, chunk: kept}
 	player.openLootID = 30
 	player.lootDirty = true
 	player.vel[1] = -12
@@ -154,6 +155,157 @@ func TestRegenerationClearsPlayerStateKeepsTheWorldAndLiftsAnEnclosedPlayer(t *t
 	if len(resent) != 1 || resent[0] != target {
 		t.Errorf("session repairs = %+v, want only %+v", resent, target)
 	}
+}
+
+func TestRegenerationClearsBodiesAndFootprintsThatCrossIntoTheChunk(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRegenerationFixture()
+	target := world.ChunkOf(world.ChunkSize-1, 64, 0)
+	neighbour := world.ChunkOf(world.ChunkSize, 64, 0)
+	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
+	owner := testPlayerID(1)
+
+	sim.mu.Lock()
+	sim.structures[10] = &structure{
+		structureID: 10,
+		kind:        vnet.StructureKindTent,
+		anchor:      [3]int32{world.ChunkSize, 64, 0},
+		owner:       owner,
+		chunk:       neighbour,
+	}
+	sim.drops[20] = &itemDrop{
+		entityID: 20,
+		pos:      [3]float64{world.ChunkSize + 0.1, 64, 0.5},
+		chunk:    neighbour,
+	}
+	sim.corpses[30] = &corpse{
+		entityID: 30,
+		kind:     vnet.MobKindDraugr,
+		pos:      [3]float64{world.ChunkSize + 0.1, 64, 0.5},
+		chunk:    neighbour,
+	}
+	sim.mobs[40] = &mob{
+		entityID: 40,
+		kind:     vnet.MobKindDraugr,
+		pos:      [3]float64{world.ChunkSize + 0.1, 64, 0.5},
+		chunk:    neighbour,
+	}
+	sim.RegenerateChunksLocked([]world.Coord{target}, func(world.Column) bool { return false })
+	sim.advanceChunkRegenerationLocked()
+	_, structureStillThere := sim.structures[10]
+	_, dropStillThere := sim.drops[20]
+	_, corpseStillThere := sim.corpses[30]
+	_, mobStillThere := sim.mobs[40]
+	sim.mu.Unlock()
+
+	if structureStillThere || dropStillThere || corpseStillThere || mobStillThere {
+		t.Fatalf("cross-boundary state after regeneration: structure=%v drop=%v corpse=%v mob=%v; want all false",
+			structureStillThere, dropStillThere, corpseStillThere, mobStillThere)
+	}
+}
+
+func TestRegenerationLiftsABorderPlayerAboveTheHighestOverlappingColumn(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRegenerationFixture()
+	var targetX, centreColumnX, z int64
+	found := false
+	for chunkX := int64(-8); chunkX <= 8 && !found; chunkX++ {
+		boundary := chunkX * world.ChunkSize
+		for candidateZ := int64(-64); candidateZ <= 64; candidateZ++ {
+			if world.GeneratedColumnTop(testWorldSeed, boundary-1, candidateZ) ==
+				world.GeneratedColumnTop(testWorldSeed, boundary, candidateZ) {
+				continue
+			}
+			targetX, centreColumnX, z = boundary-1, boundary, candidateZ
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("could not find adjacent generated columns with different safe heights")
+	}
+	target := world.ChunkOf(targetX, 64, z)
+	fixture.becomesSolid[target] = map[[3]int64]bool{{targetX, 64, z}: true}
+	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
+	player, err := sim.Join(1, testPlayerID(1), testCharacterName,
+		[3]float32{float32(centreColumnX) + 0.1, 64, float32(z) + 0.5}, testAppearance(), nil, func([]byte) bool { return true })
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+
+	sim.mu.Lock()
+	sim.RegenerateChunksLocked([]world.Coord{target}, func(world.Column) bool { return false })
+	sim.advanceChunkRegenerationLocked()
+	gotY := player.pos[1]
+	sim.mu.Unlock()
+
+	wantY := float64(world.GeneratedColumnTop(testWorldSeed, targetX, z) + world.SpawnClearance)
+	if gotY != wantY {
+		t.Fatalf("border player y = %v, want regenerated overlap column height %v", gotY, wantY)
+	}
+}
+
+func TestRegenerationRemovalAppearsAsOmissionFromTheNextCompleteSnapshot(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRegenerationFixture()
+	target := world.ChunkOf(10, 64, 0)
+	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
+	out := &dropSink{}
+	if _, err := sim.Join(1, testPlayerID(1), testCharacterName,
+		[3]float32{0.5, 64, 0.5}, testAppearance(), nil, out.deliver); err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+
+	sim.mu.Lock()
+	sim.drops[20] = &itemDrop{
+		entityID: 20,
+		item:     ItemStone,
+		count:    1,
+		pos:      [3]float64{10.5, 64, 0.5},
+		chunk:    target,
+	}
+	sim.mobs[40] = &mob{
+		entityID: 40,
+		kind:     vnet.MobKindDraugr,
+		pos:      [3]float64{10.5, 64, 0.5},
+		chunk:    target,
+		health:   draugrRow.maxHealth,
+		action:   vnet.MobActionIdle,
+	}
+	sim.mu.Unlock()
+	sim.Step(1)
+	if !snapshotHasDrop(out.snapshotDrops(t), 20) || !snapshotHasMob(newestSnapshotMobs(t, out), 40) {
+		t.Fatal("the viewer did not first receive the drop and mob that regeneration will remove")
+	}
+
+	sim.mu.Lock()
+	sim.RegenerateChunksLocked([]world.Coord{target}, func(world.Column) bool { return false })
+	sim.mu.Unlock()
+	sim.Step(2)
+	if snapshotHasDrop(out.snapshotDrops(t), 20) || snapshotHasMob(newestSnapshotMobs(t, out), 40) {
+		t.Fatal("the complete snapshot after regeneration still contains a removed drop or mob")
+	}
+}
+
+func snapshotHasDrop(drops []protocol.ItemDropState, entityID uint64) bool {
+	for _, drop := range drops {
+		if drop.EntityID == entityID {
+			return true
+		}
+	}
+	return false
+}
+
+func snapshotHasMob(mobs []protocol.MobState, entityID uint64) bool {
+	for _, mob := range mobs {
+		if mob.EntityID == entityID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRegenerationExaminesAtMostSixtyFourChunksPerTick(t *testing.T) {

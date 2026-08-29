@@ -2,7 +2,6 @@ package game
 
 import (
 	"errors"
-	"math"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -89,7 +88,7 @@ func (s *Sim) advanceChunkRegenerationLocked() {
 func (s *Sim) regenerateChunkLocked(coord world.Coord) {
 	structuresChanged := false
 	for id, held := range s.structures {
-		if held.chunk != coord || held.worldOwned() {
+		if held.worldOwned() || !structureOverlapsChunk(held, coord) {
 			continue
 		}
 		delete(s.structures, id)
@@ -97,20 +96,21 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) {
 	}
 	if structuresChanged {
 		s.structuresDirty = true
+		s.rebuildWardsLocked()
 	}
 
 	for id, drop := range s.drops {
-		if drop.chunk == coord {
+		if boxOverlapsChunk(drop.box(), coord) {
 			delete(s.drops, id)
 		}
 	}
 	for id, corpse := range s.corpses {
-		if corpse.chunk == coord {
+		if boxOverlapsChunk(mobRegistry[corpse.kind].body.boxAt(corpse.pos), coord) {
 			s.removeCorpseLocked(id)
 		}
 	}
 	for id, mob := range s.mobs {
-		if mob.chunk == coord {
+		if boxOverlapsChunk(mob.species().body.boxAt(mob.pos), coord) {
 			delete(s.mobs, id)
 		}
 	}
@@ -126,9 +126,7 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) {
 			continue
 		}
 
-		x := int64(math.Floor(player.pos[0]))
-		z := int64(math.Floor(player.pos[2]))
-		player.pos[1] = float64(world.GeneratedColumnTop(s.worldSeed, x, z) + world.SpawnClearance)
+		player.pos[1] = generatedLiftHeight(s.worldSeed, playerBox(player.pos), coord)
 		player.vel[1] = 0
 		player.onGround = false
 		if next := chunkAt(player.pos); next != player.chunk {
@@ -141,6 +139,59 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) {
 	// every woken diff reads the regenerated composition, while a session still waiting
 	// on its first send simply receives that new composition through the ordinary path.
 	s.resendChunk(coord)
+}
+
+// structureOverlapsChunk reports whether any support or occupied cell of held lies in
+// coord. The cached chunk names only the anchor; a rotated multi-cell footprint can
+// cross a horizontal boundary, and its headroom can cross a vertical one.
+func structureOverlapsChunk(held *structure, coord world.Coord) bool {
+	anchor := [3]int64{int64(held.anchor[0]), int64(held.anchor[1]), int64(held.anchor[2])}
+	footprint, headroom, ok := footprintOf(held.kind, held.facing, anchor)
+	if !ok {
+		return held.chunk == coord
+	}
+	for _, cell := range footprint {
+		for dy := int64(0); dy <= headroom; dy++ {
+			if world.ChunkOf(cell[0], cell[1]+dy, cell[2]) == coord {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// boxOverlapsChunk reports whether the half-open body intersects any voxel in coord.
+// Entity chunk fields follow their standing position and are a visibility cache, not
+// the complete physical extent used by destructive world operations.
+func boxOverlapsChunk(b box, coord world.Coord) bool {
+	return anyVoxel(b, func(x, y, z int64) bool { return world.ChunkOf(x, y, z) == coord })
+}
+
+// generatedLiftHeight is the safe feet height above every regenerated column the
+// player's body overlaps. Choosing the maximum matters at chunk borders: the player's
+// centre can remain in the neighbouring chunk while one shoulder is enclosed here.
+func generatedLiftHeight(seed int64, b box, coord world.Coord) float64 {
+	x0, x1 := voxelSpan(b.min[0], b.max[0])
+	z0, z1 := voxelSpan(b.min[2], b.max[2])
+	var top int
+	found := false
+	for z := z0; z <= z1; z++ {
+		for x := x0; x <= x1; x++ {
+			column := world.ChunkOf(x, int64(coord.Y)*world.ChunkSize, z)
+			if column.X != coord.X || column.Z != coord.Z {
+				continue
+			}
+			generated := world.GeneratedColumnTop(seed, x, z)
+			if !found || generated > top {
+				top = generated
+				found = true
+			}
+		}
+	}
+	if !found {
+		return 0
+	}
+	return float64(top + world.SpawnClearance)
 }
 
 // overlapsChunk reports whether b intersects a solid voxel in exactly coord. Limiting
