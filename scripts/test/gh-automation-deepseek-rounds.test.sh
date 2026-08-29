@@ -284,6 +284,9 @@ for function_name in graphql_pr_review cmd_pr_comments cmd_pr_deepseek_rounds cm
 done
 
 helper_text=$(<"${SCRIPT_DIR}/gh-automation.sh")
+rounds_query=${helper_text#*cmd_pr_deepseek_rounds()}
+assert_contains "round lookup reads the newest review window" "$rounds_query" \
+  "reviews(last: 100, states: [APPROVED, COMMENTED])"
 if [[ "$helper_text" == *'REPO="FabioSM46/voxelheim"'* ]]; then
   stale_repo_literal="present"
 else

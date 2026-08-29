@@ -254,16 +254,20 @@ A timeout here is a real signal, not noise. A job cancelled by the 100-minute ca
    finding before deciding whether to acknowledge them:
 
    ```bash
-   BODY_REVIEWS=$(gh api graphql \
+   ACK_STATE=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number>)
+   ACK_REVIEW_ID=$(echo "$ACK_STATE" | jq -er '.latest_review_id | select(. != 0)')
+   if ! BODY_REVIEWS=$(gh api graphql \
      --raw-field 'query=query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(last:100,states:[APPROVED,CHANGES_REQUESTED,COMMENTED]){nodes{databaseId submittedAt state author{login} body}}}}}' \
-     -f owner="${REPO%%/*}" -f repo="${REPO##*/}" -F pr=<pr-number>)
+     -f owner="${REPO%%/*}" -f repo="${REPO##*/}" -F pr=<pr-number>); then
+     echo "Could not fetch DeepSeek review bodies; acknowledgement is blocked"
+     exit 1
+   fi
    echo "$BODY_REVIEWS" | jq --arg bot "${DEEPSEEK_BOT_USER:-github-actions[bot]}" '
      def canon: sub("\\[bot\\]$"; "");
      .data.repository.pullRequest.reviews.nodes[]
      | select((.author.login // "" | canon) == ($bot | canon))
      | select((.body // "") != "")
      | {databaseId, submittedAt, state, body}'
-   ACK_REVIEW_ID=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number> | jq -r '.latest_review_id')
    ```
 
    Address each valid point in code. A point you reject needs concrete evidence from the diff,
@@ -277,29 +281,71 @@ A timeout here is a real signal, not noise. A job cancelled by the 100-minute ca
 
    ```bash
    ACK_COMMENT='<one bullet per DeepSeek body finding, including review ID and evidence>'
-   echo "$ACK_COMMENT" | bash scripts/check-body-privacy.sh
-   gh pr comment <pr-number> --body "$ACK_COMMENT"
+   printf '%s\n' "$ACK_COMMENT" | bash scripts/check-body-privacy.sh || {
+     echo "Acknowledgement comment failed the publication privacy check"
+     exit 1
+   }
+   gh pr comment <pr-number> --body "$ACK_COMMENT" || {
+     echo "Could not publish the acknowledgement audit trail"
+     exit 1
+   }
    ```
 
    The AI is authorized to apply `DEEPSEEK_REVIEW_READ` only after that public audit trail exists.
-   Its timestamp must follow the review it acknowledges, so remove an existing label before
-   re-adding it. A failed lookup is not absence and must stop the operation:
+   Re-read `pr-deepseek-rounds` before touching the label. If its `latest_review_id` differs from
+   `ACK_REVIEW_ID`, a new review landed after the body snapshot: do not acknowledge it; repeat this
+   step from the fetch and include it in a new audit comment. Otherwise refresh the label so its
+   timestamp follows the review it acknowledges. A failed lookup is not absence and must stop the
+   operation:
 
    ```bash
+   LATEST_BEFORE_ACK=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number> \
+     | jq -er '.latest_review_id')
+   [ "$LATEST_BEFORE_ACK" = "$ACK_REVIEW_ID" ] || {
+     echo "A new DeepSeek review landed after the body snapshot; repeat the acknowledgement step"
+     exit 1
+   }
    if bash scripts/gh-automation.sh pr-check-label <pr-number> DEEPSEEK_REVIEW_READ; then
-     bash scripts/gh-automation.sh pr-label <pr-number> remove DEEPSEEK_REVIEW_READ
+     bash scripts/gh-automation.sh pr-label <pr-number> remove DEEPSEEK_REVIEW_READ || exit $?
+     if bash scripts/gh-automation.sh pr-check-label <pr-number> DEEPSEEK_REVIEW_READ; then
+       echo "Stale acknowledgement label is still present after removal"
+       exit 1
+     else
+       LABEL_RC=$?
+       [ "$LABEL_RC" -eq 1 ] || { echo "Could not verify acknowledgement label removal"; exit "$LABEL_RC"; }
+     fi
    else
      LABEL_RC=$?
      [ "$LABEL_RC" -eq 1 ] || { echo "Could not determine acknowledgement label state"; exit "$LABEL_RC"; }
    fi
-   bash scripts/gh-automation.sh pr-label <pr-number> add DEEPSEEK_REVIEW_READ
+   bash scripts/gh-automation.sh pr-label <pr-number> add DEEPSEEK_REVIEW_READ || exit $?
+   if bash scripts/gh-automation.sh pr-check-label <pr-number> DEEPSEEK_REVIEW_READ; then
+     :
+   else
+     LABEL_RC=$?
+     echo "Could not verify the fresh acknowledgement label"
+     exit "$LABEL_RC"
+   fi
    ```
 
-   Re-read `pr-deepseek-rounds` after the write. If its `latest_review_id` differs from
-   `ACK_REVIEW_ID`, a new review may have landed between reading and acknowledgement: remove the
-   label immediately and repeat this step for the new body. Otherwise verify
-   `deepseek_unread_findings == 0` with `pr-status-json`. Never use `NO_DEEPSEEK_REVIEW` here;
-   that exemption remains human-only.
+   Re-read both postconditions after the write. If `latest_review_id` differs from
+   `ACK_REVIEW_ID`, or `deepseek_unread_findings` is not exactly zero, remove the label immediately
+   and repeat this step from the body fetch. A review arriving just after these reads is still safe:
+   its timestamp is newer than the label, so the frozen rule counts it as unread.
+
+   ```bash
+   LATEST_AFTER_ACK=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number> \
+     | jq -er '.latest_review_id')
+   UNREAD_AFTER_ACK=$(bash scripts/gh-automation.sh pr-status-json <pr-number> \
+     | jq -er '.deepseek_unread_findings')
+   if [ "$LATEST_AFTER_ACK" != "$ACK_REVIEW_ID" ] || [ "$UNREAD_AFTER_ACK" != "0" ]; then
+     bash scripts/gh-automation.sh pr-label <pr-number> remove DEEPSEEK_REVIEW_READ
+     echo "DeepSeek acknowledgement postcondition failed; repeat from the body fetch"
+     exit 1
+   fi
+   ```
+
+   Never use `NO_DEEPSEEK_REVIEW` here; that exemption remains human-only.
 
 #### 4d — Fix CI failures
 

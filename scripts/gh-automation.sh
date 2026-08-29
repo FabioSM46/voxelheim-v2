@@ -1168,7 +1168,10 @@ cmd_pr_deepseek_rounds() {
     query($owner: String!, $repo: String!, $pr: Int!) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $pr) {
-          reviews(first: 50, states: [APPROVED, COMMENTED]) {
+          # Match the newest-end window used by pr-status-json and process-pr
+          # acknowledgement snapshot. `first` can return a stale latest_review_id
+          # once Mode B reply wrappers push the current review past the first page.
+          reviews(last: 100, states: [APPROVED, COMMENTED]) {
             nodes {
               databaseId
               author { login }
