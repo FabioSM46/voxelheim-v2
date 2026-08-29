@@ -290,6 +290,12 @@ type Sim struct {
 	// owns, and writing either down would create a second answer to keep in step.
 	wards map[world.Column]wardClaim
 
+	// wardsRevision changes whenever the runestone half of wards is rebuilt. Settlement
+	// claims are pure in worldSeed and never spend it. Sessions compare this value on the
+	// worker that forwards their per-tick snapshot, so a stone raised or removed while a
+	// player stands still still replaces that player's WardsNearby list.
+	wardsRevision uint64
+
 	// residents is every person a settlement holds, keyed by identity for the reason
 	// every other collection here is: a snapshot names them by id, and an interaction has
 	// to find one without scanning.
