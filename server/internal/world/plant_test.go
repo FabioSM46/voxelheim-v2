@@ -2,22 +2,22 @@ package world
 
 import "testing"
 
-func TestTheConiferIsTheOnlyPlantSpeciesRow(t *testing.T) {
+func TestThePlantSpeciesTableNamesConiferPalmAndScrub(t *testing.T) {
 	t.Parallel()
 
-	if len(plantSpeciesTable) != 1 {
-		t.Fatalf("plantSpeciesTable has %d rows, want the conifer only", len(plantSpeciesTable))
+	if len(plantSpeciesTable) != 3 {
+		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm and shrub", len(plantSpeciesTable))
 	}
-	species := plantSpeciesTable[0]
-	if species.name != "conifer" || species.seedOffset != treeSeedOffset || species.footprint != treeCanopyRadius || !species.forest {
+	conifer := plantSpeciesTable[0]
+	if conifer.name != "conifer" || conifer.seedOffset != treeSeedOffset || conifer.footprint != treeCanopyRadius || !conifer.forest {
 		t.Fatalf("conifer row = {name:%q seedOffset:%d footprint:%d forest:%t}",
-			species.name, species.seedOffset, species.footprint, species.forest)
+			conifer.name, conifer.seedOffset, conifer.footprint, conifer.forest)
 	}
-	if !species.rootsOn(Grass) {
+	if !conifer.rootsOn(Grass) {
 		t.Fatal("the conifer does not root on grass")
 	}
-	for _, block := range []Block{Air, Dirt, Stone, Snow, Sand, Gravel, Water, Ice} {
-		if species.rootsOn(block) {
+	for _, block := range []Block{Air, Dirt, Stone, Snow, Sand, Sandstone, Gravel, Water, Ice} {
+		if conifer.rootsOn(block) {
 			t.Fatalf("the conifer roots on block %d", block)
 		}
 	}
@@ -30,9 +30,41 @@ func TestTheConiferIsTheOnlyPlantSpeciesRow(t *testing.T) {
 		{Tundra, 0},
 		{Desert, 0},
 	} {
-		if got := species.denominator(tc.climate); got != tc.want {
+		if got := conifer.denominator(tc.climate); got != tc.want {
 			t.Errorf("conifer denominator in %v = %d, want %d", tc.climate, got, tc.want)
 		}
+	}
+
+	for index, tc := range []struct {
+		name        string
+		seedOffset  int64
+		denominator uint64
+		footprint   int
+		forest      bool
+	}{
+		{"palm", palmSeedOffset, palmChanceDenominator, palmFrondLength, true},
+		{"shrub", shrubSeedOffset, shrubChanceDenominator, 0, false},
+	} {
+		species := plantSpeciesTable[index+1]
+		if species.name != tc.name || species.seedOffset != tc.seedOffset || species.footprint != tc.footprint || species.forest != tc.forest {
+			t.Errorf("row %d = {name:%q seedOffset:%d footprint:%d forest:%t}, want %+v",
+				index+1, species.name, species.seedOffset, species.footprint, species.forest, tc)
+		}
+		if !species.rootsOn(Sand) || species.rootsOn(Sandstone) {
+			t.Errorf("%s rootsOn(Sand) = %t and rootsOn(Sandstone) = %t, want true and false",
+				tc.name, species.rootsOn(Sand), species.rootsOn(Sandstone))
+		}
+		for _, climate := range []Climate{Plains, Taiga, Tundra} {
+			if got := species.denominator(climate); got != 0 {
+				t.Errorf("%s denominator in %v = %d, want 0", tc.name, climate, got)
+			}
+		}
+		if got := species.denominator(Desert); got != tc.denominator {
+			t.Errorf("%s denominator in desert = %d, want %d", tc.name, got, tc.denominator)
+		}
+	}
+	if palmSeedOffset == shrubSeedOffset || palmSeedOffset == treeSeedOffset || shrubSeedOffset == treeSeedOffset {
+		t.Fatal("plant species share a seed offset")
 	}
 }
 
@@ -56,10 +88,7 @@ func TestTheConiferRowMatchesTheLegacyPredicate(t *testing.T) {
 				if height, ok := legacyTreeAtColumn(seed, x, z, col); ok {
 					legacy[[2]int64{x, z}] = height
 				}
-				if species, h, ok := plantAtColumn(seed, x, z, col); ok {
-					if species.name != "conifer" {
-						t.Fatalf("seed %d column (%d, %d) selected %q with a one-row table", seed, x, z, species.name)
-					}
+				if species, h, ok := plantAtColumn(seed, x, z, col); ok && species == &plantSpeciesTable[0] {
 					table[[2]int64{x, z}] = coniferTrunkHeight(h)
 				}
 			}
@@ -76,6 +105,59 @@ func TestTheConiferRowMatchesTheLegacyPredicate(t *testing.T) {
 					seed, column[0], column[1], got, ok, want)
 			}
 		}
+	}
+}
+
+func TestPalmShapeHasATrunkCrownArmsDroopAndDiagonals(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rootX   = int64(10)
+		rootZ   = int64(-7)
+		surface = 64
+	)
+	h := uint64(2) << 32
+	got := make(map[[3]int64]Block)
+	visitPalm(0, rootX, rootZ, surface, h, func(x, y, z int64, block Block) {
+		got[[3]int64{x, y, z}] = block
+	})
+
+	trunkHeight := palmMinTrunkHeight + 2
+	trunkTop, crownY := int64(surface+trunkHeight), int64(surface+trunkHeight+1)
+	for y := int64(surface + 1); y <= trunkTop; y++ {
+		if block := got[[3]int64{rootX, y, rootZ}]; block != PalmLog {
+			t.Errorf("trunk at y=%d is %d, want PalmLog", y, block)
+		}
+	}
+	for _, pos := range [][3]int64{
+		{rootX, crownY, rootZ},
+		{rootX + 1, crownY, rootZ}, {rootX - 1, crownY, rootZ},
+		{rootX, crownY, rootZ + 1}, {rootX, crownY, rootZ - 1},
+		{rootX + 1, crownY, rootZ + 1}, {rootX + 1, crownY, rootZ - 1},
+		{rootX - 1, crownY, rootZ + 1}, {rootX - 1, crownY, rootZ - 1},
+		{rootX + palmFrondLength, crownY - 1, rootZ},
+		{rootX - palmFrondLength, crownY - 1, rootZ},
+		{rootX, crownY - 1, rootZ + palmFrondLength},
+		{rootX, crownY - 1, rootZ - palmFrondLength},
+	} {
+		if block := got[pos]; block != PalmFronds {
+			t.Errorf("crown voxel %v is %d, want PalmFronds", pos, block)
+		}
+	}
+	if got[[3]int64{rootX + palmFrondLength, crownY, rootZ}] != Air {
+		t.Fatal("outer frond did not droop one block")
+	}
+}
+
+func TestShrubIsOneBlockAboveItsRoot(t *testing.T) {
+	t.Parallel()
+
+	visited := make(map[[3]int64]Block)
+	visitShrub(0, 4, 9, 61, 0, func(x, y, z int64, block Block) {
+		visited[[3]int64{x, y, z}] = block
+	})
+	if len(visited) != 1 || visited[[3]int64{4, 62, 9}] != DesertShrub {
+		t.Fatalf("shrub shape = %v, want one DesertShrub at (4, 62, 9)", visited)
 	}
 }
 
@@ -161,6 +243,31 @@ func TestPlantSpeciesSkipsTheSurfacePredicateWhenItsClimateIsAbsent(t *testing.T
 
 	if species, _, ok := plantAtColumnIn(table, seed, x, z, col); ok || species != nil {
 		t.Fatalf("absent species returned (%v, %t), want (nil, false)", species, ok)
+	}
+}
+
+func TestPlantSpeciesShareSettlementAndSeaLevelRefusals(t *testing.T) {
+	t.Parallel()
+
+	const seed = int64(0xA11CE)
+	x, z, col := uncarvedPlantTestColumn(t, seed)
+	table := []plantSpecies{{
+		name:        "candidate",
+		seedOffset:  1,
+		rootsOn:     func(Block) bool { return true },
+		denominator: func(Climate) uint64 { return 1 },
+	}}
+
+	settled := col
+	settled.settlement = true
+	if species, _, ok := plantAtColumnIn(table, seed, x, z, settled); ok || species != nil {
+		t.Fatalf("settlement selected (%v, %t), want no plant", species, ok)
+	}
+
+	submerged := col
+	submerged.surface = seaLevel - 1
+	if species, _, ok := plantAtColumnIn(table, seed, x, z, submerged); ok || species != nil {
+		t.Fatalf("submerged surface selected (%v, %t), want no plant", species, ok)
 	}
 }
 

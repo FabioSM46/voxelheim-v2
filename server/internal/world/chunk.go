@@ -103,6 +103,14 @@ const (
 	Planks      Block = 14
 	Cobblestone Block = 15
 	Thatch      Block = 16
+
+	// What grows over desert sand. Appended, never inserted: the ids above are
+	// already carried in chunk runs and persisted world deltas. Palm wood and
+	// fronds can be taken and placed again; scrub belongs only to worldgen and has
+	// no item for a player to carry.
+	PalmLog     Block = 17
+	PalmFronds  Block = 18
+	DesertShrub Block = 19
 )
 
 // Solid reports whether a block stops movement.
@@ -148,7 +156,7 @@ func Fluid(b Block) bool {
 func Placeable(b Block) bool {
 	switch b {
 	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice,
-		Planks, Cobblestone, Thatch:
+		Planks, Cobblestone, Thatch, PalmLog, PalmFronds:
 		return true
 	default:
 		return false

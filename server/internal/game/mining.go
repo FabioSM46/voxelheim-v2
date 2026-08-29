@@ -102,6 +102,10 @@ var handMiningTimes = map[world.Block]time.Duration{
 	world.Thatch:      400 * time.Millisecond,
 	world.Planks:      800 * time.Millisecond,
 	world.Cobblestone: 2500 * time.Millisecond,
+
+	world.PalmLog:     2400 * time.Millisecond,
+	world.PalmFronds:  400 * time.Millisecond,
+	world.DesertShrub: 400 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -166,8 +170,11 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		// made of rather than being left unhelped, because every block a hand can
 		// break has exactly one implement for it and that invariant is worth more
 		// than the taste question of what one strips a roof with.
-		world.Planks: {},
-		world.Thatch: {},
+		world.Planks:      {},
+		world.Thatch:      {},
+		world.PalmLog:     {},
+		world.PalmFronds:  {},
+		world.DesertShrub: {},
 	},
 }
 

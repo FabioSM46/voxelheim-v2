@@ -57,6 +57,30 @@ func TestTheRunestoneCarriesItsAppendedIDAndRegistryRow(t *testing.T) {
 	}
 }
 
+func TestPalmLogCarriesItsAppendedIDAndRegistryRow(t *testing.T) {
+	t.Parallel()
+
+	if ItemPalmLog != 40 {
+		t.Errorf("palm log item id = %d, want appended wire id 40", ItemPalmLog)
+	}
+	got, registered := itemByID(ItemPalmLog)
+	if !registered {
+		t.Fatal("the palm log is not registered")
+	}
+	want := itemDefinition{places: world.PalmLog, maxStack: 64}
+	if got != want {
+		t.Errorf("palm log registry row = %+v, want %+v", got, want)
+	}
+	if block, placeable := blockPlacedBy(ItemPalmLog); !placeable || block != world.PalmLog {
+		t.Errorf("palm log places block %d (placeable %v), want PalmLog", block, placeable)
+	}
+	for _, block := range []world.Block{world.PalmFronds, world.DesertShrub} {
+		if item := itemDroppedBy(block); item != ItemNone {
+			t.Errorf("block %d drops item %d, want none", block, item)
+		}
+	}
+}
+
 func TestBothMeatsCarryTheirPinnedIDsAndResourceStats(t *testing.T) {
 	t.Parallel()
 
@@ -340,6 +364,9 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		world.Planks:      ItemPlanks,
 		world.Cobblestone: ItemCobblestone,
 		world.Thatch:      ItemThatch,
+		world.PalmLog:     ItemPalmLog,
+		world.PalmFronds:  ItemNone,
+		world.DesertShrub: ItemNone,
 	}
 	// **The same length guard TestBlockExperienceNamesEveryRewardAndExplicitZero has,
 	// and it was missing here.** Without it this loop only checks the rows somebody
@@ -388,6 +415,9 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 		world.Planks:      0,
 		world.Cobblestone: 0,
 		world.Thatch:      0,
+		world.PalmLog:     2,
+		world.PalmFronds:  0,
+		world.DesertShrub: 0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))

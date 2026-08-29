@@ -178,8 +178,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 9 {
-		t.Fatalf("WorldgenVersion = %d, want 9 for the capital's towers and bridge", WorldgenVersion)
+	if WorldgenVersion != 10 {
+		t.Fatalf("WorldgenVersion = %d, want 10 for palms and scrub on desert sand", WorldgenVersion)
 	}
 }
 
@@ -314,6 +314,12 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 			if (terrain != Air && !carved) || !treeCanPlace(seed, worldX, worldY, worldZ, Leaves) {
 				t.Fatalf("leaves at (%d, %d, %d) are not part of a deterministic canopy", worldX, worldY, worldZ)
 			}
+		case PalmLog, PalmFronds, DesertShrub:
+			featured = true
+			if terrain != Air || !plantCanPlace(seed, worldX, worldY, worldZ, got) {
+				t.Fatalf("desert plant block %d at (%d, %d, %d) is not part of a deterministic species shape",
+					got, worldX, worldY, worldZ)
+			}
 		case Water, Ice:
 			// Two fills, and which one applies is decided by whether the terrain
 			// here was ground. Above the surface it is the sea line's; below it, it
@@ -360,6 +366,22 @@ func treeCanPlace(seed, worldX, worldY, worldZ int64, want Block) bool {
 		for rootX := worldX - treeCanopyRadius; rootX <= worldX+treeCanopyRadius; rootX++ {
 			found := false
 			visitTree(seed, rootX, rootZ, func(x, y, z int64, block Block) {
+				found = found || (x == worldX && y == worldY && z == worldZ && block == want)
+			})
+			if found {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func plantCanPlace(seed, worldX, worldY, worldZ int64, want Block) bool {
+	footprint := int64(largestPlantFootprint())
+	for rootZ := worldZ - footprint; rootZ <= worldZ+footprint; rootZ++ {
+		for rootX := worldX - footprint; rootX <= worldX+footprint; rootX++ {
+			found := false
+			visitPlant(seed, rootX, rootZ, func(x, y, z int64, block Block) {
 				found = found || (x == worldX && y == worldY && z == worldZ && block == want)
 			})
 			if found {
@@ -666,44 +688,30 @@ func TestOreIsDenseEnoughToFind(t *testing.T) {
 	}
 }
 
-func TestTreesGrowOnlyFromGrass(t *testing.T) {
+func TestEverySpeciesGrowsOnlyFromTheSurfaceItsRowNames(t *testing.T) {
 	t.Parallel()
 
-	logs, leaves := 0, 0
-	for seed := int64(1); seed <= 8; seed++ {
-		for chunkZ := int32(-1); chunkZ <= 0; chunkZ++ {
-			for chunkX := int32(-1); chunkX <= 0; chunkX++ {
-				for chunkY := int32(1); chunkY <= 2; chunkY++ {
-					chunk := Generate(seed, Coord{X: chunkX, Y: chunkY, Z: chunkZ})
-					originX, originY, originZ := chunk.Coord.Origin()
-					for z := range ChunkSize {
-						for x := range ChunkSize {
-							worldX, worldZ := originX+int64(x), originZ+int64(z)
-							for y := range ChunkSize {
-								got := chunk.At(x, y, z)
-								switch got {
-								case Log:
-									logs++
-									worldY := originY + int64(y)
-									surface, trunkHeight, ok := treeAt(seed, worldX, worldZ)
-									if !ok || columnAt(seed, worldX, worldZ).blockAt(surface) != Grass {
-										t.Fatalf("log at (%d, %d, %d) has no grass root", worldX, worldY, worldZ)
-									}
-									if worldY <= int64(surface) || worldY > int64(surface+trunkHeight) {
-										t.Fatalf("log at y=%d lies outside its trunk [%d, %d]", worldY, surface+1, surface+trunkHeight)
-									}
-								case Leaves:
-									leaves++
-								}
-							}
-						}
-					}
-				}
+	seen := make(map[string]int, len(plantSpeciesTable))
+	const steps = 1024
+	for i := range steps {
+		for j := range steps {
+			x, z := int64(i)*61, int64(j)*61
+			col := columnAt(climateSeed, x, z)
+			species, _, rooted := plantAtColumn(climateSeed, x, z, col)
+			if !rooted {
+				continue
 			}
+			surface := col.blockAt(col.surface)
+			if !species.rootsOn(surface) {
+				t.Fatalf("%s at (%d, %d) roots on block %d its row refuses", species.name, x, z, surface)
+			}
+			seen[species.name]++
 		}
 	}
-	if logs == 0 || leaves == 0 {
-		t.Fatalf("sample found %d logs and %d leaves; complete trees must exist", logs, leaves)
+	for i := range plantSpeciesTable {
+		if seen[plantSpeciesTable[i].name] == 0 {
+			t.Errorf("fixed lattice selected no %s roots", plantSpeciesTable[i].name)
+		}
 	}
 }
 
@@ -712,6 +720,9 @@ func TestATreeCrossingAChunkBorderIsCompleteInEitherGenerationOrder(t *testing.T
 
 	for i := range plantSpeciesTable {
 		species := &plantSpeciesTable[i]
+		if species.footprint == 0 {
+			continue
+		}
 		t.Run(species.name, func(t *testing.T) {
 			seed, rootZ, surface, h := findIsolatedEastBorderPlant(t, species)
 
@@ -796,7 +807,7 @@ func findIsolatedEastBorderPlant(t *testing.T, target *plantSpecies) (seed, root
 					if nearbyX == rootX && nearbyZ == rootZ {
 						continue
 					}
-					if _, _, other := plantAtColumn(seed, nearbyX, nearbyZ, columnAt(seed, nearbyX, nearbyZ)); other {
+					if otherSpecies, _, other := plantAtColumn(seed, nearbyX, nearbyZ, columnAt(seed, nearbyX, nearbyZ)); other && otherSpecies.footprint > 0 {
 						isolated = false
 						break
 					}
