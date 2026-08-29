@@ -362,10 +362,11 @@ main schedule, and become one entity each. These rules hold that pipeline togeth
   on the upper chunk. That edge-diagonal dependency is gathered and invalidated explicitly.
   The edited chunk still remeshes: colour is its own. A **payload off the
   wire** could have moved any of the six border layers, so `ChunkStore::note_neighbours_stale`
-  compares them: a neighbour's mesh depends on whether each boundary voxel is opaque and on
-  water's effective height, and a revision that does not exist compares as all air —
-  which is what the mesher reads a missing neighbour as, so "arrived", "replaced" and "went
-  away" are one comparison. **Both paths apply the same criterion**, and that is not a
+  compares them: a neighbour's mesh depends on whether each boundary voxel is opaque and,
+  across a vertical face, whether it is water; only a horizontal face additionally reads
+  water's effective level for its side skirt. A revision that does not exist compares as all
+  air — which is what the mesher reads a missing neighbour as, so "arrived", "replaced" and
+  "went away" are one comparison. **Both paths apply the same criterion**, and that is not a
   coincidence to be maintained by hand: the edit path was written without it and remeshed up
   to three neighbours into byte-identical meshes until the review on legacy PR 66 said so.
 

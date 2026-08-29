@@ -366,9 +366,10 @@ impl ChunkStore {
     /// differently from the way it has been drawing it.
     ///
     /// A neighbour's mesh depends on one geometry key for each voxel on the shared
-    /// face: whether it is opaque and, for water, its effective height. Not *which
-    /// blocks* they are — colour belongs to the chunk that owns the voxel — and not
-    /// the other layers. So the shared layer is what is compared, and a revision
+    /// face: whether it is opaque and whether it is water on a vertical face, plus
+    /// water's effective height on a horizontal face where a side skirt reads it. Not
+    /// *which blocks* they are — colour belongs to the chunk that owns the voxel — and
+    /// not the other layers. So the shared layer is what is compared, and a revision
     /// that does not exist compares as all air, which is precisely what the mesher reads
     /// a missing neighbour as. That makes three events one: a chunk arriving (`before` is
     /// `None`), a chunk being replaced, and a chunk going away (`after` is `None`).
@@ -660,6 +661,18 @@ struct BorderGeometry {
     water_level: u8,
 }
 
+impl BorderGeometry {
+    /// Vertical faces read water presence; horizontal skirts also read its level.
+    fn differs_for_face(self, other: Self, axis: usize) -> bool {
+        self.opaque != other.opaque
+            || if axis == 1 {
+                (self.water_level != 0) != (other.water_level != 0)
+            } else {
+                self.water_level != other.water_level
+            }
+    }
+}
+
 fn border_geometry(
     chunk: Option<&VoxelChunk>,
     cell: [usize; 3],
@@ -681,7 +694,9 @@ fn border_geometry(
         } else {
             let mut above = cell;
             above[1] = 0;
-            above_chunk.map_or(palette::AIR, |chunk| chunk.block(above))
+            above_chunk
+                .filter(|above_chunk| above_chunk.size() == chunk.size())
+                .map_or(palette::AIR, |above_chunk| above_chunk.block(above))
         };
         if palette::is_water(above) {
             water_level = 8;
@@ -727,7 +742,9 @@ fn border_layer_differs(
         border_geometry(chunk, cell, above)
     };
 
-    (0..size).any(|j| (0..size).any(|i| geometry(before, i, j) != geometry(after, i, j)))
+    (0..size).any(|j| {
+        (0..size).any(|i| geometry(before, i, j).differs_for_face(geometry(after, i, j), axis))
+    })
 }
 
 fn falling_border_differs(
@@ -2310,6 +2327,56 @@ mod tests {
             store
                 .take_changes()
                 .contains(&ChunkChange::NeighbourChanged(coord(0, 0, 0)))
+        );
+    }
+
+    #[test]
+    fn a_vertical_re_sent_water_border_reads_presence_not_level() {
+        let below = coord(0, 0, 0);
+        let above = coord(0, 1, 0);
+        let mut store = ChunkStore::default();
+        store.insert(below, air());
+        let mut flow3 = air();
+        flow3.set(5, 0, 5, palette::WATER_FLOW3);
+        store.insert(above, flow3);
+        store.take_changes();
+
+        let mut flow4 = air();
+        flow4.set(5, 0, 5, palette::WATER_FLOW4);
+        store.insert(above, flow4);
+
+        assert_eq!(
+            store.take_changes(),
+            vec![ChunkChange::Loaded(above)],
+            "a vertical neighbour cannot see a water level change"
+        );
+
+        store.insert(above, air());
+        assert_eq!(
+            store.take_changes(),
+            vec![
+                ChunkChange::Loaded(above),
+                ChunkChange::NeighbourChanged(below),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mismatched_above_chunk_is_air_for_border_geometry() {
+        let mut below = air();
+        below.set(SIZE - 1, SIZE - 1, SIZE - 1, palette::WATER_FLOW3);
+        let one_block_above = VoxelChunk::from_runs(&[palette::WATER, 1], 1).expect("valid");
+
+        assert_eq!(
+            border_geometry(
+                Some(&below),
+                [SIZE - 1, SIZE - 1, SIZE - 1],
+                Some(&one_block_above),
+            ),
+            BorderGeometry {
+                opaque: false,
+                water_level: 3,
+            }
         );
     }
 
