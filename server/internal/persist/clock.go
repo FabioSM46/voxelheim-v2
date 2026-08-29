@@ -19,38 +19,71 @@ import (
 // clock, a camp, a player record and a chunk delta change for unrelated reasons — and
 // **world.StoreVersion in particular must not be reached for**, since bumping it
 // invalidates every stored chunk delta in every existing world.
-const ClockVersion uint32 = 1
+const ClockVersion uint32 = 2
+
+// previousClockVersion is the sixteen-byte clock this store wrote before the absolute
+// tick existed: magic, version, tick_of_day, crc32 and nothing else. Read, migrated and
+// never written — see [decodeV1Clock].
+const previousClockVersion uint32 = 1
 
 // On-disk layout, little-endian throughout, one file for the whole world.
 //
 //	clock.bin
-//	    magic[4] version:u32 tick_of_day:u32 crc32:u32
+//	    magic[4] version:u32 tick_of_day:u32 world_tick:u64 next_storm_unix:i64 crc32:u32
 //
-// Sixteen bytes, and the only file under the world directory whose size is fixed by the
-// format rather than by its contents. That is worth one thing at the read: the size
-// check below is an equality rather than a ceiling, so a truncated file and an
-// over-long one are both refused before a byte is loaded, and neither can be read as a
-// shorter or longer clock.
+// Thirty-two bytes, and the only file under the world directory whose size is fixed by
+// the format rather than by its contents. That is worth two things at the read: the size
+// picks the layout, so a version-1 file is recognised before a byte of it is
+// interpreted; and within each layout the check is an equality rather than a ceiling, so
+// a truncated file and an over-long one are both refused before a byte is loaded.
 //
-// **What is not here is the absolute tick.** The simulation counts ticks in a uint64
-// that only ever increases, and storing that would mean a restarted world claiming an
-// uptime it never had. What outlives the process is where the world stands in its day,
-// which is the one number anything asks about — see game.IsNight.
+// **The absolute tick is here, and it did not used to be.** This block used to say that
+// storing it would mean a restarted world claiming an uptime it never had. Two features
+// then needed a clock that survives a restart — weather that drifts across days, and a
+// storm counted in weeks — and neither can be built on a number that recurs every twenty
+// minutes. The uptime worry was answering the wrong question: world_tick is the *world's*
+// time, not the process's. A world that ran for a day and was switched off for a month
+// comes back having lived one day, which is exactly what it did.
 //
-// **Nor is the day length.** It is a constant of this build announced in every welcome,
-// not a property of the world: recording it would create a second copy to keep in step
-// with game.DayLengthTicks, and the only thing that copy could ever do is disagree.
-// A build whose day length changed reads this file's tick against its own constant and
-// refuses it if it no longer fits, which is exactly what the range check in
-// game.Sim.RestoreClock is for.
+// **next_storm_unix is a wall-clock second, the one field here that is not a tick.** The
+// storm rides a real week (GDD §9), and a week that includes the days a server spent
+// switched off is not a quantity any tick counter can hold. Zero means unscheduled — see
+// game.Sim.NextStorm for why an absent deadline needs no flag beside it.
+//
+// **Nor is the day length here.** It is a constant of this build announced in every
+// welcome, not a property of the world: recording it would create a second copy to keep
+// in step with game.DayLengthTicks, and the only thing that copy could ever do is
+// disagree. A build whose day length changed reads this file's ticks against its own
+// constant and refuses them if they no longer fit, which is what the checks in
+// game.Sim.RestoreClock are for.
 const (
 	clockFileName = "clock.bin"
 
 	offClockTickOfDay = world.HeaderSize
-	clockFileSize     = offClockTickOfDay + 4 + world.ChecksumSize
+	offClockWorldTick = offClockTickOfDay + 4
+	offClockNextStorm = offClockWorldTick + 8
+	clockFileSize     = offClockNextStorm + 8 + world.ChecksumSize
+
+	// clockV1FileSize is the whole of the previous format: the same header and tick of
+	// day, and then the checksum.
+	clockV1FileSize = offClockTickOfDay + 4 + world.ChecksumSize
 )
 
 var clockMagic = [4]byte{'V', 'X', 'H', 'C'}
+
+// Clock is what one clock file holds: where the world stands in its day, how many ticks
+// it has ever run, and when its next storm falls due.
+//
+// A struct on the way out and three arguments on the way in, which is less inconsistent
+// than it looks: [ClockStore.Save] is handed three values a caller captured from the
+// simulation in one lock, and separate parameters are what make a transposed pair a
+// compile error. A read has no such pairing to get wrong and would otherwise be five
+// return values.
+type Clock struct {
+	TickOfDay     uint32
+	WorldTick     uint64
+	NextStormUnix int64
+}
 
 // ClockStore is one world's clock file.
 //
@@ -103,7 +136,7 @@ func (s *ClockStore) Path() string {
 	return s.path
 }
 
-// Load reads the tick of the day this world last wrote down.
+// Load reads the clock this world last wrote down.
 //
 // Three answers, the same three [Store.Load] and [StructureStore.Load] give: found,
 // absent, or unreadable. A world nobody has played in has no file, which is not an
@@ -111,60 +144,73 @@ func (s *ClockStore) Path() string {
 // read **is** an error and must stay one: reporting it as "no clock" would restart the
 // world at dawn and then write that over the only record of where its day had got to.
 //
-// **What comes back is the number that was stored and nothing more.** Whether it names
-// a tick that can exist is decided by game.Sim.RestoreClock, which owns the day length;
-// this package judges what a file can be wrong about and no further.
-func (s *ClockStore) Load() (uint32, bool, error) {
+// **A version-1 file is found rather than refused**, and comes back as the world it
+// describes — see [decodeV1Clock]. It is rewritten in this build's format by the first
+// save, which the autosave loop makes within one interval of the start.
+//
+// **What comes back is what was stored and nothing more.** Whether it names a clock that
+// can exist is decided by game.Sim.RestoreClock, which owns the day length; this package
+// judges what a file can be wrong about and no further.
+func (s *ClockStore) Load() (Clock, bool, error) {
 	if s == nil {
-		return 0, false, nil
+		return Clock{}, false, nil
 	}
 
 	info, err := os.Stat(s.path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return 0, false, nil
+		return Clock{}, false, nil
 	case err != nil:
-		return 0, false, fmt.Errorf("persist: reading %s: %w", s.path, err)
+		return Clock{}, false, fmt.Errorf("persist: reading %s: %w", s.path, err)
 	}
 	// Before the read, not after, for the reason every store here checks a size first:
-	// a file that is not this size is not one this format wrote, and finding that out by
-	// allocating it is how a corrupt directory becomes an out-of-memory.
-	if info.Size() != clockFileSize {
-		return 0, false, fmt.Errorf("%w: %s is %d bytes, and a clock file is exactly %d",
-			world.ErrCorruptStore, s.path, info.Size(), clockFileSize)
+	// a file that is not one of these sizes is not one this format ever wrote, and
+	// finding that out by allocating it is how a corrupt directory becomes an
+	// out-of-memory.
+	if info.Size() != clockFileSize && info.Size() != clockV1FileSize {
+		return Clock{}, false, fmt.Errorf("%w: %s is %d bytes, and a clock file is exactly %d, or the %d version %d wrote",
+			world.ErrCorruptStore, s.path, info.Size(), clockFileSize, clockV1FileSize, previousClockVersion)
 	}
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		return 0, false, fmt.Errorf("persist: reading %s: %w", s.path, err)
+		return Clock{}, false, fmt.Errorf("persist: reading %s: %w", s.path, err)
 	}
 
-	tickOfDay, err := decodeClock(data)
+	clock, err := decodeClock(data)
 	if err != nil {
-		return 0, false, fmt.Errorf("%s: %w", s.path, err)
+		return Clock{}, false, fmt.Errorf("%s: %w", s.path, err)
 	}
-	return tickOfDay, true, nil
+	return clock, true, nil
 }
 
-// Save writes the world's time of day, atomically. A no-op in an ephemeral world.
+// Save writes the world's clock, atomically, in this build's format. A no-op in an
+// ephemeral world.
 //
-// **Every uint32 it can write it can read back**, so unlike [StructureStore.Save] there
+// **Every value it can write it can read back**, so unlike [StructureStore.Save] there
 // is nothing for this to refuse. The cap that one enforces on both sides exists because
-// the format has a limit of its own; this format has none, and the only value that
-// could be wrong here is one the simulation would have to have produced — which is a
-// bug in game, caught by game's own invariant, and not something a second opinion on
-// this side would improve.
-func (s *ClockStore) Save(tickOfDay uint32) error {
+// the format has a limit of its own; this format has none, and the only values that
+// could be wrong here are ones the simulation would have to have produced — a bug in
+// game, caught by game's own invariant.
+//
+// **Three arguments rather than a [Clock]**: the pair this writes down has to have been
+// captured together — see game.Sim.Clock — and separate parameters are what make the
+// call site say which value is which.
+func (s *ClockStore) Save(tickOfDay uint32, worldTick uint64, nextStormUnix int64) error {
 	if s == nil {
 		return nil
 	}
-	return world.WriteAtomic(s.path, encodeClock(tickOfDay))
+	return world.WriteAtomic(s.path, encodeClock(tickOfDay, worldTick, nextStormUnix))
 }
 
-// encodeClock lays out the sixteen bytes.
-func encodeClock(tickOfDay uint32) []byte {
-	buf := world.NewRecord(offClockTickOfDay, 4, clockMagic, ClockVersion)
+// encodeClock lays out the thirty-two bytes.
+func encodeClock(tickOfDay uint32, worldTick uint64, nextStormUnix int64) []byte {
+	buf := world.NewRecord(offClockTickOfDay, 4+8+8, clockMagic, ClockVersion)
 	binary.LittleEndian.PutUint32(buf[offClockTickOfDay:offClockTickOfDay+4], tickOfDay)
+	binary.LittleEndian.PutUint64(buf[offClockWorldTick:offClockWorldTick+8], worldTick)
+	// Two's-complement in both directions, undone exactly by the decoder, so the field
+	// carries the whole of an int64 rather than half of one.
+	binary.LittleEndian.PutUint64(buf[offClockNextStorm:offClockNextStorm+8], uint64(nextStormUnix))
 	world.PutChecksum(buf)
 	return buf
 }
@@ -174,16 +220,59 @@ func encodeClock(tickOfDay uint32) []byte {
 // Its own length check rather than a reliance on [ClockStore.Load]'s: the size test up
 // there guards the allocation, this one guards the indexing, and a decoder that is only
 // safe because of its caller is one edit away from not being.
-func decodeClock(data []byte) (uint32, error) {
-	if len(data) != clockFileSize {
-		return 0, fmt.Errorf("%w: %d bytes is not the %d a clock file has",
-			world.ErrCorruptStore, len(data), clockFileSize)
+//
+// **The length picks the layout and the header still decides.** Both formats are fixed
+// sizes and they differ, so a file of either length is read as that format and then has
+// its declared version checked against the one that length belongs to. A version-2 file
+// truncated to sixteen bytes fails on its version rather than being read as a version-1
+// clock, and a version-1 file padded to thirty-two fails the same way.
+func decodeClock(data []byte) (Clock, error) {
+	switch len(data) {
+	case clockFileSize:
+		return decodeV2Clock(data)
+	case clockV1FileSize:
+		return decodeV1Clock(data)
+	default:
+		return Clock{}, fmt.Errorf("%w: %d bytes is neither the %d a clock file has nor the %d version %d wrote",
+			world.ErrCorruptStore, len(data), clockFileSize, clockV1FileSize, previousClockVersion)
 	}
+}
+
+func decodeV2Clock(data []byte) (Clock, error) {
 	if err := world.CheckHeader(data, clockMagic, ClockVersion); err != nil {
-		return 0, err
+		return Clock{}, err
 	}
 	if err := world.CheckChecksum(data); err != nil {
-		return 0, err
+		return Clock{}, err
 	}
-	return binary.LittleEndian.Uint32(data[offClockTickOfDay : offClockTickOfDay+4]), nil
+	return Clock{
+		TickOfDay:     binary.LittleEndian.Uint32(data[offClockTickOfDay : offClockTickOfDay+4]),
+		WorldTick:     binary.LittleEndian.Uint64(data[offClockWorldTick : offClockWorldTick+8]),
+		NextStormUnix: int64(binary.LittleEndian.Uint64(data[offClockNextStorm : offClockNextStorm+8])),
+	}, nil
+}
+
+// decodeV1Clock reads the sixteen-byte clock and says what it means in this format.
+//
+// **A migration and not a refusal**, the choice decodeV7Record makes for a player
+// record. Refusing would discard a working world's day phase over a field that did not
+// exist when it was written.
+//
+// world_tick becomes the stored tick of day: the only value that satisfies the invariant
+// game.Sim.RestoreClock enforces without claiming history the file does not record. The
+// world comes back inside its first day, at the phase it actually stopped at. Nothing in
+// sixteen bytes could say how long it really ran, and the honest version of that is an
+// absolute clock that starts counting now.
+//
+// next_storm_unix becomes zero, which is "unscheduled": a file written before storms
+// existed says nothing about one.
+func decodeV1Clock(data []byte) (Clock, error) {
+	if err := world.CheckHeader(data, clockMagic, previousClockVersion); err != nil {
+		return Clock{}, err
+	}
+	if err := world.CheckChecksum(data); err != nil {
+		return Clock{}, err
+	}
+	tickOfDay := binary.LittleEndian.Uint32(data[offClockTickOfDay : offClockTickOfDay+4])
+	return Clock{TickOfDay: tickOfDay, WorldTick: uint64(tickOfDay)}, nil
 }

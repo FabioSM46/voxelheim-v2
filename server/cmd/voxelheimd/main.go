@@ -645,16 +645,21 @@ func openClock(opts options, log *slog.Logger) (*persist.ClockStore, error) {
 	return store, nil
 }
 
-// restoreClock puts the stored time of day back, or starts the world at first light.
+// restoreClock puts the stored clock back, or starts the world at first light.
 //
-// **restoreStructures' discipline, one number instead of a camp**, and the same three
+// **restoreStructures' discipline, three numbers instead of a camp**, and the same three
 // answers. A file that is not there is a world that has not been played in, and that is
 // silence rather than a log line. A file that cannot be *read* — unreachable, wrong
-// magic, a version this build does not speak, a flipped byte under the checksum — and a
-// value that cannot be *true* — at or beyond the day length — are both logged at error
-// and both survived: the world starts at tick 0 and everything else about it still
-// works. Refusing to start over a clock would take the terrain, every player record and
-// the ability to log in at all hostage to sixteen bytes.
+// magic, a version this build does not speak, a flipped byte under the checksum — and
+// values that cannot be *true* — a tick of day at or beyond the day length, or a world
+// tick that disagrees with it — are both logged at error and both survived: the world
+// starts at tick 0 with no storm scheduled and everything else about it still works.
+// Refusing to start over a clock would take the terrain, every player record and the
+// ability to log in at all hostage to thirty-two bytes.
+//
+// **The storm deadline is restored even though nothing schedules one yet**: the field is
+// written by every save from now on, so a build that read it only once the scheduler
+// existed would spend the intervening releases dropping a value it had stored.
 //
 // **The unreadable file is left exactly where it is**, and unlike the structures file it
 // does not stay there long: the clock is rewritten on the next autosave pass, because
@@ -674,22 +679,20 @@ func restoreClock(sim *game.Sim, store *persist.ClockStore, log *slog.Logger) {
 		return
 	}
 
-	// The range check belongs to game, which owns the day length; persist judges only
-	// what a file can be wrong about. A tick that cannot exist is refused rather than
-	// wrapped — see game.Sim.RestoreClock.
-	//
-	// **The absolute tick is derived from the stored one because the file does not hold
-	// it yet.** The clock file records where the world stands in its day and nothing
-	// more, so the only world tick that is honestly implied by it is the one that puts
-	// the world inside its first day at exactly that phase — which is what the pair
-	// RestoreClock enforces requires, and what a world with no recorded history has.
-	// The half of #462 that widens the file replaces this line with the stored value.
-	if err := sim.RestoreClock(stored, uint64(stored)); err != nil {
+	// The checks belong to game, which owns the day length; persist judges only what a
+	// file can be wrong about. A clock that cannot exist is refused rather than repaired
+	// — see game.Sim.RestoreClock.
+	if err := sim.RestoreClock(stored.TickOfDay, stored.WorldTick); err != nil {
 		log.Error("the stored clock was refused; this world starts at first light",
-			"clock_file", store.Path(), "tick_of_day", stored, "error", err)
+			"clock_file", store.Path(), "tick_of_day", stored.TickOfDay,
+			"world_tick", stored.WorldTick, "error", err)
 		return
 	}
-	log.Info("clock restored", "clock_file", store.Path(), "tick_of_day", stored)
+	// Only after the pair is accepted. A file whose clock was refused is one this build
+	// does not believe, and taking one field out of it would be believing part of it.
+	sim.ScheduleStorm(stored.NextStormUnix)
+	log.Info("clock restored", "clock_file", store.Path(), "tick_of_day", stored.TickOfDay,
+		"world_tick", stored.WorldTick, "next_storm_unix", stored.NextStormUnix)
 }
 
 // server wires the transport, the session registry and the simulation loop
@@ -967,7 +970,7 @@ func (s *server) flushStructures() {
 // because a world nobody is building in should cost no I/O at all; there is no such
 // thing as a world in which time is not passing, so a flag would be set on every pass
 // and would buy a comparison instead of a write. What the clock costs unconditionally
-// is sixteen bytes and a rename every five seconds.
+// is thirty-two bytes and a rename every five seconds.
 //
 // **A failed write is not re-marked either, for the same reason it needs no flag.** The
 // next pass reads the live clock, which is newer than the one that failed — so unlike a
@@ -993,16 +996,24 @@ func (s *server) saveClockLoop(ctx context.Context) error {
 	}
 }
 
-// flushClock writes where the world's day has got to.
+// flushClock writes where the world's day has got to, how long the world has run, and
+// when its next storm falls due.
 //
 // The capture and the write are separate here as everywhere else in this file:
-// Sim.TickOfDay takes the simulation's lock, copies one number, and releases it; the
-// byte that reaches the disk does so with nothing held.
+// Sim.Clock takes the simulation's lock, copies three numbers, and releases it; the
+// bytes that reach the disk do so with nothing held.
+//
+// **Sim.Clock and not the three readers beside it**, and this is the call site that
+// distinction was written for: the tick loop is free to run between two lock takes, so a
+// tick of day from one and a world tick from the next can disagree — and
+// game.Sim.RestoreClock refuses a pair that disagrees, so the world would lose its clock
+// at the next start with nothing to say why.
 func (s *server) flushClock() {
-	tickOfDay := s.sim.TickOfDay()
-	if err := s.clock.Save(tickOfDay); err != nil {
+	tickOfDay, worldTick, nextStormUnix := s.sim.Clock()
+	if err := s.clock.Save(tickOfDay, worldTick, nextStormUnix); err != nil {
 		s.log.Error("saving the clock failed; it will be retried",
-			"clock_file", s.clock.Path(), "tick_of_day", tickOfDay, "error", err)
+			"clock_file", s.clock.Path(), "tick_of_day", tickOfDay,
+			"world_tick", worldTick, "next_storm_unix", nextStormUnix, "error", err)
 	}
 }
 
