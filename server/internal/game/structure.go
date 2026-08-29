@@ -373,42 +373,80 @@ func (s *Sim) rebuildWardsLocked() {
 			stones = append(stones, held)
 		}
 	}
-	if len(stones) == 0 {
-		// nil rather than an empty map: wardOf reads a nil map correctly, and a world
-		// nobody has claimed any ground in carries no allocation for the fact.
-		s.wards = nil
-		return
-	}
 	slices.SortFunc(stones, func(a, b *structure) int {
 		return compareEntityIDs(a.structureID, b.structureID)
 	})
 
-	wards := make(map[world.Column]identity.PlayerID, len(stones)*(2*WardChunkRadius+1)*(2*WardChunkRadius+1))
+	// Keep every settlement lookup, positive and negative, while dropping the old
+	// runestone overlay. A settlement never changes for one seed; a stone is exactly
+	// what caused this rebuild.
+	wards := make(map[world.Column]wardClaim, len(s.wards)+len(stones)*(2*WardChunkRadius+1)*(2*WardChunkRadius+1))
+	for col, cached := range s.wards {
+		if !cached.settlementChecked {
+			continue
+		}
+		cached.owner = identity.PlayerID{}
+		cached.warded = cached.settlement
+		wards[col] = cached
+	}
 	for _, stone := range stones {
 		centre := stone.chunk.Column()
 		for dx := int32(-WardChunkRadius); dx <= WardChunkRadius; dx++ {
 			for dz := int32(-WardChunkRadius); dz <= WardChunkRadius; dz++ {
 				col := world.Column{CX: centre.CX + dx, CZ: centre.CZ + dz}
-				if _, claimed := wards[col]; claimed {
+				claim := wards[col]
+				if claim.warded {
 					continue
 				}
-				wards[col] = stone.owner
+				claim.owner = stone.owner
+				claim.warded = true
+				wards[col] = claim
 			}
 		}
 	}
-	s.wards = wards
+	if len(wards) == 0 {
+		s.wards = nil
+	} else {
+		s.wards = wards
+	}
+}
+
+// wardClaim is one cached answer in the shared settlement-and-runestone index.
+// settlement records which world-owned answer to restore when a runestone rebuild
+// removes its overlay; settlementChecked lets an unwarded column be cached too.
+type wardClaim struct {
+	owner             identity.PlayerID
+	warded            bool
+	settlement        bool
+	settlementChecked bool
 }
 
 // wardOf is who owns the ground in one chunk column, if anybody does.
 //
-// A map hit and nothing else, which is the whole reason the radius is measured in chunk
-// columns: this is asked on the edit path, on the mining path, on the placement path and,
-// once the storm lands, once per chunk it is about to scour.
+// A settlement is asked first and is owned by the zero identity — nobody — so it
+// always wins over any nearby runestone. The first query for a column is a bounded,
+// pure lattice lookup; every later query is a map hit. Storm callers must keep on the
+// returned boolean, not on the owner: zero is a real ward owner here.
 //
 // The caller holds Sim.mu.
 func (s *Sim) wardOf(col world.Column) (identity.PlayerID, bool) {
-	owner, warded := s.wards[col]
-	return owner, warded
+	claim, cached := s.wards[col]
+	if cached && claim.settlementChecked {
+		return claim.owner, claim.warded
+	}
+
+	_, settlement := world.SettlementWarding(s.worldSeed, col)
+	claim.settlementChecked = true
+	claim.settlement = settlement
+	if settlement {
+		claim.owner = identity.PlayerID{}
+		claim.warded = true
+	}
+	if s.wards == nil {
+		s.wards = make(map[world.Column]wardClaim)
+	}
+	s.wards[col] = claim
+	return claim.owner, claim.warded
 }
 
 // wardedAgainstLocked reports whether this voxel stands on ground somebody other than the

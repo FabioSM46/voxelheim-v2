@@ -706,7 +706,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         (
             RefusedAction::EditBlock | RefusedAction::MineBlock | RefusedAction::PlaceStructure,
             RefusalReason::Warded,
-        ) => Some("This ground is warded by another's runestone".to_owned()),
+        ) => Some("This ground is warded and not yours to dig or build on".to_owned()),
         (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
         (RefusedAction::Trade, _) => trade_reason.map(str::to_owned),
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
@@ -1440,7 +1440,7 @@ mod tests {
                         || line == "They have nothing to trade"
                         || line == "Not enough silver"
                         || line == "They do not want that"
-                        || line == "This ground is warded by another's runestone",
+                        || line == "This ground is warded and not yours to dig or build on",
                     "{reason:?} -> {line}"
                 );
             }
@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn a_warded_world_action_names_another_players_runestone() {
+    fn a_warded_world_action_explains_that_the_ground_is_not_yours() {
         for action in [
             RefusedAction::EditBlock,
             RefusedAction::MineBlock,
@@ -1680,7 +1680,7 @@ mod tests {
                     anchor: Some(crate::net::BlockCoord { x: 2, y: 63, z: -4 }),
                 })
                 .as_deref(),
-                Some("This ground is warded by another's runestone"),
+                Some("This ground is warded and not yours to dig or build on"),
                 "{action:?}"
             );
         }

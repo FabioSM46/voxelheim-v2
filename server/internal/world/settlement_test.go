@@ -1,6 +1,7 @@
 package world
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -1509,6 +1510,92 @@ func TestSettlementLookupIsPureInSeedAndCell(t *testing.T) {
 					got.Plateau != first.Plateau || len(got.Buildings) != len(first.Buildings) {
 					t.Fatalf("cell (%d, %d) reading %d: %+v, first reading was %+v", cx, cz, again+2, got, first)
 				}
+			}
+		}
+	}
+}
+
+// A ward is the plateau disc against a chunk's whole block square, not against
+// its origin or centre. The exhaustive referee below is intentionally simpler
+// than WardsColumn: it asks every block coordinate in each nearby column.
+func TestSettlementWardsExactlyTheColumnsItsPlateauDiscTouches(t *testing.T) {
+	t.Parallel()
+
+	settlement := Settlement{CentreX: 7, CentreZ: -11, Radius: capitalRadius}
+	for cz := int32(-4); cz <= 3; cz++ {
+		for cx := int32(-3); cx <= 4; cx++ {
+			col := Column{CX: cx, CZ: cz}
+			want := false
+			for z := int64(cz) * ChunkSize; z < int64(cz+1)*ChunkSize && !want; z++ {
+				for x := int64(cx) * ChunkSize; x < int64(cx+1)*ChunkSize; x++ {
+					if squaredDistance(x, z, settlement.CentreX, settlement.CentreZ) <= int64(settlement.Radius*settlement.Radius) {
+						want = true
+						break
+					}
+				}
+			}
+			if got := settlement.WardsColumn(col); got != want {
+				t.Errorf("WardsColumn(%+v) = %v, exhaustive disc intersection = %v", col, got, want)
+			}
+		}
+	}
+
+	// Exactly tangent belongs to the plateau; one block into the blend does not.
+	tangent := Settlement{CentreX: 8, CentreZ: 0, Radius: capitalRadius}
+	if !tangent.WardsColumn(Column{CX: 2, CZ: 0}) {
+		t.Error("a column whose nearest block is exactly Radius away is not warded")
+	}
+	tangent.CentreX--
+	if tangent.WardsColumn(Column{CX: 2, CZ: 0}) {
+		t.Error("the first column beyond Radius is warded as though the blend band counted")
+	}
+}
+
+func TestSettlementWardingFindsCapitalAndVillageDiscsWithoutChangingTheLayout(t *testing.T) {
+	t.Parallel()
+
+	capital := theCapital(t, settlementTestSeed)
+	assertWardingMatchesSettlement(t, settlementTestSeed, capital)
+
+	var village Settlement
+	for cz := int64(-3); cz <= 3 && village.Radius == 0; cz++ {
+		for cx := int64(-3); cx <= 3; cx++ {
+			candidate, ok := SettlementAt(settlementTestSeed, cx, cz)
+			if ok && candidate.Kind == SettlementVillage {
+				village = candidate
+				break
+			}
+		}
+	}
+	if village.Radius == 0 {
+		t.Fatal("the fixture has no village near spawn")
+	}
+	assertWardingMatchesSettlement(t, settlementTestSeed, village)
+}
+
+func assertWardingMatchesSettlement(t *testing.T, seed int64, settlement Settlement) {
+	t.Helper()
+
+	centre := ChunkOf(settlement.CentreX, 0, settlement.CentreZ).Column()
+	for dz := int32(-3); dz <= 3; dz++ {
+		for dx := int32(-3); dx <= 3; dx++ {
+			col := Column{CX: centre.CX + dx, CZ: centre.CZ + dz}
+			want := settlement.WardsColumn(col)
+			first, found := SettlementWarding(seed, col)
+			if found != want {
+				t.Errorf("%v column %+v: SettlementWarding found = %v, WardsColumn = %v", settlement.Kind, col, found, want)
+				continue
+			}
+			if !found {
+				continue
+			}
+			if first.Kind != settlement.Kind || first.CentreX != settlement.CentreX || first.CentreZ != settlement.CentreZ ||
+				first.Radius != settlement.Radius || first.Plateau != settlement.Plateau || !reflect.DeepEqual(first.Buildings, settlement.Buildings) {
+				t.Errorf("%v column %+v returned a different settlement layout", settlement.Kind, col)
+			}
+			second, again := SettlementWarding(seed, col)
+			if !again || second.CentreX != first.CentreX || second.CentreZ != first.CentreZ || !reflect.DeepEqual(second.Buildings, first.Buildings) {
+				t.Errorf("%v column %+v did not return the same answer twice", settlement.Kind, col)
 			}
 		}
 	}

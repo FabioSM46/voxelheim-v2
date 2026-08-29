@@ -41,6 +41,8 @@ func (s *Sim) StartStormRegeneration(coords []world.Coord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.RegenerateChunksLocked(coords, func(column world.Column) bool {
+		// Keep on the boolean, never on the owner: a settlement is a ward owned
+		// by the zero identity, which deliberately names nobody.
 		_, warded := s.wardOf(column)
 		return warded
 	})
