@@ -9,9 +9,12 @@
 use bevy::prelude::*;
 
 use super::inventory::{refresh_silver_readout, spawn_silver_readout};
-use super::{FILLED_CELL, icon, stack_style};
+use super::{BUTTON, FILLED_CELL, button_colour, icon, stack_style};
 use crate::net::{InventoryStack, Session, VendorEntry};
-use crate::player::{InputMode, Inventory, Liveries, SelfVitals, VendorWindow, item_label};
+use crate::player::{
+    InputMode, Inventory, Liveries, SHIFT_COUNT, SelfVitals, VendorTradeClick, VendorWindow,
+    item_label,
+};
 
 const WIDTH: f32 = 620.0;
 
@@ -35,12 +38,30 @@ const HINT: Color = Color::srgb(0.62, 0.62, 0.66);
 const NOTHING_FOR_SALE: &str = "nothing for sale here";
 const NOTHING_WANTED: &str = "nothing here they will buy";
 
+/// The two column headings, and the two words on the buttons under them. One pair of
+/// constants rather than four literals, because the heading is also what tells
+/// [`spawn_column`] which direction its rows trade in.
+const BUY: &str = "Buy";
+const SELL: &str = "Sell";
+
 /// One drawn line: the vendor's entry, and what the player holds of it when that is
 /// something the column shows.
 type Row = (VendorEntry, Option<u32>);
 
 #[derive(Component)]
 struct VendorRoot;
+
+/// The button on one row, carrying the whole of what pressing it asks for.
+///
+/// The direction lives here rather than being inferred from which column the button was
+/// found in: an item may be in both of a vendor's vectors at different prices — the
+/// trader's leather patch is — and a press that only named the item would be ambiguous
+/// about which of the two it meant.
+#[derive(Component, Debug, Clone, Copy)]
+struct VendorRowButton {
+    item_id: u16,
+    buying: bool,
+}
 
 pub(super) struct VendorUiPlugin;
 
@@ -65,7 +86,9 @@ impl Plugin for VendorUiPlugin {
                     show_window,
                 )
                     .chain(),
-            );
+            )
+            .add_message::<VendorTradeClick>()
+            .add_systems(Update, click_rows);
     }
 }
 
@@ -151,8 +174,8 @@ fn rebuild_window(
                 ..default()
             })
             .with_children(|columns| {
-                spawn_column(columns, "Buy", &buy, NOTHING_FOR_SALE, liveries.as_deref());
-                spawn_column(columns, "Sell", &sell, NOTHING_WANTED, liveries.as_deref());
+                spawn_column(columns, BUY, &buy, NOTHING_FOR_SALE, liveries.as_deref());
+                spawn_column(columns, SELL, &sell, NOTHING_WANTED, liveries.as_deref());
             });
             spawn_silver_readout(root, PADDING);
         });
@@ -179,6 +202,7 @@ fn spawn_column(
     when_empty: &str,
     liveries: Option<&Liveries>,
 ) {
+    let buying = heading == BUY;
     columns
         .spawn(Node {
             // A basis of zero with equal growth, so the columns are halves of the window
@@ -200,7 +224,7 @@ fn spawn_column(
                 TextColor(Color::WHITE),
             ));
             for (entry, held) in rows {
-                spawn_row(column, *entry, *held, liveries);
+                spawn_row(column, *entry, *held, buying, liveries);
             }
             if rows.is_empty() {
                 column.spawn((
@@ -215,7 +239,8 @@ fn spawn_column(
         });
 }
 
-/// One row: the icon, the label, what the player holds of it, and the silver per unit.
+/// One row: the icon, the label, what the player holds of it, the silver per unit, and the
+/// one button that asks for it.
 ///
 /// ASCII throughout, and the separator is the pipe the rest of this client uses. Bevy's
 /// embedded fallback font is the whole font stack here — a 95-glyph subset — so a
@@ -224,6 +249,7 @@ fn spawn_row(
     column: &mut ChildSpawnerCommands<'_>,
     entry: VendorEntry,
     held: Option<u32>,
+    buying: bool,
     liveries: Option<&Liveries>,
 ) {
     let style = stack_style(Some(InventoryStack {
@@ -262,6 +288,10 @@ fn spawn_row(
                 }
             });
             row.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    ..default()
+                },
                 Text::new(format!(
                     "{}{holding} | {} silver",
                     item_label(entry.item_id),
@@ -273,7 +303,57 @@ fn spawn_row(
                 },
                 TextColor(Color::WHITE),
             ));
+            row.spawn((
+                VendorRowButton {
+                    item_id: entry.item_id,
+                    buying,
+                },
+                Button,
+                Node {
+                    flex_shrink: 0.0,
+                    padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                    ..default()
+                },
+                BackgroundColor(BUTTON),
+            ))
+            .with_children(|button| {
+                button.spawn((
+                    Text::new(if buying { BUY } else { SELL }.to_owned()),
+                    TextFont {
+                        font_size: FontSize::Px(15.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                ));
+            });
         });
+}
+
+/// Reports one press per button, with the amount the modifier asked for.
+///
+/// **Shift is read here and not in `player::vendor`**, for the reason `ui/inventory.rs`
+/// reads it for a drop: which of two amounts a press meant is a fact about the press, and
+/// the module that builds the frame should be told what was asked for rather than have to
+/// reconstruct it. `Changed<Interaction>` is the edge every other button in this client
+/// uses, so a held button is one request rather than one per frame at a stall that would
+/// answer `StaleRevision` to all but the first.
+fn click_rows(
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut rows: Query<(&VendorRowButton, &Interaction, &mut BackgroundColor), Changed<Interaction>>,
+    mut clicks: MessageWriter<VendorTradeClick>,
+) {
+    let many = keys
+        .is_some_and(|keys| keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight));
+    for (button, interaction, mut colour) in &mut rows {
+        colour.0 = button_colour(interaction);
+        if *interaction == Interaction::Pressed {
+            clicks.write(VendorTradeClick {
+                item_id: button.item_id,
+                buying: button.buying,
+                count: if many { SHIFT_COUNT } else { 1 },
+            });
+        }
+    }
 }
 
 /// Shows the window only for a live session that is in the mode and has a list to draw.
@@ -473,6 +553,70 @@ mod tests {
             app.world().resource::<VendorWindow>().state().is_some(),
             "this test asserts what the UI draws, not what the player plugin cleared"
         );
+    }
+
+    /// **A press reports the row and the direction, and shift is the only thing that
+    /// changes the amount.**
+    ///
+    /// The two buttons are found by their own component rather than by position, and the
+    /// direction is asserted on both, because an item can be in a vendor's two vectors at
+    /// different prices and a press that got the direction from the column it was drawn in
+    /// would be reading a layout rather than a row.
+    #[test]
+    fn a_press_reports_the_row_the_direction_and_the_modifier() {
+        let mut app = app();
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.update();
+
+        for (item_id, buying, count, held) in [
+            (PICKAXE, true, 1u16, None),
+            (RAW_IRON, false, SHIFT_COUNT, Some(KeyCode::ShiftLeft)),
+            (PICKAXE, true, SHIFT_COUNT, Some(KeyCode::ShiftRight)),
+        ] {
+            {
+                let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+                keys.clear();
+                keys.release_all();
+                if let Some(key) = held {
+                    keys.press(key);
+                }
+            }
+            press(&mut app, item_id, buying);
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<Messages<VendorTradeClick>>()
+                    .drain()
+                    .collect::<Vec<_>>(),
+                [VendorTradeClick {
+                    item_id,
+                    buying,
+                    count
+                }]
+            );
+        }
+    }
+
+    /// Presses the one button drawn for that row and runs the frame that reads it.
+    fn press(app: &mut App, item_id: u16, buying: bool) {
+        let world = app.world_mut();
+        let mut buttons = world.query::<(&VendorRowButton, &mut Interaction)>();
+        let mut found = false;
+        for (button, mut interaction) in buttons.iter_mut(world) {
+            let mine = button.item_id == item_id && button.buying == buying;
+            // Every button is written every pass, so `Changed<Interaction>` fires for the
+            // one under test rather than for whichever happened to differ from last time.
+            *interaction = if mine {
+                found = true;
+                Interaction::Pressed
+            } else {
+                Interaction::None
+            };
+        }
+        assert!(
+            found,
+            "no button was drawn for item {item_id} buying {buying}"
+        );
+        app.update();
     }
 
     /// Leaving the mode hides the window; the list is still what the server last said.

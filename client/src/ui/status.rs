@@ -580,24 +580,22 @@ fn refresh_notice_text(
 ///
 /// **Not a defect, and not an unreadable code** — the two silences that existed before
 /// V25. These are reasons the contract names, this build decodes, and no surface answers
-/// yet: the two trade refusals are answered where the vendor window is, and that window
-/// lands in #459. `TileMisaligned` is here for a different reason with the same shape — a
-/// misaligned tile request is this build asking wrongly, but it is not one of the four
-/// `Malformed*` codes [`RefusalReason::is_client_defect`] names, so nothing classified it
-/// at all.
+/// yet. `TileMisaligned` is the only one left: a misaligned tile request is this build
+/// asking wrongly, but it is not one of the four `Malformed*` codes
+/// [`RefusalReason::is_client_defect`] names, so nothing classified it at all.
 ///
 /// It exists because the sweep needs a third category to assert against, and because the
 /// caller needs one to keep from logging "no sentence for" at a reason whose silence is a
-/// decision. A reason leaves this list when something answers it, which is the edit #458
-/// has just made for `NotAVendor` — F now addresses a resident, so the refusal that answer
-/// comes back as has somewhere to be read — and the edit #459 makes for the other two.
+/// decision. **A reason leaves this list when something answers it**, which is what #458
+/// did for `NotAVendor` — F addresses a resident, so the answer has somewhere to be read —
+/// and what #459 has now done for `NotEnoughSilver` and `VendorDoesNotWant`: there is a
+/// stall on screen, and a refused trade is answered beside it.
+///
+/// One name is left, so [`the_deliberate_silences_do_not_overlap`]'s non-empty assertion
+/// still holds. It will not survive the issue that gives `TileMisaligned` a surface, and
+/// that test says so rather than the category quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
-    matches!(
-        reason,
-        RefusalReason::TileMisaligned
-            | RefusalReason::NotEnoughSilver
-            | RefusalReason::VendorDoesNotWant
-    )
+    matches!(reason, RefusalReason::TileMisaligned)
 }
 
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
@@ -638,8 +636,8 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::NoteTooLong
         | RefusalReason::MarkerUnknown
         // V25's three settlement refusals. None of them is about a placement either:
-        // `NotAVendor` is answered below, against the action that produces it, and a trade
-        // that did not happen is answered where the window is, in #459.
+        // `NotAVendor` and the two trade reasons are all answered below, against the
+        // actions that produce them.
         | RefusalReason::NotAVendor
         | RefusalReason::NotEnoughSilver
         | RefusalReason::VendorDoesNotWant
@@ -679,8 +677,30 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         _ => None,
     };
 
+    // Every reason `Player.Trade` can answer with, in the whole-sentence shape the map's
+    // and the interact line's use: nothing was refused that the player meant to do *to the
+    // world*, so "Cannot build here: x" would be the wrong frame for it.
+    //
+    // **Seven, not the three the issue names.** The three are the ones a player meets by
+    // playing badly; the other four are how a stall ends underneath them — walking out of
+    // reach, dying, clicking a list the server has already replaced, and a pack another
+    // request holds the lock on. A reason that reached this arm with no line would be
+    // logged as "this build has no sentence for", which is the log entry reserved for a
+    // *defect*, and none of the four is one.
+    let trade_reason = match refused.reason {
+        RefusalReason::NotEnoughSilver => Some("Not enough silver"),
+        RefusalReason::VendorDoesNotWant => Some("They do not want that"),
+        RefusalReason::InventoryFull => Some("Your pack is full"),
+        RefusalReason::NotAVendor => Some("That stall is closed"),
+        RefusalReason::StaleRevision => Some("The prices changed; look again"),
+        RefusalReason::InventoryBusy => Some("Your pack was busy; try again"),
+        RefusalReason::PlayerIsDead => Some("You cannot trade while dead"),
+        _ => None,
+    };
+
     match (refused.action, refused.reason) {
         (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
+        (RefusedAction::Trade, _) => trade_reason.map(str::to_owned),
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
         // A whole sentence about the person rather than the "Cannot X: y" shape, for the
         // reason the map's lines are whole sentences: nothing was refused that the player
@@ -1322,6 +1342,13 @@ mod tests {
             // would sweep it as silent and pin the opposite of what is true — exactly the
             // trap the marker three are lifted out of above.
             RefusalReason::NotAVendor => RefusedAction::Interact,
+            // And the same trap for the two #459 lifted out of `has_no_sentence_yet`: the
+            // `_` arm below sent both in as `PlaceStructure`, which has no sentence for
+            // either, so the sweep would have kept passing over the pair while reading as
+            // though it had checked them.
+            RefusalReason::NotEnoughSilver | RefusalReason::VendorDoesNotWant => {
+                RefusedAction::Trade
+            }
             _ => RefusedAction::PlaceStructure,
         };
         ActionRefused {
@@ -1399,7 +1426,9 @@ mod tests {
                         || line.starts_with("The map holds no more marks")
                         || line == "That note is too long"
                         || line == "That mark is already gone"
-                        || line == "They have nothing to trade",
+                        || line == "They have nothing to trade"
+                        || line == "Not enough silver"
+                        || line == "They do not want that",
                     "{reason:?} -> {line}"
                 );
             }
@@ -1424,12 +1453,47 @@ mod tests {
                 "Unknown is silent because it cannot be read, not because nobody wrote it"
             );
         }
-        // The list is not empty today, and when #458 and #459 empty it this test says so
-        // rather than the category quietly becoming decorative.
+        // One name is left after #458 and #459 took theirs out — `TileMisaligned` — and
+        // when the issue that gives it a surface empties the list this test says so rather
+        // than the category quietly becoming decorative.
         assert!(
             EVERY_REASON.iter().copied().any(has_no_sentence_yet),
             "no reason awaits a surface; delete `has_no_sentence_yet` and its category"
         );
+    }
+
+    /// **Every reason one refused trade can come back as, pinned to its exact sentence.**
+    ///
+    /// The sweep above sees only one action per reason, so it checks two of these seven
+    /// and cannot see the other five at all: `InventoryFull` is swept as a loot refusal,
+    /// `NotAVendor` as an interact one, and `InventoryBusy` and `PlayerIsDead` as
+    /// placements. This is where the `RefusedAction::Trade` arm is actually read, and the
+    /// three the issue names are spelled out rather than matched loosely — they are the
+    /// whole of what a player is told about a trade that did not happen.
+    #[test]
+    fn every_trade_refusal_has_its_own_sentence() {
+        for (reason, want) in [
+            (RefusalReason::NotEnoughSilver, "Not enough silver"),
+            (RefusalReason::VendorDoesNotWant, "They do not want that"),
+            (RefusalReason::InventoryFull, "Your pack is full"),
+            (RefusalReason::NotAVendor, "That stall is closed"),
+            (
+                RefusalReason::StaleRevision,
+                "The prices changed; look again",
+            ),
+            (
+                RefusalReason::InventoryBusy,
+                "Your pack was busy; try again",
+            ),
+            (RefusalReason::PlayerIsDead, "You cannot trade while dead"),
+        ] {
+            let refused = ActionRefused {
+                action: RefusedAction::Trade,
+                reason,
+                anchor: None,
+            };
+            assert_eq!(describe_refusal(&refused).as_deref(), Some(want));
+        }
     }
 
     /// Addressing somebody who keeps no stall says so, in those words.
