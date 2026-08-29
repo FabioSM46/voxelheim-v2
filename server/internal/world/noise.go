@@ -169,3 +169,15 @@ func fbm3D(seed, x, y, z int64) int64 {
 	// sum <= norm <= 2*one, so sum*one <= 2^33: no overflow.
 	return (sum * one) / norm
 }
+
+// HashLattice is [hashLattice] under an exported name, for the one caller outside this
+// package that derives something from a lattice point instead of reading a field.
+//
+// **internal/game names the world-owned stations with it**, and the alternative was a
+// second mixing function: a village forge is written down nowhere, so its id has to be a
+// hash of the seed and the column it stands on, exactly as this package's own decisions
+// are. Two copies of splitmix64's finalizer would agree until somebody tuned one, and the
+// disagreement would be a forge that changed its id at a deploy. It still says nothing
+// about entities — it is arithmetic over three integers, and what the answer names
+// belongs to the caller.
+func HashLattice(seed, x, y int64) uint64 { return hashLattice(seed, x, y) }

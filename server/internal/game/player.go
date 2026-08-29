@@ -217,11 +217,19 @@ type Sim struct {
 	// the next kill leaves behind. See loot.go, where the stream constant is argued.
 	loot *rand.Rand
 
+	// worldSeed is the number this world is, kept rather than only spent on the two
+	// generators above. **Still not a licence to generate terrain**: the simulation does
+	// not call world.Generate, cannot, and reads chunks through a seam that carries no
+	// seed. What it reads with this is world.SettlementsNear, which opens no chunk and no
+	// cache. See station.go.
+	worldSeed int64
+
 	// structures is every placed tent and forge, keyed by identity for the reason the
 	// three maps above are: a snapshot names them by id, and a removal has to find one
 	// without scanning. Unlike the three, nothing in the tick advances them — a
 	// structure has no state that changes with time — so they are read here and written
-	// only by placement, removal, collapse and the restore at startup.
+	// only by placement, removal, collapse, the restore at startup, and the settlement
+	// stations station.go derives from the seed.
 	structures map[uint64]*structure
 
 	// structuresDirty says the camp has changed since it was last written down.
@@ -261,12 +269,14 @@ type Sim struct {
 //
 // mintEntityID is the identity source shared with the sessions; see the field.
 //
-// **worldSeed is here to seed the simulation's generators, not to generate anything.**
-// The simulation still knows nothing about terrain: it does not call world.Generate, it
-// cannot, and the seam it reads chunks through has no seed on it. What the number buys
-// is that the spawn director's choices and a kill's yield are properties of the *world*
-// rather than of the process — two runs of the same world, given the same ticks, place
-// the same creatures in the same places and roll the same corpse entries.
+// **worldSeed is here to derive from, not to generate anything.** The simulation still
+// knows nothing about terrain: it does not call world.Generate, it cannot, and the seam
+// it reads chunks through has no seed on it. What the number buys is that the spawn
+// director's choices and a kill's yield are properties of the *world* rather than of the
+// process — two runs of the same world, given the same ticks, place the same creatures in
+// the same places and roll the same corpse entries — and, since #456, that a village
+// smithy's forge is the same forge with the same id on every server that runs this world
+// without a byte of it being written down.
 // Each generator gets its own PCG stream off this one seed, so neither is a function of
 // what the other has drawn. Any value is accepted, including zero: a seed is a starting
 // point and there is no such thing as a wrong one.
@@ -320,6 +330,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		corpseLifetimeTicks:  uint64(ticksFor(CorpseLifetime, tickRate)),
 		spawns:               newSpawnRNG(worldSeed),
 		loot:                 newLootRNG(worldSeed),
+		worldSeed:            worldSeed,
 		attackCooldown:       ticksFor(SwordCooldown, tickRate),
 		bowCooldownTicks:     ticksFor(BowCooldown, tickRate),
 		sceptreCooldownTicks: ticksFor(SceptreCooldown, tickRate),
