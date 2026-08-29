@@ -38,7 +38,8 @@ import (
 // /   - `anchor` is present; an absent struct field decodes as null, and the origin is a
 // /     real location rather than a default
 // /   - `kind` and `facing` are known non-zero members
-// /   - `lit` has no invalid value; see the field
+// /   - `lit` has no invalid value, and is read only where `kind` is
+// /     `StructureKind.Campfire`; see the field
 type StructureState struct {
 	_tab flatbuffers.Table
 }
@@ -161,8 +162,18 @@ func (rcv *StructureState) MutateOwnerEntityId(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(12, n)
 }
 
-// / Whether this structure is burning. False is a campfire the rain has put out, and
-// / true is every other structure of every other kind, always.
+// / Whether this campfire is burning.
+// /
+// / **It means something for `StructureKind.Campfire` and for nothing else, and a
+// / client reads it only there.** `false` is a campfire the rain has put out; `true` is
+// / one that is alight. Every structure of every other kind carries `true` as well, and
+// / that is this field's default showing through rather than a statement about it — no
+// / server writes the byte for a tent, a forge or a runestone, because none of them is
+// / the sort of thing that burns. So `lit` on a non-campfire is not "burning", it is
+// / "unset", and a renderer that lights a structure on this field alone would set fire
+// / to every tent in the world. Read the `kind` beside it first; the existing renderer
+// / already decides a structure's light per kind, and this field refines that decision
+// / for the one kind that has two states rather than replacing it for all four.
 // /
 // / **The server decides, and a doused fire is not a station**: it lights nothing,
 // / warms nobody and satisfies no recipe that needs a campfire nearby. The client draws
@@ -170,10 +181,13 @@ func (rcv *StructureState) MutateOwnerEntityId(n uint64) bool {
 // / falls and how long it takes are all authoritative, and a renderer that guessed
 // / would show a fire the crafting menu disagreed with.
 // /
-// / **The default is `true`, and it is load-bearing**: an elided field then reads as the
-// / burning fire every fire on a pre-V26 server is, so the byte is written only when one
-// / is actually out and the field owes no version bump of its own. `common.fbs` records
-// / what a default of `false` would have cost.
+// / **The default is `true`, and it is load-bearing**: a campfire's elided field then
+// / reads as the burning fire every fire on a pre-V26 server is, so the byte is written
+// / only when one is actually out and the field owes no version bump of its own.
+// / `common.fbs` records what a default of `false` would have cost. That the same
+// / default also reaches the three kinds that never burn is the price of it, and it is
+// / paid in the paragraph above rather than in the wire: a field nobody reads for those
+// / kinds costs nothing whichever way it defaults.
 func (rcv *StructureState) Lit() bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
@@ -182,8 +196,18 @@ func (rcv *StructureState) Lit() bool {
 	return true
 }
 
-// / Whether this structure is burning. False is a campfire the rain has put out, and
-// / true is every other structure of every other kind, always.
+// / Whether this campfire is burning.
+// /
+// / **It means something for `StructureKind.Campfire` and for nothing else, and a
+// / client reads it only there.** `false` is a campfire the rain has put out; `true` is
+// / one that is alight. Every structure of every other kind carries `true` as well, and
+// / that is this field's default showing through rather than a statement about it — no
+// / server writes the byte for a tent, a forge or a runestone, because none of them is
+// / the sort of thing that burns. So `lit` on a non-campfire is not "burning", it is
+// / "unset", and a renderer that lights a structure on this field alone would set fire
+// / to every tent in the world. Read the `kind` beside it first; the existing renderer
+// / already decides a structure's light per kind, and this field refines that decision
+// / for the one kind that has two states rather than replacing it for all four.
 // /
 // / **The server decides, and a doused fire is not a station**: it lights nothing,
 // / warms nobody and satisfies no recipe that needs a campfire nearby. The client draws
@@ -191,10 +215,13 @@ func (rcv *StructureState) Lit() bool {
 // / falls and how long it takes are all authoritative, and a renderer that guessed
 // / would show a fire the crafting menu disagreed with.
 // /
-// / **The default is `true`, and it is load-bearing**: an elided field then reads as the
-// / burning fire every fire on a pre-V26 server is, so the byte is written only when one
-// / is actually out and the field owes no version bump of its own. `common.fbs` records
-// / what a default of `false` would have cost.
+// / **The default is `true`, and it is load-bearing**: a campfire's elided field then
+// / reads as the burning fire every fire on a pre-V26 server is, so the byte is written
+// / only when one is actually out and the field owes no version bump of its own.
+// / `common.fbs` records what a default of `false` would have cost. That the same
+// / default also reaches the three kinds that never burn is the price of it, and it is
+// / paid in the paragraph above rather than in the wire: a field nobody reads for those
+// / kinds costs nothing whichever way it defaults.
 func (rcv *StructureState) MutateLit(n bool) bool {
 	return rcv._tab.MutateBoolSlot(14, n)
 }
