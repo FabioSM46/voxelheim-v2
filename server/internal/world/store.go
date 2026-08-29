@@ -1,6 +1,7 @@
 package world
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -123,11 +125,18 @@ const (
 	chunkDirName  = "chunks"
 	chunkFileExt  = ".vxd"
 
+	// chunkFilePrefix opens the name of every chunk file, and is what tells one from
+	// the other files a world directory may come to hold. Named rather than spelled
+	// out at each use because three places now depend on the same two characters:
+	// the name a chunk is written under, the glob that sweeps its temporaries, and
+	// the parse that reads a coordinate back out of a directory listing.
+	chunkFilePrefix = "c."
+
 	// chunkFileGlob is every name this store gives a chunk file and nothing else, in
 	// the form [filepath.Match] reads. It is what [Store.sweepTemporaries] hands
 	// [SweepTemporaries] for the chunk directory: a directory this store creates and
 	// fills with its own files can name the whole of its contents in one pattern.
-	chunkFileGlob = "c.*" + chunkFileExt
+	chunkFileGlob = chunkFilePrefix + "*" + chunkFileExt
 
 	// tempFileMarker separates the name of the file [WriteAtomic] is replacing from the
 	// run of digits os.CreateTemp appends to it, so a temporary is always exactly
@@ -374,7 +383,129 @@ func temporaryDestination(name string) (string, bool) {
 // chunkPath is where one chunk's edits live. The coordinate is in the name so a directory
 // listing is readable, and in the file so a misplaced one is caught.
 func (s *Store) chunkPath(coord Coord) string {
-	return filepath.Join(s.chunkDir, fmt.Sprintf("c.%d.%d.%d%s", coord.X, coord.Y, coord.Z, chunkFileExt))
+	return filepath.Join(s.chunkDir, chunkFileName(coord))
+}
+
+// chunkFileName is the name alone, without the directory.
+//
+// Split out from [Store.chunkPath] because [chunkFileCoord] has to be able to check its
+// own answer against it: one function writes the name, so one function decides what a
+// name is, and the two cannot drift into disagreeing about a leading zero.
+func chunkFileName(coord Coord) string {
+	return fmt.Sprintf("%s%d.%d.%d%s", chunkFilePrefix, coord.X, coord.Y, coord.Z, chunkFileExt)
+}
+
+// chunkFileCoord recovers the coordinate [chunkFileName] encoded into a name, and reports
+// whether name is one this store could have written at all.
+//
+// **The round trip is the test, not the parse.** Splitting on dots and calling ParseInt
+// accepts a good deal this store never writes — `c.007.0.0`, `c.+1.0.0`, `c.-0.0.0` — and
+// each of those would answer a coordinate whose own file is somewhere else entirely. So
+// the recovered coordinate is formatted back and compared: a name is ours exactly when it
+// is the name we would have given the chunk it claims to be.
+func chunkFileCoord(name string) (Coord, bool) {
+	trimmed, ok := strings.CutPrefix(name, chunkFilePrefix)
+	if !ok {
+		return Coord{}, false
+	}
+	trimmed, ok = strings.CutSuffix(trimmed, chunkFileExt)
+	if !ok {
+		return Coord{}, false
+	}
+
+	fields := strings.Split(trimmed, ".")
+	if len(fields) != 3 {
+		return Coord{}, false
+	}
+	var axes [3]int32
+	for i, field := range fields {
+		value, err := strconv.ParseInt(field, 10, 32)
+		if err != nil {
+			return Coord{}, false
+		}
+		axes[i] = int32(value)
+	}
+
+	coord := Coord{X: axes[0], Y: axes[1], Z: axes[2]}
+	if chunkFileName(coord) != name {
+		return Coord{}, false
+	}
+	return coord, true
+}
+
+// ListChunks is every chunk this world has stored edits for.
+//
+// The question the Fimbulvetr storm asks before it starts. Restoring the world means
+// visiting the chunks somebody has changed, and because only deltas are ever written,
+// this directory *is* that list: a chunk nobody has touched has no file, so the walk is
+// over the edited world rather than over the world.
+//
+// **Only names this store could have written are answered, and everything else in the
+// directory is passed over rather than refused** — a temporary a crash left mid-write, a
+// file an operator copied in, a subdirectory. That is [SweepTemporaries]'s rule one
+// question further along, and it fails in the same direction: naming too few. A file
+// whose *name* is ours and whose *contents* are corrupt is still listed, because deciding
+// that belongs to [Store.LoadChunk], which refuses rather than guessing.
+//
+// Sorted by coordinate rather than by name, so a pass over the world is the same on every
+// machine and in every test: sorted lexically, `c.10.0.0` precedes `c.2.0.0`.
+func (s *Store) ListChunks() ([]Coord, error) {
+	entries, err := os.ReadDir(s.chunkDir)
+	if err != nil {
+		return nil, fmt.Errorf("world: listing %s: %w", s.chunkDir, err)
+	}
+
+	coords := make([]Coord, 0, len(entries))
+	for _, entry := range entries {
+		// A directory or a symlink wearing a chunk file's name is not something this
+		// code wrote, whatever else it is — the same check the sweep makes.
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		coord, ok := chunkFileCoord(entry.Name())
+		if !ok {
+			continue
+		}
+		coords = append(coords, coord)
+	}
+
+	slices.SortFunc(coords, func(a, b Coord) int {
+		return cmp.Or(cmp.Compare(a.X, b.X), cmp.Compare(a.Y, b.Y), cmp.Compare(a.Z, b.Z))
+	})
+	return coords, nil
+}
+
+// RemoveChunk deletes the edits stored for coord, so the next read of that chunk finds
+// the world the seed makes.
+//
+// The disk half of putting a chunk back, and the reason this file opens by insisting that
+// only deltas are stored: because a chunk file *is* the edit list, restoring a chunk stays
+// "delete the deltas" rather than "diff two worlds". The memory half is [Deltas.Forget],
+// and [Cache.Regenerate] is what performs the two together — neither alone is a
+// restoration, since a live delta layer would re-save the file and a stale file would be
+// hydrated back into the delta layer.
+//
+// **A file that is not there is not an error.** Most chunks have never been edited, so an
+// absent file is the ordinary state of the world rather than a surprise, and a caller
+// sweeping every chunk in a region cannot be asked to find out first.
+//
+// The directory is flushed for the reason [WriteAtomic] flushes it, and against the same
+// loss: the removal is a write to the *directory*, so a power failure that dropped it
+// while keeping the file would bring back a shelter the storm had already taken down. The
+// Windows limit stated there applies here unchanged.
+func (s *Store) RemoveChunk(coord Coord) error {
+	path := s.chunkPath(coord)
+
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("world: removing %s: %w", path, err)
+	}
+	if err := syncDir(s.chunkDir); err != nil {
+		return fmt.Errorf("world: flushing %s after removing %s: %w", s.chunkDir, path, err)
+	}
+	return nil
 }
 
 // LoadChunk reads the edits stored for coord.
@@ -762,6 +893,22 @@ func (c *Cache) markDirty(coord Coord) {
 	}
 	c.dirtyMu.Lock()
 	c.dirty[coord] = struct{}{}
+	c.dirtyMu.Unlock()
+}
+
+// clearDirty forgets that coord was awaiting a write.
+//
+// The one place a mark is dropped without the write ever happening, and [Cache.Regenerate]
+// is the one caller: a chunk whose edits have just been thrown away must not have them
+// written back out by the save that was already pending for it. Called under composeMu,
+// beside the [Deltas.Forget] it belongs to, so no window exists in which the edits are
+// gone and the mark that would re-create their file is not.
+func (c *Cache) clearDirty(coord Coord) {
+	if c.store == nil {
+		return
+	}
+	c.dirtyMu.Lock()
+	delete(c.dirty, coord)
 	c.dirtyMu.Unlock()
 }
 

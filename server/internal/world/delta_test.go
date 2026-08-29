@@ -443,3 +443,60 @@ func TestPlaceableIncludesBuildingBlocksAndExcludesAirAndOre(t *testing.T) {
 		}
 	}
 }
+
+// The half of a restoration that lives in memory. Known is what persistence reads before
+// it decides whether a file is worth opening, so a chunk this layer still claims to know
+// is a chunk whose stored edits are never read again — which after a storm would mean the
+// edits come back at the next restart and not before.
+func TestForgetLeavesTheChunkUnknownToTheEditLayer(t *testing.T) {
+	t.Parallel()
+
+	deltas := NewDeltas()
+	kept := Coord{X: 1}
+	forgotten := Coord{X: 2}
+	deltas.Record(kept, 0, Snow)
+	deltas.Record(forgotten, 0, Snow)
+	deltas.Record(forgotten, 1, Dirt)
+
+	deltas.Forget(forgotten)
+
+	if deltas.Known(forgotten) {
+		t.Error("the edit layer still knows a chunk it was told to forget")
+	}
+	if got := deltas.CountFor(forgotten); got != 0 {
+		t.Errorf("the forgotten chunk holds %d edits, want none", got)
+	}
+	if deltas.Snapshot(forgotten) != nil {
+		t.Error("a forgotten chunk still snapshots edits for the saver to write")
+	}
+	if !deltas.Known(kept) || deltas.CountFor(kept) != 1 {
+		t.Error("forgetting one chunk disturbed another")
+	}
+	if got := deltas.Count(); got != 1 {
+		t.Errorf("the world holds %d edits after one chunk was forgotten, want 1", got)
+	}
+
+	// And composition stops carrying them: a chunk generated after the Forget is the
+	// base, unchanged.
+	want := Generate(11, forgotten).Blocks[0]
+	if want == Snow {
+		t.Fatal("the generator already produces Snow at the edited voxel; the test would prove nothing")
+	}
+	composed := Generate(11, forgotten)
+	deltas.ApplyTo(composed)
+	if composed.Blocks[0] != want {
+		t.Errorf("the composed chunk holds %d at the forgotten edit, want the generated %d", composed.Blocks[0], want)
+	}
+}
+
+// Forgetting a chunk nobody has edited is not an error and not a special case: the storm
+// visits chunks by coordinate and most of them have never been touched.
+func TestForgettingAnUneditedChunkIsANoOp(t *testing.T) {
+	t.Parallel()
+
+	deltas := NewDeltas()
+	deltas.Forget(Coord{X: 7})
+	if got := deltas.Count(); got != 0 {
+		t.Errorf("the edit layer holds %d edits after forgetting nothing, want 0", got)
+	}
+}
