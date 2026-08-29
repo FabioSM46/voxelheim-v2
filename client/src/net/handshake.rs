@@ -31,8 +31,8 @@ use std::fmt;
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
     LootState, MapExplored, MapTile, MarkerList, Message, MineProgress, MobHit, PartyInvite,
-    PlayerAppearance, Reject, ResidentAppearance, SessionParams, Snapshot, VendorClosed,
-    VendorState, WorldClock, WorldUpdate,
+    PlayerAppearance, Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning,
+    VendorClosed, VendorState, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -132,6 +132,19 @@ pub enum Transition {
     VendorState(VendorState),
     /// The authoritative end of an open stall.
     VendorClosed(VendorClosed),
+    /// Where the blizzard is in its life, admitted because a session exists.
+    ///
+    /// Nothing is checked here that the codec has not: the phase's membership and its
+    /// agreement with `seconds_until` are properties of the message alone, and there is
+    /// nothing in the welcome for a storm to be checked against — the countdown is in
+    /// seconds rather than in the server's ticks, deliberately.
+    StormWarning(StormWarning),
+    /// Every warded column in view, admitted because a session exists.
+    ///
+    /// Complete by definition, like a `MarkerList`, so there is no earlier one to check
+    /// it against; the bound, the ward kinds and the uniqueness of a column address are
+    /// all held at the decode boundary.
+    WardsNearby(WardsNearby),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -504,6 +517,13 @@ impl Handshake {
             (Phase::Established, Message::VendorClosed(closed)) => {
                 Ok(Transition::VendorClosed(closed))
             }
+            // V26's two, carried by name for the same reason V25's three are: each is
+            // fully validated at the decode boundary, and nothing about a session changes
+            // what either one means.
+            (Phase::Established, Message::StormWarning(warning)) => {
+                Ok(Transition::StormWarning(warning))
+            }
+            (Phase::Established, Message::WardsNearby(wards)) => Ok(Transition::WardsNearby(wards)),
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -535,6 +555,8 @@ impl Handshake {
             }
             (_, Message::VendorState(_)) => Err(HandshakeError::Premature("VendorState")),
             (_, Message::VendorClosed(_)) => Err(HandshakeError::Premature("VendorClosed")),
+            (_, Message::StormWarning(_)) => Err(HandshakeError::Premature("StormWarning")),
+            (_, Message::WardsNearby(_)) => Err(HandshakeError::Premature("WardsNearby")),
         }
     }
 }
