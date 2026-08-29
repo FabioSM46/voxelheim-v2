@@ -250,10 +250,16 @@ pub(super) enum SessionEvent {
     VendorState(codec::VendorState),
     /// The authoritative end of one open stall.
     VendorClosed(codec::VendorClosed),
-    /// Where the blizzard is in its life. Validated at the decode boundary; no ECS system
-    /// reads it until #470, exactly as `MapTile` was carried here before the map window
-    /// existed.
-    StormWarning(codec::StormWarning),
+    /// Where the blizzard is in its life, with the moment the bytes arrived.
+    ///
+    /// The timestamp is taken on this thread for the same reason a snapshot's is: the
+    /// frame that drains the channel may be delayed, and the countdown is display of the
+    /// server's whole-second statement from its arrival rather than from Bevy's next
+    /// opportunity to read it.
+    StormWarning {
+        warning: codec::StormWarning,
+        at: Instant,
+    },
     /// Every warded chunk column in view, **replacing** the client's previous set
     /// wholesale. Validated at the decode boundary; nothing draws it yet.
     WardsNearby(codec::WardsNearby),
@@ -1456,7 +1462,12 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                     events.send(SessionEvent::VendorClosed(closed)).ok()?;
                 }
                 Ok(Transition::StormWarning(warning)) => {
-                    events.send(SessionEvent::StormWarning(warning)).ok()?;
+                    events
+                        .send(SessionEvent::StormWarning {
+                            warning,
+                            at: Instant::now(),
+                        })
+                        .ok()?;
                 }
                 Ok(Transition::WardsNearby(wards)) => {
                     events.send(SessionEvent::WardsNearby(wards)).ok()?;

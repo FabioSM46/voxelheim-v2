@@ -745,6 +745,33 @@ impl RefusalInbox {
     }
 }
 
+/// Every storm warning the net thread has delivered and the presentation has not read.
+///
+/// Each value carries the instant it was decoded. The warning's seconds are the server's
+/// statement and the instant is only the display anchor from which the HUD subtracts wall
+/// time; neither is a client-side storm clock.
+#[derive(Resource, Debug, Default)]
+pub struct StormInbox(Vec<(StormWarning, Instant)>);
+
+impl StormInbox {
+    /// Takes every queued warning in wire order, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<(StormWarning, Instant)> {
+        std::mem::take(&mut self.0)
+    }
+
+    /// Whether there is anything for the presentation to consume.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Queues one as the net thread would. Test-only, so the presentation can be driven
+    /// at a fixed instant without a socket or a sleeping test.
+    #[cfg(test)]
+    pub fn push(&mut self, warning: StormWarning, at: Instant) {
+        self.0.push((warning, at));
+    }
+}
+
 /// One entry in the ordered conversation stream shown by the chat log.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEntry {
@@ -1064,6 +1091,7 @@ impl Plugin for NetPlugin {
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
+            .init_resource::<StormInbox>()
             .init_resource::<ChatInbox>()
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
@@ -1550,6 +1578,7 @@ struct Inboxes<'w> {
     appearances: ResMut<'w, AppearanceInbox>,
     residents: ResMut<'w, ResidentInbox>,
     refusals: ResMut<'w, RefusalInbox>,
+    storms: ResMut<'w, StormInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
@@ -1743,19 +1772,20 @@ fn drain_session_events(
             }
 
             // V26's two Fimbulvetr payloads: fully decoded and fully validated one layer
-            // down, and dropped here because there is no inbox to put them in yet. #466
-            // gives the sky its precipitation, #470 gives the storm a countdown on screen
-            // and the ward boundary is its own issue; each adds its own queue and its own
-            // arm. Dropped rather than logged, for the reason V25's three were — a
-            // warning arrives when a phase changes and a ward set whenever the player
-            // walks, and a line per one would be noise from the first winter.
+            // down. The warning is queued for #470's presentation; the ward set remains
+            // dropped until its own issue gives it a surface. Neither is logged here: a
+            // warning is visible in the HUD and chat, and a ward set can arrive whenever
+            // the player walks.
             //
             // **The validation is the point of carrying them this far.** An unnameable
             // storm phase, a passed storm that still counts down, a ward list past the
             // contract's bound or a column named twice all end the session at the decode
             // boundary — which is where they should, and that is true now rather than
             // when somebody writes the renderer.
-            Ok(SessionEvent::StormWarning(_)) | Ok(SessionEvent::WardsNearby(_)) => {}
+            Ok(SessionEvent::StormWarning { warning, at }) => {
+                inboxes.storms.0.push((warning, at));
+            }
+            Ok(SessionEvent::WardsNearby(_)) => {}
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
@@ -4393,6 +4423,7 @@ mod tests {
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
+            .init_resource::<StormInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,
                 commands: command_tx,
@@ -4407,6 +4438,26 @@ mod tests {
             .add_systems(Update, drain_session_events);
 
         (app, event_tx)
+    }
+
+    #[test]
+    fn a_storm_warning_keeps_the_instant_the_net_thread_received_it() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        let at = Instant::now();
+        let warning = StormWarning {
+            phase: StormPhase::Raging,
+            seconds_until: 299,
+        };
+
+        events
+            .send(SessionEvent::StormWarning { warning, at })
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<StormInbox>().take(),
+            vec![(warning, at)]
+        );
     }
 
     #[test]

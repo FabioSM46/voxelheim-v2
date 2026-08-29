@@ -38,6 +38,8 @@ use bevy::ui::FocusPolicy;
 use crate::net::Session;
 use crate::player::{AimCamera, InputMode, LookState, PlayerStats};
 
+use super::storm::Storm;
+
 /// Distance from the top of the window, in logical pixels.
 const TOP: f32 = 12.0;
 
@@ -111,6 +113,7 @@ impl Plugin for CompassUiPlugin {
             // under the reading are a readout of what the server said, so this module has
             // to be buildable on its own without the plugin that fills it in.
             .init_resource::<PlayerStats>()
+            .init_resource::<Storm>()
             .add_systems(Startup, spawn_compass)
             .add_systems(
                 Update,
@@ -128,6 +131,7 @@ impl Plugin for CompassUiPlugin {
                     // ordering against a system this module's headless tests never build
                     // would be a no-op there anyway.
                     refresh_coordinates,
+                    refresh_storm_countdown.after(super::storm::IngestStorm),
                     show_compass,
                 ),
             );
@@ -157,6 +161,10 @@ struct CompassReading;
 /// Where the player stands, in blocks, under the heading.
 #[derive(Component)]
 struct CoordinatesReading;
+
+/// The server-anchored Fimbulvetr countdown under the coordinates.
+#[derive(Component)]
+struct StormCountdown;
 
 /// The bearing the player faces, in degrees clockwise from North, in `[0, 360)`.
 ///
@@ -407,6 +415,23 @@ fn spawn_compass(mut commands: Commands) {
                 TextShadow::default(),
                 FocusPolicy::Pass,
             ));
+
+            // The third Text child in this column, after the coordinates. Empty and
+            // hidden until the latest server warning says the storm is within a minute
+            // or raging; no local weather state is consulted.
+            root.spawn((
+                StormCountdown,
+                Text::default(),
+                TextFont {
+                    font_size: FontSize::Px(READING_SIZE),
+                    ..default()
+                },
+                TextColor(POINTER),
+                TextLayout::no_wrap(),
+                TextShadow::default(),
+                FocusPolicy::Pass,
+                Visibility::Hidden,
+            ));
         });
 }
 
@@ -454,6 +479,32 @@ fn refresh_coordinates(
     }
 }
 
+/// Rewrites the countdown only when its displayed whole second changes.
+///
+/// `Storm` owns the last server warning and its receive instant. This system reads that
+/// presentation state and nothing else: in particular, a blizzard weather snapshot does
+/// not manufacture a countdown and a countdown does not manufacture weather.
+fn refresh_storm_countdown(
+    storm: Option<Res<Storm>>,
+    mut readings: Query<(&mut Text, &mut Visibility), With<StormCountdown>>,
+) {
+    let next = storm.and_then(|storm| storm.countdown_at(std::time::Instant::now()));
+    let visibility = if next.is_some() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    let next = next.unwrap_or_default();
+    for (mut text, mut shown) in &mut readings {
+        if text.0 != next {
+            text.0 = next.clone();
+        }
+        if *shown != visibility {
+            *shown = visibility;
+        }
+    }
+}
+
 /// The compass is up exactly while there is a world to be facing something in.
 ///
 /// The same gate the experience bar and the party rows use: a live session, and a mode in
@@ -481,9 +532,10 @@ fn show_compass(
 #[cfg(test)]
 mod tests {
     use std::f32::consts::{FRAC_PI_2, PI};
+    use std::time::Instant;
 
     use super::*;
-    use crate::net::SessionParams;
+    use crate::net::{SessionParams, StormPhase, StormWarning};
 
     fn session() -> Session {
         Session(SessionParams {
@@ -529,6 +581,13 @@ mod tests {
             .expect("one coordinates reading")
             .0
             .clone()
+    }
+
+    fn storm_countdown(app: &mut App) -> (String, Visibility) {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&Text, &Visibility), With<StormCountdown>>();
+        let (text, visibility) = query.single(world).expect("one storm countdown");
+        (text.0.clone(), *visibility)
     }
 
     fn stand(app: &mut App, position: Option<Vec3>) {
@@ -750,6 +809,49 @@ mod tests {
         assert!(
             found.iter().any(|&(entity, _)| entity == coordinates),
             "the coordinates reading was not among the nodes walked"
+        );
+
+        let world = app.world_mut();
+        let mut named = world.query_filtered::<Entity, With<StormCountdown>>();
+        let countdown = named.single(world).expect("one storm countdown");
+        assert!(
+            found.iter().any(|&(entity, _)| entity == countdown),
+            "the storm countdown was not among the nodes walked"
+        );
+    }
+
+    #[test]
+    fn the_storm_line_is_hidden_until_the_server_statement_has_a_countdown() {
+        let mut app = compass_app();
+        assert_eq!(
+            storm_countdown(&mut app),
+            (String::new(), Visibility::Hidden)
+        );
+
+        app.world_mut().resource_mut::<Storm>().receive(
+            StormWarning {
+                phase: StormPhase::Raging,
+                seconds_until: 299,
+            },
+            Instant::now(),
+        );
+        app.update();
+        assert_eq!(
+            storm_countdown(&mut app),
+            ("Fimbulvetr | 4:59".to_owned(), Visibility::Visible)
+        );
+
+        app.world_mut().resource_mut::<Storm>().receive(
+            StormWarning {
+                phase: StormPhase::Passed,
+                seconds_until: 0,
+            },
+            Instant::now(),
+        );
+        app.update();
+        assert_eq!(
+            storm_countdown(&mut app),
+            (String::new(), Visibility::Hidden)
         );
     }
 
