@@ -16,6 +16,7 @@ mod hotbar;
 /// into here; the drawing is still reached through `stack_style` and `refresh_cell_contents`.
 pub(crate) mod icon;
 mod inventory;
+mod leaving;
 mod login;
 mod loot;
 mod map;
@@ -169,7 +170,11 @@ impl Plugin for UiPlugin {
                 // most fifteen and this list is at that ceiling. A tuple of plugins is
                 // itself `Plugins`, so the nesting changes nothing but the shape.
                 (compass::CompassUiPlugin, crosshair::CrosshairPlugin),
-                health::HealthUiPlugin,
+                // Nested for the reason the compass and the crosshair are: the tuple is
+                // at `add_plugins`' fifteen-plugin ceiling. The leave countdown is beside
+                // health because it is the same kind of surface -- permanent game UI a
+                // release build keeps drawing -- and it borrows that module's z-ordering.
+                (health::HealthUiPlugin, leaving::LeavingUiPlugin),
                 hunger::HungerUiPlugin,
                 experience::ExperienceUiPlugin,
                 hotbar::HotbarPlugin,
