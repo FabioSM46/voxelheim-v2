@@ -995,9 +995,11 @@ type EntitySnapshot struct {
 	// session over. The two absences must therefore stay distinguishable in this type, and
 	// a bool is how.
 	//
-	// Nothing in the simulation fills it yet — #464 is the issue that computes a climate's
-	// weather — so HasWeather is false on every snapshot the server sends today, which is
-	// byte-identical to what it sent before this field existed.
+	// **The simulation fills it on every tick, for every player** (#464): game.Sim samples
+	// world.WeatherAt at the recipient's own column and sets the flag unconditionally, so
+	// a false flag is now the shape a caller outside the tick loop builds rather than
+	// anything a running server sends. The blizzard is the one value that does not come
+	// from that field — game.Sim.weatherOverride imposes it, and #469 is what sets that.
 	Weather    WeatherState
 	HasWeather bool
 }
