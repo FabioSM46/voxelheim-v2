@@ -58,7 +58,7 @@ keeps meaning "everything the client is".
 | `net/tickets.rs` | the cached ticket — its file, its mode, its expiry, and the base64url the service answers in and reads back | parse a ticket's body, or decide anything from one |
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
-| `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the six chunks a mesh is culled against | mesh, or spawn anything |
+| `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on | mesh, or spawn anything |
 | `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the two materials, one entity per chunk with the water half as its child | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`) and which hide what is behind them (`is_opaque`) | know about meshes or about the wire |
@@ -226,12 +226,12 @@ Rules that hold on this boundary:
 Chunks arrive as `ChunkData`, are expanded into dense voxels, are turned into a mesh off the
 main schedule, and become one entity each. These rules hold that pipeline together:
 
-- **`world/mesher.rs` is pure, and its signature says so.** A chunk and the six chunks
-  around it in, vertex and index buffers out; no Bevy type, no resource, no `World`. That is
+- **`world/mesher.rs` is pure, and its signature says so.** A chunk, its six face neighbours
+  and the four chunks above its horizontal neighbours in; vertex and index buffers out. That is
   what lets it run on `AsyncComputeTaskPool`, and what lets its tests assert exact quad
   counts with no app and no GPU. The neighbours are what made that a live question rather
   than a settled one: they are an **input**, gathered by `ChunkStore::neighbours` on the main
-  schedule and moved into the task as six more `Arc` handles. A mesher that fetched them
+  schedule and moved into the task as `Arc` handles. A mesher that fetched them
   instead would need the store, and the meshing task could not exist.
 - **Nothing meshes on the main schedule.** `start_mesh_jobs` spawns a task and returns;
   `apply_finished_meshes` collects it on a **later** frame with `poll_once`, never a blocking
@@ -355,16 +355,12 @@ main schedule, and become one entity each. These rules hold that pipeline togeth
   same question at different costs. An **edit** knows the voxel that moved, so
   `border_neighbours` names the chunks sharing a *face* with it from its coordinate alone —
   up to three for a corner voxel, six at `chunk_size` 1, and never a diagonal, which shares
-  no face and so cannot depend on it — and it names them **only when solidity moved**, because
-  the criterion below is the whole rule and stone becoming grass on a shared wall changes
-  nothing across it. The edited chunk still remeshes: colour is its own. A **payload off the
+  no face and ordinarily cannot depend on it — and it names them **only when geometry moved**;
+  falling water can additionally invalidate horizontal neighbours below.
+  The edited chunk still remeshes: colour is its own. A **payload off the
   wire** could have moved any of the six border layers, so `ChunkStore::note_neighbours_stale`
-  compares them: a neighbour's mesh depends on exactly which of this chunk's boundary voxels
-  are solid and on nothing else, and a revision that does not exist compares as all air —
-  which is what the mesher reads a missing neighbour as, so "arrived", "replaced" and "went
-  away" are one comparison. **Both paths apply the same criterion**, and that is not a
-  coincidence to be maintained by hand: the edit path was written without it and remeshed up
-  to three neighbours into byte-identical meshes until the review on legacy PR 66 said so.
+  compares them: vertical faces read opacity and water presence, horizontal faces also read
+  level, and missing revisions compare as air.
 
   **That comparison is what keeps a join affordable, and it is not an optimisation to trade
   away.** Most of what the server streams is sky, and a chunk of air arriving beside a chunk
