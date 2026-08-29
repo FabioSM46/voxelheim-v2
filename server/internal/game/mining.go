@@ -89,10 +89,10 @@ var handMiningTimes = map[world.Block]time.Duration{
 	// it because it is not snow, and softer than rock because breaking a hole in ice
 	// is meant to be a way into the water rather than a quarrying job.
 	//
-	// **Water is deliberately absent, and the absence is the rule.** An id with no row
-	// here is not breakable at all, which is how Air is refused, so a mine request on
-	// water is refused by exactly the mechanism that already existed — no branch, no
-	// id comparison anywhere on the mining path.
+	// **The whole water family is deliberately absent, and the absence is the rule.**
+	// An id with no row here is not breakable at all, which is how Air is refused, so
+	// a mine request on any water level or current is refused by exactly the mechanism
+	// that already existed — no branch and no id comparison on the mining path.
 	world.Ice: 1500 * time.Millisecond,
 
 	// What a settlement is made of, and the three of them span nearly the whole table

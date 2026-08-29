@@ -381,7 +381,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // columns gain one of two appended foliage blocks above the surface. A stored delta
 // there may now resolve against a tree or bush instead of air, so this is a feature
 // break even though no terrain height moved.
-const WorldgenVersion uint32 = 12
+// 12 → 13: caves under standing water fill hydrostatically to that column's water
+// surface instead of stopping at the global deep-cave level. Terrain heights and
+// every uncarved voxel stay byte-identical, but carved air below a sea, basin or river
+// may become water, so stored deltas in those caves need the new base version.
+const WorldgenVersion uint32 = 13
 
 // Generate builds the chunk at coord for seed.
 //
@@ -428,7 +432,8 @@ func Generate(seed int64, coord Coord) *Chunk {
 }
 
 // column is everything about one world column that does not depend on y: how high
-// it is, what climate it belongs to, and whether it wears a gravel patch.
+// it is, what climate it belongs to, whether it wears a gravel patch, and whether
+// standing water fills it to a surface of its own.
 //
 // **It exists so those three are computed once per column rather than once per
 // voxel**, which is the same reason the height always was. Every one of them costs
@@ -439,6 +444,12 @@ type column struct {
 	gravel  bool
 	river   bool
 	beach   bool
+
+	// standingWater is true for a sea or basin column lowered below seaLevel and for
+	// every river column. waterSurface is meaningful only beside it: the sea line for
+	// sea and basins, and the channel's own surface for a river.
+	standingWater bool
+	waterSurface  int
 
 	// settlement is whether this column stands inside a settlement's radius, where
 	// the surface is the plateau exactly.
@@ -463,13 +474,16 @@ type column struct {
 func columnAt(seed, worldX, worldZ int64) column {
 	climate := ClimateAt(seed, worldX, worldZ)
 	surface, river, settled := shapeAt(seed, worldX, worldZ, climate)
+	waterSurface, standingWater := standingWaterSurface(surface, river)
 	return column{
-		surface:    surface,
-		climate:    climate,
-		gravel:     gravelAt(seed, worldX, worldZ, surface, climate),
-		river:      river,
-		beach:      beachAt(surface, climate),
-		settlement: settled,
+		surface:       surface,
+		climate:       climate,
+		gravel:        gravelAt(seed, worldX, worldZ, surface, climate),
+		river:         river,
+		beach:         beachAt(surface, climate),
+		standingWater: standingWater,
+		waterSurface:  waterSurface,
+		settlement:    settled,
 	}
 }
 
@@ -549,12 +563,11 @@ func (c column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
 		// top of it in a tundra, or air above both.
 		return c.fillAt(int(worldY))
 	case c.carvedAt(seed, worldX, worldY, worldZ):
-		// **Carving is asked before the fill, and the two fills are separate rules.**
-		// A carved voxel is below the surface by construction, so the sea line above
-		// can never reach it — an air pocket under a lake bed stays an air pocket,
-		// which is what "no flow" means when the two features meet. What stands in a
-		// tunnel is decided by depth alone, by caveFillAt.
-		return caveFillAt(int(worldY))
+		// Carving is asked before ore and then receives the column's hydrostatic fill.
+		// Deep caves still fill to caveWaterLevel everywhere; under standing water the
+		// same carved volume fills all the way to that column's water surface. Both are
+		// per-column answers, so generation stays pure and chunk-local.
+		return c.caveFillAt(int(worldY))
 	case block == Stone:
 		return oreAt(seed, worldX, worldY, worldZ, c.surface)
 	default:

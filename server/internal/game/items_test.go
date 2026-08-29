@@ -386,12 +386,14 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 	if got := itemDroppedBy(world.Air); got != ItemNone {
 		t.Errorf("Air drops item %d, want nothing", got)
 	}
-	// **Water is the second id with no yield, and unlike Leaves it has no row at
-	// all.** Leaves are breakable and drop nothing, which is a decision the table has
-	// to record; water is not breakable, so an absent row is the right shape and the
+	// **The water family has no yield, and unlike Leaves it has no rows at all.**
+	// Leaves are breakable and drop nothing, which is a decision the table has to
+	// record; water is not breakable, so absent rows are the right shape and the
 	// fail-closed default is the right answer.
-	if got := itemDroppedBy(world.Water); got != ItemNone {
-		t.Errorf("Water drops item %d, want nothing", got)
+	for _, block := range allWaterBlocks {
+		if got := itemDroppedBy(block); got != ItemNone {
+			t.Errorf("water block %d drops item %d, want nothing", block, got)
+		}
 	}
 }
 

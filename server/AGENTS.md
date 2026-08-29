@@ -2628,16 +2628,17 @@ Recorded here so the next reader does not mistake them for oversights:
   living runestone's column is protected ground and outlives its absent owner by design.
 - **No fall damage, no health, no death.** A player who falls a hundred blocks lands and walks
   away. `TerminalFallSpeed` exists to bound the per-tick step, not to model anything.
-- **Water does not flow, and nothing drowns in it.** A voxel is `Water` because whatever wrote
-  it said so at that coordinate; there is no source, no spread and no distinction between the two.
-  Mining the wall beside a lake leaves a dry hole, and placing a block into water displaces it as
-  one ordinary delta — which is exactly what buys the generator its purity, and therefore what the
-  Fimbulvetr storm's "regenerate to the original procedural state" rests on. There is no breath
-  meter and no underwater damage either. **Mobs are not taught to swim**: a creature that walks
-  into a lake sinks and walks along the bed, because a mob has a path where a player has intent,
-  and answering the swim rules for a path is a change to the pathing. The spawn director is what
-  keeps that from being the common case — it refuses a spot whose floor or headroom is water or
-  ice — so a mob only ever reaches a lake by walking there.
+- **The generator supplies a hydrostatic initial state; runtime flow starts from that base.** A
+  carved voxel under a sea, basin or river is generated as source water up to that column's
+  standing surface, while a dry-land cave still fills only below `caveWaterLevel`. The answer is
+  integer-only and column-local, so the generator remains a pure function and the Fimbulvetr
+  storm can still restore the original procedural state by discarding deltas. The palette already
+  distinguishes seven flowing levels and four generator-authored currents; scheduling their
+  runtime propagation is #594 and is not part of generation. There is still no breath meter or
+  underwater damage. **Mobs are not taught to swim**: a creature that walks into a lake sinks and
+  walks along the bed, because a mob has a path where a player has intent, and answering the swim
+  rules for a path is a change to the pathing. The spawn director keeps that from being the common
+  case by refusing every water-family voxel and the ice lid above one.
 - **No anti-cheat beyond the speed clamp and the discard rule.** A client can send input as fast as
   it likes; the server only ever applies the newest one per tick, so the ceiling is the tick rate.
   Rate limiting the *socket* is a backpressure issue, not a movement one. `ChunkResendRequest` is

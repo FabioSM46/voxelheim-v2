@@ -365,7 +365,7 @@ func TestPlacingIntoASolidVoxelIsRefused(t *testing.T) {
 // those are exactly what this exercises. The generator's own water arrives with the
 // worldgen half, and the fixture writes below are the same direct cache writes
 // `giveBlock` already uses to stage a block to carry.
-func TestPlacingIntoWaterReplacesIt(t *testing.T) {
+func TestPlacingIntoFlowingWaterReplacesIt(t *testing.T) {
 	t.Parallel()
 
 	h, chunks := editWorld(t)
@@ -373,11 +373,11 @@ func TestPlacingIntoWaterReplacesIt(t *testing.T) {
 	giveBlock(t, h, player, chunks, world.Stone)
 
 	target := [3]int32{3, 200, 0}
-	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.Water, nil); err != nil {
+	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.WaterFlow3, nil); err != nil {
 		t.Fatalf("flood the target voxel: %v", err)
 	}
-	if got := blockAt(t, chunks, 3, 200, 0); got != world.Water {
-		t.Fatalf("the fixture target holds block %d, want Water", got)
+	if got := blockAt(t, chunks, 3, 200, 0); got != world.WaterFlow3 {
+		t.Fatalf("the fixture target holds block %d, want WaterFlow3", got)
 	}
 
 	before := countOf(player.InventoryState(), game.ItemStone)

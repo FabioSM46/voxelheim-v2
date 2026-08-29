@@ -47,6 +47,10 @@ type spawnGround struct {
 	// drift away from what it stands for.
 	flooded int64
 
+	// floodedBlock selects the water-family member in the flooded cells. Zero keeps
+	// the plain source used by existing fixtures.
+	floodedBlock world.Block
+
 	// iced puts a lid of [world.Ice] on the water at flooded+1, which is what a tundra
 	// lake actually looks like. Ice is *solid*, so the surface scan stops on it and
 	// every other check in the director passes — it is the one case the headroom rule
@@ -65,7 +69,11 @@ func (w spawnGround) Block(x, y, z int64) (world.Block, bool) {
 		return world.Stone, true
 	}
 	if w.flooded != 0 && y <= w.flooded {
-		return world.Water, true
+		block := w.floodedBlock
+		if block == world.Air {
+			block = world.Water
+		}
+		return block, true
 	}
 	if w.iced && w.flooded != 0 && y == w.flooded+1 {
 		return world.Ice, true
@@ -540,10 +548,12 @@ func TestADugOutColumnIsNotSomewhereToStand(t *testing.T) {
 // legal, on which the scan finds the lake bed, the headroom is not solid, the spot is in
 // the ring, in view, clear of bodies and nowhere near a fire — and every one of those
 // answers is right. Only the block itself says no.
-func TestNothingSpawnsInsideAFluid(t *testing.T) {
+func TestNothingSpawnsInsideFlowingWater(t *testing.T) {
 	t.Parallel()
 
-	h := newVitalsHarness(t, DefaultTickRate, spawnGround{groundTop: 63, flooded: 65})
+	h := newVitalsHarness(t, DefaultTickRate, spawnGround{
+		groundTop: 63, flooded: 65, floodedBlock: world.WaterFlow3,
+	})
 	h.keepNight()
 	h.join(1, [3]float32{0.5, 66, 0.5})
 
