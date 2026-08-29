@@ -781,6 +781,31 @@ type StructureState struct {
 	Anchor        [3]int32
 	Facing        vnet.Facing
 	OwnerEntityID uint64
+
+	// Doused says this campfire has been put out, and it is the wire's `lit` field read
+	// the other way up.
+	//
+	// **The inversion is the point, and it is what makes the Go zero value safe.** The
+	// contract's `lit` defaults to `true` deliberately: FlatBuffers writes no byte for a
+	// scalar equal to its default, so a fire nobody has doused costs nothing and a server
+	// that cannot douse one is read as a world of burning fires rather than a world of
+	// cold ones (schemas/common.fbs records what a default of `false` would have cost).
+	// A Go field named `Lit` would have thrown exactly that away one layer up: Go zeroes
+	// a bool to `false`, so every `StructureState{...}` literal that did not mention fire
+	// would have encoded a doused one. Naming the absence instead puts the Go zero value
+	// and the wire default on the same side — say nothing and the fire is burning — and
+	// the encoder writes the byte only where a caller has stated that one is out.
+	//
+	// It means something for StructureKindCampfire and for nothing else. Every other kind
+	// leaves it false and rides the default, which the contract calls "unset" rather than
+	// "burning"; the client reads it only beside a campfire's kind.
+	//
+	// **The server decides.** Whether rain reaches this cell, how hard it falls and how
+	// long a fire survives it are authoritative; this package lays the answer out and
+	// holds no opinion about it. Nothing in the simulation sets this yet — #465 is the
+	// issue that douses a fire — so every structure on the wire today is lit, which is
+	// what every structure was before this field existed.
+	Doused bool
 }
 
 // PartyMemberState is one other member of a snapshot recipient's party.
@@ -836,6 +861,55 @@ type MobState struct {
 	MaxHealth      uint16
 	Action         vnet.MobAction
 	TargetEntityID uint64
+}
+
+// WeatherState is what the sky is doing at one point in the world.
+//
+// A struct on the wire for the reason schemas/player.fbs gives: it is hot — one per
+// snapshot, once per recipient per tick — and settled, because a kind and a number is
+// the whole of what weather is on the wire. Everything a client draws from it is
+// presentation derived from those two; everything it *does* has already been applied by
+// the simulation and arrives as vitals, as position and as StructureState.Doused.
+//
+// The zero value is not a legal wire value. Kind must be a known non-zero member: a
+// present struct carrying WeatherKindUnknown is a protocol error rather than "no
+// weather", and a server with no weather at all says so by not sending the struct —
+// EntitySnapshot.HasWeather is that decision.
+type WeatherState struct {
+	// Kind is a known non-zero WeatherKind. WeatherKindBlizzard is the storm's own kind
+	// and is never produced by a climate's ordinary weather; it arrives only while a
+	// StormWarning says Raging, which is what makes the two statements checkable against
+	// each other rather than two independent moods.
+	Kind vnet.WeatherKind
+
+	// Intensity is 0 to 255, 0 being none and 255 the most the sky can do. It is 0 for
+	// WeatherKindClear and unconstrained for every other kind; nothing divides the range
+	// into named bands.
+	Intensity uint8
+}
+
+// StormWarning is the server telling one session where the blizzard is in its life.
+//
+// Server to client, and sent when the phase changes rather than every tick — which is
+// why it is a table where WeatherState is a struct. Receiving one from a client is a
+// direction error, so Message has no field for it.
+//
+// It carries no weather. What the sky is doing where the player stands arrives in the
+// snapshot every tick; this message says only that a storm is coming, is here, or is
+// done. Nothing in the simulation sends one yet — #469 is the issue that schedules a
+// storm — and this encoder is what that issue will call.
+type StormWarning struct {
+	// SecondsUntil is a duration in whole seconds, never a tick count and never a
+	// timestamp: seconds until the storm arrives while Approaching, seconds it has left
+	// while Raging, and 0 once it has Passed. The contract makes a Passed that carries a
+	// countdown a refusal on the client, so the caller owns that agreement — this package
+	// lays out an authoritative value and holds no second opinion about it.
+	SecondsUntil uint32
+
+	// Phase is a known non-zero StormPhase. It is what gives SecondsUntil its meaning: a
+	// countdown, a remaining duration and a zero are three different numbers wearing one
+	// field.
+	Phase vnet.StormPhase
 }
 
 // EntitySnapshot is one tick of authoritative state, as one session sees it.
@@ -904,6 +978,28 @@ type EntitySnapshot struct {
 
 	// AccessibleLootCorpses is the complete set this recipient may currently open.
 	AccessibleLootCorpses []uint64
+
+	// Weather is what the sky is doing at **this recipient's own position**, this tick,
+	// and HasWeather says whether the server keeps weather at all.
+	//
+	// The second field here that is not about an entity, and it rides along for the reason
+	// TickOfDay does: it changes every tick and is read by the same frame the world is
+	// drawn from, so a message of its own would arrive on its own schedule and put the rain
+	// a tick away from the ground it is falling on.
+	//
+	// The flag is the requirement ActionRefused.HasAnchor records, read here for a
+	// different absence: `weather` is a FlatBuffers struct field, so an omitted one decodes
+	// as null — which the contract reads as "this server keeps no weather" — while an
+	// encoder that wrote the Go zero value instead would put WeatherKindUnknown on the
+	// wire, and a present struct carrying Unknown is a protocol error the client closes the
+	// session over. The two absences must therefore stay distinguishable in this type, and
+	// a bool is how.
+	//
+	// Nothing in the simulation fills it yet — #464 is the issue that computes a climate's
+	// weather — so HasWeather is false on every snapshot the server sends today, which is
+	// byte-identical to what it sent before this field existed.
+	Weather    WeatherState
+	HasWeather bool
 }
 
 // ProjectileState is one server-owned projectile in a snapshot. Position and velocity
@@ -2174,6 +2270,12 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		vnet.StructureStateAddAnchor(b, vnet.CreateBlockCoord(b, structure.Anchor[0], structure.Anchor[1], structure.Anchor[2]))
 		vnet.StructureStateAddFacing(b, structure.Facing)
 		vnet.StructureStateAddOwnerEntityId(b, structure.OwnerEntityID)
+		// Unconditional and still free for every structure that is burning: `lit`
+		// defaults to true on the wire, and flatc's Go output writes no byte for a scalar
+		// equal to its default. So the branch that would have skipped this call saves
+		// nothing — the generated PrependBoolSlot is already that branch — while a
+		// doused fire is the one case that costs a byte and a vtable slot.
+		vnet.StructureStateAddLit(b, !structure.Doused)
 		structureOffsets[i] = vnet.StructureStateEnd(b)
 	}
 
@@ -2354,6 +2456,14 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	}
 	if blockingOffset != 0 {
 		vnet.EntitySnapshotAddBlockingPlayers(b, blockingOffset)
+	}
+	// A struct field, so it is created inline while this table is open — the rule the mob
+	// positions above follow. Written only when the server has weather to state: an absent
+	// struct is how the contract says a server keeps none, and a zero value written in its
+	// place would be a present WeatherKindUnknown, which is a protocol error rather than
+	// silence.
+	if s.HasWeather {
+		vnet.EntitySnapshotAddWeather(b, vnet.CreateWeatherState(b, s.Weather.Kind, s.Weather.Intensity))
 	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 
@@ -3076,6 +3186,32 @@ func EncodeChunkResendRequest(r ChunkResendRequest) []byte {
 	request := vnet.ChunkResendRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadChunkResendRequest, request)
+}
+
+// EncodeStormWarning builds one storm-phase notification for one session.
+//
+// Server to client. The phase and the duration beside it are the simulation's, and this
+// encoder lays them out without holding a second opinion — the same rule EncodeMobHit
+// states, and the reason there is no validation here of the contract's "a Passed carries
+// no countdown" invariant: the caller that decides a phase is the only thing that can
+// know the seconds that belong to it, and a re-check here would be a second authority
+// over one fact.
+//
+// Both fields are written unconditionally. They are scalars, so flatc's Go output already
+// elides the ones equal to their defaults, and the two values that would vanish that way
+// are exactly the ones a receiver reads as absent: a `Passed` warning is a zero
+// SecondsUntil, and a StormPhaseUnknown is the phase a client refuses. Writing them both
+// keeps this encoder able to produce the second one, which is what the decoder tests on
+// the other side need to have something to refuse.
+func EncodeStormWarning(w StormWarning) []byte {
+	b := flatbuffers.NewBuilder(64)
+
+	vnet.StormWarningStart(b)
+	vnet.StormWarningAddSecondsUntil(b, w.SecondsUntil)
+	vnet.StormWarningAddPhase(b, w.Phase)
+	warning := vnet.StormWarningEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadStormWarning, warning)
 }
 
 // finishEnvelope wraps a built payload in the one root type on the wire and
