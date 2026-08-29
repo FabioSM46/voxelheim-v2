@@ -2433,10 +2433,16 @@ and the reasoning above it, which is the pattern any second command copies.
 
 ### What the world directory holds, and the one thing that surprises people
 
-It is the default (`world`, resolved against the working directory, so `cd server && go run …`
-writes `server/world/` — git-ignored) and it holds five things: the chunk deltas players made, the
-player records, the map ledgers under `exploration/`, the clock, and **the server's TLS key**. The
-terrain itself is not in there; it is a function of `-seed`.
+Its omitted default is `world-v<WorldgenVersion>`, resolved against the working directory, so a
+version 12 build launched with `cd server && go run …` writes `server/world-v12/` — git-ignored.
+That name is derived by `world.DefaultWorldDir()` from the generator's constant rather than copied
+beside the flag. A restart under the same generator version reuses the directory and preserves the
+chunk deltas, player records, exploration and marker ledgers, structures, clock and **the server's
+TLS key**. A generator bump selects a clean default directory and leaves every earlier version
+untouched; this is a development convenience, not migration. An explicit non-empty `-world-dir`
+remains exact and retains the fail-closed seed and worldgen checks, while explicit
+`-world-dir ""` remains ephemeral. The terrain itself is not stored there; it is a function of
+`-seed`.
 
 That last item is why `-world-dir ""` costs more than the edits it discards. A server with
 nowhere to keep a key mints a new certificate on every start, and what a client will accept is

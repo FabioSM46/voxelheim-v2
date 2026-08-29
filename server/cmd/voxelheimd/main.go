@@ -98,10 +98,7 @@ func parseFlags() options {
 
 	flag.StringVar(&opts.listen, "listen", "127.0.0.1:7777", "address to listen on; a :0 port binds a free one")
 	flag.Int64Var(&opts.seed, "seed", 1, "world seed; the same seed regenerates the same world")
-	flag.StringVar(&opts.worldDir, "world-dir", world.DefaultWorldDir,
-		"directory the world's edits and the players' records are stored in; empty runs an ephemeral world where "+
-			"nothing is kept — edits are lost on exit, no life is written, and a reconnect is a new player at the "+
-			"spawn even within the same process")
+	registerWorldDirFlag(flag.CommandLine, &opts)
 	flag.StringVar(&opts.worldName, "world-name", "",
 		"the name this world is registered under with the account service, in lowercase letters, digits and "+
 			"hyphens. A session ticket names one world and is useless at any other, so this is what the tickets "+
@@ -154,6 +151,13 @@ func parseFlags() options {
 	flag.Parse()
 
 	return opts
+}
+
+func registerWorldDirFlag(flags *flag.FlagSet, opts *options) {
+	flags.StringVar(&opts.worldDir, "world-dir", world.DefaultWorldDir(),
+		"directory the world's edits and the players' records are stored in; the default follows the terrain "+
+			"generator version. Empty runs an ephemeral world where nothing is kept — edits are lost on exit, no "+
+			"life is written, and a reconnect is a new player at the spawn even within the same process")
 }
 
 // validate checks the flags against the ranges they will be narrowed into.

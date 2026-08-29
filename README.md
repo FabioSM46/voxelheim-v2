@@ -203,10 +203,14 @@ cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release -- \
 
 ### Two things that surprise people once each
 
-**The world is on disk by default.** `-world-dir` defaults to `world`, resolved against the
-working directory, so the command above writes `server/world/` — edits, player records and the
-server's TLS key. It is git-ignored. `-seed` regenerates the terrain rather than reading it: the
-same seed is the same world, and the directory holds only what players changed.
+**The world is on disk by default.** `-world-dir` defaults to
+`world-v<WorldgenVersion>`, resolved against the working directory, so a build whose generator is
+version 12 writes `server/world-v12/` when run by the command above. It is git-ignored. Restarts of
+that build reuse the directory — edits, player records, clock, exploration, structures, markers
+and the server's TLS key all survive. `-seed` regenerates the terrain rather than reading it: the
+directory holds only what players changed. A deliberate generator bump selects a fresh default
+directory automatically; the previous version is left untouched. An explicit `-world-dir` remains
+exact, including `-world-dir ""` for an ephemeral world.
 
 **The development path is encrypted and unverified, and it presents a ticket anyway.** `--server`
 (and the default `127.0.0.1:7777`) names an address that is in no server list, so nothing states

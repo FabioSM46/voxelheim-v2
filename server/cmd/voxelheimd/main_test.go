@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -198,6 +199,65 @@ func validOptions() options {
 		characterTimeout: session.DefaultCharacterTimeout,
 		idleTimeout:      session.DefaultIdleTimeout,
 		stormPeriod:      game.DefaultStormPeriod,
+	}
+}
+
+func TestTheWorldDirectoryFlagPreservesAllThreeModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "omitted", want: world.DefaultWorldDir()},
+		{name: "explicit persistent", args: []string{"-world-dir", "named-world"}, want: "named-world"},
+		{name: "explicit ephemeral", args: []string{"-world-dir", ""}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts options
+			flags := flag.NewFlagSet("voxelheimd", flag.ContinueOnError)
+			registerWorldDirFlag(flags, &opts)
+			if err := flags.Parse(test.args); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if opts.worldDir != test.want {
+				t.Errorf("world directory = %q, want %q", opts.worldDir, test.want)
+			}
+		})
+	}
+}
+
+func TestWorldDirectoryHelpNamesTheConcreteDefault(t *testing.T) {
+	t.Parallel()
+
+	var opts options
+	var help strings.Builder
+	flags := flag.NewFlagSet("voxelheimd", flag.ContinueOnError)
+	flags.SetOutput(&help)
+	registerWorldDirFlag(flags, &opts)
+	if err := flags.Parse([]string{"-h"}); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("Parse(-h) = %v, want flag.ErrHelp", err)
+	}
+	if want := `default "` + world.DefaultWorldDir() + `"`; !strings.Contains(help.String(), want) {
+		t.Errorf("-h does not name the concrete world directory %q:\n%s", world.DefaultWorldDir(), help.String())
+	}
+}
+
+func TestOpeningTheDefaultWorldLogsItsConcreteDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), world.DefaultWorldDir())
+	var logged strings.Builder
+	log := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	if _, err := openWorld(options{worldDir: dir}, 1, log); err != nil {
+		t.Fatalf("openWorld: %v", err)
+	}
+	if !strings.Contains(logged.String(), dir) {
+		t.Errorf("startup log does not name the concrete world directory %q:\n%s", dir, logged.String())
 	}
 }
 

@@ -10,8 +10,16 @@ server/dist/
 
 # A server run with the default -world-dir writes its saved chunks here. Deltas only —
 # the generated terrain is a function of the seed — but it is local state, not source.
+# The versioned forms require a digit after `world-v`. The later exceptions put back any
+# name containing a non-digit suffix, so `world-vendor` and `world-v1-notes` remain visible.
 /world/
 server/world/
+/world-v[0-9]*/
+server/world-v[0-9]*/
+!/world-v*[!0-9]*/
+!/world-v*[!0-9]/**
+!server/world-v*[!0-9]*/
+!server/world-v*[!0-9]/**
 
 # The account service keeps its Ed25519 signing key under -auth-dir, whose default is
 # `auth` — resolved against the working directory, so running it from server/ puts a
