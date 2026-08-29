@@ -25,6 +25,7 @@ mod servers;
 mod settings;
 mod status;
 mod text_input;
+mod vendor;
 
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
@@ -175,7 +176,7 @@ impl Plugin for UiPlugin {
                 login::LoginPlugin,
                 // Nested for the reason the compass and the crosshair are, one entry
                 // above: the tuple is at `add_plugins`' fifteen-plugin ceiling.
-                (loot::LootUiPlugin, map::MapUiPlugin),
+                (loot::LootUiPlugin, map::MapUiPlugin, vendor::VendorUiPlugin),
                 menu::MenuPlugin,
                 party::PartyUiPlugin,
                 servers::ServerListUiPlugin,
@@ -334,7 +335,7 @@ fn choose_input_mode(
     if vitals.dead()
         && matches!(
             *mode,
-            InputMode::Inventory | InputMode::Loot | InputMode::Map
+            InputMode::Inventory | InputMode::Loot | InputMode::Vendor | InputMode::Map
         )
     {
         set_mode(&mut mode, InputMode::Playing);
@@ -386,7 +387,9 @@ fn choose_input_mode(
             return;
         }
         let next = match *mode {
-            InputMode::Menu | InputMode::Loot | InputMode::Map => InputMode::Playing,
+            InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
+                InputMode::Playing
+            }
             InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
         };
         set_mode(&mut mode, next);
@@ -406,6 +409,7 @@ fn choose_input_mode(
             InputMode::Playing => InputMode::Inventory,
             InputMode::Inventory => InputMode::Playing,
             InputMode::Loot => return,
+            InputMode::Vendor => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
@@ -429,6 +433,7 @@ fn choose_input_mode(
             InputMode::Map => InputMode::Playing,
             InputMode::Inventory => return,
             InputMode::Loot => return,
+            InputMode::Vendor => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
         };

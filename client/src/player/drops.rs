@@ -89,7 +89,12 @@ const BUNDLE_DROP_SIZE: Vec3 = Vec3::new(DROP_EDGE * 1.15, DROP_EDGE * 0.62, DRO
 const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 
 /// Modes whose UI owns the view instead of the 3D world.
-const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
+const HIDDEN_INPUT_MODES: [InputMode; 4] = [
+    InputMode::Inventory,
+    InputMode::Loot,
+    InputMode::Vendor,
+    InputMode::Menu,
+];
 
 /// What decides which mesh a drop is drawn from.
 ///
