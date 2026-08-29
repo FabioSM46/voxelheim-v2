@@ -474,7 +474,7 @@ func TestSurfaceBlocksFollowTheirClimateAndAltitude(t *testing.T) {
 
 	// The original chunk happens to be plain at this tree density. Add one known
 	// feature-bearing column rather than weakening the all-column sweep above.
-	treeSeed, rootZ, treeSurface := findIsolatedEastBorderTree(t)
+	treeSeed, rootZ, treeSurface, _ := findIsolatedEastBorderPlant(t, &plantSpeciesTable[0])
 	treeCoord := ChunkOf(ChunkSize-1, int64(treeSurface), rootZ)
 	treeChunk := Generate(treeSeed, treeCoord)
 	if got := treeChunk.At(Local(ChunkSize-1), Local(int64(treeSurface)), Local(rootZ)); got != Grass {
@@ -710,84 +710,105 @@ func TestTreesGrowOnlyFromGrass(t *testing.T) {
 func TestATreeCrossingAChunkBorderIsCompleteInEitherGenerationOrder(t *testing.T) {
 	t.Parallel()
 
-	seed, rootZ, surface := findIsolatedEastBorderTree(t)
-	chunkY := int32(floorDiv(int64(surface+1), ChunkSize))
-	leftCoord := Coord{X: 0, Y: chunkY, Z: 0}
-	rightCoord := Coord{X: 1, Y: chunkY, Z: 0}
+	for i := range plantSpeciesTable {
+		species := &plantSpeciesTable[i]
+		t.Run(species.name, func(t *testing.T) {
+			seed, rootZ, surface, h := findIsolatedEastBorderPlant(t, species)
 
-	leftThenRight := [2]*Chunk{Generate(seed, leftCoord), Generate(seed, rightCoord)}
-	rightFirst := Generate(seed, rightCoord)
-	rightThenLeft := [2]*Chunk{Generate(seed, leftCoord), rightFirst}
-	if !slices.Equal(leftThenRight[0].Blocks, rightThenLeft[0].Blocks) ||
-		!slices.Equal(leftThenRight[1].Blocks, rightThenLeft[1].Blocks) {
-		t.Fatal("chunk bytes changed with generation order")
-	}
+			want := make(map[[3]int64]Block)
+			minY, maxY := int64(1<<62), int64(-(1 << 62))
+			species.visit(seed, ChunkSize-1, rootZ, surface, h, func(x, y, z int64, block Block) {
+				want[[3]int64{x, y, z}] = block
+				minY = min(minY, y)
+				maxY = max(maxY, y)
+			})
+			if len(want) == 0 {
+				t.Fatal("species shape visited no voxels")
+			}
 
-	want := make(map[[3]int64]Block)
-	visitTree(seed, ChunkSize-1, rootZ, func(x, y, z int64, block Block) {
-		want[[3]int64{x, y, z}] = block
-	})
+			chunkY := int32(floorDiv(minY, ChunkSize))
+			if int32(floorDiv(maxY, ChunkSize)) != chunkY {
+				t.Fatalf("selected %s crosses a vertical chunk boundary", species.name)
+			}
+			leftCoord := Coord{X: 0, Y: chunkY, Z: 0}
+			rightCoord := Coord{X: 1, Y: chunkY, Z: 0}
 
-	features := [2]int{}
-	for pos, block := range want {
-		worldX, worldY, worldZ := pos[0], pos[1], pos[2]
-		if columnAt(seed, worldX, worldZ).blockAt(int(worldY)) != Air {
-			continue // foliage clipped honestly by a neighbouring slope
-		}
-		var chunk *Chunk
-		switch floorDiv(worldX, ChunkSize) {
-		case 0:
-			chunk = leftThenRight[0]
-		case 1:
-			chunk = leftThenRight[1]
-		default:
-			continue
-		}
-		if got := chunk.At(Local(worldX), Local(worldY), Local(worldZ)); got != block {
-			t.Fatalf("border tree voxel (%d, %d, %d) is %d, want %d", worldX, worldY, worldZ, got, block)
-		}
-		features[floorDiv(worldX, ChunkSize)]++
-	}
-	if features[0] == 0 || features[1] == 0 {
-		t.Fatalf("border tree contributed %d voxels to the left chunk and %d to the right", features[0], features[1])
+			leftThenRight := [2]*Chunk{Generate(seed, leftCoord), Generate(seed, rightCoord)}
+			rightFirst := Generate(seed, rightCoord)
+			rightThenLeft := [2]*Chunk{Generate(seed, leftCoord), rightFirst}
+			if !slices.Equal(leftThenRight[0].Blocks, rightThenLeft[0].Blocks) ||
+				!slices.Equal(leftThenRight[1].Blocks, rightThenLeft[1].Blocks) {
+				t.Fatal("chunk bytes changed with generation order")
+			}
+
+			features := [2]int{}
+			for pos, block := range want {
+				worldX, worldY, worldZ := pos[0], pos[1], pos[2]
+				if columnAt(seed, worldX, worldZ).blockAt(int(worldY)) != Air {
+					continue // foliage clipped honestly by a neighbouring slope
+				}
+				var chunk *Chunk
+				switch floorDiv(worldX, ChunkSize) {
+				case 0:
+					chunk = leftThenRight[0]
+				case 1:
+					chunk = leftThenRight[1]
+				default:
+					continue
+				}
+				if got := chunk.At(Local(worldX), Local(worldY), Local(worldZ)); got != block {
+					t.Fatalf("border %s voxel (%d, %d, %d) is %d, want %d", species.name, worldX, worldY, worldZ, got, block)
+				}
+				features[floorDiv(worldX, ChunkSize)]++
+			}
+			if features[0] == 0 || features[1] == 0 {
+				t.Fatalf("border %s contributed %d voxels to the left chunk and %d to the right", species.name, features[0], features[1])
+			}
+		})
 	}
 }
 
-func findIsolatedEastBorderTree(t *testing.T) (seed, rootZ int64, surface int) {
+func findIsolatedEastBorderPlant(t *testing.T, target *plantSpecies) (seed, rootZ int64, surface int, h uint64) {
 	t.Helper()
 
 	const rootX = ChunkSize - 1
+	isolation := int64(target.footprint + largestPlantFootprint())
 	for seed = 1; seed <= 2000; seed++ {
-		for rootZ = 4; rootZ < ChunkSize-4; rootZ++ {
-			candidateSurface, trunkHeight, ok := treeAt(seed, rootX, rootZ)
-			if !ok {
+		for rootZ = isolation; rootZ < ChunkSize-isolation; rootZ++ {
+			col := columnAt(seed, rootX, rootZ)
+			species, candidateHash, ok := plantAtColumn(seed, rootX, rootZ, col)
+			if !ok || species != target {
 				continue
 			}
-			bottom := ChunkOf(rootX, int64(candidateSurface+1), rootZ)
-			top := ChunkOf(rootX, int64(candidateSurface+trunkHeight+treeCanopyAboveCrown), rootZ)
-			if bottom.Y != top.Y {
+
+			minY, maxY := int64(1<<62), int64(-(1 << 62))
+			target.visit(seed, rootX, rootZ, col.surface, candidateHash, func(_, y, _ int64, _ Block) {
+				minY = min(minY, y)
+				maxY = max(maxY, y)
+			})
+			if minY > maxY || ChunkOf(rootX, minY, rootZ).Y != ChunkOf(rootX, maxY, rootZ).Y {
 				continue
 			}
 
 			isolated := true
-			for nearbyZ := rootZ - 2*treeCanopyRadius; nearbyZ <= rootZ+2*treeCanopyRadius && isolated; nearbyZ++ {
-				for nearbyX := int64(rootX - 2*treeCanopyRadius); nearbyX <= rootX+2*treeCanopyRadius; nearbyX++ {
+			for nearbyZ := rootZ - isolation; nearbyZ <= rootZ+isolation && isolated; nearbyZ++ {
+				for nearbyX := int64(rootX) - isolation; nearbyX <= int64(rootX)+isolation; nearbyX++ {
 					if nearbyX == rootX && nearbyZ == rootZ {
 						continue
 					}
-					if _, _, other := treeAt(seed, nearbyX, nearbyZ); other {
+					if _, _, other := plantAtColumn(seed, nearbyX, nearbyZ, columnAt(seed, nearbyX, nearbyZ)); other {
 						isolated = false
 						break
 					}
 				}
 			}
 			if isolated {
-				return seed, rootZ, candidateSurface
+				return seed, rootZ, col.surface, candidateHash
 			}
 		}
 	}
-	t.Fatal("no isolated tree rooted at the east chunk border in the deterministic search")
-	return 0, 0, 0
+	t.Fatalf("no isolated %s rooted at the east chunk border in the deterministic search", target.name)
+	return 0, 0, 0, 0
 }
 
 // The invariant is a relationship, not a number: for any seed, the block a session

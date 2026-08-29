@@ -9,7 +9,7 @@ package world
 // Climate itself lives in climate.go, caves in caves.go and water in water.go. This
 // file reads all three: HeightAt for shape — which basins and river channels are
 // part of, because every consumer has to agree about where the ground is — blockAt
-// for material, treeAtColumn for density, caveAt for what is hollow and fillAt for
+// for material, plantAtColumn for growth, caveAt for what is hollow and fillAt for
 // what stands in the hollows the sea line reaches.
 const (
 	// terrainScaleBlocks is how many blocks span one noise lattice cell. Larger is
@@ -125,14 +125,12 @@ const (
 	ironSeedOffset int64 = 0x13198A2E
 
 	// One candidate in a climate's denominator becomes a conifer. The decision and
-	// its height come from the candidate column's hash alone.
+	// its height come from the candidate column's hash alone. Ninety-six columns to
+	// a tree is a wood you have to walk through; fifteen hundred is the occasional
+	// landmark on open ground. Tundra and desert have no denominator at all.
 	//
-	// **Density is the only thing that distinguishes a taiga from a plain here**, by
-	// design: one tree species at two spacings, because a second species is a
-	// different piece of work. Ninety-six columns to a tree is a wood you have to
-	// walk through; fifteen hundred is the occasional landmark on open ground.
-	// Tundra and desert have no denominator at all — see treeChanceDenominator,
-	// where the absent case is nothing rather than a very large number.
+	// A second species is now one row in plantSpeciesTable: its surface, density,
+	// independent hash lattice, footprint, map meaning and shape travel together.
 	taigaTreeChanceDenominator        = 96
 	plainsTreeChanceDenominator       = 1536
 	treeMinTrunkHeight                = 4
@@ -628,7 +626,7 @@ func blockAt(worldY, surface int, climate Climate) Block {
 	}
 }
 
-// treeChanceDenominator is one candidate column in how many that becomes a
+// coniferChanceDenominator is one candidate column in how many that becomes a
 // conifer, for a climate.
 //
 // **Zero is "nothing grows here", not "a tree every zero columns".** Tundra and
@@ -636,7 +634,7 @@ func blockAt(worldY, surface int, climate Climate) Block {
 // denominator would still put the occasional conifer in a desert, and the
 // statement being made is that there is none. Its one caller checks the zero
 // before it reaches a modulus.
-func treeChanceDenominator(climate Climate) uint64 {
+func coniferChanceDenominator(climate Climate) uint64 {
 	switch climate {
 	case Taiga:
 		return taigaTreeChanceDenominator
@@ -647,85 +645,103 @@ func treeChanceDenominator(climate Climate) uint64 {
 	}
 }
 
-// treeAt reports the conifer rooted at one world column. Nothing about the
-// destination chunk participates: a neighbouring chunk reaches the same answer
-// by recomputing this candidate from (seed, column).
-func treeAt(seed, worldX, worldZ int64) (surface, trunkHeight int, ok bool) {
-	col := columnAt(seed, worldX, worldZ)
-	trunkHeight, ok = treeAtColumn(seed, worldX, worldZ, col)
-	return col.surface, trunkHeight, ok
+// plantSpecies is one complete answer to what may grow in a column. Table order is
+// priority: the first row whose refusals all pass owns the root.
+type plantSpecies struct {
+	name        string
+	seedOffset  int64
+	rootsOn     func(Block) bool
+	denominator func(Climate) uint64
+	footprint   int
+	forest      bool
+	visit       func(seed, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block))
 }
 
-// treeAtColumn reports the conifer rooted at one resolved column.
+var conifer = plantSpecies{
+	name:       "conifer",
+	seedOffset: treeSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Grass
+	},
+	denominator: coniferChanceDenominator,
+	footprint:   treeCanopyRadius,
+	forest:      true,
+	visit:       visitConifer,
+}
+
+var plantSpeciesTable = []plantSpecies{conifer}
+
+// plantAtColumn reports the first species rooted at one resolved column and the
+// hash that row uses for its shape.
 //
-// **The grass test is still the whole of "what may a tree stand on".** It now
-// answers for four climates rather than one, and it answers no in every case that
-// matters without naming any of them: a tundra surface is snow, a desert's is
-// sand, a mountain's is stone or snow above the altitude lines, and a gravel patch
-// is gravel. The density check is second because the surface is cheaper to reject
-// on than a hash is to interpret.
-//
-// **A carved surface is the one case the grass test cannot answer**, because
-// blockAt describes the terrain and carving happens after it: a cave mouth leaves
-// the column's top voxel air while blockAt still calls it grass. That check is
-// therefore explicit, and it is last — see the comment at it.
-func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok bool) {
-	// **Nothing grows inside a settlement**, and this is the cheapest of the four
-	// refusals below because the column already carries the answer. A conifer on a
-	// plateau would stand in a courtyard, put its canopy through a roof, and — since
-	// the clip only fills air — leave a crown floating over a hall.
+// The refusals remain ordered by cost: settlement, a row's climate denominator,
+// its surface, its independent hash, the sea line, then the carve test. The last
+// question is an order of magnitude dearer than the others and is reached only by
+// a candidate whose density draw already passed.
+func plantAtColumn(seed, worldX, worldZ int64, col column) (species *plantSpecies, h uint64, ok bool) {
+	return plantAtColumnIn(plantSpeciesTable, seed, worldX, worldZ, col)
+}
+
+func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col column) (species *plantSpecies, h uint64, ok bool) {
+	// Nothing grows inside a settlement. This is the cheapest refusal because the
+	// resolved column already carries the answer, and it applies to every row.
 	if col.settlement {
-		return 0, false
+		return nil, 0, false
 	}
 
-	denominator := treeChanceDenominator(col.climate)
-	if denominator == 0 {
-		return 0, false
-	}
-	if col.blockAt(col.surface) != Grass {
-		return 0, false
-	}
+	surface := col.blockAt(col.surface)
+	for i := range table {
+		species := &table[i]
+		denominator := species.denominator(col.climate)
+		if denominator == 0 {
+			continue
+		}
+		if !species.rootsOn(surface) {
+			continue
+		}
 
-	h := hashLattice(seed+treeSeedOffset, worldX, worldZ)
-	if h%denominator != 0 {
-		return 0, false
-	}
+		h := hashLattice(seed+species.seedOffset, worldX, worldZ)
+		if h%denominator != 0 {
+			continue
+		}
 
-	// Nothing roots under water either, and this one is cheap enough to sit above
-	// the carve test. The grass test cannot answer it: a submerged plains column is
-	// grass at its surface with ten blocks of lake standing on it, and a conifer
-	// rooted there would put its trunk through the water and its canopy in the air —
-	// setTreeBlock only ever fills air, so what a player would see is a crown
-	// floating over a lake with nothing under it.
-	if col.surface < seaLevel {
-		return 0, false
-	}
+		// A submerged surface may still be valid soil, but a plant rooted there
+		// would be clipped by the standing water and appear to float above it.
+		if col.surface < seaLevel {
+			continue
+		}
 
-	// Nothing roots in a hole. The carve test is last on purpose: it is the most
-	// expensive question here by an order of magnitude, and the density check above
-	// has already rejected all but one candidate column in ninety-six.
-	if col.carvedAt(seed, worldX, int64(col.surface), worldZ) {
-		return 0, false
-	}
+		// blockAt describes terrain before carving, so only this final question
+		// can tell that a cave mouth removed otherwise valid ground.
+		if col.carvedAt(seed, worldX, int64(col.surface), worldZ) {
+			continue
+		}
 
-	trunkHeight = treeMinTrunkHeight + int((h>>32)%treeHeightVariants)
-	return trunkHeight, true
+		return species, h, true
+	}
+	return nil, 0, false
 }
 
-// visitTree yields the canopy before the trunk. Leaves only fill air, while a
-// trunk may replace a leaf from an overlapping tree, so this ordering makes logs
+func visitPlant(seed, rootX, rootZ int64, visit func(x, y, z int64, block Block)) {
+	visitPlantAtColumn(seed, rootX, rootZ, columnAt(seed, rootX, rootZ), visit)
+}
+
+func visitPlantAtColumn(seed, rootX, rootZ int64, col column, visit func(x, y, z int64, block Block)) {
+	visitPlantAtColumnIn(plantSpeciesTable, seed, rootX, rootZ, col, visit)
+}
+
+func visitPlantAtColumnIn(table []plantSpecies, seed, rootX, rootZ int64, col column, visit func(x, y, z int64, block Block)) {
+	species, h, ok := plantAtColumnIn(table, seed, rootX, rootZ, col)
+	if ok {
+		species.visit(seed, rootX, rootZ, col.surface, h, visit)
+	}
+}
+
+// visitConifer yields the canopy before the trunk. Leaves only fill air, while a
+// trunk may replace a leaf from an overlapping plant, so this ordering makes logs
 // continuous without letting foliage overwrite them.
-func visitTree(seed, rootX, rootZ int64, visit func(x, y, z int64, block Block)) {
-	visitTreeAtColumn(seed, rootX, rootZ, columnAt(seed, rootX, rootZ), visit)
-}
-
-func visitTreeAtColumn(seed, rootX, rootZ int64, col column, visit func(x, y, z int64, block Block)) {
-	trunkHeight, ok := treeAtColumn(seed, rootX, rootZ, col)
-	if !ok {
-		return
-	}
-
-	surface := col.surface
+func visitConifer(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+	trunkHeight := coniferTrunkHeight(h)
 	crownY := int64(surface + trunkHeight)
 	for dy := -treeCanopyBelowCrown; dy <= treeCanopyAboveCrown; dy++ {
 		radius := treeCanopyRadius
@@ -751,6 +767,45 @@ func visitTreeAtColumn(seed, rootX, rootZ int64, col column, visit func(x, y, z 
 	}
 }
 
+func coniferTrunkHeight(h uint64) int {
+	return treeMinTrunkHeight + int((h>>32)%treeHeightVariants)
+}
+
+// The tree-named helpers keep the existing conifer tests readable while the table
+// has exactly one row. They are deliberately thin views of that row.
+func treeAt(seed, worldX, worldZ int64) (surface, trunkHeight int, ok bool) {
+	col := columnAt(seed, worldX, worldZ)
+	species, h, ok := plantAtColumn(seed, worldX, worldZ, col)
+	if !ok || species != &plantSpeciesTable[0] {
+		return col.surface, 0, false
+	}
+	return col.surface, coniferTrunkHeight(h), true
+}
+
+func treeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok bool) {
+	species, h, ok := plantAtColumn(seed, worldX, worldZ, col)
+	if !ok || species != &plantSpeciesTable[0] {
+		return 0, false
+	}
+	return coniferTrunkHeight(h), true
+}
+
+func visitTree(seed, rootX, rootZ int64, visit func(x, y, z int64, block Block)) {
+	col := columnAt(seed, rootX, rootZ)
+	species, h, ok := plantAtColumn(seed, rootX, rootZ, col)
+	if ok && species == &plantSpeciesTable[0] {
+		species.visit(seed, rootX, rootZ, col.surface, h, visit)
+	}
+}
+
+func largestPlantFootprint() int {
+	largest := 0
+	for i := range plantSpeciesTable {
+		largest = max(largest, plantSpeciesTable[i].footprint)
+	}
+	return largest
+}
+
 func absInt(v int) int {
 	if v < 0 {
 		return -v
@@ -764,8 +819,9 @@ func absInt(v int) int {
 // which completes their trees without reading or mutating a neighbour.
 func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column) {
 	originX, _, originZ := chunk.Coord.Origin()
-	for rootZ := originZ - treeCanopyRadius; rootZ < originZ+ChunkSize+treeCanopyRadius; rootZ++ {
-		for rootX := originX - treeCanopyRadius; rootX < originX+ChunkSize+treeCanopyRadius; rootX++ {
+	footprint := int64(largestPlantFootprint())
+	for rootZ := originZ - footprint; rootZ < originZ+ChunkSize+footprint; rootZ++ {
+		for rootX := originX - footprint; rootX < originX+ChunkSize+footprint; rootX++ {
 			var col column
 			if rootX >= originX && rootX < originX+ChunkSize && rootZ >= originZ && rootZ < originZ+ChunkSize {
 				col = columns[int(rootX-originX)][int(rootZ-originZ)]
@@ -773,7 +829,7 @@ func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column)
 				col = columnAt(seed, rootX, rootZ)
 			}
 
-			visitTreeAtColumn(seed, rootX, rootZ, col, func(worldX, worldY, worldZ int64, block Block) {
+			visitPlantAtColumn(seed, rootX, rootZ, col, func(worldX, worldY, worldZ int64, block Block) {
 				setTreeBlock(chunk, worldX, worldY, worldZ, block)
 			})
 		}
@@ -813,9 +869,10 @@ func generatedColumnTop(seed, worldX, worldZ int64) int {
 		top = max(top, seaLevel)
 	}
 
-	for rootZ := worldZ - treeCanopyRadius; rootZ <= worldZ+treeCanopyRadius; rootZ++ {
-		for rootX := worldX - treeCanopyRadius; rootX <= worldX+treeCanopyRadius; rootX++ {
-			visitTree(seed, rootX, rootZ, func(x, y, z int64, _ Block) {
+	footprint := int64(largestPlantFootprint())
+	for rootZ := worldZ - footprint; rootZ <= worldZ+footprint; rootZ++ {
+		for rootX := worldX - footprint; rootX <= worldX+footprint; rootX++ {
+			visitPlant(seed, rootX, rootZ, func(x, y, z int64, _ Block) {
 				if x == worldX && z == worldZ && y > int64(top) && col.blockAt(int(y)) == Air {
 					top = int(y)
 				}
