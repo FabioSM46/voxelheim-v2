@@ -189,8 +189,9 @@ func (p *Player) closeVendorLocked() {
 // under a condition the tick does not re-check is one a player keeps open by never
 // sending anything. Four conditions, and each is somebody else's rule read from here —
 // the act gate every request in this package passes, the role list [vendorRole] owns, the
-// view cube the snapshot is built from, and [EditReach], which is the distance every
-// other interaction in this package is measured against.
+// view cube the snapshot is built from, and [Player.reachLocked], which is the distance
+// every other interaction in this package is measured against — sandstorm and all, so a
+// stall a player can no longer reach closes on them like any other.
 //
 // The caller holds sim.mu.
 func (p *Player) tradeableLocked(r *resident) bool {
@@ -201,7 +202,7 @@ func (p *Player) tradeableLocked(r *resident) bool {
 		return false
 	}
 	distance := boxDistance(playerBox(p.pos), residentBody.boxAt(r.pos))
-	return !math.IsNaN(distance) && distance <= EditReach
+	return !math.IsNaN(distance) && distance <= p.reachLocked()
 }
 
 // openVendorLocked starts one stall session, having already decided that it may open.

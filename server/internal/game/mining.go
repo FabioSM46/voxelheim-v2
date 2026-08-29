@@ -312,8 +312,9 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 	}
 
 	target := mineTarget(req.Pos)
-	if distance := distanceToVoxel(p.pos, target); distance > EditReach {
-		return fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, EditReach)
+	reach := p.reachLocked()
+	if distance := distanceToVoxel(p.pos, target); distance > reach {
+		return fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
 
 	block, resident := p.sim.terrain.Block(target[0], target[1], target[2])
@@ -390,7 +391,11 @@ func (p *Player) advanceMining(tick uint64, terrain Terrain) {
 	state.idleTicks++
 
 	target := mineTarget(state.pos)
-	if distanceToVoxel(p.pos, target) > EditReach {
+	// The reach is re-read every tick, not only when the target was judged: a sandstorm
+	// that comes up over a player mid-swing takes the block they were breaking out of
+	// their arm's length, and the progress frame that says so is the one they already
+	// get when they walk away from it.
+	if distanceToVoxel(p.pos, target) > p.reachLocked() {
 		p.resetMining(state.pos, tick, "target moved out of reach")
 		return
 	}

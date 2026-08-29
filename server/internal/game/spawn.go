@@ -448,7 +448,14 @@ func surfaceUnderSky(t Terrain, x, z, top, bottom int64) (int64, bool) {
 	return 0, false
 }
 
-// nearACampfireLocked reports whether a spot lies on the ground a campfire keeps.
+// nearACampfireLocked reports whether a spot lies on the ground a *burning* campfire
+// keeps.
+//
+// **A fire the rain has put out keeps nothing**, and the skip is [Sim.stationWithinLocked]'s
+// rather than this function's for the reason the scan itself is: one question, one
+// implementation. A downpour therefore hands the dark back the ring it was holding, and
+// hands it back again when the rain eases, with nothing here needing to know that weather
+// exists.
 //
 // **This issue declares [CampfireSafeRadius] and this predicate; the campfire itself
 // arrives after it.** The two halves are deliberately split that way round, because a

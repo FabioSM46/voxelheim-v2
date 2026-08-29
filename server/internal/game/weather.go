@@ -91,3 +91,104 @@ func (s *Sim) weatherAtLocked(worldTick uint64, pos [3]float64) protocol.Weather
 	kind, intensity := world.WeatherAt(s.worldSeed, worldTick, int64(math.Floor(pos[0])), int64(math.Floor(pos[2])))
 	return protocol.WeatherState{Kind: weatherKindOf(kind), Intensity: intensity}
 }
+
+// ---------------------------------------------------------------------------
+// The weather that bites
+// ---------------------------------------------------------------------------
+
+// What heavy weather does, and the three predicates that decide when it does it.
+//
+// **Every effect is a scale or a skip at a place the server already decides**, which is
+// why this file gains three one-line predicates and one accessor rather than a system.
+// The reach was already checked, the walking speed was already computed, the station
+// scan already ran: nothing new is being simulated, and a sandstorm is a different
+// argument to an answer that was being computed anyway.
+//
+// **The threshold is a step and not a ramp**, and [WeatherHeavy] says why at length. The
+// three predicates below are therefore the whole of "is it bad out": each pairs the one
+// intensity threshold with the one kind its rule belongs to, so a heavy sandstorm cannot
+// slow a walker and deep snow cannot shorten an arm.
+//
+// **Nothing here invents a refusal.** A voxel outside the shortened reach is refused as
+// `OutOfReach`, exactly as a voxel outside the full one is, and a cook beside a doused
+// fire is refused because no station stands there. A client is told the same sentences
+// it was told before; what changed is where the line is.
+
+// sandstormBites reports whether this sky shortens the arm of the player standing under
+// it.
+func sandstormBites(w protocol.WeatherState) bool {
+	return w.Kind == vnet.WeatherKindSandstorm && w.Intensity >= WeatherHeavy
+}
+
+// snowBites reports whether this sky is deep enough to walk through slowly.
+//
+// **A blizzard counts, and that is the storm's whole relationship with this file.** The
+// Fimbulvetr (#469) imposes [vnet.WeatherKindBlizzard] through [Sim.weatherOverride], and
+// a storm that left everybody walking at full speed would be a storm in name. It is not
+// a fourth rule: a blizzard is snow that was scheduled rather than sampled, so it reads
+// as snow here and as nothing at all in the two predicates around it.
+func snowBites(w protocol.WeatherState) bool {
+	return (w.Kind == vnet.WeatherKindSnow || w.Kind == vnet.WeatherKindBlizzard) &&
+		w.Intensity >= WeatherHeavy
+}
+
+// rainDouses reports whether this sky puts a fire out.
+//
+// Rain and not a blizzard, which is the asymmetry [snowBites] does not have: snow lying
+// deep and snow being driven are the same thing to walk through, and a fire that a
+// blizzard extinguished would be a fire nobody could keep alight during the one event
+// the game asks them to survive.
+func rainDouses(w protocol.WeatherState) bool {
+	return w.Kind == vnet.WeatherKindRain && w.Intensity >= WeatherHeavy
+}
+
+// reachLocked is how far this player may reach right now, in blocks.
+//
+// **The one implementation of the reach, and every site that used to name [EditReach]
+// now names this instead.** That is enforced rather than asserted:
+// TestNoCallSiteReadsTheReachConstantDirectly walks the package's own source and fails on
+// a site that reads the constant, because a reach rule that applies at four of five
+// call sites is not a rule — it is a shortcut through whichever one was forgotten, and
+// the forgotten one would be discovered by a player rather than by a reviewer.
+//
+// It reads [Player.weather], which is the sky the tick loop sampled at this player's own
+// column: two players a chunk apart can be under different weather and therefore have
+// different arms, and a player indoors is no exception because there is no roof in this
+// rule — the sandstorm is over the column, not over the head.
+//
+// The caller holds Sim.mu.
+func (p *Player) reachLocked() float64 {
+	if sandstormBites(p.weather) {
+		return EditReach * SandstormReachScale
+	}
+	return EditReach
+}
+
+// douseFiresLocked settles, for every campfire standing, whether it is burning this tick.
+//
+// **A fire's weather is its own column's, not its owner's**, which is the reason this is
+// a pass over the registry rather than a flag somebody sets when they place one: a camp
+// on the edge of the tundra can be dry while the player who built it is standing in the
+// rain fifty blocks away, and the answer has to be about the fire.
+//
+// **It is recomputed from scratch every tick and never remembered, and that is the whole
+// of "it relights by itself".** There is no relighting mechanic and nothing to persist:
+// a doused fire is a fire the rain is currently on, so when the rain eases the next tick
+// computes `false` and the fire is burning again. It also means the field is safe to
+// leave out of [Structure] — a restored camp comes back lit and is corrected on the first
+// tick, which is the same direction the wire's `lit` default already fails in.
+//
+// Only campfires are asked. Nothing else has a fire to put out, and asking the field
+// about a tent would be paying for an answer that is discarded.
+//
+// The caller holds Sim.mu.
+func (s *Sim) douseFiresLocked(worldTick uint64) {
+	for _, held := range s.structures {
+		if held.kind != vnet.StructureKindCampfire {
+			continue
+		}
+		anchor := held.anchorVoxel()
+		over := [3]float64{float64(anchor[0]), float64(anchor[1]), float64(anchor[2])}
+		held.doused = rainDouses(s.weatherAtLocked(worldTick, over))
+	}
+}

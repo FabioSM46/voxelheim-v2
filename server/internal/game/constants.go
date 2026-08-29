@@ -479,4 +479,48 @@ const (
 	// The name records what the projectile stores; the constant remains a duration
 	// so three seconds means the same thing at every tick rate.
 	ArrowStuckTicks = 3 * time.Second
+
+	// --- The weather that bites --------------------------------------------------
+
+	// WeatherHeavy is where weather stops being scenery, on the 0..255 intensity the
+	// wire carries.
+	//
+	// **One threshold for all three effects, and that is a decision rather than an
+	// economy.** Three numbers would be three balance dials nobody could hold in their
+	// head at once, and worse, they would make "it is heavy out" mean a different thing
+	// depending on what was falling — a player who has learnt that a sandstorm shortens
+	// their arm would have no way to read whether this snow is deep enough to slow them.
+	// One number means the sky says one thing, and the kind decides only *which* rule it
+	// says it about.
+	//
+	// 160 of 255 is the top 37% of the scale, and it is read against what the field
+	// actually produces rather than against the range: world.WeatherAt ramps 1..255
+	// between its clear threshold and the p99.9 of its measured distribution, so an
+	// intensity is already a percentile of the weather that happens rather than of the
+	// weather that could. Below it nothing at all applies — there is no ramp, no partial
+	// scale and no interpolation, because a reach that shrank continuously would be a
+	// reach a player could never learn the edge of, and every refusal here is silent.
+	WeatherHeavy = 160
+
+	// SandstormReachScale is the fraction of EditReach a player keeps in a heavy
+	// sandstorm.
+	//
+	// Half, which puts the reach at 2.25 blocks. That still clears the block under the
+	// feet (1.4) and the block over the head (1.6), so a player caught out in one can
+	// still dig down and roof over — being unable to shelter would make the storm a
+	// death sentence rather than a cost. What it takes away is the shaft dug from its
+	// edge (3.5) and the block placed at arm's length: building in a sandstorm becomes
+	// something you do standing on top of the work.
+	SandstormReachScale = 0.5
+
+	// SnowSpeedScale is the fraction of walking speed left in heavy snow.
+	//
+	// WalkSpeed's 4.3 multiplied by 0.7 is 3.01, which is *below* the draugr's 3.2 —
+	// deliberately, and it is the one place a weather effect is allowed to be worse than
+	// starvation's. StarvingSpeedScale is 0.8 precisely so that a starving player still
+	// outruns the slowest predator; deep snow is a condition you can see coming and walk
+	// out of, so it is allowed to be the thing that makes you turn and fight. The two
+	// compose — 2.41 at zero hunger in deep snow — because being starved in a blizzard
+	// is worse than either, and nothing here needs a special case to say so.
+	SnowSpeedScale = 0.7
 )

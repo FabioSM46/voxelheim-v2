@@ -123,6 +123,16 @@ type structure struct {
 	// chunk is the chunk the anchor falls in, kept beside it for the reason a player's
 	// and a drop's are: visibility asks for it once per viewer per tick.
 	chunk world.Coord
+
+	// doused says the rain over this structure's own column is heavy enough to have put
+	// it out. It means something for StructureKindCampfire and for nothing else.
+	//
+	// **Derived every tick and never stored**, which is why it sits here and not in
+	// [Structure]: [Sim.douseFiresLocked] recomputes it from the weather field before
+	// anything reads it, so it needs no persistence, no relighting mechanic and no
+	// migration. The zero value is a burning fire, which is the same direction the
+	// wire's `lit` default already fails in — a fire nobody has asked about is alight.
+	doused bool
 }
 
 // anchorVoxel widens the anchor to the int64 every terrain lookup takes. Exact: every
@@ -384,8 +394,8 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	if err := p.cannotActLocked(); err != nil {
 		return protocol.InventoryState{}, vnet.RefusalReasonPlayerIsDead, err
 	}
-	if distance := distanceToVoxel(p.pos, anchor); distance > EditReach {
-		return protocol.InventoryState{}, vnet.RefusalReasonOutOfReach, fmt.Errorf("the anchor is %.2f blocks from the player, past the reach of %.1f", distance, EditReach)
+	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, anchor); distance > reach {
+		return protocol.InventoryState{}, vnet.RefusalReasonOutOfReach, fmt.Errorf("the anchor is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
 	if reason, err := p.sim.footprintFitsLocked(cells, headroom); err != nil {
 		return protocol.InventoryState{}, reason, err
@@ -488,8 +498,8 @@ func (p *Player) removeOwnStructure(structureID uint64) (structure, [3]int64, er
 		// two players apart rather than to hold either one's key.
 		return structure{}, [3]int64{}, fmt.Errorf("structure %d belongs to player %s", structureID, held.owner.Short())
 	}
-	if distance := distanceToVoxel(p.pos, held.anchorVoxel()); distance > EditReach {
-		return structure{}, [3]int64{}, fmt.Errorf("structure %d is %.2f blocks away, past the reach of %.1f", structureID, distance, EditReach)
+	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, held.anchorVoxel()); distance > reach {
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d is %.2f blocks away, past the reach of %.1f", structureID, distance, reach)
 	}
 
 	spawn, clear := p.sim.firstFreeVoxelAboveLocked(held.anchorVoxel())
@@ -636,6 +646,7 @@ func (s *Sim) structureStatesLocked(structures []*structure) []protocol.Structur
 			Anchor:        held.anchor,
 			Facing:        held.facing,
 			OwnerEntityID: ownerEntityID,
+			Doused:        held.doused,
 		}
 	}
 	return states
