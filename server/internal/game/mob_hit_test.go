@@ -8,6 +8,7 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 func armMobBlow(t *testing.T, h *vitalsHarness, mobID uint64, target *Player) {
@@ -178,5 +179,142 @@ func TestNonDamageAndProtectedDamageSendNoMobHit(t *testing.T) {
 	}
 	if hits := mobHits(t, out.all()); len(hits) != 0 {
 		t.Errorf("zero, environmental or protected damage sent %d MobHit events", len(hits))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A blow does not cross a block.
+// ---------------------------------------------------------------------------
+
+// walledTerrain is [dropTerrain] with a slab of extra solids standing on it, which is
+// the whole of what a wall is here: the ground the bodies stand on, plus the voxels
+// somebody built between them.
+type walledTerrain struct {
+	dropTerrain
+	wall func(x, y, z int64) bool
+}
+
+func (w walledTerrain) Block(x, y, z int64) (world.Block, bool) {
+	if w.wall != nil && w.wall(x, y, z) {
+		return world.Stone, true
+	}
+	return w.dropTerrain.Block(x, y, z)
+}
+
+func (w walledTerrain) Solid(x, y, z int64) bool {
+	block, resident := w.Block(x, y, z)
+	return !resident || world.Solid(block)
+}
+
+func (w walledTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
+
+// The reproduction, arranged so the wall is the only thing that changes.
+//
+// A draugr stands 2.5 blocks off, which is 1.9 between the two bodies and inside the
+// species' 2.0 attackRange — the control below is what proves that, by letting the same
+// swing land over the same distance with the voxels at z = -1 left as air. Two blocks
+// tall so the state machine's one-block hop cannot clear it, though nothing here steps
+// long enough for that to matter.
+func walledOff() walledTerrain {
+	return walledTerrain{
+		dropTerrain: dropTerrain{groundTop: 63},
+		wall:        func(_, y, z int64) bool { return z == -1 && (y == 64 || y == 65) },
+	}
+}
+
+var (
+	walledPlayerSpawn = [3]float32{0.5, 64, 0.5}
+	walledMobSpawn    = [3]float32{0.5, 64, -2.0}
+)
+
+func TestAMobsBlowDoesNotCrossASolidBlock(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, walledOff())
+	player, out := h.join(1, walledPlayerSpawn)
+	mobID := h.spawnDraugrAt(walledMobSpawn)
+	armMobBlow(t, h, mobID, player)
+	before := len(out.all())
+
+	healthBefore := h.vitals(player).Health
+	h.step()
+
+	if got := h.vitals(player).Health; got != healthBefore {
+		t.Errorf("health after a blow through a wall = %d, want it unchanged at %d", got, healthBefore)
+	}
+	if hits := mobHits(t, out.all()[before:]); len(hits) != 0 {
+		t.Errorf("a blow through a wall sent %d MobHit events, want none", len(hits))
+	}
+
+	// Abandoned rather than landed, and abandoned without the recovery an attack pays:
+	// the swing never happened, so it costs nothing and the creature goes back to
+	// walking into the block.
+	m, alive := h.mobState(mobID)
+	if !alive {
+		t.Fatal("the draugr is gone")
+	}
+	if m.action != vnet.MobActionChase {
+		t.Errorf("the draugr is in %v after the wall took its swing, want %v", m.action, vnet.MobActionChase)
+	}
+}
+
+// The control, and it is the load-bearing half of the pair: without it the test above
+// passes just as well when the mob is out of range, out of the world, or asleep.
+func TestTheSameBlowLandsWithTheBlockTakenAway(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, out := h.join(1, walledPlayerSpawn)
+	mobID := h.spawnDraugrAt(walledMobSpawn)
+	armMobBlow(t, h, mobID, player)
+	before := len(out.all())
+
+	healthBefore := h.vitals(player).Health
+	h.step()
+
+	if got := h.vitals(player).Health; got >= healthBefore {
+		t.Errorf("health after an unobstructed blow = %d, want less than %d", got, healthBefore)
+	}
+	if hits := mobHits(t, out.all()[before:]); len(hits) != 1 {
+		t.Errorf("an unobstructed blow sent %d MobHit events, want one", len(hits))
+	}
+}
+
+// The other half of the gate: a wall does not merely abandon a committed swing, it stops
+// one being committed. A creature standing against a block it cannot see past chases —
+// which is the same answer the navigation already gives, and now the same answer twice.
+func TestAWallStopsTheWindupBeingCommittedAtAll(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		terrain Terrain
+		want    vnet.MobAction
+	}{
+		{name: "walled off", terrain: walledOff(), want: vnet.MobActionChase},
+		{name: "in the open", terrain: dropTerrain{groundTop: 63}, want: vnet.MobActionWindup},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
+			h.keepNight()
+			player, _ := h.join(1, walledPlayerSpawn)
+			mobID := h.spawnDraugrAt(walledMobSpawn)
+
+			h.sim.mu.Lock()
+			h.sim.mobs[mobID].target = player.entityID
+			h.sim.mu.Unlock()
+
+			h.step()
+
+			m, alive := h.mobState(mobID)
+			if !alive {
+				t.Fatal("the draugr is gone")
+			}
+			if m.action != tc.want {
+				t.Errorf("the draugr is in %v after one tick, want %v", m.action, tc.want)
+			}
+		})
 	}
 }
