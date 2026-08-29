@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"math"
 	"os"
 	"path/filepath"
@@ -621,8 +622,13 @@ func TestTheWorldKeepsTimeAcrossARestart(t *testing.T) {
 	if !found {
 		t.Fatal("the first run left no clock file")
 	}
-	if stored != dusk {
-		t.Errorf("the file holds tick %d and the simulation stopped at %d", stored, dusk)
+	if stored.TickOfDay != dusk {
+		t.Errorf("the file holds tick %d and the simulation stopped at %d", stored.TickOfDay, dusk)
+	}
+	// The absolute clock is written down too, and it is the one that says the world ran
+	// past the phase it was wound to rather than merely stopping there.
+	if stored.WorldTick != uint64(dusk) {
+		t.Errorf("the file holds world tick %d and the simulation stopped at %d", stored.WorldTick, dusk)
 	}
 
 	// ---- the restart ----------------------------------------------------------
@@ -637,6 +643,9 @@ func TestTheWorldKeepsTimeAcrossARestart(t *testing.T) {
 	}
 	if !game.IsNight(got) {
 		t.Errorf("the world stopped at night and came back at tick %d, which is not", got)
+	}
+	if got := second.sim.WorldTick(); got != uint64(dusk) {
+		t.Errorf("the world came back having run %d ticks, want the %d it stopped at", got, dusk)
 	}
 }
 
@@ -663,15 +672,22 @@ func TestTheAutosaveWritesTheClock(t *testing.T) {
 	clock := openClockStore(t, dir)
 	waitFor(t, "the autosave to write a clock that has moved", func() bool {
 		stored, found, err := clock.Load()
-		return err == nil && found && stored > 0
+		return err == nil && found && stored.WorldTick > 0
 	})
 
 	stored, _, err := clock.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if stored >= game.DayLengthTicks {
-		t.Errorf("the autosave wrote tick %d, which is not inside a %d-tick day", stored, game.DayLengthTicks)
+	if stored.TickOfDay >= game.DayLengthTicks {
+		t.Errorf("the autosave wrote tick %d, which is not inside a %d-tick day", stored.TickOfDay, game.DayLengthTicks)
+	}
+	// **The pair the autosave captured has to agree**, and this is the test that fails if
+	// flushClock takes the simulation's lock twice: the tick loop runs between two
+	// captures, and the file that results is one the next start refuses.
+	if stored.WorldTick%game.DayLengthTicks != uint64(stored.TickOfDay) {
+		t.Errorf("the autosave wrote world tick %d beside tick of day %d, which disagree",
+			stored.WorldTick, stored.TickOfDay)
 	}
 }
 
@@ -717,7 +733,7 @@ func TestAnImpossibleStoredTickStartsTheWorldAtFirstLight(t *testing.T) {
 	cfg := livingWorldConfig()
 	clock := openClockStore(t, dir)
 
-	if err := clock.Save(game.DayLengthTicks); err != nil {
+	if err := clock.Save(game.DayLengthTicks, game.DayLengthTicks, 0); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -730,10 +746,105 @@ func TestAnImpossibleStoredTickStartsTheWorldAtFirstLight(t *testing.T) {
 	// tells the two apart.
 	stored, found, err := clock.Load()
 	if err != nil || !found {
-		t.Fatalf("Load = (%d, %v, %v)", stored, found, err)
+		t.Fatalf("Load = (%+v, %v, %v)", stored, found, err)
 	}
-	if stored != game.DayLengthTicks {
-		t.Errorf("the refused file now holds tick %d; it should have been left alone", stored)
+	if stored.TickOfDay != game.DayLengthTicks {
+		t.Errorf("the refused file now holds tick %d; it should have been left alone", stored.TickOfDay)
+	}
+}
+
+// A stored pair that disagrees with itself is refused whole at the level main wires it,
+// and the storm deadline in the same file goes with it: believing one field of a file
+// whose clock was just refused would be believing part of it.
+func TestADisagreeingStoredClockStartsTheWorldAtFirstLightWithNoStorm(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := livingWorldConfig()
+	clock := openClockStore(t, dir)
+
+	// Well formed, right checksum, and a world tick that falls one past the phase the
+	// same file names.
+	if err := clock.Save(game.NightStartTicks, game.NightStartTicks+1, 1_700_000_000); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	srv, _ := persistentServer(t, newQueueTransport(), dir, cfg)
+
+	if got := srv.sim.TickOfDay(); got != 0 {
+		t.Errorf("a world whose stored pair disagreed started at tick %d, want first light", got)
+	}
+	if got := srv.sim.WorldTick(); got != 0 {
+		t.Errorf("a world whose stored pair disagreed started having run %d ticks, want 0", got)
+	}
+	if got := srv.sim.NextStorm(); got != 0 {
+		t.Errorf("a refused clock still scheduled a storm at %d", got)
+	}
+}
+
+// The storm deadline outlives a restart, which is the whole reason it is in the file at
+// all: a week that includes the days a server spent switched off is not a quantity any
+// tick counter can hold.
+func TestTheStormDeadlineSurvivesARestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := livingWorldConfig()
+	clock := openClockStore(t, dir)
+
+	// A world four days in, at dusk, with a storm due. Written as a file rather than
+	// simulated: reaching day four honestly is four days of test.
+	const due = int64(1_700_000_000)
+	worldTick := uint64(4*game.DayLengthTicks + game.NightStartTicks)
+	if err := clock.Save(game.NightStartTicks, worldTick, due); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	srv, _ := persistentServer(t, newQueueTransport(), dir, cfg)
+
+	if got := srv.sim.NextStorm(); got != due {
+		t.Errorf("the world came back with its storm due at %d, want %d", got, due)
+	}
+	if got := srv.sim.WorldTick(); got != worldTick {
+		t.Errorf("the world came back having run %d ticks, want %d", got, worldTick)
+	}
+	if got := srv.sim.DaysElapsed(); got != 4 {
+		t.Errorf("a world four days in came back reporting %d days elapsed", got)
+	}
+}
+
+// A clock written by the previous build is migrated at startup rather than discarded: the
+// world keeps its day phase, its absolute clock starts at that phase, and no storm is
+// scheduled. The file itself is untouched until the first save rewrites it.
+func TestAVersionOneClockFileStartsTheWorldWhereItStopped(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := livingWorldConfig()
+	clock := openClockStore(t, dir)
+
+	// The sixteen bytes an older build wrote, spelled out here because this build has no
+	// encoder for them and must not grow one.
+	const dusk = uint32(game.NightStartTicks)
+	v1 := make([]byte, 16)
+	copy(v1[0:4], "VXHC")
+	binary.LittleEndian.PutUint32(v1[4:8], 1)
+	binary.LittleEndian.PutUint32(v1[8:12], dusk)
+	binary.LittleEndian.PutUint32(v1[12:16], crc32.ChecksumIEEE(v1[:12]))
+	if err := os.WriteFile(clock.Path(), v1, 0o600); err != nil {
+		t.Fatalf("writing the version-1 clock: %v", err)
+	}
+
+	srv, _ := persistentServer(t, newQueueTransport(), dir, cfg)
+
+	if got := srv.sim.TickOfDay(); got != dusk {
+		t.Errorf("a migrated world came back at tick %d, want the %d its file held", got, dusk)
+	}
+	if got := srv.sim.WorldTick(); got != uint64(dusk) {
+		t.Errorf("a migrated world came back having run %d ticks, want %d", got, dusk)
+	}
+	if got := srv.sim.NextStorm(); got != 0 {
+		t.Errorf("a file written before storms existed scheduled one at %d", got)
 	}
 }
 
