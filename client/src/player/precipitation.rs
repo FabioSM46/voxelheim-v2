@@ -521,7 +521,7 @@ mod tests {
         let mut chunk = VoxelChunk::all_air(usize::from(SIZE));
         if flooded {
             for y in 0..usize::from(SIZE) {
-                chunk.set(0, y, 0, palette::WATER);
+                chunk.set(0, y, 0, palette::WATER_FLOW7);
             }
         }
         let mut store = ChunkStore::default();

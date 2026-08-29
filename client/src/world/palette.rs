@@ -36,8 +36,8 @@ pub const SAND: BlockId = 9;
 pub const SANDSTONE: BlockId = 10;
 /// The loose patches that break up plains and taiga soil.
 pub const GRAVEL: BlockId = 11;
-/// The one block a body moves *through*. Not solid, not opaque, and the only id in
-/// the palette that is neither.
+/// Still water. A body moves through every member of the water family; none is
+/// solid or opaque.
 pub const WATER: BlockId = 12;
 /// The lid on some of the water. Ordinary ground: solid, opaque, walked on.
 pub const ICE: BlockId = 13;
@@ -57,15 +57,72 @@ pub const DESERT_SHRUB: BlockId = 19;
 pub const BROAD_LEAVES: BlockId = 20;
 /// Low plains cover. Mirrors the server's `world.Bush`.
 pub const BUSH: BlockId = 21;
+// Flowing levels encode their height in eighths; currents are full height.
+pub const WATER_FLOW1: BlockId = 22;
+pub const WATER_FLOW2: BlockId = 23;
+pub const WATER_FLOW3: BlockId = 24;
+pub const WATER_FLOW4: BlockId = 25;
+pub const WATER_FLOW5: BlockId = 26;
+pub const WATER_FLOW6: BlockId = 27;
+pub const WATER_FLOW7: BlockId = 28;
+pub const WATER_CURRENT_XPOS: BlockId = 29;
+pub const WATER_CURRENT_XNEG: BlockId = 30;
+pub const WATER_CURRENT_ZPOS: BlockId = 31;
+pub const WATER_CURRENT_ZNEG: BlockId = 32;
+
+const WATER_FAMILY: [BlockId; 12] = [
+    WATER,
+    WATER_FLOW1,
+    WATER_FLOW2,
+    WATER_FLOW3,
+    WATER_FLOW4,
+    WATER_FLOW5,
+    WATER_FLOW6,
+    WATER_FLOW7,
+    WATER_CURRENT_XPOS,
+    WATER_CURRENT_XNEG,
+    WATER_CURRENT_ZPOS,
+    WATER_CURRENT_ZNEG,
+];
+
+/// Whether `block` belongs to the whole water family.
+pub fn is_water(block: BlockId) -> bool {
+    WATER_FAMILY.contains(&block)
+}
+
+/// The server-authored water height in eighths. Falling is resolved by the mesher.
+#[allow(
+    dead_code,
+    reason = "the flowing-water mesher consumes this in #596 part B"
+)]
+pub fn water_level(block: BlockId) -> u8 {
+    match block {
+        WATER | WATER_CURRENT_XPOS..=WATER_CURRENT_ZNEG => 8,
+        WATER_FLOW1..=WATER_FLOW7 => (block - WATER_FLOW1 + 1) as u8,
+        _ => 0,
+    }
+}
+
+/// The horizontal current encoded by a water id, as `(x, z)`.
+#[allow(dead_code, reason = "the renderer consumes this in #598")]
+pub fn current_of(block: BlockId) -> (i8, i8) {
+    match block {
+        WATER_CURRENT_XPOS => (1, 0),
+        WATER_CURRENT_XNEG => (-1, 0),
+        WATER_CURRENT_ZPOS => (0, 1),
+        WATER_CURRENT_ZNEG => (0, -1),
+        _ => (0, 0),
+    }
+}
 
 /// Whether a block stops a body and can be aimed at.
 ///
 /// The predicate everything outside the mesher asks — the aiming ray, the camera boom,
 /// the store's `solid_at` — and the client's mirror of the server's `world.Solid`.
-/// [`WATER`] is the one id that is *there* without stopping anything, so a ray passes
-/// through it and the block behind it is what gets outlined.
+/// Water is *there* without stopping anything, so a ray passes through the whole
+/// family and the block behind it is what gets outlined.
 pub fn is_solid(block: BlockId) -> bool {
-    block != AIR && block != WATER
+    block != AIR && !is_water(block)
 }
 
 /// Whether a block hides what is behind it.
@@ -79,13 +136,13 @@ pub fn is_solid(block: BlockId) -> bool {
 /// An id from a newer contract is opaque, for the reason it is solid: this build draws
 /// what the server sent rather than deciding an id it never heard of is see-through.
 pub fn is_opaque(block: BlockId) -> bool {
-    block != AIR && block != WATER
+    block != AIR && !is_water(block)
 }
 
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 21] = [
+pub const PALETTE: [BlockId; 32] = [
     STONE,
     DIRT,
     GRASS,
@@ -107,6 +164,17 @@ pub const PALETTE: [BlockId; 21] = [
     DESERT_SHRUB,
     BROAD_LEAVES,
     BUSH,
+    WATER_FLOW1,
+    WATER_FLOW2,
+    WATER_FLOW3,
+    WATER_FLOW4,
+    WATER_FLOW5,
+    WATER_FLOW6,
+    WATER_FLOW7,
+    WATER_CURRENT_XPOS,
+    WATER_CURRENT_XNEG,
+    WATER_CURRENT_ZPOS,
+    WATER_CURRENT_ZNEG,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -205,10 +273,18 @@ const UNKNOWN_LINEAR: [f32; 3] = [0.577_580, 0.012_983, 0.304_987];
 
 /// The linear RGBA a vertex of this block's faces carries.
 ///
-/// Alpha is 1 for every id but [`WATER`], which carries [`WATER_ALPHA`]. The
-/// renderer draws water in a pass of its own with a blending material, and this is
-/// what that pass fades by.
+/// Alpha is 1 for every id outside the water family, whose members carry
+/// [`WATER_ALPHA`]. The renderer draws water in a pass of its own with a blending
+/// material, and this is what that pass fades by.
 pub fn linear_rgba(block: BlockId) -> [f32; 4] {
+    if is_water(block) {
+        return [
+            WATER_LINEAR[0],
+            WATER_LINEAR[1],
+            WATER_LINEAR[2],
+            WATER_ALPHA,
+        ];
+    }
     let [r, g, b] = match block {
         STONE => STONE_LINEAR,
         DIRT => DIRT_LINEAR,
@@ -230,16 +306,6 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         DESERT_SHRUB => DESERT_SHRUB_LINEAR,
         BROAD_LEAVES => BROAD_LEAVES_LINEAR,
         BUSH => BUSH_LINEAR,
-        // The one early return: every other id leaves this match with an opaque
-        // alpha appended below, and water is the one that must not.
-        WATER => {
-            return [
-                WATER_LINEAR[0],
-                WATER_LINEAR[1],
-                WATER_LINEAR[2],
-                WATER_ALPHA,
-            ];
-        }
         // `AIR` lands here with everything else, and correctly so: asking for the
         // colour of nothing is a meshing bug, and magenta is how it announces itself
         // instead of hiding as a plausible shade.
@@ -307,11 +373,12 @@ mod tests {
     }
 
     #[test]
-    fn air_and_water_are_the_two_ids_a_body_moves_through() {
+    fn air_and_the_water_family_are_the_ids_a_body_moves_through() {
         assert!(!is_solid(AIR));
         assert!(!is_solid(WATER), "water is swum through, not walked into");
         for block in PALETTE {
-            if block == WATER {
+            if is_water(block) {
+                assert!(!is_solid(block), "water {block} must stop no body");
                 continue;
             }
             assert!(is_solid(block), "block {block} must stop a body");
@@ -322,11 +389,12 @@ mod tests {
     }
 
     #[test]
-    fn air_and_water_are_also_the_two_ids_you_can_see_through() {
+    fn air_and_the_water_family_are_also_the_ids_you_can_see_through() {
         assert!(!is_opaque(AIR));
         assert!(!is_opaque(WATER));
         for block in PALETTE {
-            if block == WATER {
+            if is_water(block) {
+                assert!(!is_opaque(block), "water {block} must hide nothing");
                 continue;
             }
             assert!(
@@ -342,14 +410,20 @@ mod tests {
         // The pair #446 appended, and the whole of what separates them here: ice is
         // a block like stone, water is the exception every predicate above names.
         assert!(is_solid(ICE) && is_opaque(ICE));
-        assert!(!is_solid(WATER) && !is_opaque(WATER));
+        for block in PALETTE.into_iter().filter(|block| is_water(*block)) {
+            assert!(!is_solid(block) && !is_opaque(block));
+        }
     }
 
     #[test]
-    fn every_palette_colour_is_distinct() {
+    fn every_non_water_palette_colour_is_distinct() {
         // Two ids that render the same colour would make the landscape unreadable
-        // while every test still passed.
-        let colours: Vec<[f32; 4]> = PALETTE.iter().map(|b| linear_rgba(*b)).collect();
+        // while every test still passed. Water ids deliberately share one material.
+        let colours: Vec<[f32; 4]> = PALETTE
+            .iter()
+            .filter(|block| !is_water(**block))
+            .map(|block| linear_rgba(*block))
+            .collect();
         for (i, a) in colours.iter().enumerate() {
             for b in &colours[i + 1..] {
                 assert_ne!(a, b, "two palette entries share a colour");
@@ -360,7 +434,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=BUSH {
+        for block in 1..=WATER_CURRENT_ZNEG {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
@@ -387,14 +461,17 @@ mod tests {
     }
 
     #[test]
-    fn water_is_the_only_id_that_is_not_fully_opaque() {
-        assert_eq!(linear_rgba(WATER)[3], WATER_ALPHA);
+    fn the_water_family_is_the_only_part_not_fully_opaque() {
         assert!(
             (0.0..1.0).contains(&WATER_ALPHA),
             "water that is opaque, or absent, is not water"
         );
+        for block in PALETTE.into_iter().filter(|block| is_water(*block)) {
+            assert_eq!(linear_rgba(block)[3], WATER_ALPHA);
+            assert_eq!(linear_rgba(block), linear_rgba(WATER));
+        }
         for block in PALETTE.iter().chain(&[AIR, BlockId::MAX]) {
-            if *block == WATER {
+            if is_water(*block) {
                 continue;
             }
             assert_eq!(
@@ -402,6 +479,31 @@ mod tests {
                 1.0,
                 "block {block} must reach the framebuffer whole"
             );
+        }
+    }
+
+    #[test]
+    fn water_levels_and_currents_cover_the_whole_family() {
+        assert_eq!(water_level(WATER), 8);
+        for (block, level) in (WATER_FLOW1..=WATER_FLOW7).zip(1..=7) {
+            assert!(is_water(block));
+            assert_eq!(water_level(block), level);
+            assert_eq!(current_of(block), (0, 0));
+        }
+        for (block, current) in [
+            (WATER_CURRENT_XPOS, (1, 0)),
+            (WATER_CURRENT_XNEG, (-1, 0)),
+            (WATER_CURRENT_ZPOS, (0, 1)),
+            (WATER_CURRENT_ZNEG, (0, -1)),
+        ] {
+            assert!(is_water(block));
+            assert_eq!(water_level(block), 8);
+            assert_eq!(current_of(block), current);
+        }
+        for block in [AIR, STONE, BUSH, BlockId::MAX] {
+            assert!(!is_water(block));
+            assert_eq!(water_level(block), 0);
+            assert_eq!(current_of(block), (0, 0));
         }
     }
 }

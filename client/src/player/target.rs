@@ -2188,7 +2188,10 @@ mod tests {
         // special-cases nothing.
         let water = IVec3::new(2, 81, 0);
         let bed = IVec3::new(3, 81, 0);
-        let mut app = aiming_app(store_of(&[(water, palette::WATER), (bed, palette::STONE)]));
+        let mut app = aiming_app(store_of(&[
+            (water, palette::WATER_FLOW5),
+            (bed, palette::STONE),
+        ]));
         app.update();
 
         let hit = target(&app).0.expect("something is aimed at");
@@ -2207,8 +2210,10 @@ mod tests {
         // server displaces it — `allowPlacement` treats a fluid as empty.
         let water = IVec3::new(2, 81, 0);
         let bed = IVec3::new(3, 81, 0);
-        let (mut app, sent) =
-            clicking_app(store_of(&[(water, palette::WATER), (bed, palette::STONE)]));
+        let (mut app, sent) = clicking_app(store_of(&[
+            (water, palette::WATER_FLOW5),
+            (bed, palette::STONE),
+        ]));
         app.update();
 
         click(&mut app, PLACE_BUTTON);

@@ -654,7 +654,7 @@ pub(super) fn submerged_at(store: Option<&ChunkStore>, eye: Vec3, chunk_size: us
         y: voxel.y,
         z: voxel.z,
     };
-    store.block_at(pos, chunk_size) == palette::WATER
+    palette::is_water(store.block_at(pos, chunk_size))
 }
 
 /// The colour a submerged camera clears to and fades into.
@@ -1203,10 +1203,10 @@ mod tests {
     // Under water
     // -----------------------------------------------------------------------
 
-    /// A store holding one voxel of water in the chunk at the origin.
-    fn water_at(local: [usize; 3], size: usize) -> ChunkStore {
+    /// A store holding one water-family voxel in the chunk at the origin.
+    fn water_at(local: [usize; 3], size: usize, block: crate::world::BlockId) -> ChunkStore {
         let mut chunk = crate::world::VoxelChunk::all_air(size);
-        chunk.set(local[0], local[1], local[2], palette::WATER);
+        chunk.set(local[0], local[1], local[2], block);
         let mut store = ChunkStore::default();
         store.insert(
             crate::net::ChunkCoord {
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn an_eye_inside_a_voxel_of_water_is_submerged_and_one_above_it_is_not() {
-        let store = water_at([2, 3, 4], 32);
+        let store = water_at([2, 3, 4], 32, palette::WATER_FLOW7);
 
         // The voxel spans [2, 3) x [3, 4) x [4, 5), and every corner of it counts.
         for eye in [
@@ -1266,7 +1266,7 @@ mod tests {
         // before the handshake, and no chunk there, which is the edge of the volume.
         assert!(!submerged_at(None, Vec3::new(2.5, 3.5, 4.5), 32));
         assert!(!submerged_at(
-            Some(&water_at([2, 3, 4], 32)),
+            Some(&water_at([2, 3, 4], 32, palette::WATER)),
             Vec3::new(900.0, 900.0, 900.0),
             32
         ));
@@ -1276,7 +1276,7 @@ mod tests {
     fn an_eye_that_is_not_a_number_is_not_under_water() {
         // A `NaN` reaches `floor` as a `NaN` and the cast as a zero, which would report the
         // voxel at the origin. Refused before the cast, as the raycast does.
-        let store = water_at([0, 0, 0], 32);
+        let store = water_at([0, 0, 0], 32, palette::WATER);
         for eye in [
             Vec3::new(f32::NAN, 0.5, 0.5),
             Vec3::new(0.5, f32::INFINITY, 0.5),
