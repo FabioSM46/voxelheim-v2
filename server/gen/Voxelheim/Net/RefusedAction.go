@@ -57,6 +57,15 @@ const (
 	/// refusal means the vendor's stock, the player's pack and the player's purse are
 	/// exactly as they were.
 	RefusedActionTrade RefusedAction = 16
+	/// A `BlockEditRequest` the server would not apply.
+	RefusedActionEdit RefusedAction = 17
+	/// A `MineRequest` the server would not begin or would not finish.
+	///
+	/// Distinct from `MineBlock` above, which was reserved for the mining issue and names
+	/// the same action. Both members stay: `MineBlock` is the value a shipped server may
+	/// already have sent, and renumbering or removing it would relabel every refusal
+	/// already on the wire. A receiver names both.
+	RefusedActionMine RefusedAction = 18
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -77,6 +86,8 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionRemoveMarker:   "RemoveMarker",
 	RefusedActionInteract:       "Interact",
 	RefusedActionTrade:          "Trade",
+	RefusedActionEdit:           "Edit",
+	RefusedActionMine:           "Mine",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -97,6 +108,8 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"RemoveMarker":   RefusedActionRemoveMarker,
 	"Interact":       RefusedActionInteract,
 	"Trade":          RefusedActionTrade,
+	"Edit":           RefusedActionEdit,
+	"Mine":           RefusedActionMine,
 }
 
 func (v RefusedAction) String() string {

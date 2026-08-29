@@ -6,68 +6,61 @@ use super::*;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MIN_STRUCTURE_KIND: u8 = 0;
+pub const ENUM_MIN_STORM_PHASE: u8 = 0;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_STRUCTURE_KIND: u8 = 4;
+pub const ENUM_MAX_STORM_PHASE: u8 = 3;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_STRUCTURE_KIND: [StructureKind; 5] = [
-    StructureKind::Unknown,
-    StructureKind::Tent,
-    StructureKind::Forge,
-    StructureKind::Campfire,
-    StructureKind::Runestone,
+pub const ENUM_VALUES_STORM_PHASE: [StormPhase; 4] = [
+    StormPhase::Unknown,
+    StormPhase::Approaching,
+    StormPhase::Raging,
+    StormPhase::Passed,
 ];
 
-/// What kind of thing a `StructureState` describes.
+/// Where a blizzard is in its life, in a `StormWarning`.
 ///
-/// Zero member for the same fail-closed reason as `MobKind.Unknown`: an unrecognised
-/// kind is a contract the receiver does not speak, and drawing a default building in its
-/// place would put a shelter in the world the server never said was there.
-///
-/// Members are appended, never inserted, for the reason `RecipeID`'s are.
+/// Zero member for the usual fail-closed reason, and it matters here because the phase is
+/// what gives `seconds_until` its meaning: a countdown, a remaining duration and a zero
+/// are three different numbers wearing one field, and a phase that failed to decode would
+/// pick the wrong one silently.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
-pub struct StructureKind(pub u8);
+pub struct StormPhase(pub u8);
 #[allow(non_upper_case_globals)]
-impl StructureKind {
+impl StormPhase {
     pub const Unknown: Self = Self(0);
-    pub const Tent: Self = Self(1);
-    pub const Forge: Self = Self(2);
-    pub const Campfire: Self = Self(3);
-    /// A planted stone that wards the ground around it. V26, and **this member is what makes
-    /// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
-    /// cannot name it, and refusing ends the session. See `common.fbs`.
-    pub const Runestone: Self = Self(4);
+    /// The storm has been decided and has not arrived. `seconds_until` counts down to it.
+    pub const Approaching: Self = Self(1);
+    /// The storm is here. `seconds_until` is what it has left rather than what it is
+    /// waiting for.
+    pub const Raging: Self = Self(2);
+    /// The storm is over and `seconds_until` is 0. Sent once, so a client can stop drawing
+    /// a warning it would otherwise hold until the next one.
+    pub const Passed: Self = Self(3);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 4;
-    pub const ENUM_VALUES: &'static [Self] = &[
-        Self::Unknown,
-        Self::Tent,
-        Self::Forge,
-        Self::Campfire,
-        Self::Runestone,
-    ];
+    pub const ENUM_MAX: u8 = 3;
+    pub const ENUM_VALUES: &'static [Self] =
+        &[Self::Unknown, Self::Approaching, Self::Raging, Self::Passed];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
         match self {
             Self::Unknown => Some("Unknown"),
-            Self::Tent => Some("Tent"),
-            Self::Forge => Some("Forge"),
-            Self::Campfire => Some("Campfire"),
-            Self::Runestone => Some("Runestone"),
+            Self::Approaching => Some("Approaching"),
+            Self::Raging => Some("Raging"),
+            Self::Passed => Some("Passed"),
             _ => None,
         }
     }
 }
-impl ::core::fmt::Debug for StructureKind {
+impl ::core::fmt::Debug for StormPhase {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         if let Some(name) = self.variant_name() {
             f.write_str(name)
@@ -76,7 +69,7 @@ impl ::core::fmt::Debug for StructureKind {
         }
     }
 }
-impl<'a> ::flatbuffers::Follow<'a> for StructureKind {
+impl<'a> ::flatbuffers::Follow<'a> for StormPhase {
     type Inner = Self;
     #[inline]
     unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
@@ -85,15 +78,15 @@ impl<'a> ::flatbuffers::Follow<'a> for StructureKind {
     }
 }
 
-impl ::flatbuffers::Push for StructureKind {
-    type Output = StructureKind;
+impl ::flatbuffers::Push for StormPhase {
+    type Output = StormPhase;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
         unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
     }
 }
 
-impl ::flatbuffers::EndianScalar for StructureKind {
+impl ::flatbuffers::EndianScalar for StormPhase {
     type Scalar = u8;
     #[inline]
     fn to_little_endian(self) -> u8 {
@@ -107,7 +100,7 @@ impl ::flatbuffers::EndianScalar for StructureKind {
     }
 }
 
-impl<'a> ::flatbuffers::Verifiable for StructureKind {
+impl<'a> ::flatbuffers::Verifiable for StormPhase {
     #[inline]
     fn run_verifier(
         v: &mut ::flatbuffers::Verifier,
@@ -117,4 +110,4 @@ impl<'a> ::flatbuffers::Verifiable for StructureKind {
     }
 }
 
-impl ::flatbuffers::SimpleToVerifyInSlice for StructureKind {}
+impl ::flatbuffers::SimpleToVerifyInSlice for StormPhase {}

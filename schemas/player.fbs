@@ -204,7 +204,12 @@ enum RecipeID : ubyte {
   // Bow and arrows follow the wooden shield without moving its assigned wire value.
   Bow = 18,
   Arrows = 19,
-  WoodenSceptre = 20
+  WoodenSceptre = 20,
+
+  // V26. The runestone that wards ground, appended at the tail for the reason every
+  // member above was: the value is a byte on the wire, and a renumbering turns every
+  // craft a client asks for into a different one.
+  Runestone = 21
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.
@@ -797,7 +802,25 @@ enum RefusedAction : ubyte {
   /// A `TradeRequest` that moved no item and no silver. Trade is all-or-nothing: a
   /// refusal means the vendor's stock, the player's pack and the player's purse are
   /// exactly as they were.
-  Trade = 16
+  Trade = 16,
+
+  // -- V26. The two actions warded ground refuses, appended for the reason the members
+  //    above were reserved: the number is free now and will not be once anything
+  //    depends on it. Both are separate members rather than one `Build`, because they
+  //    are separate requests with separate answers and a client showing "you may not
+  //    change this ground" for a mine that was actually out of reach would be inventing
+  //    a sentence.
+
+  /// A `BlockEditRequest` the server would not apply.
+  Edit = 17,
+
+  /// A `MineRequest` the server would not begin or would not finish.
+  ///
+  /// Distinct from `MineBlock` above, which was reserved for the mining issue and names
+  /// the same action. Both members stay: `MineBlock` is the value a shipped server may
+  /// already have sent, and renumbering or removing it would relabel every refusal
+  /// already on the wire. A receiver names both.
+  Mine = 18
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -954,6 +977,17 @@ enum RefusalReason : ubyte {
   /// which is the purchase direction, and from `NotAVendor`, which is about the
   /// resident rather than the item: this vendor trades, and not in that.
   VendorDoesNotWant = 29,
+
+  /// This ground is under a runestone that is not yours, or under a settlement's own
+  /// ward. The request was legal and the world said no, which is why it is in the low
+  /// group with the rest of them: the player can walk somewhere else, and a client that
+  /// wanted to say so before asking already has `WardsNearby`.
+  ///
+  /// It says nothing about *whose* ward, deliberately, and the argument is the one
+  /// `MarkerUnknown` records: an answer that named the owner would let a client learn
+  /// who has claimed ground by poking at it. `WardsNearby` tells a session about the
+  /// wards it can see, and this reason tells it that one of them just refused.
+  Warded = 30,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -1350,7 +1384,12 @@ enum StructureKind : ubyte {
   Unknown = 0,
   Tent = 1,
   Forge = 2,
-  Campfire = 3
+  Campfire = 3,
+
+  /// A planted stone that wards the ground around it. V26, and **this member is what makes
+  /// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
+  /// cannot name it, and refusing ends the session. See `common.fbs`.
+  Runestone = 4
 }
 
 /// One placed structure's authoritative state in a snapshot.
@@ -1385,6 +1424,8 @@ enum StructureKind : ubyte {
 ///   - `anchor` is present; an absent struct field decodes as null, and the origin is a
 ///     real location rather than a default
 ///   - `kind` and `facing` are known non-zero members
+///   - `lit` has no invalid value, and is read only where `kind` is
+///     `StructureKind.Campfire`; see the field
 table StructureState {
   structure_id: ulong;
 
@@ -1408,6 +1449,34 @@ table StructureState {
   /// mean unowned, a value that changes does not mean the structure changed hands, and a
   /// mapping from id to owner is good for this session only.
   owner_entity_id: ulong;
+
+  /// Whether this campfire is burning.
+  ///
+  /// **It means something for `StructureKind.Campfire` and for nothing else, and a
+  /// client reads it only there.** `false` is a campfire the rain has put out; `true` is
+  /// one that is alight. Every structure of every other kind carries `true` as well, and
+  /// that is this field's default showing through rather than a statement about it — no
+  /// server writes the byte for a tent, a forge or a runestone, because none of them is
+  /// the sort of thing that burns. So `lit` on a non-campfire is not "burning", it is
+  /// "unset", and a renderer that lights a structure on this field alone would set fire
+  /// to every tent in the world. Read the `kind` beside it first; the existing renderer
+  /// already decides a structure's light per kind, and this field refines that decision
+  /// for the one kind that has two states rather than replacing it for all four.
+  ///
+  /// **The server decides, and a doused fire is not a station**: it lights nothing,
+  /// warms nobody and satisfies no recipe that needs a campfire nearby. The client draws
+  /// the difference and never computes it — whether rain reaches this cell, how hard it
+  /// falls and how long it takes are all authoritative, and a renderer that guessed
+  /// would show a fire the crafting menu disagreed with.
+  ///
+  /// **The default is `true`, and it is load-bearing**: a campfire's elided field then
+  /// reads as the burning fire every fire on a pre-V26 server is, so the byte is written
+  /// only when one is actually out and the field owes no version bump of its own.
+  /// `common.fbs` records what a default of `false` would have cost. That the same
+  /// default also reaches the three kinds that never burn is the price of it, and it is
+  /// paid in the paragraph above rather than in the wire: a field nobody reads for those
+  /// kinds costs nothing whichever way it defaults.
+  lit: bool = true;
 }
 
 /// One other member of the recipient's party, carried in every snapshot while the
@@ -1448,6 +1517,173 @@ table PartyRosterMember {
   entity_id: ulong;
   name: string;
   online: bool;
+}
+
+/// What the sky is doing where a player stands.
+///
+/// Zero member for the reason every enum here has one, and it is *refused* rather than
+/// carried: the field it rides in is a struct, so absence is already representable and
+/// unambiguous, and a present-but-nameless kind is a defect rather than a server that
+/// keeps no weather.
+///
+/// `Blizzard` is the storm's own kind and is never produced by the ordinary weather of a
+/// climate. It arrives only while a `StormWarning` says `Raging`, which is what makes the
+/// two statements checkable against each other rather than two independent moods.
+///
+/// Members are appended, never inserted, for the reason `RecipeID`'s are.
+enum WeatherKind : ubyte {
+  Unknown = 0,
+  Clear = 1,
+  Rain = 2,
+  Snow = 3,
+  Sandstorm = 4,
+  Blizzard = 5
+}
+
+/// The weather at one point in the world, as the server holds it.
+///
+/// **A struct, and both halves of the rule apply.** It is hot — one per snapshot, once per
+/// recipient per tick — and settled: a kind and a number is the whole of what weather is on
+/// the wire, because everything a client draws from it (particle density, fog, wind, sound)
+/// is presentation derived from those two. What is *not* settled — where a front is, how
+/// long it lasts, what it is called — is a `StormWarning`, a table for that reason.
+///
+/// Decoder invariants:
+///   - `kind` is a known non-zero member. `Unknown` is the absent-field zero and a
+///     present struct that carries it is a protocol error, never "no weather"
+///   - `intensity` is 0 for `Clear` and may be anything for the other kinds. 0 is none
+///     and 255 is the most the sky can do; nothing divides the range into named bands,
+///     so a client interpolates rather than switching on it
+struct WeatherState {
+  kind: WeatherKind;
+
+  /// How hard it is coming down, 0 to 255. Not a percentage and not a rate: a scalar the
+  /// server owns, which presentation reads and gameplay is already computed from.
+  intensity: ubyte;
+}
+
+/// Where a blizzard is in its life, in a `StormWarning`.
+///
+/// Zero member for the usual fail-closed reason, and it matters here because the phase is
+/// what gives `seconds_until` its meaning: a countdown, a remaining duration and a zero
+/// are three different numbers wearing one field, and a phase that failed to decode would
+/// pick the wrong one silently.
+enum StormPhase : ubyte {
+  Unknown = 0,
+
+  /// The storm has been decided and has not arrived. `seconds_until` counts down to it.
+  Approaching = 1,
+
+  /// The storm is here. `seconds_until` is what it has left rather than what it is
+  /// waiting for.
+  Raging = 2,
+
+  /// The storm is over and `seconds_until` is 0. Sent once, so a client can stop drawing
+  /// a warning it would otherwise hold until the next one.
+  Passed = 3
+}
+
+/// The server telling one session about the blizzard. **Server -> client.**
+///
+/// **A table where `WeatherState` is a struct**, and the pair is the clearest statement of
+/// that rule this contract has. Weather is hot and settled, so it is inlined into every
+/// snapshot. A storm warning is neither: it is sent when the phase changes rather than
+/// every tick, and a name, a region or the direction the front is coming from are all
+/// plausible next fields that a struct could never gain.
+///
+/// **It carries no weather.** What the sky is doing where the player stands arrives in
+/// the snapshot, every tick, from the authoritative simulation. This message says only
+/// that a storm is coming, is here, or is done. A client that inferred `Blizzard` from a
+/// `Raging` phase would be drawing weather the server had not stated.
+///
+/// **Appending it owes no bump by itself.** It travels server -> client, and an older
+/// client cannot name the tag and drops the whole frame: it loses a warning and nothing
+/// else. See `common.fbs` for what V26 *is* owed for.
+///
+/// Decoder invariants:
+///   - `phase` is a known non-zero member
+///   - `seconds_until` is 0 when `phase` is `Passed`, and a receiver refuses a `Passed`
+///     that carries a countdown: the two would be describing different storms
+///   - `seconds_until` is otherwise unbounded above by this contract and is a duration in
+///     whole seconds, never a tick count and never a timestamp
+table StormWarning {
+  /// Seconds until the storm arrives while `Approaching`, seconds it has left while
+  /// `Raging`, and 0 once it has `Passed`.
+  seconds_until: uint;
+
+  phase: StormPhase;
+}
+
+/// The bound on `WardsNearby.columns`, stated where both consumers can read it.
+///
+/// An enum rather than a sentence, on the `ProtocolVersion` precedent: both generated APIs
+/// expose it, so the receiver that refuses an oversized list and the sender that must never
+/// build one read one constant instead of two copies of a paragraph. 2048 is a square 45
+/// chunks on a side, past any view distance `ServerWelcome` may announce, so a legal server
+/// never approaches it — it exists because the receiver allocates from this length, and
+/// every such length here gets an explicit bound even from an authoritative server.
+enum WardBound : ushort {
+  MaxWardedColumns = 2048
+}
+
+/// What put a ward on a chunk column.
+///
+/// Zero member for the usual reason, and it is refused rather than drawn: a column the
+/// client cannot name the ward of is a contract it does not speak, and shading it as a
+/// generic claim would tell the player a settlement owns ground a runestone does.
+enum WardKind : ubyte {
+  Unknown = 0,
+
+  /// A runestone somebody planted. `WardedColumn.mine` says whether it was this player.
+  Runestone = 1,
+
+  /// A settlement's own ground, which belongs to nobody and is never `mine`.
+  Settlement = 2
+}
+
+/// One chunk column under a ward, in a `WardsNearby`.
+///
+/// A struct: fixed, small, and there are up to `MaxWardedColumns` of them in one message,
+/// so a table apiece would cost an offset each for two ints and two bytes. It is settled
+/// for the same reason `ChunkCoord` is — a column address plus who claims it is the whole
+/// of what a ward is on the wire, and the runestone that *causes* it is already a
+/// `StructureState` in the snapshot.
+///
+/// Only the horizontal axes, deliberately: a ward claims a column of the world from
+/// bedrock to sky, not a cube of it, so there is no `cy` to send and none to ignore.
+struct WardedColumn {
+  cx: int;
+  cz: int;
+  kind: WardKind;
+
+  /// True when the recipient is the one whose ward this is. Presentation only — the
+  /// server refuses the edit either way, and a client that let a `true` here authorise
+  /// anything would be deciding a gameplay outcome.
+  mine: bool;
+}
+
+/// Every warded chunk column within the recipient's view, **replacing** the client's
+/// previous set wholesale. **Server -> client.**
+///
+/// The `MarkerList` shape rather than the `MapExplored` one, and the difference is the
+/// point: this is a complete statement of a fact that changes, not a page of an additive
+/// ledger. **An empty `columns` is legal and ordinary** — it is how a client learns it has
+/// walked out of the last ward — which is why absence and empty mean the same thing here
+/// and are both accepted, where `MapExplored` refuses an empty page.
+///
+/// **Appending it owes no bump by itself**, for the reason `StormWarning` does not: an
+/// older client drops a tag it cannot name and loses the shading.
+///
+/// Decoder invariants:
+///   - at most `MaxWardedColumns` entries; more is a protocol error rather than a list to
+///     truncate, because a receiver that dropped the tail would shade the world wrong and
+///     say nothing
+///   - every `kind` is a known non-zero member
+///   - no `(cx, cz)` pair appears twice. Two rows for one column are two different
+///     answers about the same ground and the receiver cannot tell which is meant — the
+///     `MarkerList` argument, not the `MapExplored` one
+table WardsNearby {
+  columns: [WardedColumn];
 }
 
 /// The authoritative state of every entity a session can see, for one tick.
@@ -1634,6 +1870,28 @@ table EntitySnapshot {
   /// A consumer may leave both append-only blocking fields unread. Once it reads either
   /// for presentation, it validates this complete set and the cross-field agreement first.
   blocking_players: [ulong];
+
+  /// What the sky is doing at **the recipient's own position**, this tick. Absent from a
+  /// server that keeps no weather at all.
+  ///
+  /// **The second field here that is not about an entity**, and it rides along for the
+  /// reason `tick_of_day` does: it changes every tick and is read by the same frame the
+  /// world is drawn from, so a message of its own would arrive on its own schedule and
+  /// put the rain a tick away from the ground it is falling on. One value rather than a
+  /// field, a front or a map, because the only weather this session has to draw is the
+  /// weather it is standing in.
+  ///
+  /// **Authoritative, not presentation, and the split runs through the middle of it.**
+  /// The server has already applied everything this state *does* — the cold, the slowed
+  /// step, the doused fire, what a blizzard hides — and those outcomes arrive as vitals,
+  /// as position and as `StructureState.lit`. What is left for the client is everything
+  /// it *draws*: particles, fog, wind, sound. A client that re-derived an effect from
+  /// this field would be deciding a gameplay outcome from presentation data.
+  ///
+  /// Absence says this server keeps no weather, which a test world and an older server
+  /// both legitimately are; a *present* struct carrying `WeatherKind.Unknown` is a
+  /// protocol error. `WeatherState` sets both cases out.
+  weather: WeatherState;
 }
 
 /// Everything the player is carrying, as the server holds it.

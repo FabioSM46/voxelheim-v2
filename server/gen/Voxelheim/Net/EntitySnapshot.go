@@ -626,8 +626,61 @@ func (rcv *EntitySnapshot) MutateBlockingPlayers(j int, n uint64) bool {
 	return false
 }
 
+// / What the sky is doing at **the recipient's own position**, this tick. Absent from a
+// / server that keeps no weather at all.
+// /
+// / **The second field here that is not about an entity**, and it rides along for the
+// / reason `tick_of_day` does: it changes every tick and is read by the same frame the
+// / world is drawn from, so a message of its own would arrive on its own schedule and
+// / put the rain a tick away from the ground it is falling on. One value rather than a
+// / field, a front or a map, because the only weather this session has to draw is the
+// / weather it is standing in.
+// /
+// / **Authoritative, not presentation, and the split runs through the middle of it.**
+// / The server has already applied everything this state *does* — the cold, the slowed
+// / step, the doused fire, what a blizzard hides — and those outcomes arrive as vitals,
+// / as position and as `StructureState.lit`. What is left for the client is everything
+// / it *draws*: particles, fog, wind, sound. A client that re-derived an effect from
+// / this field would be deciding a gameplay outcome from presentation data.
+// /
+// / Absence says this server keeps no weather, which a test world and an older server
+// / both legitimately are; a *present* struct carrying `WeatherKind.Unknown` is a
+// / protocol error. `WeatherState` sets both cases out.
+func (rcv *EntitySnapshot) Weather(obj *WeatherState) *WeatherState {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		x := o + rcv._tab.Pos
+		if obj == nil {
+			obj = new(WeatherState)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+// / What the sky is doing at **the recipient's own position**, this tick. Absent from a
+// / server that keeps no weather at all.
+// /
+// / **The second field here that is not about an entity**, and it rides along for the
+// / reason `tick_of_day` does: it changes every tick and is read by the same frame the
+// / world is drawn from, so a message of its own would arrive on its own schedule and
+// / put the rain a tick away from the ground it is falling on. One value rather than a
+// / field, a front or a map, because the only weather this session has to draw is the
+// / weather it is standing in.
+// /
+// / **Authoritative, not presentation, and the split runs through the middle of it.**
+// / The server has already applied everything this state *does* — the cold, the slowed
+// / step, the doused fire, what a blizzard hides — and those outcomes arrive as vitals,
+// / as position and as `StructureState.lit`. What is left for the client is everything
+// / it *draws*: particles, fog, wind, sound. A client that re-derived an effect from
+// / this field would be deciding a gameplay outcome from presentation data.
+// /
+// / Absence says this server keeps no weather, which a test world and an older server
+// / both legitimately are; a *present* struct carrying `WeatherKind.Unknown` is a
+// / protocol error. `WeatherState` sets both cases out.
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(15)
+	builder.StartObject(16)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -706,6 +759,9 @@ func EntitySnapshotAddBlockingPlayers(builder *flatbuffers.Builder, blockingPlay
 }
 func EntitySnapshotStartBlockingPlayersVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(8, numElems, 8)
+}
+func EntitySnapshotAddWeather(builder *flatbuffers.Builder, weather flatbuffers.UOffsetT) {
+	builder.PrependStructSlot(15, flatbuffers.UOffsetT(weather), 0)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

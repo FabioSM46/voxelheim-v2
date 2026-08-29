@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 16;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 18;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 17] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 19] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -35,6 +35,8 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 17] = [
     RefusedAction::RemoveMarker,
     RefusedAction::Interact,
     RefusedAction::Trade,
+    RefusedAction::Edit,
+    RefusedAction::Mine,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -92,9 +94,18 @@ impl RefusedAction {
     /// refusal means the vendor's stock, the player's pack and the player's purse are
     /// exactly as they were.
     pub const Trade: Self = Self(16);
+    /// A `BlockEditRequest` the server would not apply.
+    pub const Edit: Self = Self(17);
+    /// A `MineRequest` the server would not begin or would not finish.
+    ///
+    /// Distinct from `MineBlock` above, which was reserved for the mining issue and names
+    /// the same action. Both members stay: `MineBlock` is the value a shipped server may
+    /// already have sent, and renumbering or removing it would relabel every refusal
+    /// already on the wire. A receiver names both.
+    pub const Mine: Self = Self(18);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 16;
+    pub const ENUM_MAX: u8 = 18;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -113,6 +124,8 @@ impl RefusedAction {
         Self::RemoveMarker,
         Self::Interact,
         Self::Trade,
+        Self::Edit,
+        Self::Mine,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -134,6 +147,8 @@ impl RefusedAction {
             Self::RemoveMarker => Some("RemoveMarker"),
             Self::Interact => Some("Interact"),
             Self::Trade => Some("Trade"),
+            Self::Edit => Some("Edit"),
+            Self::Mine => Some("Mine"),
             _ => None,
         }
     }

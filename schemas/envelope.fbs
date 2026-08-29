@@ -187,7 +187,23 @@ union Payload {
   NpcInteractRequest,      // 47  client -> server
   VendorState,             // 48  server -> client
   TradeRequest,            // 49  client -> server
-  VendorClosed             // 50  server -> client
+  VendorClosed,            // 50  server -> client
+
+  // -- V26. Appended, so the tags of 1..50 are untouched.
+  //
+  //    The Fimbulvetr's two messages, and **neither of them is why V26 exists**. Both
+  //    travel server -> client, so an older client drops a tag it cannot name and loses
+  //    a warning or some shading; on the rule this file states, that is a bump avoided
+  //    rather than one owed. The break is elsewhere — `StructureKind.Runestone` is an
+  //    enum member a receiver *refuses* — and it is recorded in `common.fbs`.
+  //
+  //    They are appended together with it for the reason every batch above was: the
+  //    weather, the storm and the runestone are one iteration, and the server and client
+  //    issues that follow all read this one settled contract instead of moving the
+  //    version three more times. See `player.fbs` for both tables.
+
+  StormWarning,            // 51  server -> client
+  WardsNearby              // 52  server -> client
 }
 
 table Envelope {

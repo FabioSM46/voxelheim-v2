@@ -129,6 +129,16 @@ const (
 	/// which is the purchase direction, and from `NotAVendor`, which is about the
 	/// resident rather than the item: this vendor trades, and not in that.
 	RefusalReasonVendorDoesNotWant RefusalReason = 29
+	/// This ground is under a runestone that is not yours, or under a settlement's own
+	/// ward. The request was legal and the world said no, which is why it is in the low
+	/// group with the rest of them: the player can walk somewhere else, and a client that
+	/// wanted to say so before asking already has `WardsNearby`.
+	///
+	/// It says nothing about *whose* ward, deliberately, and the argument is the one
+	/// `MarkerUnknown` records: an answer that named the owner would let a client learn
+	/// who has claimed ground by poking at it. `WardsNearby` tells a session about the
+	/// wards it can see, and this reason tells it that one of them just refused.
+	RefusalReasonWarded RefusalReason = 30
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -174,6 +184,7 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonNotAVendor:         "NotAVendor",
 	RefusalReasonNotEnoughSilver:    "NotEnoughSilver",
 	RefusalReasonVendorDoesNotWant:  "VendorDoesNotWant",
+	RefusalReasonWarded:             "Warded",
 	RefusalReasonMalformedNoAnchor:  "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:    "MalformedFacing",
 	RefusalReasonMalformedSlot:      "MalformedSlot",
@@ -211,6 +222,7 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"NotAVendor":         RefusalReasonNotAVendor,
 	"NotEnoughSilver":    RefusalReasonNotEnoughSilver,
 	"VendorDoesNotWant":  RefusalReasonVendorDoesNotWant,
+	"Warded":             RefusalReasonWarded,
 	"MalformedNoAnchor":  RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":    RefusalReasonMalformedFacing,
 	"MalformedSlot":      RefusalReasonMalformedSlot,

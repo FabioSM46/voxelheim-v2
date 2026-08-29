@@ -818,6 +818,36 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_storm_warning(&self) -> Option<StormWarning<'a>> {
+        if self.payload_type() == Payload::StormWarning {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { StormWarning::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_wards_nearby(&self) -> Option<WardsNearby<'a>> {
+        if self.payload_type() == Payload::WardsNearby {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { WardsNearby::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -879,6 +909,8 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::VendorState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VendorState>>("Payload::VendorState", pos),
           Payload::TradeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<TradeRequest>>("Payload::TradeRequest", pos),
           Payload::VendorClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VendorClosed>>("Payload::VendorClosed", pos),
+          Payload::StormWarning => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<StormWarning>>("Payload::StormWarning", pos),
+          Payload::WardsNearby => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WardsNearby>>("Payload::WardsNearby", pos),
           _ => Ok(()),
         }
      })?
@@ -1432,6 +1464,26 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::VendorClosed => {
                 if let Some(x) = self.payload_as_vendor_closed() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::StormWarning => {
+                if let Some(x) = self.payload_as_storm_warning() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::WardsNearby => {
+                if let Some(x) = self.payload_as_wards_nearby() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

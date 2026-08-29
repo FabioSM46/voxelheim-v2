@@ -617,6 +617,24 @@ mod tests {
     use crate::player::items::item_label;
     use crate::wire::voxelheim::net as fb;
 
+    /// Members the contract names that this mirror deliberately holds no row for.
+    ///
+    /// **An exemption, written down, with the issue that empties it.** The sweep below
+    /// exists because a hand-written mirror of an appended-to contract fails in exactly
+    /// one direction — a member arrives and nobody adds the row — so the exemption has to
+    /// be at least as visible as the omission it permits, and a named list of one that a
+    /// reader has to justify is that.
+    ///
+    /// `Runestone` is here because a `RECIPES` row is not the identity, which is all the
+    /// wire carries: it is a cost, a product and a station, and those are the server's
+    /// authoritative table. The contract half of #463 has no business inventing them, and
+    /// a row of plausible-looking numbers would be a display this client could not honour.
+    /// The issue that makes a runestone craftable deletes this entry, and the sweep turns
+    /// red until it does — which is the whole reason this is a constant rather than a
+    /// skipped member. `a_craft_request_carries_one_recipe_member_and_a_tick` in
+    /// `net::codec` records the same exemption for the outbound vocabulary.
+    const NOT_YET_CRAFTABLE: &[fb::RecipeID] = &[fb::RecipeID::Runestone];
+
     /// One stack of `count` of `item_id`, as a server state carries it.
     fn stack(item_id: u16, count: u16) -> InventoryStack {
         InventoryStack {
@@ -823,7 +841,7 @@ mod tests {
     #[test]
     fn every_recipe_the_contract_names_has_exactly_one_row() {
         for member in fb::RecipeID::ENUM_VALUES {
-            if *member == fb::RecipeID::Unknown {
+            if *member == fb::RecipeID::Unknown || NOT_YET_CRAFTABLE.contains(member) {
                 continue;
             }
             let rows = RECIPES
@@ -844,7 +862,7 @@ mod tests {
         // than against a number typed here, for the reason the loop is.
         assert_eq!(
             RECIPES.len(),
-            fb::RecipeID::ENUM_VALUES.len() - 1,
+            fb::RecipeID::ENUM_VALUES.len() - 1 - NOT_YET_CRAFTABLE.len(),
             "the mirror holds a row the contract does not name, or two rows for one member"
         );
     }

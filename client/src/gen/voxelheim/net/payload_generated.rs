@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 50;
+pub const ENUM_MAX_PAYLOAD: u8 = 52;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 51] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 53] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -69,6 +69,8 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 51] = [
     Payload::VendorState,
     Payload::TradeRequest,
     Payload::VendorClosed,
+    Payload::StormWarning,
+    Payload::WardsNearby,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -146,9 +148,11 @@ impl Payload {
     pub const VendorState: Self = Self(48);
     pub const TradeRequest: Self = Self(49);
     pub const VendorClosed: Self = Self(50);
+    pub const StormWarning: Self = Self(51);
+    pub const WardsNearby: Self = Self(52);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 50;
+    pub const ENUM_MAX: u8 = 52;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -201,6 +205,8 @@ impl Payload {
         Self::VendorState,
         Self::TradeRequest,
         Self::VendorClosed,
+        Self::StormWarning,
+        Self::WardsNearby,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -256,6 +262,8 @@ impl Payload {
             Self::VendorState => Some("VendorState"),
             Self::TradeRequest => Some("TradeRequest"),
             Self::VendorClosed => Some("VendorClosed"),
+            Self::StormWarning => Some("StormWarning"),
+            Self::WardsNearby => Some("WardsNearby"),
             _ => None,
         }
     }
