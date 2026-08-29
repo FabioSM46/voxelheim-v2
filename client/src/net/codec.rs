@@ -490,6 +490,7 @@ pub enum StructureKind {
     Tent,
     Forge,
     Campfire,
+    Runestone,
 }
 
 impl StructureKind {
@@ -500,6 +501,7 @@ impl StructureKind {
             fb::StructureKind::Tent => Some(Self::Tent),
             fb::StructureKind::Forge => Some(Self::Forge),
             fb::StructureKind::Campfire => Some(Self::Campfire),
+            fb::StructureKind::Runestone => Some(Self::Runestone),
             _ => None,
         }
     }
@@ -849,6 +851,7 @@ pub enum RecipeId {
     Bow,
     Arrows,
     WoodenSceptre,
+    Runestone,
 }
 
 impl RecipeId {
@@ -882,6 +885,7 @@ impl RecipeId {
             Self::Bow => fb::RecipeID::Bow,
             Self::Arrows => fb::RecipeID::Arrows,
             Self::WoodenSceptre => fb::RecipeID::WoodenSceptre,
+            Self::Runestone => fb::RecipeID::Runestone,
         }
     }
 }
@@ -9428,14 +9432,12 @@ mod tests {
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);
-        // 4 is `Runestone` from V26, and it is **still refused** — the one place here where
-        // a member the contract names is asserted to be rejected. The rule above
-        // [`StructureKind::from_wire`] is that a member is accepted in the commit that
-        // teaches `player::structures` to draw it, so this contract half names the kind and
-        // the issue that renders the stone adds the arm. Refusing costs the session, which
-        // is why V26 is a bump rather than a quiet append.
+        // V26's runestone is accepted in the same commit that gives it a structure mesh.
         assert_eq!(fb::StructureKind::Runestone.0, 4);
-        assert_eq!(StructureKind::from_wire(fb::StructureKind::Runestone), None);
+        assert_eq!(
+            StructureKind::from_wire(fb::StructureKind::Runestone),
+            Some(StructureKind::Runestone)
+        );
         assert_eq!(StructureKind::from_wire(fb::StructureKind(5)), None);
         assert_eq!(StructureKind::from_wire(fb::StructureKind(200)), None);
     }
@@ -11742,6 +11744,7 @@ mod tests {
             (RecipeId::Bow, fb::RecipeID::Bow),
             (RecipeId::Arrows, fb::RecipeID::Arrows),
             (RecipeId::WoodenSceptre, fb::RecipeID::WoodenSceptre),
+            (RecipeId::Runestone, fb::RecipeID::Runestone),
         ];
 
         for (recipe, wire) in named {
@@ -11766,16 +11769,8 @@ mod tests {
         // Every member the contract names is one this client can ask for. `Unknown` is
         // skipped because it is the absent-field case rather than a recipe, and it is
         // deliberately unrepresentable on this side.
-        //
-        // **`Runestone` is skipped too, and that is an exemption rather than a second
-        // absent-field case.** V26 names the recipe so the dependent issues consume one
-        // settled contract; nothing here can originate the craft, because what a runestone
-        // costs and where it is made are the server's table and [`crate::player::RECIPES`]
-        // holds no row for it yet — the sweep there records the same exemption. A
-        // `RecipeId` variant with no producer is dead code under `-D warnings`, so the
-        // vocabulary gains the word in the commit that gives somebody a button for it.
         for member in fb::RecipeID::ENUM_VALUES {
-            if *member == fb::RecipeID::Unknown || *member == fb::RecipeID::Runestone {
+            if *member == fb::RecipeID::Unknown {
                 continue;
             }
             assert!(

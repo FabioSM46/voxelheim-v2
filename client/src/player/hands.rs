@@ -6743,15 +6743,16 @@ mod tests {
         assert_eq!(stone.shape, Some(ItemShape::Block));
     }
 
-    /// The three items that plant an entity rather than a voxel. The hand is where a
+    /// The four items that plant an entity rather than a voxel. The hand is where a
     /// player sees which of them the place press is about to ask for, so a bundle is its
     /// own shape rather than another cube.
     #[test]
-    fn a_tent_a_forge_and_a_campfire_are_held_as_bundles() {
+    fn every_carried_structure_is_held_as_a_bundle() {
         let bundles = [
             structures::ITEM_TENT,
             structures::ITEM_FORGE,
             structures::ITEM_CAMPFIRE,
+            structures::ITEM_RUNESTONE,
         ];
         let carried = bundles.map(|item_id| {
             let held = selected_appearance(Some(InventoryStack {
@@ -6764,15 +6765,16 @@ mod tests {
             held
         });
 
-        // Three bundles, three colours: canvas, iron and firewood are what a player is
-        // carrying, and two that looked alike would be slots they had to count to tell
-        // apart.
-        for (first, second) in [(0, 1), (0, 2), (1, 2)] {
-            assert_ne!(
-                carried[first].item_colour, carried[second].item_colour,
-                "items {} and {} are carried in the same colour",
-                bundles[first], bundles[second]
-            );
+        // Four bundles, four colours: canvas, iron, firewood and cut stone are what a
+        // player is carrying, and two that looked alike would be slots they had to count.
+        for first in 0..bundles.len() {
+            for second in first + 1..bundles.len() {
+                assert_ne!(
+                    carried[first].item_colour, carried[second].item_colour,
+                    "items {} and {} are carried in the same colour",
+                    bundles[first], bundles[second]
+                );
+            }
         }
 
         // And an id none of them names is still the placeholder rather than a bundle.

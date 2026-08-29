@@ -758,6 +758,7 @@ fn station_note(station: StructureKind) -> String {
         StructureKind::Forge => "forge",
         StructureKind::Tent => "tent",
         StructureKind::Campfire => "campfire",
+        StructureKind::Runestone => "runestone",
     };
     format!("requires a {name} nearby")
 }

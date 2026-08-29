@@ -1,4 +1,4 @@
-//! Tents and forges, drawn from the newest authoritative snapshot, and the two requests
+//! Structures, drawn from the newest authoritative snapshot, and the two requests
 //! that ask for one.
 //!
 //! A structure exists exactly while the newest snapshot names its id — the same rule
@@ -8,9 +8,11 @@
 //!
 //! **Nothing appears locally when a placement is asked for.** A `PlaceStructureRequest`
 //! leaves and that is all: the server owns reach, whether the footprint is clear and
-//! supported, whether the slot really holds a tent, and whether this player is allowed
-//! another one. A refusal is silence, exactly as it is for a block edit, so there is no
-//! ghost to withdraw and no deadline to withdraw it on.
+//! supported, whether the slot really holds a structure item, and whether this player is
+//! allowed another one. A refusal may update the status line through `ActionRefused` —
+//! including `Warded` for placement, edit and mine — but it changes no local world state,
+//! so there is no ghost to withdraw and no deadline to withdraw it on. Removal refusals
+//! stay silent.
 //!
 //! **Structures never move**, so they are not on the entity-motion path at all. There is
 //! no position and no velocity in `StructureState` — an anchor cell and a `Facing` say
@@ -20,11 +22,11 @@
 //!
 //! ## The footprint arithmetic mirrors the server's, and must stay in step with it
 //!
-//! [`TENT_FOOTPRINT`], [`FORGE_FOOTPRINT`], [`TENT_HEADROOM`], [`FORGE_HEADROOM`] and
-//! [`rotate_offset`] are copies of `tentFootprint`, `forgeFootprint`, `tentHeadroom`,
-//! `forgeHeadroom` and `rotateOffset` in `server/internal/game/structure.go`. The server
-//! validates the footprint and this side draws it; a mismatch is a tent that visibly does
-//! not cover the ground the server says it covers.
+//! [`TENT_FOOTPRINT`], [`FORGE_FOOTPRINT`], [`CAMPFIRE_FOOTPRINT`],
+//! [`RUNESTONE_FOOTPRINT`] and their headrooms are copies of the tables in
+//! `server/internal/game/structure.go`. [`rotate_offset`] mirrors `rotateOffset` there.
+//! The server validates the footprint and this side draws it; a mismatch is a structure
+//! that visibly does not cover the ground the server says it covers.
 //!
 //! **The anchor is the ground cell**, on both sides. The structure stands in the air
 //! *above* it, which is why every mesh below is authored from a base plane one block over
@@ -32,6 +34,8 @@
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::camera::{AimCamera, WorldCamera};
@@ -55,16 +59,17 @@ const PLACE_BUTTON: MouseButton = MouseButton::Right;
 /// The control that takes one back — the same press that mines and swings.
 const REMOVE_BUTTON: MouseButton = MouseButton::Left;
 
-/// The three items that plant a structure, as `server/internal/game/items.go` appends
+/// The four items that plant a structure, as `server/internal/game/items.go` appends
 /// them.
 ///
 /// Presentation and routing only, exactly as [`combat::ITEM_RUSTY_SWORD`] is. They cannot
-/// make another item plantable and they cannot make these three legal: the server reads
+/// make another item plantable and they cannot make these four legal: the server reads
 /// its own registry, and a placement naming a slot of stone is refused there whatever
 /// these constants say.
 pub(super) const ITEM_FORGE: u16 = 8;
 pub(super) const ITEM_TENT: u16 = 9;
 pub(super) const ITEM_CAMPFIRE: u16 = 12;
+pub(super) const ITEM_RUNESTONE: u16 = 39;
 
 /// Modes whose UI owns the view instead of the 3D world. The same rule mobs and drops
 /// obey — a snapshot-driven visual is hidden while a panel owns the screen, and hidden
@@ -107,6 +112,8 @@ const FORGE_FOOTPRINT: [[i32; 2]; 2] = [[0, 0], [0, -1]];
 /// cells the same way whether or not the answer moves.
 const CAMPFIRE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
 
+const RUNESTONE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
+
 /// How many cells of air each kind needs above every cell of its footprint.
 ///
 /// Two for a tent, because a player has to be able to stand up inside the thing they
@@ -115,6 +122,7 @@ const CAMPFIRE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
 const TENT_HEADROOM: i32 = 2;
 const FORGE_HEADROOM: i32 = 1;
 const CAMPFIRE_HEADROOM: i32 = 1;
+const RUNESTONE_HEADROOM: i32 = 3;
 
 /// Every kind this module draws, so a fold over the whole contract has one place to read.
 ///
@@ -124,10 +132,11 @@ const CAMPFIRE_HEADROOM: i32 = 1;
 /// admits a member only in the commit that teaches this module to draw it, so whoever adds
 /// one is already standing here. A member missing from this list costs preview cells and
 /// nothing worse; [`MAX_FOOTPRINT_CELLS`] is where that bound is kept.
-const ALL_STRUCTURE_KINDS: [StructureKind; 3] = [
+const ALL_STRUCTURE_KINDS: [StructureKind; 4] = [
     StructureKind::Tent,
     StructureKind::Forge,
     StructureKind::Campfire,
+    StructureKind::Runestone,
 ];
 
 /// The footprint offsets for one kind, in the canonical North orientation.
@@ -139,6 +148,7 @@ const fn footprint_offsets(kind: StructureKind) -> &'static [[i32; 2]] {
         StructureKind::Tent => &TENT_FOOTPRINT,
         StructureKind::Forge => &FORGE_FOOTPRINT,
         StructureKind::Campfire => &CAMPFIRE_FOOTPRINT,
+        StructureKind::Runestone => &RUNESTONE_FOOTPRINT,
     }
 }
 
@@ -148,6 +158,7 @@ fn headroom(kind: StructureKind) -> i32 {
         StructureKind::Tent => TENT_HEADROOM,
         StructureKind::Forge => FORGE_HEADROOM,
         StructureKind::Campfire => CAMPFIRE_HEADROOM,
+        StructureKind::Runestone => RUNESTONE_HEADROOM,
     }
 }
 
@@ -417,6 +428,7 @@ pub(super) fn structure_in_hand(item_id: Option<u16>) -> Option<StructureKind> {
         ITEM_TENT => Some(StructureKind::Tent),
         ITEM_FORGE => Some(StructureKind::Forge),
         ITEM_CAMPFIRE => Some(StructureKind::Campfire),
+        ITEM_RUNESTONE => Some(StructureKind::Runestone),
         _ => None,
     }
 }
@@ -847,6 +859,18 @@ const FIRE_FLAME_TIP_HEIGHT: f32 = 0.30;
 /// Charred wood: what is left of a log that has been burning a while.
 const CHARRED_WOOD: Color = Color::linear_rgb(0.10, 0.07, 0.05);
 
+/// A tapered 0.8 x 3 x 0.5 monolith inside its validated envelope.
+const RUNESTONE_BASE: Vec2 = Vec2::new(0.8, 0.5);
+const RUNESTONE_TOP: Vec2 = Vec2::new(0.58, 0.34);
+const RUNESTONE_HEIGHT: f32 = 3.0;
+const RUNE_STROKE: f32 = 0.065;
+
+/// Ownership shades only; neither colour exposes the ward boundary.
+const RUNESTONE_OTHER: Color = Color::linear_rgb(0.20, 0.22, 0.24);
+const RUNESTONE_OWN: Color = Color::linear_rgb(0.38, 0.41, 0.44);
+const RUNE_OTHER: Color = Color::linear_rgb(0.54, 0.58, 0.61);
+const RUNE_OWN: Color = Color::linear_rgb(0.72, 0.76, 0.79);
+
 /// The colour, the brightness and the reach of a campfire's light.
 ///
 /// **The reach is a presentation choice and is documented as one.** The server decides
@@ -960,9 +984,13 @@ pub(super) struct StructureVisuals {
     fire_ring: Handle<Mesh>,
     fire_logs: Handle<Mesh>,
     fire_flame: Handle<Mesh>,
+    runestone: Handle<Mesh>,
+    rune: Handle<Mesh>,
     /// Indexed by `usize::from(own)`, so the two shades cannot drift apart in a `match`.
     canvas: [Handle<StandardMaterial>; 2],
     stone: [Handle<StandardMaterial>; 2],
+    runestone_stone: [Handle<StandardMaterial>; 2],
+    rune_stone: [Handle<StandardMaterial>; 2],
     iron: Handle<StandardMaterial>,
     ember: Handle<StandardMaterial>,
     charred: Handle<StandardMaterial>,
@@ -1007,6 +1035,8 @@ pub(super) fn create_visuals(
         fire_ring: meshes.add(fire_ring_mesh()),
         fire_logs: meshes.add(fire_logs_mesh()),
         fire_flame: meshes.add(fire_flame_mesh()),
+        runestone: meshes.add(runestone_mesh()),
+        rune: meshes.add(rune_mesh()),
         canvas: [
             materials.add(canvas(CANVAS_OTHER)),
             materials.add(canvas(CANVAS_OWN)),
@@ -1014,6 +1044,14 @@ pub(super) fn create_visuals(
         stone: [
             materials.add(rock(HEARTH_OTHER)),
             materials.add(rock(HEARTH_OWN)),
+        ],
+        runestone_stone: [
+            materials.add(rock(RUNESTONE_OTHER)),
+            materials.add(rock(RUNESTONE_OWN)),
+        ],
+        rune_stone: [
+            materials.add(rock(RUNE_OTHER)),
+            materials.add(rock(RUNE_OWN)),
         ],
         iron: materials.add(StandardMaterial {
             base_color: IRON,
@@ -1174,6 +1212,97 @@ fn fire_flame_mesh() -> Mesh {
     flame
 }
 
+/// Twenty-four vertices give each cut-stone face its own normal.
+fn runestone_mesh() -> Mesh {
+    let bottom = RUNESTONE_BASE / 2.0;
+    let top = RUNESTONE_TOP / 2.0;
+    let corners = [
+        Vec3::new(-bottom.x, 0.0, -bottom.y),
+        Vec3::new(bottom.x, 0.0, -bottom.y),
+        Vec3::new(bottom.x, 0.0, bottom.y),
+        Vec3::new(-bottom.x, 0.0, bottom.y),
+        Vec3::new(-top.x, RUNESTONE_HEIGHT, -top.y),
+        Vec3::new(top.x, RUNESTONE_HEIGHT, -top.y),
+        Vec3::new(top.x, RUNESTONE_HEIGHT, top.y),
+        Vec3::new(-top.x, RUNESTONE_HEIGHT, top.y),
+    ];
+
+    let mut positions = Vec::with_capacity(24);
+    let mut normals = Vec::with_capacity(24);
+    let mut uvs = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+    let mut face = |quad: [usize; 4]| {
+        let first = positions.len() as u32;
+        let [a, b, c, d] = quad.map(|index| corners[index]);
+        let normal = (b - a).cross(c - a).normalize();
+        positions.extend([a.to_array(), b.to_array(), c.to_array(), d.to_array()]);
+        normals.extend([normal.to_array(); 4]);
+        uvs.extend([[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        indices.extend([first, first + 1, first + 2, first, first + 2, first + 3]);
+    };
+
+    // Front is -Z in the canonical North orientation. Every ring is wound outward.
+    face([0, 4, 5, 1]);
+    face([1, 5, 6, 2]);
+    face([2, 6, 7, 3]);
+    face([3, 7, 4, 0]);
+    face([4, 7, 6, 5]);
+    face([3, 0, 1, 2]);
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+/// A front-facing Fehu rune: three quads projected onto the slope, clear of z-fighting.
+fn rune_mesh() -> Mesh {
+    let front_z = |y: f32| {
+        let half_depth = RUNESTONE_BASE.y / 2.0
+            + (RUNESTONE_TOP.y - RUNESTONE_BASE.y) * (y / RUNESTONE_HEIGHT) / 2.0;
+        -half_depth - 0.006
+    };
+    let bar = |from: Vec2, to: Vec2| {
+        let along = (to - from).normalize();
+        let across = Vec2::new(-along.y, along.x) * (RUNE_STROKE / 2.0);
+        let points = [from - across, from + across, to + across, to - across];
+        let positions: Vec<[f32; 3]> = points
+            .into_iter()
+            .map(|point| [point.x, point.y, front_z(point.y)])
+            .collect();
+        let a = Vec3::from_array(positions[0]);
+        let b = Vec3::from_array(positions[1]);
+        let c = Vec3::from_array(positions[2]);
+        let normal = (b - a).cross(c - a).normalize();
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![normal.to_array(); 4])
+        .with_inserted_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+        )
+        .with_inserted_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]))
+    };
+
+    let mut rune = bar(Vec2::new(-0.12, 0.58), Vec2::new(-0.12, 2.48));
+    merge_all(
+        &mut rune,
+        [
+            bar(Vec2::new(-0.12, 2.28), Vec2::new(0.22, 2.53)),
+            bar(Vec2::new(-0.12, 1.72), Vec2::new(0.20, 2.00)),
+        ],
+        "runestone rune",
+    );
+    rune
+}
+
 /// Where a campfire's light sits: in the flame, a little above the logs.
 fn fire_light_height() -> f32 {
     RING_STONE.y + FIRE_LOG_THICKNESS * 2.0 + FIRE_FLAME_BASE_HEIGHT / 2.0
@@ -1270,6 +1399,14 @@ fn spawn_structure(
                     part(visuals.fire_flame.clone(), visuals.ember.clone());
                 }
                 structure.lit
+            }
+            StructureKind::Runestone => {
+                part(
+                    visuals.runestone.clone(),
+                    visuals.runestone_stone[own].clone(),
+                );
+                part(visuals.rune.clone(), visuals.rune_stone[own].clone());
+                false
             }
         };
 
@@ -1409,6 +1546,7 @@ mod tests {
             &TENT_FOOTPRINT[..],
             &FORGE_FOOTPRINT[..],
             &CAMPFIRE_FOOTPRINT[..],
+            &RUNESTONE_FOOTPRINT[..],
         ] {
             for offset in offsets {
                 let turned = [Facing::East, Facing::South, Facing::West]
@@ -1477,6 +1615,11 @@ mod tests {
                 bounds(StructureKind::Campfire, facing, anchor),
                 (Vec3::new(4.0, 64.0, -7.0), Vec3::new(5.0, 65.0, -6.0)),
                 "a campfire facing {facing:?}"
+            );
+            assert_eq!(
+                bounds(StructureKind::Runestone, facing, anchor),
+                (Vec3::new(4.0, 64.0, -7.0), Vec3::new(5.0, 67.0, -6.0)),
+                "a runestone facing {facing:?}"
             );
         }
     }
@@ -1587,6 +1730,10 @@ mod tests {
             (
                 StructureKind::Campfire,
                 vec![fire_ring_mesh(), fire_logs_mesh(), fire_flame_mesh()],
+            ),
+            (
+                StructureKind::Runestone,
+                vec![runestone_mesh(), rune_mesh()],
             ),
         ] {
             // The box the server validated, moved into the local space the meshes are
@@ -1815,6 +1962,14 @@ mod tests {
         }
     }
 
+    fn runestone_at(structure_id: u64, anchor: [i32; 3], owner: u64) -> StructureState {
+        StructureState {
+            kind: StructureKind::Runestone,
+            facing: Facing::West,
+            ..tent_at(structure_id, anchor, owner)
+        }
+    }
+
     /// A chunk store holding one chunk of air with `solid` set, in **world** coordinates.
     fn store_with(solid: &[IVec3]) -> ChunkStore {
         let mut chunk = VoxelChunk::all_air(usize::from(SIZE));
@@ -2038,7 +2193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_with_two_structures_stands_them_up() {
+    fn a_snapshot_with_each_structure_kind_stands_them_up() {
         let mut app = aiming_app(store_with(&[]));
         deliver(
             &mut app,
@@ -2046,6 +2201,8 @@ mod tests {
             vec![
                 tent_at(900, [3, 80, 0], LOCAL_ID),
                 forge_at(901, [8, 80, 4], OTHER_ID),
+                campfire_at(902, [12, 80, 0], LOCAL_ID),
+                runestone_at(903, [16, 80, 0], OTHER_ID),
             ],
         );
         app.update();
@@ -2055,6 +2212,8 @@ mod tests {
             vec![
                 (900, StructureKind::Tent, true),
                 (901, StructureKind::Forge, false),
+                (902, StructureKind::Campfire, true),
+                (903, StructureKind::Runestone, false),
             ]
         );
     }
@@ -2136,6 +2295,27 @@ mod tests {
         ] {
             assert!(meshes.contains(&want), "{name} was not drawn");
         }
+    }
+
+    #[test]
+    fn a_runestone_draws_its_monolith_and_front_rune() {
+        let mut app = aiming_app(store_with(&[]));
+        deliver(&mut app, 1, vec![runestone_at(900, [3, 80, 0], LOCAL_ID)]);
+        app.update();
+
+        let (monolith, rune, body_material, rune_material) = {
+            let visuals = app.world().resource::<StructureVisuals>();
+            (
+                visuals.runestone.clone(),
+                visuals.rune.clone(),
+                visuals.runestone_stone[1].clone(),
+                visuals.rune_stone[1].clone(),
+            )
+        };
+        let drawn = parts(&mut app);
+        assert_eq!(drawn.len(), 2);
+        assert!(drawn.contains(&(monolith, body_material)));
+        assert!(drawn.contains(&(rune, rune_material)));
     }
 
     /// A player has to be able to tell their own camp from somebody else's at a glance.
@@ -2493,10 +2673,10 @@ mod tests {
 
     /// A campfire in hand routes the place press to a structure request, not a block edit.
     ///
-    /// The same predicate the tent and the forge go through, so the two intents stay
+    /// The same predicate every structure item goes through, so the two intents stay
     /// mutually exclusive rather than merely unlikely to overlap.
     #[test]
-    fn a_campfire_in_hand_asks_for_a_structure_rather_than_a_voxel() {
+    fn a_structure_item_in_hand_asks_for_a_structure_rather_than_a_voxel() {
         assert_eq!(
             structure_in_hand(Some(ITEM_CAMPFIRE)),
             Some(StructureKind::Campfire)
@@ -2504,6 +2684,10 @@ mod tests {
         assert_eq!(
             structure_in_hand(Some(ITEM_TENT)),
             Some(StructureKind::Tent)
+        );
+        assert_eq!(
+            structure_in_hand(Some(ITEM_RUNESTONE)),
+            Some(StructureKind::Runestone)
         );
         assert_eq!(structure_in_hand(None), None);
         assert_eq!(structure_in_hand(Some(ITEM_IRON_SWORD)), None);
@@ -3105,6 +3289,74 @@ mod tests {
                 "the {what} mesh has {got} vertices and its parts add up to {want}: \
                  a merge was refused and the part is missing"
             );
+        }
+    }
+
+    /// The standing stone has the named dimensions, taper and three-quad front rune.
+    #[test]
+    fn the_runestone_is_a_tapered_monolith_with_three_front_quads() {
+        let monolith = runestone_mesh();
+        let positions = monolith
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("the monolith carries positions");
+        let min = positions
+            .iter()
+            .fold(Vec3::splat(f32::INFINITY), |min, point| {
+                min.min(Vec3::from_array(*point))
+            });
+        let max = positions
+            .iter()
+            .fold(Vec3::splat(f32::NEG_INFINITY), |max, point| {
+                max.max(Vec3::from_array(*point))
+            });
+        assert!(
+            (max - min).abs_diff_eq(Vec3::new(0.8, 3.0, 0.5), 1e-6),
+            "the monolith spans {:?}",
+            max - min
+        );
+
+        let bottom_width = positions
+            .iter()
+            .filter(|point| point[1] == 0.0)
+            .map(|point| point[0].abs())
+            .fold(0.0f32, f32::max)
+            * 2.0;
+        let top_width = positions
+            .iter()
+            .filter(|point| point[1] == RUNESTONE_HEIGHT)
+            .map(|point| point[0].abs())
+            .fold(0.0f32, f32::max)
+            * 2.0;
+        assert_eq!(bottom_width, RUNESTONE_BASE.x);
+        assert_eq!(top_width, RUNESTONE_TOP.x);
+        assert!(top_width < bottom_width, "the monolith does not taper");
+
+        let rune = rune_mesh();
+        assert_eq!(rune.count_vertices(), 12, "the rune is exactly three quads");
+        assert_eq!(
+            rune.indices().expect("the rune is indexed").len(),
+            18,
+            "each rune quad is two triangles"
+        );
+        let rune_positions = rune
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("the rune carries positions");
+        assert!(rune_positions.iter().all(|point| point[2] < 0.0));
+        let normals = rune
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .and_then(|values| values.as_float3())
+            .expect("the rune carries normals");
+        assert!(
+            normals.iter().all(|normal| normal[2] < 0.0),
+            "the rune is not front-facing"
+        );
+
+        for (body, cut) in [(RUNESTONE_OTHER, RUNE_OTHER), (RUNESTONE_OWN, RUNE_OWN)] {
+            let body = body.to_linear();
+            let cut = cut.to_linear();
+            assert!(cut.red > body.red && cut.green > body.green && cut.blue > body.blue);
         }
     }
 }

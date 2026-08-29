@@ -615,11 +615,11 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         }
         RefusalReason::SlotUnusable => Some("what you are holding does not build anything"),
         RefusalReason::InventoryBusy => Some("your pack was busy; try again"),
-        RefusalReason::TentAlreadyPlaced => Some("you already have a tent standing"),
-        // V26's one, and the only new reason that *is* about a placement. It names no
-        // owner because the contract does not carry one: a line saying whose ward it was
-        // would be this build inventing the half the server deliberately withheld.
-        RefusalReason::Warded => Some("this ground is warded"),
+        RefusalReason::TentAlreadyPlaced => {
+            Some("you already have as many of these standing as allowed")
+        }
+        // V26's ward has its own whole sentence below for edit, mine and structure place.
+        RefusalReason::Warded => None,
         RefusalReason::TooFast
         | RefusalReason::PartyFull
         | RefusalReason::NoSuchPlayer
@@ -703,6 +703,10 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     };
 
     match (refused.action, refused.reason) {
+        (
+            RefusedAction::EditBlock | RefusedAction::MineBlock | RefusedAction::PlaceStructure,
+            RefusalReason::Warded,
+        ) => Some("This ground is warded by another's runestone".to_owned()),
         (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
         (RefusedAction::Trade, _) => trade_reason.map(str::to_owned),
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
@@ -1424,8 +1428,9 @@ mod tests {
                  and for nothing else"
             );
             if let Some(line) = shown {
-                // The map's three are whole sentences rather than the "Cannot X: y" shape,
-                // deliberately: a notebook that is full has a number worth reading.
+                // Map, trade and ward answers are whole sentences rather than the
+                // "Cannot X: y" shape. A ward covers three different world actions, so
+                // naming one verb would be wrong for two of them.
                 assert!(
                     line.starts_with("Cannot ")
                         || line == "No arrows"
@@ -1434,7 +1439,8 @@ mod tests {
                         || line == "That mark is already gone"
                         || line == "They have nothing to trade"
                         || line == "Not enough silver"
-                        || line == "They do not want that",
+                        || line == "They do not want that"
+                        || line == "This ground is warded by another's runestone",
                     "{reason:?} -> {line}"
                 );
             }
@@ -1639,10 +1645,9 @@ mod tests {
 
     /// An action this build has no verb for says nothing, whatever the reason is.
     ///
-    /// Placement is the only action a server fills this message in for today; the rest of
-    /// `RefusedAction` is reserved by the contract and becomes real in its own issue. A
-    /// mining refusal shown with the placement's sentence would be worse than silence: it
-    /// would be the wrong answer, confidently.
+    /// Edit and mine have a sentence only for `Warded`, the one reason the server now
+    /// answers for them. A mining refusal shown with a placement sentence for any other
+    /// reason would be worse than silence: it would be the wrong answer, confidently.
     #[test]
     fn a_refusal_for_an_action_this_build_has_no_verb_for_says_nothing() {
         for action in [
@@ -1658,6 +1663,26 @@ mod tests {
                 anchor: None,
             };
             assert_eq!(describe_refusal(&refused), None, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn a_warded_world_action_names_another_players_runestone() {
+        for action in [
+            RefusedAction::EditBlock,
+            RefusedAction::MineBlock,
+            RefusedAction::PlaceStructure,
+        ] {
+            assert_eq!(
+                describe_refusal(&ActionRefused {
+                    action,
+                    reason: RefusalReason::Warded,
+                    anchor: Some(crate::net::BlockCoord { x: 2, y: 63, z: -4 }),
+                })
+                .as_deref(),
+                Some("This ground is warded by another's runestone"),
+                "{action:?}"
+            );
         }
     }
 
@@ -1949,7 +1974,8 @@ mod tests {
         assert_eq!(notice_line(&mut app), "", "the notice expired");
     }
 
-    /// The newest refusal wins, rather than the oldest holding the line.
+    /// The newest refusal wins. The cap sentence fits both a second tent and a third
+    /// runestone because the server shares one reason and sends no structure kind.
     ///
     /// Two refusals are two different answers and there is one line to show them in. The
     /// one worth reading is the one about the press the player just made.
@@ -1967,7 +1993,7 @@ mod tests {
 
         assert_eq!(
             notice_line(&mut app),
-            "Cannot build here: you already have a tent standing"
+            "Cannot build here: you already have as many of these standing as allowed"
         );
     }
 
