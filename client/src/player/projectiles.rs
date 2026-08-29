@@ -29,7 +29,12 @@ const ARROW_FLETCH_THICKNESS: f32 = 0.012;
 const ORB_DIAMETER: f32 = 0.3;
 const TRAIL_OFFSETS: [f32; 2] = [0.22, 0.38];
 const TRAIL_SCALES: [f32; 2] = [0.62, 0.38];
-const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
+const HIDDEN_INPUT_MODES: [InputMode; 4] = [
+    InputMode::Inventory,
+    InputMode::Loot,
+    InputMode::Vendor,
+    InputMode::Menu,
+];
 
 const ORB_COLOUR: Color = Color::linear_rgb(0.12, 0.95, 0.32);
 const ORB_EMISSIVE: LinearRgba = LinearRgba::rgb(1.0, 8.0, 2.4);

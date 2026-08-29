@@ -120,7 +120,7 @@ struct SilverReadout;
 /// The number inside the readout, kept off the container so a refresh writes text and
 /// nothing else.
 #[derive(Component)]
-struct SilverCount;
+pub(super) struct SilverCount;
 
 /// Where the inventory was last put during this run.
 ///
@@ -515,7 +515,7 @@ fn spawn_inventory_screen(mut commands: Commands) {
                         });
                     // Last of the window's children, so it draws over whichever tab is
                     // occupying the content area beneath it.
-                    spawn_silver_readout(panel);
+                    spawn_silver_readout(panel, INVENTORY_WINDOW_PADDING);
                 });
             overlay.spawn(tooltip_bundle(SlotTooltip));
         });
@@ -538,22 +538,24 @@ fn tab_panel_node(display: Display) -> Node {
 
 /// The coin and the count, anchored in the window's bottom-right corner.
 ///
-/// Absolutely positioned and inset by [`INVENTORY_WINDOW_PADDING`], which puts it inside the
-/// window's own padding rather than against its edge: an absolute child's inset is measured
-/// from the padding box, so a zero here would sit the coin on the frame.
+/// Absolutely positioned and inset by `inset`, which puts it inside the host window's own
+/// padding rather than against its edge: an absolute child's inset is measured from the
+/// padding box, so a zero here would sit the coin on the frame. The inset is a parameter
+/// because there are two windows with a purse in the corner now — this one and the stall of
+/// #459 — and they are padded differently.
 ///
 /// `FocusPolicy::Pass` on the container is load-bearing and the omission is silent — a node
 /// with no policy blocks — and it is the same trap `ui::icon::host_bundle` records: this
 /// overlays the bottom of whichever tab panel is showing, and a readout that took the pointer
 /// would make a strip of that panel unclickable with nothing to see.
-fn spawn_silver_readout(panel: &mut ChildSpawnerCommands<'_>) {
+pub(super) fn spawn_silver_readout(panel: &mut ChildSpawnerCommands<'_>, inset: f32) {
     panel
         .spawn((
             SilverReadout,
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(INVENTORY_WINDOW_PADDING),
-                bottom: Val::Px(INVENTORY_WINDOW_PADDING),
+                right: Val::Px(inset),
+                bottom: Val::Px(inset),
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
@@ -617,7 +619,7 @@ fn silver_icon() -> Option<StackIcon> {
 /// hotbar and equipment included. No equipment slot can hold silver — the server's registry
 /// names no body location for it — so the sum is simply the total, and reading it this way
 /// is what keeps this client from having a second opinion about which slots money may sit in.
-fn refresh_silver_readout(
+pub(super) fn refresh_silver_readout(
     inventory: Option<Res<Inventory>>,
     mut counts: Query<&mut Text, With<SilverCount>>,
 ) {
