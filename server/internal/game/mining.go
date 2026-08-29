@@ -315,6 +315,20 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 	if distance := distanceToVoxel(p.pos, target); distance > EditReach {
 		return fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, EditReach)
 	}
+	// Beside the reach check, under the lock this function already holds. It is the one
+	// mining refusal that reaches the player — see [ErrWarded]; every other one on this
+	// path stays silence plus a debug line, because every other one is about a target the
+	// client can see for itself is wrong.
+	//
+	// At target acquisition, which is where reach is judged too. A stone raised while
+	// somebody is already mining does not reach backwards and cancel their progress; the
+	// tick that follows keeps paying hardness on the target it had already judged, and
+	// the next target they choose is refused. Bounded by the one block already in
+	// progress, and it is the same shape of residual the reach check accepts between the
+	// tick and the write.
+	if p.sim.wardedAgainstLocked(target, p.playerID) {
+		return fmt.Errorf("%w at %v", ErrWarded, target)
+	}
 
 	block, resident := p.sim.terrain.Block(target[0], target[1], target[2])
 	if !resident {

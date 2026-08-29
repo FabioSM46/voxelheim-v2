@@ -122,6 +122,17 @@ const (
 	ItemPlanks
 	ItemCobblestone
 	ItemThatch
+
+	// The monolith a player raises to claim the ground around it. Appended for the
+	// reason every id above was — iota renumbers everything after an insertion, and this
+	// number is in a client's pack the moment somebody forges one — and pinned by a
+	// test.
+	//
+	// **It is the fourth item that plants an entity rather than a voxel**, on exactly the
+	// tent's, the forge's and the fire's terms. What is new about it is not the item: it
+	// is what the *placed* structure does to the ground, which is structure.go's ward and
+	// is said nowhere here.
+	ItemRunestone
 )
 
 // What each blade is worth, and the only copy of it.
@@ -326,6 +337,12 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// clear of spawns, and that is a rule about the *placed* structure rather than about
 	// the item, so nothing here says it.
 	ItemCampfire: {places: world.Air, maxStack: 1},
+
+	// The runestone, on those same terms: no block, one to a slot, nothing that wears
+	// out. The ward it casts is a property of the standing stone rather than of the
+	// carried one, so — exactly as with the campfire's suppression radius — no column
+	// here says anything about it.
+	ItemRunestone: {places: world.Air, maxStack: 1},
 
 	// The forge's own products. The blade is equipment on the same terms the rusty one
 	// is: one to a slot, its own wear, its own damage.

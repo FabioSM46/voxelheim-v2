@@ -11,6 +11,7 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -553,6 +554,38 @@ func TestMineRequestForAnUndeliveredChunkIsSilent(t *testing.T) {
 	}
 	if sim.Count() != 1 {
 		t.Error("a refused MineRequest ended the admitted session")
+	}
+}
+
+func TestWardedEditAndMineRefusalsReachTheWire(t *testing.T) {
+	t.Parallel()
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
+	ground := surfaceUnderSpawn(cfg.WorldSeed)
+	if err := sim.RestoreStructures([]game.Structure{{
+		Kind: vnet.StructureKindRunestone, Anchor: ground, Facing: vnet.FacingNorth,
+		Owner: identity.PlayerID{99},
+	}}); err != nil {
+		t.Fatalf("RestoreStructures: %v", err)
+	}
+
+	placed := ground
+	placed[1]++
+	conn.in <- placeRequest(placed, 0, 1)
+	conn.in <- mineRequest(ground, 1)
+	waitUntil(t, "both ward refusals", func() bool { return len(frames.actionRefusals()) == 2 })
+
+	want := []protocol.ActionRefused{
+		{Action: vnet.RefusedActionEdit, Reason: vnet.RefusalReasonWarded, Anchor: placed, HasAnchor: true},
+		{Action: vnet.RefusedActionMine, Reason: vnet.RefusalReasonWarded, Anchor: ground, HasAnchor: true},
+	}
+	got := frames.actionRefusals()
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("refusal %d = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 

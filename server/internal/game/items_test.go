@@ -41,6 +41,22 @@ func TestEveryItemIsRegisteredWithItsOwnStackLimitAndPlacement(t *testing.T) {
 	}
 }
 
+func TestTheRunestoneCarriesItsAppendedIDAndRegistryRow(t *testing.T) {
+	t.Parallel()
+
+	if ItemRunestone != 39 {
+		t.Errorf("runestone item id = %d, want appended wire id 39", ItemRunestone)
+	}
+	got, registered := itemByID(ItemRunestone)
+	if !registered {
+		t.Fatal("the runestone is not registered")
+	}
+	want := itemDefinition{places: world.Air, maxStack: 1}
+	if got != want {
+		t.Errorf("runestone registry row = %+v, want %+v", got, want)
+	}
+}
+
 func TestBothMeatsCarryTheirPinnedIDsAndResourceStats(t *testing.T) {
 	t.Parallel()
 

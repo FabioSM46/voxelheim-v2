@@ -229,6 +229,16 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		ingredients: []ingredient{{ItemLog, 3}, {ItemBone, 2}, {ItemRawCoal, 1}},
 		product:     ItemWoodenSceptre, productCount: 1,
 	},
+
+	// The runestone, and the forge is what makes it: eight stone and two raw iron, which
+	// is the forge's own price with the coal swapped for the iron the stone has to be cut
+	// with. It is deliberately the most expensive thing on this table that is not a
+	// weapon — what it buys is not an object but ground, and a claim nobody had to work
+	// for is a claim everybody plants.
+	vnet.RecipeIDRunestone: {
+		ingredients: []ingredient{{ItemStone, 8}, {ItemRawIron, 2}}, product: ItemRunestone, productCount: 1,
+		station: vnet.StructureKindForge, experience: 10,
+	},
 }
 
 // craft spends a recipe's ingredients and inserts its product, or changes nothing.

@@ -49,6 +49,13 @@ const EditReach = 4.5
 // now the only client intent that can make a voxel become Air.
 var ErrBreakActionWithdrawn = errors.New("EditAction.Break is withdrawn; use MineRequest")
 
+// ErrWarded is the one refused edit and the one refused mining intent a player is told
+// about.
+//
+// A sentinel lets the session route on identity while every other refusal remains silent.
+// A ward is the exception because retrying cannot explain why that ground is unavailable.
+var ErrWarded = errors.New("the ground is warded by another player's runestone")
+
 // Editor is the world an edit is applied to.
 //
 // **Separate from Terrain because it is allowed to block.** Terrain is read on the tick
@@ -127,6 +134,11 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	p.sim.mu.Lock()
 	origin := p.pos
 	actErr := p.cannotActLocked()
+	// Read under this lock rather than after it, because the ward map is simulation state
+	// and is rebuilt under exactly this mutex. Evaluated below, beside the reach check it
+	// belongs with — reading it here and answering there is what keeps this function's
+	// one critical section one.
+	warded := p.sim.wardedAgainstLocked(target, p.playerID)
 	p.sim.mu.Unlock()
 
 	if actErr != nil {
@@ -138,6 +150,15 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 
 	if distance := distanceToVoxel(origin, target); distance > EditReach {
 		return EditResult{}, fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, EditReach)
+	}
+
+	// Beside the reach check, and deliberately **not** inside allowPlacement below.
+	// That predicate is evaluated inside the critical section that replaces the voxel,
+	// where every chunk being composed anywhere in the server is waiting — it must stay
+	// pure and must not block, and a ward lives behind a different lock. The ward is a
+	// rule about *who is asking*, which the block that is there cannot answer anyway.
+	if warded {
+		return EditResult{}, fmt.Errorf("%w at %v", ErrWarded, target)
 	}
 
 	// Last thing before the write, and it is a check rather than a guarantee: a tick

@@ -363,6 +363,7 @@ func TestAStructureIsPlantedOnGroundThatHoldsItAtEveryFacing(t *testing.T) {
 		{"tent", ItemTent, vnet.StructureKindTent},
 		{"forge", ItemForge, vnet.StructureKindForge},
 		{"campfire", ItemCampfire, vnet.StructureKindCampfire},
+		{"runestone", ItemRunestone, vnet.StructureKindRunestone},
 	} {
 		for _, facing := range []vnet.Facing{vnet.FacingNorth, vnet.FacingEast, vnet.FacingSouth, vnet.FacingWest} {
 			h := newStructureHarness(t)
@@ -898,6 +899,7 @@ func TestBreakingAnySupportingBlockCollapsesTheStructure(t *testing.T) {
 		{"tent", ItemTent, vnet.StructureKindTent},
 		{"forge", ItemForge, vnet.StructureKindForge},
 		{"campfire", ItemCampfire, vnet.StructureKindCampfire},
+		{"runestone", ItemRunestone, vnet.StructureKindRunestone},
 	} {
 		anchor := [3]int64{0, 63, 0}
 		cells, _, _ := footprintOf(kind.wanted, vnet.FacingNorth, anchor)
