@@ -704,7 +704,11 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
 
     match (refused.action, refused.reason) {
         (
-            RefusedAction::EditBlock | RefusedAction::MineBlock | RefusedAction::PlaceStructure,
+            RefusedAction::EditBlock
+            | RefusedAction::MineBlock
+            | RefusedAction::Edit
+            | RefusedAction::Mine
+            | RefusedAction::PlaceStructure,
             RefusalReason::Warded,
         ) => Some("This ground is warded and not yours to dig or build on".to_owned()),
         (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
@@ -1671,6 +1675,8 @@ mod tests {
         for action in [
             RefusedAction::EditBlock,
             RefusedAction::MineBlock,
+            RefusedAction::Edit,
+            RefusedAction::Mine,
             RefusedAction::PlaceStructure,
         ] {
             assert_eq!(

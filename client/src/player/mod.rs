@@ -2095,6 +2095,10 @@ fn spawn_body(
             walk,
             camera::DeathFall::newly_seen(dead),
             placed,
+            // Every rendered child carries `InheritedVisibility`, whose hierarchy
+            // propagation requires the parent to carry it too. Remote players and
+            // residents keep this inherited value; the local body overrides it below.
+            Visibility::Inherited,
         ))
         .id();
     if local {
