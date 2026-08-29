@@ -127,11 +127,12 @@ type structure struct {
 	// doused says the rain over this structure's own column is heavy enough to have put
 	// it out. It means something for StructureKindCampfire and for nothing else.
 	//
-	// **Derived every tick and never stored**, which is why it sits here and not in
-	// [Structure]: [Sim.douseFiresLocked] recomputes it from the weather field before
-	// anything reads it, so it needs no persistence, no relighting mechanic and no
-	// migration. The zero value is a burning fire, which is the same direction the
-	// wire's `lit` default already fails in — a fire nobody has asked about is alight.
+	// **Derived from the weather field and never stored**, which is why it sits here and
+	// not in [Structure]: [Sim.douseFiresLocked] recomputes standing fires every tick,
+	// while [Player.PlaceStructure] computes a new fire before publishing it. It needs no
+	// persistence, no relighting mechanic and no migration. The zero value is a burning
+	// fire, which is the same direction the wire's `lit` default already fails in — a
+	// fire nobody has asked about is alight.
 	doused bool
 }
 
@@ -435,6 +436,9 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 		facing:      req.Facing,
 		owner:       p.playerID,
 		chunk:       world.ChunkOf(anchor[0], anchor[1], anchor[2]),
+	}
+	if kind == vnet.StructureKindCampfire {
+		placed.doused = p.sim.campfireDousedLocked(p.sim.worldTick, placed)
 	}
 	p.sim.structures[placed.structureID] = placed
 	p.sim.structuresDirty = true

@@ -218,6 +218,35 @@ func TestHeavyRainDousesACampfireAndLightRainRelightsIt(t *testing.T) {
 	}
 }
 
+// Placement can happen after the tick's fire pass. A new fire must therefore sample
+// its own weather before it enters the registry, or requests arriving before the next
+// tick could cook on it and the spawn director could count its cold ground as safe.
+func TestCampfirePlacedAfterTheWeatherPassIsDousedImmediately(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.stockPack(player, ingredient{item: ItemRawMeat, count: 1})
+
+	rain := protocol.WeatherState{Kind: vnet.WeatherKindRain, Intensity: WeatherHeavy}
+	h.sim.mu.Lock()
+	h.sim.weatherOverride = &rain
+	h.sim.mu.Unlock()
+
+	fire := h.plantCampfire(player, 1, [3]int32{0, 63, 0})
+	h.sim.mu.Lock()
+	doused := fire.doused
+	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	safe := h.sim.nearACampfireLocked(player.pos)
+	h.sim.mu.Unlock()
+	if !doused || station || safe {
+		t.Errorf("new fire under heavy rain doused=%t station=%t safe=%t, want true false false", doused, station, safe)
+	}
+	if _, err := h.craft(player, vnet.RecipeIDCookedMeat); err == nil {
+		t.Error("raw meat cooked on a campfire placed under heavy rain before the next tick")
+	}
+}
+
 // Two fires can disagree in one tick because the sample belongs to each anchor, not to
 // an owner or to the simulation as a whole. The search derives stable columns from the
 // deterministic field instead of pinning coordinates that would turn a weather retune

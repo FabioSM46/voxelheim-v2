@@ -187,8 +187,18 @@ func (s *Sim) douseFiresLocked(worldTick uint64) {
 		if held.kind != vnet.StructureKindCampfire {
 			continue
 		}
-		anchor := held.anchorVoxel()
-		over := [3]float64{float64(anchor[0]), float64(anchor[1]), float64(anchor[2])}
-		held.doused = rainDouses(s.weatherAtLocked(worldTick, over))
+		held.doused = s.campfireDousedLocked(worldTick, held)
 	}
+}
+
+// campfireDousedLocked samples the rain over one campfire at the world's current
+// clock. Besides the per-tick pass, placement calls this before publishing a new fire:
+// a fire planted after that pass must not spend the rest of the tick burning in heavy
+// rain merely because it did not exist when the pass began.
+//
+// The caller holds Sim.mu.
+func (s *Sim) campfireDousedLocked(worldTick uint64, held *structure) bool {
+	anchor := held.anchorVoxel()
+	over := [3]float64{float64(anchor[0]), float64(anchor[1]), float64(anchor[2])}
+	return rainDouses(s.weatherAtLocked(worldTick, over))
 }
