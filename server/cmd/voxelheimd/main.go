@@ -38,6 +38,12 @@ import (
 const (
 	minAcceptBackoff = 50 * time.Millisecond
 	maxAcceptBackoff = time.Second
+
+	stormPollInterval  = 10 * time.Second
+	missedStormWarning = time.Minute
+	stormWarningTenMin = 10 * time.Minute
+	stormWarningOneMin = time.Minute
+	stormWarningFinal  = 10 * time.Second
 )
 
 func main() {
@@ -80,6 +86,8 @@ type options struct {
 	handshakeTimeout    time.Duration
 	characterTimeout    time.Duration
 	idleTimeout         time.Duration
+	stormPeriod         time.Duration
+	nextStorm           string
 
 	logLevel  string
 	logFormat string
@@ -137,6 +145,10 @@ func parseFlags() options {
 		"how long an admitted session may say nothing before it is closed; seconds are safe because the client sends "+
 			"PlayerInput every tick — standing still and dead included — so a healthy client is never silent for "+
 			"longer than one tick interval. Must be at least the handshake timeout")
+	flag.DurationVar(&opts.stormPeriod, "storm-period", game.DefaultStormPeriod,
+		"real-wall-clock time between Fimbulvetr storms; 0 disables storms")
+	flag.StringVar(&opts.nextStorm, "next-storm", "",
+		"one-time RFC3339 override for the next Fimbulvetr deadline; persisted at startup")
 	flag.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
 	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
 	flag.Parse()
@@ -155,6 +167,13 @@ func (o options) validate() error {
 		return fmt.Errorf("tick rate must be in 1..%d, got %d", math.MaxUint8, o.tickRate)
 	case o.viewDistance > protocol.MaxViewDistance:
 		return fmt.Errorf("view distance must be at most %d, got %d", protocol.MaxViewDistance, o.viewDistance)
+	case o.stormPeriod < 0:
+		return fmt.Errorf("storm period must not be negative, got %s", o.stormPeriod)
+	}
+	if o.nextStorm != "" {
+		if _, err := time.Parse(time.RFC3339, o.nextStorm); err != nil {
+			return fmt.Errorf("next storm must be RFC3339, got %q: %w", o.nextStorm, err)
+		}
 	}
 
 	// Asked of the type that enforces it at runtime rather than restated here. Two
@@ -339,6 +358,15 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// player's *first* snapshot should carry the evening they logged off in, not the
 	// dawn a default would have handed them for one tick.
 	restoreClock(sim, clock, log)
+	stormDeadlineChanged := false
+	if opts.stormPeriod == 0 {
+		stormDeadlineChanged = sim.NextStorm() != 0
+		sim.DisableStorm()
+	} else if opts.nextStorm != "" {
+		next, _ := time.Parse(time.RFC3339, opts.nextStorm) // validated before any world was opened
+		sim.ScheduleStorm(next.Unix())
+		stormDeadlineChanged = true
+	}
 
 	// **Nothing places a mob here, and that absence is the feature.** This used to put
 	// one draugr at a seed-derived anchor, where it stood for as long as the server ran
@@ -347,18 +375,25 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// are actually connected — so a server nobody has joined holds no creatures at all.
 
 	srv := &server{
-		tr:         tr,
-		registry:   registry,
-		identities: identities,
-		cfg:        cfg,
-		timeouts:   opts.timeouts(),
-		chunks:     chunks,
-		structures: camp,
-		clock:      clock,
-		sim:        sim,
-		saveEvery:  world.DefaultSaveInterval,
-		announce:   announce,
-		log:        log,
+		tr:          tr,
+		registry:    registry,
+		identities:  identities,
+		cfg:         cfg,
+		timeouts:    opts.timeouts(),
+		chunks:      chunks,
+		structures:  camp,
+		clock:       clock,
+		sim:         sim,
+		saveEvery:   world.DefaultSaveInterval,
+		stormPeriod: opts.stormPeriod,
+		wallClock:   game.SystemClock{},
+		announce:    announce,
+		log:         log,
+	}
+	if stormDeadlineChanged {
+		// The override is a startup action rather than an in-memory suggestion. Writing
+		// it now means a crash before the first autosave still restarts from that choice.
+		srv.flushClock()
 	}
 
 	log.Info("voxelheimd listening",
@@ -371,6 +406,8 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		"world_dir", opts.worldDir,
 		"handshake_timeout", opts.handshakeTimeout.String(),
 		"idle_timeout", opts.idleTimeout.String(),
+		"storm_period", opts.stormPeriod.String(),
+		"next_storm_unix", sim.NextStorm(),
 	)
 
 	srv.run(ctx)
@@ -711,10 +748,19 @@ type server struct {
 	structures *persist.StructureStore
 	clock      *persist.ClockStore
 	sim        *game.Sim
+	clockMu    sync.Mutex
 
 	// saveEvery is the autosave interval. Zero means world.DefaultSaveInterval; tests
 	// shorten it so the loop can be observed without waiting on the real one.
 	saveEvery time.Duration
+
+	// stormPeriod is zero when the event is disabled. wallClock is shared with no
+	// simulation state: it drives only the ten-second scheduler and is injectable so
+	// tests can cross a real week without waiting for one.
+	stormPeriod time.Duration
+	stormEvery  time.Duration
+	wallClock   game.Clock
+	stormCycle  stormCycle
 
 	// announce tells the account service where this server is, or is nil when nobody asked
 	// it to. Nil is the ordinary state — a LAN game, a test, an operator who has registered
@@ -780,6 +826,17 @@ func (s *server) run(ctx context.Context) {
 		defer workers.Done()
 		if err := s.chunks.SaveLoop(ctx, s.saveEvery, s.log); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Error("the world autosave loop stopped", "error", err)
+		}
+	}()
+
+	// The Fimbulvetr's wall-clock worker. It never performs I/O under Sim.mu: listing
+	// candidates happens here, and the simulation consumes the resulting pass in bounded
+	// slices on later authoritative ticks.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.stormLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the storm scheduler stopped", "error", err)
 		}
 	}()
 
@@ -1012,6 +1069,8 @@ func (s *server) saveClockLoop(ctx context.Context) error {
 // game.Sim.RestoreClock refuses a pair that disagrees, so the world would lose its clock
 // at the next start with nothing to say why.
 func (s *server) flushClock() {
+	s.clockMu.Lock()
+	defer s.clockMu.Unlock()
 	tickOfDay, worldTick, nextStormUnix := s.sim.Clock()
 	if err := s.clock.Save(tickOfDay, worldTick, nextStormUnix); err != nil {
 		s.log.Error("saving the clock failed; it will be retried",

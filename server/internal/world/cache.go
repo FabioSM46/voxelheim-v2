@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
@@ -155,6 +156,44 @@ func (c *Cache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lru.Len()
+}
+
+// RegenerationChunks is every chunk a world-healing pass must consider: edits
+// already on disk, newer edits still only in memory, and resident chunks whose
+// simulation-owned entities may need clearing even when their terrain is pristine.
+//
+// Listing the store is the only I/O and happens with no cache lock held. The three
+// snapshots are then de-duplicated and sorted, making a pass stable across machines.
+func (c *Cache) RegenerationChunks() ([]Coord, error) {
+	var stored []Coord
+	if c.store != nil {
+		var err error
+		stored, err = c.store.ListChunks()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	inMemory := c.deltas.Chunks()
+	c.mu.Lock()
+	resident := make([]Coord, 0, len(c.entries))
+	for coord := range c.entries {
+		resident = append(resident, coord)
+	}
+	c.mu.Unlock()
+
+	unique := make(map[Coord]struct{}, len(stored)+len(inMemory)+len(resident))
+	for _, coords := range [][]Coord{stored, inMemory, resident} {
+		for _, coord := range coords {
+			unique[coord] = struct{}{}
+		}
+	}
+	all := make([]Coord, 0, len(unique))
+	for coord := range unique {
+		all = append(all, coord)
+	}
+	slices.SortFunc(all, compareCoords)
+	return all, nil
 }
 
 // Revision counts the edits this cache has applied.

@@ -744,6 +744,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// with chunks — the starter pack, or the restored one, through this one path
 			// either way. Authoritative state is sent once on every join, so a reconnect
 			// never keeps a previous session's local mirror.
+			// A phase broadcast that happened before this session existed cannot reach it.
+			// Re-state the live phase immediately after the welcome so a late join sees the
+			// same approaching countdown or raging blizzard as everybody already inside.
+			if warning, active := sim.StormWarning(); active {
+				if wErr := enqueue(protocol.EncodeStormWarning(warning)); wErr != nil {
+					return fmt.Errorf("session: send the storm phase on join: %w", wErr)
+				}
+			}
+
 			if iErr := enqueue(protocol.EncodeInventoryState(admitted.InventoryState())); iErr != nil {
 				return fmt.Errorf("session: send the inventory on join: %w", iErr)
 			}

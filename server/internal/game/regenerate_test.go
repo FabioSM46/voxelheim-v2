@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
@@ -154,6 +155,49 @@ func TestRegenerationClearsPlayerStateKeepsTheWorldAndLiftsAnEnclosedPlayer(t *t
 	}
 	if len(resent) != 1 || resent[0] != target {
 		t.Errorf("session repairs = %+v, want only %+v", resent, target)
+	}
+}
+
+func TestFimbulvetrRegeneratesOnlyUnwardedChunksAndClearsTheBlizzard(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRegenerationFixture()
+	unwarded := world.Coord{X: 1, Y: 2, Z: 3}
+	warded := world.Coord{X: 4, Y: 2, Z: 5}
+	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
+
+	sim.mu.Lock()
+	sim.wards = map[world.Column]identity.PlayerID{warded.Column(): {1}}
+	sim.mu.Unlock()
+
+	sim.BeginStorm(uint32(StormDuration / time.Second))
+	if warning, active := sim.StormWarning(); !active || warning.Phase != vnet.StormPhaseRaging {
+		t.Fatalf("raging warning = (%+v, %v)", warning, active)
+	}
+	sim.mu.Lock()
+	weather := sim.weatherAtLocked(0, [3]float64{})
+	sim.mu.Unlock()
+	if weather.Kind != vnet.WeatherKindBlizzard || weather.Intensity != 255 {
+		t.Fatalf("storm weather = %+v, want Blizzard 255", weather)
+	}
+
+	sim.FinishStorm([]world.Coord{unwarded, warded})
+	sim.mu.Lock()
+	sim.advanceChunkRegenerationLocked()
+	weather = sim.weatherAtLocked(0, [3]float64{})
+	sim.mu.Unlock()
+
+	fixture.mu.Lock()
+	calls := append([]world.Coord(nil), fixture.calls...)
+	fixture.mu.Unlock()
+	if len(calls) != 1 || calls[0] != unwarded {
+		t.Fatalf("regenerated chunks = %+v, want only %+v", calls, unwarded)
+	}
+	if weather.Kind == vnet.WeatherKindBlizzard {
+		t.Fatalf("weather remained %+v after the storm", weather)
+	}
+	if warning, active := sim.StormWarning(); active {
+		t.Fatalf("passed storm still advertises %+v", warning)
 	}
 }
 

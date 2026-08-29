@@ -896,8 +896,8 @@ type WeatherState struct {
 //
 // It carries no weather. What the sky is doing where the player stands arrives in the
 // snapshot every tick; this message says only that a storm is coming, is here, or is
-// done. Nothing in the simulation sends one yet — #469 is the issue that schedules a
-// storm — and this encoder is what that issue will call.
+// done. The wall-clock storm worker broadcasts it on phase changes, and a session
+// joining between those changes receives the live phase immediately after its welcome.
 type StormWarning struct {
 	// SecondsUntil is a duration in whole seconds, never a tick count and never a
 	// timestamp: seconds until the storm arrives while Approaching, seconds it has left

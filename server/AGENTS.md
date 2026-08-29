@@ -1124,6 +1124,45 @@ Everything about it lives in `internal/game/clock.go` and the three constants be
   have. Its night still arrives on time; it just does not remember which part of the day
   it was in.
 
+## The Fimbulvetr, and why a real week is not a tick count
+
+`cmd/voxelheimd/storm.go` owns the wall-clock controller; `internal/game/storm.go`
+owns the small locked transitions it applies. Deciding that a deadline has arrived is a
+worker's job, while changing authoritative weather, the phase a joining player receives
+and the regeneration queue is the simulation's.
+
+- **The deadline is the state; the phase is derived.** `next_storm_unix` survives in
+  `clock.bin`, while approaching, raging and passed do not. On every ten-second pass the
+  worker compares its wall clock with `T`: the three warnings are thresholds before it,
+  the five-minute blizzard is `[T,T+StormDuration)`, and the regeneration pass begins at
+  the far end. A restart inside that interval resumes with the original remaining time
+  and no second flag to disagree with the deadline. A restart after it gives one minute
+  of warning and moves `T` there instead of scouring a world on startup without notice.
+- **The cadence is real time and the storm itself is simulation state.**
+  `-storm-period` defaults to 168 hours and zero disables the event; `-next-storm` is a
+  one-start RFC3339 override. Every deadline change is written through the ordinary
+  clock save immediately, so a crash before the next autosave does not undo an
+  operator's choice. The blizzard is `WeatherKindBlizzard` at intensity 255 in
+  `Sim.weatherOverride`, which makes every column agree and lets the ordinary snow
+  movement rule bite without a second storm-only movement rule.
+- **Warnings are transitions, but joining is a state read.** The worker broadcasts
+  Approaching at ten minutes, one minute and ten seconds, Raging at the deadline and
+  Passed at the end. `Sim.stormWarning` retains only the live Approaching or Raging
+  shape, so a session created between broadcasts receives it immediately after
+  `ServerWelcome`; Passed retains nothing because somebody joining afterwards missed an
+  event rather than joining one.
+- **Listing is outside the tick and regeneration is inside it in bounded slices.**
+  `Cache.RegenerationChunks` unions stored chunk files, newer in-memory deltas and cache
+  residents, de-duplicates and sorts them. The worker pays the directory read; then
+  `Sim.FinishStorm` queues that fixed list and `advanceChunkRegenerationLocked` examines
+  at most `RegenerateChunksPerTick` entries per authoritative tick. No directory walk,
+  generation or deletion runs on the tick goroutine.
+- **A ward keeps a column, not an object.** The keep predicate is exactly `wardOf`: if a
+  runestone claims a chunk column, every vertical chunk in it survives. Unwarded player
+  structures and transient entities are removed by the existing regeneration primitive;
+  settlements, their stations and residents are derived/world-owned and remain pristine
+  by construction. The runestone itself survives because its own column is warded.
+
 ## The spawn director, and what stopped being true when it landed
 
 Everything is in `internal/game/spawn.go`, beside the state machine it populates
@@ -2579,10 +2618,9 @@ Recorded here so the next reader does not mistake them for oversights:
   an unloadable file at the next restart. If structures ever stop being allowed to overlap, the
   rule goes in `PlaceStructure` **first** — `TestARestoredCampMayOverlapExactlyAsAPlacedOneMay`
   fails when that happens, and is the place to record the new answer.
-- **An owner who never comes back leaves their camp standing.** Nothing reclaims a structure
-  whose owner has stopped playing: the identity keeps naming them, the tent keeps being theirs,
-  and no sweep runs. That is the intended shape rather than a gap to close early — the GDD's
-  Fimbulvetr storm is the reclaim, and it is its own issue.
+- **An owner who never comes back leaves a warded camp standing.** The weekly Fimbulvetr
+  reclaims every unwarded player structure through chunk regeneration; a camp inside a
+  living runestone's column is protected ground and outlives its absent owner by design.
 - **No fall damage, no health, no death.** A player who falls a hundred blocks lands and walks
   away. `TerminalFallSpeed` exists to bound the per-tick step, not to model anything.
 - **Water does not flow, and nothing drowns in it.** A voxel is `Water` because whatever wrote

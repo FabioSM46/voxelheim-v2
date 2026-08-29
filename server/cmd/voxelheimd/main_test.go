@@ -159,6 +159,9 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}
+	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
+		t.Fatalf("ConfigureChunkRegeneration: %v", err)
+	}
 
 	return &server{
 		tr:       tr,
@@ -194,6 +197,7 @@ func validOptions() options {
 		handshakeTimeout: session.DefaultHandshakeTimeout,
 		characterTimeout: session.DefaultCharacterTimeout,
 		idleTimeout:      session.DefaultIdleTimeout,
+		stormPeriod:      game.DefaultStormPeriod,
 	}
 }
 
@@ -219,6 +223,8 @@ func TestOptionsValidate(t *testing.T) {
 		"handshake timeout 0":   func(o *options) { o.handshakeTimeout = 0 },
 		"character timeout 0":   func(o *options) { o.characterTimeout = 0 },
 		"negative idle timeout": func(o *options) { o.idleTimeout = -time.Second },
+		"negative storm period": func(o *options) { o.stormPeriod = -time.Second },
+		"non-RFC3339 storm":     func(o *options) { o.nextStorm = "next Thursday" },
 		// A first read allowed to outlive the budget every later read is held to.
 		"handshake beyond idle": func(o *options) {
 			o.handshakeTimeout = 21 * time.Second
@@ -249,6 +255,8 @@ func TestOptionsValidate(t *testing.T) {
 		func(o *options) { o.tickRate = 1; o.viewDistance = 0 },
 		func(o *options) { o.tickRate = 255; o.viewDistance = protocol.MaxViewDistance },
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
+		func(o *options) { o.stormPeriod = 0 },
+		func(o *options) { o.nextStorm = "2030-01-02T03:04:05Z" },
 		func(o *options) {
 			o.handshakeTimeout = time.Nanosecond
 			o.characterTimeout = time.Nanosecond
