@@ -645,6 +645,39 @@ impl AppearanceInbox {
     }
 }
 
+/// Every resident description the net thread has decoded and the player module has not
+/// read yet.
+///
+/// [`AppearanceInbox`] exactly, for a second kind of body: a resident is described once
+/// per session as it first enters the view, the message is not ordered against the
+/// snapshot stream, and the cache of who looks like what belongs to the module that
+/// draws bodies rather than here.
+///
+/// A queue of its own rather than a widened one, because the two messages carry different
+/// things — a player has a level and equipment, a resident has a role and neither — and a
+/// sum type here would only be taken apart again on the other side.
+#[derive(Resource, Debug, Default)]
+pub struct ResidentInbox(Vec<ResidentAppearance>);
+
+impl ResidentInbox {
+    /// Takes every queued description, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<ResidentAppearance> {
+        std::mem::take(&mut self.0)
+    }
+
+    /// Queues one as the net thread would. Test-only, so a villager can be given a name
+    /// without a socket.
+    #[cfg(test)]
+    pub fn push(&mut self, resident: ResidentAppearance) {
+        self.0.push(resident);
+    }
+
+    #[cfg(test)]
+    pub fn pending(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// Every refusal the server has sent and the UI has not shown yet.
 ///
 /// A queue, like the three above it, and drained the same way — but the consumer keeps
@@ -992,6 +1025,7 @@ impl Plugin for NetPlugin {
             .init_resource::<MapInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
+            .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
             .init_resource::<ChatInbox>()
             .insert_resource(settings.clone())
@@ -1475,6 +1509,7 @@ struct Inboxes<'w> {
     map: Option<ResMut<'w, MapInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
+    residents: ResMut<'w, ResidentInbox>,
     refusals: ResMut<'w, RefusalInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
@@ -1644,21 +1679,21 @@ fn drain_session_events(
                 }
             }
 
-            // V25's three settlement payloads: fully decoded and fully validated one
-            // layer down, and dropped here because there is no inbox to put them in yet.
-            // #458 gives residents a name over their head and #459 gives a stall a
-            // window; each adds its own queue and its own arm. Dropped rather than
-            // logged, for the reason the map's three are queued rather than logged — a
-            // resident entering view is as ordinary as a tile arriving, and a line per
-            // one would be noise from the moment the first village exists.
+            // Queued for the player module, which is the only thing that knows whether
+            // there is a body to put a name over yet. Not logged, for the reason the map's
+            // three are not: a resident entering view is as ordinary as a tile arriving,
+            // and a line per one would be noise from the moment the first village exists.
+            Ok(SessionEvent::ResidentAppearance(resident)) => inboxes.residents.0.push(resident),
+
+            // V25's two vendor payloads: fully decoded and fully validated one layer down,
+            // and dropped here because there is no inbox to put them in yet. #459 gives a
+            // stall a window and adds its own queue and its own arm.
             //
-            // **The validation is the point of carrying them this far.** A malformed
-            // name, an unknown role or a duplicate price already ends the session at the
-            // decode boundary, which is where it should, and that is true now rather than
-            // when somebody writes the window.
-            Ok(SessionEvent::ResidentAppearance(_))
-            | Ok(SessionEvent::VendorState(_))
-            | Ok(SessionEvent::VendorClosed(_)) => {}
+            // **The validation is the point of carrying them this far.** An unknown role
+            // or a duplicate price already ends the session at the decode boundary, which
+            // is where it should, and that is true now rather than when somebody writes
+            // the window.
+            Ok(SessionEvent::VendorState(_)) | Ok(SessionEvent::VendorClosed(_)) => {}
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
@@ -2456,8 +2491,8 @@ mod tests {
     use super::codec::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire, WelcomeWire,
         encode_chunk_data, encode_chunk_unload, encode_entity_snapshot, encode_inventory_state,
-        encode_leave_started, encode_mine_progress, encode_server_character_list,
-        encode_server_reject, encode_server_welcome,
+        encode_leave_started, encode_mine_progress, encode_resident_appearance,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
     };
 
     use super::codec::{PLAYER_TOKEN_LEN, SESSION_TICKET_LEN, SessionTicket};
@@ -3943,6 +3978,37 @@ mod tests {
         assert_eq!(state(&app), ConnectionState::Connected);
     }
 
+    /// A resident description crosses the thread boundary intact.
+    ///
+    /// **The arm this replaces dropped it on the floor**, deliberately, because until #458
+    /// there was no inbox to put one in. That is exactly the kind of change nothing else
+    /// notices: the payload decoded, the session stayed up, and a villager simply never got
+    /// a name. Driven through a real socket rather than by pushing at the inbox, because
+    /// what is under test is the router arm and not the queue.
+    #[test]
+    fn a_resident_appearance_after_the_welcome_reaches_the_resident_inbox() {
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
+            encode_server_welcome(&WelcomeWire::default()),
+            encode_resident_appearance(
+                (1 << 62) | 55,
+                Some("Bjorn"),
+                fb::ResidentRole::Smith.0,
+                Some(AppearanceWire::default()),
+            ),
+        ]));
+
+        let (mut app, _scratch) = headless(&addr);
+        pump_until(&mut app, "a resident appearance", |app| {
+            app.world().resource::<ResidentInbox>().pending() == 1
+        });
+
+        let arrived = app.world_mut().resource_mut::<ResidentInbox>().take();
+        assert_eq!(arrived.len(), 1);
+        assert_eq!(arrived[0].entity_id, (1 << 62) | 55);
+        assert_eq!(arrived[0].name, "Bjorn");
+        assert_eq!(arrived[0].role, ResidentRole::Smith);
+    }
+
     #[test]
     fn an_inventory_after_the_welcome_reaches_the_inventory_inbox() {
         let welcome = WelcomeWire {
@@ -4252,6 +4318,7 @@ mod tests {
             .init_resource::<InventoryInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
+            .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,

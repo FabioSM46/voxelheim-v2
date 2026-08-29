@@ -98,8 +98,8 @@ pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 
 use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
-    PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals, Sent, Session, SnapshotInbox,
-    encode_player_input,
+    PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals, ResidentInbox, ResidentRole,
+    Sent, Session, SnapshotInbox, encode_player_input,
 };
 use crate::settings::{Bindings, Control, DEFAULT_LOOK_SENSITIVITY, Settings};
 // `pub use` rather than `use` for the pitch limit: it is a build invariant rather than a
@@ -220,6 +220,7 @@ impl Plugin for PlayerPlugin {
             // whichever plugin is built first creates the inbox and the other finds it.
             .init_resource::<SnapshotInbox>()
             .init_resource::<AppearanceInbox>()
+            .init_resource::<ResidentInbox>()
             .add_systems(
                 Startup,
                 (
@@ -685,9 +686,16 @@ pub(crate) struct Appearances(HashMap<u64, Described>);
 
 impl Appearances {
     pub(crate) fn identity(&self, entity_id: u64) -> Option<(String, u16)> {
-        self.0
-            .get(&entity_id)
-            .map(|described| (name_plate_name(&described.name), described.level))
+        self.0.get(&entity_id).map(|described| {
+            let level = match described.label {
+                PlateLabel::Level(level) => level,
+                // Unreachable: the party roster is the only caller and a party is made of
+                // players. Zero rather than a second `Option` the caller would have to
+                // invent a meaning for — a resident has no level.
+                PlateLabel::Role(_) => 0,
+            };
+            (name_plate_name(&described.name), level)
+        })
     }
 }
 
@@ -715,13 +723,48 @@ impl PartyLogInbox {
     }
 }
 
+/// What a name plate says beside the name — the one thing that differs between the two
+/// kinds of body this module draws.
+///
+/// An enum rather than a level plus an optional role, because the pair has no fourth state:
+/// a resident has no level and a player has no role, so a struct holding both would carry
+/// two combinations nothing can produce and every reader would have to decide about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlateLabel {
+    /// A player's server-derived level, guaranteed non-zero by the contract.
+    Level(u16),
+    /// A resident's trade, chosen by the settlement drawing that put them there.
+    Role(ResidentRole),
+}
+
+/// The word a role is drawn as.
+///
+/// ASCII, and not by luck: `client/src/ui/mod.rs` fails this crate's build on a non-ASCII
+/// literal, because the embedded fallback font is a 95-glyph subset. Total over
+/// [`ResidentRole`], so a role the contract gains does not compile until it has a word.
+const fn role_label(role: ResidentRole) -> &'static str {
+    match role {
+        ResidentRole::Villager => "Villager",
+        ResidentRole::Smith => "Smith",
+        ResidentRole::Carpenter => "Carpenter",
+        ResidentRole::Cook => "Cook",
+        ResidentRole::Trader => "Trader",
+        ResidentRole::Guard => "Guard",
+    }
+}
+
 /// One cached appearance: what the server said, when it said it, and whether anything
 /// has been drawn wearing it yet.
+///
+/// **One cache for both kinds of body, deliberately.** A resident arrives on its own
+/// message and is drawn from the same rig, dressed by the same system and labelled by the
+/// same plate; a second map would be a second copy of every rule in [`apply_snapshots`]'s
+/// retain, and a second place for a body to go undressed.
 #[derive(Debug, Clone)]
 struct Described {
     appearance: Appearance,
     name: String,
-    level: u16,
+    label: PlateLabel,
     worn_head: u16,
     worn_chest: u16,
     worn_legs: u16,
@@ -1622,53 +1665,88 @@ fn apply_snapshots(
     }
 }
 
-/// Puts every appearance the net thread decoded into the cache, newest last.
+/// Puts every description the net thread decoded into the cache, newest last.
 ///
-/// Runs **before** [`apply_snapshots`], so a body spawned on the frame its appearance
+/// Runs **before** [`apply_snapshots`], so a body spawned on the frame its description
 /// arrives is dressed on that frame rather than showing a placeholder for one of them.
 /// Whether an entity has been drawn survives an update, because it is a fact about this
 /// client and not about the message.
-fn ingest_appearances(mut inbox: ResMut<AppearanceInbox>, mut appearances: ResMut<Appearances>) {
-    let arrived = inbox.take();
-    if arrived.is_empty() {
+///
+/// **Both queues, one system.** A resident is described by its own message with its own
+/// fields, and every rule about *when* a description may be written, replaced or forgotten
+/// is identical — so the two differ only in how a [`Described`] is built.
+fn ingest_appearances(
+    mut inbox: ResMut<AppearanceInbox>,
+    mut residents: ResMut<ResidentInbox>,
+    mut appearances: ResMut<Appearances>,
+) {
+    let players = inbox.take();
+    let arrived_residents = residents.take();
+    if players.is_empty() && arrived_residents.is_empty() {
         return;
     }
 
     let now = Instant::now();
-    for message in arrived {
-        match appearances.0.get_mut(&message.entity_id) {
-            // **The newest description wins and the clock does not restart.** A server
-            // correcting itself is ordinary, so the appearance is replaced; `at` is not,
-            // because it is when this entity was *first* described with nothing to draw it
-            // on and that is what [`APPEARANCE_GRACE`] is a grace on. Refreshing it would
-            // hand the sender the bound: an entity that never appears in a snapshot, named
-            // again inside every window, would live for as long as the connection did, and
-            // a map of them would grow with it.
-            Some(described) => {
-                described.appearance = message.appearance;
-                described.name = message.name;
-                described.level = message.level;
-                described.worn_head = message.worn_head;
-                described.worn_chest = message.worn_chest;
-                described.worn_legs = message.worn_legs;
-                described.worn_offhand = message.worn_offhand;
-            }
-            None => {
-                appearances.0.insert(
-                    message.entity_id,
-                    Described {
-                        appearance: message.appearance,
-                        name: message.name,
-                        level: message.level,
-                        worn_head: message.worn_head,
-                        worn_chest: message.worn_chest,
-                        worn_legs: message.worn_legs,
-                        worn_offhand: message.worn_offhand,
-                        at: now,
-                        drawn: false,
-                    },
-                );
-            }
+    for message in players {
+        remember(
+            &mut appearances,
+            now,
+            message.entity_id,
+            Described {
+                appearance: message.appearance,
+                name: message.name,
+                label: PlateLabel::Level(message.level),
+                worn_head: message.worn_head,
+                worn_chest: message.worn_chest,
+                worn_legs: message.worn_legs,
+                worn_offhand: message.worn_offhand,
+                at: now,
+                drawn: false,
+            },
+        );
+    }
+    for message in arrived_residents {
+        remember(
+            &mut appearances,
+            now,
+            message.entity_id,
+            Described {
+                appearance: message.appearance,
+                name: message.name,
+                label: PlateLabel::Role(message.role),
+                // **Zero on all four, a fact rather than a default.** V25's
+                // `ResidentAppearance` carries no equipment, so there is nothing to read
+                // and nothing to invent: no armour overlay is ever spawned over one.
+                worn_head: 0,
+                worn_chest: 0,
+                worn_legs: 0,
+                worn_offhand: 0,
+                at: now,
+                drawn: false,
+            },
+        );
+    }
+}
+
+/// Writes one description, keeping what belongs to this client rather than to the message.
+///
+/// **The newest description wins and the clock does not restart.** A server correcting
+/// itself is ordinary, so everything it said is replaced; `at` is not, because it is when
+/// this entity was *first* described with nothing to draw it on and that is what
+/// [`APPEARANCE_GRACE`] is a grace on. Refreshing it would hand the sender the bound: an
+/// entity that never appears in a snapshot, named again inside every window, would live as
+/// long as the connection did. `drawn` is kept for the same reason — a body exists or it
+/// does not, and a second message about it does not change which.
+fn remember(appearances: &mut Appearances, now: Instant, entity_id: u64, next: Described) {
+    match appearances.0.get_mut(&entity_id) {
+        Some(described) => {
+            let (at, drawn) = (described.at, described.drawn);
+            *described = Described { at, drawn, ..next };
+        }
+        None => {
+            appearances
+                .0
+                .insert(entity_id, Described { at: now, ..next });
         }
     }
 }
@@ -1856,7 +1934,7 @@ fn spawn_body(
     let (worn, name_plate) = match description {
         Some(description) => (
             Worn::described(description),
-            Some((description.name.as_str(), description.level)),
+            Some((description.name.as_str(), description.label)),
         ),
         None => (Worn::bare(PLACEHOLDER_APPEARANCE), None),
     };
@@ -1880,8 +1958,8 @@ fn spawn_body(
         commands
             .entity(owner)
             .insert((LocalPlayer, Visibility::Hidden));
-    } else if let Some((name, level)) = name_plate {
-        spawn_name_plate(commands, entity_id, name, level);
+    } else if let Some((name, label)) = name_plate {
+        spawn_name_plate(commands, entity_id, name, label);
     }
     commands.entity(owner).with_children(|parent| {
         for (piece, mesh, material) in parts {
@@ -1967,11 +2045,25 @@ const NAME_PLATE_TRUNCATION_MARK: &str = "...";
 /// up its column.
 const NAME_PLATE_CONTROL_MARK: char = '?';
 
-fn name_plate_text(level: u16, name: &str) -> String {
-    let prefix = format!("Lv {level}{NAME_PLATE_SEPARATOR}");
+/// The two lines a plate can read: `Lv 7 | Eivor` for a player, `Bjorn | Smith` for a
+/// resident.
+///
+/// Both are bounded by [`NAME_PLATE_CHARACTERS`] the same way, with the fixed part paid for
+/// out of the bound rather than added to it: a plate is a fixed-width box and the
+/// truncation mark is what gives way. **The name is the only untrusted half of either**,
+/// which is why it is the only half truncated or stripped of control characters — a role is
+/// one of six words this build wrote.
+fn name_plate_text(label: PlateLabel, name: &str) -> String {
+    let (prefix, suffix) = match label {
+        PlateLabel::Level(level) => (format!("Lv {level}{NAME_PLATE_SEPARATOR}"), String::new()),
+        PlateLabel::Role(role) => (
+            String::new(),
+            format!("{NAME_PLATE_SEPARATOR}{}", role_label(role)),
+        ),
+    };
     let name_characters = NAME_PLATE_CHARACTERS
-        .checked_sub(prefix.chars().count())
-        .expect("a u16 level prefix fits inside the name-plate bound");
+        .checked_sub(prefix.chars().count() + suffix.chars().count())
+        .expect("a u16 level prefix or a role label fits inside the name-plate bound");
     let mut shown = String::with_capacity(NAME_PLATE_CHARACTERS * 4);
     shown.push_str(&prefix);
     // One character past the bound is what makes this a truncation rather than a fit: a
@@ -1989,22 +2081,24 @@ fn name_plate_text(level: u16, name: &str) -> String {
     };
     if head.len() <= name_characters {
         shown.extend(head.into_iter().map(displayable));
+        shown.push_str(&suffix);
         return shown;
     }
     let kept = name_characters.saturating_sub(NAME_PLATE_TRUNCATION_MARK.chars().count());
     shown.extend(head.into_iter().take(kept).map(displayable));
     shown.extend(NAME_PLATE_TRUNCATION_MARK.chars().take(name_characters));
+    shown.push_str(&suffix);
     shown
 }
 
 fn name_plate_name(name: &str) -> String {
-    name_plate_text(0, name)
+    name_plate_text(PlateLabel::Level(0), name)
         .strip_prefix(&format!("Lv 0{NAME_PLATE_SEPARATOR}"))
         .unwrap_or(name)
         .to_owned()
 }
 
-fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, level: u16) {
+fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, label: PlateLabel) {
     commands.spawn((
         NamePlate(entity_id),
         Node {
@@ -2017,7 +2111,7 @@ fn spawn_name_plate(commands: &mut Commands, entity_id: u64, name: &str, level: 
             ..default()
         },
         BackgroundColor(Color::srgba(0.025, 0.03, 0.04, 0.72)),
-        Text::new(name_plate_text(level, name)),
+        Text::new(name_plate_text(label, name)),
         TextFont {
             font_size: FontSize::Px(NAME_PLATE_FONT_SIZE),
             ..default()
@@ -2064,7 +2158,7 @@ fn sync_name_plates(
         }
         existing.insert(plate.0);
         let described = described.expect("checked above");
-        let next = name_plate_text(described.level, &described.name);
+        let next = name_plate_text(described.label, &described.name);
         if text.0 != next {
             text.0 = next;
         }
@@ -2087,7 +2181,7 @@ fn sync_name_plates(
             continue;
         }
         if let Some(described) = appearances.0.get(&entity_id) {
-            spawn_name_plate(&mut commands, entity_id, &described.name, described.level);
+            spawn_name_plate(&mut commands, entity_id, &described.name, described.label);
         }
     }
 }
