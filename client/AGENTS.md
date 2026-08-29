@@ -1761,6 +1761,36 @@ coincidence — a gate CI cannot run is not a gate. Three patterns keep it true:
   app at all.
 - `world/mesher.rs` and `world/palette.rs` need none of that: they are plain Rust.
 
+**A test that needs a concrete port must hold it, never learn it and let go.** The only way to
+find a free port is to bind one, and the obvious helper — bind `127.0.0.1:0`, read the number,
+drop the listener, return the number — hands out a port that belongs to nobody from the drop
+until the code under test binds it. `cargo test` runs one binary on many threads and this crate
+asks the kernel for ephemeral ports all over it (`net/mod.rs`, `net/tls.rs`, and the sign-in
+tests' own fake account service), so a sibling's `bind` can be given the number that was just
+released. The sign-in tests are where it was paid for: the loser's `bind` fails, the worker
+returns, its `Sender` drops, and the test's `recv_timeout` reports **`Disconnected`** — a
+failure that reads as "the client never opened a browser" and reproduces on nothing. It turned
+`develop` red on a server-only merge (#542, #557).
+
+So `net/signin.rs`'s `reserved_loopback_port` returns the listener alongside the port and the
+test hands *that* to `signin::Loopback::Prebound`: the port passes from the test to the attempt
+without an instant of being free. `Loopback` is a `cfg(test)` seam of the same shape as
+`Browser` — one production variant, which binds the redirect's port exactly as before — and the
+`Prebound` arm asserts the handed-in listener is on the redirect's port, so the seam cannot
+become a way to test a port the browser was never sent to. Serialising those tests behind a
+mutex would not have been enough: the competing binds are not all sign-in tests.
+
+**The rule has exactly one exception, and it lives in the same crate — so read this before you
+read it as a contradiction.** `net/mod.rs` keeps two `closed_port()` helpers, one in
+`sign_in_tests` and one in `server_list_tests`, that still bind, read the number and drop the
+listener. They want the opposite thing: a port *nothing is listening on*, so `start` fails fast
+and deterministically. Holding it is not merely unnecessary there, it would destroy the property
+under test, so "hold it" has nothing to say about them. Their residual race is real and it is a
+different kind: a sibling handed the released number makes the connection *succeed* where the
+test expects it refused — a loud failure on the assertion, not the `Disconnected` ghost above
+that reads as a different bug entirely. It has never been observed and is left alone rather than
+fixed blind (#557). **Any other bind-read-drop helper is the bug, not a third exception.**
+
 Anything that meshes should be assertable as an exact quad count. If a new test needs a screen to
 tell whether the mesher is right, the property being tested has not been found yet — `winding` is
 the worked example: it is checked as a cross product against the normal attribute, because
