@@ -4576,3 +4576,47 @@ fn a_clockless_server_leaves_the_environment_alone_after_the_first_frame() {
         "a server with no clock rewrote the sun, the sky, the ambient or the fog"
     );
 }
+
+#[test]
+fn weather_updates_a_clockless_servers_sky_and_fog_together() {
+    // Weather is allowed to move even when time of day is not. The sky and the fog have
+    // separate component guards, so this pins the change that must open both of them.
+    let mut app = headless_player();
+    for _ in 0..3 {
+        app.update();
+    }
+    let before = fog(&mut app);
+
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            weather: Some(WeatherState {
+                kind: WeatherKind::Rain,
+                intensity: u8::MAX,
+            }),
+            ..Default::default()
+        },
+        Instant::now(),
+    );
+    app.update();
+
+    let after = fog(&mut app);
+    let (sky, _) = sky_and_ambient(&mut app);
+    assert_eq!(after.color, sky, "the tinted sky and fog colour disagreed");
+    let FogFalloff::Linear {
+        start: before_start,
+        end: before_end,
+    } = before.falloff
+    else {
+        panic!("the baseline fog did not fade linearly");
+    };
+    let FogFalloff::Linear {
+        start: after_start,
+        end: after_end,
+    } = after.falloff
+    else {
+        panic!("the weather fog did not fade linearly");
+    };
+    assert!((after_start - before_start * 0.6).abs() < 1e-4);
+    assert!((after_end - before_end * 0.6).abs() < 1e-4);
+}

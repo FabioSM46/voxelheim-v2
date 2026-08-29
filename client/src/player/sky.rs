@@ -606,7 +606,7 @@ pub(super) fn drive_the_sky(
             // ever moves — an unconditional write would re-extract the fog into the render
             // world on every frame of a session whose sky is a constant.
             Some(mut fog) => {
-                if fog.color != sky || !fades_between(&fog.falloff, start, end) {
+                if weather_changed || fog.color != sky || !fades_between(&fog.falloff, start, end) {
                     fog.color = sky;
                     fog.falloff = FogFalloff::Linear { start, end };
                 }
