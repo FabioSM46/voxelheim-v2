@@ -526,6 +526,44 @@ impl SnapshotBuffer {
             })
             .collect()
     }
+
+    /// Where every resident the session can see should be drawn at `now`.
+    ///
+    /// **A view of the mob stream rather than a stream of its own**, because that is how
+    /// the contract carries a resident: `schemas/player.fbs` gives `MobState` one kind
+    /// field, and the server appends its residents to the same vector with
+    /// `MobKind::Villager` (`server/internal/game/resident.go`). The client's split is
+    /// therefore about which *rig* draws a body, not about which message it arrived in —
+    /// a villager is a person and is drawn on the humanoid rig in `player/mod.rs`, where
+    /// a draugr is a handful of cuboids in `player/mobs.rs`.
+    ///
+    /// The result is an [`Interpolated`] and not an [`InterpolatedMob`] for the same
+    /// reason: it is what `spawn_body` and `WalkPose` read. **Neither walk field is
+    /// inferred** — a resident never moves, the server says so by construction, and a
+    /// phase advanced from a position that never changes would be zero anyway. Writing
+    /// the rest at rest is what keeps this side from ever animating a stride nobody took.
+    ///
+    /// Health, action and target are dropped rather than carried, and dropping them is
+    /// the point: a resident cannot be hurt, has no action but `Idle` and hunts nobody, so
+    /// there is no value here for a lootable tint, an aggro marker or a fall to be
+    /// computed from.
+    pub fn sample_residents(&self, now: Instant, interval: Duration) -> Vec<(u64, Interpolated)> {
+        self.sample_mobs(now, interval)
+            .into_iter()
+            .filter(|(_, mob)| mob.kind == MobKind::Villager)
+            .map(|(entity_id, mob)| {
+                (
+                    entity_id,
+                    Interpolated {
+                        pos: mob.pos,
+                        yaw: mob.yaw,
+                        walk_phase: 0.0,
+                        walking: false,
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 /// An entity drawn exactly where the snapshot puts it.
