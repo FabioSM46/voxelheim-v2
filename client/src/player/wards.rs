@@ -5,7 +5,7 @@
 //! answer. Nothing in this module is read by input, targeting, movement or placement: the
 //! server remains the only authority on whether an action is legal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -51,12 +51,7 @@ impl Plugin for WardBoundaryPlugin {
             .add_systems(Startup, spawn_walls)
             .add_systems(
                 Update,
-                (
-                    ingest_wards,
-                    clear_without_a_session,
-                    rebuild_walls,
-                    sync_visibility,
-                )
+                (sync_wards, rebuild_walls, sync_visibility)
                     .chain()
                     .after(DrainNetwork)
                     .after(AimCamera),
@@ -115,6 +110,23 @@ struct Edge {
     class: WardClass,
 }
 
+/// The only edges whose alpha can be raised on one frame.
+///
+/// An eye can be on the warded side of at most the four faces of the column that
+/// contains it. Keeping that fixed-size answer avoids allocating and scanning the
+/// complete ward boundary while the player moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct HighlightedEdges([Option<Edge>; 4]);
+
+impl HighlightedEdges {
+    fn contains(self, edge: Edge) -> bool {
+        self.0
+            .into_iter()
+            .flatten()
+            .any(|candidate| candidate == edge)
+    }
+}
+
 /// Marks one of the three independently sorted transparent entities.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct WardWall(WardClass);
@@ -128,10 +140,12 @@ struct WardVisuals {
 struct WardMeshState {
     eye_step: Option<i64>,
     chunk_size: Option<u16>,
-    highlighted: HashSet<Edge>,
+    edges: Vec<Edge>,
+    highlighted: HighlightedEdges,
     drawn: [bool; 3],
     active: bool,
     revision: u64,
+    edge_revision: u64,
 }
 
 fn spawn_walls(
@@ -162,7 +176,23 @@ fn spawn_walls(
     commands.insert_resource(WardVisuals { meshes: handles });
 }
 
-fn ingest_wards(mut inbox: ResMut<WardsInbox>, mut wards: ResMut<Wards>) {
+fn sync_wards(
+    session: Option<Res<Session>>,
+    mut inbox: ResMut<WardsInbox>,
+    mut wards: ResMut<Wards>,
+) {
+    if session.is_none() {
+        // The inbox belongs to the network plugin and therefore outlives a socket.
+        // Discard a late answer instead of briefly publishing it as this session's
+        // state; an answer for a future session can only arrive after its Session.
+        if !inbox.is_empty() {
+            inbox.take();
+        }
+        if !wards.0.is_empty() {
+            wards.0.clear();
+        }
+        return;
+    }
     if inbox.is_empty() {
         return;
     }
@@ -177,12 +207,6 @@ fn ingest_wards(mut inbox: ResMut<WardsInbox>, mut wards: ResMut<Wards>) {
     );
     if *wards != next {
         *wards = next;
-    }
-}
-
-fn clear_without_a_session(session: Option<Res<Session>>, mut wards: ResMut<Wards>) {
-    if session.is_none() && !wards.0.is_empty() {
-        wards.0.clear();
     }
 }
 
@@ -214,15 +238,15 @@ fn rebuild_walls(
         return;
     };
 
-    let edges = boundary_edges(&wards);
     let chunk_size = f32::from(params.chunk_size);
-    let highlighted: HashSet<_> = edges
-        .iter()
-        .copied()
-        .filter(|edge| near_warded_side(*edge, eye, chunk_size))
-        .collect();
+    let wards_changed = wards.is_changed();
+    if wards_changed || state.edges.is_empty() {
+        state.edges = boundary_edges(&wards);
+        state.edge_revision = state.edge_revision.wrapping_add(1);
+    }
+    let highlighted = highlighted_edges(&wards, eye, chunk_size);
     if state.active
-        && !wards.is_changed()
+        && !wards_changed
         && state.eye_step == Some(eye_step)
         && state.chunk_size == Some(params.chunk_size)
         && state.highlighted == highlighted
@@ -233,13 +257,14 @@ fn rebuild_walls(
     let centre_y = eye_step as f32 * WARD_WALL_REBUILD_STEP;
     let mut drawn = [false; 3];
     for class in WardClass::ALL {
-        let class_edges: Vec<_> = edges
+        let class_edges: Vec<_> = state
+            .edges
             .iter()
             .copied()
             .filter(|edge| edge.class == class)
             .collect();
         drawn[class.index()] = !class_edges.is_empty();
-        let mesh = wall_mesh(&class_edges, &highlighted, class, chunk_size, centre_y);
+        let mesh = wall_mesh(&class_edges, highlighted, class, chunk_size, centre_y);
         replace_mesh(&mut meshes, &visuals.meshes[class.index()], mesh);
     }
     state.eye_step = Some(eye_step);
@@ -263,7 +288,8 @@ fn clear_geometry_if_needed(
     }
     state.eye_step = None;
     state.chunk_size = None;
-    state.highlighted.clear();
+    state.edges.clear();
+    state.highlighted = HighlightedEdges::default();
     state.drawn = [false; 3];
     state.active = false;
     state.revision = state.revision.wrapping_add(1);
@@ -309,6 +335,58 @@ fn height_step(y: f32) -> Option<i64> {
         .then_some((y / WARD_WALL_REBUILD_STEP).floor() as i64)
 }
 
+fn column_at(value: f32, chunk_size: f32) -> Option<i32> {
+    if !value.is_finite() || !chunk_size.is_finite() || chunk_size <= 0.0 {
+        return None;
+    }
+    let column = (f64::from(value) / f64::from(chunk_size)).floor();
+    (column >= f64::from(i32::MIN) && column <= f64::from(i32::MAX)).then_some(column as i32)
+}
+
+fn neighbour_class(wards: &Wards, cx: i32, cz: i32, dx: i32, dz: i32) -> Option<WardClass> {
+    cx.checked_add(dx)
+        .zip(cz.checked_add(dz))
+        .and_then(|coord| wards.0.get(&coord))
+        .copied()
+        .map(WardClass::of)
+}
+
+fn highlighted_edges(wards: &Wards, eye: Vec3, chunk_size: f32) -> HighlightedEdges {
+    if !eye.is_finite() {
+        return HighlightedEdges::default();
+    }
+    let Some((cx, cz)) = column_at(eye.x, chunk_size).zip(column_at(eye.z, chunk_size)) else {
+        return HighlightedEdges::default();
+    };
+    let Some(&column) = wards.0.get(&(cx, cz)) else {
+        return HighlightedEdges::default();
+    };
+    let class = WardClass::of(column);
+    let mut highlighted = HighlightedEdges::default();
+    for (index, (side, dx, dz)) in [
+        (Side::West, -1, 0),
+        (Side::East, 1, 0),
+        (Side::North, 0, -1),
+        (Side::South, 0, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let edge = Edge {
+            cx,
+            cz,
+            side,
+            class,
+        };
+        if neighbour_class(wards, cx, cz, dx, dz) != Some(class)
+            && near_warded_side(edge, eye, chunk_size)
+        {
+            highlighted.0[index] = Some(edge);
+        }
+    }
+    highlighted
+}
+
 /// Set difference over the complete map. A different class deliberately counts as
 /// absent: each owner emits its own face on a shared boundary, so both colours are drawn.
 fn boundary_edges(wards: &Wards) -> Vec<Edge> {
@@ -321,11 +399,7 @@ fn boundary_edges(wards: &Wards) -> Vec<Edge> {
             (Side::North, 0, -1),
             (Side::South, 0, 1),
         ] {
-            let neighbour = cx
-                .checked_add(dx)
-                .zip(cz.checked_add(dz))
-                .and_then(|coord| wards.0.get(&coord));
-            if neighbour.is_none_or(|neighbour| WardClass::of(*neighbour) != class) {
+            if neighbour_class(wards, cx, cz, dx, dz) != Some(class) {
                 edges.push(Edge {
                     cx,
                     cz,
@@ -368,7 +442,7 @@ fn column_bounds(cx: i32, cz: i32, chunk_size: f32) -> (f32, f32, f32, f32) {
 
 fn wall_mesh(
     edges: &[Edge],
-    highlighted: &HashSet<Edge>,
+    highlighted: HighlightedEdges,
     class: WardClass,
     chunk_size: f32,
     centre_y: f32,
@@ -397,7 +471,7 @@ fn wall_mesh(
             [a[0], top, a[1]],
         ]);
         normals.extend_from_slice(&[normal; 4]);
-        let alpha = if highlighted.contains(edge) {
+        let alpha = if highlighted.contains(*edge) {
             WARD_WALL_NEAR_ALPHA
         } else {
             WARD_WALL_ALPHA
@@ -417,11 +491,19 @@ fn wall_mesh(
 }
 
 fn empty_mesh() -> Mesh {
-    wall_mesh(&[], &HashSet::new(), WardClass::Settlement, 1.0, 0.0)
+    wall_mesh(
+        &[],
+        HighlightedEdges::default(),
+        WardClass::Settlement,
+        1.0,
+        0.0,
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use bevy::asset::AssetPlugin;
     use bevy::mesh::VertexAttributeValues;
 
@@ -513,6 +595,15 @@ mod tests {
             .all(|visibility| *visibility == Visibility::Hidden)
     }
 
+    fn wall_materials(app: &mut App) -> Vec<Handle<StandardMaterial>> {
+        let world = app.world_mut();
+        world
+            .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<WardWall>>()
+            .iter(world)
+            .map(|material| material.0.clone())
+            .collect()
+    }
+
     #[test]
     fn a_three_by_three_ward_has_only_twelve_outer_edges() {
         let mut columns = Vec::new();
@@ -565,18 +656,74 @@ mod tests {
     }
 
     #[test]
+    fn only_the_newest_complete_message_in_one_frame_becomes_the_server_copy() {
+        let mut app = app(true);
+        {
+            let mut inbox = app.world_mut().resource_mut::<WardsInbox>();
+            inbox.push(WardsNearby {
+                columns: vec![column(0, 0, WardKind::Settlement, false)],
+            });
+            inbox.push(WardsNearby {
+                columns: vec![column(2, -3, WardKind::Runestone, true)],
+            });
+        }
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<Wards>().0,
+            HashMap::from([((2, -3), column(2, -3, WardKind::Runestone, true))])
+        );
+    }
+
+    #[test]
     fn the_mesh_rebuilds_on_a_list_and_an_eye_step_but_not_idle() {
         let mut app = app(true);
         deliver(&mut app, vec![column(0, 0, WardKind::Settlement, false)]);
-        let first = app.world().resource::<WardMeshState>().revision;
+        let first = app.world().resource::<WardMeshState>();
+        let first_revision = first.revision;
+        let first_edge_revision = first.edge_revision;
         app.update();
-        assert_eq!(app.world().resource::<WardMeshState>().revision, first);
+        let idle = app.world().resource::<WardMeshState>();
+        assert_eq!(idle.revision, first_revision);
+        assert_eq!(idle.edge_revision, first_edge_revision);
 
         let world = app.world_mut();
         let mut query = world.query_filtered::<&mut Transform, With<WorldCamera>>();
         query.single_mut(world).expect("one camera").translation.y += WARD_WALL_REBUILD_STEP;
         app.update();
-        assert_eq!(app.world().resource::<WardMeshState>().revision, first + 1);
+        let raised = app.world().resource::<WardMeshState>();
+        assert_eq!(raised.revision, first_revision + 1);
+        assert_eq!(raised.edge_revision, first_edge_revision);
+    }
+
+    #[test]
+    fn crossing_the_near_threshold_rebuilds_only_the_mesh_not_the_edge_cache() {
+        let mut app = app(true);
+        deliver(&mut app, vec![column(0, 0, WardKind::Settlement, false)]);
+        let first = app.world().resource::<WardMeshState>();
+        let first_revision = first.revision;
+        let first_edge_revision = first.edge_revision;
+
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&mut Transform, With<WorldCamera>>();
+        query.single_mut(world).expect("one camera").translation.x = 31.0;
+        app.update();
+
+        let near = app.world().resource::<WardMeshState>();
+        assert_eq!(near.revision, first_revision + 1);
+        assert_eq!(near.edge_revision, first_edge_revision);
+        assert!(near.highlighted.contains(Edge {
+            cx: 0,
+            cz: 0,
+            side: Side::East,
+            class: WardClass::Settlement,
+        }));
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<WardMeshState>().revision,
+            first_revision + 1
+        );
     }
 
     #[test]
@@ -584,9 +731,15 @@ mod tests {
         let mut app = app(true);
         deliver(&mut app, vec![column(0, 0, WardKind::Runestone, false)]);
         app.world_mut().remove_resource::<Session>();
+        app.world_mut()
+            .resource_mut::<WardsInbox>()
+            .push(WardsNearby {
+                columns: vec![column(8, 9, WardKind::Settlement, false)],
+            });
         app.update();
 
         assert!(app.world().resource::<Wards>().0.is_empty());
+        assert!(app.world().resource::<WardsInbox>().is_empty());
         assert_eq!(wall_quads(&mut app), 0);
         assert!(all_hidden(&mut app));
     }
@@ -628,17 +781,49 @@ mod tests {
             side: Side::West,
             class: WardClass::OwnRunestone,
         };
-        let mesh = wall_mesh(
+        let highlighted = HighlightedEdges([Some(edge), None, None, None]);
+        let near_mesh = wall_mesh(&[edge], highlighted, WardClass::OwnRunestone, 32.0, 80.0);
+        let Some(VertexAttributeValues::Float32x4(near_colours)) =
+            near_mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("wall colours are float RGBA");
+        };
+        assert_eq!(
+            near_colours,
+            &vec![[0.30, 0.80, 0.40, WARD_WALL_NEAR_ALPHA]; 4]
+        );
+
+        let far_mesh = wall_mesh(
             &[edge],
-            &HashSet::from([edge]),
+            HighlightedEdges::default(),
             WardClass::OwnRunestone,
             32.0,
             80.0,
         );
-        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        let Some(VertexAttributeValues::Float32x4(far_colours)) =
+            far_mesh.attribute(Mesh::ATTRIBUTE_COLOR)
         else {
             panic!("wall colours are float RGBA");
         };
-        assert_eq!(colours, &vec![[0.30, 0.80, 0.40, WARD_WALL_NEAR_ALPHA]; 4]);
+        assert_eq!(far_colours, &vec![[0.30, 0.80, 0.40, WARD_WALL_ALPHA]; 4]);
+    }
+
+    #[test]
+    fn every_ward_class_has_its_own_translucent_unlit_double_sided_material() {
+        let mut app = app(true);
+        app.update();
+
+        let handles = wall_materials(&mut app);
+        assert_eq!(handles.len(), 3);
+        assert_eq!(handles.iter().collect::<HashSet<_>>().len(), 3);
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        for handle in handles {
+            let material = materials.get(&handle).expect("ward material exists");
+            assert_eq!(material.base_color, Color::WHITE);
+            assert_eq!(material.alpha_mode, AlphaMode::Blend);
+            assert!(material.unlit);
+            assert!(material.double_sided);
+            assert_eq!(material.cull_mode, None);
+        }
     }
 }

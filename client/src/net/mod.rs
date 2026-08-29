@@ -790,6 +790,11 @@ impl WardsInbox {
         std::mem::take(&mut self.0)
     }
 
+    /// Drops answers that belonged to a session which is no longer current.
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
     /// Queues one list as the net thread would. Test-only, so the renderer can be driven
     /// without a socket.
     #[cfg(test)]
@@ -1687,6 +1692,11 @@ fn drain_session_events(
             }
 
             Ok(SessionEvent::Established { params, returning }) => {
+                // This queue outlives a socket so the plugins can share one resource.
+                // A newly established session must not inherit an unread ward answer
+                // from the connection it replaced; answers later in this same ordered
+                // drain belong to the new session and are queued normally.
+                inboxes.wards.clear();
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
                 // later line reaches for `{params:?}`.
@@ -1880,6 +1890,7 @@ fn drain_session_events(
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<LeaveCountdown>();
+                inboxes.wards.clear();
             }
 
             Ok(SessionEvent::Refused(reason)) => {
@@ -1892,6 +1903,7 @@ fn drain_session_events(
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<CharacterChoice>();
                 commands.remove_resource::<LeaveCountdown>();
+                inboxes.wards.clear();
             }
 
             Ok(SessionEvent::Ended(detail)) => {
@@ -1907,6 +1919,7 @@ fn drain_session_events(
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<LeaveCountdown>();
+                inboxes.wards.clear();
             }
 
             Err(TryRecvError::Empty) => break,
@@ -1967,6 +1980,7 @@ fn drain_session_events(
                 // Outside the guard above deliberately: that guard is about not rewriting a
                 // terminal *state*, and a link with no thread is stale whichever state the
                 // client is in.
+                inboxes.wards.clear();
                 commands.remove_resource::<NetLink>();
                 break;
             }
@@ -4507,6 +4521,43 @@ mod tests {
         assert_eq!(
             app.world_mut().resource_mut::<WardsInbox>().take(),
             vec![wards]
+        );
+    }
+
+    #[test]
+    fn a_new_session_discards_an_unread_ward_answer_from_the_previous_one() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connecting);
+        let stale = WardsNearby {
+            columns: vec![WardedColumn {
+                cx: -2,
+                cz: 3,
+                kind: WardKind::Settlement,
+                mine: false,
+            }],
+        };
+        let current = WardsNearby {
+            columns: vec![WardedColumn {
+                cx: 4,
+                cz: 5,
+                kind: WardKind::Runestone,
+                mine: true,
+            }],
+        };
+        app.world_mut().resource_mut::<WardsInbox>().push(stale);
+        events
+            .send(SessionEvent::Established {
+                params: params(),
+                returning: Some(false),
+            })
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::WardsNearby(current.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<WardsInbox>().take(),
+            vec![current]
         );
     }
 
