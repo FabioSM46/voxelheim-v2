@@ -9,8 +9,8 @@ use super::{
 };
 use crate::net::{
     LootEvent, LootInbox, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest,
-    Outbound, Session, encode_loot_open_request, encode_loot_take_all_request,
-    encode_loot_take_request,
+    NpcInteractRequest, Outbound, Session, encode_loot_open_request, encode_loot_take_all_request,
+    encode_loot_take_request, encode_npc_interact_request,
 };
 use crate::settings::{Control, Settings};
 
@@ -214,6 +214,24 @@ fn send_loot_intents(
         return;
     };
     let Some(corpse_id) = buffer.nearest_accessible_corpse(session.0.entity_id, MAX_REACH) else {
+        // **The corpse keeps priority, and nothing about that is arbitrary.** One key means
+        // two things, and the two are not equally likely to be a mistake: a player who has
+        // just killed something is standing over it deliberately, while a resident is
+        // simply somewhere a village put them. Reaching this arm means the server offered
+        // no corpse this player may open within reach, so the other meaning is the only one
+        // left.
+        //
+        // **One request, and it states nothing.** Whether that entity keeps a stall,
+        // whether the player is close enough by the server's own measure and whether
+        // anything opens are all the server's — `MAX_REACH` here only decides which intent
+        // is originated, and the answer today is `NotAVendor` on every path
+        // (`Player.InteractNPC` in `server/internal/game/resident.go`).
+        if let Some(entity_id) = buffer.nearest_resident(session.0.entity_id, MAX_REACH) {
+            outbound.send(encode_npc_interact_request(&NpcInteractRequest {
+                entity_id,
+                client_tick: cadence.client_tick,
+            }));
+        }
         return;
     };
     window.dismissed.remove(&corpse_id);
@@ -258,26 +276,56 @@ mod tests {
         })
     }
 
+    /// A resident's id, in the space the server derives them in.
+    ///
+    /// Bit 62, exactly as `residentID` sets it in `server/internal/game/resident.go`.
+    /// Spelled that way rather than as a small number so a reader can see at a glance that
+    /// it can never collide with the counter-minted [`PLAYER`].
+    const RESIDENT: u64 = (1 << 62) | 55;
+
+    fn me() -> EntityState {
+        EntityState {
+            entity_id: PLAYER,
+            pos: [0.0, 64.0, 0.0],
+            vel: [0.0; 3],
+            yaw: 0.0,
+        }
+    }
+
+    fn corpse(x: f32) -> MobState {
+        MobState {
+            entity_id: CORPSE,
+            kind: MobKind::Draugr,
+            pos: [x, 64.0, 0.0],
+            vel: [0.0; 3],
+            yaw: 0.0,
+            health: 0,
+            max_health: 60,
+            action: MobAction::Corpse,
+            target_entity_id: 0,
+        }
+    }
+
+    /// A resident as the server sends one: full health, `Idle`, hunting nobody.
+    fn villager(entity_id: u64, x: f32) -> MobState {
+        MobState {
+            entity_id,
+            kind: MobKind::Villager,
+            pos: [x, 64.0, 0.0],
+            vel: [0.0; 3],
+            yaw: 0.0,
+            health: 100,
+            max_health: 100,
+            action: MobAction::Idle,
+            target_entity_id: 0,
+        }
+    }
+
     fn snapshot() -> Snapshot {
         Snapshot {
             server_tick: 1,
-            entities: vec![EntityState {
-                entity_id: PLAYER,
-                pos: [0.0, 64.0, 0.0],
-                vel: [0.0; 3],
-                yaw: 0.0,
-            }],
-            mobs: vec![MobState {
-                entity_id: CORPSE,
-                kind: MobKind::Draugr,
-                pos: [2.0, 64.0, 0.0],
-                vel: [0.0; 3],
-                yaw: 0.0,
-                health: 0,
-                max_health: 60,
-                action: MobAction::Corpse,
-                target_entity_id: 0,
-            }],
+            entities: vec![me()],
+            mobs: vec![corpse(2.0)],
             accessible_loot_corpses: vec![CORPSE],
             ..Default::default()
         }
@@ -298,8 +346,12 @@ mod tests {
     }
 
     fn app() -> App {
+        app_seeing(snapshot())
+    }
+
+    fn app_seeing(seen: Snapshot) -> App {
         let mut buffer = SnapshotBuffer::default();
-        assert!(buffer.accept(snapshot(), Instant::now()));
+        assert!(buffer.accept(seen, Instant::now()));
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(session())
@@ -385,7 +437,11 @@ mod tests {
 
     /// The loot module with the real keyboard pipeline behind it and somewhere to send.
     fn held_key_app() -> (App, Receiver<Vec<u8>>) {
-        let mut app = app();
+        held_key_app_seeing(snapshot())
+    }
+
+    fn held_key_app_seeing(seen: Snapshot) -> (App, Receiver<Vec<u8>>) {
+        let mut app = app_seeing(seen);
         app.add_plugins(InputPlugin);
         let (outbound, frames) = Outbound::to_a_test(8);
         app.insert_resource(outbound);
@@ -405,6 +461,90 @@ mod tests {
         }
         app.update();
         frames.try_iter().collect()
+    }
+
+    /// F next to somebody, with nothing to loot, addresses them.
+    ///
+    /// One request, naming the nearest of the two, and nothing else: the client states an
+    /// intent and the server decides everything about it. Two residents rather than one,
+    /// because "the nearest" is the whole of what this side chooses and a single villager
+    /// would not check that it chose at all.
+    #[test]
+    fn interact_with_no_corpse_in_reach_addresses_the_nearest_resident() {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![me()],
+            mobs: vec![villager(RESIDENT + 1, 3.0), villager(RESIDENT, 2.0)],
+            ..Default::default()
+        });
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert_eq!(
+            sent,
+            vec![encode_npc_interact_request(&NpcInteractRequest {
+                entity_id: RESIDENT,
+                client_tick: 0,
+            })]
+        );
+    }
+
+    /// A corpse in reach keeps the key, even with somebody standing closer.
+    ///
+    /// The priority is not a tie-break by distance: a player who has just killed something
+    /// is standing over it deliberately, and a resident is merely somewhere a village put
+    /// them. The villager is placed *nearer* than the corpse precisely so a distance
+    /// comparison sneaking in would fail here.
+    #[test]
+    fn a_corpse_in_reach_keeps_the_key_even_with_a_resident_closer() {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![me()],
+            mobs: vec![corpse(3.0), villager(RESIDENT, 1.0)],
+            accessible_loot_corpses: vec![CORPSE],
+            ..Default::default()
+        });
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert_eq!(
+            sent,
+            vec![encode_loot_open_request(&LootOpenRequest {
+                corpse_id: CORPSE,
+                client_tick: 0,
+            })],
+            "the corpse lost its key to somebody standing nearer"
+        );
+    }
+
+    /// Somebody past the reach is not addressed, and nothing is sent at all.
+    ///
+    /// The bound is [`MAX_REACH`], and it decides which intent this client *originates* —
+    /// never whether anything happens, which the server re-measures against its own boxes.
+    /// What this pins is that a key pressed in an empty field sends nothing: a request per
+    /// press, whatever is or is not nearby, is how a client starts talking to a server
+    /// twenty times a second about nothing.
+    #[test]
+    fn a_resident_past_the_reach_is_not_addressed() {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![me()],
+            mobs: vec![villager(RESIDENT, MAX_REACH + 1.0)],
+            ..Default::default()
+        });
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert!(sent.is_empty(), "{sent:?}");
     }
 
     /// **The same property as `ui::inventory`'s

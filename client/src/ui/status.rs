@@ -580,21 +580,21 @@ fn refresh_notice_text(
 ///
 /// **Not a defect, and not an unreadable code** — the two silences that existed before
 /// V25. These are reasons the contract names, this build decodes, and no surface answers
-/// yet: the three settlement refusals are answered where the vendor window is, and that
-/// window lands in #458 and #459. `TileMisaligned` is here for a different reason with the
-/// same shape — a misaligned tile request is this build asking wrongly, but it is not one
-/// of the four `Malformed*` codes [`RefusalReason::is_client_defect`] names, so nothing
-/// classified it at all.
+/// yet: the two trade refusals are answered where the vendor window is, and that window
+/// lands in #459. `TileMisaligned` is here for a different reason with the same shape — a
+/// misaligned tile request is this build asking wrongly, but it is not one of the four
+/// `Malformed*` codes [`RefusalReason::is_client_defect`] names, so nothing classified it
+/// at all.
 ///
 /// It exists because the sweep needs a third category to assert against, and because the
 /// caller needs one to keep from logging "no sentence for" at a reason whose silence is a
-/// decision. A reason leaves this list when something answers it, which is the edit
-/// #458 and #459 each make.
+/// decision. A reason leaves this list when something answers it, which is the edit #458
+/// has just made for `NotAVendor` — F now addresses a resident, so the refusal that answer
+/// comes back as has somewhere to be read — and the edit #459 makes for the other two.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
         RefusalReason::TileMisaligned
-            | RefusalReason::NotAVendor
             | RefusalReason::NotEnoughSilver
             | RefusalReason::VendorDoesNotWant
     )
@@ -637,9 +637,9 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::TooManyMarkers
         | RefusalReason::NoteTooLong
         | RefusalReason::MarkerUnknown
-        // V25's three settlement refusals. None of them is about a placement either: a
-        // stall that would not open and a trade that did not happen are answered where
-        // the window is, in #458 and #459, and until then they reach nobody.
+        // V25's three settlement refusals. None of them is about a placement either:
+        // `NotAVendor` is answered below, against the action that produces it, and a trade
+        // that did not happen is answered where the window is, in #459.
         | RefusalReason::NotAVendor
         | RefusalReason::NotEnoughSilver
         | RefusalReason::VendorDoesNotWant
@@ -682,6 +682,19 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     match (refused.action, refused.reason) {
         (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
+        // A whole sentence about the person rather than the "Cannot X: y" shape, for the
+        // reason the map's lines are whole sentences: nothing was refused that the player
+        // meant to do to the world. They addressed somebody, and the answer is about that
+        // somebody.
+        //
+        // **It says what is true today and no more.** The server answers `NotAVendor` on
+        // every path — an unknown entity, one out of its own reach, a guard, and a smith
+        // whose price list #459 has not written yet — so a line naming any of those four
+        // would be this build inventing which one it was. "They have nothing to trade" is
+        // the one sentence all four support.
+        (RefusedAction::Interact, RefusalReason::NotAVendor) => {
+            Some("They have nothing to trade".to_owned())
+        }
         (RefusedAction::PlaceStructure, _) => {
             placement_reason.map(|reason| format!("Cannot build here: {reason}"))
         }
@@ -1305,6 +1318,10 @@ mod tests {
             | RefusalReason::LootNotOwned
             | RefusalReason::StaleRevision
             | RefusalReason::InventoryFull => RefusedAction::OpenLoot,
+            // Its sentence lives behind the interact action, so a placement action here
+            // would sweep it as silent and pin the opposite of what is true — exactly the
+            // trap the marker three are lifted out of above.
+            RefusalReason::NotAVendor => RefusedAction::Interact,
             _ => RefusedAction::PlaceStructure,
         };
         ActionRefused {
@@ -1381,7 +1398,8 @@ mod tests {
                         || line == "No arrows"
                         || line.starts_with("The map holds no more marks")
                         || line == "That note is too long"
-                        || line == "That mark is already gone",
+                        || line == "That mark is already gone"
+                        || line == "They have nothing to trade",
                     "{reason:?} -> {line}"
                 );
             }
@@ -1411,6 +1429,36 @@ mod tests {
         assert!(
             EVERY_REASON.iter().copied().any(has_no_sentence_yet),
             "no reason awaits a surface; delete `has_no_sentence_yet` and its category"
+        );
+    }
+
+    /// Addressing somebody who keeps no stall says so, in those words.
+    ///
+    /// Pinned to the exact sentence rather than to "something non-empty", because this is
+    /// the whole of what a player is told when F does nothing: the request left, the server
+    /// answered, and this line is the only evidence of either.
+    ///
+    /// The pair matters as much as the reason. `NotAVendor` against a *placement* is still
+    /// silent — it cannot arrive that way, and inventing a line for a combination no server
+    /// produces is how a status line starts describing a world that is not there.
+    #[test]
+    fn addressing_somebody_with_no_stall_says_they_have_nothing_to_trade() {
+        assert_eq!(
+            describe_refusal(&ActionRefused {
+                action: RefusedAction::Interact,
+                reason: RefusalReason::NotAVendor,
+                anchor: None,
+            })
+            .as_deref(),
+            Some("They have nothing to trade")
+        );
+        assert_eq!(
+            describe_refusal(&ActionRefused {
+                action: RefusedAction::PlaceStructure,
+                reason: RefusalReason::NotAVendor,
+                anchor: None,
+            }),
+            None
         );
     }
 
