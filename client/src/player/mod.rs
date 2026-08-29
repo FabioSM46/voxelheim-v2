@@ -38,6 +38,7 @@
 //! | `crafting.rs` | the display-only recipe mirror and the craft intent it originates |
 //! | `camera.rs` | the one camera, and what it follows |
 //! | `sky.rs` | the sun, the sky colour, the ambient term and the fog, on the server's clock |
+//! | `wards.rs` | the newest server-sent ward columns and their translucent boundary meshes |
 //! | `target.rs` | the voxel raycast, mining intent/progress, placement and outline |
 //! | `structures.rs` | the tents and forges a snapshot names, and the two requests for one |
 //! | `constants.rs` | the numbers, and which of them mirror the server |
@@ -62,6 +63,7 @@ mod sky;
 mod structures;
 mod target;
 mod vendor;
+mod wards;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -375,6 +377,9 @@ impl Plugin for PlayerPlugin {
             )
             .add_plugins(projectiles::ProjectilesPlugin)
             .add_plugins(camera::PlayerCameraPlugin)
+            // After the camera plugin, because the walls follow the eye's coarse height
+            // step and WardBoundaryPlugin orders its rebuild after AimCamera.
+            .add_plugins(wards::WardBoundaryPlugin)
             .add_systems(
                 Update,
                 (

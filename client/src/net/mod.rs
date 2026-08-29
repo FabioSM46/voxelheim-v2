@@ -79,11 +79,10 @@ pub use codec::{
     NpcInteractRequest, RESIDENT_NAME_MAX_BYTES, ResidentAppearance, ResidentRole, TradeRequest,
     VendorClosed, VendorEntry, VendorState,
 };
-// V26's Fimbulvetr surface, ahead of the consumers that read it: the precipitation volume
-// is #466, the storm's countdown is #470 and the ward boundary is its own issue. Named
-// here for the reason the two blocks above are — so none of those issues has to reopen
-// `codec.rs` to find out what it is allowed to spell.
-#[allow(unused_imports)] // V26 protocol surface; ECS consumers land in #466, #470 and later.
+// V26's Fimbulvetr surface. Named here for the reason the two blocks above are: a
+// presentation consumer should not have to reopen `codec.rs` to find out what it is
+// allowed to spell.
+#[allow(unused_imports)] // The contract bound remains public for later ward consumers.
 pub use codec::{
     MAX_WARDED_COLUMNS, StormPhase, StormWarning, WardKind, WardedColumn, WardsNearby, WeatherKind,
     WeatherState,
@@ -772,6 +771,38 @@ impl StormInbox {
     }
 }
 
+/// Complete ward lists the net thread has delivered and the presentation has not read.
+///
+/// Each list replaces the one before it wholesale. The queue preserves wire order until
+/// the player module consumes the batch, then that module keeps the last complete answer;
+/// an empty list is therefore a real clearing answer rather than no answer.
+#[derive(Resource, Debug, Default)]
+pub struct WardsInbox(Vec<WardsNearby>);
+
+impl WardsInbox {
+    /// Whether a frame has delivered no ward answer.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Takes every complete list in wire order, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<WardsNearby> {
+        std::mem::take(&mut self.0)
+    }
+
+    /// Drops answers that belonged to a session which is no longer current.
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Queues one list as the net thread would. Test-only, so the renderer can be driven
+    /// without a socket.
+    #[cfg(test)]
+    pub fn push(&mut self, wards: WardsNearby) {
+        self.0.push(wards);
+    }
+}
+
 /// One entry in the ordered conversation stream shown by the chat log.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEntry {
@@ -1092,6 +1123,7 @@ impl Plugin for NetPlugin {
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
+            .init_resource::<WardsInbox>()
             .init_resource::<ChatInbox>()
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
@@ -1579,6 +1611,7 @@ struct Inboxes<'w> {
     residents: ResMut<'w, ResidentInbox>,
     refusals: ResMut<'w, RefusalInbox>,
     storms: ResMut<'w, StormInbox>,
+    wards: ResMut<'w, WardsInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
@@ -1659,6 +1692,11 @@ fn drain_session_events(
             }
 
             Ok(SessionEvent::Established { params, returning }) => {
+                // This queue outlives a socket so the plugins can share one resource.
+                // A newly established session must not inherit an unread ward answer
+                // from the connection it replaced; answers later in this same ordered
+                // drain belong to the new session and are queued normally.
+                inboxes.wards.clear();
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
                 // later line reaches for `{params:?}`.
@@ -1772,10 +1810,8 @@ fn drain_session_events(
             }
 
             // V26's two Fimbulvetr payloads: fully decoded and fully validated one layer
-            // down. The warning is queued for #470's presentation; the ward set remains
-            // dropped until its own issue gives it a surface. Neither is logged here: a
-            // warning is visible in the HUD and chat, and a ward set can arrive whenever
-            // the player walks.
+            // down. Neither is logged here: a warning is visible in the HUD and chat, and
+            // a ward set can arrive whenever the player walks.
             //
             // **The validation is the point of carrying them this far.** An unnameable
             // storm phase, a passed storm that still counts down, a ward list past the
@@ -1785,7 +1821,7 @@ fn drain_session_events(
             Ok(SessionEvent::StormWarning { warning, at }) => {
                 inboxes.storms.0.push((warning, at));
             }
-            Ok(SessionEvent::WardsNearby(_)) => {}
+            Ok(SessionEvent::WardsNearby(wards)) => inboxes.wards.0.push(wards),
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
@@ -1854,6 +1890,7 @@ fn drain_session_events(
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<LeaveCountdown>();
+                inboxes.wards.clear();
             }
 
             Ok(SessionEvent::Refused(reason)) => {
@@ -1866,6 +1903,7 @@ fn drain_session_events(
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<CharacterChoice>();
                 commands.remove_resource::<LeaveCountdown>();
+                inboxes.wards.clear();
             }
 
             Ok(SessionEvent::Ended(detail)) => {
@@ -1881,6 +1919,7 @@ fn drain_session_events(
                 commands.remove_resource::<Session>();
                 commands.remove_resource::<Identity>();
                 commands.remove_resource::<LeaveCountdown>();
+                inboxes.wards.clear();
             }
 
             Err(TryRecvError::Empty) => break,
@@ -1941,6 +1980,7 @@ fn drain_session_events(
                 // Outside the guard above deliberately: that guard is about not rewriting a
                 // terminal *state*, and a link with no thread is stale whichever state the
                 // client is in.
+                inboxes.wards.clear();
                 commands.remove_resource::<NetLink>();
                 break;
             }
@@ -4424,6 +4464,7 @@ mod tests {
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
+            .init_resource::<WardsInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,
                 commands: command_tx,
@@ -4457,6 +4498,66 @@ mod tests {
         assert_eq!(
             app.world_mut().resource_mut::<StormInbox>().take(),
             vec![(warning, at)]
+        );
+    }
+
+    #[test]
+    fn a_ward_list_crosses_the_net_boundary_whole() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        let wards = WardsNearby {
+            columns: vec![WardedColumn {
+                cx: -2,
+                cz: 3,
+                kind: WardKind::Runestone,
+                mine: true,
+            }],
+        };
+
+        events
+            .send(SessionEvent::WardsNearby(wards.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<WardsInbox>().take(),
+            vec![wards]
+        );
+    }
+
+    #[test]
+    fn a_new_session_discards_an_unread_ward_answer_from_the_previous_one() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connecting);
+        let stale = WardsNearby {
+            columns: vec![WardedColumn {
+                cx: -2,
+                cz: 3,
+                kind: WardKind::Settlement,
+                mine: false,
+            }],
+        };
+        let current = WardsNearby {
+            columns: vec![WardedColumn {
+                cx: 4,
+                cz: 5,
+                kind: WardKind::Runestone,
+                mine: true,
+            }],
+        };
+        app.world_mut().resource_mut::<WardsInbox>().push(stale);
+        events
+            .send(SessionEvent::Established {
+                params: params(),
+                returning: Some(false),
+            })
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::WardsNearby(current.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<WardsInbox>().take(),
+            vec![current]
         );
     }
 

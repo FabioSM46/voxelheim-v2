@@ -73,6 +73,7 @@ keeps meaning "everything the client is".
 | `player/interpolate.rs` | the two-snapshot buffer and the interpolation | mention a Bevy world, or extrapolate |
 | `player/camera.rs` | the one camera, and what it follows | decide a gameplay outcome |
 | `player/sky.rs` | the one directional light, the curve the sun, the sky colour, the ambient term and the fog are read from, and the sky and fog a submerged eye sees instead | hold a boundary the server sent, let anything read a rule back out of a colour, own a light that is not the sky's, or decide what being in water *does* |
+| `player/wards.rs` | the newest complete server-sent ward columns and the three translucent boundary meshes drawn from them | derive a ward, authorise an action, feed targeting or movement, draw a dome, or let presentation become gameplay state |
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
@@ -116,16 +117,17 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are four**:
+**Every edge from `player` to `world` is narrow and read-only, and there are five**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
 the authority on which of those exist; `player/camera.rs` reads it for the same question one step
 further on, so the third-person boom stops at a wall instead of going through it;
 `player/sky.rs` reads it for exactly one voxel — the one the eye is inside — because water is the
-one block that changes what the sky looks like; and `player/items.rs` asks `palette` for a terrain
+one block that changes what the sky looks like; `player/wards.rs` reads that same answer to hide
+its presentation under water; and `player/items.rs` asks `palette` for a terrain
 swatch when an item deliberately reuses one. The first-person hand takes its skin colour from the
 local player's server-sent `Appearance`, not from a terrain approximation. **No edge writes world
-state, and no edge points back from `world` to `player`.** A fifth, in either direction, is a
-design question rather than an import. The three that read the store all resolve their voxel
+state, and no edge points back from `world` to `player`.** A sixth, in either direction, is a
+design question rather than an import. The four that read the store all resolve their voxel
 through `ChunkStore::block_at`, the one place a world coordinate becomes a block id.
 
 **The last of those is the client's one opinion about what an item looks like, and every
@@ -185,6 +187,10 @@ Rules that hold on this boundary:
   time from the exact seconds the server stated. It never changes the stored phase or seconds,
   never infers one from `Snapshot.weather`, and clears the pair when the session ends. The
   receive instant is presentation's anchor, not a second world clock.
+- **A `WardsNearby` crosses as one complete value.** The ECS queues it in `WardsInbox`;
+  `player/wards.rs` keeps only the newest complete set in a frame and replaces `Wards` wholesale.
+  An empty set clears it, and ending the session clears it again. The boundary renderer reads
+  those columns and never derives a ward from terrain, structures or the seed.
 - **No Bevy type appears below `net/mod.rs`.** That is what makes `frame`, `codec`, `handshake`
   and `session` testable as plain Rust, with no app to build and no display to open.
 - **The thread is stopped by dropping the ECS end of the channels**, not by an atomic flag: the
