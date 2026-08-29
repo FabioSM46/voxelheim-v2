@@ -196,11 +196,15 @@ type Sim struct {
 	// a present one carrying WeatherKindUnknown is a protocol error and a Clear at
 	// intensity 0 is a perfectly ordinary sky somebody might genuinely be imposing.
 	//
-	// **Nothing in this package sets it yet** — #469 is the storm that does, and it sets
-	// it under this lock like every other field here. It is read once per tick by
-	// weatherAtLocked, and read there rather than per player so that a storm cannot begin
-	// halfway down one tick's player list.
+	// The Fimbulvetr controller sets it through BeginStorm and clears it through
+	// CompleteStorm, under this lock like every other field here. It is read once per
+	// tick by weatherAtLocked, and read there rather than per player so that a storm
+	// cannot begin halfway down one tick's player list.
 	weatherOverride *protocol.WeatherState
+
+	// stormWarning is the current phase sent to somebody joining between broadcasts.
+	// Its zero value means the ordinary world: no warning is owed.
+	stormWarning protocol.StormWarning
 
 	// drops is every item lying in the world. Keyed by identity like players, and for
 	// the same reasons: a snapshot names entities by id, and a merge or a pickup has to

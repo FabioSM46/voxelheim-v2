@@ -61,6 +61,9 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}
+	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
+		t.Fatalf("ConfigureChunkRegeneration: %v", err)
+	}
 	restoreStructures(sim, camp, discard())
 	restoreClock(sim, clock, discard())
 
