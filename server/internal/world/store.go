@@ -72,8 +72,13 @@ import (
 const StoreVersion uint32 = 1
 
 // DefaultWorldDir is where voxelheimd stores a world when the operator names no other
-// directory.
-const DefaultWorldDir = "world"
+// directory. The generator version is part of the name so a deliberate terrain break
+// starts a clean development world while a restart of the same build reuses its state.
+func DefaultWorldDir() string { return defaultWorldDirFor(WorldgenVersion) }
+
+// defaultWorldDirFor keeps the naming rule independently testable without changing the
+// production [WorldgenVersion].
+func defaultWorldDirFor(version uint32) string { return fmt.Sprintf("world-v%d", version) }
 
 // DefaultSaveInterval is how often the autosave loop writes the chunks that changed.
 //

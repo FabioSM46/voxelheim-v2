@@ -27,7 +27,8 @@ import (
 const StoreVersion uint32 = 1
 
 // DefaultAuthDir is where the account service keeps its accounts unless told
-// otherwise, in the shape world.DefaultWorldDir has for the game server.
+// otherwise. Unlike the game world's generator-versioned default, an account
+// directory is independent of terrain generation.
 const DefaultAuthDir = "auth"
 
 // On-disk layout, little-endian throughout, one file per account.
