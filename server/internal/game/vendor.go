@@ -295,12 +295,23 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 
 	next := p.inventory.slots
 	if req.Buying {
+		// The comparison and the spend are both uint32, and that is the entirety of the
+		// safety argument — there is no narrowing left to justify. A purse is a sum over
+		// pack slots rather than a single stack, so `heldInPack` can exceed what one slot
+		// holds and a total it covers can too; the old `uint16(total)` here was checked
+		// against the wide value and then spent as the narrow one, which is the shape of
+		// a free purchase. A 90,000 silver total was settled as `uint16(90000)` = 24,464
+		// with the goods delivered in full, and the comment that stood here argued it was
+		// safe because "forty slots of a uint16 count" fit a uint16 — which is backwards,
+		// and is why the truncation was reachable rather than why it was not.
+		//
+		// Reachable, not theoretical: `restoredSlots` copies a stored count straight from
+		// the record on purpose, and `validateStoredSlot` bounds it by nothing but the
+		// uint16 it is stored in, so a restored purse is not held to a stack maximum.
 		if next.heldInPack(ItemSilver) < total {
 			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("%d silver is more than the purse holds", total)
 		}
-		// Safe by the comparison above: the purse is at most forty slots of a uint16
-		// count, so a total it covers fits one.
-		if !next.consumePack(ItemSilver, uint16(total)) {
+		if !next.consumePack(ItemSilver, total) {
 			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("the purse did not yield %d silver", total)
 		}
 		if remaining := next.insert(item, req.Count); remaining != 0 {
@@ -311,9 +322,14 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 		// the rule consumePack exists for. Held-and-not-enough and not-held-at-all are
 		// one answer, because a vendor that does not want six of something it will take
 		// one of is the same sentence to a player either way.
-		if !next.consumePack(item, req.Count) {
+		if !next.consumePack(item, uint32(req.Count)) {
 			return vnet.RefusalReasonVendorDoesNotWant, fmt.Errorf("the pack does not hold %d of item %d", req.Count, req.ItemID)
 		}
+		// This branch keeps an explicit MaxUint16 refusal and the buying one needs none,
+		// because the two guard different widths: `insert` writes a single slot's count
+		// and genuinely takes a uint16, while a spend walks the whole pack and now takes
+		// the uint32 it always summed to. Paying is bounded by what the purse holds;
+		// being paid is bounded by what one call to `insert` can be asked for.
 		if total > math.MaxUint16 {
 			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d silver is more than a pack could hold", total)
 		}

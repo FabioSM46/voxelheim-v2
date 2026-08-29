@@ -275,7 +275,7 @@ func (t *slotTable) insert(itemID ItemID, count uint16) uint16 {
 // distinction rather than a detail.** Nothing crafted has ever been worn, so "wherever it
 // is" and "wherever the insertion rule could have put it" were the same set of slots for
 // as long as this had one caller.
-func (t *slotTable) consume(itemID ItemID, count uint16) bool {
+func (t *slotTable) consume(itemID ItemID, count uint32) bool {
 	return t.consumeWithin(itemID, count, len(t))
 }
 
@@ -288,14 +288,24 @@ func (t *slotTable) consume(itemID ItemID, count uint16) bool {
 // on the player's legs because the pack ran out. The same bound answers "how much silver
 // is in the purse", for the plainer reason that a purse is a pack slot and a breastplate
 // is not.
-func (t *slotTable) consumePack(itemID ItemID, count uint16) bool {
+func (t *slotTable) consumePack(itemID ItemID, count uint32) bool {
 	return t.consumeWithin(itemID, count, equipmentFirst)
 }
 
 // consumeWithin is the spending rule itself, over the leading `limit` slots. One
 // implementation, for the reason `insert` is one: two loops that walk a slot table
 // subtracting counts are two places for "the stack emptied" to be got wrong.
-func (t *slotTable) consumeWithin(itemID ItemID, count uint16, limit int) bool {
+//
+// **The count is a uint32 because a spend is a pack-wide quantity, not a slot-wide
+// one.** A slot holds a uint16, but a spend walks many slots, so what is affordable is
+// bounded by the sum and not by any one stack — which is exactly why [slotTable.heldInPack]
+// reports a uint32. Taking a uint16 here made every caller with a wider total narrow it
+// first, and a narrowing on the paying side of a trade is a purchase settled for
+// `total mod 65536`.
+//
+// The narrowing that remains is the safe direction: `spent` is at most `stack.count`,
+// which is a uint16 by construction, so it fits one whatever `count` was.
+func (t *slotTable) consumeWithin(itemID ItemID, count uint32, limit int) bool {
 	if itemID == ItemNone || count == 0 {
 		return false
 	}
@@ -308,8 +318,8 @@ func (t *slotTable) consumeWithin(itemID ItemID, count uint16, limit int) bool {
 		if stack.item != itemID || stack.count == 0 {
 			continue
 		}
-		spent := min(count, stack.count)
-		stack.count -= spent
+		spent := min(count, uint32(stack.count))
+		stack.count -= uint16(spent)
 		count -= spent
 		if stack.count == 0 {
 			*stack = inventoryStack{}

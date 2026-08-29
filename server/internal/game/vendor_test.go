@@ -48,6 +48,23 @@ func (h *vitalsHarness) stock(p *Player, slot uint8, item ItemID, count uint16) 
 	p.inventory.slots[slot] = stackOf(item, count)
 }
 
+// stockRaw puts a stack into a slot exactly as given, without stackOf's clamp to the
+// registry's stack maximum.
+//
+// **Not a synthetic state.** `restoredSlots` is deliberately a straight copy of a stored
+// record rather than a second place a slot is decided, and `validateStoredSlot` bounds a
+// count by nothing but the uint16 it is stored in — so a restored purse really can come
+// back holding more silver than stackOf would ever put in one slot. That is what makes a
+// total wider than a uint16 something the trade has to survive rather than something only
+// a test can build.
+func (h *vitalsHarness) stockRaw(p *Player, slot uint8, item ItemID, count uint16) {
+	h.t.Helper()
+
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	p.inventory.slots[slot] = inventoryStack{item: item, count: count}
+}
+
 // carrying is how many of one item the player holds in the pack, read under the lock
 // that owns it.
 func (h *vitalsHarness) carrying(p *Player, item ItemID) uint32 {
@@ -781,6 +798,85 @@ func TestSpendingFromThePackNeverReachesWhatIsWorn(t *testing.T) {
 	if !all.consume(ItemIronHelm, 2) {
 		t.Error("consume could not reach both helms")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// A total wider than a slot
+// ---------------------------------------------------------------------------
+
+// **A spend larger than one slot spends the whole of it.** A purse is a sum over pack
+// slots, so what a player can pay is bounded by that sum and not by the uint16 a single
+// stack is stored in — which is why `heldInPack` reports a uint32 and why the spending
+// rule now takes one.
+//
+// It took a uint16 until this was found: the buying branch compared the wide total
+// against the purse and then handed the rule `uint16(total)`, so a 90,000 silver purchase
+// was settled for 90,000 mod 65,536 = 24,464 with the goods delivered in full.
+//
+// Asked of the helper directly, because no row of today's price table can put goods worth
+// more than 65,535 silver into a 36-slot pack — the truncation is reachable arithmetic
+// that the pack's capacity happens to hide, and "safe because of something over there" is
+// exactly what stops being true when a row changes.
+func TestAPurseSpendsATotalWiderThanASingleSlot(t *testing.T) {
+	t.Parallel()
+
+	var slots slotTable
+	slots[0] = inventoryStack{item: ItemSilver, count: 60000}
+	slots[1] = inventoryStack{item: ItemSilver, count: 30000}
+
+	if held := slots.heldInPack(ItemSilver); held != 90000 {
+		t.Fatalf("the purse counts %d silver, want the 90000 spread over two slots", held)
+	}
+
+	// A copy per attempt, for the reason the worn-equipment test above records:
+	// consumeWithin does not unwind a partial spend.
+	spent := slots
+	if !spent.consumePack(ItemSilver, 90000) {
+		t.Fatal("a purse holding 90000 silver could not pay 90000")
+	}
+	if held := spent.heldInPack(ItemSilver); held != 0 {
+		t.Errorf("paying 90000 out of 90000 left %d silver behind, want 0 — a truncated spend pays the remainder of the division and keeps the rest", held)
+	}
+
+	short := slots
+	if short.consumePack(ItemSilver, 90001) {
+		t.Error("a purse holding 90000 silver paid 90001")
+	}
+}
+
+// **A purchase the purse can plainly afford is never refused for want of silver**, and a
+// purchase it cannot must not be settled for a fraction of its price.
+//
+// Sixteen thousand three hundred and eighty-four leather patches at four silver is
+// exactly 65,536, whose low sixteen bits are zero. Under the truncation this pins, a
+// player carrying 131,070 silver was told the purse would not yield — the honest refusal
+// is the one the pack gives, because 36 slots of eight patches cannot take delivery of
+// 16,384 of them. Both halves are asserted: which refusal arrives, and that a refused
+// trade moved nothing.
+func TestABuyingTotalWiderThanASlotIsNotTruncated(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
+	h.stockRaw(player, 0, ItemSilver, 65535)
+	h.stockRaw(player, 1, ItemSilver, 65535)
+	h.step()
+	was := h.pack(player)
+
+	if held := h.carrying(player, ItemSilver); held != 131070 {
+		t.Fatalf("the purse holds %d silver, want the 131070 the test put in it", held)
+	}
+
+	reason, err := player.Trade(tradeFor(r, ItemLeatherPatch, 16384, true, 1, 2))
+	if err == nil {
+		t.Fatal("a 36-slot pack took delivery of 16384 leather patches")
+	}
+	if reason == vnet.RefusalReasonNotEnoughSilver {
+		t.Error("a purse holding 131070 silver was refused a 65536-silver purchase for want of silver: the total was narrowed to a uint16 before it was paid")
+	}
+	if reason != vnet.RefusalReasonInventoryFull {
+		t.Errorf("a purchase with nowhere to go is refused %s, want InventoryFull", reason)
+	}
+	h.unchanged(player, was, "a purchase costing more than a slot can count")
 }
 
 // Silver is counted across the pack and nowhere else, over as many slots as it is spread
