@@ -248,7 +248,7 @@ func (t *slotTable) craft(r recipe) bool {
 	scratch := *t
 
 	for _, needed := range r.ingredients {
-		if !scratch.consume(needed.item, needed.count) {
+		if !scratch.consume(needed.item, uint32(needed.count)) {
 			return false
 		}
 	}

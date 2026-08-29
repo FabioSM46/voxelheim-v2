@@ -580,6 +580,10 @@ type Player struct {
 	// entry, and one must never silence the other in the frame they share.
 	haveLootTakeAllTick bool
 	lastLootTakeAllTick uint32
+	// And a trade is its own stream beside them, for the reason take-all is beside take:
+	// buying at a stall is not looting a body, and one must never silence the other.
+	haveTradeTick bool
+	lastTradeTick uint32
 
 	// described is every entity this session has been told the appearance of, against
 	// the tick it was last visible on. **This player is the viewer here, not the

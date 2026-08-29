@@ -9,14 +9,13 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
-// What a stall is, asked from two directions: what it deals in, and when it opens and
-// stops being open. What one trade moves — and what a refused one moves, which is
-// nothing — is the second half of the server side of #459 and arrives with
-// Player.Trade.
+// What a stall is, asked from four directions: what it deals in, when it opens and when
+// it stops being open, what one trade moves, and what a refused one moves — which is
+// nothing, in every direction there is to refuse one.
 //
-// Every assertion here is about what the *server* decided. A stall is opened through
-// Player.InteractNPC and closed by the tick rather than by reaching into the fields,
-// because the whole question this file asks is what the authoritative path does.
+// Every assertion here is about what the *server* decided. The trades a test performs go
+// through Player.Trade rather than through the slot table, because the whole question
+// this file asks is what happens inside the one TryLock window.
 
 // ---------------------------------------------------------------------------
 // The fixture
@@ -36,6 +35,42 @@ func stall(t *testing.T, role vnet.ResidentRole) (*vitalsHarness, *Player, *drop
 		t.Fatalf("addressing a %s was refused %s: %v", role, reason, err)
 	}
 	return h, player, out, r
+}
+
+// stock puts an item straight into a slot, which is how a test gets silver: nothing in
+// this package mints any, and killing draugr for it would make every trade test a combat
+// test as well.
+func (h *vitalsHarness) stock(p *Player, slot uint8, item ItemID, count uint16) {
+	h.t.Helper()
+
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	p.inventory.slots[slot] = stackOf(item, count)
+}
+
+// stockRaw puts a stack into a slot exactly as given, without stackOf's clamp to the
+// registry's stack maximum.
+//
+// **Not a synthetic state.** `restoredSlots` is deliberately a straight copy of a stored
+// record rather than a second place a slot is decided, and `validateStoredSlot` bounds a
+// count by nothing but the uint16 it is stored in — so a restored purse really can come
+// back holding more silver than stackOf would ever put in one slot. That is what makes a
+// total wider than a uint16 something the trade has to survive rather than something only
+// a test can build.
+func (h *vitalsHarness) stockRaw(p *Player, slot uint8, item ItemID, count uint16) {
+	h.t.Helper()
+
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	p.inventory.slots[slot] = inventoryStack{item: item, count: count}
+}
+
+// carrying is how many of one item the player holds in the pack, read under the lock
+// that owns it.
+func (h *vitalsHarness) carrying(p *Player, item ItemID) uint32 {
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	return p.inventory.slots.heldInPack(item)
 }
 
 // standAt moves the player without simulating the walk, which is what a reach test needs:
@@ -265,30 +300,27 @@ func TestOpeningASecondStallClosesTheFirst(t *testing.T) {
 }
 
 // Addressing the stall that is already open is not a new session. The revision would
-// restart at 1, and a request written against the previous revision 1 would stop being
+// restart at 1, and a trade written against the previous revision 1 would stop being
 // stale without anything having told the client its list had been replaced.
-//
-// The revision is advanced by hand rather than by the trade that will advance it in
-// life, because a guard against "resetting to 1" is invisible while the number is
-// already 1 — and what is under test is openVendorLocked, not what moved the counter.
 func TestAddressingTheOpenStallAgainKeepsItsRevision(t *testing.T) {
 	t.Parallel()
 
 	h, player, out, r := stall(t, vnet.ResidentRoleCarpenter)
+	h.stock(player, 0, ItemSilver, 50)
 	h.step()
 
-	h.sim.mu.Lock()
-	player.vendorRevision = 7
-	player.vendorDirty = false
-	h.sim.mu.Unlock()
+	if _, err := player.Trade(tradeFor(r, ItemPlanks, 5, true, 1, 2)); err != nil {
+		t.Fatalf("buying five planks was refused: %v", err)
+	}
+	h.step()
 
 	if _, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: 3}); err != nil {
 		t.Fatalf("addressing the same carpenter again was refused: %v", err)
 	}
 	h.step()
 
-	if state := newestVendorState(t, out); state.Revision != 7 {
-		t.Errorf("re-addressing the open stall left it at revision %d, want the 7 it already had", state.Revision)
+	if state := newestVendorState(t, out); state.Revision != 2 {
+		t.Errorf("re-addressing the open stall left it at revision %d, want the 2 the trade produced", state.Revision)
 	}
 	if ended := out.vendorClosures(t); len(ended) != 0 {
 		t.Errorf("re-addressing the open stall closed %v", ended)
@@ -409,5 +441,462 @@ func TestTheStallHoldsOpenOnFourConditions(t *testing.T) {
 	player.lifeState = vnet.LifeStateDead
 	if player.tradeableLocked(near) {
 		t.Error("a dead player is trading")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// One trade
+// ---------------------------------------------------------------------------
+
+// tradeFor is the request a client sends, with the fields a test rarely varies filled in.
+func tradeFor(r *resident, item ItemID, count uint16, buying bool, revision, tick uint32) protocol.TradeRequest {
+	return protocol.TradeRequest{
+		EntityID: r.entityID, ItemID: uint16(item), Count: count,
+		Buying: buying, Revision: revision, ClientTick: tick,
+	}
+}
+
+// A purchase moves both stacks and bumps the revision. Twenty-five silver for a pickaxe,
+// out of the fifty the player is carrying — and the fresh list the tick sends afterwards
+// is what the next request must be written against.
+func TestBuyingAPickaxeSpendsTheSilverAndBumpsTheRevision(t *testing.T) {
+	t.Parallel()
+
+	h, player, out, r := stall(t, vnet.ResidentRoleSmith)
+	h.stock(player, 0, ItemSilver, 50)
+	h.step()
+
+	reason, err := player.Trade(tradeFor(r, ItemPickaxe, 1, true, 1, 2))
+	if err != nil {
+		t.Fatalf("buying a pickaxe was refused %s: %v", reason, err)
+	}
+	h.step()
+
+	if got := h.carrying(player, ItemSilver); got != 25 {
+		t.Errorf("the purse holds %d silver after a 25-silver purchase from 50, want 25", got)
+	}
+	if got := h.carrying(player, ItemPickaxe); got != 1 {
+		t.Errorf("the pack holds %d pickaxes, want 1", got)
+	}
+	if state := newestVendorState(t, out); state.Revision != 2 {
+		t.Errorf("the list is at revision %d after one trade, want 2", state.Revision)
+	}
+	if states := out.inventoryStates(t); len(states) == 0 {
+		t.Error("a trade that moved two stacks sent no inventory state")
+	}
+}
+
+// The count is the multiplier and the total is the server's. Ten arrows at one silver is
+// ten silver, and the arrows arrive as one stack rather than as ten.
+func TestBuyingTenArrowsCostsTenSilver(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleCarpenter)
+	h.stock(player, 0, ItemSilver, 30)
+	h.step()
+
+	if _, err := player.Trade(tradeFor(r, ItemArrow, 10, true, 1, 2)); err != nil {
+		t.Fatalf("buying ten arrows was refused: %v", err)
+	}
+	if got := h.carrying(player, ItemSilver); got != 20 {
+		t.Errorf("the purse holds %d silver, want 20", got)
+	}
+	if got := h.carrying(player, ItemArrow); got != 10 {
+		t.Errorf("the pack holds %d arrows, want 10", got)
+	}
+}
+
+// Selling is the same window in the other direction: the goods go and the silver arrives.
+func TestSellingBonesPaysForThem(t *testing.T) {
+	t.Parallel()
+
+	h, player, out, r := stall(t, vnet.ResidentRoleTrader)
+	h.stock(player, 0, ItemBone, 10)
+	h.stock(player, 1, ItemVargrPelt, 3)
+	h.step()
+
+	if _, err := player.Trade(tradeFor(r, ItemVargrPelt, 3, false, 1, 2)); err != nil {
+		t.Fatalf("selling three pelts was refused: %v", err)
+	}
+	h.step()
+
+	if got := h.carrying(player, ItemVargrPelt); got != 0 {
+		t.Errorf("the pack still holds %d pelts after selling all three", got)
+	}
+	if got := h.carrying(player, ItemSilver); got != 12 {
+		t.Errorf("three pelts at 4 paid %d silver, want 12", got)
+	}
+	if got := h.carrying(player, ItemBone); got != 10 {
+		t.Errorf("selling pelts took %d of the 10 bones", 10-got)
+	}
+	if state := newestVendorState(t, out); state.Revision != 2 {
+		t.Errorf("the list is at revision %d after one sale, want 2", state.Revision)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Every refusal moves nothing
+// ---------------------------------------------------------------------------
+
+// unchanged fails the test unless the pack is exactly as the caller left it.
+func (h *vitalsHarness) unchanged(p *Player, was slotTable, what string) {
+	h.t.Helper()
+
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	if p.inventory.slots != was {
+		h.t.Errorf("%s moved something: the pack is %v, want %v", what, p.inventory.slots, was)
+	}
+}
+
+// pack is a copy of the authoritative slots, for a test to compare against afterwards.
+func (h *vitalsHarness) pack(p *Player) slotTable {
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	return p.inventory.slots
+}
+
+// A purse that is short buys nothing, and the silver it does hold stays where it is. The
+// server owns the price and the purse both: this is the answer that corrects a client
+// whose arithmetic disagreed.
+func TestBuyingWithoutTheSilverRefusesAndSpendsNothing(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
+	h.stock(player, 0, ItemSilver, 39)
+	h.step()
+	was := h.pack(player)
+
+	reason, err := player.Trade(tradeFor(r, ItemIronSword, 1, true, 1, 2))
+	if err == nil {
+		t.Fatal("thirty-nine silver bought a forty-silver sword")
+	}
+	if reason != vnet.RefusalReasonNotEnoughSilver {
+		t.Errorf("a short purse is refused %s, want NotEnoughSilver", reason)
+	}
+	h.unchanged(player, was, "a purchase nobody could afford")
+	if player.vendorRevision != 1 {
+		t.Errorf("a refused purchase bumped the revision to %d", player.vendorRevision)
+	}
+}
+
+// **A full pack refuses the purchase and spends nothing**, which is the whole reason the
+// trade runs on a copy: paying and then finding no room would leave the silver gone and
+// nothing bought.
+//
+// The purse deliberately holds more than the purchase costs, so paying does not empty its
+// slot — a slot the payment frees is a slot the goods can go into, which is the ordinary
+// case and is tested by the purchases above.
+func TestBuyingIntoAFullPackRefusesAndSpendsNothing(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
+	h.stock(player, 0, ItemSilver, 200)
+	for slot := 1; slot < equipmentFirst; slot++ {
+		h.stock(player, uint8(slot), ItemStone, 60000)
+	}
+	h.step()
+	was := h.pack(player)
+
+	reason, err := player.Trade(tradeFor(r, ItemSharpeningStone, 1, true, 1, 2))
+	if err == nil {
+		t.Fatal("a pack with no empty slot took delivery of a sharpening stone")
+	}
+	if reason != vnet.RefusalReasonInventoryFull {
+		t.Errorf("a full pack is refused %s, want InventoryFull", reason)
+	}
+	h.unchanged(player, was, "a purchase with nowhere to put it")
+}
+
+// Selling what the pack does not hold is refused, and holding some of it is the same
+// answer as holding none: a vendor that does not want six of something it will take one
+// of is one sentence to a player either way.
+func TestSellingWhatIsNotThereRefusesAndMovesNothing(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
+	h.stock(player, 0, ItemBone, 2)
+	h.step()
+	was := h.pack(player)
+
+	reason, err := player.Trade(tradeFor(r, ItemBone, 5, false, 1, 2))
+	if err == nil {
+		t.Fatal("two bones sold as five")
+	}
+	if reason != vnet.RefusalReasonVendorDoesNotWant {
+		t.Errorf("selling more than is held is refused %s, want VendorDoesNotWant", reason)
+	}
+	h.unchanged(player, was, "a sale of what was not there")
+}
+
+// An item the vendor does not deal in at all, in either direction. The cook buys raw meat
+// and sells the cooked kind; neither is a bone, and a smith is not the cook.
+func TestAVendorRefusesWhatItDoesNotDealIn(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleCook)
+	h.stock(player, 0, ItemSilver, 100)
+	h.stock(player, 1, ItemBone, 10)
+	h.step()
+	was := h.pack(player)
+
+	for _, one := range []struct {
+		what    string
+		request protocol.TradeRequest
+	}{
+		{"buying a bone from a cook", tradeFor(r, ItemBone, 1, true, 1, 2)},
+		{"selling a bone to a cook", tradeFor(r, ItemBone, 1, false, 1, 3)},
+		{"selling the cooked meat a cook only sells", tradeFor(r, ItemCookedMeat, 1, false, 1, 4)},
+	} {
+		reason, err := player.Trade(one.request)
+		if err == nil {
+			t.Errorf("%s went through", one.what)
+		}
+		if reason != vnet.RefusalReasonVendorDoesNotWant {
+			t.Errorf("%s is refused %s, want VendorDoesNotWant", one.what, reason)
+		}
+	}
+	h.unchanged(player, was, "three trades a cook does not deal in")
+}
+
+// A request written against a list the server has replaced is refused rather than applied
+// to a different one, which is LootState's rule and is why the revision exists.
+func TestAStaleRevisionRefusesTheTrade(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleCarpenter)
+	h.stock(player, 0, ItemSilver, 100)
+	h.step()
+
+	if _, err := player.Trade(tradeFor(r, ItemPlanks, 1, true, 1, 2)); err != nil {
+		t.Fatalf("the first purchase was refused: %v", err)
+	}
+	was := h.pack(player)
+
+	reason, err := player.Trade(tradeFor(r, ItemPlanks, 1, true, 1, 3))
+	if err == nil {
+		t.Fatal("a request against the replaced list went through")
+	}
+	if reason != vnet.RefusalReasonStaleRevision {
+		t.Errorf("a stale revision is refused %s, want StaleRevision", reason)
+	}
+	h.unchanged(player, was, "a trade against a list that had been replaced")
+}
+
+// Trading with a stall this session does not have open is refused the way addressing a
+// non-vendor is: nothing a client sends here tells it anything it could not already see.
+func TestTradingWithNoStallOpenIsRefused(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	r := h.standResidentAt(vnet.ResidentRoleSmith, [3]float64{1.5, 64, 0.5}, 0)
+	h.stock(player, 0, ItemSilver, 100)
+	h.step()
+	was := h.pack(player)
+
+	reason, err := player.Trade(tradeFor(r, ItemShovel, 1, true, 1, 2))
+	if err == nil {
+		t.Fatal("a stall nobody opened sold a shovel")
+	}
+	if reason != vnet.RefusalReasonNotAVendor {
+		t.Errorf("trading with an unopened stall is refused %s, want NotAVendor", reason)
+	}
+	h.unchanged(player, was, "a trade with a stall that was never opened")
+}
+
+// Walking away between the open and the request refuses the trade and ends the stall,
+// rather than leaving a session that can trade from across the village.
+func TestTradingAfterWalkingAwayRefusesAndCloses(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
+	h.stock(player, 0, ItemSilver, 100)
+	h.step()
+	was := h.pack(player)
+
+	h.standAt(player, [3]float64{0.5, 64, EditReach + 6.5})
+	reason, err := player.Trade(tradeFor(r, ItemShovel, 1, true, 1, 2))
+	if err == nil {
+		t.Fatal("a shovel was bought from across the village")
+	}
+	if reason != vnet.RefusalReasonNotAVendor {
+		t.Errorf("trading out of reach is refused %s, want NotAVendor", reason)
+	}
+	if player.openVendorID != 0 {
+		t.Errorf("the stall is still open at %d", player.openVendorID)
+	}
+	h.unchanged(player, was, "a trade from out of reach")
+}
+
+// A dead player trades nothing, through the same act gate that refuses them mining,
+// crafting and looting.
+func TestADeadPlayerTradesNothing(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
+	h.stock(player, 0, ItemSilver, 100)
+	h.step()
+	was := h.pack(player)
+
+	h.hurt(player, PlayerMaxHealth)
+	reason, err := player.Trade(tradeFor(r, ItemCampfire, 1, true, 1, 2))
+	if err == nil {
+		t.Fatal("a corpse bought a campfire")
+	}
+	if reason != vnet.RefusalReasonPlayerIsDead {
+		t.Errorf("a dead player is refused %s, want PlayerIsDead", reason)
+	}
+	h.unchanged(player, was, "a trade by somebody who was dead")
+	if reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: 3}); err == nil {
+		t.Error("a corpse opened a stall")
+	} else if reason != vnet.RefusalReasonPlayerIsDead {
+		t.Errorf("a dead player addressing a trader is refused %s, want PlayerIsDead", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What a sale may never reach
+// ---------------------------------------------------------------------------
+
+// **Nothing worn is for sale**, and consumePack is where that is true. No row of today's
+// table names a piece of armour, so this is asked of the helper directly rather than
+// through a trade — the rule has to hold before the row that would exercise it is added,
+// not after.
+func TestSpendingFromThePackNeverReachesWhatIsWorn(t *testing.T) {
+	t.Parallel()
+
+	var slots slotTable
+	slots[0] = stackOf(ItemIronHelm, 1)
+	slots[equipmentHead] = stackOf(ItemIronHelm, 1)
+
+	if held := slots.heldInPack(ItemIronHelm); held != 1 {
+		t.Errorf("the pack is counted as holding %d iron helms, want the 1 that is in it rather than the one on the player's head", held)
+	}
+
+	// A copy per attempt, because consumeWithin does not unwind a partial spend — the
+	// discipline every caller of it keeps, and the reason Player.Trade runs the whole
+	// transaction on a copy of the table.
+	short := slots
+	if short.consumePack(ItemIronHelm, 2) {
+		t.Error("selling two helms took the one the player was wearing")
+	}
+	if short[equipmentHead] != slots[equipmentHead] {
+		t.Error("a pack spend that ran out reached into an equipment slot for the rest")
+	}
+
+	one := slots
+	if !one.consumePack(ItemIronHelm, 1) {
+		t.Fatal("the one helm in the pack could not be spent")
+	}
+	if one[equipmentHead] != slots[equipmentHead] {
+		t.Error("spending from the pack emptied an equipment slot")
+	}
+
+	// And the unbounded form still reaches everything, which is what craft relies on.
+	all := slots
+	if !all.consume(ItemIronHelm, 2) {
+		t.Error("consume could not reach both helms")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A total wider than a slot
+// ---------------------------------------------------------------------------
+
+// **A spend larger than one slot spends the whole of it.** A purse is a sum over pack
+// slots, so what a player can pay is bounded by that sum and not by the uint16 a single
+// stack is stored in — which is why `heldInPack` reports a uint32 and why the spending
+// rule now takes one.
+//
+// It took a uint16 until this was found: the buying branch compared the wide total
+// against the purse and then handed the rule `uint16(total)`, so a 90,000 silver purchase
+// was settled for 90,000 mod 65,536 = 24,464 with the goods delivered in full.
+//
+// Asked of the helper directly, because no row of today's price table can put goods worth
+// more than 65,535 silver into a 36-slot pack — the truncation is reachable arithmetic
+// that the pack's capacity happens to hide, and "safe because of something over there" is
+// exactly what stops being true when a row changes.
+func TestAPurseSpendsATotalWiderThanASingleSlot(t *testing.T) {
+	t.Parallel()
+
+	var slots slotTable
+	slots[0] = inventoryStack{item: ItemSilver, count: 60000}
+	slots[1] = inventoryStack{item: ItemSilver, count: 30000}
+
+	if held := slots.heldInPack(ItemSilver); held != 90000 {
+		t.Fatalf("the purse counts %d silver, want the 90000 spread over two slots", held)
+	}
+
+	// A copy per attempt, for the reason the worn-equipment test above records:
+	// consumeWithin does not unwind a partial spend.
+	spent := slots
+	if !spent.consumePack(ItemSilver, 90000) {
+		t.Fatal("a purse holding 90000 silver could not pay 90000")
+	}
+	if held := spent.heldInPack(ItemSilver); held != 0 {
+		t.Errorf("paying 90000 out of 90000 left %d silver behind, want 0 — a truncated spend pays the remainder of the division and keeps the rest", held)
+	}
+
+	short := slots
+	if short.consumePack(ItemSilver, 90001) {
+		t.Error("a purse holding 90000 silver paid 90001")
+	}
+}
+
+// **A purchase the purse can plainly afford is never refused for want of silver**, and a
+// purchase it cannot must not be settled for a fraction of its price.
+//
+// Sixteen thousand three hundred and eighty-four leather patches at four silver is
+// exactly 65,536, whose low sixteen bits are zero. Under the truncation this pins, a
+// player carrying 131,070 silver was told the purse would not yield — the honest refusal
+// is the one the pack gives, because 36 slots of eight patches cannot take delivery of
+// 16,384 of them. Both halves are asserted: which refusal arrives, and that a refused
+// trade moved nothing.
+func TestABuyingTotalWiderThanASlotIsNotTruncated(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
+	h.stockRaw(player, 0, ItemSilver, 65535)
+	h.stockRaw(player, 1, ItemSilver, 65535)
+	h.step()
+	was := h.pack(player)
+
+	if held := h.carrying(player, ItemSilver); held != 131070 {
+		t.Fatalf("the purse holds %d silver, want the 131070 the test put in it", held)
+	}
+
+	reason, err := player.Trade(tradeFor(r, ItemLeatherPatch, 16384, true, 1, 2))
+	if err == nil {
+		t.Fatal("a 36-slot pack took delivery of 16384 leather patches")
+	}
+	if reason == vnet.RefusalReasonNotEnoughSilver {
+		t.Error("a purse holding 131070 silver was refused a 65536-silver purchase for want of silver: the total was narrowed to a uint16 before it was paid")
+	}
+	if reason != vnet.RefusalReasonInventoryFull {
+		t.Errorf("a purchase with nowhere to go is refused %s, want InventoryFull", reason)
+	}
+	h.unchanged(player, was, "a purchase costing more than a slot can count")
+}
+
+// Silver is counted across the pack and nowhere else, over as many slots as it is spread
+// through — the purse is not a slot, it is however many slots money ended up in.
+func TestThePurseIsEveryPackSlotSilverIsIn(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
+	h.stock(player, 0, ItemSilver, 20)
+	h.stock(player, 5, ItemSilver, 20)
+	h.stock(player, 9, ItemSilver, 5)
+	h.step()
+
+	if held := h.carrying(player, ItemSilver); held != 45 {
+		t.Fatalf("the purse holds %d, want the 45 spread over three slots", held)
+	}
+	if _, err := player.Trade(tradeFor(r, ItemIronCuirass, 1, true, 1, 2)); err != nil {
+		t.Fatalf("forty-five silver did not buy a forty-five-silver cuirass: %v", err)
+	}
+	if held := h.carrying(player, ItemSilver); held != 0 {
+		t.Errorf("%d silver survived a purchase that cost every coin", held)
 	}
 }

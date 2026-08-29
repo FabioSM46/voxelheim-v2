@@ -266,16 +266,51 @@ func (t *slotTable) insert(itemID ItemID, count uint16) uint16 {
 // whether the pack held enough.
 //
 // **It does not unwind a partial spend, and that is safe only because of who calls it.**
-// The one caller is `craft`, which works on a copy and throws the whole copy away the
-// moment any step returns false — so a half-consumed table is never a table anybody sees.
-// A second caller would need either that discipline or an unwind, and this comment is the
-// place to notice which.
-func (t *slotTable) consume(itemID ItemID, count uint16) bool {
+// Both callers — `craft` and the trade below — work on a copy and throw the whole copy
+// away the moment any step returns false, so a half-consumed table is never a table
+// anybody sees. A third caller would need either that discipline or an unwind, and this
+// comment is the place to notice which.
+//
+// **It reaches the equipment slots, and consumePack is the reason that is now a
+// distinction rather than a detail.** Nothing crafted has ever been worn, so "wherever it
+// is" and "wherever the insertion rule could have put it" were the same set of slots for
+// as long as this had one caller.
+func (t *slotTable) consume(itemID ItemID, count uint32) bool {
+	return t.consumeWithin(itemID, count, len(t))
+}
+
+// consumePack is consume over the pack alone: the slots automatic insertion may reach,
+// and never the four a player is wearing.
+//
+// **Selling is what needed the distinction, and it is a rule rather than a nicety.** #459
+// puts no worn item on the wire — the trade takes what the player is carrying and leaves
+// what they have on — so a vendor buying iron greaves must not be able to take the pair
+// on the player's legs because the pack ran out. The same bound answers "how much silver
+// is in the purse", for the plainer reason that a purse is a pack slot and a breastplate
+// is not.
+func (t *slotTable) consumePack(itemID ItemID, count uint32) bool {
+	return t.consumeWithin(itemID, count, equipmentFirst)
+}
+
+// consumeWithin is the spending rule itself, over the leading `limit` slots. One
+// implementation, for the reason `insert` is one: two loops that walk a slot table
+// subtracting counts are two places for "the stack emptied" to be got wrong.
+//
+// **The count is a uint32 because a spend is a pack-wide quantity, not a slot-wide
+// one.** A slot holds a uint16, but a spend walks many slots, so what is affordable is
+// bounded by the sum and not by any one stack — which is exactly why [slotTable.heldInPack]
+// reports a uint32. Taking a uint16 here made every caller with a wider total narrow it
+// first, and a narrowing on the paying side of a trade is a purchase settled for
+// `total mod 65536`.
+//
+// The narrowing that remains is the safe direction: `spent` is at most `stack.count`,
+// which is a uint16 by construction, so it fits one whatever `count` was.
+func (t *slotTable) consumeWithin(itemID ItemID, count uint32, limit int) bool {
 	if itemID == ItemNone || count == 0 {
 		return false
 	}
 
-	for slot := range t {
+	for slot := range t[:limit] {
 		if count == 0 {
 			break
 		}
@@ -283,14 +318,33 @@ func (t *slotTable) consume(itemID ItemID, count uint16) bool {
 		if stack.item != itemID || stack.count == 0 {
 			continue
 		}
-		spent := min(count, stack.count)
-		stack.count -= spent
+		spent := min(count, uint32(stack.count))
+		stack.count -= uint16(spent)
 		count -= spent
 		if stack.count == 0 {
 			*stack = inventoryStack{}
 		}
 	}
 	return count == 0
+}
+
+// heldInPack is how many of one item the player is carrying, counted over the slots
+// automatic insertion may reach and never over the four they are wearing.
+//
+// Saturating at MaxUint32 is arithmetic that cannot be reached — forty slots of at most
+// MaxUint16 is nowhere near it — and is written as a uint32 anyway so that a caller
+// comparing it against a `price × count` total is comparing two values of the same width.
+func (t *slotTable) heldInPack(itemID ItemID) uint32 {
+	if itemID == ItemNone {
+		return 0
+	}
+	var held uint32
+	for slot := range t[:equipmentFirst] {
+		if t[slot].item == itemID {
+			held += uint32(t[slot].count)
+		}
+	}
+	return held
 }
 
 // consumeOneLocked spends exactly one item from the named slot. expected makes
