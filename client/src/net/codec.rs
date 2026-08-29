@@ -2082,10 +2082,12 @@ pub enum WeatherKind {
     Rain,
     Snow,
     Sandstorm,
-    /// The storm's own kind. It arrives only while a `StormWarning` says `Raging`; the
-    /// ordinary weather of a climate never produces it. **Both halves of that statement
-    /// are the server's**, and this side checks neither against the other — the warning
-    /// is a message of its own, decoded in the part of #463 that follows this one.
+    /// The storm's own kind. It arrives only while a [`StormWarning`] says
+    /// [`StormPhase::Raging`]; the ordinary weather of a climate never produces it.
+    /// **Both halves of that statement are the server's**, and this side checks neither
+    /// against the other: the two travel in different messages and `decode` sees one
+    /// frame at a time, so a client that refused a `Blizzard` for want of a warning it
+    /// had not been sent yet would be inventing an ordering the contract does not state.
     Blizzard,
 }
 
@@ -2123,6 +2125,116 @@ pub struct WeatherState {
     /// is refused rather than clamped: the two halves of the struct would then be
     /// describing different skies, and neither reading is the server's.
     pub intensity: u8,
+}
+
+/// Where a blizzard is in its life, in a [`StormWarning`].
+///
+/// No `Unknown` variant, and it matters more here than anywhere else this rule is
+/// applied: the phase is what gives [`StormWarning::seconds_until`] its meaning. A
+/// countdown, a remaining duration and a zero are three different numbers wearing one
+/// field, so a phase that failed to decode would pick the wrong one silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StormPhase {
+    /// Decided and not yet arrived. `seconds_until` counts down to it.
+    Approaching,
+    /// Here. `seconds_until` is what it has left rather than what it is waiting for.
+    Raging,
+    /// Over, and `seconds_until` is 0.
+    Passed,
+}
+
+impl StormPhase {
+    /// `None` for the contract's zero and for a member this build has no name for.
+    fn from_wire(value: fb::StormPhase) -> Option<Self> {
+        match value {
+            fb::StormPhase::Approaching => Some(Self::Approaching),
+            fb::StormPhase::Raging => Some(Self::Raging),
+            fb::StormPhase::Passed => Some(Self::Passed),
+            _ => None,
+        }
+    }
+}
+
+/// The server telling this session about the blizzard.
+///
+/// **It carries no weather.** What the sky is doing where the player stands arrives in
+/// the snapshot, every tick, as [`Snapshot::weather`]. This message says only that a
+/// storm is coming, is here, or is done — and a client that inferred
+/// [`WeatherKind::Blizzard`] from a [`StormPhase::Raging`] would be drawing weather the
+/// server had not stated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StormWarning {
+    /// Seconds until the storm arrives while [`StormPhase::Approaching`], seconds it has
+    /// left while [`StormPhase::Raging`], and 0 once it has [`StormPhase::Passed`].
+    ///
+    /// A duration in whole seconds, never a tick count and never a timestamp, and
+    /// unbounded above by this contract.
+    pub seconds_until: u32,
+    pub phase: StormPhase,
+}
+
+/// The most warded chunk columns one [`WardsNearby`] may carry.
+///
+/// Read off the contract rather than written again here, unlike [`MAX_MARKERS`] and the
+/// two byte bounds beside it: `schemas/player.fbs` states this one as a `WardBound` enum
+/// precisely so both generated trees carry it and neither consumer keeps a copy that could
+/// drift. 2048 is a square 45 chunks on a side, past any view distance a welcome may
+/// announce, so a legal server never approaches it — it exists because this side allocates
+/// from a length the peer chose.
+pub const MAX_WARDED_COLUMNS: usize = fb::WardBound::MaxWardedColumns.0 as usize;
+
+/// What put a ward on a chunk column.
+///
+/// No `Unknown` variant, and refused rather than drawn as a generic claim: shading a
+/// column whose ward the client cannot name would tell the player a settlement owns
+/// ground a runestone does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WardKind {
+    /// A runestone somebody planted. [`WardedColumn::mine`] says whether it was this
+    /// player.
+    Runestone,
+    /// A settlement's own ground, which belongs to nobody and is never `mine`.
+    Settlement,
+}
+
+impl WardKind {
+    /// `None` for the contract's zero and for a member this build has no name for.
+    fn from_wire(value: fb::WardKind) -> Option<Self> {
+        match value {
+            fb::WardKind::Runestone => Some(Self::Runestone),
+            fb::WardKind::Settlement => Some(Self::Settlement),
+            _ => None,
+        }
+    }
+}
+
+/// One chunk column under a ward.
+///
+/// Only the horizontal axes, deliberately: a ward claims a column of the world from
+/// bedrock to sky rather than a cube of it, so there is no `cy` to carry and none to
+/// ignore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WardedColumn {
+    pub cx: i32,
+    pub cz: i32,
+    pub kind: WardKind,
+    /// True when the recipient is the one whose ward this is. **Presentation only** — the
+    /// server refuses the edit either way, and a client that let a `true` here authorise
+    /// anything would be deciding a gameplay outcome.
+    pub mine: bool,
+}
+
+/// Every warded chunk column within the recipient's view, **replacing** the client's
+/// previous set wholesale.
+///
+/// [`MarkerList`]'s shape rather than [`MapExplored`]'s, and the difference is the point:
+/// this is a complete statement of a fact that changes, not a page of an additive ledger.
+/// **An empty set is legal and ordinary** — it is how a client learns it has walked out of
+/// the last ward — which is why absence and empty mean the same thing here, where an empty
+/// `MapExplored` page is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WardsNearby {
+    pub columns: Vec<WardedColumn>,
 }
 
 /// One authoritative monster blow that reduced this player's health.
@@ -2267,6 +2379,13 @@ pub enum Message {
     VendorState(VendorState),
     /// The named stall is no longer open.
     VendorClosed(VendorClosed),
+    /// Where the blizzard is in its life. Decoded and validated here; no ECS system
+    /// consumes it until the storm's countdown (#470), exactly as `MineProgress` was
+    /// decoded from V2 and drawn later.
+    StormWarning(StormWarning),
+    /// Every warded chunk column in view, replacing the client's copy wholesale. Decoded
+    /// and validated here; the boundary that draws it is its own issue.
+    WardsNearby(WardsNearby),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -2719,6 +2838,23 @@ pub enum DecodeError {
     /// refused rather than repaired: the two fields are describing different skies and
     /// nothing here can tell which one the server is simulating.
     ClearWeatherWithIntensity { intensity: u8 },
+    /// A `StormWarning` carries a phase this build has no member for, the absent-field
+    /// `Unknown` included. There is no phase to read `seconds_until` against.
+    UnknownStormPhase { value: u8 },
+    /// A `StormWarning` says the storm has passed and still carries a countdown. The two
+    /// statements are about different storms.
+    StormPassedWithCountdown { seconds_until: u32 },
+    /// A `WardsNearby` carries more columns than the contract's bound.
+    ///
+    /// Refused rather than truncated: a receiver that dropped the tail would shade the
+    /// world wrong and say nothing about it.
+    TooManyWardedColumns(usize),
+    /// A `WardedColumn` carries a ward kind this build has no member for, the
+    /// absent-field `Unknown` included.
+    UnknownWardKind { cx: i32, cz: i32, value: u8 },
+    /// One `(cx, cz)` appears twice in the same `WardsNearby`. Two rows for one column
+    /// are two answers about the same ground with no way to tell which is meant.
+    DuplicateWardedColumn { cx: i32, cz: i32 },
 }
 
 impl fmt::Display for DecodeError {
@@ -3186,6 +3322,24 @@ impl fmt::Display for DecodeError {
                 f,
                 "clear weather carries intensity {intensity}, and clear is always 0"
             ),
+            Self::UnknownStormPhase { value } => {
+                write!(f, "a StormWarning carries an unknown phase: {value}")
+            }
+            Self::StormPassedWithCountdown { seconds_until } => write!(
+                f,
+                "a passed storm carries {seconds_until} seconds, and a passed storm carries 0"
+            ),
+            Self::TooManyWardedColumns(len) => write!(
+                f,
+                "a WardsNearby carries {len} columns, at most {MAX_WARDED_COLUMNS}"
+            ),
+            Self::UnknownWardKind { cx, cz, value } => write!(
+                f,
+                "warded column ({cx}, {cz}) has an unknown ward kind: {value}"
+            ),
+            Self::DuplicateWardedColumn { cx, cz } => {
+                write!(f, "a WardsNearby names column ({cx}, {cz}) twice")
+            }
         }
     }
 }
@@ -3574,12 +3728,24 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::NpcInteractRequest
         | fb::Payload::TradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
-        // V26's two server→client payloads, carried by name until their decoders land.
-        // Named here rather than left to the fallback for the reason `NONE` is: the
-        // fallback answers `UNKNOWN_VARIANT`, and a member this build *can* name reaching
-        // it would report a contract gap that does not exist. The contract half of #463
-        // settles the tags; the decoders that copy and validate these two follow it.
-        fb::Payload::StormWarning | fb::Payload::WardsNearby => Ok(Message::Deferred(name)),
+        // V26's two server→client payloads. Both are read and validated here and neither
+        // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
+        // and the ward boundary is its own issue. Validating at the decode boundary is
+        // the point of carrying them this far — a phase the client cannot name, or a
+        // ward list longer than the contract allows, ends the session now rather than
+        // when somebody writes the renderer.
+        fb::Payload::StormWarning => {
+            let payload = envelope
+                .payload_as_storm_warning()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::StormWarning(storm_warning(&payload)?))
+        }
+        fb::Payload::WardsNearby => {
+            let payload = envelope
+                .payload_as_wards_nearby()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::WardsNearby(wards_nearby(&payload)?))
+        }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -3717,6 +3883,73 @@ fn marker_list(list: &fb::MarkerList<'_>) -> Result<MarkerList, DecodeError> {
         });
     }
     Ok(MarkerList { markers: decoded })
+}
+
+/// Copies and validates one storm warning.
+///
+/// The phase is read first because it is what gives the number beside it a meaning: a
+/// countdown, a remaining duration and a zero are three different quantities wearing one
+/// field, so a phase this build cannot name leaves nothing to read `seconds_until` as.
+///
+/// `seconds_until` has no upper bound to check — the contract states none, deliberately —
+/// and exactly one cross-field rule: a storm that has passed carries 0. That pair is
+/// refused rather than repaired, for the reason a broken world clock is: the two halves
+/// describe different storms and neither of them is knowably the server's.
+fn storm_warning(warning: &fb::StormWarning<'_>) -> Result<StormWarning, DecodeError> {
+    let phase = StormPhase::from_wire(warning.phase()).ok_or(DecodeError::UnknownStormPhase {
+        value: warning.phase().0,
+    })?;
+    let seconds_until = warning.seconds_until();
+    if phase == StormPhase::Passed && seconds_until != 0 {
+        return Err(DecodeError::StormPassedWithCountdown { seconds_until });
+    }
+    Ok(StormWarning {
+        seconds_until,
+        phase,
+    })
+}
+
+/// Copies and validates the complete set of warded columns in view.
+///
+/// **An empty set is accepted, and it is the message a player walking out of the last
+/// ward receives.** That is why absence and empty are one case here — [`MarkerList`]'s
+/// rule rather than [`MapExplored`]'s, because this replaces the client's copy instead of
+/// adding to it, so an empty one states something.
+///
+/// The length is checked before anything is allocated from it, and column addresses are
+/// checked for uniqueness because the set is complete: two rows for one column are two
+/// answers about the same ground, and nothing downstream could tell which was meant.
+fn wards_nearby(wards: &fb::WardsNearby<'_>) -> Result<WardsNearby, DecodeError> {
+    let columns = wards.columns().unwrap_or_default();
+    if columns.len() > MAX_WARDED_COLUMNS {
+        return Err(DecodeError::TooManyWardedColumns(columns.len()));
+    }
+
+    let mut decoded = Vec::with_capacity(columns.len());
+    let mut addresses = HashSet::new();
+    for column in &columns {
+        let (cx, cz) = (column.cx(), column.cz());
+        let kind = WardKind::from_wire(column.kind()).ok_or(DecodeError::UnknownWardKind {
+            cx,
+            cz,
+            value: column.kind().0,
+        })?;
+        if !addresses.insert((cx, cz)) {
+            return Err(DecodeError::DuplicateWardedColumn { cx, cz });
+        }
+        // `mine` is copied verbatim and never checked against anything. It is
+        // presentation: the server refuses a warded edit whatever this byte says, and a
+        // client that read a permission out of it would be deciding a gameplay outcome.
+        // A `Settlement` column claiming to be this player's is therefore a shading bug
+        // on the server, not a frame this side may reinterpret.
+        decoded.push(WardedColumn {
+            cx,
+            cz,
+            kind,
+            mine: column.mine(),
+        });
+    }
+    Ok(WardsNearby { columns: decoded })
 }
 
 /// Copies and validates the weather at the recipient's own position.
@@ -6967,6 +7200,56 @@ pub(super) mod server_side {
         )
     }
 
+    /// A `StormWarning` built from raw wire parts, so a test can name a phase this
+    /// contract has no member for and a countdown a correct server never pairs with it.
+    pub fn encode_storm_warning(seconds_until: u32, phase: u8) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let payload = fb::StormWarning::create(
+            &mut builder,
+            &fb::StormWarningArgs {
+                seconds_until,
+                phase: fb::StormPhase(phase),
+            },
+        );
+        finish_envelope(builder, fb::Payload::StormWarning, payload.as_union_value())
+    }
+
+    /// One warded column as raw wire parts, so a test can build a set a correct server
+    /// never sends: an `Unknown` kind, or one column named twice.
+    #[derive(Debug, Clone, Copy)]
+    pub struct WardedColumnWire {
+        pub cx: i32,
+        pub cz: i32,
+        pub kind: u8,
+        pub mine: bool,
+    }
+
+    /// A `WardsNearby` whose vector can be absent, present-and-empty, or anything else.
+    ///
+    /// The first two are the same message by contract, and this helper keeps them
+    /// distinguishable on the wire so that a test can say so rather than assume it.
+    pub fn encode_wards_nearby(columns: Option<&[WardedColumnWire]>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(
+            columns.map_or(0, |columns| columns.len() * 16) + super::BUILDER_CAPACITY,
+        );
+        let columns = columns.map(|columns| {
+            let laid_out: Vec<_> = columns
+                .iter()
+                .map(|column| {
+                    fb::WardedColumn::new(
+                        column.cx,
+                        column.cz,
+                        fb::WardKind(column.kind),
+                        column.mine,
+                    )
+                })
+                .collect();
+            builder.create_vector(&laid_out)
+        });
+        let payload = fb::WardsNearby::create(&mut builder, &fb::WardsNearbyArgs { columns });
+        finish_envelope(builder, fb::Payload::WardsNearby, payload.as_union_value())
+    }
+
     pub fn encode_loot_closed(corpse_id: u64) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let payload = fb::LootClosed::create(&mut builder, &fb::LootClosedArgs { corpse_id });
@@ -7075,10 +7358,10 @@ mod tests {
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
         ItemDropDurabilityWire, ItemDropStateWire, MarkerWire, MobStateWire, PartyMemberStateWire,
         PartyRosterMemberWire, PlayerVitalsWire, ProjectileStateWire, StructureStateWire,
-        WelcomeWire, encode_action_refused, encode_bare_block_update, encode_bare_chunk_data,
-        encode_bare_chunk_unload, encode_bare_entity_snapshot, encode_block_update,
-        encode_chat_message, encode_chunk_data, encode_chunk_unload, encode_entity_snapshot,
-        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        WardedColumnWire, WelcomeWire, encode_action_refused, encode_bare_block_update,
+        encode_bare_chunk_data, encode_bare_chunk_unload, encode_bare_entity_snapshot,
+        encode_block_update, encode_chat_message, encode_chunk_data, encode_chunk_unload,
+        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
         encode_entity_snapshot_with_roster, encode_entity_snapshot_with_weather_and_bare_structure,
@@ -7088,7 +7371,8 @@ mod tests {
         encode_mine_progress, encode_mob_hit, encode_party_invite, encode_player_appearance,
         encode_player_appearance_with_worn, encode_player_appearance_without_level,
         encode_resident_appearance, encode_server_character_list, encode_server_reject,
-        encode_server_welcome, encode_vendor_closed, encode_vendor_state,
+        encode_server_welcome, encode_storm_warning, encode_vendor_closed, encode_vendor_state,
+        encode_wards_nearby,
     };
     use super::*;
 
@@ -7400,12 +7684,12 @@ mod tests {
         (fb::Payload::VendorState, Handling::Consumed),
         (fb::Payload::TradeRequest, Handling::ClientOnly),
         (fb::Payload::VendorClosed, Handling::Consumed),
-        // V26's two, both server→client and both named as `Deferred` until their decoders
-        // land — the same staged shape V24's map payloads and V25's stall had between
-        // their two halves. `Deferred` means "this build has no arm yet", not "this
-        // contract has no member".
-        (fb::Payload::StormWarning, Handling::Deferred),
-        (fb::Payload::WardsNearby, Handling::Deferred),
+        // V26's two, both server→client and both read by an arm of their own since the
+        // payload half of #463. They were `Deferred` through the two parts before it —
+        // the staged shape V24's map payloads and V25's stall each had — and `Deferred`
+        // meant "this build has no arm yet" rather than "this contract has no member".
+        (fb::Payload::StormWarning, Handling::Consumed),
+        (fb::Payload::WardsNearby, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -8304,6 +8588,200 @@ mod tests {
         assert_eq!(
             decode(&encode_vendor_closed(0)),
             Err(DecodeError::VendorWithoutEntity("VendorClosed"))
+        );
+    }
+
+    /// A warning says where the storm is, and the number beside the phase is read as
+    /// whatever that phase makes it.
+    ///
+    /// The phase is the only thing here with a vocabulary, and it carries the whole
+    /// message: a countdown, a remaining duration and a zero are three quantities wearing
+    /// one field. So the zero member is refused like every other absent-field zero, and
+    /// the one cross-field rule the contract states — a passed storm carries 0 — is
+    /// refused rather than repaired, because a `Passed` with 300 seconds on it is two
+    /// statements about two different storms.
+    #[test]
+    fn a_storm_warning_says_which_number_it_is_carrying() {
+        for (seconds_until, phase, want) in [
+            (300u32, fb::StormPhase::Approaching, StormPhase::Approaching),
+            (0, fb::StormPhase::Approaching, StormPhase::Approaching),
+            (45, fb::StormPhase::Raging, StormPhase::Raging),
+            (0, fb::StormPhase::Raging, StormPhase::Raging),
+            (0, fb::StormPhase::Passed, StormPhase::Passed),
+        ] {
+            assert_eq!(
+                decode(&encode_storm_warning(seconds_until, phase.0)),
+                Ok(Message::StormWarning(StormWarning {
+                    seconds_until,
+                    phase: want
+                })),
+                "{phase:?} with {seconds_until}s did not survive the wire"
+            );
+        }
+
+        // Unbounded above by this contract, deliberately: seconds are not ticks, and
+        // nothing here has a day length to measure them against.
+        assert_eq!(
+            decode(&encode_storm_warning(u32::MAX, fb::StormPhase::Raging.0)),
+            Ok(Message::StormWarning(StormWarning {
+                seconds_until: u32::MAX,
+                phase: StormPhase::Raging
+            }))
+        );
+
+        assert_eq!(
+            decode(&encode_storm_warning(0, fb::StormPhase::Unknown.0)),
+            Err(DecodeError::UnknownStormPhase { value: 0 }),
+            "the absent-field zero is a defect, not a phase"
+        );
+        assert_eq!(
+            decode(&encode_storm_warning(0, 9)),
+            Err(DecodeError::UnknownStormPhase { value: 9 }),
+            "a phase from a newer contract has no number to read seconds_until as"
+        );
+        assert_eq!(
+            decode(&encode_storm_warning(300, fb::StormPhase::Passed.0)),
+            Err(DecodeError::StormPassedWithCountdown { seconds_until: 300 }),
+            "a storm that is over does not still count down"
+        );
+    }
+
+    /// The warded columns are a complete set, and an empty one is the message that says
+    /// the player has walked out of the last ward.
+    ///
+    /// That is why absence and empty are one case here and not two — [`MarkerList`]'s
+    /// rule — where an empty `MapExplored` page is refused: this message *replaces* the
+    /// client's set, so an empty one states something, and a page that adds nothing does
+    /// not.
+    #[test]
+    fn wards_are_a_complete_set_and_an_empty_one_is_a_statement() {
+        let columns = [
+            WardedColumnWire {
+                cx: -3,
+                cz: 7,
+                kind: fb::WardKind::Runestone.0,
+                mine: true,
+            },
+            WardedColumnWire {
+                cx: -3,
+                cz: 8,
+                kind: fb::WardKind::Runestone.0,
+                mine: false,
+            },
+            WardedColumnWire {
+                cx: 40,
+                cz: -12,
+                kind: fb::WardKind::Settlement.0,
+                mine: false,
+            },
+        ];
+        assert_eq!(
+            decode(&encode_wards_nearby(Some(&columns))),
+            Ok(Message::WardsNearby(WardsNearby {
+                columns: vec![
+                    WardedColumn {
+                        cx: -3,
+                        cz: 7,
+                        kind: WardKind::Runestone,
+                        mine: true,
+                    },
+                    WardedColumn {
+                        cx: -3,
+                        cz: 8,
+                        kind: WardKind::Runestone,
+                        mine: false,
+                    },
+                    WardedColumn {
+                        cx: 40,
+                        cz: -12,
+                        kind: WardKind::Settlement,
+                        mine: false,
+                    },
+                ],
+            }))
+        );
+
+        // Both spellings of "no wards in view", and they are the same message.
+        for (name, frame) in [
+            ("an absent vector", encode_wards_nearby(None)),
+            ("a present empty vector", encode_wards_nearby(Some(&[]))),
+        ] {
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::WardsNearby(WardsNearby { columns: vec![] })),
+                "{name} is how a client learns it has walked out of the last ward"
+            );
+        }
+
+        assert_eq!(
+            MAX_WARDED_COLUMNS, 2048,
+            "the bound is the contract's own WardBound, and a change to it is a contract change"
+        );
+        let at_the_bound: Vec<_> = (0..MAX_WARDED_COLUMNS)
+            .map(|index| WardedColumnWire {
+                cx: index as i32,
+                cz: 0,
+                kind: fb::WardKind::Settlement.0,
+                mine: false,
+            })
+            .collect();
+        let Ok(Message::WardsNearby(full)) = decode(&encode_wards_nearby(Some(&at_the_bound)))
+        else {
+            panic!("a set exactly at the bound is legal");
+        };
+        assert_eq!(full.columns.len(), MAX_WARDED_COLUMNS);
+
+        let mut over = at_the_bound.clone();
+        over.push(WardedColumnWire {
+            cx: MAX_WARDED_COLUMNS as i32,
+            cz: 0,
+            kind: fb::WardKind::Settlement.0,
+            mine: false,
+        });
+        assert_eq!(
+            decode(&encode_wards_nearby(Some(&over))),
+            Err(DecodeError::TooManyWardedColumns(MAX_WARDED_COLUMNS + 1)),
+            "an oversized set is refused rather than truncated: a dropped tail shades the \
+             world wrong and says nothing"
+        );
+
+        for (name, kind, value) in [
+            ("the absent-field zero", fb::WardKind::Unknown.0, 0u8),
+            ("a kind from a newer contract", 9, 9),
+        ] {
+            assert_eq!(
+                decode(&encode_wards_nearby(Some(&[WardedColumnWire {
+                    cx: 2,
+                    cz: -5,
+                    kind,
+                    mine: false,
+                }]))),
+                Err(DecodeError::UnknownWardKind {
+                    cx: 2,
+                    cz: -5,
+                    value
+                }),
+                "{name} would shade ground whose claim this build cannot name"
+            );
+        }
+
+        assert_eq!(
+            decode(&encode_wards_nearby(Some(&[
+                WardedColumnWire {
+                    cx: 2,
+                    cz: -5,
+                    kind: fb::WardKind::Runestone.0,
+                    mine: true,
+                },
+                WardedColumnWire {
+                    cx: 2,
+                    cz: -5,
+                    kind: fb::WardKind::Settlement.0,
+                    mine: false,
+                },
+            ]))),
+            Err(DecodeError::DuplicateWardedColumn { cx: 2, cz: -5 }),
+            "two rows for one column are two answers about the same ground"
         );
     }
 
