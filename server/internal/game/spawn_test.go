@@ -252,7 +252,7 @@ func TestTheLastPlayerLeavingEmptiesTheWorld(t *testing.T) {
 // the harness happened to start at.
 func (h *vitalsHarness) keepDay() {
 	h.t.Helper()
-	if err := h.sim.RestoreClock(NightStartTicks / 2); err != nil {
+	if err := h.sim.RestoreClock(NightStartTicks/2, NightStartTicks/2); err != nil {
 		h.t.Fatalf("RestoreClock: %v", err)
 	}
 }
@@ -332,7 +332,7 @@ func TestDawnTakesADraugrThatIsHuntingNobody(t *testing.T) {
 	// Two ticks short of the end of the night. The clock advances at the *top* of Step,
 	// so the first tick below lands on NightEndTicks-1 — the last tick of the night —
 	// and the second lands on NightEndTicks, which is the first that is not.
-	if err := h.sim.RestoreClock(NightEndTicks - 2); err != nil {
+	if err := h.sim.RestoreClock(NightEndTicks-2, NightEndTicks-2); err != nil {
 		t.Fatalf("RestoreClock: %v", err)
 	}
 	h.join(1, [3]float32{0.5, 64, 0.5})
@@ -363,7 +363,7 @@ func TestTheDawnLeavesAVargrWhereItStands(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, spawnGround{groundTop: 63})
-	if err := h.sim.RestoreClock(NightEndTicks - 2); err != nil {
+	if err := h.sim.RestoreClock(NightEndTicks-2, NightEndTicks-2); err != nil {
 		t.Fatalf("RestoreClock: %v", err)
 	}
 	h.join(1, [3]float32{0.5, 64, 0.5})
@@ -395,7 +395,7 @@ func TestDawnSparesADraugrThatIsHuntingSomebody(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, spawnGround{groundTop: 63})
-	if err := h.sim.RestoreClock(NightEndTicks - 2); err != nil {
+	if err := h.sim.RestoreClock(NightEndTicks-2, NightEndTicks-2); err != nil {
 		t.Fatalf("RestoreClock: %v", err)
 	}
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})

@@ -597,7 +597,7 @@ func TestTheWorldKeepsTimeAcrossARestart(t *testing.T) {
 	// minutes of test. What the wind-forward does not touch is anything below it — the
 	// clock still advances one per tick from here, and shutdown still writes whatever it
 	// reached.
-	if err := first.sim.RestoreClock(game.NightStartTicks); err != nil {
+	if err := first.sim.RestoreClock(game.NightStartTicks, game.NightStartTicks); err != nil {
 		t.Fatalf("winding the clock to dusk: %v", err)
 	}
 

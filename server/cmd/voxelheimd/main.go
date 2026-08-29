@@ -677,7 +677,14 @@ func restoreClock(sim *game.Sim, store *persist.ClockStore, log *slog.Logger) {
 	// The range check belongs to game, which owns the day length; persist judges only
 	// what a file can be wrong about. A tick that cannot exist is refused rather than
 	// wrapped — see game.Sim.RestoreClock.
-	if err := sim.RestoreClock(stored); err != nil {
+	//
+	// **The absolute tick is derived from the stored one because the file does not hold
+	// it yet.** The clock file records where the world stands in its day and nothing
+	// more, so the only world tick that is honestly implied by it is the one that puts
+	// the world inside its first day at exactly that phase — which is what the pair
+	// RestoreClock enforces requires, and what a world with no recorded history has.
+	// The half of #462 that widens the file replaces this line with the stored value.
+	if err := sim.RestoreClock(stored, uint64(stored)); err != nil {
 		log.Error("the stored clock was refused; this world starts at first light",
 			"clock_file", store.Path(), "tick_of_day", stored, "error", err)
 		return
