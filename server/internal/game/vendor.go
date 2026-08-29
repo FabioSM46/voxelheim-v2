@@ -1,6 +1,8 @@
 package game
 
 import (
+	"errors"
+	"fmt"
 	"math"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -16,14 +18,6 @@ import (
 // revision it has replaced, and ends with an explicit frame. What a corpse does not have
 // is a direction of travel — everything comes out of it — so the two halves of a trade
 // are the one thing here with no precedent above.
-//
-// **This file is the window, not the transaction.** #459 is two pull requests on the
-// server side and this is the first: the table, and the session that decides which stall
-// a player has open and which revision they are looking at. `TradeRequest` — the atomic
-// buy and sell inside one `inventory.mu.TryLock` window — is the second, and it is
-// deliberately not stubbed here. Nothing routes that message today, which is exactly
-// where develop already stands; a refusal-only case would be a stand-in for a dependency
-// that is merely late rather than absent.
 //
 // **Nothing about a vendor is per-entity state.** The table is keyed by role, stock is
 // unlimited by contract, and there is no restock timer, no drift and no reputation, so
@@ -230,6 +224,119 @@ func (p *Player) openVendorLocked(r *resident) {
 	// this field means when no stall is open.
 	p.vendorRevision = 1
 	p.vendorDirty = true
+}
+
+// Trade moves silver one way and goods the other, or moves nothing at all.
+//
+// **The whole transaction happens inside one TryLock window and on one copy of the slot
+// table**, and those two facts are the entirety of the atomicity argument. The copy is
+// what makes "nothing spent" true without an unwind — a purchase that pays for a pickaxe
+// and then finds no room for it throws the copy away, exactly as `craft` does — and the
+// window is what makes "what fits" a question about a pack no other request can be
+// halfway through changing. TryLock rather than Lock, for the reason every other holder
+// records: the tick takes this lock only under sim.mu, which this call is already
+// holding, so waiting on it is the one thing that could deadlock.
+//
+// **Silver is consumed and the goods inserted in that order, deliberately.** A player
+// whose purse is the last slot with room in it can buy something, because paying empties
+// the slot the purchase goes into; doing it the other way round would refuse that trade
+// with a full pack the player is about to have room in.
+//
+// The caller is the session goroutine. No frame is produced here: the accepted trade
+// dirties the inventory and the stall, and the tick delivers both complete states.
+func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if err := p.cannotActLocked(); err != nil {
+		return vnet.RefusalReasonPlayerIsDead, err
+	}
+	if p.haveTradeTick && !newerTick(req.ClientTick, p.lastTradeTick) {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("stale trade client tick %d; newest is %d", req.ClientTick, p.lastTradeTick)
+	}
+	p.haveTradeTick, p.lastTradeTick = true, req.ClientTick
+
+	// The stall, and every reason it might not be one: the request names a vendor this
+	// session does not have open, or one it does that has since stopped being reachable.
+	// `NotAVendor` for all of them, which is the answer [Player.InteractNPC] gives an
+	// address that opens nothing and for the same reason — nothing a client can send here
+	// tells it anything about the world it could not already see.
+	if p.openVendorID == 0 || p.openVendorID != req.EntityID {
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("entity %d is not the stall this session has open", req.EntityID)
+	}
+	r, standing := p.sim.residents[p.openVendorID]
+	if !standing || !p.tradeableLocked(r) {
+		p.closeVendorLocked()
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("the stall at entity %d is no longer open", req.EntityID)
+	}
+	if req.Revision != p.vendorRevision {
+		return vnet.RefusalReasonStaleRevision, fmt.Errorf("trade revision %d is not current revision %d", req.Revision, p.vendorRevision)
+	}
+	if req.Count == 0 {
+		// Unreachable through protocol.Decode, which refuses an absent count as
+		// malformed, and answered anyway: a trade for nothing is a defect in the sender
+		// rather than an outcome to report, so it is logged and no frame is sent.
+		return vnet.RefusalReasonUnknown, errors.New("a trade of zero items asks for nothing")
+	}
+
+	item := ItemID(req.ItemID)
+	price, traded := vendorTable[r.role].priceOf(item, req.Buying)
+	if !traded {
+		return vnet.RefusalReasonVendorDoesNotWant, fmt.Errorf("%s does not trade item %d in that direction", r.name, req.ItemID)
+	}
+	// uint32 throughout, because uint16 × uint16 overflows a uint16 and the overflow is
+	// the shape of a free purchase: 65536 arrows at one silver would total zero.
+	total := uint32(price) * uint32(req.Count)
+
+	if !p.inventory.mu.TryLock() {
+		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
+	}
+	defer p.inventory.mu.Unlock()
+
+	next := p.inventory.slots
+	if req.Buying {
+		if next.heldInPack(ItemSilver) < total {
+			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("%d silver is more than the purse holds", total)
+		}
+		// Safe by the comparison above: the purse is at most forty slots of a uint16
+		// count, so a total it covers fits one.
+		if !next.consumePack(ItemSilver, uint16(total)) {
+			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("the purse did not yield %d silver", total)
+		}
+		if remaining := next.insert(item, req.Count); remaining != 0 {
+			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d of item %d do not fit", remaining, req.ItemID)
+		}
+	} else {
+		// The pack, never the four equipment slots: nothing worn is for sale, which is
+		// the rule consumePack exists for. Held-and-not-enough and not-held-at-all are
+		// one answer, because a vendor that does not want six of something it will take
+		// one of is the same sentence to a player either way.
+		if !next.consumePack(item, req.Count) {
+			return vnet.RefusalReasonVendorDoesNotWant, fmt.Errorf("the pack does not hold %d of item %d", req.Count, req.ItemID)
+		}
+		if total > math.MaxUint16 {
+			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d silver is more than a pack could hold", total)
+		}
+		if remaining := next.insert(ItemSilver, uint16(total)); remaining != 0 {
+			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d of the %d silver does not fit", remaining, total)
+		}
+	}
+	p.inventory.slots = next
+
+	// No refreshWornLocked, and it is worth saying why rather than leaving its absence to
+	// look like an omission: both halves above are bounded to the pack — `insert` writes
+	// only below equipmentFirst and `consumePack` reads only below it — so no equipment
+	// slot can have changed and the combat summary derived from those four is still true.
+	p.inventoryDirty = true
+	p.vendorRevision++
+	p.vendorDirty = true
+
+	p.sim.log.Debug("trade applied",
+		"entity_id", p.entityID, "vendor_id", r.entityID, "vendor_role", r.role.String(),
+		"item", req.ItemID, "count", req.Count, "buying", req.Buying,
+		"silver", total, "revision", p.vendorRevision, "client_tick", req.ClientTick)
+
+	return vnet.RefusalReasonUnknown, nil
 }
 
 // offerVendorLocked reviews the open stall, then retries what this session is owed.

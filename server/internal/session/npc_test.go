@@ -38,3 +38,36 @@ func TestNpcInteractionIsRoutedAndRefusedWithoutEndingSession(t *testing.T) {
 		}
 	}
 }
+
+// **The arm again, one message later.** V25 taught the protocol boundary to decode a
+// TradeRequest at the same moment it taught it NpcInteractRequest, and until #459 the
+// router had a case for neither — so this is the same defect the test above exists for,
+// on the message that was still falling through the default when the other stopped.
+//
+// The answer is the fail-closed one: this session has opened no stall, so there is
+// nothing to trade with whatever the request names. Two requests again, and the second is
+// the load-bearing half.
+func TestATradeIsRoutedAndRefusedWithoutEndingSession(t *testing.T) {
+	t.Parallel()
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
+
+	conn.in <- protocol.EncodeTradeRequest(protocol.TradeRequest{
+		EntityID: 404, ItemID: 1, Count: 1, Buying: true, Revision: 1, ClientTick: 1,
+	})
+	conn.in <- protocol.EncodeTradeRequest(protocol.TradeRequest{
+		EntityID: 404, ItemID: 1, Count: 1, Buying: false, Revision: 1, ClientTick: 2,
+	})
+	waitUntil(t, "both trade refusals", func() bool { return len(frames.actionRefusals()) == 2 })
+
+	want := protocol.ActionRefused{
+		Action: vnet.RefusedActionTrade,
+		Reason: vnet.RefusalReasonNotAVendor,
+	}
+	for index, got := range frames.actionRefusals() {
+		if got != want {
+			t.Errorf("refusal %d = %+v, want %+v", index, got, want)
+		}
+	}
+}

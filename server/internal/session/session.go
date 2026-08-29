@@ -1652,6 +1652,41 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	// A trade answers through its own refused action, unlike take-all through take:
+	// buying at a stall and looting a body are two things a player did, and the client
+	// has a sentence for each of this one's reasons. An accepted trade sends nothing
+	// from here — the fresh InventoryState and VendorState are owed to the session and
+	// the tick delivers both.
+	case vnet.PayloadTradeRequest:
+		if player == nil || msg.Trade == nil {
+			log.Debug("trade arrived with no player to attribute it to; discarding")
+			return nil
+		}
+
+		request := *msg.Trade
+		reason, tradeErr := player.Trade(request)
+		if tradeErr == nil {
+			return nil
+		}
+		log.Debug("refusing trade",
+			"reason", tradeErr.Error(),
+			"code", reason.String(),
+			"entity_id", request.EntityID,
+			"item_id", request.ItemID,
+			"count", request.Count,
+			"buying", request.Buying,
+			"revision", request.Revision,
+			"client_tick", request.ClientTick,
+		)
+		if reason == vnet.RefusalReasonUnknown {
+			return nil
+		}
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionTrade, Reason: reason}
+		if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+			return fmt.Errorf("session: send trade refusal: %w", sErr)
+		}
+		return nil
+
 	case vnet.PayloadLeaveRequest:
 		if player == nil || msg.LeaveRequest == nil {
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)
