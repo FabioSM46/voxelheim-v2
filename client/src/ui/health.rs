@@ -35,6 +35,7 @@ use bevy::prelude::*;
 use bevy::ui::{ColorStop, FocusPolicy};
 use std::time::Duration;
 
+use super::leaving::LEAVING_LAYER;
 use super::menu::MENU_LAYER;
 use super::{CELL_EDGE, CELL_SIZE};
 use crate::net::{DrainNetwork, LifeState, MobHit, MobHitInbox, PlayerVitals, Session};
@@ -69,7 +70,11 @@ const LONGEST_READING_CHARS: f32 = 34.0;
 
 /// The advance of Bevy's embedded default font, in ems. FiraMono is monospace, so every
 /// glyph is exactly this wide and the fit below is an exact bound rather than an estimate.
-const DEFAULT_FONT_ADVANCE_EM: f32 = 0.6;
+///
+/// `pub(super)` since #541: `ui/leaving.rs` bounds its own readings the same way, and a
+/// second copy of this number would be a second thing to correct if the font stack ever
+/// stops being the one described above.
+pub(super) const DEFAULT_FONT_ADVANCE_EM: f32 = 0.6;
 
 /// Line height as a multiple of the font size: the scale in Bevy's `LineHeight` default,
 /// which every reading here inherits rather than setting. `parley` resolves that scale as
@@ -137,7 +142,11 @@ const DEATH_VEIL: Color = Color::srgba(0.10, 0.008, 0.012, 0.62);
 /// The death overlay's layer. Above the crosshair (10) and the hotbar (12), below the
 /// inventory (30) and — deliberately — below the pause menu (40): quitting and
 /// disconnecting must never be buried under a death screen.
-const DEATH_LAYER: i32 = 20;
+///
+/// `pub(super)` since #541, for the same reason [`MENU_LAYER`] is: it is a boundary other
+/// overlays are specified against — the leave countdown must sit under it, because a
+/// player who dies during the linger still has to see that they died.
+pub(super) const DEATH_LAYER: i32 = 20;
 
 /// A brief peripheral warning: visible enough to register, faint enough not to hide play.
 const HIT_PULSE_DURATION: Duration = Duration::from_millis(300);
@@ -191,8 +200,16 @@ const EYELID_CLOSE_DURATION: Duration = Duration::from_millis(300);
 const FINAL_BLACK_DURATION: Duration = Duration::from_secs(1);
 const DEATH_TRANSITION_LAYER: i32 = 35;
 
+/// The one ordering every overlay this client draws over the world joins, rather than
+/// picking a number that happens to look right beside its neighbours.
+///
+/// [`LEAVING_LAYER`] enters it at the bottom (#541): the leave countdown is a reading a
+/// player must not miss, so it is above the HUD and the chat log, and it is under every
+/// layer here — under the death overlay because dying during the linger must still be
+/// visible, and under the menu for the reason [`MENU_LAYER`] gives.
 const _: () = assert!(
-    VIGNETTE_LAYER < HIT_PULSE_LAYER
+    LEAVING_LAYER < VIGNETTE_LAYER
+        && VIGNETTE_LAYER < HIT_PULSE_LAYER
         && HIT_PULSE_LAYER < DEATH_LAYER
         && DEATH_LAYER < DEATH_TRANSITION_LAYER
         && DEATH_TRANSITION_LAYER < MENU_LAYER
