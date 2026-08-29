@@ -778,6 +778,26 @@ fn vignette_alpha(vitals: PlayerVitals) -> f32 {
 
 /// A transparent centre and one darkening edge, shaped to the current node rather than
 /// to a fixed aspect ratio. Opacity changes; the unobscured centre never does.
+///
+/// **This is the client's only [`BackgroundGradient`], so it is the only consumer of that
+/// render path — and #536 reported that the path produces nothing.** It does. The whole
+/// of it was instrumented and measured, and what the arithmetic below turns into on a
+/// screen is recorded here because the next person to doubt it has no cheaper way to find
+/// out: `bevy_ui_render`'s `extract_gradients` matches this entity with an inherited
+/// visibility of `true`, a node the size of the viewport and a camera that maps;
+/// `queue_gradient` adds its phase item; `prepare_gradient` emits the two segments the
+/// three stops below describe; `DrawGradient` issues the draw; and the pixels change.
+/// Read off a 1280x720 window with the player at 50 of 100 health, the corner of the
+/// screen darkened from `(14, 18, 24)` to `(9, 13, 17)` and the first-person hand from
+/// `(93, 92, 92)` to `(77, 76, 76)`, two frames after the snapshot landed, with the
+/// centre untouched — debug and release alike.
+///
+/// **What that leaves is a bound rather than a bug, and it is worth knowing before
+/// reaching for [`VIGNETTE_MAX_ALPHA`].** Black at an alpha darkens in proportion to what
+/// is already there, so the same gradient that takes 16 levels off a lit surface takes 5
+/// off a night sky. A vignette read against a nearly black scene is arithmetically
+/// present and perceptually absent, and no opacity short of opaque changes that — the
+/// thing it would have to darken is the thing that is already dark.
 fn vignette_gradient(alpha: f32) -> RadialGradient {
     let clear = Color::srgba(0.0, 0.0, 0.0, 0.0);
     RadialGradient::new(
@@ -1406,6 +1426,90 @@ mod tests {
             .alpha
     }
 
+    /// The opacity the gradient shader will sample at `point`, in physical pixels from the
+    /// centre of a node `viewport` pixels across.
+    ///
+    /// **This is how far past the component state this harness reaches, and the limit is
+    /// worth stating rather than implying.** A headless `MinimalPlugins` app has no
+    /// renderer, and CI's `client` job has no GPU, so nothing here can prove a pixel
+    /// changed colour — that was established by hand, on a window, and the measurement is
+    /// written down at [`vignette_gradient`]. What this *can* do is stop asserting the
+    /// input to the render path and start computing its output: every length below comes
+    /// from Bevy's own resolution functions, called exactly as `extract_gradients` calls
+    /// them — `UiPosition::resolve` for the centre, `RadialGradientShape::resolve` for the
+    /// end shape, `Val::resolve` for each stop's distance along it — and the walk over the
+    /// segments is `interpolate_gradient` in `gradient.wgsl`. So a stop order that put the
+    /// darkening outside the viewport, a shape that collapsed to nothing, or a clear band
+    /// that swallowed the whole screen would fail here; a plugin that stopped being
+    /// registered would not.
+    ///
+    /// Alpha is the one channel this can model exactly: the shader interpolates it with a
+    /// plain `mix` beside the colour rather than through the colour space, so `Oklaba`
+    /// does not enter it.
+    fn sampled_alpha(gradient: &RadialGradient, viewport: Vec2, point: Vec2) -> f32 {
+        // One physical pixel per logical pixel. The gradient is specified entirely in
+        // percentages, so this scales both sides of every ratio and cancels; it is named
+        // rather than left implicit because `Val::resolve` takes it.
+        const SCALE: f32 = 1.0;
+
+        let centre = gradient.position.resolve(SCALE, viewport, viewport);
+        let extent = gradient.shape.resolve(centre, SCALE, viewport, viewport);
+        assert!(
+            extent.x > 0.0 && extent.y > 0.0,
+            "an end shape with no extent would make every assertion below vacuous"
+        );
+
+        // The shader measures in the ellipse's own metric: the x extent is the gradient
+        // line, and y is scaled onto it.
+        let offset = point - centre;
+        let distance = Vec2::new(offset.x, offset.y * extent.x / extent.y).length();
+
+        let stops: Vec<(f32, f32)> = gradient
+            .stops
+            .iter()
+            .map(|stop| {
+                assert_eq!(
+                    stop.hint, 0.5,
+                    "a moved interpolation midpoint is no longer the linear ramp modelled here"
+                );
+                (
+                    stop.point
+                        .resolve(SCALE, extent.x, viewport)
+                        .expect("every vignette stop is a percentage of the gradient line"),
+                    stop.color.to_srgba().alpha,
+                )
+            })
+            .collect();
+
+        let (first_at, first_alpha) = *stops.first().expect("a gradient with no stops");
+        if distance <= first_at {
+            return first_alpha;
+        }
+        let (last_at, last_alpha) = *stops.last().expect("a gradient with no stops");
+        if last_at <= distance {
+            // The last segment carries FILL_END, so everything beyond it is the edge.
+            return last_alpha;
+        }
+        for pair in stops.windows(2) {
+            let ((start_at, start_alpha), (end_at, end_alpha)) = (pair[0], pair[1]);
+            if distance <= end_at {
+                let t = (distance - start_at) / (end_at - start_at);
+                return start_alpha + (end_alpha - start_alpha) * t;
+            }
+        }
+        unreachable!("a distance between the first and last stop lies in some segment")
+    }
+
+    /// The node the sampling above is measured across, as a viewport-sized box. The
+    /// gradient is shaped to its node, so a vignette that stopped spanning the window
+    /// would be sampled over the wrong box and every distance would be wrong.
+    fn vignette_spans(app: &mut App) -> bool {
+        let node = node::<LowHealthVignette>(app);
+        node.position_type == PositionType::Absolute
+            && node.width == Val::Percent(100.0)
+            && node.height == Val::Percent(100.0)
+    }
+
     fn transition_visibility(app: &mut App) -> Visibility {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Visibility, With<DeathTransitionRoot>>();
@@ -1485,6 +1589,98 @@ mod tests {
             Val::Percent(VIGNETTE_CLEAR_PERCENT)
         );
         assert_eq!(edge_alpha(&gradient), VIGNETTE_MAX_ALPHA);
+    }
+
+    /// The assertion #536 asked for: not that the components hold the right numbers, but
+    /// that the numbers resolve into a darkening the screen actually contains.
+    ///
+    /// Every earlier vignette test reads `Visibility` and a stop's alpha, and all of them
+    /// would pass with the darkened band resolved to a radius past the corner of the
+    /// window — which is one of the three things the bug report suspected. This one
+    /// resolves the band through Bevy's own arithmetic and asks where it lands.
+    #[test]
+    fn the_darkening_the_renderer_resolves_lands_inside_the_window() {
+        let mut app = hud(vitals(100, 100));
+        assert!(vignette_spans(&mut app));
+
+        deliver(&mut app, vitals(50, 100));
+        let (visibility, gradient) = vignette(&mut app);
+        assert_eq!(visibility, Visibility::Visible);
+        let edge = vignette_alpha(vitals(50, 100));
+
+        // Three shapes of window, because the end shape is resolved from the node rather
+        // than from a constant: a 16:9 one, the same at twice the scale, and a 4:3 one.
+        for viewport in [
+            Vec2::new(1280.0, 720.0),
+            Vec2::new(2560.0, 1440.0),
+            Vec2::new(800.0, 600.0),
+        ] {
+            let half = viewport / 2.0;
+            let alpha = |x: f32, y: f32| sampled_alpha(&gradient, viewport, Vec2::new(x, y));
+
+            // The centre the player is looking through.
+            assert_eq!(alpha(0.0, 0.0), 0.0, "{viewport} centre");
+
+            // Every corner and every edge midpoint of the window is at the full edge
+            // opacity. This is the assertion that fails if the band is pushed outside.
+            for (x, y) in [
+                (-half.x, -half.y),
+                (half.x, -half.y),
+                (half.x, half.y),
+                (-half.x, half.y),
+                (-half.x, 0.0),
+                (half.x, 0.0),
+                (0.0, -half.y),
+                (0.0, half.y),
+            ] {
+                let sampled = alpha(x, y);
+                assert!(
+                    (sampled - edge).abs() < 1e-5,
+                    "{viewport} at ({x}, {y}): {sampled} is not the edge opacity {edge}"
+                );
+            }
+
+            // And the ramp between them is inside the window on both axes: clear well
+            // before the halfway mark, part-way darkened before the edge.
+            assert_eq!(alpha(half.x * 0.25, 0.0), 0.0, "{viewport} inner quarter");
+            assert_eq!(alpha(0.0, half.y * 0.25), 0.0, "{viewport} inner quarter");
+            for (x, y) in [(half.x * 0.8, 0.0), (0.0, half.y * 0.8)] {
+                let sampled = alpha(x, y);
+                assert!(
+                    0.0 < sampled && sampled < edge,
+                    "{viewport} at ({x}, {y}): the ramp is not inside the window ({sampled})"
+                );
+            }
+
+            // Monotone outwards along the diagonal, which is what "the edges darken"
+            // means when read as a picture rather than as a list of stops.
+            let diagonal: Vec<f32> = (0..=10u8)
+                .map(|step| {
+                    let t = f32::from(step) / 10.0;
+                    alpha(half.x * t, half.y * t)
+                })
+                .collect();
+            assert!(
+                diagonal.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{viewport} diagonal is not monotone: {diagonal:?}"
+            );
+            assert_eq!(diagonal[0], 0.0);
+            assert!((diagonal[10] - edge).abs() < 1e-5);
+        }
+
+        // Full health resolves to nothing anywhere, rather than to a band that happens to
+        // be hidden. Both halves matter: the node is hidden *and* it would draw nothing.
+        deliver(&mut app, vitals(100, 100));
+        let (visibility, healed) = vignette(&mut app);
+        assert_eq!(visibility, Visibility::Hidden);
+        let viewport = Vec2::new(1280.0, 720.0);
+        for (x, y) in [(0.0, 0.0), (-640.0, -360.0), (640.0, 360.0), (640.0, 0.0)] {
+            assert_eq!(
+                sampled_alpha(&healed, viewport, Vec2::new(x, y)),
+                0.0,
+                "full health at ({x}, {y})"
+            );
+        }
     }
 
     #[test]
