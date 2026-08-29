@@ -164,9 +164,10 @@ ALLOWED = {
 # The citations that reach the tree only through the wrapped-attribution path. Pinned by
 # name: both tightenings this guard has already been through would have silently dropped
 # them, and a guard that quietly stops exempting is a guard somebody will "fix" by deleting
-# the wrap path. If this set changes, say why.
+# the wrap path. The reviewer script's former wrapped #466 now carries `clinic-deck` on the
+# citation line itself after its acknowledgement policy was reworded, so it no longer belongs
+# to this set. If this set changes again, say why.
 WRAPPED_PIN = {
-    (".github/scripts/deepseek_review.py", "#466"),
     ("scripts/gh-automation.sh", "#315"),
     ("scripts/gh-automation.sh", "#317"),
 }

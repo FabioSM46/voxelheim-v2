@@ -42,9 +42,10 @@ six-hour sweep and manual dispatch), evaluates the frozen rule, and labels the P
 **Force-cycle**: `/process-pr <number>` reads review feedback, implements fixes, re-runs
 quality gates, pushes.
 
-**You**: Review PRs, merge any with `READY TO MERGE`, run `/process-pr` on `needs-work`
-PRs, and acknowledge body-level review findings with the `DEEPSEEK_REVIEW_READ` label
-after reading them.
+**You**: Review PRs, merge any with `READY TO MERGE`, and run `/process-pr` on
+`needs-work` PRs. You may acknowledge body-level findings with `DEEPSEEK_REVIEW_READ`
+after reading them. `/process-pr` may do so too, but only after it has addressed or
+evidence-backed rejected every finding and posted that disposition publicly on the PR.
 
 There is no calendar deadline. If you stop work for a month, the active iteration simply
 remains open. When its final committed issue closes, `iteration-lifecycle.yml` creates one
@@ -125,7 +126,7 @@ needs-triage → needs-refinement → ready-for-dev → in-progress → in-revie
 | `needs-review` | Waiting for CI / review | `pr-labeler.yml` |
 | `needs-work` | CI failing or changes requested | `pr-labeler.yml` |
 | `READY TO MERGE` | Frozen acceptance rule satisfied | `pr-labeler.yml` |
-| `DEEPSEEK_REVIEW_READ` | A human has read the findings DeepSeek left in a review body | You, by hand |
+| `DEEPSEEK_REVIEW_READ` | Every DeepSeek review-body finding has been read and publicly disposed of; acknowledgement must postdate the review | You, or `/process-pr` after its audited review |
 | `NO_DEEPSEEK_REVIEW` | PR exempt from DeepSeek review (bot branches, trivial changes) | You, by hand |
 
 ## Frozen Acceptance Rule
