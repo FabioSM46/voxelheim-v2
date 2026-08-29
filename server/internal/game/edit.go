@@ -135,9 +135,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	origin := p.pos
 	actErr := p.cannotActLocked()
 	// Read under this lock rather than after it, because the ward map is simulation state
-	// and is rebuilt under exactly this mutex. Evaluated below, beside the reach check it
-	// belongs with — reading it here and answering there is what keeps this function's
-	// one critical section one.
+	// and is rebuilt under exactly this mutex. This first read refuses the request before
+	// it can generate terrain; the post-generation guard below reads again and keeps the
+	// answer stable through the write.
 	warded := p.sim.wardedAgainstLocked(target, p.playerID)
 	p.sim.mu.Unlock()
 
@@ -182,38 +182,42 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	}
 
 	inventoryLocked := false
+	simulationLocked := false
 	guard := func() error {
-		// Liveness again, and this is the check that matters. The one above runs before
+		// Liveness and the ward again, and these are the checks that matter. The ones above run before
 		// the chunk is generated, which is what stops a corpse's request from making the
-		// server generate terrain — but generation can take milliseconds, and a player
-		// mining on the way down dies inside exactly that window. This runs after it and
-		// immediately before the write.
+		// server generate terrain and reject an already-claimed target cheaply — but
+		// generation can take milliseconds, and either fact can change in that window.
 		//
-		// sim.mu is taken and released *before* the inventory lock rather than inside
-		// it. The tick holds sim.mu and then reaches for the inventory
-		// (offerInventoryLocked), so nesting them the other way round here would be the
-		// deadlock.
-		//
-		// It narrows the window rather than closing it: the write still happens after
-		// this returns, and the only way to hold the simulation's lock across it would
-		// be to hold it across a chunk generation, which is a tick every connected
-		// player misses. That is the same residual the occupancy check above accepts,
-		// for the same reason.
+		// ApplyGuarded calls this after generation and before taking the cache composition
+		// lock. Leaving sim.mu held on success therefore linearizes the ward with the write
+		// without holding it across generation or reaching from allowPlacement into the
+		// simulation. The inventory lock is nested under it, in the tick's established
+		// sim.mu -> inventory.mu order; the reverse order would deadlock.
 		p.sim.mu.Lock()
 		actErr := p.cannotActLocked()
-		p.sim.mu.Unlock()
 		if actErr != nil {
+			p.sim.mu.Unlock()
 			return fmt.Errorf("the player became unable to act while the target chunk was loading: %w", actErr)
 		}
+		if p.sim.wardedAgainstLocked(target, p.playerID) {
+			p.sim.mu.Unlock()
+			return fmt.Errorf("%w at %v", ErrWarded, target)
+		}
+		simulationLocked = true
 
 		p.inventory.mu.Lock()
 		itemID, block, guardErr := itemToPlaceLocked(&p.inventory, req.Slot)
 		if guardErr != nil {
 			p.inventory.mu.Unlock()
+			p.sim.mu.Unlock()
+			simulationLocked = false
 			return guardErr
 		}
 		if itemID != placingItem || block != placing {
 			p.inventory.mu.Unlock()
+			p.sim.mu.Unlock()
+			simulationLocked = false
 			return fmt.Errorf("inventory slot %d changed while its target chunk was loading", req.Slot)
 		}
 		inventoryLocked = true
@@ -224,6 +228,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	if applyErr != nil {
 		if inventoryLocked {
 			p.inventory.mu.Unlock()
+		}
+		if simulationLocked {
+			p.sim.mu.Unlock()
 		}
 		return EditResult{}, applyErr
 	}
@@ -236,6 +243,7 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 
 	state := p.inventory.stateLocked()
 	p.inventory.mu.Unlock()
+	p.sim.mu.Unlock()
 	p.sim.invalidateMining(req.Pos)
 
 	return EditResult{

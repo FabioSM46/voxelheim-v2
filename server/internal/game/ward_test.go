@@ -3,7 +3,10 @@ package game
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
@@ -250,6 +253,105 @@ func TestAStructureInsideAnothersWardCannotBeRemoved(t *testing.T) {
 	}
 	if standing := len(h.structures()); standing != 2 {
 		t.Errorf("%d structures stand, want 2 — the refused removal took one down", standing)
+	}
+}
+
+// The anchor is in unclaimed column 2, while the tent's western cells cross into
+// claimed column 1. The whole structure occupies claimed ground, not only its anchor.
+func TestAWardRefusesAPlacementWhoseFootprintCrossesItsBoundary(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	claimant, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.raise(claimant, [3]int32{0, 63, 0})
+
+	anchorX := int32(2 * ChunkSizeBlocks)
+	builder, _ := h.join(2, [3]float32{float32(anchorX) + 0.5, 64, 0.5})
+	h.give(builder, 0, ItemTent, 1)
+	_, reason, err := builder.PlaceStructure(placeRequest(0, [3]int32{anchorX, 63, 0}, vnet.FacingNorth))
+	if err == nil {
+		t.Fatal("a tent crossed from an unclaimed anchor into another player's ward")
+	}
+	if reason != vnet.RefusalReasonWarded {
+		t.Errorf("reason = %s, want Warded", reason)
+	}
+}
+
+// A structure built before its neighbour raised a stone is protected across the same
+// boundary when its owner later tries to remove it.
+func TestAWardRefusesRemovalWhenAnyFootprintCellCrossesItsBoundary(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	anchorX := int32(2 * ChunkSizeBlocks)
+	builder, _ := h.join(1, [3]float32{float32(anchorX) + 0.5, 64, 0.5})
+	tent := h.plantTent(builder, [3]int32{anchorX, 63, 0})
+
+	claimant, _ := h.join(2, [3]float32{0.5, 64, 0.5})
+	h.raise(claimant, [3]int32{0, 63, 0})
+	if err := builder.RemoveStructure(protocol.RemoveStructureRequest{StructureID: tent.structureID}); err == nil {
+		t.Fatal("a tent crossing into another player's ward was removed")
+	}
+	if standing := len(h.structures()); standing != 2 {
+		t.Errorf("%d structures stand, want the tent and runestone", standing)
+	}
+}
+
+// Generation happens before the authoritative write guard. A ward raised during that
+// wait must be re-read by the guard, rather than letting the edit use its earlier answer.
+func TestAWardRaisedWhileAnEditGeneratesRefusesTheWrite(t *testing.T) {
+	t.Parallel()
+
+	editor := &stagedEditor{
+		generationStarted: make(chan struct{}),
+		finishGeneration:  make(chan struct{}),
+		guardAcquired:     make(chan struct{}),
+		finishWrite:       make(chan struct{}),
+		current:           world.Air,
+	}
+	sim, err := NewSim(DefaultTickRate, 1, testWorldSeed, emptyTerrain{}, editor, testEntityIDs(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	player, err := sim.Join(1, testPlayerID(1), testCharacterName, [3]float32{0.5, 200, 0.5}, testAppearance(), nil, func([]byte) bool { return true })
+	if err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	player.inventory.slots[0] = inventoryStack{item: ItemStone, count: 1}
+
+	result := make(chan error, 1)
+	go func() {
+		_, editErr := player.Edit(context.Background(), protocol.BlockEditRequest{
+			Pos: [3]int32{3, 200, 0}, HasPos: true, Action: vnet.EditActionPlace, Slot: 0,
+		})
+		result <- editErr
+	}()
+	awaitSignal(t, "generation to start", editor.generationStarted)
+
+	sim.mu.Lock()
+	stoneID := sim.mintEntityID()
+	sim.structures[stoneID] = &structure{
+		structureID: stoneID,
+		kind:        vnet.StructureKindRunestone,
+		anchor:      [3]int32{0, 199, 0},
+		facing:      vnet.FacingNorth,
+		owner:       testPlayerID(2),
+		chunk:       world.ChunkOf(0, 199, 0),
+	}
+	sim.rebuildWardsLocked()
+	sim.mu.Unlock()
+	close(editor.finishGeneration)
+
+	select {
+	case editErr := <-result:
+		if !errors.Is(editErr, ErrWarded) {
+			t.Fatalf("Edit returned %v, want ErrWarded", editErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the guarded edit")
+	}
+	if got := player.InventoryState().Stacks[0].Count; got != 1 {
+		t.Errorf("the refused edit spent the stack, leaving %d", got)
 	}
 }
 

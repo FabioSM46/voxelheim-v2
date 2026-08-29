@@ -415,6 +415,20 @@ func (s *Sim) wardedAgainstLocked(voxel [3]int64, actor identity.PlayerID) bool 
 	return warded && owner != actor
 }
 
+// wardedFootprintAgainstLocked names the first ground cell in a structure footprint
+// claimed by somebody other than the actor. A structure occupies its whole footprint,
+// so an unclaimed anchor cannot make a tent or forge legal across a ward boundary.
+//
+// The caller holds Sim.mu.
+func (s *Sim) wardedFootprintAgainstLocked(cells [][3]int64, actor identity.PlayerID) ([3]int64, bool) {
+	for _, cell := range cells {
+		if s.wardedAgainstLocked(cell, actor) {
+			return cell, true
+		}
+	}
+	return [3]int64{}, false
+}
+
 // PlaceStructure resolves one PlaceStructureRequest and plants the structure if it is
 // legal, returning the inventory the placement spent an item from and, when it refuses,
 // the code that says why.
@@ -512,8 +526,8 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	// It names no owner, deliberately. The refusal a player is shown says the ground is
 	// claimed and not by whom, because an answer that named one would let a client learn
 	// who has claimed which ground by walking around poking at it.
-	if p.sim.wardedAgainstLocked(anchor, p.playerID) {
-		return protocol.InventoryState{}, vnet.RefusalReasonWarded, fmt.Errorf("the ground at %v is warded by another player", anchor)
+	if cell, warded := p.sim.wardedFootprintAgainstLocked(cells, p.playerID); warded {
+		return protocol.InventoryState{}, vnet.RefusalReasonWarded, fmt.Errorf("the structure footprint at %v is warded by another player", cell)
 	}
 	if reason, err := p.sim.footprintFitsLocked(cells, headroom); err != nil {
 		return protocol.InventoryState{}, reason, err
@@ -643,8 +657,12 @@ func (p *Player) removeOwnStructure(structureID uint64) (structure, [3]int64, er
 	// could map somebody else's camp by asking. The check is still worth making — the
 	// structure this refuses is the actor's own, standing inside ground a neighbour has
 	// since claimed, which the owner check above would have let through.
-	if p.sim.wardedAgainstLocked(held.anchorVoxel(), p.playerID) {
-		return structure{}, [3]int64{}, fmt.Errorf("structure %d stands on ground warded by another player", structureID)
+	cells, _, known := footprintOf(held.kind, held.facing, held.anchorVoxel())
+	if !known {
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d has unknown kind %s", structureID, held.kind)
+	}
+	if cell, warded := p.sim.wardedFootprintAgainstLocked(cells, p.playerID); warded {
+		return structure{}, [3]int64{}, fmt.Errorf("structure %d stands on ground warded by another player at %v", structureID, cell)
 	}
 
 	spawn, clear := p.sim.firstFreeVoxelAboveLocked(held.anchorVoxel())
