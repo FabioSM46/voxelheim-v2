@@ -17,7 +17,9 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::time::TimeUpdateStrategy;
 
 use super::*;
-use crate::net::{EntityState, PlayerAppearance, SessionParams, Snapshot, WorldClock};
+use crate::net::{
+    EntityState, PlayerAppearance, SessionParams, Snapshot, WeatherKind, WeatherState, WorldClock,
+};
 
 const TICK_RATE: u8 = 20;
 const INTERVAL: Duration = Duration::from_millis(50);
@@ -72,6 +74,64 @@ fn deliver(app: &mut App, tick: u32, entities: Vec<EntityState>, at: Instant) {
         },
         at,
     );
+}
+
+#[test]
+fn weather_mirrors_only_the_newest_accepted_snapshot() {
+    let mut app = headless_player();
+    let deliver_weather = |app: &mut App, tick, kind, intensity| {
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: tick,
+                weather: Some(WeatherState { kind, intensity }),
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+    };
+
+    deliver_weather(&mut app, 10, WeatherKind::Rain, 128);
+    app.update();
+    assert_eq!(
+        app.world().resource::<Weather>().get(),
+        Some(WeatherState {
+            kind: WeatherKind::Rain,
+            intensity: 128,
+        })
+    );
+
+    deliver_weather(&mut app, 9, WeatherKind::Sandstorm, 255);
+    app.update();
+    assert_eq!(
+        app.world().resource::<Weather>().get(),
+        Some(WeatherState {
+            kind: WeatherKind::Rain,
+            intensity: 128,
+        }),
+        "a snapshot the buffer refused changed the weather"
+    );
+}
+
+#[test]
+fn an_ended_session_takes_its_weather_with_it() {
+    let mut app = headless_player();
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            weather: Some(WeatherState {
+                kind: WeatherKind::Snow,
+                intensity: 200,
+            }),
+            ..Default::default()
+        },
+        Instant::now(),
+    );
+    app.update();
+    assert!(app.world().resource::<Weather>().get().is_some());
+
+    app.world_mut().remove_resource::<Session>();
+    app.update();
+    assert_eq!(app.world().resource::<Weather>().get(), None);
 }
 
 fn deliver_party(
@@ -4515,4 +4575,48 @@ fn a_clockless_server_leaves_the_environment_alone_after_the_first_frame() {
         vec![false; 4],
         "a server with no clock rewrote the sun, the sky, the ambient or the fog"
     );
+}
+
+#[test]
+fn weather_updates_a_clockless_servers_sky_and_fog_together() {
+    // Weather is allowed to move even when time of day is not. The sky and the fog have
+    // separate component guards, so this pins the change that must open both of them.
+    let mut app = headless_player();
+    for _ in 0..3 {
+        app.update();
+    }
+    let before = fog(&mut app);
+
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            weather: Some(WeatherState {
+                kind: WeatherKind::Rain,
+                intensity: u8::MAX,
+            }),
+            ..Default::default()
+        },
+        Instant::now(),
+    );
+    app.update();
+
+    let after = fog(&mut app);
+    let (sky, _) = sky_and_ambient(&mut app);
+    assert_eq!(after.color, sky, "the tinted sky and fog colour disagreed");
+    let FogFalloff::Linear {
+        start: before_start,
+        end: before_end,
+    } = before.falloff
+    else {
+        panic!("the baseline fog did not fade linearly");
+    };
+    let FogFalloff::Linear {
+        start: after_start,
+        end: after_end,
+    } = after.falloff
+    else {
+        panic!("the weather fog did not fade linearly");
+    };
+    assert!((after_start - before_start * 0.6).abs() < 1e-4);
+    assert!((after_end - before_end * 0.6).abs() < 1e-4);
 }

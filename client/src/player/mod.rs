@@ -106,7 +106,7 @@ pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 use crate::net::{
     Appearance, AppearanceInbox, BlockCoord, HairModel, LifeState, Outbound,
     PLACEHOLDER_APPEARANCE, PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals,
-    ResidentInbox, ResidentRole, Sent, Session, SnapshotInbox, encode_player_input,
+    ResidentInbox, ResidentRole, Sent, Session, SnapshotInbox, WeatherState, encode_player_input,
 };
 use crate::settings::{Bindings, Control, DEFAULT_LOOK_SENSITIVITY, Settings};
 // The only edge from this file into the world module, and it is a read: a name plate asks
@@ -274,6 +274,7 @@ impl Plugin for PlayerPlugin {
             .init_resource::<Party>()
             .init_resource::<PartyLogInbox>()
             .init_resource::<sky::SkyClock>()
+            .init_resource::<Weather>()
             .init_resource::<PlayerStats>()
             // `init_resource` rather than `insert_resource`, and `NetPlugin` does the same:
             // whichever plugin is built first creates the inbox and the other finds it.
@@ -357,6 +358,7 @@ impl Plugin for PlayerPlugin {
                         .in_set(ApplySnapshots),
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
+                    forget_weather_without_a_session.after(ApplySnapshots),
                     forget_party_without_a_session.after(ApplySnapshots),
                     forget_snapshots_without_a_session.after(ApplySnapshots),
                     forget_bodies_without_a_session.after(ApplySnapshots),
@@ -854,6 +856,34 @@ pub struct PlayerStats {
     pub inputs_sent: u32,
     /// Input frames dropped because the outbound queue was full.
     pub inputs_dropped: u32,
+}
+
+/// What the sky is doing where this player stands, as the newest **accepted** snapshot
+/// left it.
+///
+/// A mirror and nothing more. `None` covers two states this side does not distinguish and
+/// does not need to: no snapshot has arrived yet, and the server keeps no weather at all
+/// (a test world and a pre-V26 server both legitimately do). Both draw a clear sky, which
+/// is what a client that has been told nothing must show.
+///
+/// **Presentation only, and the decoder is where that is enforced.** `net/codec.rs`
+/// already refuses a kind this build has no member for and a `Clear` carrying a non-zero
+/// intensity, so an out-of-contract value ends the session rather than reaching here.
+/// Nothing downstream reads a *rule* back out of these two bytes: the cold, the slowed
+/// step and the doused fire are the server's, and they arrive as vitals, as position and
+/// as `StructureState::lit`.
+///
+/// It rides the same acceptance gate [`SelfVitals`] does — a snapshot the buffer refused
+/// describes a moment already drawn, and letting it set the weather would flicker the sky
+/// back to a tick that has been and gone.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Weather(Option<WeatherState>);
+
+impl Weather {
+    /// What the server last said the sky was doing, if it has said anything.
+    pub(crate) fn get(self) -> Option<WeatherState> {
+        self.0
+    }
 }
 
 /// The vitals the newest accepted snapshot carried, or `None` before one has arrived.
@@ -1510,6 +1540,9 @@ fn ingest_snapshots(
         // late describes a moment already drawn, and letting it anchor the sky would run
         // the sun backwards — the one thing `SkyClock` promises it never does.
         let tick_of_day = snapshot.tick_of_day;
+        // And the weather, on the same gate for the same reason: a late frame describes a
+        // sky that has already been drawn.
+        let weather = snapshot.weather;
         let next_party = Party {
             roster: snapshot.party_roster.clone(),
             members: snapshot.party_members.clone(),
@@ -1520,6 +1553,7 @@ fn ingest_snapshots(
             // UI that reads it.
             set_if_changed(&mut outputs.vitals, SelfVitals(Some(self_vitals)));
             outputs.sky.anchor(tick_of_day, at);
+            set_if_changed(&mut outputs.weather, Weather(weather));
             let recipient = outputs
                 .session
                 .as_deref()
@@ -1578,6 +1612,7 @@ fn ingest_snapshots(
 struct SnapshotOutputs<'w> {
     vitals: ResMut<'w, SelfVitals>,
     sky: ResMut<'w, sky::SkyClock>,
+    weather: ResMut<'w, Weather>,
     session: Option<Res<'w, Session>>,
     party: ResMut<'w, Party>,
     party_log: ResMut<'w, PartyLogInbox>,
@@ -1616,6 +1651,18 @@ fn forget_snapshots_without_a_session(
 fn forget_vitals_without_a_session(session: Option<Res<Session>>, mut vitals: ResMut<SelfVitals>) {
     if session.is_none() {
         set_if_changed(&mut vitals, SelfVitals::default());
+    }
+}
+
+/// Forgets the weather once there is no session to have had it.
+///
+/// The resource half of the same rule [`forget_vitals_without_a_session`] states: a sky a
+/// session ended under is not this session's sky, and a reconnect that inherited it would
+/// draw the last server's rain over the next server's desert until its first snapshot
+/// landed.
+fn forget_weather_without_a_session(session: Option<Res<Session>>, mut weather: ResMut<Weather>) {
+    if session.is_none() {
+        set_if_changed(&mut weather, Weather::default());
     }
 }
 
