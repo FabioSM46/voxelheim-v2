@@ -326,6 +326,9 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}
+	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
+		return fmt.Errorf("configure chunk regeneration: %w", err)
+	}
 
 	// Before the listener is served and therefore before any session can be admitted,
 	// which is what puts the camp in the first snapshot a returning player receives
