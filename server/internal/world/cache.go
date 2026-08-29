@@ -499,14 +499,19 @@ func (c *Cache) apply(ctx context.Context, x, y, z int64, block Block, guard fun
 //
 // # The order of the steps is the correctness argument
 //
-//  1. **Serialised against a save**, through saveMu. Flush takes a coordinate out of the
-//     dirty set and only then reads its edits, so a save running beside this one could be
-//     holding a snapshot of the very edits being thrown away and would write the file back
-//     moments after it was removed.
-//  2. **The base is generated outside every lock**, and only when the chunk is resident.
+//  1. **The base is generated outside every lock**, and only when the chunk is resident.
 //     Generate is the millisecond-scale part and no lock in this file is ever held across
-//     it; a chunk nobody holds needs no base at all, because the next [Cache.Get] will
+//     it — saveMu least of all, because a save waiting behind it would be waiting for
+//     arithmetic. It is safe out there because the base is a pure function of (seed,
+//     coord) and so cannot go stale while the locks below are taken, and because the entry
+//     it was generated for is read again under composeMu before anything is published into
+//     it. A chunk nobody holds needs no base at all, because the next [Cache.Get] will
 //     make one from a delta layer this call has already emptied.
+//  2. **Serialised against a save**, through saveMu, from the Forget to the file removal.
+//     Flush takes a coordinate out of the dirty set and only then reads its edits, so a
+//     save running beside this one could be holding a snapshot of the very edits being
+//     thrown away and would write the file back moments after it was removed. That is why
+//     the removal in step 5 is inside this lock rather than after it.
 //  3. **Forgotten under composeMu**, beside the publish and the dirty clear. That is the
 //     same critical section [Cache.apply] uses, so there is no interleaving in which a
 //     reader sees the deltas gone and the composed chunk still carrying them, and none in
@@ -514,9 +519,13 @@ func (c *Cache) apply(ctx context.Context, x, y, z int64, block Block, guard fun
 //  4. **The revision is bumped after the publish**, for [Cache.Revision]'s contract: a
 //     consumer that memoises a chunk pointer must never read the new number beside the old
 //     chunk. Collision reads a regenerated chunk exactly the way it reads an edited one.
-//  5. **The file is removed last**, outside every lock, because it is the I/O. A failure
-//     there is returned and nothing is rolled back: the chunk is already pristine in
-//     memory, and the file that outlived it is one the next call can remove again.
+//  5. **The file is removed last**, outside composeMu and still under saveMu, because it
+//     is the I/O. Outside composeMu so no reader and no edit ever waits on a disk write;
+//     under saveMu because step 2 is the whole reason the removal cannot be moved past it
+//     — a Flush let through here is one holding a snapshot that would put the file back.
+//     A failure there is returned and nothing is rolled back: the chunk is already
+//     pristine in memory, and the file that outlived it is one the next call can remove
+//     again.
 //
 // # What it does not promise
 //
@@ -529,15 +538,18 @@ func (c *Cache) apply(ctx context.Context, x, y, z int64, block Block, guard fun
 // nothing is corrupted in between. Closing it properly would mean holding composeMu across
 // a file read, which is the one thing this file's locking rule forbids.
 func (c *Cache) Regenerate(coord Coord) error {
-	c.saveMu.Lock()
-	defer c.saveMu.Unlock()
-
+	// Before saveMu rather than inside it, so a save never waits on a generation. The
+	// probe is a hint either way — it is not composeMu, so the entry can be evicted or
+	// replaced before the publish — and the read under composeMu below is what decides.
 	entry := c.resident(coord)
 	var regenerated *composition
 	if entry != nil {
 		base := Generate(c.seed, coord)
 		regenerated = &composition{chunk: base, encoded: Encode(base)}
 	}
+
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
 
 	c.composeMu.Lock()
 	c.deltas.Forget(coord)
