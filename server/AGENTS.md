@@ -743,8 +743,9 @@ with time, so `Step` reads them and never advances them.
   because `spawnDrop` takes it itself.
 - **The respawn point is resolved from the live registry every time.** A cached position
   would still name a tent that collapsed or was picked up an hour ago, and the player would
-  come back standing in the air where one used to be. With no tent, the join spawn — which
-  is what `respawnLocked` always did.
+  come back standing in the air where one used to be. With no tent the answer is no longer
+  the join spawn directly — see "Waking up with no tent" below — but the registry is still
+  the first question asked and a standing tent still outranks everything.
 - **A structure is placed in the chunk of the ground it rests on**, which is the chunk
   *below* the player standing on it whenever the anchor is the last block of one. It only
   matters at a view distance of zero or one; every real deployment streams further than that.
@@ -928,6 +929,44 @@ second visibility decision to keep in step with the first.
 - **What draws any of this is a separate change.** This is the wire and the server half; the
   client still tips only the viewer's own body, and `client/AGENTS.md` still records that gap
   until the half that closes it lands.
+
+## Waking up with no tent, and the wall the offset does not clear
+
+`respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460
+inserted the middle one: **the player's tent, else the nearest settlement to where they fell,
+else the join spawn.**
+
+- **`world.NearestSettlement` is a pure lattice query, which is the only reason this can run
+  on the tick.** It is a handful of hashes over the seed and the death column — no chunk is
+  read, nothing is generated, and a settlement that has never been visited answers as readily
+  as one somebody lives in. It searches three lattice cells of blocks out from the column and
+  answers false rather than spiralling when nothing that far out holds anything, which is the
+  case the third tier exists for.
+- **`Sim.worldSeed` is retained for it**, and that is a small widening of what the seed was
+  for: it used to feed the spawn director's and the loot table's generators and nothing else.
+  It still generates nothing. The voxels the lattice names are read through the terrain seam
+  like every other voxel in this package.
+- **The body is put down at the settlement's plateau plus `world.SpawnClearance`**, which is
+  the join spawn's own rule rather than a second one — a settlement flattens its ground, so
+  the plateau *is* the surface and there is no height field to sample — and then pushed
+  `respawnSettlementOffset` (3) blocks out along the bearing they died on. The bearing is what
+  the offset is for: two deaths from two directions land on two columns instead of stacking on
+  one voxel, and pointing outward faces the player at the walk they are about to make.
+- **The chosen column is then verified through the same non-generating read a tent placement
+  uses** — `footprintFitsLocked`'s two questions asked over a body: the plateau under the feet
+  resident and not air, every voxel the body occupies resident and air. A tick may not wait for
+  a chunk, and a body that starts inside a solid cannot be moved by `moveAndCollide` at all. On
+  either refusal the tier falls through to the join spawn and says so at `Debug`.
+- **A capital blocks three of its four cardinal bearings, and that is known rather than
+  discovered.** The keep is the one drawing that is not hollow three blocks from its middle:
+  its inner tower's wall stands exactly there on ±x and −z, and the fourth cardinal is the
+  tower's doorway. So a player who dies due east of a capital wakes at the join spawn — which
+  costs them almost nothing, because a capital is placed within two hundred blocks of it by
+  construction. Villages put a hollow hall or smithy at their centre and are clear on every
+  bearing, and they are what this tier exists for. Widening the offset until it cleared the
+  keep would move every respawn in the world to repair the one case where falling through is
+  cheapest. `TestTheKeepStandsWhereThisRespawnRuleSaysItDoes` reads the drawings, so the
+  paragraph cannot quietly stop being true.
 
 ## The world's clock, and the one predicate that reads it
 
@@ -2349,7 +2388,8 @@ Recorded here so the next reader does not mistake them for oversights:
   **A record always describes a living player**, which is what makes quitting mid-death neither an
   escape nor a double charge. A player who is dead when their record is taken is written as
   `respawnLocked` would have left them: alive, at `PlayerMaxHealth`, at `respawnPositionLocked` —
-  their tent if one stands, the join spawn otherwise — with the −20% durability penalty charged if
+  their tent if one stands, the nearest settlement to where they fell if not, the join spawn
+  otherwise — with the −20% durability penalty charged if
   the tick had not managed it yet. `chargeDeathPenaltyLocked` is the one-shot both paths go through,
   so whichever gets there first, it is spent once. `game.Life.Validate` refuses a health of zero for
   the same reason: it is not a corpse to restore, it is a record this server did not write.
