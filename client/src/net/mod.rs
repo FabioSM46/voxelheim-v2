@@ -510,6 +510,33 @@ impl LootInbox {
     }
 }
 
+/// Vendor payloads not yet consumed by the player presentation, in wire order.
+#[derive(Resource, Debug, Default)]
+pub struct VendorInbox(Vec<VendorEvent>);
+
+/// The two server-owned changes one open stall can receive.
+///
+/// [`LootEvent`]'s shape on the other revisioned session this client keeps, and one queue
+/// rather than two for its reason: a `VendorClosed` that arrives after a `VendorState`
+/// ends the window, and one that arrives before it does not, so the pair cannot be sorted
+/// into separate inboxes without losing which happened first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VendorEvent {
+    State(VendorState),
+    Closed(VendorClosed),
+}
+
+impl VendorInbox {
+    pub fn take(&mut self) -> Vec<VendorEvent> {
+        std::mem::take(&mut self.0)
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, event: VendorEvent) {
+        self.0.push(event);
+    }
+}
+
 /// Map payloads not yet consumed by the map screen, in wire order.
 ///
 /// Order is what makes these one queue rather than three: a `MapExplored` that arrives
@@ -1021,6 +1048,7 @@ impl Plugin for NetPlugin {
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
             .init_resource::<LootInbox>()
+            .init_resource::<VendorInbox>()
             .init_resource::<MobHitInbox>()
             .init_resource::<MapInbox>()
             .init_resource::<MineProgressInbox>()
@@ -1506,6 +1534,8 @@ struct Inboxes<'w> {
     // Optional only for focused boundary tests that install the drain directly.
     mob_hits: Option<ResMut<'w, MobHitInbox>>,
     // Optional only for focused boundary tests that install the drain directly.
+    vendor: Option<ResMut<'w, VendorInbox>>,
+    // Optional only for focused boundary tests that install the drain directly.
     map: Option<ResMut<'w, MapInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
@@ -1685,15 +1715,23 @@ fn drain_session_events(
             // and a line per one would be noise from the moment the first village exists.
             Ok(SessionEvent::ResidentAppearance(resident)) => inboxes.residents.0.push(resident),
 
-            // V25's two vendor payloads: fully decoded and fully validated one layer down,
-            // and dropped here because there is no inbox to put them in yet. #459 gives a
-            // stall a window and adds its own queue and its own arm.
+            // V25's two vendor payloads, queued for the player module the way loot's pair
+            // is. Not logged: a price list arrives once per stall a player addresses, and
+            // the window is the signal.
             //
-            // **The validation is the point of carrying them this far.** An unknown role
-            // or a duplicate price already ends the session at the decode boundary, which
-            // is where it should, and that is true now rather than when somebody writes
-            // the window.
-            Ok(SessionEvent::VendorState(_)) | Ok(SessionEvent::VendorClosed(_)) => {}
+            // **The validation happens one layer down and is the reason these arrive
+            // whole.** An unknown role or a duplicate price ends the session at the decode
+            // boundary, so nothing that reaches this arm needs checking here.
+            Ok(SessionEvent::VendorState(state)) => {
+                if let Some(vendor) = inboxes.vendor.as_deref_mut() {
+                    vendor.0.push(VendorEvent::State(state));
+                }
+            }
+            Ok(SessionEvent::VendorClosed(closed)) => {
+                if let Some(vendor) = inboxes.vendor.as_deref_mut() {
+                    vendor.0.push(VendorEvent::Closed(closed));
+                }
+            }
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),

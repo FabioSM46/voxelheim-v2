@@ -70,7 +70,12 @@ pub(super) const ITEM_CAMPFIRE: u16 = 12;
 /// obey — a snapshot-driven visual is hidden while a panel owns the screen, and hidden
 /// rather than despawned, so opening a pack cannot be mistaken for anything happening in
 /// the world.
-const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
+const HIDDEN_INPUT_MODES: [InputMode; 4] = [
+    InputMode::Inventory,
+    InputMode::Loot,
+    InputMode::Vendor,
+    InputMode::Menu,
+];
 
 // ---------------------------------------------------------------------------
 // The footprint, mirrored from the server

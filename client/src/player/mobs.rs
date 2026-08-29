@@ -179,7 +179,12 @@ const VARGR_COLLAPSE_ROLL: f32 = 1.15;
 const VARGR_LEG_SPLAY: f32 = 1.9;
 
 /// Modes whose UI owns the view instead of the 3D world. The same rule drops obey.
-const HIDDEN_INPUT_MODES: [InputMode; 3] = [InputMode::Inventory, InputMode::Loot, InputMode::Menu];
+const HIDDEN_INPUT_MODES: [InputMode; 4] = [
+    InputMode::Inventory,
+    InputMode::Loot,
+    InputMode::Vendor,
+    InputMode::Menu,
+];
 
 /// A small planar arrowhead above a mob the server says is hunting this player.
 const AGGRO_MARKER_WIDTH: f32 = 0.30;

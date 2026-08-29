@@ -60,6 +60,7 @@ mod projectiles;
 mod sky;
 mod structures;
 mod target;
+mod vendor;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -95,6 +96,7 @@ pub(crate) use livery::{Liveries, field_rect};
 pub use loot::{LootTakeClick, LootWindow};
 pub(crate) use sky::Daylight;
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
+pub use vendor::VendorWindow;
 
 use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,
@@ -180,6 +182,13 @@ pub enum InputMode {
     Inventory,
     /// Pointer released over one authoritative corpse container.
     Loot,
+    /// Pointer released over one authoritative stall.
+    ///
+    /// [`Self::Loot`]'s rules with a different window behind them, and deliberately not a
+    /// second spelling of them: the pointer is released because the whole content is rows,
+    /// `Escape` closes it, the pack key is ignored rather than layering a second window over
+    /// it, and death closes it because the server refuses every trade from a corpse anyway.
+    Vendor,
     /// Pointer released and the pause menu visible.
     Menu,
     /// Pointer released and the world map visible. Movement is closed, as it is for
@@ -326,6 +335,7 @@ impl Plugin for PlayerPlugin {
             // against its system set.
             .add_plugins(crafting::CraftingPlugin)
             .add_plugins(loot::LootPlugin)
+            .add_plugins(vendor::VendorPlugin)
             // After the camera plugin, because the ray starts at the camera and the
             // ordering inside `BlockTargetPlugin` is written against its system set.
             .add_plugins(combat::CombatPlugin)
