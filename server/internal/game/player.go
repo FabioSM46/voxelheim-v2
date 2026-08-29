@@ -181,6 +181,27 @@ type Sim struct {
 	// week, which includes the days this server was switched off.
 	nextStormUnix int64
 
+	// weatherOverride replaces every player's weather while it is non-nil, and is nil in
+	// the ordinary world.
+	//
+	// **The one thing about the sky that is state rather than a field.** Everything else
+	// is world.WeatherAt, which is a pure function of the seed, the tick and a column —
+	// so it can say "rain here, snow a kilometre north" and cannot say "a blizzard,
+	// everywhere, starting now". The Fimbulvetr storm is exactly that second sentence:
+	// it is scheduled against nextStormUnix above, announced by a StormWarning, and it
+	// is the same weather for every player wherever they stand.
+	//
+	// A pointer rather than a value plus a flag, for the reason nextStormUnix needs no
+	// boolean beside it: there is no legal WeatherState that means "no override", since
+	// a present one carrying WeatherKindUnknown is a protocol error and a Clear at
+	// intensity 0 is a perfectly ordinary sky somebody might genuinely be imposing.
+	//
+	// **Nothing in this package sets it yet** — #469 is the storm that does, and it sets
+	// it under this lock like every other field here. It is read once per tick by
+	// weatherAtLocked, and read there rather than per player so that a storm cannot begin
+	// halfway down one tick's player list.
+	weatherOverride *protocol.WeatherState
+
 	// drops is every item lying in the world. Keyed by identity like players, and for
 	// the same reasons: a snapshot names entities by id, and a merge or a pickup has to
 	// find one without scanning.
@@ -489,6 +510,20 @@ type Player struct {
 	// on demand because streaming is driven by the *change*, and comparing against
 	// the value already published is how the tick notices one.
 	chunk world.Coord
+
+	// weather is what the sky is doing over this player, recomputed once per tick in
+	// stepWorld at the position that tick produced and carried by that tick's snapshot.
+	//
+	// Kept on the player rather than computed inside the per-viewer snapshot loop
+	// because the two loops are not the same shape: the sample belongs to where *this*
+	// player is standing, and the snapshot loop is already walking every other player
+	// from this one's point of view. Storing it also makes it one sample per player per
+	// tick by construction, which is the cost the design commits to.
+	//
+	// Wire-ready rather than a world.WeatherKind, so the vocabulary is converted once at
+	// the sample and not once per snapshot. The zero value never reaches a snapshot: the
+	// tick loop writes this for every connected player before any snapshot is built.
+	weather protocol.WeatherState
 
 	current   intent
 	idleTicks int
@@ -1023,6 +1058,12 @@ func (s *Sim) stepWorld(tick uint64) {
 
 	players := s.sortedPlayersLocked()
 
+	// The world's own tick, read once for the whole tick and handed to every weather
+	// sample below. Under this lock it cannot change between two players anyway; reading
+	// it here is what says so, and it is what makes "the same sky for everyone" a
+	// property of the code rather than of the lock's scope.
+	worldTick := s.worldTick
+
 	for _, p := range players {
 		// Vitals first, and the order is load-bearing. A player who died on tick N has
 		// their countdown decremented from N+1, so the three seconds are three seconds
@@ -1040,6 +1081,12 @@ func (s *Sim) stepWorld(tick uint64) {
 			// session; a crossing is the event that has anything to send.
 			p.chunks.publish(coord)
 		}
+
+		// The sky, at the position this tick produced rather than the last one's — the
+		// same rule the chunk crossing above and every mob's chase below follow. One
+		// sample per player per tick, and none at all for a player nobody is simulating,
+		// because this loop is the whole of what weather costs.
+		p.weather = s.weatherAtLocked(worldTick, p.pos)
 	}
 
 	// The drops, in the order the world changed them: fall and age first, then combine
@@ -1369,6 +1416,20 @@ func (s *Sim) stepWorld(tick uint64) {
 			PartyRoster:           partyRoster,
 			AccessibleLootCorpses: visibleLootCorpses,
 			Projectiles:           visibleProjectiles,
+			// The sky over **this** recipient, sampled above at their own column, and
+			// the third field here that is not about an entity. Unlike TickOfDay beside
+			// it, it is not the same for every recipient: two players in different
+			// climates are told different things in the same tick, which is the whole
+			// point of sampling it per player.
+			//
+			// HasWeather is unconditionally true, and that is this issue's change to the
+			// wire: the flag distinguishes "this server keeps no weather" from a present
+			// WeatherKindUnknown, and this server now keeps weather for every player on
+			// every tick. The value is never the Go zero — the loop above writes one for
+			// every connected player before this loop runs — so there is no tick on
+			// which a true flag could carry an Unknown.
+			Weather:    viewer.weather,
+			HasWeather: true,
 		}
 		if !viewer.deliver(protocol.EncodeEntitySnapshot(snapshot)) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
