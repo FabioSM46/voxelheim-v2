@@ -90,6 +90,11 @@ const (
 	// carries the argument: a map nobody can read is not a map.
 	MaxMarkers = 64
 
+	// MaxWardedColumns is the generated WardBound member both consumers share. A
+	// complete replacement above this size is a programming error, never a list to
+	// truncate: dropping the tail would leave the client shading the wrong ground.
+	MaxWardedColumns = int(vnet.WardBoundMaxWardedColumns)
+
 	// MarkerNoteMaxBytes bounds Marker.note and MarkerPlaceRequest.note. Bytes
 	// rather than characters, because a byte is what the wire and both decoders
 	// actually count.
@@ -306,6 +311,22 @@ type MapColumn struct {
 // column named once is explored for good, so pages need no ordering.
 type MapExplored struct {
 	Columns []MapColumn
+}
+
+// WardedColumn is one authoritative chunk-column claim as WardsNearby carries it.
+// The conversion from the simulation's answer stays in this protocol-owned value, so
+// no generated FlatBuffers accessor escapes this package.
+type WardedColumn struct {
+	CX   int32
+	CZ   int32
+	Kind vnet.WardKind
+	Mine bool
+}
+
+// WardsNearby replaces the recipient's whole visible ward set. Unlike MapExplored, an
+// empty list is a message: it clears the last ward the client was drawing.
+type WardsNearby struct {
+	Columns []WardedColumn
 }
 
 // MarkerPlaceRequest asks to put one mark on this character's map. It names no marker
@@ -2855,6 +2876,33 @@ func EncodeMapExplored(explored MapExplored) []byte {
 	vnet.MapExploredAddColumns(b, columns)
 	payload := vnet.MapExploredEnd(b)
 	return finishEnvelope(b, vnet.PayloadMapExplored, payload)
+}
+
+// EncodeWardsNearby builds one complete replacement of the ward columns a session can
+// see. An empty vector is encoded deliberately; silence would leave the previous set
+// standing on the client.
+//
+// More than MaxWardedColumns is refused rather than truncated. The sender owns these
+// values, so every other invariant is established by the simulation that constructed
+// them; the count is checked here because this is where an allocation and a frame size
+// follow from it.
+func EncodeWardsNearby(nearby WardsNearby) ([]byte, error) {
+	if len(nearby.Columns) > MaxWardedColumns {
+		return nil, fmt.Errorf("protocol: %d warded columns exceeds the maximum of %d", len(nearby.Columns), MaxWardedColumns)
+	}
+
+	b := flatbuffers.NewBuilder(len(nearby.Columns)*12 + 128)
+	vnet.WardsNearbyStartColumnsVector(b, len(nearby.Columns))
+	for i := len(nearby.Columns) - 1; i >= 0; i-- {
+		column := nearby.Columns[i]
+		vnet.CreateWardedColumn(b, column.CX, column.CZ, column.Kind, column.Mine)
+	}
+	columns := b.EndVector(len(nearby.Columns))
+
+	vnet.WardsNearbyStart(b)
+	vnet.WardsNearbyAddColumns(b, columns)
+	payload := vnet.WardsNearbyEnd(b)
+	return finishEnvelope(b, vnet.PayloadWardsNearby, payload), nil
 }
 
 // EncodeMarkerList builds the complete list of marks one character holds.

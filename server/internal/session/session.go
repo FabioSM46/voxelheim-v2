@@ -353,6 +353,11 @@ func placementSpawn(cfg Config, self Resolved) [3]float32 {
 // noticed, which is how a warning stops being read.
 func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeouts, chunks *world.Cache, sim *game.Sim, peers *Registry, identities *Identities, entityID uint64, log *slog.Logger) (err error) {
 	out := make(chan []byte, outboundQueue)
+	// Snapshots cross a one-entry, newest-wins handoff instead of entering out on the
+	// tick goroutine. The authoritative column travels beside each frame, so the session
+	// can wait for streaming to reach that centre and put WardsNearby immediately before
+	// the snapshot without ever making the tick wait.
+	snapshots := make(chan snapshotAt, 1)
 
 	// A session-scoped context, so teardown can stop the streamer without waiting
 	// for the server to shut down.
@@ -534,6 +539,25 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// mask the exact reordering that TestSnapshotsStopBeforeTheOutboundQueueIsClosed
 	// exists to catch, turning a panic into a test that passes.
 	trySend := func(frame []byte) bool {
+		select {
+		case out <- frame:
+			return true
+		default:
+			return false
+		}
+	}
+	// offerLatestSnapshot is the snapshot-only half of the simulation delivery seam.
+	// One tick goroutine is the sole producer. Replacing the buffered value is therefore
+	// non-blocking and bounded, while retaining the only frame still worth sending.
+	deliverLatestSnapshot := func(frame []byte, center world.Column) bool {
+		return offerLatestSnapshot(snapshots, snapshotAt{frame: frame, center: center})
+	}
+
+	// offerSnapshot is the worker-side half of the handoff above. It keeps the old
+	// non-blocking snapshot contract: a full outbound queue drops one stale tick,
+	// while the WardsNearby frame before it uses enqueue because a replacement list
+	// is not superseded until another authoritative trigger occurs.
+	offerSnapshot := func(frame []byte) bool {
 		select {
 		case out <- frame:
 			return true
@@ -734,7 +758,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// stored character. Nothing the client said at any point in this handshake
 			// reaches it, and a creation's appearance reaches it only by having been
 			// written down first.
-			admitted, jErr := sim.JoinCharacter(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend)
+			admitted, jErr := sim.JoinCharacterWithSnapshotDelivery(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend, deliverLatestSnapshot)
 			if jErr != nil {
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}
@@ -801,6 +825,17 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// they stand on is when the simulation creates them — see game/station.go.
 			streamer.ReportEntering(admitted.MaterialiseSettlements)
 
+			// One worker owns both ward replacements and snapshot forwarding. The first
+			// centre arrives only after MoveTo has materialised every settlement structure
+			// entering the initial view, so the first WardsNearby is ordered after those
+			// authoritative facts and before the first snapshot this worker releases.
+			wardCenters := make(chan world.Column)
+			streaming.Add(1)
+			go func() {
+				defer streaming.Done()
+				followSnapshotsAndWards(sctx, admitted.PlayerID(), sim, int32(cfg.ViewDistance), wardCenters, snapshots, enqueue, offerSnapshot, log)
+			}()
+
 			// Follow the player from its own goroutine. Two reasons, and the second is
 			// structural: the initial view is hundreds of frames, and producing them
 			// from the read loop would leave the session unable to notice a disconnect
@@ -810,7 +845,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			streaming.Add(1)
 			go func() {
 				defer streaming.Done()
-				followPlayer(sctx, admitted, streamer, log)
+				followPlayer(sctx, admitted, streamer, wardCenters, log)
 			}()
 
 			// Registered as a broadcast target only now, and with the streamer's own view:
@@ -911,7 +946,7 @@ func malformedChoice(kind vnet.Payload) *Refused {
 // generating terrain on the tick goroutine would cost every connected player a tick.
 // The position it follows is the server's own answer — there is no message in which
 // the client says where it is.
-func followPlayer(ctx context.Context, player *game.Player, streamer *Streamer, log *slog.Logger) {
+func followPlayer(ctx context.Context, player *game.Player, streamer *Streamer, wardCenters chan<- world.Column, log *slog.Logger) {
 	for {
 		center, err := player.NextChunk(ctx)
 		if err != nil {
@@ -923,6 +958,15 @@ func followPlayer(ctx context.Context, player *game.Player, streamer *Streamer, 
 			if ctx.Err() == nil {
 				log.Warn("streaming the view failed", "center", center, "error", sErr)
 			}
+			return
+		}
+
+		// After MoveTo, because its entering hook materialised every settlement
+		// structure in the new view. The ward worker sends the replacement before it
+		// releases the newest snapshot accumulated while streaming.
+		select {
+		case wardCenters <- center.Column():
+		case <-ctx.Done():
 			return
 		}
 	}

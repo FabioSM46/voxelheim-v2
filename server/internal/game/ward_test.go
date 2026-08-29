@@ -83,6 +83,74 @@ func TestARunestoneWardsTheNineColumnsAroundItsOwn(t *testing.T) {
 	}
 }
 
+func TestWardsNearIsClippedOwnedAndTotallyOrdered(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	stone := h.raise(owner, [3]int32{0, 63, 0})
+	centre := stone.chunk.Column()
+
+	got := h.sim.WardsNear(owner.playerID, centre, WardChunkRadius)
+	if len(got) != 9 {
+		t.Fatalf("WardsNear returned %d columns, want the runestone's 3x3", len(got))
+	}
+	for i, column := range got {
+		wantX := centre.CX + int32(i%3) - WardChunkRadius
+		wantZ := centre.CZ + int32(i/3) - WardChunkRadius
+		if column.CX != wantX || column.CZ != wantZ {
+			t.Errorf("column %d = (%d,%d), want (%d,%d) in (CZ,CX) order", i, column.CX, column.CZ, wantX, wantZ)
+		}
+		if column.Kind != vnet.WardKindRunestone || !column.Mine {
+			t.Errorf("column %d = kind %s mine %v, want the caller's runestone", i, column.Kind, column.Mine)
+		}
+	}
+
+	other := h.sim.WardsNear(testPlayerID(2), centre, 0)
+	if len(other) != 1 || other[0].CX != centre.CX || other[0].CZ != centre.CZ || other[0].Mine {
+		t.Errorf("the radius-zero view for another player = %+v, want only the centre with mine false", other)
+	}
+}
+
+func TestWardsNearNamesASettlementAndSettlementQueriesSpendNoRevision(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	capital := testCapital(t)
+	centre := world.ChunkOf(capital.CentreX, 0, capital.CentreZ).Column()
+	before := h.sim.WardsRevision()
+
+	got := h.sim.WardsNear(testPlayerID(1), centre, 0)
+	if len(got) != 1 {
+		t.Fatalf("WardsNear at the capital returned %d columns, want its centre", len(got))
+	}
+	if got[0].Kind != vnet.WardKindSettlement || got[0].Mine {
+		t.Errorf("capital ward = kind %s mine %v, want Settlement and false", got[0].Kind, got[0].Mine)
+	}
+	if after := h.sim.WardsRevision(); after != before {
+		t.Errorf("querying a settlement changed the ward revision from %d to %d", before, after)
+	}
+}
+
+func TestWardsRevisionChangesOnRunestoneRebuilds(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	before := h.sim.WardsRevision()
+	stone := h.raise(player, [3]int32{0, 63, 0})
+	afterPlacement := h.sim.WardsRevision()
+	if afterPlacement != before+1 {
+		t.Fatalf("placing a runestone changed revision from %d to %d, want one increment", before, afterPlacement)
+	}
+	if err := player.RemoveStructure(protocol.RemoveStructureRequest{StructureID: stone.structureID}); err != nil {
+		t.Fatalf("RemoveStructure: %v", err)
+	}
+	if afterRemoval := h.sim.WardsRevision(); afterRemoval != afterPlacement+1 {
+		t.Errorf("removing a runestone changed revision from %d to %d, want one increment", afterPlacement, afterRemoval)
+	}
+}
+
 func TestASettlementWardBelongsToNobodyAndAlwaysWinsAnOverlap(t *testing.T) {
 	t.Parallel()
 

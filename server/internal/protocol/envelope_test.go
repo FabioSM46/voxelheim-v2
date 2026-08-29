@@ -4118,6 +4118,57 @@ func TestV26AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	}
 }
 
+func TestWardsNearbyCarriesACompleteOrderedReplacementIncludingEmpty(t *testing.T) {
+	t.Parallel()
+
+	for name, want := range map[string][]WardedColumn{
+		"empty": {},
+		"two kinds": {
+			{CX: -4, CZ: 2, Kind: vnet.WardKindRunestone, Mine: true},
+			{CX: 7, CZ: 9, Kind: vnet.WardKindSettlement, Mine: false},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			frame, err := EncodeWardsNearby(WardsNearby{Columns: want})
+			if err != nil {
+				t.Fatalf("EncodeWardsNearby: %v", err)
+			}
+			envelope := vnet.GetRootAsEnvelope(frame, 0)
+			if envelope.PayloadType() != vnet.PayloadWardsNearby {
+				t.Fatalf("PayloadType = %s, want WardsNearby", envelope.PayloadType())
+			}
+			table := payloadTable(t, envelope)
+			var nearby vnet.WardsNearby
+			nearby.Init(table.Bytes, table.Pos)
+			if nearby.ColumnsLength() != len(want) {
+				t.Fatalf("ColumnsLength = %d, want %d", nearby.ColumnsLength(), len(want))
+			}
+			for i, expected := range want {
+				var got vnet.WardedColumn
+				if !nearby.Columns(&got, i) {
+					t.Fatalf("column %d is absent", i)
+				}
+				if got.Cx() != expected.CX || got.Cz() != expected.CZ || got.Kind() != expected.Kind || got.Mine() != expected.Mine {
+					t.Errorf("column %d = (%d,%d,%s,%v), want (%d,%d,%s,%v)", i,
+						got.Cx(), got.Cz(), got.Kind(), got.Mine(),
+						expected.CX, expected.CZ, expected.Kind, expected.Mine)
+				}
+			}
+		})
+	}
+}
+
+func TestWardsNearbyRefusesMoreThanTheGeneratedBound(t *testing.T) {
+	t.Parallel()
+
+	columns := make([]WardedColumn, MaxWardedColumns+1)
+	if frame, err := EncodeWardsNearby(WardsNearby{Columns: columns}); err == nil || frame != nil {
+		t.Fatalf("EncodeWardsNearby returned %d bytes and %v, want a refusal above %d columns", len(frame), err, MaxWardedColumns)
+	}
+}
+
 // A storm warning round trips through the generated reader in all three phases, and the
 // envelope names it as its own payload rather than as anything already on the wire.
 //
