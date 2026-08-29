@@ -53,9 +53,15 @@ const (
 
 	// The two sizes of settlement, as the radius of flat ground each stands on.
 	//
-	// A capital has to hold a keep, a hall, a smithy and a ring of six huts without
+	// A capital has to hold a castle, a hall, a smithy and a ring of six huts without
 	// any of them touching; fifty-six is what that measures out to with the ring at
-	// forty and the largest footprint fifteen across. A village is half of it.
+	// forty and the largest footprint twenty-one across. A village is half of it.
+	//
+	// **The castle grew from 15 across to 21 in #555 and none of the three radii moved**,
+	// which is worth saying because it looked at first as though one had to. What binds
+	// the plateau is `capitalHutRingRadius + hutRingClearance` and the huts are the
+	// outermost thing here; what binds the middle is the guard beside
+	// [plotRingNearestAxis], and the plot ring already cleared a castle this wide.
 	capitalRadius = 56
 	villageRadius = 28
 
@@ -175,14 +181,28 @@ const (
 // on a ring at radius r, reaches r + h√2 at its corner, so `ceil(h√2)` is the clearance a
 // ring needs from the edge of the plateau.
 const (
-	hutHalfFootprint      = 3 // hutSchematic is 7 across
-	hutRingClearance      = 5 // ceil(3√2)
-	smithyHalfFootprint   = 4 // smithySchematic is 9 across
-	hallHalfFootprint     = 6 // hallSchematic is 13 across
-	largestHalfFootprint  = 7 // keepSchematic is 15 across
+	hutHalfFootprint      = 3  // hutSchematic is 7 across
+	hutRingClearance      = 5  // ceil(3√2)
+	smithyHalfFootprint   = 4  // smithySchematic is 9 across
+	hallHalfFootprint     = 6  // hallSchematic is 13 across
+	largestHalfFootprint  = 10 // keepSchematic is 21 across
 	publicHalfFootprint   = hallHalfFootprint
 	plotRingHalfFootprint = hallHalfFootprint
 )
+
+// plotRingNearestAxis is how far a building on the capital's plot ring stands from the
+// centre along the *larger* of its two axes, at the worst of the twelve bearings.
+//
+// **The castle #555 put at the centre is the first building wide enough that the ring's
+// radius is not what clears it, and the diagonal argument above is the wrong one for
+// it.** Two boxes miss each other when they are apart on *either* axis, so a centred
+// building is cleared by the larger leg of the offset rather than by its length: at 25
+// blocks and a bearing of 30° a hall stands 21 out on x and only 12 out on z, and it is
+// the 21 doing the work. 56756 is cos 30° in Q16.16, the smallest that larger leg ever
+// gets on a twelve-spoke table. It is a literal for the reason the half-footprints above
+// are — a const expression cannot index a `var` — and
+// [TestTheGuardsBelowDescribeTheActualDrawings] pins it to the table.
+const plotRingNearestAxis = (capitalPlotRadius * 56756) >> fracBits
 
 // **The scan in [settlementShapeAt] reads four cells, and what makes that enough is not
 // this constant.** The comment here used to claim that breaking it would make the scan
@@ -209,6 +229,12 @@ const _ = uint8(villageCellInset - settlementReach)
 // a building with its corner in another building.
 const _ = uint8(capitalRadius - capitalHutRingRadius - hutRingClearance)
 const _ = uint8(capitalHutRingRadius - capitalPlotRadius - plotRingHalfFootprint - hutHalfFootprint)
+
+// And the castle in the middle has to stand clear of that plot ring. The `- 1` makes it
+// a gap rather than a touch: two boxes whose faces are in adjacent columns do not
+// overlap, and a guard that allowed the equal case would allow a hall built against the
+// curtain wall.
+const _ = uint8(plotRingNearestAxis - largestHalfFootprint - plotRingHalfFootprint - 1)
 
 // **And the same three for a village, which had none of them.** The capital's guards were
 // the only ones, so `villageHutRingRadius` could be raised from 16 to 26 — still under

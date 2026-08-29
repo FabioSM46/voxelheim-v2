@@ -178,8 +178,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 7 {
-		t.Fatalf("WorldgenVersion = %d, want 7 for the ore density fix", WorldgenVersion)
+	if WorldgenVersion != 8 {
+		t.Fatalf("WorldgenVersion = %d, want 8 for the capital's castle", WorldgenVersion)
 	}
 }
 

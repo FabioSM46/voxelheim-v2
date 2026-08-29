@@ -421,18 +421,18 @@ func (p *Player) respawnPositionLocked() [3]float64 {
 // that starts inside a solid and the player would be standing in masonry until they mined
 // their way out. Either way the answer is no answer, and the tier above falls through.
 //
-// **A capital's centre is one of those walls on three bearings out of four, and that is
-// known rather than discovered.** The keep is the one building whose drawing is not
-// hollow at [respawnSettlementOffset] from its middle: its inner tower's wall stands
-// exactly three blocks out along ±x and −z, and the fourth cardinal is the tower's own
-// doorway. So a player who dies due east of a capital falls through to the world spawn.
-// It costs them almost nothing, because a capital is placed within two hundred blocks of
-// the world spawn by construction — the fallback is the same street. Villages, which are
-// the settlements this tier actually exists for, put a hollow hall or smithy at their
-// centre and are clear on every bearing. Widening the offset until it cleared the keep
-// would move every respawn in the world to repair the one case where falling through is
-// cheapest; TestTheKeepStandsWhereThisRespawnRuleSaysItDoes is what keeps this paragraph
-// from quietly becoming false.
+// **A capital's centre used to be one of those walls on three bearings out of four, and
+// #555 removed the case rather than repairing it.** The keep's inner tower stood exactly
+// three blocks out along ±x and −z, so a player who died due east of a capital fell
+// through to the world spawn. The castle that replaced it is eleven blocks of open
+// ground floor across, so all four cardinals are clear and a capital now answers this
+// tier like a village does: the player wakes on the castle's ground floor, which has a
+// door and a gate and can be walked out of. **Nothing moved to make that true** —
+// [respawnSettlementOffset] is still three, because widening it until it cleared a wall
+// would have moved every respawn in the world to repair the one case where falling
+// through was cheapest. The wall stopped being there instead.
+// TestTheKeepStandsWhereThisRespawnRuleSaysItDoes keeps this paragraph from quietly
+// becoming false again.
 //
 // The caller holds sim.mu.
 func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
