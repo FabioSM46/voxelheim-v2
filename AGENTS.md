@@ -240,10 +240,11 @@ general-purpose subagent does not. Keep those lists narrow; they are now the rea
 a skill invocation over a hand-rolled agent.
 
 **The merge side has now moved, and #217 is where.** CI still runs on the pull request whichever
-hand opened it, `READY TO MERGE` is still computed by the one frozen rule, the rulesets still
-reject direct pushes at the remote, and `DEEPSEEK_REVIEW_READ` and `NO_DEEPSEEK_REVIEW` are still
-human-only. What changed is the merge itself: into `develop` it is the AI's call, and a thread the
-AI has answered is the AI's to resolve. **The human gate was the merge, it was the gate that was
+hand opened it, `READY TO MERGE` is still computed by the one frozen rule, and the rulesets still
+reject direct pushes at the remote. `NO_DEEPSEEK_REVIEW` remains human-only;
+`DEEPSEEK_REVIEW_READ` may also be applied by the AI, but only after it has read and disposed of
+every body finding with a public, evidence-backed audit trail. Into `develop` the merge is the AI's
+call, and a thread the AI has answered is the AI's to resolve. **The human gate was the merge, it was the gate that was
 ever load-bearing, and it is gone by decision rather than by oversight** — read the residual risk
 closing the next section before assuming otherwise.
 
@@ -332,8 +333,8 @@ are not the same thing:
    still binds whoever merges — what changed is only how long a mistake stays invisible.
 
 What still stands: `ci-gate` present and green, the rulesets, `DEEPSEEK_REVIEW_READ` as the one
-acknowledgement that a *person* read a finding, `NO_DEEPSEEK_REVIEW` beside it, and iteration
-planning as a human decision.
+dated acknowledgement that every body finding was read and publicly disposed of,
+`NO_DEEPSEEK_REVIEW` as a human-only exemption, and iteration planning as a human decision.
 
 ### Frozen Acceptance Rule
 
@@ -410,7 +411,13 @@ sticky: only reviews submitted before it was applied count as read. A forced sec
 blocks again on its own; removing the label un-acknowledges everything; pre-applying it
 acknowledges nothing. `NO_DEEPSEEK_REVIEW` does **not** waive it — that label answers
 "should DeepSeek review this PR", where findings that already exist were written either way
-and nobody has read them. Both labels are human-only actions.
+and nobody has read them. A human may apply `DEEPSEEK_REVIEW_READ` after reading the findings.
+The AI may apply it only after it has read **every** finding in every unread review body, corrected
+each valid point or refuted it with evidence, and posted those dispositions publicly on the pull
+request. Its write must be newer than the reviews it acknowledges: remove and re-add a stale label,
+then verify that no newer review arrived during the write. If any point is not understood or has no
+defensible disposition, leave the label absent. `NO_DEEPSEEK_REVIEW` remains human-only: the AI
+must never use an exemption to replace review.
 
 ### Completion-Driven Iteration Lifecycle
 
@@ -474,7 +481,7 @@ bootstrap path.
 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
-| **A — Full Review** | PR opened or new commit pushed | Fetches the full diff, sends to DeepSeek, posts inline review comments with code suggestions. **Any finding that names a file must be anchored to it**; the review body is reserved for observations that belong to no single file. A body comment creates no review thread, so it can only be cleared by the `DEEPSEEK_REVIEW_READ` label — anchoring is what keeps that click rare instead of routine. |
+| **A — Full Review** | PR opened or new commit pushed | Fetches the full diff, sends to DeepSeek, posts inline review comments with code suggestions. **Any finding that names a file must be anchored to it**; the review body is reserved for observations that belong to no single file. A body comment creates no review thread, so it can only be cleared by the `DEEPSEEK_REVIEW_READ` label — anchoring keeps that separate audited acknowledgement exceptional. |
 | **B — Reply** | Developer replies to a DeepSeek review comment | Fetches full context (diff + all threads), sends the developer's reply as the focal question, posts the response in the same thread. Never touches code. |
 
 **Mode A asks the API for a JSON object; Mode B must not.** `response_format` of type
@@ -528,7 +535,7 @@ reading develop's copy, never the branch's.
 review-only. The bot ignores its own comments (anti-loop guard, enforced at job level
 before a runner boots). Diffs over 45,000 characters are truncated with every dropped file
 named in the log **and in the review itself**: a truncated pass cannot come back clean, because
-the skipped files are injected as a finding, so the pull request blocks until a human has
+the skipped files are injected as a finding, so the pull request blocks until a reviewer has
 acknowledged what nobody read (legacy PR 32 — on legacy PR 30 the budget ran out after the client files and the
 entire server half was reported as having no issues). Splitting the pull request is still the
 reliable fix when a diff exceeds it.
@@ -549,7 +556,7 @@ said it was not raised "because the model's context is what the cap describes". 
 **1M-token context**, flash and pro alike; 120,000 characters is roughly 35K tokens, about 3.5%
 of that window. The cap described a limit the model did not have. It cost legacy PR 158 five unread
 files — `session.go` and `world/store.go` among them, the two the change actually turned on —
-and the block did its job: nothing came back clean, and a human had to acknowledge the gap.
+and the block did its job: nothing came back clean, and the gap had to be acknowledged explicitly.
 
 **Then it was 600,000, and that was the same mistake with a bigger number.** It described the
 *new* model's context window, and the context window is not what bounds a review: the chain of
@@ -620,8 +627,8 @@ row is why.
 33-minute run that produces nothing, a failing `review` check and a pull request nobody can merge
 until it is split by hand — and nothing says the size was the problem until you open the job. Too
 low is loud: the diff is truncated, every dropped file is named in the log and injected into the
-review as a finding, and the pull request blocks until a human acknowledges the gap. One costs
-half an hour and a manual split, the other costs a `DEEPSEEK_REVIEW_READ` click.
+review as a finding, and the pull request blocks until a reviewer acknowledges the gap. One costs
+half an hour and a manual split, the other costs an audited `DEEPSEEK_REVIEW_READ` action.
 
 **It costs review latency, and that was chosen rather than inherited.** Five of Iteration 29's
 seven issues already needed splitting at 90,000; at 45,000 most changes become two or three pull

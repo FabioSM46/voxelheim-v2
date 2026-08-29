@@ -69,7 +69,10 @@ all. A review made entirely of them scores zero unresolved threads while holding
 and GitHub would let it merge.
 
 `pr-status-json` counts those separately as `deepseek_unread_findings`, acknowledged by the dated
-`DEEPSEEK_REVIEW_READ` label. So:
+`DEEPSEEK_REVIEW_READ` label. A human may apply it after reading the findings; the AI may apply it
+only after addressing or evidence-backed rejecting every body finding and publishing the resulting
+audit trail on the PR. A stale acknowledgement must be removed and re-applied after the review.
+`NO_DEEPSEEK_REVIEW` remains a human-only exemption. So:
 
 - the **ruleset** guarantees nobody merges over an unresolved thread or a red `ci-gate` by accident
 - the **`READY TO MERGE` label** additionally guarantees the review was read, the round is

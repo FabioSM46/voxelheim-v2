@@ -986,13 +986,15 @@ DEEPSEEK_FULL_REVIEW_MARKER="<!-- deepseek:full-review -->"
 # wrong in.
 DEEPSEEK_NO_FINDINGS_MARKER="<!-- deepseek:no-findings -->"
 
-# The acknowledgement. A human adds it to say they have read what DeepSeek left in
-# a review body; the frozen rule refuses READY TO MERGE until they have.
+# The acknowledgement says a reviewer has read and disposed of what DeepSeek left in
+# a review body; the frozen rule refuses READY TO MERGE until that has happened. An AI
+# applying it must first publish its fix-or-evidence disposition for every finding.
 #
-# It is a label, not a reaction or a magic comment, for two reasons: it is one click
-# in the UI on a control humans already use here (NO_DEEPSEEK_REVIEW is the same
-# shape), and — because it can always be applied — it can never make READY TO MERGE
+# It is a label, not a reaction or a magic comment, because its event is dated and —
+# because it can always be applied — it can never make READY TO MERGE
 # unreachable, which is the failure every condition on that list has to answer for.
+# NO_DEEPSEEK_REVIEW is a separate, human-only exemption; this acknowledgement never
+# grants permission to skip review.
 DEEPSEEK_REVIEW_READ_LABEL="${DEEPSEEK_REVIEW_READ_LABEL:-DEEPSEEK_REVIEW_READ}"
 
 # Emit the error shape consumed by callers that gate automation on this helper.
@@ -1166,7 +1168,10 @@ cmd_pr_deepseek_rounds() {
     query($owner: String!, $repo: String!, $pr: Int!) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $pr) {
-          reviews(first: 50, states: [APPROVED, COMMENTED]) {
+          # Match the newest-end window used by pr-status-json and process-pr
+          # acknowledgement snapshot. `first` can return a stale latest_review_id
+          # once Mode B reply wrappers push the current review past the first page.
+          reviews(last: 100, states: [APPROVED, COMMENTED]) {
             nodes {
               databaseId
               author { login }
