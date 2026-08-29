@@ -49,6 +49,13 @@ const EditReach = 4.5
 // now the only client intent that can make a voxel become Air.
 var ErrBreakActionWithdrawn = errors.New("EditAction.Break is withdrawn; use MineRequest")
 
+// ErrWarded is the one refused edit and the one refused mining intent a player is told
+// about.
+//
+// A sentinel lets the session route on identity while every other refusal remains silent.
+// A ward is the exception because retrying cannot explain why that ground is unavailable.
+var ErrWarded = errors.New("the ground is warded by another player's runestone")
+
 // Editor is the world an edit is applied to.
 //
 // **Separate from Terrain because it is allowed to block.** Terrain is read on the tick
@@ -132,6 +139,11 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	// position it was about to be compared against.
 	reach := p.reachLocked()
 	actErr := p.cannotActLocked()
+	// Read under this lock rather than after it, because the ward map is simulation state
+	// and is rebuilt under exactly this mutex. This first read refuses the request before
+	// it can generate terrain; the post-generation guard below reads again and keeps the
+	// answer stable through the write.
+	warded := p.sim.wardedAgainstLocked(target, p.playerID)
 	p.sim.mu.Unlock()
 
 	if actErr != nil {
@@ -143,6 +155,15 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 
 	if distance := distanceToVoxel(origin, target); distance > reach {
 		return EditResult{}, fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, reach)
+	}
+
+	// Beside the reach check, and deliberately **not** inside allowPlacement below.
+	// That predicate is evaluated inside the critical section that replaces the voxel,
+	// where every chunk being composed anywhere in the server is waiting — it must stay
+	// pure and must not block, and a ward lives behind a different lock. The ward is a
+	// rule about *who is asking*, which the block that is there cannot answer anyway.
+	if warded {
+		return EditResult{}, fmt.Errorf("%w at %v", ErrWarded, target)
 	}
 
 	// Last thing before the write, and it is a check rather than a guarantee: a tick
@@ -166,38 +187,42 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	}
 
 	inventoryLocked := false
+	simulationLocked := false
 	guard := func() error {
-		// Liveness again, and this is the check that matters. The one above runs before
+		// Liveness and the ward again, and these are the checks that matter. The ones above run before
 		// the chunk is generated, which is what stops a corpse's request from making the
-		// server generate terrain — but generation can take milliseconds, and a player
-		// mining on the way down dies inside exactly that window. This runs after it and
-		// immediately before the write.
+		// server generate terrain and reject an already-claimed target cheaply — but
+		// generation can take milliseconds, and either fact can change in that window.
 		//
-		// sim.mu is taken and released *before* the inventory lock rather than inside
-		// it. The tick holds sim.mu and then reaches for the inventory
-		// (offerInventoryLocked), so nesting them the other way round here would be the
-		// deadlock.
-		//
-		// It narrows the window rather than closing it: the write still happens after
-		// this returns, and the only way to hold the simulation's lock across it would
-		// be to hold it across a chunk generation, which is a tick every connected
-		// player misses. That is the same residual the occupancy check above accepts,
-		// for the same reason.
+		// ApplyGuarded calls this after generation and before taking the cache composition
+		// lock. Leaving sim.mu held on success therefore linearizes the ward with the write
+		// without holding it across generation or reaching from allowPlacement into the
+		// simulation. The inventory lock is nested under it, in the tick's established
+		// sim.mu -> inventory.mu order; the reverse order would deadlock.
 		p.sim.mu.Lock()
 		actErr := p.cannotActLocked()
-		p.sim.mu.Unlock()
 		if actErr != nil {
+			p.sim.mu.Unlock()
 			return fmt.Errorf("the player became unable to act while the target chunk was loading: %w", actErr)
 		}
+		if p.sim.wardedAgainstLocked(target, p.playerID) {
+			p.sim.mu.Unlock()
+			return fmt.Errorf("%w at %v", ErrWarded, target)
+		}
+		simulationLocked = true
 
 		p.inventory.mu.Lock()
 		itemID, block, guardErr := itemToPlaceLocked(&p.inventory, req.Slot)
 		if guardErr != nil {
 			p.inventory.mu.Unlock()
+			p.sim.mu.Unlock()
+			simulationLocked = false
 			return guardErr
 		}
 		if itemID != placingItem || block != placing {
 			p.inventory.mu.Unlock()
+			p.sim.mu.Unlock()
+			simulationLocked = false
 			return fmt.Errorf("inventory slot %d changed while its target chunk was loading", req.Slot)
 		}
 		inventoryLocked = true
@@ -208,6 +233,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	if applyErr != nil {
 		if inventoryLocked {
 			p.inventory.mu.Unlock()
+		}
+		if simulationLocked {
+			p.sim.mu.Unlock()
 		}
 		return EditResult{}, applyErr
 	}
@@ -220,6 +248,7 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 
 	state := p.inventory.stateLocked()
 	p.inventory.mu.Unlock()
+	p.sim.mu.Unlock()
 	p.sim.invalidateMining(req.Pos)
 
 	return EditResult{
