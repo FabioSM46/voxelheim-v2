@@ -195,6 +195,16 @@ type Sim struct {
 	// order.
 	corpses map[uint64]*corpse
 
+	// worldSeed is the world this simulation runs over, retained because two of the
+	// answers below are properties of the *world* rather than of the process: the
+	// generators are seeded from it, and a respawn with no tent asks
+	// [world.NearestSettlement] where the nearest settlement stands.
+	//
+	// **Retained, not used to generate anything.** The lattice query is a handful of
+	// hashes over the seed and reads no chunk at all, which is what lets it answer on
+	// the tick without going anywhere near the seam this package reads terrain through.
+	worldSeed int64
+
 	// spawns is the director's random source: seeded from the world seed at
 	// construction and advanced only here, under this lock, inside Step.
 	//
@@ -261,12 +271,16 @@ type Sim struct {
 //
 // mintEntityID is the identity source shared with the sessions; see the field.
 //
-// **worldSeed is here to seed the simulation's generators, not to generate anything.**
+// **worldSeed is here to answer questions about the world, not to generate anything.**
 // The simulation still knows nothing about terrain: it does not call world.Generate, it
 // cannot, and the seam it reads chunks through has no seed on it. What the number buys
 // is that the spawn director's choices and a kill's yield are properties of the *world*
 // rather than of the process — two runs of the same world, given the same ticks, place
 // the same creatures in the same places and roll the same corpse entries.
+//
+// It is also what a respawn hands [world.NearestSettlement], which is a pure function of
+// the seed and a column: it says where a village *is* without building one, and the
+// voxels it names are still read through the terrain seam like every other voxel here.
 // Each generator gets its own PCG stream off this one seed, so neither is a function of
 // what the other has drawn. Any value is accepted, including zero: a seed is a starting
 // point and there is no such thing as a wrong one.
@@ -318,6 +332,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		threatDecayTicks:     uint32(tickRate),
 		threatForgetTicks:    uint32(ThreatForgetSeconds) * uint32(tickRate),
 		corpseLifetimeTicks:  uint64(ticksFor(CorpseLifetime, tickRate)),
+		worldSeed:            worldSeed,
 		spawns:               newSpawnRNG(worldSeed),
 		loot:                 newLootRNG(worldSeed),
 		attackCooldown:       ticksFor(SwordCooldown, tickRate),

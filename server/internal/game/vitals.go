@@ -339,8 +339,23 @@ func (p *Player) respawnLocked() {
 		"pos", p.pos, "protection_ticks", p.protectionTicks)
 }
 
-// respawnPositionLocked is where this player comes back: their own tent if one stands,
-// and otherwise the spawn their join was given.
+// respawnSettlementOffset is how far from a settlement's centre a body with no tent is
+// put down, in blocks, along the bearing it died on.
+//
+// **Three blocks, and the direction is what the number is for.** Landing on the centre
+// column exactly would stack every death in a village on one voxel; a body pushed out
+// along the line back to where it fell lands somewhere different for every bearing, and
+// pointing *outward* also puts the player facing the walk they are about to make. It
+// stays well inside the smallest public building — nine blocks across, so four from its
+// centre to its wall — which is what keeps the offset from being the thing that pushes
+// a player into masonry.
+const respawnSettlementOffset = 3
+
+// respawnPositionLocked is where this player comes back, in three tiers: their own tent
+// if one stands, else the nearest settlement to where they fell, else the spawn their
+// join was given.
+//
+// # Their tent
 //
 // Their own by *identity*, which is what makes a tent somewhere to come back to rather
 // than somewhere to come back to until the connection drops: the same player rejoining
@@ -357,19 +372,137 @@ func (p *Player) respawnLocked() {
 // moveAndCollide refuses to move a body that starts inside one, so the player stands
 // still until it is broken again, exactly as they would anywhere else.
 //
+// # The nearest settlement
+//
+// This is the tier #460 adds, and it is what the GDD's open world already promised:
+// dying a day's walk from anywhere costs the walk back rather than the whole journey.
+// [world.NearestSettlement] is a pure lattice query — a handful of hashes over the seed
+// and the death column, no chunk touched — so the tick pays for it on the death tick and
+// on no other. It looks three lattice cells of blocks out from the column and answers
+// false rather than spiralling outward when no cell that far out holds anything.
+//
+// # The world spawn
+//
+// The fallback the two tiers above fall through to, and the answer this function gave on
+// its own before either of them existed.
+//
 // The caller holds sim.mu.
 func (p *Player) respawnPositionLocked() [3]float64 {
-	home, standing := p.sim.tentOfLocked(p.playerID)
-	if !standing {
-		return p.spawn
+	if home, standing := p.sim.tentOfLocked(p.playerID); standing {
+		anchor := home.anchorVoxel()
+		return [3]float64{
+			float64(anchor[0]) + 0.5,
+			float64(anchor[1]) + 1,
+			float64(anchor[2]) + 0.5,
+		}
 	}
 
-	anchor := home.anchorVoxel()
-	return [3]float64{
-		float64(anchor[0]) + 0.5,
-		float64(anchor[1]) + 1,
-		float64(anchor[2]) + 0.5,
+	if bed, found := p.settlementRespawnLocked(); found {
+		return bed
 	}
+	return p.spawn
+}
+
+// settlementRespawnLocked is the middle tier: the nearest settlement to where this
+// player fell, on its plateau, or no answer at all.
+//
+// **The height is the settlement's own plateau plus [world.SpawnClearance], which is the
+// join spawn's rule rather than a second one.** A settlement flattens its ground, so the
+// plateau *is* the surface of every column inside the radius — there is no height field
+// to sample and nothing to disagree with. The clearance above it is the two blocks a
+// session starts with anywhere else, and the settle onto the ground is the same fall.
+//
+// **The column is then verified through the same non-generating read a tent placement
+// uses**, [Sim.footprintFitsLocked]'s rule spelled out over a body rather than a
+// footprint: the plateau under the feet must be resident and not air, and every voxel
+// the body would occupy must be resident and air. A tick may not wait for a chunk, so a
+// column the server has not composed is not a place to put anybody; and a column with a
+// wall in it is worse than a long walk, because moveAndCollide refuses to move a body
+// that starts inside a solid and the player would be standing in masonry until they mined
+// their way out. Either way the answer is no answer, and the tier above falls through.
+//
+// **A capital's centre is one of those walls on three bearings out of four, and that is
+// known rather than discovered.** The keep is the one building whose drawing is not
+// hollow at [respawnSettlementOffset] from its middle: its inner tower's wall stands
+// exactly three blocks out along ±x and −z, and the fourth cardinal is the tower's own
+// doorway. So a player who dies due east of a capital falls through to the world spawn.
+// It costs them almost nothing, because a capital is placed within two hundred blocks of
+// the world spawn by construction — the fallback is the same street. Villages, which are
+// the settlements this tier actually exists for, put a hollow hall or smithy at their
+// centre and are clear on every bearing. Widening the offset until it cleared the keep
+// would move every respawn in the world to repair the one case where falling through is
+// cheapest; TestTheKeepStandsWhereThisRespawnRuleSaysItDoes is what keeps this paragraph
+// from quietly becoming false.
+//
+// The caller holds sim.mu.
+func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
+	deathX, deathZ := p.pos[0], p.pos[2]
+	town, found := world.NearestSettlement(p.sim.worldSeed,
+		int64(math.Floor(deathX)), int64(math.Floor(deathZ)))
+	if !found {
+		p.sim.log.Debug("respawn found no settlement near the death position",
+			"entity_id", p.entityID, "pos", p.pos)
+		return [3]float64{}, false
+	}
+
+	// Centred in the cell, like the tent and like every drop: a centre names a voxel and
+	// half a block is the middle of one.
+	bed := [3]float64{
+		float64(town.CentreX) + 0.5,
+		float64(town.Plateau + world.SpawnClearance),
+		float64(town.CentreZ) + 0.5,
+	}
+	// Back along the bearing they died on. A player who died *at* the centre has no
+	// bearing to push out along and keeps the centre, which is the only degenerate case
+	// and needs no rule beyond not dividing by zero.
+	if reach := math.Hypot(deathX-bed[0], deathZ-bed[2]); reach > 0 {
+		bed[0] += (deathX - bed[0]) / reach * respawnSettlementOffset
+		bed[2] += (deathZ - bed[2]) / reach * respawnSettlementOffset
+	}
+
+	if !p.sim.respawnColumnFitsLocked(bed, int64(town.Plateau)) {
+		p.sim.log.Debug("respawn fell through to the world spawn: the settlement column is not standable",
+			"entity_id", p.entityID, "settlement", [2]int64{town.CentreX, town.CentreZ},
+			"bed", bed)
+		return [3]float64{}, false
+	}
+	return bed, true
+}
+
+// respawnColumnFitsLocked reports whether a body put down at pos would be standing on
+// generated ground with the space it occupies clear.
+//
+// [Sim.footprintFitsLocked]'s two questions asked about a body instead of a structure's
+// cells, and asked through the same [Terrain.Block] read: resident, because a tick may
+// not wait for a chunk and an absent one is not a place to stand; and air above a
+// non-air floor, because the alternative is a player inside a wall.
+//
+// It is not [landedOnResidentTerrain], which asks a narrower question — did the surface
+// that just hurt somebody really exist — and deliberately answers "at least one voxel is
+// solid" rather than "all of them are clear".
+//
+// The caller holds sim.mu.
+func (s *Sim) respawnColumnFitsLocked(pos [3]float64, ground int64) bool {
+	body := playerBox(pos)
+	x0, x1 := voxelSpan(body.min[0], body.max[0])
+	z0, z1 := voxelSpan(body.min[2], body.max[2])
+	top := int64(math.Ceil(body.max[1])) - 1
+
+	for z := z0; z <= z1; z++ {
+		for x := x0; x <= x1; x++ {
+			floor, resident := s.terrain.Block(x, ground, z)
+			if !resident || floor == world.Air {
+				return false
+			}
+			for y := ground + 1; y <= top; y++ {
+				block, resident := s.terrain.Block(x, y, z)
+				if !resident || block != world.Air {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // fallDamage is what an impact at this speed costs, in health.
