@@ -79,6 +79,11 @@ pub use codec::{
     NpcInteractRequest, RESIDENT_NAME_MAX_BYTES, ResidentAppearance, ResidentRole, TradeRequest,
     VendorClosed, VendorEntry, VendorState,
 };
+// V26's weather, ahead of the consumers that read it: the precipitation volume is #466 and
+// the storm's countdown is #470. Named here for the reason the two blocks above are — so
+// neither issue has to reopen `codec.rs` to find out what it is allowed to spell.
+#[allow(unused_imports)] // V26 protocol surface; ECS consumers land in #466 and #470.
+pub use codec::{WeatherKind, WeatherState};
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a

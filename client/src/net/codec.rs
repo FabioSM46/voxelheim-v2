@@ -1036,6 +1036,24 @@ pub struct StructureState {
     /// `ClientHello.player_token`, which never crosses the wire. So `0` does not mean
     /// unowned, and a value that changes does not mean the structure changed hands.
     pub owner_entity_id: u64,
+    /// Whether this campfire is burning.
+    ///
+    /// **It means something for [`StructureKind::Campfire`] and for nothing else.**
+    /// `false` is a campfire the rain has put out; `true` is one that is alight. Every
+    /// structure of every other kind carries `true` as well, and that is the contract
+    /// field's default showing through rather than a statement about it — no server
+    /// writes the byte for a tent or a forge, because neither is the sort of thing that
+    /// burns. So `lit` on a non-campfire is "unset", not "burning", and a renderer that
+    /// lit a structure on this field alone would set fire to every tent in the world:
+    /// read the `kind` beside it first.
+    ///
+    /// **The server decides, and a doused fire is not a station** — it lights nothing,
+    /// warms nobody and satisfies no recipe that needs a campfire nearby. Whether rain
+    /// reaches this cell, how hard it falls and how long it takes are all authoritative.
+    ///
+    /// The contract's default is `true`, which is what lets a pre-V26 server's elided
+    /// field read as the burning fire every fire on such a server is.
+    pub lit: bool,
 }
 
 /// One other member of the snapshot recipient's party.
@@ -1119,6 +1137,22 @@ pub struct Snapshot {
     pub party_roster: Vec<PartyRosterMember>,
     /// Complete set of corpse containers this recipient may currently open.
     pub accessible_loot_corpses: Vec<u64>,
+    /// What the sky is doing at **this recipient's own position**, this tick.
+    ///
+    /// **The third field here that is not about an entity**, and it rides along for the
+    /// reason `tick_of_day` does: it changes every tick and is read by the same frame the
+    /// world is drawn from, so a message of its own would arrive on its own schedule and
+    /// put the rain a tick away from the ground it is falling on.
+    ///
+    /// `None` says this server keeps no weather at all, which a test world and a pre-V26
+    /// server both legitimately are. That is the *field* being absent; a present
+    /// [`WeatherState`] naming an unknown kind is a protocol error and refused.
+    ///
+    /// **Nothing in `player/` draws from this yet**, and that is a split rather than an
+    /// oversight — the same one `dead_players` had. This half lands the decoder that
+    /// copies and validates it; the precipitation volume is #466 and the storm's own
+    /// countdown is #470.
+    pub weather: Option<WeatherState>,
 }
 
 #[cfg(test)]
@@ -1146,6 +1180,7 @@ impl Default for Snapshot {
             party_members: Vec::new(),
             party_roster: Vec::new(),
             accessible_loot_corpses: Vec::new(),
+            weather: None,
         }
     }
 }
@@ -2032,6 +2067,64 @@ pub struct TradeRequest {
     pub client_tick: u32,
 }
 
+/// What the sky is doing where the player stands.
+///
+/// No `Unknown` variant, for the reason [`ResidentRole`] has none — with one difference
+/// worth stating, because it is what makes the refusal unambiguous here. [`WeatherState`]
+/// is a *struct*, so "this server keeps no weather" is already representable as the whole
+/// field being absent. A struct that is present and names zero is therefore a defect
+/// rather than a silence, and [`Self::from_wire`] answers `None` for it.
+///
+/// Members are appended, never inserted, mirroring `WeatherKind` in `schemas/player.fbs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeatherKind {
+    Clear,
+    Rain,
+    Snow,
+    Sandstorm,
+    /// The storm's own kind. It arrives only while a `StormWarning` says `Raging`; the
+    /// ordinary weather of a climate never produces it. **Both halves of that statement
+    /// are the server's**, and this side checks neither against the other — the warning
+    /// is a message of its own, decoded in the part of #463 that follows this one.
+    Blizzard,
+}
+
+impl WeatherKind {
+    /// `None` for the contract's zero and for a member this build has no name for, which
+    /// are one refusal: [`decode`]'s caller ends the session over either.
+    fn from_wire(value: fb::WeatherKind) -> Option<Self> {
+        match value {
+            fb::WeatherKind::Clear => Some(Self::Clear),
+            fb::WeatherKind::Rain => Some(Self::Rain),
+            fb::WeatherKind::Snow => Some(Self::Snow),
+            fb::WeatherKind::Sandstorm => Some(Self::Sandstorm),
+            fb::WeatherKind::Blizzard => Some(Self::Blizzard),
+            _ => None,
+        }
+    }
+}
+
+/// The weather at the recipient's own position, for one tick.
+///
+/// **Authoritative for what it does and presentation for what is drawn from it**, and the
+/// split runs through the middle of the value. The server has already applied the cold,
+/// the slowed step and the doused fire, and those outcomes arrive as vitals, as position
+/// and as [`StructureState::lit`]. What is left for this side is particles, fog, wind and
+/// sound. A client that re-derived an effect from these two bytes would be deciding a
+/// gameplay outcome from presentation data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeatherState {
+    pub kind: WeatherKind,
+    /// How hard it is coming down: 0 is none, 255 is the most the sky can do. Not a
+    /// percentage and not a rate. Nothing divides the range into named bands, so a
+    /// consumer interpolates rather than switching on it.
+    ///
+    /// [`WeatherKind::Clear`] always carries 0, and a `Clear` that carries anything else
+    /// is refused rather than clamped: the two halves of the struct would then be
+    /// describing different skies, and neither reading is the server's.
+    pub intensity: u8,
+}
+
 /// One authoritative monster blow that reduced this player's health.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobHit {
@@ -2613,6 +2706,19 @@ pub enum DecodeError {
         field: &'static str,
         item_id: u16,
     },
+    /// A present `WeatherState` names a kind this build has no member for, the
+    /// absent-field `Unknown` included.
+    ///
+    /// Absence of the whole struct is the legal "this server keeps no weather" and never
+    /// reaches here: it is `Snapshot::weather == None`. This is a struct that arrived and
+    /// then said nothing.
+    UnknownWeatherKind { value: u8 },
+    /// A `WeatherState` says `Clear` and carries a non-zero intensity.
+    ///
+    /// Refused rather than clamped to either half, for the reason a broken world clock is
+    /// refused rather than repaired: the two fields are describing different skies and
+    /// nothing here can tell which one the server is simulating.
+    ClearWeatherWithIntensity { intensity: u8 },
 }
 
 impl fmt::Display for DecodeError {
@@ -3073,6 +3179,13 @@ impl fmt::Display for DecodeError {
                 field,
                 item_id,
             } => write!(f, "vendor {entity_id} {field} names item {item_id} twice"),
+            Self::UnknownWeatherKind { value } => {
+                write!(f, "a snapshot carries an unknown weather kind: {value}")
+            }
+            Self::ClearWeatherWithIntensity { intensity } => write!(
+                f,
+                "clear weather carries intensity {intensity}, and clear is always 0"
+            ),
         }
     }
 }
@@ -3604,6 +3717,26 @@ fn marker_list(list: &fb::MarkerList<'_>) -> Result<MarkerList, DecodeError> {
         });
     }
     Ok(MarkerList { markers: decoded })
+}
+
+/// Copies and validates the weather at the recipient's own position.
+///
+/// `None` in, `None` out: an absent struct is a server that keeps no weather, which a
+/// test world and a pre-V26 server both legitimately are. A struct that is *present* has
+/// to name a kind, because the absent case already has its own representation and a
+/// second one spelled `Unknown` would be a defect wearing it.
+fn weather_state(weather: Option<&fb::WeatherState>) -> Result<Option<WeatherState>, DecodeError> {
+    let Some(weather) = weather else {
+        return Ok(None);
+    };
+    let kind = WeatherKind::from_wire(weather.kind()).ok_or(DecodeError::UnknownWeatherKind {
+        value: weather.kind().0,
+    })?;
+    let intensity = weather.intensity();
+    if kind == WeatherKind::Clear && intensity != 0 {
+        return Err(DecodeError::ClearWeatherWithIntensity { intensity });
+    }
+    Ok(Some(WeatherState { kind, intensity }))
 }
 
 /// Copies and validates one complete price list.
@@ -4243,6 +4376,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         party_members,
         party_roster,
         accessible_loot_corpses,
+        weather: weather_state(snapshot.weather())?,
     })
 }
 
@@ -4299,6 +4433,14 @@ fn structure_state(state: &fb::StructureState) -> Result<StructureState, DecodeE
         },
         facing,
         owner_entity_id,
+        // Copied, never checked, and there is nothing here to check it against: `lit` is
+        // a bool, so every value it can hold is a legal one, and its cross-field rule —
+        // that it means anything only for a campfire — is the reader's to honour rather
+        // than the decoder's to enforce. A pre-V26 server writes no byte at all and the
+        // contract's `true` default answers for it, which is the whole reason the default
+        // is `true`: the elided field reads as the burning fire every fire on such a
+        // server is.
+        lit: state.lit(),
     })
 }
 
@@ -5722,6 +5864,10 @@ pub(super) mod server_side {
         pub anchor: Option<[i32; 3]>,
         pub facing: fb::Facing,
         pub owner_entity_id: u64,
+        /// Written unconditionally by the builder below, `true` included, so that a test
+        /// naming `lit: true` produces a frame that carries the byte rather than one that
+        /// elides it. The elided case is its own frame and its own encoder.
+        pub lit: bool,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -5750,6 +5896,7 @@ pub(super) mod server_side {
                 anchor: Some([4, 63, -7]),
                 facing: fb::Facing::North,
                 owner_entity_id,
+                lit: true,
             }
         }
     }
@@ -6149,6 +6296,7 @@ pub(super) mod server_side {
                 }
                 table.add_facing(structure.facing);
                 table.add_owner_entity_id(structure.owner_entity_id);
+                table.add_lit(structure.lit);
                 table.finish()
             })
             .collect();
@@ -6757,6 +6905,68 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::VendorClosed, payload.as_union_value())
     }
 
+    /// A snapshot carrying the recipient's vitals, optionally the weather where they
+    /// stand, and optionally one structure whose `lit` byte is never written.
+    ///
+    /// Both options exist to reach a frame the ordinary builders cannot. `None` weather
+    /// omits the struct field entirely, which is the server that keeps none, and `Some`
+    /// writes it kind byte and all, so a test can name a kind this contract has no member
+    /// for. The structure is written through a builder that never calls `add_lit`, which
+    /// is the pre-V26 frame — `StructureStateWire` writes that field unconditionally, so
+    /// "wrote `true`" and "wrote nothing" stay two distinguishable frames.
+    pub fn encode_entity_snapshot_with_weather_and_bare_structure(
+        weather: Option<(u8, u8)>,
+        structure: Option<StructureStateWire>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let vitals = PlayerVitalsWire::default();
+        let self_vitals = fb::PlayerVitals::create(
+            &mut builder,
+            &fb::PlayerVitalsArgs {
+                health: vitals.health,
+                max_health: vitals.max_health,
+                hunger: vitals.hunger,
+                max_hunger: vitals.max_hunger,
+                level: vitals.level,
+                experience: vitals.experience,
+                experience_to_next: vitals.experience_to_next,
+                life_state: vitals.life_state,
+                respawn_ticks: vitals.respawn_ticks,
+                invulnerable: vitals.invulnerable,
+                blocking: vitals.blocking,
+            },
+        );
+        let structures = structure.map(|structure| {
+            let laid_out = {
+                let mut table = fb::StructureStateBuilder::new(&mut builder);
+                table.add_structure_id(structure.structure_id);
+                table.add_kind(structure.kind);
+                if let Some([x, y, z]) = structure.anchor {
+                    table.add_anchor(&fb::BlockCoord::new(x, y, z));
+                }
+                table.add_facing(structure.facing);
+                table.add_owner_entity_id(structure.owner_entity_id);
+                table.finish()
+            };
+            builder.create_vector(&[laid_out])
+        });
+        let mut table = fb::EntitySnapshotBuilder::new(&mut builder);
+        table.add_server_tick(1);
+        table.add_self_vitals(self_vitals);
+        if let Some(structures) = structures {
+            table.add_structures(structures);
+        }
+        if let Some((kind, intensity)) = weather {
+            table.add_weather(&fb::WeatherState::new(fb::WeatherKind(kind), intensity));
+        }
+        let payload = table.finish();
+        finish_envelope(
+            builder,
+            fb::Payload::EntitySnapshot,
+            payload.as_union_value(),
+        )
+    }
+
     pub fn encode_loot_closed(corpse_id: u64) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let payload = fb::LootClosed::create(&mut builder, &fb::LootClosedArgs { corpse_id });
@@ -6871,14 +7081,14 @@ mod tests {
         encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
-        encode_entity_snapshot_with_roster, encode_entity_snapshot_without_vitals,
-        encode_inventory_state, encode_inventory_state_with_durability, encode_leave_started,
-        encode_loot_closed, encode_loot_state, encode_map_explored, encode_map_tile,
-        encode_marker_list, encode_mine_progress, encode_mob_hit, encode_party_invite,
-        encode_player_appearance, encode_player_appearance_with_worn,
-        encode_player_appearance_without_level, encode_resident_appearance,
-        encode_server_character_list, encode_server_reject, encode_server_welcome,
-        encode_vendor_closed, encode_vendor_state,
+        encode_entity_snapshot_with_roster, encode_entity_snapshot_with_weather_and_bare_structure,
+        encode_entity_snapshot_without_vitals, encode_inventory_state,
+        encode_inventory_state_with_durability, encode_leave_started, encode_loot_closed,
+        encode_loot_state, encode_map_explored, encode_map_tile, encode_marker_list,
+        encode_mine_progress, encode_mob_hit, encode_party_invite, encode_player_appearance,
+        encode_player_appearance_with_worn, encode_player_appearance_without_level,
+        encode_resident_appearance, encode_server_character_list, encode_server_reject,
+        encode_server_welcome, encode_vendor_closed, encode_vendor_state,
     };
     use super::*;
 
@@ -8095,6 +8305,126 @@ mod tests {
             decode(&encode_vendor_closed(0)),
             Err(DecodeError::VendorWithoutEntity("VendorClosed"))
         );
+    }
+
+    /// The weather is a struct, so "this server keeps none" is the field being absent —
+    /// and a struct that *arrived* has to name a sky.
+    ///
+    /// The two refusals are the pair the contract states. `Unknown` is the absent-field
+    /// zero arriving inside a present struct, which is a defect rather than a silence,
+    /// because the silence already has its own spelling. A `Clear` with a non-zero
+    /// intensity is refused rather than clamped to either half, for the reason a broken
+    /// world clock is refused rather than repaired: the two fields describe different
+    /// skies and neither reading is knowably the server's.
+    #[test]
+    fn the_weather_is_where_the_recipient_stands_and_absence_is_a_server_without_one() {
+        let Ok(Message::Snapshot(snapshot)) = decode(
+            &encode_entity_snapshot_with_weather_and_bare_structure(None, None),
+        ) else {
+            panic!("a snapshot with no weather field is an ordinary snapshot");
+        };
+        assert_eq!(
+            snapshot.weather, None,
+            "an absent struct is a server that keeps no weather, not a defect"
+        );
+
+        for (kind, intensity, want) in [
+            (fb::WeatherKind::Clear, 0u8, WeatherKind::Clear),
+            (fb::WeatherKind::Rain, 1, WeatherKind::Rain),
+            (fb::WeatherKind::Rain, 255, WeatherKind::Rain),
+            (fb::WeatherKind::Snow, 128, WeatherKind::Snow),
+            (fb::WeatherKind::Sandstorm, 200, WeatherKind::Sandstorm),
+            (fb::WeatherKind::Blizzard, 255, WeatherKind::Blizzard),
+            // 0 is a legal intensity for every kind, not only for Clear: it is "none of
+            // it right now", and nothing here divides the range into named bands.
+            (fb::WeatherKind::Snow, 0, WeatherKind::Snow),
+        ] {
+            let Ok(Message::Snapshot(snapshot)) =
+                decode(&encode_entity_snapshot_with_weather_and_bare_structure(
+                    Some((kind.0, intensity)),
+                    None,
+                ))
+            else {
+                panic!("{kind:?} at {intensity} did not survive the wire");
+            };
+            assert_eq!(
+                snapshot.weather,
+                Some(WeatherState {
+                    kind: want,
+                    intensity
+                })
+            );
+        }
+
+        for (name, kind, value) in [
+            ("the absent-field zero", fb::WeatherKind::Unknown.0, 0u8),
+            ("a kind from a newer contract", 9, 9),
+        ] {
+            assert_eq!(
+                decode(&encode_entity_snapshot_with_weather_and_bare_structure(
+                    Some((kind, 40)),
+                    None
+                )),
+                Err(DecodeError::UnknownWeatherKind { value }),
+                "{name} inside a present struct is a defect, not 'no weather'"
+            );
+        }
+
+        assert_eq!(
+            decode(&encode_entity_snapshot_with_weather_and_bare_structure(
+                Some((fb::WeatherKind::Clear.0, 1)),
+                None
+            )),
+            Err(DecodeError::ClearWeatherWithIntensity { intensity: 1 }),
+            "clear weather always carries 0, and the two halves must agree"
+        );
+    }
+
+    /// A campfire says whether it is burning, and a server that cannot douse one says
+    /// nothing at all.
+    ///
+    /// The third case is the one the contract's `true` default exists for: a pre-V26
+    /// server writes no byte, and the elided field has to read as the burning fire every
+    /// fire on such a server is. A default of `false` would have made that same silence
+    /// claim the world's fires were all out.
+    ///
+    /// Nothing is refused here, and that is the whole shape of this field: `lit` is a
+    /// bool, so every value it can hold is a legal one, and its only rule — that it means
+    /// something for a campfire and nothing for the other kinds — belongs to the reader
+    /// rather than to the decoder.
+    #[test]
+    fn a_campfire_says_whether_it_is_burning_and_an_older_server_says_nothing() {
+        let mut campfire = StructureStateWire::tent(77, 4);
+        campfire.kind = fb::StructureKind::Campfire;
+
+        for lit in [true, false] {
+            let Ok(Message::Snapshot(snapshot)) = decode(&encode_entity_snapshot_with(
+                1,
+                &[],
+                &[],
+                &[],
+                PlayerVitalsWire::default(),
+                &[StructureStateWire { lit, ..campfire }],
+            )) else {
+                panic!("a campfire with lit = {lit} did not survive the wire");
+            };
+            assert_eq!(snapshot.structures.len(), 1);
+            assert_eq!(snapshot.structures[0].lit, lit);
+        }
+
+        // Every other kind carries `true` as well, and on both of these it is the
+        // contract's default showing through rather than a claim that a tent is on fire.
+        for structure in [campfire, StructureStateWire::tent(78, 4)] {
+            let Ok(Message::Snapshot(snapshot)) = decode(
+                &encode_entity_snapshot_with_weather_and_bare_structure(None, Some(structure)),
+            ) else {
+                panic!("a structure with no lit byte is an ordinary structure");
+            };
+            assert!(
+                snapshot.structures[0].lit,
+                "the contract's default is true, so a pre-V26 server's silence is a burning fire"
+            );
+        }
     }
 
     /// The two client requests carry intent and nothing else.
@@ -9877,6 +10207,7 @@ mod tests {
                     party_members: vec![],
                     party_roster: vec![],
                     accessible_loot_corpses: vec![],
+                    weather: None,
                 })),
                 "{name}"
             );
@@ -11672,6 +12003,7 @@ mod tests {
                 anchor: BlockCoord { x: 4, y: 63, z: -7 },
                 facing: Facing::South,
                 owner_entity_id: 7,
+                lit: true,
             }]
         );
     }
@@ -12099,6 +12431,7 @@ mod tests {
                     anchor: BlockCoord { x: 4, y: 63, z: -7 },
                     facing: Facing::North,
                     owner_entity_id: 7,
+                    lit: true,
                 },
                 StructureState {
                     structure_id: 900,
@@ -12110,6 +12443,7 @@ mod tests {
                     },
                     facing: Facing::West,
                     owner_entity_id: 7,
+                    lit: true,
                 },
             ]
         );
