@@ -249,7 +249,103 @@ A timeout here is a real signal, not noise. A job cancelled by the 100-minute ca
    that states the evidence, because that reply is the whole of the audit trail once no human is
    required to read it. Never resolve a thread you have not answered.
 
-5. **Findings in the review body** (general comments) create no thread and cannot be resolved. Address them in code where valid, then tell the user to read the review and apply the `DEEPSEEK_REVIEW_READ` label — that acknowledgement is a human-only action; never apply it yourself.
+5. **Findings in the review body** (general comments) create no thread and cannot be resolved.
+   Fetch the complete recent DeepSeek review bodies, not just the thread list, and read every
+   finding before deciding whether to acknowledge them:
+
+   ```bash
+   ACK_STATE=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number>)
+   ACK_REVIEW_ID=$(echo "$ACK_STATE" | jq -er '.latest_review_id | select(. != 0)')
+   if ! BODY_REVIEWS=$(gh api graphql \
+     --raw-field 'query=query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviews(last:100,states:[APPROVED,CHANGES_REQUESTED,COMMENTED]){nodes{databaseId submittedAt state author{login} body}}}}}' \
+     -f owner="${REPO%%/*}" -f repo="${REPO##*/}" -F pr=<pr-number>); then
+     echo "Could not fetch DeepSeek review bodies; acknowledgement is blocked"
+     exit 1
+   fi
+   echo "$BODY_REVIEWS" | jq --arg bot "${DEEPSEEK_BOT_USER:-github-actions[bot]}" '
+     def canon: sub("\\[bot\\]$"; "");
+     .data.repository.pullRequest.reviews.nodes[]
+     | select((.author.login // "" | canon) == ($bot | canon))
+     | select((.body // "") != "")
+     | {databaseId, submittedAt, state, body}'
+   ```
+
+   Address each valid point in code. A point you reject needs concrete evidence from the diff,
+   a test, or a measured behavior; disagreement without evidence is not a disposition. If any
+   finding is unclear or unsupported by evidence either way, leave it unacknowledged and report
+   the block.
+
+   Before applying `DEEPSEEK_REVIEW_READ`, post a public PR comment that identifies every body
+   finding and records its disposition: fixed (with the file/test), or rejected (with the
+   evidence). Scan the exact comment for publication privacy before posting it:
+
+   ```bash
+   ACK_COMMENT='<one bullet per DeepSeek body finding, including review ID and evidence>'
+   printf '%s\n' "$ACK_COMMENT" | bash scripts/check-body-privacy.sh || {
+     echo "Acknowledgement comment failed the publication privacy check"
+     exit 1
+   }
+   gh pr comment <pr-number> --body "$ACK_COMMENT" || {
+     echo "Could not publish the acknowledgement audit trail"
+     exit 1
+   }
+   ```
+
+   The AI is authorized to apply `DEEPSEEK_REVIEW_READ` only after that public audit trail exists.
+   Re-read `pr-deepseek-rounds` before touching the label. If its `latest_review_id` differs from
+   `ACK_REVIEW_ID`, a new review landed after the body snapshot: do not acknowledge it; repeat this
+   step from the fetch and include it in a new audit comment. Otherwise refresh the label so its
+   timestamp follows the review it acknowledges. A failed lookup is not absence and must stop the
+   operation:
+
+   ```bash
+   LATEST_BEFORE_ACK=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number> \
+     | jq -er '.latest_review_id')
+   [ "$LATEST_BEFORE_ACK" = "$ACK_REVIEW_ID" ] || {
+     echo "A new DeepSeek review landed after the body snapshot; repeat the acknowledgement step"
+     exit 1
+   }
+   if bash scripts/gh-automation.sh pr-check-label <pr-number> DEEPSEEK_REVIEW_READ; then
+     bash scripts/gh-automation.sh pr-label <pr-number> remove DEEPSEEK_REVIEW_READ || exit $?
+     if bash scripts/gh-automation.sh pr-check-label <pr-number> DEEPSEEK_REVIEW_READ; then
+       echo "Stale acknowledgement label is still present after removal"
+       exit 1
+     else
+       LABEL_RC=$?
+       [ "$LABEL_RC" -eq 1 ] || { echo "Could not verify acknowledgement label removal"; exit "$LABEL_RC"; }
+     fi
+   else
+     LABEL_RC=$?
+     [ "$LABEL_RC" -eq 1 ] || { echo "Could not determine acknowledgement label state"; exit "$LABEL_RC"; }
+   fi
+   bash scripts/gh-automation.sh pr-label <pr-number> add DEEPSEEK_REVIEW_READ || exit $?
+   if bash scripts/gh-automation.sh pr-check-label <pr-number> DEEPSEEK_REVIEW_READ; then
+     :
+   else
+     LABEL_RC=$?
+     echo "Could not verify the fresh acknowledgement label"
+     exit "$LABEL_RC"
+   fi
+   ```
+
+   Re-read both postconditions after the write. If `latest_review_id` differs from
+   `ACK_REVIEW_ID`, or `deepseek_unread_findings` is not exactly zero, remove the label immediately
+   and repeat this step from the body fetch. A review arriving just after these reads is still safe:
+   its timestamp is newer than the label, so the frozen rule counts it as unread.
+
+   ```bash
+   LATEST_AFTER_ACK=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number> \
+     | jq -er '.latest_review_id')
+   UNREAD_AFTER_ACK=$(bash scripts/gh-automation.sh pr-status-json <pr-number> \
+     | jq -er '.deepseek_unread_findings')
+   if [ "$LATEST_AFTER_ACK" != "$ACK_REVIEW_ID" ] || [ "$UNREAD_AFTER_ACK" != "0" ]; then
+     bash scripts/gh-automation.sh pr-label <pr-number> remove DEEPSEEK_REVIEW_READ
+     echo "DeepSeek acknowledgement postcondition failed; repeat from the body fetch"
+     exit 1
+   fi
+   ```
+
+   Never use `NO_DEEPSEEK_REVIEW` here; that exemption remains human-only.
 
 #### 4d — Fix CI failures
 
@@ -317,7 +413,7 @@ PR #<number>: <title>
 ├── CI:          ✅ ci-gate ran and passed
 ├── DeepSeek:    ✅ approved / rounds exhausted
 ├── Threads:     ✅ 0 unresolved
-├── Body finds:  ✅ none unread (or: N awaiting your DEEPSEEK_REVIEW_READ)
+├── Body finds:  ✅ none unread (or: N left unacknowledged with the blocking reason)
 ├── Label:       READY TO MERGE
 └── Status:      Ready for manual review and merge
 ```
@@ -353,7 +449,8 @@ Report each line from what `pr-status` actually printed. Remind the user: "PR is
   turning red).
 - Never force-push or rebase without explicit user instruction (the `git pull --rebase` of your own feature branch in 4e is the sanctioned exception).
 - Always run quality gates locally before pushing fixes.
-- Never apply `DEEPSEEK_REVIEW_READ` or `NO_DEEPSEEK_REVIEW` yourself — both are human-only acknowledgements.
+- Apply `DEEPSEEK_REVIEW_READ` only through Step 4c's read/dispose/public-audit/fresh-write
+  sequence. Never apply `NO_DEEPSEEK_REVIEW`; that exemption remains human-only.
 
 ## Reference
 

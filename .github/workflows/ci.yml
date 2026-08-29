@@ -410,6 +410,7 @@ jobs:
           bash scripts/test/changed-areas.test.sh
           bash scripts/test/ci-gate.test.sh
           bash scripts/test/deepseek-budget.test.sh
+          bash scripts/test/deepseek-review-ack-policy.test.sh
           bash scripts/test/client-ci-budget.test.sh
           bash scripts/test/client-cache-parity.test.sh
           bash scripts/test/client-data-home-isolation.test.sh

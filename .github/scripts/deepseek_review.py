@@ -74,9 +74,9 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # nothing, a failing `review` check and a pull request that cannot merge until somebody
 # splits it by hand — and nothing in the log says the size was the problem until you open
 # the job. Too low is loud: the diff is truncated, every dropped file is named in the log
-# *and* injected into the review as a finding, and the pull request blocks until a human
-# acknowledges the gap. One costs half an hour and a manual split; the other costs a
-# DEEPSEEK_REVIEW_READ click. Set the number from the tail.
+# *and* injected into the review as a finding, and the pull request blocks until a reviewer
+# acknowledges the gap. One costs half an hour and a manual split; the other costs an
+# audited DEEPSEEK_REVIEW_READ action. Set the number from the tail.
 #
 # The margin is the one 90,000 already used, taken against the observed point rather than
 # the estimated one: 90,000 was 72% of the 124,711 #164 measured, and **45,000 is 74% of
@@ -230,16 +230,16 @@ PAUSED_NOTICE_MARKER = "<!-- deepseek:review-paused -->"
 #
 # The merge gate reads findings structurally: a DeepSeek review whose body still has
 # content after the markers are stripped is holding feedback that no review thread
-# counts, and it blocks READY TO MERGE until a human acknowledges it (clinic-deck
-# #466). That rule derives from what is in the body rather than from a marker the
+# counts, and it blocks READY TO MERGE until a reviewer acknowledges it
+# (clinic-deck #466). That rule derives from what is in the body rather than from a marker the
 # model has to remember, so it also covers reviews this script never stamped —
 # including the APPROVE-with-general-comments shape (clinic-deck #478).
 #
 # The clean approve is the one body that is prose and yet says nothing, so it is the
 # one case that needs marking. Keep in sync with DEEPSEEK_NO_FINDINGS_MARKER in
 # scripts/gh-automation.sh: an approve stamped here and unrecognised there simply
-# blocks the label until someone clicks, which is the safe direction but a pointless
-# click.
+# blocks the label until an acknowledgement is applied, which is the safe direction
+# but a pointless action.
 NO_FINDINGS_MARKER = "<!-- deepseek:no-findings -->"
 
 
@@ -510,7 +510,7 @@ def get_diff(pr):
     # whole ceiling reasoning and exited on a missing verdict, with nothing anywhere saying
     # the size was the problem. A cap the model can actually reach is what turns that back
     # into the outcome this code was written for — a partial review, every unread file
-    # named, and a human who has to acknowledge the gap before the PR can merge (#32).
+    # named, and a reviewer who has to acknowledge the gap before the PR can merge (#32).
     MAX_CHARS = DEEPSEEK_MAX_DIFF_CHARS
     if len(diff) > MAX_CHARS:
         truncated_notice = (
@@ -835,7 +835,7 @@ Rules:
   line — anything a reader would have to open a file to check — it MUST carry that
   file's path and the line number on the new-file side. Findings delivered as
   general comments create no review thread on GitHub, so nobody can resolve them
-  and the pull request stalls waiting for a human to acknowledge prose.
+  and the pull request stalls waiting for an audited acknowledgement of that prose.
 - path=null + line=null ONLY for an observation that genuinely belongs to no single
   file: a repository-wide concern, or a remark about the change as a whole. If you
   can name the file it is about, it is not one of these.
@@ -860,7 +860,7 @@ Rules:
     # Injecting the skipped files as a finding rather than adding a second posting path
     # is deliberate: it reuses the machinery that already stamps the round marker and
     # already makes prose in the body count as unread findings, so the pull request
-    # blocks until a human acknowledges what was not reviewed. Which files get dropped is
+    # blocks until a reviewer acknowledges what was not reviewed. Which files get dropped is
     # not random either — the budget fills in file order, so the same directories lose
     # every time, and saying which ones is the whole point.
     if diff.dropped:
@@ -1006,7 +1006,7 @@ Rules:
     #
     # A verdict with observations therefore lands as a stamped COMMENT, which does
     # consume the round. That is the honest accounting: a full review happened, and the
-    # observations are content a human must still read — the frozen rule counts them as
+    # observations are content a reviewer must still read — the frozen rule counts them as
     # unread findings until the DEEPSEEK_REVIEW_READ label says otherwise.
     event_type = "COMMENT"
 
