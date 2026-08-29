@@ -1511,7 +1511,21 @@ fn apply_snapshots(
     };
 
     let now = Instant::now();
-    let drawn = buffer.sample(now, tick_interval(session.0.tick_rate));
+    let interval = tick_interval(session.0.tick_rate);
+    let mut drawn = buffer.sample(now, interval);
+
+    // **Residents are drawn here, on the rig, and appended to the same list.** They ride in
+    // the snapshot's `MobState` vector — `MobKind::Villager`, which is why
+    // `mobs::MobVisuals::of` answers `None` for it — but a resident is a person, and every
+    // rule below is already the rule a person needs: the newest snapshot is the existence
+    // set, the description may arrive on either side of the body, and the cache is the size
+    // of a view. A second loop would be a second copy of all three.
+    //
+    // **Nothing here can put a resident in a fall pose.** `player_is_dead` reads
+    // `dead_players`, which the server fills with players; a resident's id is derived with
+    // bit 62 set rather than minted from a counter, so it can never appear there — the
+    // disjointness `server/internal/game/resident.go` argues, not a condition on this line.
+    drawn.extend(buffer.sample_residents(now, interval));
 
     // The world is the authority on which bodies exist, rather than a map kept beside it.
     // A map would be a second copy of the same fact and could drift from it — a despawned

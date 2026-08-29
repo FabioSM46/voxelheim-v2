@@ -1989,6 +1989,191 @@ fn a_description_that_arrives_late_adds_a_plate_without_replacing_the_body() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The people a settlement put there
+// ---------------------------------------------------------------------------
+
+/// A resident exactly as the server sends one, in the snapshot's `MobState` vector.
+///
+/// `Villager`, `Idle`, full health and no target are constants in `resident.state()`
+/// (`server/internal/game/resident.go`), not choices this helper makes.
+fn resident_state(entity_id: u64, pos: [f32; 3], yaw: f32) -> crate::net::MobState {
+    crate::net::MobState {
+        entity_id,
+        kind: crate::net::MobKind::Villager,
+        pos,
+        vel: [0.0; 3],
+        yaw,
+        health: 100,
+        max_health: 100,
+        action: crate::net::MobAction::Idle,
+        target_entity_id: 0,
+    }
+}
+
+/// A snapshot carrying players and residents together, which is how one really arrives.
+fn deliver_with_residents(
+    app: &mut App,
+    tick: u32,
+    entities: Vec<EntityState>,
+    residents: Vec<crate::net::MobState>,
+    at: Instant,
+) {
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: tick,
+            entities,
+            mobs: residents,
+            ..Default::default()
+        },
+        at,
+    );
+}
+
+/// What the rig says one body is wearing.
+fn worn_appearance(app: &mut App, entity_id: u64) -> Option<Appearance> {
+    let world = app.world_mut();
+    let mut query = world.query::<(&Body, &Worn)>();
+    query
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, worn)| worn.appearance)
+}
+
+/// A villager in the snapshot is drawn as a person rather than as a creature.
+///
+/// The acceptance criterion this part carries: the resident arrives in the `MobState`
+/// vector beside the draugrs, and what comes out is a body on the humanoid rig — the same
+/// path a remote player takes — wearing the neutral grey `schemas/player.fbs` documents.
+///
+/// **No plate, and that is this part's boundary rather than an omission.** Nothing here
+/// consumes `ResidentAppearance`, so this client has no name and no trade for that entity
+/// yet; part 4b adds the queue that carries them and the label that reads `Name | Role`.
+/// A resident is dressed in place when a description arrives, exactly as a remote player
+/// is, so nothing about that later part respawns anything drawn here.
+#[test]
+fn a_villager_is_drawn_as_a_person_rather_than_as_a_creature() {
+    let mut app = headless_player();
+    deliver_with_residents(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![resident_state(400, [4.0, 64.0, 0.0], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+
+    assert!(
+        body_of(&mut app, 400).is_some(),
+        "a resident was not drawn on the rig every other person is drawn on"
+    );
+    assert_eq!(
+        worn_appearance(&mut app, 400),
+        Some(PLACEHOLDER_APPEARANCE),
+        "an undescribed resident is not wearing the documented placeholder"
+    );
+    assert!(
+        name_plate_of(&mut app, 400).is_none(),
+        "a plate was drawn before there was a name to put on it"
+    );
+}
+
+/// A resident who leaves the view takes their body with them.
+///
+/// The newest snapshot is the existence set for a resident exactly as it is for everybody
+/// else, and this client does not guess why one stopped being sent.
+#[test]
+fn a_resident_who_leaves_the_view_takes_their_body_with_them() {
+    let mut app = headless_player();
+    let start = Instant::now();
+    deliver_with_residents(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![resident_state(400, [4.0, 64.0, 0.0], 0.0)],
+        start,
+    );
+    app.update();
+    assert!(body_of(&mut app, 400).is_some());
+
+    deliver_with_residents(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![],
+        start + INTERVAL,
+    );
+    app.update();
+    assert!(body_of(&mut app, 400).is_none());
+}
+
+/// A resident never goes over, not even on the frame this session's own body does.
+///
+/// The criterion says never a fall pose, and what makes it true is structural:
+/// `dead_players` is a list of *players*, and a resident's id is derived with bit 62 set
+/// where a player's is minted from a counter, so it can never appear there. Asserted on the
+/// same frame the local body is falling, because a test where nobody is dead would pass
+/// against a build with no such rule at all.
+#[test]
+fn a_resident_never_falls_over() {
+    let mut app = headless_player();
+    let start = Instant::now();
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: 1,
+            entities: vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+            mobs: vec![resident_state(400, [4.0, 64.0, 0.0], 0.0)],
+            dead_players: vec![LOCAL_ID],
+            ..Default::default()
+        },
+        start,
+    );
+    app.update();
+    app.world_mut()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            400,
+        )));
+    app.update();
+
+    let (local_fall, resident_fall) = {
+        let world = app.world_mut();
+        let mut query = world.query::<(&Body, &camera::DeathFall)>();
+        let found: Vec<(u64, f32)> = query
+            .iter(world)
+            .map(|(body, fall)| (body.0, fall.fallen()))
+            .collect();
+        let of = |entity_id: u64| {
+            found
+                .iter()
+                .find(|(drawn, _)| *drawn == entity_id)
+                .map(|(_, fallen)| *fallen)
+        };
+        (of(LOCAL_ID), of(400))
+    };
+    assert!(
+        local_fall.is_some_and(|fallen| fallen > 0.0),
+        "the dead player is not falling, so this test would pass against anything"
+    );
+    assert_eq!(
+        resident_fall,
+        Some(0.0),
+        "a resident went over while somebody else died"
+    );
+
+    let upright = {
+        let world = app.world_mut();
+        let mut query = world.query::<(&Body, &Transform)>();
+        query
+            .iter(world)
+            .find(|(body, _)| body.0 == 400)
+            .map(|(_, transform)| transform.rotation)
+    };
+    assert!(
+        upright.is_some_and(|rotation| rotation.abs_diff_eq(Quat::IDENTITY, 1e-5)),
+        "a resident standing at yaw zero is not upright: {upright:?}"
+    );
+}
+
 #[test]
 fn a_player_who_leaves_takes_their_name_plate_with_them() {
     let mut app = headless_player();
