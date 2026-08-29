@@ -280,17 +280,15 @@ type Sim struct {
 
 	// wards is which chunk columns are claimed, and by whom.
 	//
-	// **Derived state, and derived from [Sim.structures] alone**, so it is never the
-	// answer to a question the registry could not answer for itself — it is that answer
-	// precomputed, because the storm asks it once per chunk and the edit, mining and
-	// placement paths ask it once per request. Rebuilt whole by
-	// [Sim.rebuildWardsLocked] whenever a runestone is placed, removed, collapsed or
-	// restored, and nil while no stone stands.
+	// Runestone claims are derived from [Sim.structures]. Settlement claims are a pure
+	// function of worldSeed and the column, cached here on first query (including a
+	// negative answer) because settlements never move within one world. Rebuilding after
+	// a runestone change replaces only the runestone half and preserves those settlement
+	// answers.
 	//
-	// Nothing here is persisted, for the reason no structure id is: a ward is a function
-	// of where the stones are, and writing one down would put a second thing on disk that
-	// has to agree with the first.
-	wards map[world.Column]identity.PlayerID
+	// Nothing here is persisted: both halves are functions of state the server already
+	// owns, and writing either down would create a second answer to keep in step.
+	wards map[world.Column]wardClaim
 
 	// residents is every person a settlement holds, keyed by identity for the reason
 	// every other collection here is: a snapshot names them by id, and an interaction has

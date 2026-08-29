@@ -796,6 +796,16 @@ every decoder is already correct — see #456's pull request.
   a forge item would hand out one crafted station per break. Digging under a village forge
   leaves it standing on nothing.
 
+### Two wards, and why one belongs to nobody
+
+A runestone wards its 3x3 column square for the player who raised it; that owner may still dig,
+build and remove structures there. A settlement wards every column touched by its plateau disc
+for the zero `identity.PlayerID`. Join can never assign that identity to a player, so the ordinary
+owner exemption matches nobody and the village belongs to the world rather than to whoever plants
+a runestone beside it. `wardOf` checks and caches the settlement answer first, which also makes a
+settlement win every overlap; storm regeneration must therefore keep on its returned boolean,
+never on whether the returned owner is non-zero.
+
 ### The residents — the third entity class
 
 `internal/game/resident.go`. A **resident** is a person a settlement drawing put in a slot:
