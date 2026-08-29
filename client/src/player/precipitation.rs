@@ -203,9 +203,9 @@ fn empty_volume_mesh() -> Mesh {
 
     Mesh::new(
         PrimitiveTopology::TriangleList,
-        // `default()` rather than `RENDER_WORLD`: the positions are rewritten from the main
-        // world every frame, so the vertex data has to still be there to rewrite.
-        RenderAssetUsages::default(),
+        // Extraction must keep both copies: the renderer consumes one while
+        // `draw_precipitation` rewrites the main-world vertex data every frame.
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; vertices])
     // Never read -- the material is unlit -- and present because a `StandardMaterial` mesh
@@ -610,6 +610,15 @@ mod tests {
             Quat::IDENTITY,
         );
         into
+    }
+
+    /// The renderer extracts one copy, but the next frame still needs the CPU copy to
+    /// rewrite. Headless tests do not run extraction, so pin the usage contract itself.
+    #[test]
+    fn the_volume_mesh_remains_mutable_after_render_extraction() {
+        let usage = empty_volume_mesh().asset_usage;
+        assert!(usage.contains(RenderAssetUsages::MAIN_WORLD));
+        assert!(usage.contains(RenderAssetUsages::RENDER_WORLD));
     }
 
     /// The resource is the newest **accepted** snapshot's weather and nothing else: an
