@@ -648,3 +648,101 @@ func TestAGiveUpAsksForOneMoreDiffAndOnlyOne(t *testing.T) {
 // maxChunkResendsInTest mirrors the unexported maxChunkResends. Kept as a named constant
 // so the expectations above read as arithmetic rather than as the number 3.
 const maxChunkResendsInTest = 2
+
+// ---------------------------------------------------------------------------
+// The chunk entering the view, reported once
+// ---------------------------------------------------------------------------
+
+// What the simulation is told, and when.
+//
+// A settlement's forge and fire are written down nowhere: they are derived the first time
+// somebody looks at the ground they stand on, and this hook is the one moment the server
+// learns a piece of the world has become visible. Every chunk the diff loads is reported,
+// and nothing already held is reported again.
+func TestEveryChunkEnteringTheViewIsReportedOnce(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var entered []world.Coord
+
+	streamer := testStreamer(world.NewCache(5, 1, 8), 1, func([]byte) error { return nil })
+	streamer.ReportEntering(func(coord world.Coord) { entered = append(entered, coord) })
+
+	if err := streamer.MoveTo(ctx, world.Coord{}); err != nil {
+		t.Fatalf("MoveTo: %v", err)
+	}
+	// A radius of one is a 3×3×3 cube, and every chunk in it is new.
+	if len(entered) != 27 {
+		t.Fatalf("%d chunks were reported for the first diff, want 27", len(entered))
+	}
+	for _, coord := range entered {
+		if !streamer.View().Holds(coord) {
+			t.Errorf("chunk %+v was reported as entering the view and is not in it", coord)
+		}
+	}
+
+	// Standing still reports nothing: the view holds everything already.
+	entered = entered[:0]
+	if err := streamer.MoveTo(ctx, world.Coord{}); err != nil {
+		t.Fatalf("MoveTo without moving: %v", err)
+	}
+	if len(entered) != 0 {
+		t.Fatalf("standing still reported %d chunks, want none", len(entered))
+	}
+
+	// One step along x brings a 3×3 face in and takes one out.
+	if err := streamer.MoveTo(ctx, world.Coord{X: 1}); err != nil {
+		t.Fatalf("MoveTo one chunk east: %v", err)
+	}
+	if len(entered) != 9 {
+		t.Fatalf("a one-chunk step reported %d chunks, want the 9 of the new face", len(entered))
+	}
+	for _, coord := range entered {
+		if coord.X != 2 {
+			t.Errorf("chunk %+v was reported and is not on the face the step revealed", coord)
+		}
+	}
+}
+
+// A chunk this session could not be sent has still entered its view. The report is ahead
+// of the send deliberately: what it produces is an entity a snapshot carries, and a
+// snapshot does not wait on terrain.
+//
+// The chunks *behind* a failed send are not lost either: [View.MarkLoaded] runs only
+// after a send returns, so a partial send leaves the rest out of the view, and
+// [View.MoveTo] refuses to shortcut an unchanged centre for exactly this reason.
+func TestAChunkThatCouldNotBeSentIsStillReported(t *testing.T) {
+	t.Parallel()
+
+	const inView, before = 27, 3 // a radius of one is 3×3×3, one frame each
+	sent, failing := 0, true
+	var entered []world.Coord
+	streamer := testStreamer(world.NewCache(5, 1, 8), 1, func([]byte) error {
+		sent++
+		if failing && sent > before {
+			return errors.New("the session is finished")
+		}
+		return nil
+	})
+	streamer.ReportEntering(func(c world.Coord) { entered = append(entered, c) })
+
+	if err := streamer.MoveTo(context.Background(), world.Coord{}); err == nil {
+		t.Fatal("MoveTo returned no error for a send that failed")
+	}
+	if len(entered) != before+1 {
+		t.Fatalf("%d chunks reported, want %d", len(entered), before+1)
+	}
+
+	// The same centre: a partial send leaves the player where they were.
+	failing = false
+	if err := streamer.MoveTo(context.Background(), world.Coord{}); err != nil {
+		t.Fatalf("the recovery pass: %v", err)
+	}
+	reported := make(map[world.Coord]struct{}, inView)
+	for _, c := range entered {
+		reported[c] = struct{}{}
+	}
+	if len(reported) != inView {
+		t.Errorf("%d of %d chunks in view reported, want all", len(reported), inView)
+	}
+}

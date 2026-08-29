@@ -106,6 +106,10 @@ type structure struct {
 	// respawn, and nothing else: any player may walk into any tent, and the crafting
 	// issue reads this registry without consulting this field at all.
 	//
+	// **The zero identity is the world**, which is the absence of a rule rather than a
+	// new one: no live player is ever the zero id, so removal already refuses a structure
+	// carrying it and the tent lookup already fails to match it. See station.go.
+	//
 	// **An identity, not an entity id, and the difference is the whole of this issue.**
 	// An entity id names one session; a camp outlives every session its owner will ever
 	// open. Keyed by the entity id, a tent stopped being its owner's the moment they
@@ -527,6 +531,13 @@ func (s *Sim) firstFreeVoxelAboveLocked(anchor [3]int64) ([3]int64, bool) {
 // down — but a tent over a pit and an anvil in mid-air are worlds the server would be
 // asserting, and one break is enough to make either.
 //
+// **A world-owned station does not come down, and the reason is duplication.** Nothing
+// removes one and the seed puts it back the next time its chunk enters a view, so a
+// collapse that dropped its item would leave a forge on the ground *and* a forge still in
+// the village — one crafted station per break, for as long as somebody keeps digging.
+// Digging under a village forge therefore leaves it standing on nothing, which is the
+// honest consequence of "never despawned" rather than an oversight.
+//
 // O(structures × footprint) per completed break, on the explicit trade the drops and the
 // mobs already record. The footprint is recomputed rather than stored, because it is
 // derived from two fields that never change and a second copy is a second thing to keep
@@ -537,6 +548,9 @@ func (s *Sim) collapseStructuresAt(voxel [3]int64) []structure {
 
 	var collapsed []structure
 	for id, held := range s.structures {
+		if held.worldOwned() {
+			continue
+		}
 		cells, _, known := footprintOf(held.kind, held.facing, held.anchorVoxel())
 		if !known || !slices.Contains(cells, voxel) {
 			continue

@@ -786,6 +786,12 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// ledger, and every view diff that revealed one says so.
 			streamer.RecordExploration(self.Explored)
 
+			// And the other direction over the same list: what the *world* has in a
+			// chunk this session is about to be shown. A settlement's forge and fire are
+			// not written down anywhere, so the first time anybody looks at the ground
+			// they stand on is when the simulation creates them — see game/station.go.
+			streamer.ReportEntering(admitted.MaterialiseSettlements)
+
 			// Follow the player from its own goroutine. Two reasons, and the second is
 			// structural: the initial view is hundreds of frames, and producing them
 			// from the read loop would leave the session unable to notice a disconnect

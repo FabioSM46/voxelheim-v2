@@ -299,3 +299,72 @@ func TestACampIsTheSizeTheFormatSaysItIs(t *testing.T) {
 		t.Errorf("a %d-structure camp encodes to %d bytes, want %d", len(camp), len(encoded), want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// What the world put there is not part of the camp
+// ---------------------------------------------------------------------------
+
+// A record with no owner never reaches the file. The zero identity names nobody, so one
+// carrying it is a station the world derived from its seed — and game.Sim.RestoreStructures
+// refuses a stored camp holding one *whole*, so a save that wrote one would make the next
+// start refuse everything anybody had built.
+func TestSaveWritesNothingAWorldPutThere(t *testing.T) {
+	t.Parallel()
+
+	store := openCamp(t, t.TempDir())
+	placed := campFixture()
+
+	camp := []StructureRecord{
+		{Kind: vnet.StructureKindForge, Anchor: [3]int32{44, 75, -140}, Facing: vnet.FacingEast},
+		placed[0],
+		{Kind: vnet.StructureKindCampfire, Anchor: [3]int32{71, 75, -167}, Facing: vnet.FacingNorth},
+	}
+	camp = append(camp, placed[1:]...)
+
+	if err := store.Save(camp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, found, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !found {
+		t.Fatal("the camp that was just saved was reported as absent")
+	}
+	if len(got) != len(placed) {
+		t.Fatalf("loaded %d structures, want the %d somebody placed", len(got), len(placed))
+	}
+	for i := range placed {
+		if got[i] != placed[i] {
+			t.Errorf("structure %d round-tripped as %+v, want %+v", i, got[i], placed[i])
+		}
+	}
+}
+
+// The cap is measured against what is written, not against what stands. Counted before the
+// filter, the stations a player is standing among could refuse the save of a camp far
+// inside the format's limit — a miscount that would read as a corrupt world.
+func TestTheStoredCampIsCountedAfterTheWorldsOwnAreDropped(t *testing.T) {
+	t.Parallel()
+
+	store := openCamp(t, t.TempDir())
+	camp := make([]StructureRecord, MaxStructures+8)
+	for i := range camp {
+		camp[i] = StructureRecord{Kind: vnet.StructureKindForge, Facing: vnet.FacingNorth}
+	}
+	for i := range MaxStructures {
+		camp[i].Owner = identity.PlayerID{1}
+	}
+
+	if err := store.Save(camp); err != nil {
+		t.Fatalf("Save refused a camp of exactly %d placed structures: %v", MaxStructures, err)
+	}
+	got, _, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != MaxStructures {
+		t.Fatalf("loaded %d structures, want %d", len(got), MaxStructures)
+	}
+}
