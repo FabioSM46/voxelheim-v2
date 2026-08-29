@@ -574,7 +574,17 @@ func TestASwingObeysThePlayersPitch(t *testing.T) {
 			t.Parallel()
 
 			// Two blocks below the player's feet, so the only way to it is downwards.
-			h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 62, 0.5})
+			//
+			// Over empty terrain rather than [armedHarness]'s flat ground, because two
+			// blocks under a player standing on that ground is two blocks *inside* it:
+			// the draugr was buried, and a swing that reached it would now be a swing
+			// through solid rock — which is exactly what this file asserts elsewhere
+			// cannot happen. Nothing solid anywhere is the cheapest way to make "below"
+			// somewhere a creature can actually stand, and pitch is the only thing this
+			// test was ever about.
+			h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			id := h.spawnDraugrAt([3]float32{0.5, 62, 0.5})
 			h.aimAt(player, 0, tc.pitch)
 			if err := h.swing(player, 0, 1); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
@@ -1286,5 +1296,128 @@ func TestAVargrDiesInOneSwingFewerThanADraugr(t *testing.T) {
 	if vargr != draugr-1 {
 		t.Errorf("the starter blade needs %d swings for a vargr and %d for a draugr, want exactly one fewer",
 			vargr, draugr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A swing does not cross a block
+// ---------------------------------------------------------------------------
+
+// The reproduction, and its control in the same table: the same player, the same draugr,
+// the same distance, with the voxels at z = -1 solid and then left as air.
+//
+// [walledOff] is the arrangement the mob's blow is tested over, reused rather than
+// restated. The wall that stops a draugr hitting a player is the wall that has to stop a
+// player hitting a draugr, and one description of it standing behind both assertions is
+// the point rather than an economy.
+func TestASwingDoesNotCrossASolidBlock(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		terrain Terrain
+		wantHit bool
+	}{
+		{name: "walled off", terrain: walledOff(), wantHit: false},
+		{name: "in the open", terrain: dropTerrain{groundTop: 63}, wantHit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
+			player, _ := h.join(1, walledPlayerSpawn)
+			id := h.spawnDraugrAt(walledMobSpawn)
+
+			if err := h.swing(player, 0, 1); err != nil {
+				t.Fatalf("the swing was refused: %v", err)
+			}
+			h.step()
+
+			if hit := h.mobHealth(id) < draugrRow.maxHealth; hit != tc.wantHit {
+				t.Errorf("the swing hit = %v, want %v", hit, tc.wantHit)
+			}
+		})
+	}
+}
+
+// pillarTerrain is flat ground with a single one-voxel column standing on it, two blocks
+// tall so it covers the height both bodies' centres sit at.
+//
+// One column rather than a wall, because the whole of what the test below needs is a
+// solid the line to one draugr enters and the line to the other never does — which a wall
+// spanning x cannot give, since anything within the 90° arc that crosses z = 0 is still
+// inside the player's own x column when it does.
+func pillarTerrain() walledTerrain {
+	return walledTerrain{
+		dropTerrain: dropTerrain{groundTop: 63},
+		wall:        func(x, y, z int64) bool { return x == 1 && z == -1 && (y == 64 || y == 65) },
+	}
+}
+
+var (
+	// Yaw 0 looks along -Z, so both draugr below stand inside the arc and inside
+	// SwordReach — 1.46 blocks between bodies for the near one and 2.25 for the far one,
+	// against a reach of 2.5. What differs is the pillar: the line to the near draugr
+	// enters it at x = 1, z = -1, and the line to the far one leaves the player's own x
+	// column westward before it ever reaches z = -1.
+	pillarPlayerSpawn = [3]float32{0.5, 64, 0.5}
+	occludedMobSpawn  = [3]float32{1.5, 64, -1.5}
+	visibleMobSpawn   = [3]float32{-0.9, 64, -2.2}
+)
+
+// A draugr behind the pillar does not swallow the swing aimed at the one in the clear.
+//
+// **This is the half that is not symmetric with the mob's blow**, and the reason the
+// occlusion test is a `continue` rather than a return. The loop returns the nearest
+// candidate, so a check that ended the search on the first occluded mob would hand a
+// player standing beside a walled-off draugr a sword that does nothing, with nothing on
+// screen saying why — the corpse hazard the function's own doc comment describes, with
+// terrain in the corpse's place.
+//
+// The control row is what makes the other one mean anything: with the pillar taken away
+// the near draugr is the one that takes the blow, which is the nearest-candidate rule
+// still working and both creatures still being inside reach and inside the arc.
+func TestAnOccludedDraugrDoesNotAbsorbTheSwing(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		terrain      Terrain
+		wantOccluded bool
+		wantVisible  bool
+	}{
+		{
+			name:         "no pillar, so the nearer one takes it",
+			terrain:      dropTerrain{groundTop: 63},
+			wantOccluded: true,
+			wantVisible:  false,
+		},
+		{
+			name:         "pillar, so the search carries on past it",
+			terrain:      pillarTerrain(),
+			wantOccluded: false,
+			wantVisible:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
+			player, _ := h.join(1, pillarPlayerSpawn)
+			occluded := h.spawnDraugrAt(occludedMobSpawn)
+			visible := h.spawnDraugrAt(visibleMobSpawn)
+
+			if err := h.swing(player, 0, 1); err != nil {
+				t.Fatalf("the swing was refused: %v", err)
+			}
+			h.step()
+
+			if hit := h.mobHealth(occluded) < draugrRow.maxHealth; hit != tc.wantOccluded {
+				t.Errorf("the draugr behind the pillar was hit = %v, want %v", hit, tc.wantOccluded)
+			}
+			if hit := h.mobHealth(visible) < draugrRow.maxHealth; hit != tc.wantVisible {
+				t.Errorf("the draugr in the clear was hit = %v, want %v", hit, tc.wantVisible)
+			}
+		})
 	}
 }
