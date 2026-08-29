@@ -190,16 +190,35 @@ func (s *StructureStore) Load() ([]StructureRecord, bool, error) {
 // Whole rather than incremental, which is what makes the file a snapshot of the
 // simulation rather than a log to be replayed: there is no removal record to lose and
 // no ordering to get wrong, and a world that shrinks writes a smaller file.
+//
+// **A record with no owner is dropped rather than written, and that is a rule about a
+// key.** The zero [identity.PlayerID] is the digest of nothing and names nobody, so a
+// record carrying one describes a station the world derived from its seed rather than
+// anything a player built — and this file is for what players did. Two things follow, and
+// both are the point: nothing here can write the record game.Sim.RestoreStructures would
+// refuse the whole file for, and [MaxStructures] is measured against what is actually
+// written, so a busy village can never push a real camp over the limit.
 func (s *StructureStore) Save(records []StructureRecord) error {
 	if s == nil {
 		return nil
 	}
 
-	data, err := encodeStructures(records)
+	data, err := encodeStructures(placedOnly(records))
 	if err != nil {
 		return err
 	}
 	return world.WriteAtomic(s.path, data)
+}
+
+// placedOnly is the records somebody actually placed, in the order they were given.
+func placedOnly(records []StructureRecord) []StructureRecord {
+	kept := make([]StructureRecord, 0, len(records))
+	for _, rec := range records {
+		if rec.Owner != (identity.PlayerID{}) {
+			kept = append(kept, rec)
+		}
+	}
+	return kept
 }
 
 // encodeStructures lays the camp out, in the order it was given.

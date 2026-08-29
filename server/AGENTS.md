@@ -767,6 +767,35 @@ with time, so `Step` reads them and never advances them.
   layout and for nothing else; `TestACampIsTheSizeTheFormatSaysItIs` reads the entry size and
   the version as one pair for that reason.
 
+### The village forge belongs to nobody
+
+`internal/game/station.go`, and it needed almost no new rule: a **world-owned station** is an
+ordinary structure whose owner is the zero `identity.PlayerID`, which `Join` refuses — so
+removal already refuses one, the tent lookup already fails to match one, and crafting never
+consulted the owner. Nothing on the wire moved: `owner_entity_id` is the 0 V5 already
+reserved, and a client compares it against its own entity id, which is never 0.
+
+**What that widened is the *meaning* of 0, and `schemas/player.fbs` has not caught up.** It
+says "`0` while the owner is offline" and, in as many words, "so `0` does not mean unowned" —
+which was true until a settlement's forge and fire had no owner at all. Amending it is a
+`schemas/**` change: flatc copies those comments into `server/gen/` and into the client's
+`*_generated.rs`, so it costs a regeneration, all three CI jobs and the two client comments
+that restate the same sentence. It is owed, it is a comment rather than a decoder rule, and
+every decoder is already correct — see #456's pull request.
+
+- **Nothing about one is written down.** Its position is a settlement anchor and its id is
+  `world.HashLattice(seed + offset, x, z)` with the high bit set — both pure functions of the
+  seed, so a restart re-derives the same forge with the same id. The bit keeps a derived id
+  out of `session.Registry.NextID`'s range, which matters because a client that meets two
+  entities sharing an id closes the connection; `persist.StructureStore.Save` drops an
+  ownerless record, so `structures.bin` still holds only what players did.
+- **They are created by being looked at** — `Streamer.ReportEntering`, once per chunk that
+  newly enters a view — and the derived id is what makes that idempotent.
+- **Nothing brings one down**, the collapse in `breakMined` included, and the reason is
+  duplication: the seed puts it back the next time somebody looks, so a collapse that dropped
+  a forge item would hand out one crafted station per break. Digging under a village forge
+  leaves it standing on nothing.
+
 ## Crafting, and how a transaction is made out of an array
 
 Everything here lives in `internal/game/craft.go`, beside the registry it reads.

@@ -281,6 +281,16 @@ type Streamer struct {
 	// revealed them: the reveal happens inside sendChunk, and this is the first place
 	// afterwards that knows the pass is over.
 	explored *Exploration
+
+	// entering is told about every chunk that newly enters this view, or nil when nobody
+	// is listening. It is the simulation's one chance to learn a piece of the world became
+	// visible, which is when the settlement stations standing in it are created —
+	// game.Player.MaterialiseSettlements is what the server passes.
+	//
+	// The load list rather than MarkLoaded, deliberately: a station is an entity a
+	// snapshot carries rather than terrain the client is holding, so waiting for the send
+	// would leave a village forge missing while a failed chunk was retried.
+	entering func(world.Coord)
 }
 
 // NewStreamer returns a streamer for one session.
@@ -372,6 +382,13 @@ func (s *Streamer) MoveTo(ctx context.Context, center world.Coord) error {
 	}
 
 	for _, coord := range load {
+		// Before the send, and before anything that can fail. What this reports is that a
+		// chunk has entered the view, which is true the moment the diff said so; the
+		// simulation's answer to it is an entity the next snapshot carries, and a
+		// snapshot does not wait on terrain.
+		if s.entering != nil {
+			s.entering(coord)
+		}
 		if err := s.sendChunk(ctx, coord, repairing); err != nil {
 			return err
 		}
@@ -481,6 +498,16 @@ func (s *Streamer) sendChunk(ctx context.Context, coord world.Coord, repairing b
 func (s *Streamer) RecordExploration(explored *Exploration) {
 	s.explored = explored
 	s.view.RecordExploration(explored.Reveal)
+}
+
+// ReportEntering makes this streamer tell entering about every chunk that newly enters
+// the view, and replaces whatever was there before. A nil hook turns it off.
+//
+// Separate from [NewStreamer] for [Streamer.RecordExploration]'s reason and set on the
+// same line of the session's assembly, before the streaming goroutine starts — which is
+// the ordering that makes the field safe to read with no lock of the streamer's own.
+func (s *Streamer) ReportEntering(entering func(world.Coord)) {
+	s.entering = entering
 }
 
 // sendExplored puts this pass's newly revealed columns on the wire, and sends nothing
