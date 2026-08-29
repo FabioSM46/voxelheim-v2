@@ -56,6 +56,7 @@ mod items;
 mod livery;
 mod loot;
 mod mobs;
+mod precipitation;
 mod projectiles;
 mod sky;
 mod structures;
@@ -288,6 +289,7 @@ impl Plugin for PlayerPlugin {
                     mobs::create_visuals,
                     structures::create_visuals,
                     sky::spawn_sun,
+                    precipitation::create_visuals,
                 ),
             )
             .add_systems(
@@ -378,6 +380,10 @@ impl Plugin for PlayerPlugin {
                 (
                     (sync_name_plates, position_name_plates).chain(),
                     mobs::face_aggro_markers,
+                    // After the camera, because the volume is centred on the eye and its
+                    // quads face it. Reading a frame early would turn fast-moving weather
+                    // edge-on while the player turns.
+                    precipitation::draw_precipitation,
                 )
                     .after(camera::AimCamera),
             )
