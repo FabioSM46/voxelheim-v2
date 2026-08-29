@@ -13,10 +13,12 @@ func TestThePlantSpeciesTableNamesConiferPalmAndScrub(t *testing.T) {
 		t.Fatalf("conifer row = {name:%q seedOffset:%d footprint:%d forest:%t}",
 			conifer.name, conifer.seedOffset, conifer.footprint, conifer.forest)
 	}
-	if !conifer.rootsOn(Grass) {
-		t.Fatal("the conifer does not root on grass")
+	for _, block := range []Block{Grass, Snow} {
+		if !conifer.rootsOn(block) {
+			t.Fatalf("the conifer does not root on block %d", block)
+		}
 	}
-	for _, block := range []Block{Air, Dirt, Stone, Snow, Sand, Sandstone, Gravel, Water, Ice} {
+	for _, block := range []Block{Air, Dirt, Stone, Sand, Sandstone, Gravel, Water, Ice} {
 		if conifer.rootsOn(block) {
 			t.Fatalf("the conifer roots on block %d", block)
 		}
@@ -27,7 +29,7 @@ func TestThePlantSpeciesTableNamesConiferPalmAndScrub(t *testing.T) {
 	}{
 		{Taiga, taigaTreeChanceDenominator},
 		{Plains, plainsTreeChanceDenominator},
-		{Tundra, 0},
+		{Tundra, tundraTreeChanceDenominator},
 		{Desert, 0},
 	} {
 		if got := conifer.denominator(tc.climate); got != tc.want {
@@ -68,14 +70,50 @@ func TestThePlantSpeciesTableNamesConiferPalmAndScrub(t *testing.T) {
 	}
 }
 
-// The table must be a refactor and no more: the old predicate is kept here only
-// as an independent oracle over the fixed climate lattice, while production has
-// one implementation through plantAtColumn.
-func TestTheConiferRowMatchesTheLegacyPredicate(t *testing.T) {
+func TestOnlyATundraConiferWearsASnowCap(t *testing.T) {
+	t.Parallel()
+
+	x, z, col, h := findTundraConifer(t)
+	trunkHeight := coniferTrunkHeight(h)
+	wantY := int64(col.surface + trunkHeight + treeCanopyAboveCrown + 1)
+	snow := make([][3]int64, 0, 1)
+	visitConifer(climateSeed, x, z, col.surface, h, func(x, y, z int64, block Block) {
+		if block == Snow {
+			snow = append(snow, [3]int64{x, y, z})
+		}
+	})
+	if len(snow) != 1 || snow[0] != [3]int64{x, wantY, z} {
+		t.Fatalf("tundra conifer snow voxels = %v, want [(%d, %d, %d)]", snow, x, wantY, z)
+	}
+
+	for _, tc := range []struct {
+		name string
+		x    int64
+		z    int64
+	}{
+		{"taiga", 0, 0},
+		{"plains", 0, 2048},
+	} {
+		if got := ClimateAt(climateSeed, tc.x, tc.z); (tc.name == "taiga" && got != Taiga) || (tc.name == "plains" && got != Plains) {
+			t.Fatalf("%s shape probe is in %v", tc.name, got)
+		}
+		visitConifer(climateSeed, tc.x, tc.z, col.surface, h, func(_, _, _ int64, block Block) {
+			if block == Snow {
+				t.Errorf("%s conifer emitted a snow cap", tc.name)
+			}
+		})
+	}
+}
+
+// The row's two independent predicates and the selector's snow-climate rule are
+// restated here as one oracle. Production keeps them separate so a species row
+// remains data; this test proves their composition names exactly the intended
+// columns, including tundra snow but excluding altitude snow elsewhere.
+func TestTheConiferRowMatchesItsColumnPredicate(t *testing.T) {
 	t.Parallel()
 
 	for _, seed := range []int64{1, climateSeed, 0x51A7E} {
-		legacy := make(map[[2]int64]int)
+		oracle := make(map[[2]int64]int)
 		table := make(map[[2]int64]int)
 		climates := make(map[Climate]bool, 4)
 		for i := range climateLatticeSteps {
@@ -85,8 +123,8 @@ func TestTheConiferRowMatchesTheLegacyPredicate(t *testing.T) {
 				col := columnAt(seed, x, z)
 				climates[col.climate] = true
 
-				if height, ok := legacyTreeAtColumn(seed, x, z, col); ok {
-					legacy[[2]int64{x, z}] = height
+				if height, ok := expectedConiferAtColumn(seed, x, z, col); ok {
+					oracle[[2]int64{x, z}] = height
 				}
 				if species, h, ok := plantAtColumn(seed, x, z, col); ok && species == &plantSpeciesTable[0] {
 					table[[2]int64{x, z}] = coniferTrunkHeight(h)
@@ -96,12 +134,12 @@ func TestTheConiferRowMatchesTheLegacyPredicate(t *testing.T) {
 		if len(climates) != 4 {
 			t.Fatalf("seed %d lattice crossed %d climates, want all four", seed, len(climates))
 		}
-		if len(legacy) != len(table) {
-			t.Fatalf("seed %d produced %d legacy roots and %d table roots", seed, len(legacy), len(table))
+		if len(oracle) != len(table) {
+			t.Fatalf("seed %d produced %d oracle roots and %d table roots", seed, len(oracle), len(table))
 		}
-		for column, want := range legacy {
+		for column, want := range oracle {
 			if got, ok := table[column]; !ok || got != want {
-				t.Fatalf("seed %d column (%d, %d): table height = %d, present %t; legacy height = %d",
+				t.Fatalf("seed %d column (%d, %d): table height = %d, present %t; oracle height = %d",
 					seed, column[0], column[1], got, ok, want)
 			}
 		}
@@ -161,7 +199,7 @@ func TestShrubIsOneBlockAboveItsRoot(t *testing.T) {
 	}
 }
 
-func legacyTreeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok bool) {
+func expectedConiferAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int, ok bool) {
 	if col.settlement {
 		return 0, false
 	}
@@ -172,10 +210,13 @@ func legacyTreeAtColumn(seed, worldX, worldZ int64, col column) (trunkHeight int
 		denominator = taigaTreeChanceDenominator
 	case Plains:
 		denominator = plainsTreeChanceDenominator
+	case Tundra:
+		denominator = tundraTreeChanceDenominator
 	default:
 		return 0, false
 	}
-	if col.blockAt(col.surface) != Grass {
+	surface := col.blockAt(col.surface)
+	if surface != Grass && (surface != Snow || col.climate != Tundra) {
 		return 0, false
 	}
 
@@ -283,4 +324,22 @@ func uncarvedPlantTestColumn(t *testing.T, seed int64) (int64, int64, column) {
 	}
 	t.Fatal("no uncarved column found for the priority test")
 	return 0, 0, column{}
+}
+
+func findTundraConifer(t *testing.T) (x, z int64, col column, h uint64) {
+	t.Helper()
+	for x = 3584; x < 3584+512; x++ {
+		for z = -31744; z < -31744+512; z++ {
+			col = columnAt(climateSeed, x, z)
+			if col.climate != Tundra {
+				t.Fatalf("fixed tundra square contains %v at (%d, %d)", col.climate, x, z)
+			}
+			species, candidateHash, ok := plantAtColumn(climateSeed, x, z, col)
+			if ok && species == &plantSpeciesTable[0] {
+				return x, z, col, candidateHash
+			}
+		}
+	}
+	t.Fatal("fixed tundra square contains no conifer")
+	return 0, 0, column{}, 0
 }

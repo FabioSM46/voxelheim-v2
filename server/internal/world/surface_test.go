@@ -67,6 +67,20 @@ func TestSurfaceAtHeightIsTheHeightField(t *testing.T) {
 	}
 }
 
+func TestATundraConiferColumnIsForestOnTheMap(t *testing.T) {
+	t.Parallel()
+
+	x, z, col, _ := findTundraConifer(t)
+	if got := col.blockAt(col.surface); got != Snow {
+		t.Fatalf("tundra conifer at (%d, %d) roots on %d, want Snow", x, z, got)
+	}
+	height, kind := SurfaceAt(climateSeed, x, z)
+	if height != col.surface || kind != SurfaceForest {
+		t.Fatalf("SurfaceAt(%d, %d) = (%d, %d), want (%d, %d)",
+			x, z, height, kind, col.surface, SurfaceForest)
+	}
+}
+
 // TestSurfaceAtNamesWhatTheGeneratorBuilt is the acceptance criterion in one sweep: the
 // map is true to the ground, and every kind it can draw is drawn somewhere.
 //

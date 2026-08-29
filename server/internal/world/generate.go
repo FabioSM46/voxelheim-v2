@@ -127,12 +127,14 @@ const (
 	// One candidate in a climate's denominator becomes a conifer. The decision and
 	// its height come from the candidate column's hash alone. Ninety-six columns to
 	// a tree is a wood you have to walk through; fifteen hundred is the occasional
-	// landmark on open ground. Tundra and desert have no conifer denominator.
+	// landmark on open ground. One tree in five hundred and twelve columns makes
+	// the tundra a sparse tree line; the desert has no conifer denominator at all.
 	//
 	// Every additional species is one row in plantSpeciesTable: its surface,
 	// density, independent hash lattice, footprint, map meaning and shape travel
 	// together.
 	taigaTreeChanceDenominator        = 96
+	tundraTreeChanceDenominator       = 512
 	plainsTreeChanceDenominator       = 1536
 	treeMinTrunkHeight                = 4
 	treeHeightVariants                = 3
@@ -360,7 +362,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // appended plant blocks above their surface. Existing deltas cannot be replayed
 // against a base that may now hold a trunk, fronds or scrub where version 9 held
 // air, so the stored-world precondition advances with the generator.
-const WorldgenVersion uint32 = 10
+// 10 → 11: tundra conifers. Sparse conifers now root in tundra snow and carry one
+// snow block above the crown; every terrain column and every conifer outside tundra
+// stays byte-identical. A stored delta in one of the newly wooded columns nevertheless
+// resolves against a different base, so the narrow break still needs its own version.
+const WorldgenVersion uint32 = 11
 
 // Generate builds the chunk at coord for seed.
 //
@@ -646,15 +652,16 @@ func blockAt(worldY, surface int, climate Climate) Block {
 // coniferChanceDenominator is one candidate column in how many that becomes a
 // conifer, for a climate.
 //
-// **Zero is "nothing grows here", not "a tree every zero columns".** Tundra and
-// desert are absent from the switch on purpose and reach the default: an enormous
-// denominator would still put the occasional conifer in a desert, and the
-// statement being made is that there is none. Its one caller checks the zero
-// before it reaches a modulus.
+// **Zero is "nothing grows here", not "a tree every zero columns".** The desert is
+// absent from the switch on purpose and reaches the default: an enormous denominator
+// would still put the occasional conifer there, and the statement being made is that
+// there is none. Its one caller checks the zero before it reaches a modulus.
 func coniferChanceDenominator(climate Climate) uint64 {
 	switch climate {
 	case Taiga:
 		return taigaTreeChanceDenominator
+	case Tundra:
+		return tundraTreeChanceDenominator
 	case Plains:
 		return plainsTreeChanceDenominator
 	default:
@@ -687,7 +694,7 @@ var conifer = plantSpecies{
 	name:       "conifer",
 	seedOffset: treeSeedOffset,
 	rootsOn: func(block Block) bool {
-		return block == Grass
+		return block == Grass || block == Snow
 	},
 	denominator: coniferChanceDenominator,
 	footprint:   treeCanopyRadius,
@@ -754,6 +761,12 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 		if !species.rootsOn(surface) {
 			continue
 		}
+		// Snow is tundra ground or an altitude cap. A row may name Snow as a
+		// surface, but a mountain does not become tundra merely because its peak is
+		// white: climate remains the authoritative half of that distinction.
+		if surface == Snow && col.climate != Tundra {
+			continue
+		}
 
 		h := hashLattice(seed+species.seedOffset, worldX, worldZ)
 		if h%denominator != 0 {
@@ -795,7 +808,7 @@ func visitPlantAtColumnIn(table []plantSpecies, seed, rootX, rootZ int64, col co
 // visitConifer yields the canopy before the trunk. Leaves only fill air, while a
 // trunk may replace a leaf from an overlapping plant, so this ordering makes logs
 // continuous without letting foliage overwrite them.
-func visitConifer(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+func visitConifer(seed int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
 	trunkHeight := coniferTrunkHeight(h)
 	crownY := int64(surface + trunkHeight)
 	for dy := -treeCanopyBelowCrown; dy <= treeCanopyAboveCrown; dy++ {
@@ -819,6 +832,13 @@ func visitConifer(_ int64, rootX, rootZ int64, surface int, h uint64, visit func
 	}
 	for y := int64(surface + 1); y <= crownY; y++ {
 		visit(rootX, y, rootZ, Log)
+	}
+	// The cap is a tundra shape decision, never a test for Snow under the root:
+	// every climate can wear altitude snow above snowLine, and those caps stay bare.
+	// setTreeBlock gives Snow the same air-only placement as Leaves, so an overlap
+	// clips the cap honestly instead of overwriting an existing tree.
+	if ClimateAt(seed, rootX, rootZ) == Tundra {
+		visit(rootX, crownY+treeCanopyAboveCrown+1, rootZ, Snow)
 	}
 }
 

@@ -215,36 +215,30 @@ func assertColumnMaterials(t *testing.T, col column, worldX, worldZ int64, want 
 	}
 }
 
-// Conifers never leave grass climates, while desert plants never leave desert
-// sand. Bare rock, snow and sandstone are roots for no species.
+// No conifer grows in a desert or on bare rock, while desert plants never leave
+// desert sand. Tundra snow is valid ground only for the conifer.
 //
 // Asserted through the generator's own predicate rather than by counting logs in a
 // chunk, because the claim is about every column rather than about the ones that
 // happened to be sampled.
-func TestNoConiferStandsInTundraDesertOrBareRockAndDesertPlantsStayOnSand(t *testing.T) {
+func TestNoConiferStandsInDesertOrBareRockAndDesertPlantsStayOnSand(t *testing.T) {
 	t.Parallel()
 
-	tundra, desert, high, desertPlants := 0, 0, 0, 0
+	desert, bareRock, desertPlants := 0, 0, 0
 	for i := range climateLatticeSteps {
 		for j := range climateLatticeSteps {
 			x, z := int64(i)*climateLatticeStep, int64(j)*climateLatticeStep
 			col := columnAt(climateSeed, x, z)
 			species, _, rooted := plantAtColumn(climateSeed, x, z, col)
 
-			switch col.climate {
-			case Tundra:
-				tundra++
-				if rooted && species == &plantSpeciesTable[0] {
-					t.Fatalf("a conifer is rooted in tundra at (%d, %d)", x, z)
-				}
-			case Desert:
+			if col.climate == Desert {
 				desert++
 				if rooted && species == &plantSpeciesTable[0] {
 					t.Fatalf("a conifer is rooted in the desert at (%d, %d)", x, z)
 				}
 			}
-			if col.surface >= stoneLine {
-				high++
+			if col.blockAt(col.surface) == Stone {
+				bareRock++
 				if rooted {
 					t.Fatalf("%s is rooted on bare rock at (%d, %d), height %d", species.name, x, z, col.surface)
 				}
@@ -258,10 +252,10 @@ func TestNoConiferStandsInTundraDesertOrBareRockAndDesertPlantsStayOnSand(t *tes
 			}
 		}
 	}
-	if tundra == 0 || desert == 0 {
-		t.Fatalf("the sweep saw %d tundra and %d desert columns; both must be exercised", tundra, desert)
+	if desert == 0 {
+		t.Fatal("the sweep saw no desert column")
 	}
-	if high == 0 {
+	if bareRock == 0 {
 		t.Log("no lattice sample reached the stone line; the bare-rock clause was not exercised here")
 	}
 	if desertPlants == 0 {
@@ -269,29 +263,60 @@ func TestNoConiferStandsInTundraDesertOrBareRockAndDesertPlantsStayOnSand(t *tes
 	}
 }
 
+// Snow above snowLine is an altitude override in every climate. Only tundra snow
+// is plantable: a plains or taiga mountain does not become a tundra tree line, and
+// the desert has no denominator in the first place.
+func TestNoConiferStandsOnAMountainCap(t *testing.T) {
+	t.Parallel()
+
+	const seed int64 = climateSeed
+	for _, climate := range []Climate{Plains, Taiga, Desert} {
+		col := column{surface: snowLine, climate: climate}
+		if got := col.blockAt(col.surface); got != Snow {
+			t.Fatalf("synthetic %v mountain surface = %d, want Snow", climate, got)
+		}
+
+		// Exercise a column whose density hash would otherwise accept the conifer,
+		// so a false result cannot be credited to a lucky modulus miss.
+		denominator := coniferChanceDenominator(climate)
+		x := int64(0)
+		if denominator != 0 {
+			for hashLattice(seed+treeSeedOffset, x, 0)%denominator != 0 {
+				x++
+			}
+		}
+		if species, _, rooted := plantAtColumn(seed, x, 0, col); rooted && species == &plantSpeciesTable[0] {
+			t.Fatalf("a conifer is rooted on a %v mountain snow cap", climate)
+		}
+	}
+}
+
 // Conifers arrive at the density their climate names.
 //
-// Measured over two squares that are one climate throughout — a taiga at the
-// origin and a plain 2048 blocks north of it — and against the *eligible* columns
-// rather than all of them, because a column whose surface is gravel or bare rock
-// was never a candidate. Thirty percent is the band the issue asks for: a hash
-// modulus is a Bernoulli trial per column, so a few hundred roots is enough to
-// land well inside it and a broken denominator misses by a factor.
+// Measured over three fixed squares that are one climate throughout and against
+// the *eligible* columns rather than all of them, because gravel, bare rock and
+// water are not candidates. Twenty-five percent is deliberately statistical: a
+// hash modulus is a Bernoulli trial per column, and a few hundred roots put a
+// correct denominator well inside the band while a wrong one misses by a factor.
 func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	t.Parallel()
 
+	counts := make(map[Climate]int, 3)
 	for _, tc := range []struct {
 		name        string
+		originX     int64
 		originZ     int64
 		climate     Climate
 		denominator uint64
+		rootBlock   Block
 	}{
-		{"taiga", 0, Taiga, taigaTreeChanceDenominator},
-		{"plains", 2048, Plains, plainsTreeChanceDenominator},
+		{"taiga", 0, 0, Taiga, taigaTreeChanceDenominator, Grass},
+		{"tundra", 3584, -31744, Tundra, tundraTreeChanceDenominator, Snow},
+		{"plains", 0, 2048, Plains, plainsTreeChanceDenominator, Grass},
 	} {
 		const side = 512
 		eligible, roots := 0, 0
-		for x := int64(0); x < side; x++ {
+		for x := tc.originX; x < tc.originX+side; x++ {
 			for z := tc.originZ; z < tc.originZ+side; z++ {
 				col := columnAt(climateSeed, x, z)
 				if col.climate != tc.climate {
@@ -300,7 +325,7 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				// A column under the sea line grows nothing however green its bed is,
 				// so it is not a candidate the density is measured against. See
 				// treeAtColumn, which refuses it for the same reason.
-				if col.blockAt(col.surface) == Grass && col.surface >= seaLevel {
+				if col.blockAt(col.surface) == tc.rootBlock && col.surface >= seaLevel {
 					eligible++
 				}
 				if _, ok := treeAtColumn(climateSeed, x, z, col); ok {
@@ -312,10 +337,15 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 		if roots == 0 || want == 0 {
 			t.Fatalf("%s square produced %d roots over %d eligible columns", tc.name, roots, eligible)
 		}
-		if ratio := float64(roots) / want; ratio < 0.7 || ratio > 1.3 {
-			t.Errorf("%s square has %d roots over %d eligible columns; one in %d predicts %.0f (ratio %.2f, want within ±30%%)",
+		if ratio := float64(roots) / want; ratio < 0.75 || ratio > 1.25 {
+			t.Errorf("%s square has %d roots over %d eligible columns; one in %d predicts %.0f (ratio %.2f, want within ±25%%)",
 				tc.name, roots, eligible, tc.denominator, want, ratio)
 		}
+		counts[tc.climate] = roots
+	}
+	if counts[Taiga] <= counts[Tundra] || counts[Tundra] <= counts[Plains] {
+		t.Errorf("root counts taiga=%d, tundra=%d, plains=%d; want taiga > tundra > plains",
+			counts[Taiga], counts[Tundra], counts[Plains])
 	}
 
 	// Desert is a thin intersection of two climate-field tails, so its fixed
