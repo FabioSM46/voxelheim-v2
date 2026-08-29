@@ -1780,6 +1780,17 @@ without an instant of being free. `Loopback` is a `cfg(test)` seam of the same s
 become a way to test a port the browser was never sent to. Serialising those tests behind a
 mutex would not have been enough: the competing binds are not all sign-in tests.
 
+**The rule has exactly one exception, and it lives in the same crate — so read this before you
+read it as a contradiction.** `net/mod.rs` keeps two `closed_port()` helpers, one in
+`sign_in_tests` and one in `server_list_tests`, that still bind, read the number and drop the
+listener. They want the opposite thing: a port *nothing is listening on*, so `start` fails fast
+and deterministically. Holding it is not merely unnecessary there, it would destroy the property
+under test, so "hold it" has nothing to say about them. Their residual race is real and it is a
+different kind: a sibling handed the released number makes the connection *succeed* where the
+test expects it refused — a loud failure on the assertion, not the `Disconnected` ghost above
+that reads as a different bug entirely. It has never been observed and is left alone rather than
+fixed blind (#557). **Any other bind-read-drop helper is the bug, not a third exception.**
+
 Anything that meshes should be assertable as an exact quad count. If a new test needs a screen to
 tell whether the mesher is right, the property being tested has not been found yet — `winding` is
 the worked example: it is checked as a cross product against the normal attribute, because

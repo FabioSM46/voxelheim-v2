@@ -1136,12 +1136,20 @@ mod tests {
     /// nothing would exercise [`bind`] at all.
     ///
     /// The collision is the assertion: a second listener on an address another
-    /// socket is actively listening on is refused by the kernel (`SO_REUSEADDR`,
-    /// which Rust sets, relaxes `TIME_WAIT` and not this), so the refusal is proof
-    /// `bind` aimed at exactly the port the redirect named and at no other. Written
-    /// as a collision rather than as a success because the success direction would
-    /// need a port known to be free, and learning one by releasing it is the bug
-    /// this whole change is about.
+    /// socket is actively listening on is refused by the kernel, so the refusal is
+    /// proof `bind` aimed at exactly the port the redirect named and at no other.
+    /// Written as a collision rather than as a success because the success
+    /// direction would need a port known to be free, and learning one by releasing
+    /// it is the bug this whole change is about.
+    ///
+    /// **The refusal holds on Windows too — and not for the reason it holds here.**
+    /// `std` sets `SO_REUSEADDR` under `#[cfg(not(windows))]` only, where it relaxes
+    /// `TIME_WAIT` and not an active listener. On Windows that same option would
+    /// permit binding a port another socket is actively listening on — "socket
+    /// hijacking" — so `std` deliberately does not set it there, and the bind is
+    /// refused for the plainer reason that the address is in use. Worth writing
+    /// down, because the option is absent on the one platform where its presence
+    /// would have made this test pass its `bind` and fail its `expect_err`.
     #[test]
     fn bind_refuses_the_redirects_port_when_something_already_holds_it() {
         let (held, port) = reserved_loopback_port();
