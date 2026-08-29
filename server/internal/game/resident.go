@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"math"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -421,4 +422,53 @@ func (r *resident) appearanceFrame() []byte {
 		Appearance:    r.appearance,
 		HasAppearance: true,
 	})
+}
+
+// vendorRole reports whether this role is one that could keep a stall.
+//
+// **Nothing acts on a true today, and that is deliberate rather than unfinished.** #459
+// is what teaches the server what a vendor role opens; until it lands, every interaction
+// is refused and this predicate exists so that the *shape* of the answer is already
+// right — the trades are named in one place, and the issue that adds a price list changes
+// what happens on a true rather than having to discover which roles it applies to.
+func vendorRole(role vnet.ResidentRole) bool {
+	switch role {
+	case vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader:
+		return true
+	default:
+		return false
+	}
+}
+
+// InteractNPC answers one NpcInteractRequest, and today it answers every one of them no.
+//
+// **`NotAVendor` for all four refusals, and the uniformity is the fail-closed default
+// rather than a placeholder.** An entity id nobody has, an id that names something other
+// than a resident, a resident too far away and a resident who keeps no stall all produce
+// the same frame, so nothing a client can send tells it anything about the world it could
+// not already see. A smith is refused with it too: until #459 the server has no price
+// list to open, and answering "yes" to a request it cannot fulfil would be the client
+// deciding an outcome.
+//
+// The error is separate from the reason for the reason every other refusal here keeps the
+// two apart: the code is for the player and the sentence is for the operator, and the
+// sentence is the only thing that says *which* of the four it was. It is non-nil on every
+// path, because there is no success to report yet — #459 is what gives this a second
+// return shape.
+func (p *Player) InteractNPC(request protocol.NpcInteractRequest) (vnet.RefusalReason, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	r, standing := p.sim.residents[request.EntityID]
+	if !standing {
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("entity %d is not a resident of this world", request.EntityID)
+	}
+	if distance := boxDistance(playerBox(p.pos), residentBody.boxAt(r.pos)); distance > EditReach {
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is %.2f blocks away, past the reach of %.1f", r.name, distance, EditReach)
+	}
+	if !vendorRole(r.role) {
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is a %s and keeps no stall", r.name, r.role.String())
+	}
+	return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is a %s, and no stall opens until this server knows what a vendor sells", r.name, r.role.String())
 }

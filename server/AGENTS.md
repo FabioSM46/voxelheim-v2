@@ -830,12 +830,18 @@ the cost either of them would pay alone.
   everyone else back toward their anchor's bearing at the same rate. Nothing walks, paths,
   schedules or speaks. The pass iterates the map rather than a sorted slice because it reads
   only players and writes only its own field — there is no order for a result to depend on.
-- **No session may address one yet, and until one can this is a live edge.**
-  `NpcInteractRequest` has decoded at the protocol boundary since V25, but the router still has
-  no case for it — so such a frame falls through the default and closes the session as
-  malformed. The refusal that answers it instead (`ActionRefused{Interact, NotAVendor}` on every
-  path, a vendor role included, so a client learns nothing by probing) is #458's remaining
-  server half.
+- **Every `NpcInteractRequest` is refused `ActionRefused{Interact, NotAVendor}`**, a vendor
+  role included. An unknown id, an id that is not a resident, one out of `EditReach` and one
+  who keeps no stall all produce the same frame, so a client learns nothing by probing. This is
+  the fail-closed default rather than a stand-in: #459 is what teaches the server what a vendor
+  role opens, and `vendorRole` is the one place the trades are named so that issue changes an
+  outcome rather than rediscovering a list.
+- **The router's case is what closed a live edge, and it is worth knowing which one.**
+  `NpcInteractRequest` has decoded at the protocol boundary since V25; while the router had no
+  case for it, such a frame fell through the default and closed the session as **malformed** —
+  a V25 client hung up on by a server that understood every byte it sent. A refusal is an
+  answer and a disconnect is not, which is why `npc_test.go` sends two requests rather than
+  one: the second can only be answered by a session that survived the first.
 
 ## Crafting, and how a transaction is made out of an array
 
