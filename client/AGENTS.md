@@ -63,6 +63,7 @@ keeps meaning "everything the client is".
 | `world/render.rs` | the meshing tasks, the mesh assets, the two materials, one entity per chunk with the water half as its child | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`) and which hide what is behind them (`is_opaque`) | know about meshes or about the wire |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
+| `player/ambience.rs` | the cosmetic ground look sampled from the loaded voxels around the eye | be read by anything that decides an outcome, be sent, or be derived from anything the server said about climate or weather |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
@@ -117,17 +118,18 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are five**:
+**Every edge from `player` to `world` is narrow and read-only, and there are six**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
 the authority on which of those exist; `player/camera.rs` reads it for the same question one step
 further on, so the third-person boom stops at a wall instead of going through it;
 `player/sky.rs` reads it for exactly one voxel — the one the eye is inside — because water is the
 one block that changes what the sky looks like; `player/wards.rs` reads that same answer to hide
-its presentation under water; and `player/items.rs` asks `palette` for a terrain
+its presentation under water; `player/ambience.rs` reads a coarse lattice of loaded columns to
+describe their cosmetic ground look; and `player/items.rs` asks `palette` for a terrain
 swatch when an item deliberately reuses one. The first-person hand takes its skin colour from the
 local player's server-sent `Appearance`, not from a terrain approximation. **No edge writes world
-state, and no edge points back from `world` to `player`.** A sixth, in either direction, is a
-design question rather than an import. The four that read the store all resolve their voxel
+state, and no edge points back from `world` to `player`.** A seventh, in either direction, is a
+design question rather than an import. The five that read the store all resolve their voxel
 through `ChunkStore::block_at`, the one place a world coordinate becomes a block id.
 
 **The last of those is the client's one opinion about what an item looks like, and every
