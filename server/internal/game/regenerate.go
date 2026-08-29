@@ -72,12 +72,16 @@ func (s *Sim) advanceChunkRegenerationLocked() {
 	for budget > 0 && len(s.regeneration) > 0 {
 		pass := &s.regeneration[0]
 		coord := pass.coords[0]
-		pass.coords = pass.coords[1:]
 		budget--
 
 		if !pass.keep(coord.Column()) {
-			s.regenerateChunkLocked(coord)
+			if err := s.regenerateChunkLocked(coord); err != nil {
+				// Keep it at the head: a failed durable removal is retried next tick.
+				s.log.Error("chunk regeneration did not finish cleanly", "coord", coord, "error", err)
+				return
+			}
 		}
+		pass.coords = pass.coords[1:]
 		if len(pass.coords) == 0 {
 			s.regeneration[0] = chunkRegenerationPass{}
 			s.regeneration = s.regeneration[1:]
@@ -85,7 +89,7 @@ func (s *Sim) advanceChunkRegenerationLocked() {
 	}
 }
 
-func (s *Sim) regenerateChunkLocked(coord world.Coord) {
+func (s *Sim) regenerateChunkLocked(coord world.Coord) error {
 	structuresChanged := false
 	for id, held := range s.structures {
 		if held.worldOwned() || !structureOverlapsChunk(held, coord) {
@@ -117,9 +121,7 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) {
 
 	// Regenerate republishes a resident chunk before it returns, so the collision
 	// reader below observes the restored composition through its revision check.
-	if err := s.chunkRegenerator.Regenerate(coord); err != nil {
-		s.log.Error("chunk regeneration did not finish cleanly", "coord", coord, "error", err)
-	}
+	err := s.chunkRegenerator.Regenerate(coord)
 
 	for _, player := range s.players {
 		if !overlapsChunk(s.terrain, playerBox(player.pos), coord) {
@@ -139,6 +141,7 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) {
 	// every woken diff reads the regenerated composition, while a session still waiting
 	// on its first send simply receives that new composition through the ordinary path.
 	s.resendChunk(coord)
+	return err
 }
 
 // structureOverlapsChunk reports whether any support or occupied cell of held lies in

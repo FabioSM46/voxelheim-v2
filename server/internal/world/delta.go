@@ -100,11 +100,7 @@ func (d *Deltas) Count() int {
 	return total
 }
 
-// Chunks is every chunk for which this process currently holds an edit.
-//
-// A storm cannot rely on the files alone: an edit accepted since the last autosave
-// already belongs to the world, even though no file names it yet. The copy is sorted
-// so callers can combine it with stored and resident coordinates deterministically.
+// Chunks returns the sorted coordinates with live in-memory edits, including unsaved ones.
 func (d *Deltas) Chunks() []Coord {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

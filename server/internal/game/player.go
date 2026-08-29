@@ -197,9 +197,9 @@ type Sim struct {
 	// intensity 0 is a perfectly ordinary sky somebody might genuinely be imposing.
 	//
 	// The Fimbulvetr controller sets it through BeginStorm and clears it through
-	// FinishStorm, under this lock like every other field here. It is read once per tick
-	// by weatherAtLocked, and read there rather than per player so that a storm cannot
-	// begin halfway down one tick's player list.
+	// CompleteStorm, under this lock like every other field here. It is read once per
+	// tick by weatherAtLocked, and read there rather than per player so that a storm
+	// cannot begin halfway down one tick's player list.
 	weatherOverride *protocol.WeatherState
 
 	// stormWarning is the current phase sent to somebody joining between broadcasts.

@@ -20,11 +20,10 @@ type stormCycle struct {
 	warned   uint8
 	seen     bool
 	raging   bool
+	healing  bool
 }
 
-// stormLoop checks immediately at startup and then every ten seconds. An immediate
-// pass is what resumes a storm after a restart instead of leaving ordinary weather in
-// place until the first ticker edge.
+// stormLoop checks immediately at startup, then at the configured poll interval.
 func (s *server) stormLoop(ctx context.Context) error {
 	if s.stormPeriod == 0 {
 		s.sim.DisableStorm()
@@ -43,14 +42,16 @@ func (s *server) stormLoop(ctx context.Context) error {
 	for {
 		s.stormPass(clock.Now())
 		next = next.Add(every)
+		// SleepUntil does not coalesce missed edges as a ticker does.
+		if now := clock.Now(); !next.After(now) {
+			next = now.Add(every)
+		}
 		if err := clock.SleepUntil(ctx, next); err != nil {
 			return err
 		}
 	}
 }
 
-// stormPass is one wall-clock decision. It is kept separate from the wait so a fake
-// clock can drive every boundary exactly and so none of these rules enters the tick.
 func (s *server) stormPass(now time.Time) {
 	if s.stormPeriod == 0 {
 		return
@@ -88,8 +89,7 @@ func (s *server) stormPass(now time.Time) {
 	}
 
 	if !s.stormCycle.raging {
-		// The process was not here for the deadline. Give everybody one useful minute
-		// instead of silently scouring a world the instant it restarts.
+		// Give a missed storm one useful minute instead of healing without notice.
 		newDue := nowUnix + durationSeconds(missedStormWarning)
 		s.sim.ScheduleStorm(newDue)
 		s.sim.ApproachStorm(uint32(durationSeconds(missedStormWarning)))
@@ -105,20 +105,31 @@ func (s *server) stormPass(now time.Time) {
 		return
 	}
 
-	coords, err := s.chunks.RegenerationChunks()
-	if err != nil {
-		// Keep the blizzard in place and retry. Clearing it without being able to name
-		// what must heal would announce a storm that did not finish its only outcome.
-		s.sim.BeginStorm(1)
-		s.log.Error("listing chunks for Fimbulvetr failed; the storm remains active", "error", err)
+	if !s.stormCycle.healing {
+		coords, err := s.chunks.RegenerationChunks()
+		if err != nil {
+			s.sim.BeginStorm(1)
+			s.log.Error("listing chunks for Fimbulvetr failed; the storm remains active", "error", err)
+			return
+		}
+		s.sim.StartStormRegeneration(coords)
+		s.stormCycle.healing = true
+		s.log.Info("Fimbulvetr began healing the world", "chunks_considered", len(coords))
+	}
+	if !s.sim.StormRegenerationComplete() {
 		return
 	}
-	s.sim.FinishStorm(coords)
+	if !s.flushStructures() {
+		return
+	}
+	if !s.sim.CompleteStorm() {
+		return
+	}
 	s.broadcastStorm(vnet.StormPhasePassed, 0)
 	nextDue := due + durationSeconds(s.stormPeriod)
 	s.sim.ScheduleStorm(nextDue)
 	s.flushClock()
-	s.log.Info("Fimbulvetr passed", "chunks_considered", len(coords), "next_storm_unix", nextDue)
+	s.log.Info("Fimbulvetr passed", "next_storm_unix", nextDue)
 	s.stormCycle = stormCycle{deadline: nextDue, seen: true}
 }
 
@@ -138,8 +149,7 @@ func (s *server) approachStorm(remaining int64) {
 		bit, prior = warnedOneMinute, warnedTenMinutes
 	}
 	if !s.stormCycle.seen {
-		// On restart announce only the phase that is useful now, not every threshold
-		// crossed while the server was down.
+		// On restart announce only the useful current threshold.
 		s.stormCycle.warned |= prior
 	}
 	s.stormCycle.seen = true

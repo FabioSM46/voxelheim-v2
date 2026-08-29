@@ -158,12 +158,8 @@ func (c *Cache) Len() int {
 	return c.lru.Len()
 }
 
-// RegenerationChunks is every chunk a world-healing pass must consider: edits
-// already on disk, newer edits still only in memory, and resident chunks whose
-// simulation-owned entities may need clearing even when their terrain is pristine.
-//
-// Listing the store is the only I/O and happens with no cache lock held. The three
-// snapshots are then de-duplicated and sorted, making a pass stable across machines.
+// RegenerationChunks returns the sorted union of stored, in-memory and resident chunks.
+// Store listing is the only I/O and runs without a cache lock.
 func (c *Cache) RegenerationChunks() ([]Coord, error) {
 	var stored []Coord
 	if c.store != nil {

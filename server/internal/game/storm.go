@@ -9,19 +9,15 @@ import (
 )
 
 const (
-	// DefaultStormPeriod is the real-week cadence used when the operator supplies no
-	// override. Unlike the duration, the cadence is exposed as a server flag.
+	// DefaultStormPeriod is the operator-overridable real-week cadence.
 	DefaultStormPeriod = 168 * time.Hour
 
-	// StormDuration is how long the Fimbulvetr blizzard occupies the whole world.
-	// It is a gameplay rule rather than an operator setting.
+	// StormDuration is the fixed global-blizzard duration.
 	StormDuration = 5 * time.Minute
 )
 
 var blizzard = protocol.WeatherState{Kind: vnet.WeatherKindBlizzard, Intensity: 255}
 
-// ApproachStorm records the warning a newly joined player must receive. Broadcasts
-// remain the wall-clock worker's responsibility; this is only authoritative state.
 func (s *Sim) ApproachStorm(secondsUntil uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -31,8 +27,6 @@ func (s *Sim) ApproachStorm(secondsUntil uint32) {
 	}
 }
 
-// BeginStorm imposes the global blizzard and records how much of it remains for a
-// newly joined player. Repeated calls update the countdown without changing phase.
 func (s *Sim) BeginStorm(secondsUntil uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -43,21 +37,33 @@ func (s *Sim) BeginStorm(secondsUntil uint32) {
 	}
 }
 
-// FinishStorm clears the blizzard and queues the bounded regeneration pass. A ward
-// protects its whole column, whatever kind of chunk in that column is being examined.
-func (s *Sim) FinishStorm(coords []world.Coord) {
+func (s *Sim) StartStormRegeneration(coords []world.Coord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.weatherOverride = nil
-	s.stormWarning = protocol.StormWarning{}
 	s.RegenerateChunksLocked(coords, func(column world.Column) bool {
 		_, warded := s.wardOf(column)
 		return warded
 	})
 }
 
-// DisableStorm removes live storm state without scouring anything. It is used by
-// -storm-period 0, including when a stored deadline exists from an earlier run.
+func (s *Sim) StormRegenerationComplete() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.regeneration) == 0
+}
+
+func (s *Sim) CompleteStorm() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.regeneration) != 0 {
+		return false
+	}
+	s.weatherOverride = nil
+	s.stormWarning = protocol.StormWarning{}
+	return true
+}
+
+// DisableStorm removes live state without healing, including a stored deadline.
 func (s *Sim) DisableStorm() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

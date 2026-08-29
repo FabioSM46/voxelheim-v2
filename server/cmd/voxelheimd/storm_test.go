@@ -23,6 +23,22 @@ func (onePassClock) SleepUntil(context.Context, time.Time) error {
 	return context.Canceled
 }
 
+type stalledStormClock struct {
+	now       time.Time
+	deadlines []time.Time
+}
+
+func (c *stalledStormClock) Now() time.Time { return c.now }
+
+func (c *stalledStormClock) SleepUntil(_ context.Context, deadline time.Time) error {
+	c.deadlines = append(c.deadlines, deadline)
+	if len(c.deadlines) == 1 {
+		c.now = deadline.Add(time.Hour)
+		return nil
+	}
+	return context.Canceled
+}
+
 type warningRecorder struct {
 	mu       sync.Mutex
 	warnings []protocol.StormWarning
@@ -117,7 +133,30 @@ func TestStormPassSchedulesWarnsRagesPassesAndPersists(t *testing.T) {
 	if warning, active := srv.sim.StormWarning(); !active || warning.SecondsUntil != 1 {
 		t.Fatalf("last raging second = (%+v, %v)", warning, active)
 	}
+	if _, _, err := srv.chunks.Get(context.Background(), world.Coord{X: 100}); err != nil {
+		t.Fatalf("make a regeneration candidate resident: %v", err)
+	}
 	srv.stormPass(time.Unix(due, 0).Add(game.StormDuration))
+	if got := srv.sim.NextStorm(); got != due {
+		t.Fatalf("deadline advanced to %d before regeneration, want original %d", got, due)
+	}
+	if warning, active := srv.sim.StormWarning(); !active || warning.Phase != vnet.StormPhaseRaging {
+		t.Fatalf("phase while regeneration is queued = (%+v, %v), want Raging", warning, active)
+	}
+	stored, found, err = srv.clock.Load()
+	if err != nil || !found || stored.NextStormUnix != due {
+		t.Fatalf("stored deadline before regeneration = (%+v, %v, %v), want %d", stored, found, err, due)
+	}
+	restarted, _ := newStormHarness(t)
+	restarted.sim.ScheduleStorm(stored.NextStormUnix)
+	restarted.stormPass(time.Unix(due, 0).Add(game.StormDuration + time.Second))
+	if warning, active := restarted.sim.StormWarning(); !active ||
+		warning.Phase != vnet.StormPhaseApproaching || warning.SecondsUntil != 60 {
+		t.Fatalf("phase after a crash with queued healing = (%+v, %v), want Approaching 60", warning, active)
+	}
+
+	srv.sim.Step(1)
+	srv.stormPass(time.Unix(due, 0).Add(game.StormDuration + stormPollInterval))
 	got = recorder.snapshot()
 	last := got[len(got)-1]
 	if last.Phase != vnet.StormPhasePassed || last.SecondsUntil != 0 {
@@ -130,6 +169,24 @@ func TestStormPassSchedulesWarnsRagesPassesAndPersists(t *testing.T) {
 	stored, found, err = srv.clock.Load()
 	if err != nil || !found || stored.NextStormUnix != next {
 		t.Fatalf("stored next deadline = (%+v, %v, %v)", stored, found, err)
+	}
+}
+
+func TestAStalledStormPollerCoalescesMissedIntervals(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := newStormHarness(t)
+	start := time.Unix(1_800_000_000, 0)
+	clock := &stalledStormClock{now: start}
+	srv.wallClock = clock
+	if err := srv.stormLoop(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stormLoop after fake stall = %v, want context.Canceled", err)
+	}
+	if len(clock.deadlines) != 2 {
+		t.Fatalf("sleep deadlines = %v, want two", clock.deadlines)
+	}
+	if got, want := clock.deadlines[1], clock.now.Add(stormPollInterval); !got.Equal(want) {
+		t.Fatalf("deadline after stall = %v, want coalesced %v", got, want)
 	}
 }
 

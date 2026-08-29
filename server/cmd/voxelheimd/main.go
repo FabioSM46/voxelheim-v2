@@ -363,7 +363,10 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		stormDeadlineChanged = sim.NextStorm() != 0
 		sim.DisableStorm()
 	} else if opts.nextStorm != "" {
-		next, _ := time.Parse(time.RFC3339, opts.nextStorm) // validated before any world was opened
+		next, err := time.Parse(time.RFC3339, opts.nextStorm)
+		if err != nil {
+			return fmt.Errorf("parse validated next storm %q: %w", opts.nextStorm, err)
+		}
 		sim.ScheduleStorm(next.Unix())
 		stormDeadlineChanged = true
 	}
@@ -994,10 +997,10 @@ func (s *server) saveStructuresLoop(ctx context.Context) error {
 // The re-marking is the contract Sim.TakeDirtyStructures states and the one
 // world.Cache.Flush keeps for a chunk: taking the camp clears the flag, so a caller
 // that dropped a failed write would lose the change for good.
-func (s *server) flushStructures() {
+func (s *server) flushStructures() bool {
 	camp, dirty := s.sim.TakeDirtyStructures()
 	if !dirty {
-		return
+		return true
 	}
 
 	// The other direction of restoreStructures' loop, and the only other place the two
@@ -1017,7 +1020,9 @@ func (s *server) flushStructures() {
 		s.sim.MarkStructuresDirty()
 		s.log.Error("saving the structures failed; they will be retried",
 			"structures_file", s.structures.Path(), "structures", len(camp), "error", err)
+		return false
 	}
+	return true
 }
 
 // saveClockLoop writes the world's time of day, every interval, until ctx ends.
