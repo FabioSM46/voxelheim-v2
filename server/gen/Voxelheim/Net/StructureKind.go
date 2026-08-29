@@ -18,20 +18,26 @@ const (
 	StructureKindTent     StructureKind = 1
 	StructureKindForge    StructureKind = 2
 	StructureKindCampfire StructureKind = 3
+	/// A planted stone that wards the ground around it. V26, and **this member is what makes
+	/// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
+	/// cannot name it, and refusing ends the session. See `common.fbs`.
+	StructureKindRunestone StructureKind = 4
 )
 
 var EnumNamesStructureKind = map[StructureKind]string{
-	StructureKindUnknown:  "Unknown",
-	StructureKindTent:     "Tent",
-	StructureKindForge:    "Forge",
-	StructureKindCampfire: "Campfire",
+	StructureKindUnknown:   "Unknown",
+	StructureKindTent:      "Tent",
+	StructureKindForge:     "Forge",
+	StructureKindCampfire:  "Campfire",
+	StructureKindRunestone: "Runestone",
 }
 
 var EnumValuesStructureKind = map[string]StructureKind{
-	"Unknown":  StructureKindUnknown,
-	"Tent":     StructureKindTent,
-	"Forge":    StructureKindForge,
-	"Campfire": StructureKindCampfire,
+	"Unknown":   StructureKindUnknown,
+	"Tent":      StructureKindTent,
+	"Forge":     StructureKindForge,
+	"Campfire":  StructureKindCampfire,
+	"Runestone": StructureKindRunestone,
 }
 
 func (v StructureKind) String() string {

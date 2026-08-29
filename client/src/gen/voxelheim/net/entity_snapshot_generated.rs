@@ -40,6 +40,7 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_ACCESSIBLE_LOOT_CORPSES: ::flatbuffers::VOffsetT = 28;
     pub const VT_PROJECTILES: ::flatbuffers::VOffsetT = 30;
     pub const VT_BLOCKING_PLAYERS: ::flatbuffers::VOffsetT = 32;
+    pub const VT_WEATHER: ::flatbuffers::VOffsetT = 34;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -57,6 +58,9 @@ impl<'a> EntitySnapshot<'a> {
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
         builder.add_party_leader_entity_id(args.party_leader_entity_id);
+        if let Some(x) = args.weather {
+            builder.add_weather(x);
+        }
         if let Some(x) = args.blocking_players {
             builder.add_blocking_players(x);
         }
@@ -434,6 +438,36 @@ impl<'a> EntitySnapshot<'a> {
                 )
         }
     }
+    /// What the sky is doing at **the recipient's own position**, this tick. Absent from a
+    /// server that keeps no weather at all.
+    ///
+    /// **The second field here that is not about an entity**, and it rides along for the
+    /// reason `tick_of_day` does: it changes every tick and is read by the same frame the
+    /// world is drawn from, so a message of its own would arrive on its own schedule and
+    /// put the rain a tick away from the ground it is falling on. One value rather than a
+    /// field, a front or a map, because the only weather this session has to draw is the
+    /// weather it is standing in.
+    ///
+    /// **Authoritative, not presentation, and the split runs through the middle of it.**
+    /// The server has already applied everything this state *does* — the cold, the slowed
+    /// step, the doused fire, what a blizzard hides — and those outcomes arrive as vitals,
+    /// as position and as `StructureState.lit`. What is left for the client is everything
+    /// it *draws*: particles, fog, wind, sound. A client that re-derived an effect from
+    /// this field would be deciding a gameplay outcome from presentation data.
+    ///
+    /// Absence says this server keeps no weather, which a test world and an older server
+    /// both legitimately are; a *present* struct carrying `WeatherKind.Unknown` is a
+    /// protocol error. `WeatherState` sets both cases out.
+    #[inline]
+    pub fn weather(&self) -> Option<&'a WeatherState> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<WeatherState>(EntitySnapshot::VT_WEATHER, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -458,6 +492,7 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("accessible_loot_corpses", Self::VT_ACCESSIBLE_LOOT_CORPSES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ProjectileState>>>("projectiles", Self::VT_PROJECTILES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("blocking_players", Self::VT_BLOCKING_PLAYERS, false)?
+     .visit_field::<WeatherState>("weather", Self::VT_WEATHER, false)?
      .finish();
         Ok(())
     }
@@ -492,6 +527,7 @@ pub struct EntitySnapshotArgs<'a> {
     pub accessible_loot_corpses: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
     pub projectiles: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ProjectileState>>>,
     pub blocking_players: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
+    pub weather: Option<&'a WeatherState>,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -512,6 +548,7 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             accessible_loot_corpses: None,
             projectiles: None,
             blocking_players: None,
+            weather: None,
         }
     }
 }
@@ -658,6 +695,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
         );
     }
     #[inline]
+    pub fn add_weather(&mut self, weather: &WeatherState) {
+        self.fbb_
+            .push_slot_always::<&WeatherState>(EntitySnapshot::VT_WEATHER, weather);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -694,6 +736,7 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("accessible_loot_corpses", &self.accessible_loot_corpses());
         ds.field("projectiles", &self.projectiles());
         ds.field("blocking_players", &self.blocking_players());
+        ds.field("weather", &self.weather());
         ds.finish()
     }
 }

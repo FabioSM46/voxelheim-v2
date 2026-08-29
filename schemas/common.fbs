@@ -163,6 +163,42 @@ namespace Voxelheim.Net;
 /// Three bumps owed are still one bump. Taking them together is what lets the resident
 /// and vendor issues that follow consume one settled contract instead of moving this
 /// number again.
+///
+/// **V26 adds the Fimbulvetr: the weather where a player stands, a warning about the
+/// storm, a fire the rain can put out, and the stone that wards ground.** Of everything
+/// it adds, exactly one thing owes the bump, and naming it precisely is the point of this
+/// paragraph.
+///
+/// **`StructureKind.Runestone` is the break.** It is an enum member inside a table field
+/// travelling server -> client, and `StructureState` states its invariant as a known
+/// non-zero `kind`: both decoders refuse a kind they cannot name, and refusing a
+/// structure ends the session. So a V25 client against a V26 server would handshake
+/// cleanly and drop the connection the first time somebody's runestone came into view.
+/// That is `MobKind.Villager`'s argument and `MobAction.Dying`'s before it — the receiver
+/// refuses, so the bump is owed.
+///
+/// **Nothing else here owes one, and the reasons differ.** `StormWarning` and
+/// `WardsNearby` are appended union members travelling server -> client, so an older
+/// client drops the tag and loses a warning or some shading — `ActionRefused`'s
+/// exemption, not `DropItemRequest`'s. `RefusedAction.Edit` and `RefusedAction.Mine` and
+/// `RefusalReason.Warded` ride inside an `ActionRefused`, whose decoders are deliberately
+/// total on both sides: an unrecognised action or reason reads as `Unknown` and costs one
+/// sentence rather than the session. `RecipeID.Runestone` travels client -> server, where
+/// an unknown recipe is refused by the authoritative server as a recipe it has no table
+/// entry for, which is an ordinary answer rather than a dropped connection.
+///
+/// **The two appended table fields are the shape V10 and V11 moved this number for, so it
+/// is worth saying why neither does here.** `weather` is absent from a V25 server, and
+/// absence already means "this server keeps no weather" — exactly true of one, so there is
+/// no silent disagreement to have. `lit` defaults to **`true`**, so the field a V25 server
+/// never writes reads as a lit fire, which is what every fire on a server that cannot
+/// douse one is. Had it defaulted to `false` it would have owed the bump alone, for V11's
+/// reason precisely: two peers assigning different state to one entity after a clean
+/// handshake.
+///
+/// One bump owed is still one bump, and taking the whole iteration's contract with it lets
+/// the weather, storm, runestone and ward issues that follow consume one settled contract
+/// instead of moving this number four more times.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -170,7 +206,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 25
+  Current = 26
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

@@ -1337,6 +1337,11 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonNotAVendor,
 		vnet.RefusalReasonNotEnoughSilver,
 		vnet.RefusalReasonVendorDoesNotWant,
+		// V26 reserves one for the runestone's ward, and it is the same shape: the ground
+		// belongs to somebody else, the request was well formed, and the player can walk
+		// somewhere else. It names no owner, deliberately — an answer that did would let
+		// a client learn who has claimed ground by poking at it.
+		vnet.RefusalReasonWarded,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1358,8 +1363,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// vocabulary now and receive producers in the dependent authoritative loot issue;
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 34 {
-		t.Errorf("RefusalReason has %d members, want 34 — a new one needs a producer and client handling, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 35 {
+		t.Errorf("RefusalReason has %d members, want 35 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

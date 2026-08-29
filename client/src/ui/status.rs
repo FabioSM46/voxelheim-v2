@@ -616,6 +616,10 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         RefusalReason::SlotUnusable => Some("what you are holding does not build anything"),
         RefusalReason::InventoryBusy => Some("your pack was busy; try again"),
         RefusalReason::TentAlreadyPlaced => Some("you already have a tent standing"),
+        // V26's one, and the only new reason that *is* about a placement. It names no
+        // owner because the contract does not carry one: a line saying whose ward it was
+        // would be this build inventing the half the server deliberately withheld.
+        RefusalReason::Warded => Some("this ground is warded"),
         RefusalReason::TooFast
         | RefusalReason::PartyFull
         | RefusalReason::NoSuchPlayer
@@ -1281,7 +1285,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 34] = [
+    const EVERY_REASON: [RefusalReason; 35] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1314,6 +1318,8 @@ mod tests {
         RefusalReason::NotAVendor,
         RefusalReason::NotEnoughSilver,
         RefusalReason::VendorDoesNotWant,
+        // V26's one warded-ground reason.
+        RefusalReason::Warded,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,

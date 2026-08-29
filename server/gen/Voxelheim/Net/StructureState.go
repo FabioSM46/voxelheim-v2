@@ -38,6 +38,7 @@ import (
 // /   - `anchor` is present; an absent struct field decodes as null, and the origin is a
 // /     real location rather than a default
 // /   - `kind` and `facing` are known non-zero members
+// /   - `lit` has no invalid value; see the field
 type StructureState struct {
 	_tab flatbuffers.Table
 }
@@ -160,8 +161,46 @@ func (rcv *StructureState) MutateOwnerEntityId(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(12, n)
 }
 
+// / Whether this structure is burning. False is a campfire the rain has put out, and
+// / true is every other structure of every other kind, always.
+// /
+// / **The server decides, and a doused fire is not a station**: it lights nothing,
+// / warms nobody and satisfies no recipe that needs a campfire nearby. The client draws
+// / the difference and never computes it — whether rain reaches this cell, how hard it
+// / falls and how long it takes are all authoritative, and a renderer that guessed
+// / would show a fire the crafting menu disagreed with.
+// /
+// / **The default is `true`, and it is load-bearing**: an elided field then reads as the
+// / burning fire every fire on a pre-V26 server is, so the byte is written only when one
+// / is actually out and the field owes no version bump of its own. `common.fbs` records
+// / what a default of `false` would have cost.
+func (rcv *StructureState) Lit() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return true
+}
+
+// / Whether this structure is burning. False is a campfire the rain has put out, and
+// / true is every other structure of every other kind, always.
+// /
+// / **The server decides, and a doused fire is not a station**: it lights nothing,
+// / warms nobody and satisfies no recipe that needs a campfire nearby. The client draws
+// / the difference and never computes it — whether rain reaches this cell, how hard it
+// / falls and how long it takes are all authoritative, and a renderer that guessed
+// / would show a fire the crafting menu disagreed with.
+// /
+// / **The default is `true`, and it is load-bearing**: an elided field then reads as the
+// / burning fire every fire on a pre-V26 server is, so the byte is written only when one
+// / is actually out and the field owes no version bump of its own. `common.fbs` records
+// / what a default of `false` would have cost.
+func (rcv *StructureState) MutateLit(n bool) bool {
+	return rcv._tab.MutateBoolSlot(14, n)
+}
+
 func StructureStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func StructureStateAddStructureId(builder *flatbuffers.Builder, structureId uint64) {
 	builder.PrependUint64Slot(0, structureId, 0)
@@ -177,6 +216,9 @@ func StructureStateAddFacing(builder *flatbuffers.Builder, facing Facing) {
 }
 func StructureStateAddOwnerEntityId(builder *flatbuffers.Builder, ownerEntityId uint64) {
 	builder.PrependUint64Slot(4, ownerEntityId, 0)
+}
+func StructureStateAddLit(builder *flatbuffers.Builder, lit bool) {
+	builder.PrependBoolSlot(5, lit, true)
 }
 func StructureStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

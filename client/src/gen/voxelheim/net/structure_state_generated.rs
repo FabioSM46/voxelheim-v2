@@ -37,6 +37,7 @@ pub enum StructureStateOffset {}
 ///   - `anchor` is present; an absent struct field decodes as null, and the origin is a
 ///     real location rather than a default
 ///   - `kind` and `facing` are known non-zero members
+///   - `lit` has no invalid value; see the field
 pub struct StructureState<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -57,6 +58,7 @@ impl<'a> StructureState<'a> {
     pub const VT_ANCHOR: ::flatbuffers::VOffsetT = 8;
     pub const VT_FACING: ::flatbuffers::VOffsetT = 10;
     pub const VT_OWNER_ENTITY_ID: ::flatbuffers::VOffsetT = 12;
+    pub const VT_LIT: ::flatbuffers::VOffsetT = 14;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -78,6 +80,7 @@ impl<'a> StructureState<'a> {
         if let Some(x) = args.anchor {
             builder.add_anchor(x);
         }
+        builder.add_lit(args.lit);
         builder.add_facing(args.facing);
         builder.add_kind(args.kind);
         builder.finish()
@@ -147,6 +150,30 @@ impl<'a> StructureState<'a> {
                 .unwrap()
         }
     }
+    /// Whether this structure is burning. False is a campfire the rain has put out, and
+    /// true is every other structure of every other kind, always.
+    ///
+    /// **The server decides, and a doused fire is not a station**: it lights nothing,
+    /// warms nobody and satisfies no recipe that needs a campfire nearby. The client draws
+    /// the difference and never computes it — whether rain reaches this cell, how hard it
+    /// falls and how long it takes are all authoritative, and a renderer that guessed
+    /// would show a fire the crafting menu disagreed with.
+    ///
+    /// **The default is `true`, and it is load-bearing**: an elided field then reads as the
+    /// burning fire every fire on a pre-V26 server is, so the byte is written only when one
+    /// is actually out and the field owes no version bump of its own. `common.fbs` records
+    /// what a default of `false` would have cost.
+    #[inline]
+    pub fn lit(&self) -> bool {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<bool>(StructureState::VT_LIT, Some(true))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for StructureState<'_> {
@@ -161,6 +188,7 @@ impl ::flatbuffers::Verifiable for StructureState<'_> {
             .visit_field::<BlockCoord>("anchor", Self::VT_ANCHOR, false)?
             .visit_field::<Facing>("facing", Self::VT_FACING, false)?
             .visit_field::<u64>("owner_entity_id", Self::VT_OWNER_ENTITY_ID, false)?
+            .visit_field::<bool>("lit", Self::VT_LIT, false)?
             .finish();
         Ok(())
     }
@@ -171,6 +199,7 @@ pub struct StructureStateArgs<'a> {
     pub anchor: Option<&'a BlockCoord>,
     pub facing: Facing,
     pub owner_entity_id: u64,
+    pub lit: bool,
 }
 impl<'a> Default for StructureStateArgs<'a> {
     #[inline]
@@ -181,6 +210,7 @@ impl<'a> Default for StructureStateArgs<'a> {
             anchor: None,
             facing: Facing::Unknown,
             owner_entity_id: 0,
+            lit: true,
         }
     }
 }
@@ -216,6 +246,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> StructureStateBuilder<'a, 'b,
             .push_slot::<u64>(StructureState::VT_OWNER_ENTITY_ID, owner_entity_id, 0);
     }
     #[inline]
+    pub fn add_lit(&mut self, lit: bool) {
+        self.fbb_
+            .push_slot::<bool>(StructureState::VT_LIT, lit, true);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> StructureStateBuilder<'a, 'b, A> {
@@ -240,6 +275,7 @@ impl ::core::fmt::Debug for StructureState<'_> {
         ds.field("anchor", &self.anchor());
         ds.field("facing", &self.facing());
         ds.field("owner_entity_id", &self.owner_entity_id());
+        ds.field("lit", &self.lit());
         ds.finish()
     }
 }

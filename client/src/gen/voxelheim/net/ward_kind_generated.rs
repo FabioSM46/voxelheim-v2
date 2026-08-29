@@ -6,68 +6,50 @@ use super::*;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MIN_STRUCTURE_KIND: u8 = 0;
+pub const ENUM_MIN_WARD_KIND: u8 = 0;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_STRUCTURE_KIND: u8 = 4;
+pub const ENUM_MAX_WARD_KIND: u8 = 2;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_STRUCTURE_KIND: [StructureKind; 5] = [
-    StructureKind::Unknown,
-    StructureKind::Tent,
-    StructureKind::Forge,
-    StructureKind::Campfire,
-    StructureKind::Runestone,
-];
+pub const ENUM_VALUES_WARD_KIND: [WardKind; 3] =
+    [WardKind::Unknown, WardKind::Runestone, WardKind::Settlement];
 
-/// What kind of thing a `StructureState` describes.
+/// What put a ward on a chunk column.
 ///
-/// Zero member for the same fail-closed reason as `MobKind.Unknown`: an unrecognised
-/// kind is a contract the receiver does not speak, and drawing a default building in its
-/// place would put a shelter in the world the server never said was there.
-///
-/// Members are appended, never inserted, for the reason `RecipeID`'s are.
+/// Zero member for the usual reason, and it is refused rather than drawn: a column the
+/// client cannot name the ward of is a contract it does not speak, and shading it as a
+/// generic claim would tell the player a settlement owns ground a runestone does.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
-pub struct StructureKind(pub u8);
+pub struct WardKind(pub u8);
 #[allow(non_upper_case_globals)]
-impl StructureKind {
+impl WardKind {
     pub const Unknown: Self = Self(0);
-    pub const Tent: Self = Self(1);
-    pub const Forge: Self = Self(2);
-    pub const Campfire: Self = Self(3);
-    /// A planted stone that wards the ground around it. V26, and **this member is what makes
-    /// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
-    /// cannot name it, and refusing ends the session. See `common.fbs`.
-    pub const Runestone: Self = Self(4);
+    /// A runestone somebody planted. `WardedColumn.mine` says whether it was this player.
+    pub const Runestone: Self = Self(1);
+    /// A settlement's own ground, which belongs to nobody and is never `mine`.
+    pub const Settlement: Self = Self(2);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 4;
-    pub const ENUM_VALUES: &'static [Self] = &[
-        Self::Unknown,
-        Self::Tent,
-        Self::Forge,
-        Self::Campfire,
-        Self::Runestone,
-    ];
+    pub const ENUM_MAX: u8 = 2;
+    pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Runestone, Self::Settlement];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
         match self {
             Self::Unknown => Some("Unknown"),
-            Self::Tent => Some("Tent"),
-            Self::Forge => Some("Forge"),
-            Self::Campfire => Some("Campfire"),
             Self::Runestone => Some("Runestone"),
+            Self::Settlement => Some("Settlement"),
             _ => None,
         }
     }
 }
-impl ::core::fmt::Debug for StructureKind {
+impl ::core::fmt::Debug for WardKind {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         if let Some(name) = self.variant_name() {
             f.write_str(name)
@@ -76,7 +58,7 @@ impl ::core::fmt::Debug for StructureKind {
         }
     }
 }
-impl<'a> ::flatbuffers::Follow<'a> for StructureKind {
+impl<'a> ::flatbuffers::Follow<'a> for WardKind {
     type Inner = Self;
     #[inline]
     unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
@@ -85,15 +67,15 @@ impl<'a> ::flatbuffers::Follow<'a> for StructureKind {
     }
 }
 
-impl ::flatbuffers::Push for StructureKind {
-    type Output = StructureKind;
+impl ::flatbuffers::Push for WardKind {
+    type Output = WardKind;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
         unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
     }
 }
 
-impl ::flatbuffers::EndianScalar for StructureKind {
+impl ::flatbuffers::EndianScalar for WardKind {
     type Scalar = u8;
     #[inline]
     fn to_little_endian(self) -> u8 {
@@ -107,7 +89,7 @@ impl ::flatbuffers::EndianScalar for StructureKind {
     }
 }
 
-impl<'a> ::flatbuffers::Verifiable for StructureKind {
+impl<'a> ::flatbuffers::Verifiable for WardKind {
     #[inline]
     fn run_verifier(
         v: &mut ::flatbuffers::Verifier,
@@ -117,4 +99,4 @@ impl<'a> ::flatbuffers::Verifiable for StructureKind {
     }
 }
 
-impl ::flatbuffers::SimpleToVerifyInSlice for StructureKind {}
+impl ::flatbuffers::SimpleToVerifyInSlice for WardKind {}

@@ -43,6 +43,7 @@ const (
 	RecipeIDBow             RecipeID = 18
 	RecipeIDArrows          RecipeID = 19
 	RecipeIDWoodenSceptre   RecipeID = 20
+	RecipeIDRunestone       RecipeID = 21
 )
 
 var EnumNamesRecipeID = map[RecipeID]string{
@@ -67,6 +68,7 @@ var EnumNamesRecipeID = map[RecipeID]string{
 	RecipeIDBow:             "Bow",
 	RecipeIDArrows:          "Arrows",
 	RecipeIDWoodenSceptre:   "WoodenSceptre",
+	RecipeIDRunestone:       "Runestone",
 }
 
 var EnumValuesRecipeID = map[string]RecipeID{
@@ -91,6 +93,7 @@ var EnumValuesRecipeID = map[string]RecipeID{
 	"Bow":             RecipeIDBow,
 	"Arrows":          RecipeIDArrows,
 	"WoodenSceptre":   RecipeIDWoodenSceptre,
+	"Runestone":       RecipeIDRunestone,
 }
 
 func (v RecipeID) String() string {

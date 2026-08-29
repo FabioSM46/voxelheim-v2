@@ -1249,6 +1249,13 @@ pub enum RefusedAction {
     RemoveMarker,
     Interact,
     Trade,
+    /// A `BlockEditRequest` the server would not apply. V26, and the member warded ground
+    /// answers an edit with.
+    Edit,
+    /// A `MineRequest` the server would not begin or finish. Distinct from
+    /// [`Self::MineBlock`], which names the same action and is the value a shipped server
+    /// may already have sent: both stay, and a receiver names both.
+    Mine,
 }
 
 impl RefusedAction {
@@ -1271,6 +1278,8 @@ impl RefusedAction {
             fb::RefusedAction::RemoveMarker => Self::RemoveMarker,
             fb::RefusedAction::Interact => Self::Interact,
             fb::RefusedAction::Trade => Self::Trade,
+            fb::RefusedAction::Edit => Self::Edit,
+            fb::RefusedAction::Mine => Self::Mine,
             _ => Self::Unknown,
         }
     }
@@ -1322,6 +1331,13 @@ pub enum RefusalReason {
     NotAVendor,
     NotEnoughSilver,
     VendorDoesNotWant,
+    /// This ground is under a runestone that is not the player's, or under a settlement's
+    /// own ward. In the low group: the request was legal and the world said no.
+    ///
+    /// It names no owner, deliberately — the argument `MarkerUnknown` records, one field
+    /// over: an answer that did would let a client learn who has claimed ground by poking
+    /// at it.
+    Warded,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1364,6 +1380,7 @@ impl RefusalReason {
             fb::RefusalReason::NotAVendor => Self::NotAVendor,
             fb::RefusalReason::NotEnoughSilver => Self::NotEnoughSilver,
             fb::RefusalReason::VendorDoesNotWant => Self::VendorDoesNotWant,
+            fb::RefusalReason::Warded => Self::Warded,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -3444,6 +3461,12 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::NpcInteractRequest
         | fb::Payload::TradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
+        // V26's two server→client payloads, carried by name until their decoders land.
+        // Named here rather than left to the fallback for the reason `NONE` is: the
+        // fallback answers `UNKNOWN_VARIANT`, and a member this build *can* name reaching
+        // it would report a contract gap that does not exist. The contract half of #463
+        // settles the tags; the decoders that copy and validate these two follow it.
+        fb::Payload::StormWarning | fb::Payload::WardsNearby => Ok(Message::Deferred(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -7000,14 +7023,23 @@ mod tests {
     /// appended enum members, opposite conclusions, and the receiver is the whole of the
     /// difference.
     ///
+    /// **V26 appends the Fimbulvetr: two union members, neither of which is the break.**
+    /// `StormWarning` and `WardsNearby` both travel server to client, and an older client
+    /// drops a tag it cannot name — a warning lost, some shading lost, and the session
+    /// intact. What moved the version is not in this union at all:
+    /// `StructureKind::Runestone` is an enum member inside a table field whose invariant
+    /// is a known non-zero kind, so [`StructureKind::from_wire`] answers `None` and the
+    /// caller ends the session. Same shape as `MobKind::Villager` one version earlier, and
+    /// the same conclusion.
+    ///
     /// The rule that generalises, now that eight shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v25_names_the_settlement() {
+    fn protocol_v26_names_the_fimbulvetr() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 25);
+        assert_eq!(fb::ProtocolVersion::Current.0, 26);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -7059,6 +7091,8 @@ mod tests {
             (fb::Payload::VendorState, 48),
             (fb::Payload::TradeRequest, 49),
             (fb::Payload::VendorClosed, 50),
+            (fb::Payload::StormWarning, 51),
+            (fb::Payload::WardsNearby, 52),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -7074,7 +7108,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            51,
+            53,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -7104,7 +7138,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 51] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 53] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -7156,6 +7190,12 @@ mod tests {
         (fb::Payload::VendorState, Handling::Consumed),
         (fb::Payload::TradeRequest, Handling::ClientOnly),
         (fb::Payload::VendorClosed, Handling::Consumed),
+        // V26's two, both server→client and both named as `Deferred` until their decoders
+        // land — the same staged shape V24's map payloads and V25's stall had between
+        // their two halves. `Deferred` means "this build has no arm yet", not "this
+        // contract has no member".
+        (fb::Payload::StormWarning, Handling::Deferred),
+        (fb::Payload::WardsNearby, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -8231,6 +8271,11 @@ mod tests {
         // V25 reserves the settlement's two, on the same terms.
         assert_eq!(fb::RefusedAction::Interact.0, 15);
         assert_eq!(fb::RefusedAction::Trade.0, 16);
+        // V26 reserves the two actions warded ground refuses, on the same terms. `Mine`
+        // sits beside the reserved `MineBlock` = 2 rather than replacing it: removing or
+        // renumbering that one would relabel every refusal a shipped server has sent.
+        assert_eq!(fb::RefusedAction::Edit.0, 17);
+        assert_eq!(fb::RefusedAction::Mine.0, 18);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -8241,7 +8286,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            17,
+            19,
             "a removal is refused in silence by design"
         );
 
@@ -8278,6 +8323,9 @@ mod tests {
             (fb::RefusalReason::NotAVendor, 27),
             (fb::RefusalReason::NotEnoughSilver, 28),
             (fb::RefusalReason::VendorDoesNotWant, 29),
+            // V26's one, appended inside the low group: warded ground is the world
+            // answering a legal question no, and the player can walk somewhere else.
+            (fb::RefusalReason::Warded, 30),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -8287,7 +8335,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            34,
+            35,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -8572,7 +8620,15 @@ mod tests {
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);
-        assert_eq!(StructureKind::from_wire(fb::StructureKind(4)), None);
+        // 4 is `Runestone` from V26, and it is **still refused** — the one place here where
+        // a member the contract names is asserted to be rejected. The rule above
+        // [`StructureKind::from_wire`] is that a member is accepted in the commit that
+        // teaches `player::structures` to draw it, so this contract half names the kind and
+        // the issue that renders the stone adds the arm. Refusing costs the session, which
+        // is why V26 is a bump rather than a quiet append.
+        assert_eq!(fb::StructureKind::Runestone.0, 4);
+        assert_eq!(StructureKind::from_wire(fb::StructureKind::Runestone), None);
+        assert_eq!(StructureKind::from_wire(fb::StructureKind(5)), None);
         assert_eq!(StructureKind::from_wire(fb::StructureKind(200)), None);
     }
 
@@ -10901,8 +10957,16 @@ mod tests {
         // Every member the contract names is one this client can ask for. `Unknown` is
         // skipped because it is the absent-field case rather than a recipe, and it is
         // deliberately unrepresentable on this side.
+        //
+        // **`Runestone` is skipped too, and that is an exemption rather than a second
+        // absent-field case.** V26 names the recipe so the dependent issues consume one
+        // settled contract; nothing here can originate the craft, because what a runestone
+        // costs and where it is made are the server's table and [`crate::player::RECIPES`]
+        // holds no row for it yet — the sweep there records the same exemption. A
+        // `RecipeId` variant with no producer is dead code under `-D warnings`, so the
+        // vocabulary gains the word in the commit that gives somebody a button for it.
         for member in fb::RecipeID::ENUM_VALUES {
-            if *member == fb::RecipeID::Unknown {
+            if *member == fb::RecipeID::Unknown || *member == fb::RecipeID::Runestone {
                 continue;
             }
             assert!(
