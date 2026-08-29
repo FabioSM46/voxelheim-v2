@@ -757,27 +757,21 @@ func TestAResidentOutsideTheViewCubeIsNeitherSentNorDescribed(t *testing.T) {
 // Nothing opens
 // ---------------------------------------------------------------------------
 
-// **Every interaction is refused, and every one of them is refused the same way.** A role
-// that could keep a stall, a role that never could, somebody out of reach and an id that
-// names nothing at all: four different sentences for an operator, one frame for the
-// player. The uniformity is the fail-closed default — until #459 the server has no price
-// list to open, so answering anything else would be the client deciding an outcome.
-func TestEveryInteractionIsRefusedNotAVendor(t *testing.T) {
+// **A trade opens a stall; everything else is refused, and every refusal is the same
+// frame.** A role that keeps no stall and an id that names nothing at all are two
+// different sentences for an operator and one code for the player. The uniformity is the
+// fail-closed default: a probe must learn nothing about the world it could not see.
+func TestOnlyATradeOpensAndEveryOtherAddressIsRefusedTheSameWay(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	roles := []vnet.ResidentRole{
-		vnet.ResidentRoleVillager, vnet.ResidentRoleGuard,
-		vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
-		vnet.ResidentRoleCook, vnet.ResidentRoleTrader,
-	}
-	for index, role := range roles {
+	for index, role := range []vnet.ResidentRole{vnet.ResidentRoleVillager, vnet.ResidentRoleGuard} {
 		// A separate column per role, because the id is a function of the column.
 		r := h.standResidentAt(role, [3]float64{float64(index) + 0.5, 64, 1.5}, 0)
 
-		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: 1})
+		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: uint32(index) + 1})
 		if err == nil {
 			t.Errorf("addressing a %s opened something", role)
 		}

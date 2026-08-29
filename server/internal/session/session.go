@@ -1628,11 +1628,12 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 
 		request := *msg.NpcInteract
 
-		// **Every one of these is refused today, and the refusal is the feature.** The
-		// server has no price list to open until #459 teaches it what a vendor role sells,
-		// so a request naming a smith is answered exactly as one naming a guard, an entity
-		// out of reach, or an id that names nothing at all — see game.Player.InteractNPC,
-		// where the four sentences that distinguish them for an operator live.
+		// **A vendor role opens a stall and everything else is refused the same way.**
+		// A request naming a guard, an entity out of reach, or an id that names nothing
+		// at all is answered identically — see game.Player.InteractNPC, where the four
+		// sentences that distinguish them for an operator live. Nothing is sent from
+		// here on the accepting path: the complete VendorState is owed to the session
+		// and the tick delivers it, exactly as a LootState is.
 		reason, iErr := player.InteractNPC(request)
 		if iErr != nil {
 			log.Debug("refusing npc interaction",
