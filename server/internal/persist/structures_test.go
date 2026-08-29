@@ -17,7 +17,7 @@ import (
 // campFixture is a camp with the things worth round-tripping: every kind this build can
 // place, two owners, and anchors with a negative axis.
 //
-// **Every kind, and the campfire is why that is written down as a rule rather than as a
+// **Every kind, and the campfire and runestone are why that is written down as a rule rather than as a
 // list.** A record is fixed-width and the kind is one byte of it, so a new kind is a new
 // value rather than a new shape — but the way to know that is to put one through the file
 // and read it back, and the cheapest place to do that is the fixture every test here
@@ -41,6 +41,12 @@ func campFixture() []StructureRecord {
 			Anchor: [3]int32{-7, 64, 21},
 			Facing: vnet.FacingWest,
 			Owner:  identity.PlayerID{9, 9, 9, 9},
+		},
+		{
+			Kind:   vnet.StructureKindRunestone,
+			Anchor: [3]int32{64, 71, -32},
+			Facing: vnet.FacingNorth,
+			Owner:  identity.PlayerID{1, 2, 3},
 		},
 	}
 }

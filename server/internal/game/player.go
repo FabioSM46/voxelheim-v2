@@ -274,6 +274,20 @@ type Sim struct {
 	// stations station.go derives from the seed.
 	structures map[uint64]*structure
 
+	// wards is which chunk columns are claimed, and by whom.
+	//
+	// **Derived state, and derived from [Sim.structures] alone**, so it is never the
+	// answer to a question the registry could not answer for itself — it is that answer
+	// precomputed, because the storm asks it once per chunk and the edit, mining and
+	// placement paths ask it once per request. Rebuilt whole by
+	// [Sim.rebuildWardsLocked] whenever a runestone is placed, removed, collapsed or
+	// restored, and nil while no stone stands.
+	//
+	// Nothing here is persisted, for the reason no structure id is: a ward is a function
+	// of where the stones are, and writing one down would put a second thing on disk that
+	// has to agree with the first.
+	wards map[world.Column]identity.PlayerID
+
 	// residents is every person a settlement holds, keyed by identity for the reason
 	// every other collection here is: a snapshot names them by id, and an interaction has
 	// to find one without scanning.
