@@ -148,6 +148,7 @@ impl Plugin for UiPlugin {
             .add_message::<InventoryClick>()
             .add_message::<CraftClick>()
             .add_message::<crate::player::LootTakeClick>()
+            .add_message::<crate::player::VendorTradeClick>()
             .add_message::<DisconnectRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
             // when no account service is configured. `add_message` is idempotent,

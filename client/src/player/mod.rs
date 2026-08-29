@@ -96,7 +96,7 @@ pub(crate) use livery::{Liveries, field_rect};
 pub use loot::{LootTakeClick, LootWindow};
 pub(crate) use sky::Daylight;
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
-pub use vendor::VendorWindow;
+pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 
 use crate::net::{
     Appearance, AppearanceInbox, HairModel, LifeState, Outbound, PLACEHOLDER_APPEARANCE,

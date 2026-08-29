@@ -8,8 +8,10 @@
 
 use bevy::prelude::*;
 
-use super::{ApplyInputMode, ApplySnapshots, InputMode, SelfVitals};
-use crate::net::{Session, VendorEvent, VendorInbox, VendorState};
+use super::{ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals};
+use crate::net::{
+    Outbound, Session, TradeRequest, VendorEvent, VendorInbox, VendorState, encode_trade_request,
+};
 
 /// The newest complete price list currently shown, or `None` when no stall is open.
 #[derive(Resource, Debug, Default)]
@@ -30,12 +32,37 @@ impl VendorWindow {
     }
 }
 
+/// A press on one row's `Buy` or `Sell` button.
+///
+/// **It carries what was asked for and nothing about what will happen.** No price, no
+/// total, no verdict about the purse: the server owns all three, and a message that named
+/// one would be this client stating an outcome. The count is the shift modifier already
+/// resolved — `ui/vendor.rs` reads the key, exactly as `ui/inventory.rs` reads it for a
+/// drop — because which of two amounts a press meant is a fact about the press.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VendorTradeClick {
+    pub item_id: u16,
+    /// True for a row in the vendor's `sells` list, false for one in its `buys` list.
+    pub buying: bool,
+    /// One, or [`SHIFT_COUNT`] while shift is held.
+    pub count: u16,
+}
+
+/// What a shift-click asks for instead of one.
+///
+/// **All or nothing, which is the server's rule and not a courtesy this side adds.** Ten
+/// arrows the purse only covers seven of buys none of them, and the refusal is what says
+/// so — a client that trimmed the count to what it thought was affordable would be
+/// deciding the trade.
+pub const SHIFT_COUNT: u16 = 10;
+
 pub(super) struct VendorPlugin;
 
 impl Plugin for VendorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VendorWindow>()
             .init_resource::<VendorInbox>()
+            .add_message::<VendorTradeClick>()
             .add_systems(
                 Update,
                 reconcile_vendor
@@ -48,7 +75,7 @@ impl Plugin for VendorPlugin {
             // with it in the same frame rather than one later.
             .add_systems(
                 Update,
-                dismiss_the_stall_the_player_left.after(ApplyInputMode),
+                (dismiss_the_stall_the_player_left, send_trade_intents).after(ApplyInputMode),
             );
     }
 }
@@ -140,12 +167,72 @@ fn set_mode(mode: &mut ResMut<'_, InputMode>, next: InputMode) {
     }
 }
 
+/// Turns each press into one `TradeRequest`, written against the list on screen.
+///
+/// **The revision is what makes a one-message-old view safe to originate from.** A trade
+/// against a list the server has replaced is refused rather than applied at prices the
+/// player never saw, so this side never has to ask whether what it is showing is current —
+/// it says which list it was looking at and lets the server answer.
+///
+/// **Nothing is checked here that the server checks**, and the one thing that *is* checked
+/// is not a gameplay rule: a click naming an item that is not in the vector it claims to
+/// come from is a defect in this build rather than a request, and sending it would spend a
+/// tick asking a question whose answer is already known. Whether the purse covers it,
+/// whether the pack has room and whether the player still holds what they are selling are
+/// all the server's, and all three come back as an `ActionRefused` with a sentence in
+/// `ui/status.rs`.
+fn send_trade_intents(
+    gate: InputGate<'_>,
+    cadence: Res<InputCadence>,
+    window: Res<VendorWindow>,
+    outbound: Option<ResMut<Outbound>>,
+    mut clicks: MessageReader<VendorTradeClick>,
+) {
+    // Read and dropped rather than left queued: a press that arrived on the frame the
+    // window closed belongs to a stall that is gone, and holding it would send it at
+    // whatever opened next.
+    let presses: Vec<VendorTradeClick> = clicks.read().copied().collect();
+    let Some(outbound) = outbound else {
+        return;
+    };
+    if gate.mode() != InputMode::Vendor || gate.dead() {
+        return;
+    }
+    let Some(state) = window.state() else {
+        return;
+    };
+    let outbound = outbound.into_inner();
+    for click in presses {
+        let list = if click.buying {
+            &state.sells
+        } else {
+            &state.buys
+        };
+        if !list.iter().any(|entry| entry.item_id == click.item_id) {
+            continue;
+        }
+        outbound.send(encode_trade_request(&TradeRequest {
+            entity_id: state.entity_id,
+            item_id: click.item_id,
+            count: click.count,
+            buying: click.buying,
+            revision: state.revision,
+            client_tick: cadence.client_tick,
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::net::{
-        ANY_TOKEN, LifeState, PlayerVitals, SessionParams, VendorClosed, VendorEntry,
+        ANY_TOKEN, LifeState, Outbound, PlayerVitals, SessionParams, VendorClosed, VendorEntry,
     };
+    use crate::player::ViewMode;
+
+    /// The two items the smith in [`state`] deals in, one each way.
+    const PICKAXE: u16 = 6;
+    const RAW_IRON: u16 = 12;
 
     const SMITH: u64 = (1 << 62) | 55;
     const COOK: u64 = (1 << 62) | 56;
@@ -171,11 +258,11 @@ mod tests {
             entity_id,
             revision,
             sells: vec![VendorEntry {
-                item_id: 6,
+                item_id: PICKAXE,
                 price: 25,
             }],
             buys: vec![VendorEntry {
-                item_id: 12,
+                item_id: RAW_IRON,
                 price: 3,
             }],
         }
@@ -187,6 +274,8 @@ mod tests {
             .insert_resource(session())
             .init_resource::<InputMode>()
             .init_resource::<SelfVitals>()
+            .init_resource::<ViewMode>()
+            .init_resource::<InputCadence>()
             .add_plugins(VendorPlugin);
         app
     }
@@ -280,6 +369,113 @@ mod tests {
         assert!(
             app.world().resource::<VendorWindow>().state().is_none(),
             "the stall survived the player dying in front of it"
+        );
+    }
+
+    /// **One press, one request, written against the list on screen** — and the count is
+    /// the modifier the UI resolved rather than anything decided here. Neither request
+    /// names a price or a total, because the contract has no field to put one in.
+    #[test]
+    fn a_press_sends_one_request_from_the_revision_on_screen() {
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound);
+        push(&mut app, VendorEvent::State(state(SMITH, 4)));
+        assert!(frames.try_iter().collect::<Vec<_>>().is_empty());
+
+        app.world_mut().write_message(VendorTradeClick {
+            item_id: PICKAXE,
+            buying: true,
+            count: 1,
+        });
+        app.world_mut().write_message(VendorTradeClick {
+            item_id: RAW_IRON,
+            buying: false,
+            count: SHIFT_COUNT,
+        });
+        app.update();
+
+        assert_eq!(
+            frames.try_iter().collect::<Vec<_>>(),
+            vec![
+                encode_trade_request(&TradeRequest {
+                    entity_id: SMITH,
+                    item_id: PICKAXE,
+                    count: 1,
+                    buying: true,
+                    revision: 4,
+                    client_tick: 0,
+                }),
+                encode_trade_request(&TradeRequest {
+                    entity_id: SMITH,
+                    item_id: RAW_IRON,
+                    count: SHIFT_COUNT,
+                    buying: false,
+                    revision: 4,
+                    client_tick: 0,
+                }),
+            ]
+        );
+    }
+
+    /// **A press this build could not have drawn sends nothing**, in either direction.
+    ///
+    /// Not a gameplay rule and not a second opinion about the trade: the vendor's own
+    /// answer to all three of these is `VendorDoesNotWant`, and the server still gives it
+    /// if one ever leaves. What it prevents is a defect in this build spending a tick
+    /// asking a question whose answer is already on screen — the pickaxe is in `sells` and
+    /// asking to sell one is asking against the wrong vector.
+    #[test]
+    fn a_press_naming_a_row_the_stall_does_not_show_sends_nothing() {
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound);
+        push(&mut app, VendorEvent::State(state(SMITH, 1)));
+
+        for click in [
+            VendorTradeClick {
+                item_id: PICKAXE,
+                buying: false,
+                count: 1,
+            },
+            VendorTradeClick {
+                item_id: RAW_IRON,
+                buying: true,
+                count: 1,
+            },
+            VendorTradeClick {
+                item_id: 999,
+                buying: true,
+                count: 1,
+            },
+        ] {
+            app.world_mut().write_message(click);
+        }
+        app.update();
+        assert!(frames.try_iter().collect::<Vec<_>>().is_empty());
+    }
+
+    /// A press that outlived the window sends nothing, and is not held for the next stall.
+    #[test]
+    fn a_press_that_outlived_the_window_is_dropped_rather_than_queued() {
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound);
+        push(&mut app, VendorEvent::State(state(SMITH, 1)));
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.world_mut().write_message(VendorTradeClick {
+            item_id: PICKAXE,
+            buying: true,
+            count: 1,
+        });
+        app.update();
+        assert!(frames.try_iter().collect::<Vec<_>>().is_empty());
+
+        push(&mut app, VendorEvent::State(state(COOK, 1)));
+        assert!(
+            frames.try_iter().collect::<Vec<_>>().is_empty(),
+            "a press meant for one stall was delivered to the next"
         );
     }
 
