@@ -127,10 +127,11 @@ const (
 	// One candidate in a climate's denominator becomes a conifer. The decision and
 	// its height come from the candidate column's hash alone. Ninety-six columns to
 	// a tree is a wood you have to walk through; fifteen hundred is the occasional
-	// landmark on open ground. Tundra and desert have no denominator at all.
+	// landmark on open ground. Tundra and desert have no conifer denominator.
 	//
-	// A second species is now one row in plantSpeciesTable: its surface, density,
-	// independent hash lattice, footprint, map meaning and shape travel together.
+	// Every additional species is one row in plantSpeciesTable: its surface,
+	// density, independent hash lattice, footprint, map meaning and shape travel
+	// together.
 	taigaTreeChanceDenominator        = 96
 	plainsTreeChanceDenominator       = 1536
 	treeMinTrunkHeight                = 4
@@ -139,6 +140,17 @@ const (
 	treeCanopyBelowCrown              = 2
 	treeCanopyAboveCrown              = 1
 	treeSeedOffset              int64 = 0x3C6EF372
+
+	// Desert plants use independent hash lattices so sparse palms do not select
+	// the same columns as the more common scrub. Palm is first in the species
+	// table: a successful palm candidate owns its column before scrub is asked.
+	palmChanceDenominator        = 640
+	shrubChanceDenominator       = 40
+	palmMinTrunkHeight           = 5
+	palmHeightVariants           = 3
+	palmFrondLength              = 3
+	palmSeedOffset         int64 = 0xA54FF53A
+	shrubSeedOffset        int64 = 0x510E527F
 
 	// gravelSeedOffset decorrelates the gravel field from every other 2D field. A
 	// patch that always sat on the same side of a climate boundary would be a
@@ -343,7 +355,12 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // byte-identical; only courses y=8..27 of the capital's centre building move. It is
 // still a break for a played-in capital, whose deltas were recorded against version 8's
 // lower silhouette.
-const WorldgenVersion uint32 = 9
+// 9 → 10: palms and scrub on desert sand. Terrain heights and underground
+// materials stay byte-identical, but selected desert columns gain one of three
+// appended plant blocks above their surface. Existing deltas cannot be replayed
+// against a base that may now hold a trunk, fronds or scrub where version 9 held
+// air, so the stored-world precondition advances with the generator.
+const WorldgenVersion uint32 = 10
 
 // Generate builds the chunk at coord for seed.
 //
@@ -501,7 +518,7 @@ func (c column) blockAt(worldY int) Block {
 // passage runs through is cut by it rather than hanging in it, and the ore that
 // survives is the ore in the wall, which is exactly what a miner is meant to find.
 //
-// Trees are not here: they are placed over the finished terrain by placeTrees,
+// Plants are not here: they are placed over the finished terrain by placeTrees,
 // after every column in the chunk has been composed.
 func (c column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
 	block := c.blockAt(int(worldY))
@@ -645,6 +662,15 @@ func coniferChanceDenominator(climate Climate) uint64 {
 	}
 }
 
+func desertChanceDenominator(denominator uint64) func(Climate) uint64 {
+	return func(climate Climate) uint64 {
+		if climate == Desert {
+			return denominator
+		}
+		return 0
+	}
+}
+
 // plantSpecies is one complete answer to what may grow in a column. Table order is
 // priority: the first row whose refusals all pass owns the root.
 type plantSpecies struct {
@@ -669,7 +695,31 @@ var conifer = plantSpecies{
 	visit:       visitConifer,
 }
 
-var plantSpeciesTable = []plantSpecies{conifer}
+var palm = plantSpecies{
+	name:       "palm",
+	seedOffset: palmSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Sand
+	},
+	denominator: desertChanceDenominator(palmChanceDenominator),
+	footprint:   palmFrondLength,
+	forest:      true,
+	visit:       visitPalm,
+}
+
+var shrub = plantSpecies{
+	name:       "shrub",
+	seedOffset: shrubSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Sand
+	},
+	denominator: desertChanceDenominator(shrubChanceDenominator),
+	footprint:   0,
+	forest:      false,
+	visit:       visitShrub,
+}
+
+var plantSpeciesTable = []plantSpecies{conifer, palm, shrub}
 
 // plantAtColumn reports the first species rooted at one resolved column and the
 // hash that row uses for its shape.
@@ -772,12 +822,43 @@ func visitConifer(_ int64, rootX, rootZ int64, surface int, h uint64, visit func
 	}
 }
 
+func visitPalm(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+	trunkHeight := palmTrunkHeight(h)
+	trunkTop := int64(surface + trunkHeight)
+	crownY := trunkTop + 1
+
+	visit(rootX, crownY, rootZ, PalmFronds)
+	for _, direction := range [][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+		for distance := int64(1); distance <= palmFrondLength; distance++ {
+			y := crownY
+			if distance == palmFrondLength {
+				y--
+			}
+			visit(rootX+direction[0]*distance, y, rootZ+direction[1]*distance, PalmFronds)
+		}
+	}
+	for _, diagonal := range [][2]int64{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}} {
+		visit(rootX+diagonal[0], crownY, rootZ+diagonal[1], PalmFronds)
+	}
+	for y := int64(surface + 1); y <= trunkTop; y++ {
+		visit(rootX, y, rootZ, PalmLog)
+	}
+}
+
+func visitShrub(_ int64, rootX, rootZ int64, surface int, _ uint64, visit func(x, y, z int64, block Block)) {
+	visit(rootX, int64(surface+1), rootZ, DesertShrub)
+}
+
 func coniferTrunkHeight(h uint64) int {
 	return treeMinTrunkHeight + int((h>>32)%treeHeightVariants)
 }
 
-// The tree-named helpers keep the existing conifer tests readable while the table
-// has exactly one row. They are deliberately thin views of that row.
+func palmTrunkHeight(h uint64) int {
+	return palmMinTrunkHeight + int((h>>32)%palmHeightVariants)
+}
+
+// The tree-named helpers keep the existing conifer tests readable. They are
+// deliberately thin views of the table's first, conifer row.
 func treeAt(seed, worldX, worldZ int64) (surface, trunkHeight int, ok bool) {
 	col := columnAt(seed, worldX, worldZ)
 	species, h, ok := plantAtColumn(seed, worldX, worldZ, col)
@@ -818,7 +899,7 @@ func absInt(v int) int {
 	return v
 }
 
-// placeTrees scans roots outside the chunk by one complete canopy footprint and
+// placeTrees scans plant roots outside the chunk by one complete footprint and
 // writes only the yielded voxels that belong to this chunk. Interior roots reuse
 // the terrain pass's heights; border roots are recomputed from world coordinates,
 // which completes their trees without reading or mutating a neighbour.
@@ -850,7 +931,7 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 
 	x, y, z := int(localX), int(localY), int(localZ)
 	current := chunk.At(x, y, z)
-	if current == Air || (block == Log && current == Leaves) {
+	if current == Air || (block == Log && current == Leaves) || (block == PalmLog && current == PalmFronds) {
 		chunk.Set(x, y, z, block)
 	}
 }

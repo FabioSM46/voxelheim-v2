@@ -147,9 +147,9 @@ func TestSurfaceAtNamesWhatTheGeneratorBuilt(t *testing.T) {
 				}
 
 			case SurfaceForest:
-				// A conifer's trunk starts one voxel above the ground it is rooted in.
-				if got := voxel(x, int64(height)+1, z); got != Log {
-					t.Fatalf("(%d, %d) drawn as forest, but the voxel above height %d is %d, not a log", x, z, height, got)
+				// Every forest species starts its trunk one voxel above the ground.
+				if got := voxel(x, int64(height)+1, z); got != Log && got != PalmLog {
+					t.Fatalf("(%d, %d) drawn as forest, but the voxel above height %d is %d, not a forest trunk", x, z, height, got)
 				}
 
 			default:
@@ -182,6 +182,37 @@ func TestSurfaceAtNamesWhatTheGeneratorBuilt(t *testing.T) {
 	// this test does not have to be lucky to find.
 	if checked[SurfaceUnknown] != 0 {
 		t.Errorf("%d columns drawn as %d, which nothing may return", checked[SurfaceUnknown], SurfaceUnknown)
+	}
+}
+
+func TestPalmColumnsAreForestAndShrubColumnsRemainSand(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		species *plantSpecies
+		want    SurfaceKind
+	}{
+		{&plantSpeciesTable[1], SurfaceForest},
+		{&plantSpeciesTable[2], SurfaceSand},
+	} {
+		x, z, found := int64(0), int64(0), false
+		for i := 0; i < 1024 && !found; i++ {
+			for j := 0; j < 1024; j++ {
+				x, z = int64(i)*61, int64(j)*61
+				col := columnAt(surfaceSeed, x, z)
+				species, _, rooted := plantAtColumn(surfaceSeed, x, z, col)
+				if rooted && species == tc.species {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("fixed lattice selected no %s", tc.species.name)
+		}
+		if _, got := SurfaceAt(surfaceSeed, x, z); got != tc.want {
+			t.Errorf("%s root at (%d, %d) maps as %d, want %d", tc.species.name, x, z, got, tc.want)
+		}
 	}
 }
 
