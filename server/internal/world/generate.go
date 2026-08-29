@@ -689,12 +689,17 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 		return nil, 0, false
 	}
 
-	surface := col.blockAt(col.surface)
+	var surface Block
+	surfaceRead := false
 	for i := range table {
 		species := &table[i]
 		denominator := species.denominator(col.climate)
 		if denominator == 0 {
 			continue
+		}
+		if !surfaceRead {
+			surface = col.blockAt(col.surface)
+			surfaceRead = true
 		}
 		if !species.rootsOn(surface) {
 			continue

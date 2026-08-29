@@ -144,6 +144,26 @@ func TestPlantSpeciesTableOrderOwnsAContestedColumn(t *testing.T) {
 	}
 }
 
+func TestPlantSpeciesSkipsTheSurfacePredicateWhenItsClimateIsAbsent(t *testing.T) {
+	t.Parallel()
+
+	const seed = int64(0xA11CE)
+	x, z, col := uncarvedPlantTestColumn(t, seed)
+	table := []plantSpecies{{
+		name:       "absent",
+		seedOffset: 1,
+		rootsOn: func(Block) bool {
+			t.Fatal("surface predicate was consulted after a zero denominator")
+			return false
+		},
+		denominator: func(Climate) uint64 { return 0 },
+	}}
+
+	if species, _, ok := plantAtColumnIn(table, seed, x, z, col); ok || species != nil {
+		t.Fatalf("absent species returned (%v, %t), want (nil, false)", species, ok)
+	}
+}
+
 func uncarvedPlantTestColumn(t *testing.T, seed int64) (int64, int64, column) {
 	t.Helper()
 	for z := int64(-64); z <= 64; z++ {
