@@ -103,7 +103,7 @@ const DAY_SKY: [f32; 3] = [0.055, 0.070, 0.094];
 /// while the horizon is still a horizon: the fog fades distant terrain into this colour, so
 /// a black sky would turn the far edge of the streamed cube into a void rather than into
 /// distance.
-const NIGHT_SKY: [f32; 3] = [0.018, 0.024, 0.040];
+pub(crate) const NIGHT_SKY: [f32; 3] = [0.018, 0.024, 0.040];
 
 /// The one directional light's illuminance at midday, in lux. Full daylight is ~100 000;
 /// this is a winter overcast, and it is the constant `world/render.rs` carried before.

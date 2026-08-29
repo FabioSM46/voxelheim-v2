@@ -95,6 +95,11 @@ pub(crate) use items::{ITEM_SILVER, ItemShape, Livery, item_linear_rgba, item_li
 pub(crate) use livery::{Liveries, field_rect};
 pub use loot::{LootTakeClick, LootWindow};
 pub(crate) use sky::Daylight;
+// The sky the low-health vignette has to be visible against. Test-only and deliberately
+// so: `ui/health.rs` reads the colour to assert that its edge is not one the night has
+// already reached (#553), and nothing at runtime may read a rule back out of it.
+#[cfg(test)]
+pub(crate) use sky::NIGHT_SKY;
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 
