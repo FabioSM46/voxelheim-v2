@@ -288,6 +288,56 @@ type Settlement struct {
 	Buildings []Building
 }
 
+// WardsColumn reports whether this settlement's plateau disc touches one chunk
+// column.
+//
+// A column is a 32 by 32 square of block coordinates, so the nearest point in
+// that square is the one the disc has to reach. The blend band is deliberately
+// absent: a ward protects the place the settlement stands on, not the slope that
+// joins it back to the surrounding land.
+func (s Settlement) WardsColumn(col Column) bool {
+	loX := int64(col.CX) * ChunkSize
+	loZ := int64(col.CZ) * ChunkSize
+	hiX := loX + ChunkSize - 1
+	hiZ := loZ + ChunkSize - 1
+
+	nearestX := min(max(s.CentreX, loX), hiX)
+	nearestZ := min(max(s.CentreZ, loZ), hiZ)
+	radius := int64(s.Radius)
+	return squaredDistance(nearestX, nearestZ, s.CentreX, s.CentreZ) <= radius*radius
+}
+
+// SettlementWarding returns the settlement whose plateau disc touches col, if
+// one does.
+//
+// It compares sites first and lays out buildings only for the winner. That is
+// what keeps this legal on the simulation's edit paths: an uncached query is a
+// bounded lattice scan and one layout, never terrain generation or a chunk read.
+func SettlementWarding(seed int64, col Column) (Settlement, bool) {
+	originX := int64(col.CX) * ChunkSize
+	originZ := int64(col.CZ) * ChunkSize
+	// The midpoint is only how nearestSettlementSite orders candidates. The exact
+	// disc-versus-square decision remains WardsColumn below.
+	x := originX + ChunkSize/2
+	z := originZ + ChunkSize/2
+	site, cellX, cellZ, _, found := nearestSettlementSite(seed, x, z, capitalRadius+ChunkSize)
+	if !found {
+		return Settlement{}, false
+	}
+
+	winner := Settlement{
+		Kind:    site.kind,
+		CentreX: site.centreX,
+		CentreZ: site.centreZ,
+		Radius:  site.radius,
+		Plateau: site.plateau,
+	}
+	if !winner.WardsColumn(col) {
+		return Settlement{}, false
+	}
+	return settlementFrom(seed, cellX, cellZ, site), true
+}
+
 // Anchors is every slot in every building of this settlement, in world coordinates.
 //
 // The one call the stations and residents issues need: they ask a settlement what it

@@ -54,7 +54,7 @@ var ErrBreakActionWithdrawn = errors.New("EditAction.Break is withdrawn; use Min
 //
 // A sentinel lets the session route on identity while every other refusal remains silent.
 // A ward is the exception because retrying cannot explain why that ground is unavailable.
-var ErrWarded = errors.New("the ground is warded by another player's runestone")
+var ErrWarded = errors.New("the ground is warded and not owned by this player")
 
 // Editor is the world an edit is applied to.
 //

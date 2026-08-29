@@ -169,13 +169,18 @@ func TestFimbulvetrRegeneratesOnlyUnwardedChunksBeforeClearingTheBlizzard(t *tes
 	t.Parallel()
 
 	fixture := newRegenerationFixture()
-	unwarded := world.Coord{X: 1, Y: 2, Z: 3}
-	warded := world.Coord{X: 4, Y: 2, Z: 5}
+	unwarded := world.Coord{X: 20, Y: 2, Z: 20}
+	capital, found := world.NearestSettlement(testWorldSeed, 0, 0)
+	if !found {
+		t.Fatal("the fixture has no capital near spawn")
+	}
+	wardedColumn := world.ChunkOf(capital.CentreX, 0, capital.CentreZ).Column()
+	warded := world.Coord{X: wardedColumn.CX, Y: 2, Z: wardedColumn.CZ}
 	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
 
-	sim.mu.Lock()
-	sim.wards = map[world.Column]identity.PlayerID{warded.Column(): {1}}
-	sim.mu.Unlock()
+	if _, settlement := world.SettlementWarding(testWorldSeed, unwarded.Column()); settlement {
+		t.Fatal("the unwarded fixture column unexpectedly touches a settlement")
+	}
 
 	sim.BeginStorm(uint32(StormDuration / time.Second))
 	if warning, active := sim.StormWarning(); !active || warning.Phase != vnet.StormPhaseRaging {

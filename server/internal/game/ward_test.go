@@ -83,6 +83,110 @@ func TestARunestoneWardsTheNineColumnsAroundItsOwn(t *testing.T) {
 	}
 }
 
+func TestASettlementWardBelongsToNobodyAndAlwaysWinsAnOverlap(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	capital, found := world.NearestSettlement(testWorldSeed, 0, 0)
+	if !found || capital.Kind != world.SettlementCapital {
+		t.Fatal("the fixture has no capital near spawn")
+	}
+	col := world.ChunkOf(capital.CentreX, 0, capital.CentreZ).Column()
+
+	owner, warded := h.ward(col)
+	if !warded || owner != (identity.PlayerID{}) {
+		t.Fatalf("capital column %+v is warded by %s, want the zero identity", col, owner.Short())
+	}
+
+	// Put a player's stone directly over the cached settlement column. Placement is
+	// tested below; direct insertion isolates precedence from that refusal.
+	claimant := testPlayerID(7)
+	h.sim.mu.Lock()
+	stoneID := h.sim.mintEntityID()
+	h.sim.structures[stoneID] = &structure{
+		structureID: stoneID,
+		kind:        vnet.StructureKindRunestone,
+		anchor:      [3]int32{int32(capital.CentreX), 63, int32(capital.CentreZ)},
+		facing:      vnet.FacingNorth,
+		owner:       claimant,
+		chunk:       world.Coord{X: col.CX, Y: 1, Z: col.CZ},
+	}
+	h.sim.rebuildWardsLocked()
+	cached := h.sim.wards[col]
+	h.sim.mu.Unlock()
+
+	owner, warded = h.ward(col)
+	if !warded || owner != (identity.PlayerID{}) {
+		t.Errorf("runestone annexed the capital for %s", owner.Short())
+	}
+	if !cached.settlementChecked || !cached.settlement {
+		t.Error("a runestone rebuild discarded the cached settlement answer")
+	}
+
+	// Removing the stone rebuilds only its half; the immutable settlement answer
+	// stays cached and remains the claim.
+	h.sim.mu.Lock()
+	delete(h.sim.structures, stoneID)
+	h.sim.rebuildWardsLocked()
+	cached = h.sim.wards[col]
+	h.sim.mu.Unlock()
+	if !cached.settlementChecked || !cached.settlement || !cached.warded {
+		t.Error("removing a runestone invalidated the settlement ward")
+	}
+}
+
+func TestASettlementWardRefusesEveryWorldChangeButNotPresence(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	capital, found := world.NearestSettlement(testWorldSeed, 0, 0)
+	if !found {
+		t.Fatal("the fixture has no capital near spawn")
+	}
+	x, z := int32(capital.CentreX), int32(capital.CentreZ)
+	player, _ := h.join(1, [3]float32{float32(x) + 0.5, 64, float32(z) + 0.5})
+	target := [3]int32{x, 63, z}
+
+	// The successful Join is the presence rule: a settlement ward rejects actions,
+	// not a player standing or spawning inside it.
+	for slot, item := range []ItemID{ItemTent, ItemCampfire, ItemRunestone} {
+		h.give(player, uint8(slot), item, 1)
+		_, reason, err := player.PlaceStructure(placeRequest(uint8(slot), target, vnet.FacingNorth))
+		if err == nil {
+			t.Errorf("item %d was placed inside the capital", uint16(item))
+		} else if reason != vnet.RefusalReasonWarded {
+			t.Errorf("placing item %d: reason = %s, want Warded", uint16(item), reason)
+		}
+	}
+
+	h.give(player, 4, ItemStone, 1)
+	if _, err := player.Edit(context.Background(), protocol.BlockEditRequest{
+		Action: vnet.EditActionPlace, Pos: [3]int32{x, 64, z}, HasPos: true, Slot: 4,
+	}); !errors.Is(err, ErrWarded) {
+		t.Errorf("Edit inside the capital returned %v, want ErrWarded", err)
+	}
+	if err := player.Mine(mineRequest(target, 1), true); !errors.Is(err, ErrWarded) {
+		t.Errorf("Mine inside the capital returned %v, want ErrWarded", err)
+	}
+
+	// A pre-existing player structure on world-owned ground is not removable even
+	// by its owner. RemoveStructure's caller keeps this refusal silent on the wire.
+	h.sim.mu.Lock()
+	heldID := h.sim.mintEntityID()
+	h.sim.structures[heldID] = &structure{
+		structureID: heldID,
+		kind:        vnet.StructureKindCampfire,
+		anchor:      target,
+		facing:      vnet.FacingNorth,
+		owner:       player.playerID,
+		chunk:       world.ChunkOf(int64(x), 63, int64(z)),
+	}
+	h.sim.mu.Unlock()
+	if err := player.RemoveStructure(protocol.RemoveStructureRequest{StructureID: heldID}); err == nil {
+		t.Error("a player removed their structure from world-owned settlement ground")
+	}
+}
+
 func TestARunestoneNeedsThreeCellsOfHeadroom(t *testing.T) {
 	t.Parallel()
 
