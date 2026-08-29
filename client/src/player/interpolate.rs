@@ -779,6 +779,9 @@ mod tests {
             anchor: BlockCoord { x, y: 63, z: -7 },
             facing: Facing::East,
             owner_entity_id: 7,
+            // A tent, so `lit` is the contract's default showing through rather than a
+            // statement: it means something for a campfire and for nothing else.
+            lit: true,
         };
 
         let mut buffer = SnapshotBuffer::default();
