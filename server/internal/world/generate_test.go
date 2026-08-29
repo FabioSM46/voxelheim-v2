@@ -178,8 +178,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 6 {
-		t.Fatalf("WorldgenVersion = %d, want 6 for settlements", WorldgenVersion)
+	if WorldgenVersion != 7 {
+		t.Fatalf("WorldgenVersion = %d, want 7 for the ore density fix", WorldgenVersion)
 	}
 }
 
@@ -490,6 +490,11 @@ func TestSurfaceBlocksFollowTheirClimateAndAltitude(t *testing.T) {
 	}
 }
 
+// This test asserts where ore may be, never how much of it there is, and that is
+// exactly what it kept asserting while the world had none: at one coal voxel per
+// twenty chunks every line below still passed, because "some exists" and "two of
+// them touch" are both true of a single vein in a hundred chunks (#540).
+// TestOreIsDenseEnoughToFind is the half this one cannot cover.
 func TestOreAppearsOnlyInStoneAndInsideItsDepthBand(t *testing.T) {
 	t.Parallel()
 
@@ -552,6 +557,112 @@ func TestOreAppearsOnlyInStoneAndInsideItsDepthBand(t *testing.T) {
 	}
 	if !vein[CoalOre] || !vein[IronOre] {
 		t.Fatalf("connected neighbours found: coal=%t iron=%t", vein[CoalOre], vein[IronOre])
+	}
+}
+
+// Ore has to be findable by mining, and only a density says so.
+//
+// **The floor is the point of this test.** #540 was not ore in the wrong place, it
+// was ore in the right place at 0.00015% of the world, and every existence and
+// connectivity assertion in the test above survived it. The share a threshold
+// selects is not readable from the threshold — fbm3D is an average of four octaves
+// and its distribution is bell-shaped — so the only honest statement about density
+// is a measured one, and this is where it is measured.
+//
+// The denominator is the rock a miner actually passes through: voxels inside the
+// band that came out Stone or ore, so carved-out cave volume, soil and the sea are
+// all excluded. [column.voxelAt] is the real composition path, which is what keeps
+// this measuring the generator rather than a second copy of it.
+//
+// The bands are wide, and deliberately. Coal's share ran 0.30%–1.09% over these
+// eight seeds and iron's 0.14%–0.36%, a spread of three to one, because a twelve
+// block field gathers ore into veins and how many veins fall inside one square is
+// a property of the seed. A band tight enough to pin the mean would be a flake;
+// these are set to catch the failure that actually happened — a threshold read as
+// if the field were uniform, which is wrong by four orders of magnitude and cannot
+// hide inside any factor of three.
+func TestOreIsDenseEnoughToFind(t *testing.T) {
+	t.Parallel()
+
+	// Half a chunk either side of the origin, per seed: 16 chunk footprints through
+	// the full band, which is enough rock that a seed with no vein in it is a
+	// finding rather than a sampling accident.
+	const side = 128
+
+	coalTotal, coalRock, ironTotal, ironRock := 0, 0, 0, 0
+	for seed := int64(1); seed <= 8; seed++ {
+		coal, coalBand, iron, ironBand := 0, 0, 0, 0
+		for x := int64(-side / 2); x < side/2; x++ {
+			for z := int64(-side / 2); z < side/2; z++ {
+				col := columnAt(seed, x, z)
+				for depth := int64(coalMinDepth); depth <= int64(ironMaxDepth); depth++ {
+					worldY := int64(col.surface) - depth
+					switch col.voxelAt(seed, x, worldY, z) {
+					case Stone:
+						if depth <= coalMaxDepth {
+							coalBand++
+						} else {
+							ironBand++
+						}
+					case CoalOre:
+						coalBand++
+						coal++
+					case IronOre:
+						ironBand++
+						iron++
+					}
+				}
+			}
+		}
+		if coalBand == 0 || ironBand == 0 {
+			t.Fatalf("seed %d exposed %d coal-band and %d iron-band rock voxels; the sample found no band to measure", seed, coalBand, ironBand)
+		}
+
+		// Per seed, a floor and a ceiling. The floor is roughly half the lowest share
+		// measured and two hundred times the share the bug produced; the ceiling says
+		// ore is still a vein in the rock rather than the rock.
+		coalShare := 100 * float64(coal) / float64(coalBand)
+		ironShare := 100 * float64(iron) / float64(ironBand)
+		if coalShare < 0.15 || coalShare > 3 {
+			t.Errorf("seed %d: coal is %.3f%% of the coal band (%d of %d voxels), outside the 0.15–3%% band coalThreshold %d aims at",
+				seed, coalShare, coal, coalBand, coalThreshold)
+		}
+		if ironShare < 0.05 || ironShare > 2 {
+			t.Errorf("seed %d: iron is %.3f%% of the iron band (%d of %d voxels), outside the 0.05–2%% band ironThreshold %d aims at",
+				seed, ironShare, iron, ironBand, ironThreshold)
+		}
+
+		coalTotal += coal
+		coalRock += coalBand
+		ironTotal += iron
+		ironRock += ironBand
+	}
+
+	// The aggregate is where the tuning target lives: 0.55% of the coal band and
+	// 0.22% of the iron band when these thresholds were chosen.
+	coalShare := 100 * float64(coalTotal) / float64(coalRock)
+	ironShare := 100 * float64(ironTotal) / float64(ironRock)
+	if coalShare < 0.3 || coalShare > 1.2 {
+		t.Errorf("coal is %.3f%% of the coal band across eight seeds, outside the 0.3–1.2%% the threshold was set for", coalShare)
+	}
+	if ironShare < 0.1 || ironShare > 0.6 {
+		t.Errorf("iron is %.3f%% of the iron band across eight seeds, outside the 0.1–0.6%% the threshold was set for", ironShare)
+	}
+
+	// Coal is the more common of the two on purpose: it gates the forge, and the
+	// forge gates everything iron. Equal thresholds would state no design call.
+	if coalShare <= ironShare {
+		t.Errorf("coal is %.3f%% of its band and iron %.3f%% of its own; coal must be the more common of the two", coalShare, ironShare)
+	}
+
+	// The same numbers as the player meets them: what one chunk's footprint holds
+	// through the whole band. A forge costs two coal.
+	const footprints = 8 * (side * side) / (ChunkSize * ChunkSize)
+	if perChunk := float64(coalTotal) / footprints; perChunk < 20 {
+		t.Errorf("a chunk's footprint holds %.0f coal voxels through the whole band; a forge costs two and this has to be reachable by digging", perChunk)
+	}
+	if perChunk := float64(ironTotal) / footprints; perChunk < 10 {
+		t.Errorf("a chunk's footprint holds %.0f iron voxels through the whole band", perChunk)
 	}
 }
 
