@@ -25,6 +25,28 @@ const storeSeed = 11
 // an edit to Air is visibly not terrain.
 var storeCoord = Coord{X: 0, Y: 0, Z: 0}
 
+func TestTheDefaultWorldDirectoryFollowsTheGeneratorVersion(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		version uint32
+		want    string
+	}{
+		{version: 3, want: "world-v3"},
+		{version: 12, want: "world-v12"},
+		{version: 147, want: "world-v147"},
+	} {
+		if got := defaultWorldDirFor(test.version); got != test.want {
+			t.Errorf("defaultWorldDirFor(%d) = %q, want %q", test.version, got, test.want)
+		}
+	}
+
+	want := fmt.Sprintf("world-v%d", WorldgenVersion)
+	if got := DefaultWorldDir(); got != want {
+		t.Errorf("DefaultWorldDir() = %q, want %q for worldgen %d", got, want, WorldgenVersion)
+	}
+}
+
 func testStore(t *testing.T, dir string, seed int64) *Store {
 	t.Helper()
 
