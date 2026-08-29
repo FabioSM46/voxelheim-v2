@@ -81,7 +81,10 @@ pub(crate) use appearance::{
     placed as placed_box, placed_armour,
 };
 
-pub use ambience::Ambience;
+// Issue #548 deliberately adds no production consumer, but the resource's public field
+// must still expose a nameable type to the presentation modules that will consume it.
+#[allow(unused_imports)]
+pub use ambience::{Ambience, GroundLook};
 pub(crate) use camera::{AimCamera, DeathFall};
 pub use camera::{Orbit, ViewMode, WorldCamera};
 // The character screen's preview is the same rig with no server entity behind it, so it

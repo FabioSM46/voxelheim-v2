@@ -16,7 +16,6 @@ use bevy::input::mouse::MouseMotion;
 use bevy::mesh::VertexAttributeValues;
 use bevy::time::TimeUpdateStrategy;
 
-use super::ambience::GroundLook;
 use super::*;
 use crate::net::{
     EntityState, PlayerAppearance, SessionParams, Snapshot, WeatherKind, WeatherState, WorldClock,
