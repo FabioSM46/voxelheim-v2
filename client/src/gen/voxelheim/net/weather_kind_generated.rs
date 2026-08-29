@@ -6,68 +6,74 @@ use super::*;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MIN_STRUCTURE_KIND: u8 = 0;
+pub const ENUM_MIN_WEATHER_KIND: u8 = 0;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_STRUCTURE_KIND: u8 = 4;
+pub const ENUM_MAX_WEATHER_KIND: u8 = 5;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_STRUCTURE_KIND: [StructureKind; 5] = [
-    StructureKind::Unknown,
-    StructureKind::Tent,
-    StructureKind::Forge,
-    StructureKind::Campfire,
-    StructureKind::Runestone,
+pub const ENUM_VALUES_WEATHER_KIND: [WeatherKind; 6] = [
+    WeatherKind::Unknown,
+    WeatherKind::Clear,
+    WeatherKind::Rain,
+    WeatherKind::Snow,
+    WeatherKind::Sandstorm,
+    WeatherKind::Blizzard,
 ];
 
-/// What kind of thing a `StructureState` describes.
+/// What the sky is doing where a player stands.
 ///
-/// Zero member for the same fail-closed reason as `MobKind.Unknown`: an unrecognised
-/// kind is a contract the receiver does not speak, and drawing a default building in its
-/// place would put a shelter in the world the server never said was there.
+/// Zero member for the reason every enum here has one, and it is *refused* rather than
+/// carried: the field it rides in is a struct, so absence is already representable and
+/// unambiguous, and a present-but-nameless kind is a defect rather than a server that
+/// keeps no weather.
+///
+/// `Blizzard` is the storm's own kind and is never produced by the ordinary weather of a
+/// climate. It arrives only while a `StormWarning` says `Raging`, which is what makes the
+/// two statements checkable against each other rather than two independent moods.
 ///
 /// Members are appended, never inserted, for the reason `RecipeID`'s are.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
-pub struct StructureKind(pub u8);
+pub struct WeatherKind(pub u8);
 #[allow(non_upper_case_globals)]
-impl StructureKind {
+impl WeatherKind {
     pub const Unknown: Self = Self(0);
-    pub const Tent: Self = Self(1);
-    pub const Forge: Self = Self(2);
-    pub const Campfire: Self = Self(3);
-    /// A planted stone that wards the ground around it. V26, and **this member is what makes
-    /// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
-    /// cannot name it, and refusing ends the session. See `common.fbs`.
-    pub const Runestone: Self = Self(4);
+    pub const Clear: Self = Self(1);
+    pub const Rain: Self = Self(2);
+    pub const Snow: Self = Self(3);
+    pub const Sandstorm: Self = Self(4);
+    pub const Blizzard: Self = Self(5);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 4;
+    pub const ENUM_MAX: u8 = 5;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
-        Self::Tent,
-        Self::Forge,
-        Self::Campfire,
-        Self::Runestone,
+        Self::Clear,
+        Self::Rain,
+        Self::Snow,
+        Self::Sandstorm,
+        Self::Blizzard,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
         match self {
             Self::Unknown => Some("Unknown"),
-            Self::Tent => Some("Tent"),
-            Self::Forge => Some("Forge"),
-            Self::Campfire => Some("Campfire"),
-            Self::Runestone => Some("Runestone"),
+            Self::Clear => Some("Clear"),
+            Self::Rain => Some("Rain"),
+            Self::Snow => Some("Snow"),
+            Self::Sandstorm => Some("Sandstorm"),
+            Self::Blizzard => Some("Blizzard"),
             _ => None,
         }
     }
 }
-impl ::core::fmt::Debug for StructureKind {
+impl ::core::fmt::Debug for WeatherKind {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         if let Some(name) = self.variant_name() {
             f.write_str(name)
@@ -76,7 +82,7 @@ impl ::core::fmt::Debug for StructureKind {
         }
     }
 }
-impl<'a> ::flatbuffers::Follow<'a> for StructureKind {
+impl<'a> ::flatbuffers::Follow<'a> for WeatherKind {
     type Inner = Self;
     #[inline]
     unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
@@ -85,15 +91,15 @@ impl<'a> ::flatbuffers::Follow<'a> for StructureKind {
     }
 }
 
-impl ::flatbuffers::Push for StructureKind {
-    type Output = StructureKind;
+impl ::flatbuffers::Push for WeatherKind {
+    type Output = WeatherKind;
     #[inline]
     unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
         unsafe { ::flatbuffers::emplace_scalar::<u8>(dst, self.0) };
     }
 }
 
-impl ::flatbuffers::EndianScalar for StructureKind {
+impl ::flatbuffers::EndianScalar for WeatherKind {
     type Scalar = u8;
     #[inline]
     fn to_little_endian(self) -> u8 {
@@ -107,7 +113,7 @@ impl ::flatbuffers::EndianScalar for StructureKind {
     }
 }
 
-impl<'a> ::flatbuffers::Verifiable for StructureKind {
+impl<'a> ::flatbuffers::Verifiable for WeatherKind {
     #[inline]
     fn run_verifier(
         v: &mut ::flatbuffers::Verifier,
@@ -117,4 +123,4 @@ impl<'a> ::flatbuffers::Verifiable for StructureKind {
     }
 }
 
-impl ::flatbuffers::SimpleToVerifyInSlice for StructureKind {}
+impl ::flatbuffers::SimpleToVerifyInSlice for WeatherKind {}

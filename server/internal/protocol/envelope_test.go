@@ -278,11 +278,11 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // because MobState.kind is *refused* when the receiver cannot name it while a refusal
 // reason is read as Unknown. Ask what the receiver does with the value it does not
 // recognise, not which way it travelled.
-func TestProtocolV25NamesTheSettlement(t *testing.T) {
+func TestProtocolV26NamesTheFimbulvetr(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 25 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 25", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 26 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 26", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -335,6 +335,11 @@ func TestProtocolV25NamesTheSettlement(t *testing.T) {
 		vnet.PayloadVendorState,
 		vnet.PayloadTradeRequest,
 		vnet.PayloadVendorClosed,
+		// V26's two, both server -> client. Neither owes the bump: an older client drops
+		// a tag it cannot name and loses a warning or some shading. StructureKind.Runestone
+		// is what moved the version, and it is not in this union at all.
+		vnet.PayloadStormWarning,
+		vnet.PayloadWardsNearby,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2161,6 +2166,12 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		// is answered by anything today, and the number is free only until it is not.
 		"RefusedAction.Interact": {byte(vnet.RefusedActionInteract), 15},
 		"RefusedAction.Trade":    {byte(vnet.RefusedActionTrade), 16},
+		// V26's two, the actions warded ground refuses. Edit and Mine are separate
+		// members rather than one, because they are separate requests with separate
+		// answers. Mine sits beside the reserved MineBlock = 2 rather than replacing it:
+		// removing or renumbering that one would relabel every refusal already sent.
+		"RefusedAction.Edit": {byte(vnet.RefusedActionEdit), 17},
+		"RefusedAction.Mine": {byte(vnet.RefusedActionMine), 18},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2175,8 +2186,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 17 {
-		t.Errorf("RefusedAction has %d members, want 17 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 19 {
+		t.Errorf("RefusedAction has %d members, want 19 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2214,6 +2225,9 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"NotAVendor":        {byte(vnet.RefusalReasonNotAVendor), 27},
 		"NotEnoughSilver":   {byte(vnet.RefusalReasonNotEnoughSilver), 28},
 		"VendorDoesNotWant": {byte(vnet.RefusalReasonVendorDoesNotWant), 29},
+		// V26's one, appended inside the low group for the same reason: the ground is
+		// warded, the request was legal, and the player can walk somewhere else.
+		"Warded":            {byte(vnet.RefusalReasonWarded), 30},
 		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -2223,8 +2237,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 34 {
-		t.Errorf("RefusalReason has %d members, want 34 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 35 {
+		t.Errorf("RefusalReason has %d members, want 35 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -2663,6 +2677,14 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"RecipeID.Bow":             {byte(vnet.RecipeIDBow), 18},
 		"RecipeID.Arrows":          {byte(vnet.RecipeIDArrows), 19},
 		"RecipeID.WoodenSceptre":   {byte(vnet.RecipeIDWoodenSceptre), 20},
+
+		// V26's two. StructureKind.Runestone is the member that moved
+		// ProtocolVersion.Current on its own — StructureState.kind is refused rather than
+		// dropped when a receiver cannot name it, which ends the session. RecipeID.Runestone
+		// travels the other way and owes nothing: an unknown recipe is refused by the
+		// authoritative server as an ordinary answer.
+		"StructureKind.Runestone": {byte(vnet.StructureKindRunestone), 4},
+		"RecipeID.Runestone":      {byte(vnet.RecipeIDRunestone), 21},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2676,8 +2698,8 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// Five since V25's Villager, which is the one member of this enum whose arrival
 		// moved ProtocolVersion.Current on its own.
 		"MobKind":       {len(vnet.EnumNamesMobKind), 5},
-		"StructureKind": {len(vnet.EnumNamesStructureKind), 4},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 21},
+		"StructureKind": {len(vnet.EnumNamesStructureKind), 5},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 22},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])
@@ -4043,5 +4065,55 @@ func TestDecodeIsTotalOverADamagedDropItemRequest(t *testing.T) {
 		damaged := bytes.Clone(valid)
 		damaged[i] ^= 0xFF
 		_, _ = Decode(damaged)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protocol V26 — the Fimbulvetr's contract
+// ---------------------------------------------------------------------------
+
+// The V26 enums, pinned by value and by count. Every number here is a byte on the wire,
+// so a renumbering compiles perfectly on both sides and relabels every value already
+// sent — the trap RecipeID's own comment records.
+//
+// WardBound is not a wire enum at all: it is the bound on WardsNearby.columns, stated as
+// a constant both generated APIs can read rather than as a paragraph each consumer copies.
+func TestV26AppendsWithoutMovingWhatCameBefore(t *testing.T) {
+	t.Parallel()
+
+	for name, pair := range map[string][2]byte{
+		"WeatherKind.Unknown":   {byte(vnet.WeatherKindUnknown), 0},
+		"WeatherKind.Clear":     {byte(vnet.WeatherKindClear), 1},
+		"WeatherKind.Rain":      {byte(vnet.WeatherKindRain), 2},
+		"WeatherKind.Snow":      {byte(vnet.WeatherKindSnow), 3},
+		"WeatherKind.Sandstorm": {byte(vnet.WeatherKindSandstorm), 4},
+		"WeatherKind.Blizzard":  {byte(vnet.WeatherKindBlizzard), 5},
+
+		"StormPhase.Unknown":     {byte(vnet.StormPhaseUnknown), 0},
+		"StormPhase.Approaching": {byte(vnet.StormPhaseApproaching), 1},
+		"StormPhase.Raging":      {byte(vnet.StormPhaseRaging), 2},
+		"StormPhase.Passed":      {byte(vnet.StormPhasePassed), 3},
+
+		"WardKind.Unknown":    {byte(vnet.WardKindUnknown), 0},
+		"WardKind.Runestone":  {byte(vnet.WardKindRunestone), 1},
+		"WardKind.Settlement": {byte(vnet.WardKindSettlement), 2},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
+		}
+	}
+
+	for name, pair := range map[string][2]int{
+		"WeatherKind": {len(vnet.EnumNamesWeatherKind), 6},
+		"StormPhase":  {len(vnet.EnumNamesStormPhase), 4},
+		"WardKind":    {len(vnet.EnumNamesWardKind), 3},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])
+		}
+	}
+
+	if got := uint16(vnet.WardBoundMaxWardedColumns); got != 2048 {
+		t.Errorf("WardBound.MaxWardedColumns = %d, want 2048", got)
 	}
 }
