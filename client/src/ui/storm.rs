@@ -104,7 +104,7 @@ fn ingest_storm_warnings(
     real_time: Res<Time<Real>>,
     mut presentation: StormPresentation<'_>,
 ) {
-    let connected = presentation.state.as_deref().is_none_or(|state| {
+    let connected = presentation.state.as_deref().is_some_and(|state| {
         matches!(
             *state,
             ConnectionState::Connected | ConnectionState::Leaving { .. }
@@ -334,5 +334,24 @@ mod tests {
         let storm = app.world().resource::<Storm>();
         assert!(storm.last.is_none());
         assert!(storm.pending_notice.is_none());
+    }
+
+    #[test]
+    fn a_missing_connection_state_is_disconnected_even_with_a_session() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session())
+            .insert_resource(InputMode::Playing)
+            .add_plugins(StormUiPlugin);
+
+        deliver(
+            &mut app,
+            warning(StormPhase::Approaching, 60),
+            Instant::now(),
+        );
+
+        assert!(app.world().resource::<Storm>().is_clear());
+        assert!(app.world().resource::<StormInbox>().is_empty());
+        assert_eq!(app.world().resource::<ChatLog>().newest(), None);
     }
 }
