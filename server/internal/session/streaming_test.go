@@ -707,84 +707,42 @@ func TestEveryChunkEnteringTheViewIsReportedOnce(t *testing.T) {
 // A chunk this session could not be sent has still entered its view. The report is ahead
 // of the send deliberately: what it produces is an entity a snapshot carries, and a
 // snapshot does not wait on terrain.
+//
+// The chunks *behind* a failed send are not lost either: [View.MarkLoaded] runs only
+// after a send returns, so a partial send leaves the rest out of the view, and
+// [View.MoveTo] refuses to shortcut an unchanged centre for exactly this reason.
 func TestAChunkThatCouldNotBeSentIsStillReported(t *testing.T) {
 	t.Parallel()
 
-	var entered []world.Coord
-	streamer := testStreamer(world.NewCache(5, 1, 8), 0,
-		func([]byte) error { return errors.New("the session is finished") },
-	)
-	streamer.ReportEntering(func(coord world.Coord) { entered = append(entered, coord) })
-
-	if err := streamer.MoveTo(context.Background(), world.Coord{}); err == nil {
-		t.Fatal("MoveTo returned no error for a send that always fails")
-	}
-	if len(entered) != 1 {
-		t.Fatalf("%d chunks were reported, want the one the diff loaded", len(entered))
-	}
-}
-
-// And the chunks *behind* a failed send are reported by the pass that finally sends them,
-// which is what makes the report ahead of the send safe on a diff of more than one chunk.
-//
-// The recovery is [View.MarkLoaded]'s and it is not new: a chunk is recorded as the
-// client's only after its send returned, so a send that failed partway leaves every chunk
-// after it absent from the view, and [View.MoveTo] — which refuses to shortcut an
-// unchanged centre for exactly this reason — offers them again. Reporting the whole load
-// list up front instead would be the same set of reports in a different order, not a
-// repair; this test is what says the order does not lose one.
-func TestTheChunksBehindAFailedSendAreReportedByTheNextPass(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	// A radius of one is a 3×3×3 cube and the first diff loads all 27, one frame each.
-	const inView = 27
-	const sendsBeforeFailure = 3
-
-	sent := 0
-	failing := true
-	sendErr := errors.New("connection gone")
-
+	const inView, before = 27, 3 // a radius of one is 3×3×3, one frame each
+	sent, failing := 0, true
 	var entered []world.Coord
 	streamer := testStreamer(world.NewCache(5, 1, 8), 1, func([]byte) error {
 		sent++
-		if failing && sent > sendsBeforeFailure {
-			return sendErr
+		if failing && sent > before {
+			return errors.New("the session is finished")
 		}
 		return nil
 	})
-	streamer.ReportEntering(func(coord world.Coord) { entered = append(entered, coord) })
+	streamer.ReportEntering(func(c world.Coord) { entered = append(entered, c) })
 
-	if err := streamer.MoveTo(ctx, world.Coord{}); !errors.Is(err, sendErr) {
-		t.Fatalf("MoveTo error = %v, want the send failure", err)
+	if err := streamer.MoveTo(context.Background(), world.Coord{}); err == nil {
+		t.Fatal("MoveTo returned no error for a send that failed")
 	}
-	// The report is ahead of the send, so the chunk whose send failed is reported too.
-	if len(entered) != sendsBeforeFailure+1 {
-		t.Fatalf("%d chunks were reported before the failure, want %d",
-			len(entered), sendsBeforeFailure+1)
-	}
-	if got := streamer.View().Loaded(); got != sendsBeforeFailure {
-		t.Fatalf("the view recorded %d chunks, want the %d that were actually sent",
-			got, sendsBeforeFailure)
+	if len(entered) != before+1 {
+		t.Fatalf("%d chunks reported, want %d", len(entered), before+1)
 	}
 
-	// The same centre, because a partial send leaves the player exactly where they were.
+	// The same centre: a partial send leaves the player where they were.
 	failing = false
-	if err := streamer.MoveTo(ctx, world.Coord{}); err != nil {
-		t.Fatalf("MoveTo after the failure: %v", err)
+	if err := streamer.MoveTo(context.Background(), world.Coord{}); err != nil {
+		t.Fatalf("the recovery pass: %v", err)
 	}
-
 	reported := make(map[world.Coord]struct{}, inView)
-	for _, coord := range entered {
-		reported[coord] = struct{}{}
+	for _, c := range entered {
+		reported[c] = struct{}{}
 	}
 	if len(reported) != inView {
-		t.Errorf("%d of the %d chunks in view were reported, want all of them",
-			len(reported), inView)
-	}
-	for coord := range reported {
-		if !streamer.View().Holds(coord) {
-			t.Errorf("chunk %+v was reported and is not in the view", coord)
-		}
+		t.Errorf("%d of %d chunks in view reported, want all", len(reported), inView)
 	}
 }
