@@ -402,7 +402,7 @@ fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
         // dropped sword reaches or how it tumbles moves.
         ItemShape::Blade => sword_mesh_with(DROP_EDGE * BLADE_DROP_LENGTH, livery),
         // A carried structure is packed gear: one horizontal canvas roll with two raised
-        // collars. The three structures share this silhouette and their item-table colour
+        // collars. The four structures share this silhouette and their item-table colour
         // tells them apart. `bundle_mesh` fills the old box's exact bounds.
         ItemShape::Bundle => bundle_mesh(),
         // A haft with a head across the top of it, merged into one mesh for the reason the
