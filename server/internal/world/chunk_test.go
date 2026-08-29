@@ -117,6 +117,32 @@ func TestTheDesertPlantBlocksCarryAppendedIDsAndFailClosedPlacement(t *testing.T
 	}
 }
 
+func TestThePlainsPlantBlocksCarryAppendedIDsAndFailClosedPlacement(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		block     Block
+		id        Block
+		placeable bool
+	}{
+		{BroadLeaves, 20, true},
+		{Bush, 21, false},
+	} {
+		if tc.block != tc.id {
+			t.Errorf("plains plant block id = %d, want appended id %d", tc.block, tc.id)
+		}
+		if !Solid(tc.block) {
+			t.Errorf("Solid(%d) = false, want true", tc.block)
+		}
+		if Fluid(tc.block) {
+			t.Errorf("Fluid(%d) = true, want false", tc.block)
+		}
+		if got := Placeable(tc.block); got != tc.placeable {
+			t.Errorf("Placeable(%d) = %t, want %t", tc.block, got, tc.placeable)
+		}
+	}
+}
+
 // The index order is wire contract: schemas/world.fbs documents it and the
 // client's mesher indexes in it, so these four values are part of the protocol.
 func TestIndexOrderIsXFastestThenZThenY(t *testing.T) {

@@ -2,11 +2,11 @@ package world
 
 import "testing"
 
-func TestThePlantSpeciesTableNamesConiferPalmAndScrub(t *testing.T) {
+func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 	t.Parallel()
 
-	if len(plantSpeciesTable) != 3 {
-		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm and shrub", len(plantSpeciesTable))
+	if len(plantSpeciesTable) != 5 {
+		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm, shrub, broadleaf and bush", len(plantSpeciesTable))
 	}
 	conifer := plantSpeciesTable[0]
 	if conifer.name != "conifer" || conifer.seedOffset != treeSeedOffset || conifer.footprint != treeCanopyRadius || !conifer.forest {
@@ -65,8 +65,43 @@ func TestThePlantSpeciesTableNamesConiferPalmAndScrub(t *testing.T) {
 			t.Errorf("%s denominator in desert = %d, want %d", tc.name, got, tc.denominator)
 		}
 	}
-	if palmSeedOffset == shrubSeedOffset || palmSeedOffset == treeSeedOffset || shrubSeedOffset == treeSeedOffset {
-		t.Fatal("plant species share a seed offset")
+
+	for index, tc := range []struct {
+		name        string
+		seedOffset  int64
+		denominator uint64
+		footprint   int
+		forest      bool
+	}{
+		{"broadleaf", broadleafSeedOffset, broadleafChanceDenominator, broadleafCanopyRadius, true},
+		{"bush", bushSeedOffset, bushChanceDenominator, 1, false},
+	} {
+		species := plantSpeciesTable[index+3]
+		if species.name != tc.name || species.seedOffset != tc.seedOffset || species.footprint != tc.footprint || species.forest != tc.forest {
+			t.Errorf("row %d = {name:%q seedOffset:%d footprint:%d forest:%t}, want %+v",
+				index+3, species.name, species.seedOffset, species.footprint, species.forest, tc)
+		}
+		if !species.rootsOn(Grass) || species.rootsOn(Snow) {
+			t.Errorf("%s rootsOn(Grass) = %t and rootsOn(Snow) = %t, want true and false",
+				tc.name, species.rootsOn(Grass), species.rootsOn(Snow))
+		}
+		for _, climate := range []Climate{Taiga, Tundra, Desert} {
+			if got := species.denominator(climate); got != 0 {
+				t.Errorf("%s denominator in %v = %d, want 0", tc.name, climate, got)
+			}
+		}
+		if got := species.denominator(Plains); got != tc.denominator {
+			t.Errorf("%s denominator in plains = %d, want %d", tc.name, got, tc.denominator)
+		}
+	}
+
+	offsets := map[int64]string{}
+	for i := range plantSpeciesTable {
+		species := &plantSpeciesTable[i]
+		if other, duplicate := offsets[species.seedOffset]; duplicate {
+			t.Errorf("%s and %s share seed offset %#x", other, species.name, species.seedOffset)
+		}
+		offsets[species.seedOffset] = species.name
 	}
 }
 
@@ -196,6 +231,96 @@ func TestShrubIsOneBlockAboveItsRoot(t *testing.T) {
 	})
 	if len(visited) != 1 || visited[[3]int64{4, 62, 9}] != DesertShrub {
 		t.Fatalf("shrub shape = %v, want one DesertShrub at (4, 62, 9)", visited)
+	}
+}
+
+func TestBroadleafShapeHasARoundFourLayerCrownAndVariableTrunk(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rootX   = int64(12)
+		rootZ   = int64(-8)
+		surface = 64
+	)
+	for _, variant := range []uint64{0, uint64(1) << 32} {
+		leaves := make(map[[3]int64]bool)
+		logs := make(map[[3]int64]bool)
+		visitBroadleaf(0, rootX, rootZ, surface, variant, func(x, y, z int64, block Block) {
+			switch block {
+			case BroadLeaves:
+				leaves[[3]int64{x, y, z}] = true
+			case Log:
+				logs[[3]int64{x, y, z}] = true
+			}
+		})
+
+		trunkHeight := broadleafMinTrunkHeight + int(variant>>32)%2
+		crownY := int64(surface + trunkHeight)
+		if len(logs) != trunkHeight {
+			t.Fatalf("variant %d emitted %d logs, want %d", variant>>32, len(logs), trunkHeight)
+		}
+		for y := int64(surface + 1); y <= crownY; y++ {
+			if !logs[[3]int64{rootX, y, rootZ}] {
+				t.Errorf("variant %d has no trunk at y=%d", variant>>32, y)
+			}
+		}
+
+		for _, tc := range []struct {
+			dy, radius, count int
+		}{
+			{-1, 2, 21},
+			{0, 2, 21},
+			{1, 2, 21},
+			{2, 1, 9},
+		} {
+			count := 0
+			for pos := range leaves {
+				if pos[1] == crownY+int64(tc.dy) {
+					count++
+				}
+			}
+			if count != tc.count {
+				t.Errorf("crown layer dy=%d has %d leaves, want %d", tc.dy, count, tc.count)
+			}
+			if !leaves[[3]int64{rootX + int64(tc.radius), crownY + int64(tc.dy), rootZ}] {
+				t.Errorf("crown layer dy=%d does not reach radius %d", tc.dy, tc.radius)
+			}
+			if tc.radius > 1 && leaves[[3]int64{rootX + int64(tc.radius), crownY + int64(tc.dy), rootZ + int64(tc.radius)}] {
+				t.Errorf("crown layer dy=%d kept its square corner", tc.dy)
+			}
+		}
+	}
+}
+
+func TestBushHashChoosesOneBlockOrAnEastOrSouthPair(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		h    uint64
+		want map[[3]int64]bool
+	}{
+		{"single", 0, map[[3]int64]bool{{4, 62, 9}: true}},
+		{"east pair", uint64(1) << 40, map[[3]int64]bool{{4, 62, 9}: true, {5, 62, 9}: true}},
+		{"south pair", uint64(3) << 40, map[[3]int64]bool{{4, 62, 9}: true, {4, 62, 10}: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(map[[3]int64]bool)
+			visitBush(0, 4, 9, 61, tc.h, func(x, y, z int64, block Block) {
+				if block != Bush {
+					t.Errorf("bush shape emitted block %d", block)
+				}
+				got[[3]int64{x, y, z}] = true
+			})
+			if len(got) != len(tc.want) {
+				t.Fatalf("bush shape = %v, want %v", got, tc.want)
+			}
+			for pos := range tc.want {
+				if !got[pos] {
+					t.Errorf("bush shape lacks %v", pos)
+				}
+			}
+		})
 	}
 }
 

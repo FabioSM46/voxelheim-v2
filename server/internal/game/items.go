@@ -493,6 +493,8 @@ var blockDrops = map[world.Block]ItemID{
 	world.PalmLog:     ItemPalmLog,
 	world.PalmFronds:  ItemNone,
 	world.DesertShrub: ItemNone,
+	world.BroadLeaves: ItemNone,
+	world.Bush:        ItemNone,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -530,6 +532,11 @@ var blockExperience = map[world.Block]uint16{
 	world.PalmLog:     2,
 	world.PalmFronds:  0,
 	world.DesertShrub: 0,
+
+	// Both plains foliage blocks are breakable but teach nothing. Broadleaf wood
+	// remains ordinary Log, so no new item or drop row is needed for its trunk.
+	world.BroadLeaves: 0,
+	world.Bush:        0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {
