@@ -1,6 +1,7 @@
 package world
 
 import (
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -1180,4 +1181,329 @@ func TestNewRecordRefusesAHeaderTooSmallToHoldOne(t *testing.T) {
 		}
 	}()
 	_ = NewRecord(2, 100, [4]byte{'V', 'X', 'H', 'T'}, 1)
+}
+
+// --- putting a chunk back the way the seed made it ---
+
+// regenSeed and the three chunks below are the storm's smallest interesting world: three
+// separate chunk files, of which two are restored and one is warded.
+const regenSeed = 11
+
+var (
+	regenA = [3]int64{5, 6, 7}    // chunk (0, 0, 0)
+	regenB = [3]int64{40, 6, 7}   // chunk (1, 0, 0)
+	regenC = [3]int64{5, 6, -40}  // chunk (0, 0, -2), and a negative coordinate in a name
+	regenD = [3]int64{-40, 6, 40} // chunk (-2, 0, 1), unedited, for the "no file" case
+)
+
+// The directory listing the storm walks: it names the chunks somebody has edited, and
+// nothing else that has found its way into the directory.
+func TestListChunksNamesTheEditedChunksAndNothingElse(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ctx := context.Background()
+	store := testStore(t, dir, regenSeed)
+	cache := NewPersistentCache(store, 2, 16)
+
+	for _, pos := range [][3]int64{regenA, regenB, regenC} {
+		requireEditable(t, regenSeed, pos, Air)
+		if err := cache.Apply(ctx, pos[0], pos[1], pos[2], Air, allowAnything); err != nil {
+			t.Fatalf("Apply%v: %v", pos, err)
+		}
+	}
+	if err := cache.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// Everything a world directory can hold that is not a chunk file. The temporary is
+	// the one a crash mid-write leaves; the rest are names this store never writes and
+	// therefore never has to explain.
+	strays := []string{
+		"c.0.0.0" + chunkFileExt + tempFileMarker + "12345",
+		"c.0.0" + chunkFileExt,
+		"c.0.0.0.0" + chunkFileExt,
+		"c.007.0.0" + chunkFileExt,
+		"c.+1.0.0" + chunkFileExt,
+		"c.x.0.0" + chunkFileExt,
+		"chunk.0.0.0" + chunkFileExt,
+		"c.9.9.9.txt",
+	}
+	for _, name := range strays {
+		if err := os.WriteFile(filepath.Join(store.chunkDir, name), []byte("not a chunk"), 0o600); err != nil {
+			t.Fatalf("writing the stray %s: %v", name, err)
+		}
+	}
+	// And a directory wearing a chunk file's name, which is not a file this code wrote
+	// however convincing the name is.
+	if err := os.Mkdir(filepath.Join(store.chunkDir, "c.5.5.5"+chunkFileExt), 0o755); err != nil {
+		t.Fatalf("creating the stray directory: %v", err)
+	}
+
+	got, err := store.ListChunks()
+	if err != nil {
+		t.Fatalf("ListChunks: %v", err)
+	}
+	want := []Coord{
+		ChunkOf(regenC[0], regenC[1], regenC[2]),
+		ChunkOf(regenA[0], regenA[1], regenA[2]),
+		ChunkOf(regenB[0], regenB[1], regenB[2]),
+	}
+	slices.SortFunc(want, func(a, b Coord) int {
+		return cmp.Or(cmp.Compare(a.X, b.X), cmp.Compare(a.Y, b.Y), cmp.Compare(a.Z, b.Z))
+	})
+	if !slices.Equal(got, want) {
+		t.Errorf("ListChunks answered %v, want %v", got, want)
+	}
+}
+
+// The order is by coordinate and not by name, so a pass over the world is the same
+// everywhere. Sorted lexically, c.10.0.0 would come before c.2.0.0.
+func TestListChunksSortsByCoordinateRatherThanByName(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t, t.TempDir(), regenSeed)
+	for _, x := range []int32{10, 2, -3} {
+		if err := store.SaveChunk(Coord{X: x}, map[int]Block{0: Air}); err != nil {
+			t.Fatalf("SaveChunk(%d): %v", x, err)
+		}
+	}
+
+	got, err := store.ListChunks()
+	if err != nil {
+		t.Fatalf("ListChunks: %v", err)
+	}
+	want := []Coord{{X: -3}, {X: 2}, {X: 10}}
+	if !slices.Equal(got, want) {
+		t.Errorf("ListChunks answered %v, want %v", got, want)
+	}
+}
+
+// A removal takes the file, and asking twice is not an error: most chunks have never been
+// edited, so a caller sweeping a region cannot be made to check first.
+func TestRemoveChunkTakesTheFileAndForgivesAnAbsentOne(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t, t.TempDir(), regenSeed)
+	coord := ChunkOf(regenA[0], regenA[1], regenA[2])
+	if err := store.SaveChunk(coord, map[int]Block{0: Air}); err != nil {
+		t.Fatalf("SaveChunk: %v", err)
+	}
+	if names := chunkFiles(t, store); len(names) != 1 {
+		t.Fatalf("the chunk directory holds %v, want one saved chunk", names)
+	}
+
+	if err := store.RemoveChunk(coord); err != nil {
+		t.Fatalf("RemoveChunk: %v", err)
+	}
+	if names := chunkFiles(t, store); len(names) != 0 {
+		t.Errorf("the chunk directory still holds %v after the removal", names)
+	}
+	if err := store.RemoveChunk(coord); err != nil {
+		t.Errorf("removing a chunk that has no file: %v, want no error", err)
+	}
+	// A chunk nobody ever edited has no file either, and is the same non-error.
+	if err := store.RemoveChunk(ChunkOf(regenD[0], regenD[1], regenD[2])); err != nil {
+		t.Errorf("removing a chunk that was never edited: %v, want no error", err)
+	}
+	if _, err := store.LoadChunk(coord); err != nil {
+		t.Errorf("LoadChunk after a removal: %v, want the no-edits answer", err)
+	}
+}
+
+// Forgetting an edit is not a wire event: a resident chunk is put back by publishing a
+// new composition, exactly as an edit publishes one, so every reader that watches the
+// revision notices.
+func TestRegenerateRepublishesAResidentChunkAndBumpsTheRevision(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	cache := NewPersistentCache(testStore(t, t.TempDir(), regenSeed), 2, 16)
+	coord := ChunkOf(regenA[0], regenA[1], regenA[2])
+	index := Index(Local(regenA[0]), Local(regenA[1]), Local(regenA[2]))
+	original := Generate(regenSeed, coord).Blocks[index]
+
+	requireEditable(t, regenSeed, regenA, Air)
+	if err := cache.Apply(ctx, regenA[0], regenA[1], regenA[2], Air, allowAnything); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	edited, _, err := cache.Get(ctx, coord)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	before := cache.Revision()
+
+	if rErr := cache.Regenerate(coord); rErr != nil {
+		t.Fatalf("Regenerate: %v", rErr)
+	}
+
+	if cache.Revision() <= before {
+		t.Errorf("the revision is %d after regenerating a resident chunk, want more than %d", cache.Revision(), before)
+	}
+	if got := edited.Blocks[index]; got != Air {
+		t.Errorf("the composition published before the regeneration now holds %d; a published chunk is never written to", got)
+	}
+	chunk, err := cache.Peek(coord)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if got := chunk.Blocks[index]; got != original {
+		t.Errorf("the regenerated chunk holds %d at the edited voxel, want the generated %d", got, original)
+	}
+	if cache.deltas.Known(coord) {
+		t.Error("the edit layer still knows the regenerated chunk")
+	}
+}
+
+// The generator is never called for a chunk nobody holds: a regeneration of one that is
+// not resident is a removal and nothing else, and does not pull it into the cache.
+func TestRegenerateLeavesANonResidentChunkOutOfTheCache(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := testStore(t, t.TempDir(), regenSeed)
+	cache := NewPersistentCache(store, 2, 16)
+	coord := ChunkOf(regenA[0], regenA[1], regenA[2])
+
+	requireEditable(t, regenSeed, regenA, Air)
+	if err := cache.Apply(ctx, regenA[0], regenA[1], regenA[2], Air, allowAnything); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := cache.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	// A second cache over the same directory has never composed the chunk, so it is
+	// stored but not resident — the state every chunk in the world is in when a storm
+	// reaches it.
+	cold := NewPersistentCache(testStore(t, store.Dir(), regenSeed), 2, 16)
+	if cold.Len() != 0 {
+		t.Fatalf("a fresh cache holds %d chunks, want none", cold.Len())
+	}
+	if err := cold.Regenerate(coord); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	if cold.Len() != 0 {
+		t.Errorf("regenerating a chunk nobody holds made %d chunks resident, want none", cold.Len())
+	}
+	if names := chunkFiles(t, store); len(names) != 0 {
+		t.Errorf("the chunk directory still holds %v after the regeneration", names)
+	}
+
+	// And composing it now reads a directory with nothing in it for this chunk.
+	index := Index(Local(regenA[0]), Local(regenA[1]), Local(regenA[2]))
+	chunk, _, err := cold.Get(ctx, coord)
+	if err != nil {
+		t.Fatalf("Get after the regeneration: %v", err)
+	}
+	if got, want := chunk.Blocks[index], Generate(regenSeed, coord).Blocks[index]; got != want {
+		t.Errorf("the chunk composes to %d after the regeneration, want the generated %d", got, want)
+	}
+}
+
+// The pending save is cancelled with the edits, or the storm's own removal is undone by
+// the autosave a few seconds later.
+func TestRegenerateCancelsThePendingSave(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := testStore(t, t.TempDir(), regenSeed)
+	cache := NewPersistentCache(store, 2, 16)
+	coord := ChunkOf(regenA[0], regenA[1], regenA[2])
+
+	requireEditable(t, regenSeed, regenA, Air)
+	if err := cache.Apply(ctx, regenA[0], regenA[1], regenA[2], Air, allowAnything); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cache.dirtyMu.Lock()
+	_, marked := cache.dirty[coord]
+	cache.dirtyMu.Unlock()
+	if !marked {
+		t.Fatal("the edit did not mark the chunk for saving; the test would prove nothing")
+	}
+
+	if err := cache.Regenerate(coord); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+
+	cache.dirtyMu.Lock()
+	_, stillMarked := cache.dirty[coord]
+	cache.dirtyMu.Unlock()
+	if stillMarked {
+		t.Error("the chunk is still awaiting a write after its edits were thrown away")
+	}
+	if err := cache.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if names := chunkFiles(t, store); len(names) != 0 {
+		t.Errorf("the save after a regeneration wrote %v, want an empty directory", names)
+	}
+}
+
+// The world-directory round trip, which is the acceptance criterion in one test: edit
+// three chunks, save them, put two back, restart. The two are pristine on disk and in
+// memory; the third — the warded one — still has what was built on it.
+func TestRegeneratedChunksArePristineAfterARestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ctx := context.Background()
+	edited := [][3]int64{regenA, regenB, regenC}
+	for _, pos := range edited {
+		requireEditable(t, regenSeed, pos, Air)
+	}
+
+	first := NewPersistentCache(testStore(t, dir, regenSeed), 2, 16)
+	for _, pos := range edited {
+		if err := first.Apply(ctx, pos[0], pos[1], pos[2], Air, allowAnything); err != nil {
+			t.Fatalf("Apply%v: %v", pos, err)
+		}
+	}
+	if err := first.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if names := chunkFiles(t, first.store); len(names) != 3 {
+		t.Fatalf("the chunk directory holds %v, want three saved chunks", names)
+	}
+
+	// The storm takes two of the three. regenC is warded and is not visited.
+	restored := []Coord{
+		ChunkOf(regenA[0], regenA[1], regenA[2]),
+		ChunkOf(regenB[0], regenB[1], regenB[2]),
+	}
+	for _, coord := range restored {
+		if err := first.Regenerate(coord); err != nil {
+			t.Fatalf("Regenerate%+v: %v", coord, err)
+		}
+	}
+
+	// On disk: only the warded chunk still has a file, and the listing says so.
+	warded := ChunkOf(regenC[0], regenC[1], regenC[2])
+	stored, err := first.store.ListChunks()
+	if err != nil {
+		t.Fatalf("ListChunks: %v", err)
+	}
+	if !slices.Equal(stored, []Coord{warded}) {
+		t.Errorf("the world directory lists %v after the storm, want only the warded %+v", stored, warded)
+	}
+
+	// In memory, in the process that ran the storm, and again in one that knows nothing
+	// but the seed and the path.
+	for _, cache := range []*Cache{first, NewPersistentCache(testStore(t, dir, regenSeed), 2, 16)} {
+		for _, pos := range edited {
+			coord := ChunkOf(pos[0], pos[1], pos[2])
+			want := Generate(regenSeed, coord).Blocks[Index(Local(pos[0]), Local(pos[1]), Local(pos[2]))]
+			if coord == warded {
+				want = Air
+			}
+			got, bErr := cache.BlockAt(ctx, pos[0], pos[1], pos[2])
+			if bErr != nil {
+				t.Fatalf("BlockAt%v: %v", pos, bErr)
+			}
+			if got != want {
+				t.Errorf("voxel %v holds %d, want %d", pos, got, want)
+			}
+		}
+	}
 }
