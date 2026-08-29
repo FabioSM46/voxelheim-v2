@@ -163,6 +163,9 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
 		t.Fatalf("ConfigureChunkRegeneration: %v", err)
 	}
+	if err := sim.ConfigureWater(chunks); err != nil {
+		t.Fatalf("ConfigureWater: %v", err)
+	}
 
 	return &server{
 		tr:       tr,

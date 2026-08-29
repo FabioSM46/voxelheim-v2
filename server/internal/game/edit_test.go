@@ -44,6 +44,9 @@ func editWorld(t *testing.T) (*harness, *world.Cache) {
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}
+	if err := sim.ConfigureWater(chunks); err != nil {
+		t.Fatalf("ConfigureWater: %v", err)
+	}
 	return &harness{t: t, sim: sim}, chunks
 }
 
@@ -373,6 +376,12 @@ func TestPlacingIntoFlowingWaterReplacesIt(t *testing.T) {
 	giveBlock(t, h, player, chunks, world.Stone)
 
 	target := [3]int32{3, 200, 0}
+	if err := chunks.Apply(context.Background(), 4, 199, 0, world.Stone, nil); err != nil {
+		t.Fatalf("support neighbouring flow: %v", err)
+	}
+	if err := chunks.Apply(context.Background(), 4, 200, 0, world.WaterFlow3, nil); err != nil {
+		t.Fatalf("prepare neighbouring flow: %v", err)
+	}
 	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.WaterFlow3, nil); err != nil {
 		t.Fatalf("flood the target voxel: %v", err)
 	}
@@ -393,6 +402,10 @@ func TestPlacingIntoFlowingWaterReplacesIt(t *testing.T) {
 	}
 	if got := countOf(*result.Inventory, game.ItemStone); got != before-1 {
 		t.Errorf("Stone count after placing = %d, want %d: a placement into water spends one block like any other", got, before-1)
+	}
+	h.step()
+	if got := blockAt(t, chunks, 4, 200, 0); got != world.Air {
+		t.Errorf("neighbour after placement = %d, want scheduled flow to drain", got)
 	}
 }
 
@@ -546,6 +559,9 @@ func TestBreakingPutsNothingInThePackAndLeavesTheYieldOnTheGround(t *testing.T) 
 	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.Dirt, nil); err != nil {
 		t.Fatalf("prepare Dirt: %v", err)
 	}
+	if err := chunks.Apply(context.Background(), int64(target[0]-1), int64(target[1]), int64(target[2]), world.Water, nil); err != nil {
+		t.Fatalf("prepare source beside Dirt: %v", err)
+	}
 
 	result := mineAt(t, h, player, target)
 	if result.Inventory != nil {
@@ -556,6 +572,10 @@ func TestBreakingPutsNothingInThePackAndLeavesTheYieldOnTheGround(t *testing.T) 
 	}
 	if got := blockAt(t, chunks, int64(target[0]), int64(target[1]), int64(target[2])); got != world.Air {
 		t.Errorf("the broken voxel holds block %d, want Air", got)
+	}
+	h.step()
+	if got := blockAt(t, chunks, int64(target[0]), int64(target[1]), int64(target[2])); got != world.WaterFlow7 {
+		t.Errorf("broken voxel after one tick = %d, want scheduled WaterFlow7", got)
 	}
 
 	// Standing beside it is enough: no key, no aim, and no request from the client.

@@ -8,6 +8,121 @@ import (
 	"testing"
 )
 
+func TestApplyResidentGuardedNeverGeneratesAndDistinguishesTheGuard(t *testing.T) {
+	t.Parallel()
+
+	cache := NewCache(11, 1, 4)
+	guardMismatch := errors.New("the resident value changed")
+
+	if err := cache.ApplyResidentGuarded(1, 2, 3, Stone, nil); !errors.Is(err, ErrNotResident) {
+		t.Fatalf("absent resident write error = %v, want ErrNotResident", err)
+	}
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("resident-only write composed %d chunks, want none", got)
+	}
+
+	coord := ChunkOf(1, 2, 3)
+	chunk, _, err := cache.Get(context.Background(), coord)
+	if err != nil {
+		t.Fatalf("Get resident chunk: %v", err)
+	}
+	want := chunk.At(Local(1), Local(2), Local(3))
+	revision := cache.Revision()
+	if err := cache.ApplyResidentGuarded(1, 2, 3, Stone, func(Block) error { return guardMismatch }); !errors.Is(err, guardMismatch) {
+		t.Fatalf("guarded resident write error = %v, want guard mismatch", err)
+	}
+	if cache.Revision() != revision {
+		t.Fatal("a refused resident write advanced the cache revision")
+	}
+	got, err := cache.BlockAt(context.Background(), 1, 2, 3)
+	if err != nil || got != want {
+		t.Fatalf("refused resident write left block %d (err %v), want %d", got, err, want)
+	}
+}
+
+func TestWaterCompositionDoorbellDeduplicatesWithoutLosingAFullWake(t *testing.T) {
+	t.Parallel()
+
+	cache := NewCache(11, 1, 4)
+	coords := []Coord{{X: 2}, {X: -1}, {X: 2}}
+	for _, coord := range coords {
+		if _, _, err := cache.Get(context.Background(), coord); err != nil {
+			t.Fatalf("Get(%+v): %v", coord, err)
+		}
+		cache.markWaterComposition(coord)
+	}
+
+	if got := len(cache.waterWake); got != 1 {
+		t.Fatalf("doorbell depth = %d, want its hard bound of 1", got)
+	}
+	<-cache.WaterCompositions()
+	chunks := cache.TakeWaterCompositions()
+	if len(chunks) != 2 || chunks[0].Coord != (Coord{X: -1}) || chunks[1].Coord != (Coord{X: 2}) {
+		t.Fatalf("deduplicated compositions = %+v, want chunks -1 then 2", chunkCoords(chunks))
+	}
+	if remaining := cache.TakeWaterCompositions(); len(remaining) != 0 {
+		t.Fatalf("second take returned %+v, want nothing", chunkCoords(remaining))
+	}
+}
+
+func TestResidentWaterPersistsAndRegenerateRestoresAndRearms(t *testing.T) {
+	t.Parallel()
+
+	const seed = int64(11)
+	dir := t.TempDir()
+	cache := NewPersistentCache(testStore(t, dir, seed), 1, 4)
+	coord := Coord{}
+	chunk, _, err := cache.Get(context.Background(), coord)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	index := Index(1, 2, 3)
+	original := chunk.Blocks[index]
+	<-cache.WaterCompositions()
+	cache.TakeWaterCompositions()
+	if err := cache.ApplyResidentGuarded(1, 2, 3, WaterFlow4, nil); err != nil {
+		t.Fatalf("ApplyResidentGuarded: %v", err)
+	}
+	if err := cache.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	cache = NewPersistentCache(testStore(t, dir, seed), 1, 4)
+	chunk, _, err = cache.Get(context.Background(), coord)
+	if err != nil {
+		t.Fatalf("reload Get: %v", err)
+	}
+	if got := chunk.Blocks[index]; got != WaterFlow4 {
+		t.Fatalf("reloaded water = %d, want WaterFlow4", got)
+	}
+	<-cache.WaterCompositions()
+	cache.TakeWaterCompositions()
+
+	if err := cache.Regenerate(coord); err != nil {
+		t.Fatalf("Regenerate: %v", err)
+	}
+	select {
+	case <-cache.WaterCompositions():
+	default:
+		t.Fatal("Regenerate did not ring the water composition doorbell")
+	}
+	chunks := cache.TakeWaterCompositions()
+	if len(chunks) != 1 || chunks[0].Coord != coord {
+		t.Fatalf("regeneration compositions = %+v, want %+v", chunkCoords(chunks), coord)
+	}
+	if got := chunks[0].Blocks[index]; got != original {
+		t.Fatalf("regenerated block = %d, want generated %d", got, original)
+	}
+}
+
+func chunkCoords(chunks []*Chunk) []Coord {
+	coords := make([]Coord, len(chunks))
+	for i, chunk := range chunks {
+		coords[i] = chunk.Coord
+	}
+	return coords
+}
+
 // The cache exists so a chunk two players can both see is generated once. With
 // eight goroutines asking at the same moment, one generation must satisfy all of
 // them — which is why an entry is published before the chunk exists, with a

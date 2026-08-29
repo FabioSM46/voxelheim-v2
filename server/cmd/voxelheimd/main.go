@@ -352,6 +352,9 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
 		return fmt.Errorf("configure chunk regeneration: %w", err)
 	}
+	if err := sim.ConfigureWater(chunks); err != nil {
+		return fmt.Errorf("configure water: %w", err)
+	}
 
 	// Before the listener is served and therefore before any session can be admitted,
 	// which is what puts the camp in the first snapshot a returning player receives
@@ -787,6 +790,14 @@ func (s *server) run(ctx context.Context) {
 		workers   sync.WaitGroup
 	)
 
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.waterScanLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the water composition scanner stopped", "error", err)
+		}
+	}()
+
 	// One heartbeat per simulated minute, at debug level: enough to see that the
 	// loop is alive without turning the log into a metronome.
 	heartbeatEvery := uint64(s.cfg.TickRate) * 60
@@ -796,7 +807,7 @@ func (s *server) run(ctx context.Context) {
 		// in the world does not depend on who is watching. Every player is advanced
 		// from their intent and every session is handed what it can see — nothing here
 		// blocks, and nothing here generates terrain.
-		s.sim.Step(tick)
+		s.broadcastWaterChanges(s.sim.Step(tick))
 
 		if tick%heartbeatEvery == 0 {
 			// Peek-only, never Get: the tick loop must not generate terrain, because a
