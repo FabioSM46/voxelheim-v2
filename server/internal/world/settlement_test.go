@@ -191,6 +191,25 @@ func TestTheGuardsBelowDescribeTheActualDrawings(t *testing.T) {
 		}
 	}
 
+	// **[plotRingNearestAxis] reads one number out of [settlementBearings] and nothing
+	// checked that it is the number it claims to be.** A building on a ring separates
+	// from a centred one on whichever axis it is *further* out on, so each bearing's
+	// useful leg is the larger of its two — and the worst bearing is the one whose
+	// larger leg is smallest, which on a twelve-spoke table is cos 30°. Rewrite the
+	// table with sixteen bearings and the number moves; nothing else here would say so.
+	worst := int64(1) << fracBits
+	for _, v := range settlementBearings {
+		if leg := max(absInt64(v[0]), absInt64(v[1])); leg < worst {
+			worst = leg
+		}
+	}
+	if worst != 56756 {
+		t.Errorf("the smallest larger leg in settlementBearings is %d and plotRingNearestAxis is written for 56756", worst)
+	}
+	if got, want := int(plotRingNearestAxis), (capitalPlotRadius*int(worst))>>fracBits; got != want {
+		t.Errorf("plotRingNearestAxis is %d and the bearing table puts a plot-ring building %d out on its nearer axis", got, want)
+	}
+
 	// ceil(3√2) = 5: a 7-across footprint centred on a ring reaches this far past it at
 	// its corner, which is the clearance both hut-ring guards subtract.
 	if got := hutHalfFootprint * hutHalfFootprint * 2; got > hutRingClearance*hutRingClearance {
@@ -235,7 +254,7 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		{"capitalHutCount", capitalHutCount, 6},
 	} {
 		if c.got != c.want {
-			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 6 is the world it produces",
+			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 8 is the world it produces",
 				c.name, c.got, c.want)
 		}
 	}
@@ -247,7 +266,7 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		originX, originY, originZ int64
 		facing                    Facing
 	}{
-		{BuildingKeep, 109, 64, 104, FacingPlusZ},
+		{BuildingKeep, 106, 64, 101, FacingPlusZ},
 		{BuildingHall, 135, 64, 105, FacingMinusX},
 		{BuildingSmithy, 90, 64, 119, FacingPlusX},
 		{BuildingHut, 133, 64, 142, FacingMinusZ},
@@ -1059,8 +1078,8 @@ func TestEveryAnchorIsAirOverSolidGround(t *testing.T) {
 // for settlements, and the counterpart of the tree test beside it.
 //
 // **A building is the first feature here bigger than a chunk**, so this is not the same
-// statement the canopy makes: a keep is fifteen blocks across and fourteen tall and can
-// straddle eight chunks at once. Generating them in both orders is what says no chunk is
+// statement the canopy makes: the capital's castle is twenty-one blocks across and
+// twenty tall and can straddle eight chunks at once. Generating them in both orders is what says no chunk is
 // reading, caching or mutating anything belonging to its neighbour — which, if it ever
 // became untrue, would show up as a wall that exists only when a player happens to walk
 // in from the east.

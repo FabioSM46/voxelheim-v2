@@ -1747,10 +1747,14 @@ func TestASettlementColumnTheTickCannotUseFallsThroughToTheWorldSpawn(t *testing
 	}
 }
 
-// The paragraph in settlementRespawnLocked that says a capital blocks three of its four
-// cardinal bearings is a claim about a drawing, and a decision was made from it — that
-// the offset stays at three blocks and the fallback absorbs the keep. So the drawing is
-// asked.
+// settlementRespawnLocked makes a claim about a drawing, and a decision was made from it
+// — that the offset stays at three blocks. So the drawing is asked.
+//
+// **The claim inverted at #555 and the decision did not.** Through worldgen 7 a capital
+// blocked three of its four cardinals; the castle that replaced the keep is eleven
+// blocks of open ground floor across, so every bearing is clear. What this test is for
+// is the same either way: the offset is a constant chosen against a picture, and a
+// picture is free to move under it.
 //
 // The keep stands unrotated on the settlement's centre and its floor is one above the
 // plateau, so a body put down at Plateau + [world.SpawnClearance] occupies the drawing's
@@ -1762,24 +1766,19 @@ func TestTheKeepStandsWhereThisRespawnRuleSaysItDoes(t *testing.T) {
 	midX, midZ := keep.W/2, keep.D/2
 
 	for _, tc := range []struct {
-		name        string
-		dx, dz      int
-		wantBlocked bool
+		name   string
+		dx, dz int
 	}{
-		{"east", respawnSettlementOffset, 0, true},
-		{"west", -respawnSettlementOffset, 0, true},
-		{"north", 0, -respawnSettlementOffset, true},
-		{"south — the tower's doorway", 0, respawnSettlementOffset, false},
+		{"east", respawnSettlementOffset, 0},
+		{"west", -respawnSettlementOffset, 0},
+		{"north", 0, -respawnSettlementOffset},
+		{"south", 0, respawnSettlementOffset},
 	} {
-		blocked := false
 		for _, y := range []int{1, 2} {
-			if keep.At(midX+tc.dx, y, midZ+tc.dz) != world.Air {
-				blocked = true
+			if got := keep.At(midX+tc.dx, y, midZ+tc.dz); got != world.Air {
+				t.Errorf("%s of the castle's middle holds %v at y=%d; the respawn tier puts a body there",
+					tc.name, got, y)
 			}
-		}
-		if blocked != tc.wantBlocked {
-			t.Errorf("%s of the keep's middle is blocked=%v at body height, want %v",
-				tc.name, blocked, tc.wantBlocked)
 		}
 	}
 
