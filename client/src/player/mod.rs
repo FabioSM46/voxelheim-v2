@@ -1016,10 +1016,20 @@ struct NamePlate(u64);
 /// has differed from it. Keeping the counter beside the answer rather than in a resource is
 /// what makes the two rules per-plate: a name plate strobing behind a fence post must not be
 /// steadied or disturbed by what any other plate is doing.
+///
+/// `near` is the distance rule's *own* settled answer, and it is a separate field rather
+/// than a read of `shown` because the two rules are only independent if their hysteresis is
+/// too. Choosing the threshold from `shown` couples them in the direction that is least
+/// obvious and hurts most: a plate hidden by a wall at 31 blocks would come back needing the
+/// *hidden* threshold of 30, so clearing the wall without also walking a block closer left
+/// the plate off with a clear line of sight and the distance rule plainly satisfied. The
+/// band belongs to the distance rule, so it is judged against the distance rule's own
+/// history and against nothing else.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct PlateSight {
     shown: bool,
     dwell: u8,
+    near: bool,
 }
 
 /// Marks the body belonging to this session. Exactly one entity ever has it.
@@ -2273,13 +2283,16 @@ fn name_plate_anchor(body: &Transform) -> Vec3 {
 
 /// The limit this plate is currently judged against, in blocks.
 ///
-/// The band that makes the distance rule stable: a drawn plate keeps its full
-/// [`NAME_PLATE_DISTANCE`], a hidden one has to come [`NAME_PLATE_DISTANCE_MARGIN`] further
-/// in before it comes back. Reading the current answer to pick the threshold is the whole
-/// of the hysteresis; there is no state here beyond the `shown` flag the caller already
-/// holds.
-fn name_plate_reach(shown: bool) -> f32 {
-    if shown {
+/// The band that makes the distance rule stable: a plate the distance rule currently admits
+/// keeps its full [`NAME_PLATE_DISTANCE`], one it currently rejects has to come
+/// [`NAME_PLATE_DISTANCE_MARGIN`] further in before it is admitted again. Reading the
+/// current answer to pick the threshold is the whole of the hysteresis; there is no state
+/// here beyond the `near` flag the caller already holds.
+///
+/// **`near`, emphatically not `shown`.** The argument is the distance rule's own previous
+/// answer — see [`PlateSight`] for what choosing the drawn state instead would cost.
+fn name_plate_reach(near: bool) -> f32 {
+    if near {
         NAME_PLATE_DISTANCE
     } else {
         NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN
@@ -2316,12 +2329,19 @@ fn name_plate_line_is_clear(eye: Vec3, anchor: Vec3, mut solid: impl FnMut(IVec3
     .is_none()
 }
 
-/// Whether the player could see the owner of a plate that is currently `shown`.
+/// Whether the player could see the owner of a plate whose distance rule last answered
+/// `near`, and what the distance rule answers this frame.
 ///
 /// The two rules, in the order they have to run and nowhere else in the file. They are
 /// independent: a plate near enough but behind rock fails on the second, a plate on a
 /// perfectly clear line but too far away fails on the first, and neither can mask the other
 /// because `&&` is the only thing joining them.
+///
+/// **The returned `near` is what makes that independence hold over time rather than only
+/// within a frame.** The `&&` keeps either rule from masking the other's *hiding*; carrying
+/// the distance answer back out — instead of letting the caller re-derive it from the drawn
+/// state — is what keeps either from masking the other's *showing*. [`PlateSight`] records
+/// what the coupled version cost.
 ///
 /// **Distance first, and the ordering is load-bearing rather than tidy.** This runs per
 /// plate per frame, the traversal is the expensive half, and the rejection is a subtraction
@@ -2330,10 +2350,11 @@ fn name_plate_line_is_clear(eye: Vec3, anchor: Vec3, mut solid: impl FnMut(IVec3
 fn name_plate_is_in_sight(
     eye: Vec3,
     anchor: Vec3,
-    shown: bool,
+    near: bool,
     solid: impl FnMut(IVec3) -> bool,
-) -> bool {
-    eye.distance(anchor) <= name_plate_reach(shown) && name_plate_line_is_clear(eye, anchor, solid)
+) -> (bool, bool) {
+    let near = eye.distance(anchor) <= name_plate_reach(near);
+    (near, near && name_plate_line_is_clear(eye, anchor, solid))
 }
 
 /// Advances one plate's hysteresis by a frame and answers what it should now do.
@@ -2349,6 +2370,7 @@ fn settle_plate_sight(sight: PlateSight, wanted: bool) -> PlateSight {
         PlateSight {
             shown: wanted,
             dwell: 0,
+            ..sight
         }
     } else {
         PlateSight { dwell, ..sight }
@@ -2364,10 +2386,12 @@ fn settle_plate_sight(sight: PlateSight, wanted: bool) -> PlateSight {
 ///
 /// Three rules hide a plate and they are independent. Beyond [`NAME_PLATE_DISTANCE`] it is
 /// hidden however clear the line; with solid terrain between the camera and the anchor it
-/// is hidden however close; and a projection that fails hides it as it always has. The
-/// first two settle through [`settle_plate_sight`] so neither boundary can strobe; the
-/// third stays immediate, because it is not a boundary a player stands on — it is the
-/// anchor leaving the frame.
+/// is hidden however close; and a projection that fails hides it as it always has. The first
+/// two are steadied by a mechanism each — the distance rule by its own band, carried in
+/// `PlateSight::near`, and the occlusion rule by the dwell in [`settle_plate_sight`] — so
+/// neither boundary can strobe and neither steadies or holds back the other. The third stays
+/// immediate, because it is not a boundary a player stands on — it is the anchor leaving the
+/// frame.
 fn position_name_plates(
     session: Option<Res<Session>>,
     store: Option<Res<ChunkStore>>,
@@ -2400,7 +2424,7 @@ fn position_name_plates(
             continue;
         };
         let anchor = name_plate_anchor(body);
-        let wanted = name_plate_is_in_sight(eye, anchor, sight.shown, |voxel| {
+        let (near, wanted) = name_plate_is_in_sight(eye, anchor, sight.near, |voxel| {
             voxels.is_some_and(|(store, size)| {
                 store.solid_at(
                     BlockCoord {
@@ -2413,7 +2437,10 @@ fn position_name_plates(
             })
         });
 
-        let next = settle_plate_sight(*sight, wanted);
+        // The distance answer is written back before the dwell runs, and it is not filtered
+        // by it. Its own band is what steadies it, so passing it through the occlusion
+        // filter as well would only make the two rules share a mechanism again.
+        let next = settle_plate_sight(PlateSight { near, ..*sight }, wanted);
         if *sight != next {
             *sight = next;
         }

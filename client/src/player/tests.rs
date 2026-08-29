@@ -2523,20 +2523,91 @@ fn the_two_name_plate_rules_are_independent() {
     let wall = |voxel: IVec3| voxel.z == 4;
 
     assert!(
-        name_plate_is_in_sight(eye, near, false, clear),
+        name_plate_is_in_sight(eye, near, false, clear).1,
         "a body six blocks away in the open has no plate"
     );
     assert!(
-        !name_plate_is_in_sight(eye, near, false, wall),
+        !name_plate_is_in_sight(eye, near, false, wall).1,
         "the occlusion rule did not fire on a body well inside the distance limit"
     );
     assert!(
-        !name_plate_is_in_sight(eye, far, true, clear),
+        !name_plate_is_in_sight(eye, far, true, clear).1,
         "the distance rule did not fire on a completely clear line"
     );
     assert!(
-        !name_plate_is_in_sight(eye, far, true, wall),
+        !name_plate_is_in_sight(eye, far, true, wall).1,
         "neither rule fired when both should have"
+    );
+
+    // And the distance answer that comes back is the distance rule's alone: a wall between
+    // the two endpoints hides the plate without ever reporting the body as far away, which
+    // is the property the next test spends a walk on.
+    assert!(
+        name_plate_is_in_sight(eye, near, false, wall).0,
+        "an occluded body six blocks away was reported as out of distance"
+    );
+}
+
+#[test]
+fn clearing_a_wall_brings_a_name_plate_back_inside_the_hysteresis_band() {
+    // The regression that reading `shown` for the threshold produced. A plate is drawn at 31
+    // blocks, a wall goes up, the plate settles out — and then the wall comes down with the
+    // body never having moved. Judged against the drawn state the plate would now be asked
+    // for the hidden threshold of 30, and would stay off with a clear line of sight and the
+    // distance rule satisfied; judged against the distance rule's own history it comes back.
+    let eye = Vec3::ZERO;
+    let inside = Vec3::Z * (NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN - 1.0);
+    let anchor = Vec3::Z * (NAME_PLATE_DISTANCE - 1.0);
+    assert!(
+        anchor.length() > NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN,
+        "the body has to sit inside the band for this test to be about anything"
+    );
+
+    let clear = |_: IVec3| false;
+    let wall = |voxel: IVec3| voxel.z == 4;
+    let mut sight = PlateSight::default();
+
+    // Walk inside the tighter threshold before moving out into the band, so `near` is earned
+    // rather than asserted. A plate that starts hidden must not appear from inside the band;
+    // that is the hysteresis this regression test is meant to preserve.
+    let settle =
+        |sight: &mut PlateSight, anchor: Vec3, solid: &dyn Fn(IVec3) -> bool, frames: usize| {
+            for _ in 0..frames {
+                let (near, wanted) = name_plate_is_in_sight(eye, anchor, sight.near, solid);
+                *sight = settle_plate_sight(PlateSight { near, ..*sight }, wanted);
+            }
+        };
+
+    settle(
+        &mut sight,
+        inside,
+        &clear,
+        NAME_PLATE_SIGHT_DWELL as usize + 1,
+    );
+    assert!(sight.shown, "the plate never appeared on a clear line");
+
+    settle(
+        &mut sight,
+        anchor,
+        &wall,
+        NAME_PLATE_SIGHT_DWELL as usize + 1,
+    );
+    assert!(!sight.shown, "the wall did not hide the plate");
+    assert!(
+        sight.near,
+        "the occlusion rule moved the distance rule's own answer"
+    );
+
+    settle(
+        &mut sight,
+        anchor,
+        &clear,
+        NAME_PLATE_SIGHT_DWELL as usize + 1,
+    );
+    assert!(
+        sight.shown,
+        "the plate stayed hidden after the wall came down, {} blocks away with a clear line",
+        anchor.length()
     );
 }
 
@@ -2574,6 +2645,7 @@ fn a_name_plate_behind_a_fence_post_does_not_strobe() {
     let mut sight = PlateSight {
         shown: true,
         dwell: 0,
+        near: true,
     };
     for frame in 0..40 {
         sight = settle_plate_sight(sight, frame % 2 == 0);
@@ -2588,6 +2660,7 @@ fn a_name_plate_behind_a_fence_post_does_not_strobe() {
     let mut sight = PlateSight {
         shown: true,
         dwell: 0,
+        near: true,
     };
     for frame in 1..NAME_PLATE_SIGHT_DWELL {
         sight = settle_plate_sight(sight, false);
@@ -2607,24 +2680,25 @@ fn a_name_plate_sitting_on_the_distance_limit_settles_once_and_stays() {
     let mut sight = PlateSight {
         shown: true,
         dwell: 0,
+        near: true,
     };
     let mut history = Vec::new();
     for frame in 0..60 {
         let jitter = if frame % 2 == 0 { -0.2 } else { 0.2 };
         let anchor = Vec3::Z * (NAME_PLATE_DISTANCE + jitter);
-        let wanted = name_plate_is_in_sight(eye, anchor, sight.shown, |_| false);
-        sight = settle_plate_sight(sight, wanted);
+        let (near, wanted) = name_plate_is_in_sight(eye, anchor, sight.near, |_| false);
+        sight = settle_plate_sight(PlateSight { near, ..sight }, wanted);
         history.push(sight.shown);
     }
 
     let flips = history.windows(2).filter(|pair| pair[0] != pair[1]).count();
     assert_eq!(
-        flips, 0,
-        "the plate changed {flips} times sitting on the limit"
+        flips, 1,
+        "the plate changed {flips} times instead of settling once"
     );
     assert!(
-        history.iter().all(|shown| *shown),
-        "and the answer it held was not the one it started on"
+        !history.last().copied().unwrap_or(true),
+        "the plate never settled on the hidden side of the band"
     );
 
     // The other half, without which a filter that never let anything through would pass:
@@ -2632,8 +2706,8 @@ fn a_name_plate_sitting_on_the_distance_limit_settles_once_and_stays() {
     // inside the band.
     for step in 0..20u32 {
         let anchor = Vec3::Z * (NAME_PLATE_DISTANCE + 4.0);
-        let wanted = name_plate_is_in_sight(eye, anchor, sight.shown, |_| false);
-        sight = settle_plate_sight(sight, wanted);
+        let (near, wanted) = name_plate_is_in_sight(eye, anchor, sight.near, |_| false);
+        sight = settle_plate_sight(PlateSight { near, ..sight }, wanted);
         assert!(
             step < u32::from(NAME_PLATE_SIGHT_DWELL) || !sight.shown,
             "a body four blocks past the limit kept its name at step {step}"
@@ -2641,8 +2715,8 @@ fn a_name_plate_sitting_on_the_distance_limit_settles_once_and_stays() {
     }
     let inside_the_band = Vec3::Z * (NAME_PLATE_DISTANCE - NAME_PLATE_DISTANCE_MARGIN / 2.0);
     for _ in 0..20 {
-        let wanted = name_plate_is_in_sight(eye, inside_the_band, sight.shown, |_| false);
-        sight = settle_plate_sight(sight, wanted);
+        let (near, wanted) = name_plate_is_in_sight(eye, inside_the_band, sight.near, |_| false);
+        sight = settle_plate_sight(PlateSight { near, ..sight }, wanted);
     }
     assert!(
         !sight.shown,
