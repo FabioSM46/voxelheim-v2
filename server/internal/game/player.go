@@ -239,6 +239,20 @@ type Sim struct {
 	// stations station.go derives from the seed.
 	structures map[uint64]*structure
 
+	// residents is every person a settlement holds, keyed by identity for the reason
+	// every other collection here is: an id is how one of them is found without scanning,
+	// and here it is what makes materialising a chunk twice produce one person.
+	//
+	// **Deliberately not [Sim.mobs], and that is the design rather than a filing
+	// decision.** Combat, the projectiles, the spawn director and the corpse maker all
+	// read `mobs`; a resident is invulnerable, unlootable, un-aggroable and never
+	// despawned because it is in none of the collections those walk. See resident.go.
+	//
+	// Nothing here is persisted and nothing is ever removed: a resident is derived from
+	// the seed like a world-owned station, so a restart re-derives the same people with
+	// the same ids the first time anybody looks at their chunk again.
+	residents map[uint64]*resident
+
 	// structuresDirty says the camp has changed since it was last written down.
 	//
 	// The chunk cache's dirty flag, for a store that rewrites one file rather than many:
@@ -361,6 +375,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		mobs:                 make(map[uint64]*mob),
 		corpses:              make(map[uint64]*corpse),
 		structures:           make(map[uint64]*structure),
+		residents:            make(map[uint64]*resident),
 		byIdentity:           make(map[identity.PlayerID]*Player),
 		minersByPos:          make(map[[3]int32]map[*Player]struct{}),
 	}, nil

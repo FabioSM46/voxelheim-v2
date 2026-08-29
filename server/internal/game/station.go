@@ -115,8 +115,14 @@ func (p *Player) MaterialiseSettlements(coord world.Coord) {
 	p.sim.materialiseSettlementsLocked(coord)
 }
 
-// materialiseSettlementsLocked puts a forge in every smithy and a fire in every hall this
-// chunk holds the ground of, if they are not standing already.
+// materialiseSettlementsLocked puts a forge in every smithy, a fire in every hall and a
+// person in every resident slot this chunk holds, for whatever is not there already.
+//
+// **One hook for both entity classes, deliberately.** A station and a resident are
+// different things — one is a structure a client draws from a footprint, the other an
+// entity in the mob stream — but they are the same *fact about the world*: something the
+// seed put in a settlement that nothing wrote down. Asking the question twice would mean
+// two passes over world.SettlementsNear per chunk for one answer.
 //
 // **Idempotent, because the id is the answer**: a second pass derives the same number,
 // finds it in the registry and does nothing. That is what makes the hook safe on a failed
@@ -128,11 +134,6 @@ func (p *Player) MaterialiseSettlements(coord world.Coord) {
 // settled cell, and it runs once per chunk per view rather than per tick, so a join's
 // several hundred chunks each pay it once in a critical section of their own.
 //
-// **The ground, not the floor.** A world.PlacedAnchor names the cell a station occupies,
-// which is a building's floor and therefore air; a [structure]'s anchor is the voxel it
-// *rests on*. Taking the one below is what makes a village forge draw where a placed one
-// would, and what puts it in the chunk of the ground it stands on — placement's own rule.
-//
 // One lattice cell out is far more than enough: a settlement reaches 56 blocks from its
 // centre at most, and a cell is 2048 across.
 //
@@ -143,44 +144,64 @@ func (s *Sim) materialiseSettlementsLocked(coord world.Coord) {
 
 	for _, settled := range near {
 		for _, slot := range settled.Anchors() {
-			kind, station := stationKind(slot.Kind)
-			if !station {
+			// The two answers a slot can have, asked in the order the vocabulary was
+			// written: a forge or a fire goes to station.go's half, a smith or a guard to
+			// resident.go's, and an anchor neither of them claims — there is none today —
+			// is passed over rather than defaulted.
+			if kind, station := stationKind(slot.Kind); station {
+				s.materialiseStationLocked(coord, settled, slot, kind)
 				continue
 			}
-
-			// The block under the slot, and the chunk *that* block falls in — which is
-			// not always the slot's own, and asking about the ground is what keeps
-			// materialisation and visibility answering about one chunk.
-			x, y, z := slot.X, slot.Y-1, slot.Z
-			if world.ChunkOf(x, y, z) != coord {
-				continue
+			if role, lives := residentRole(slot.Kind); lives {
+				s.materialiseResidentLocked(coord, settled, slot, role)
 			}
-			if x < -worldLimit || x >= worldLimit || z < -worldLimit || z >= worldLimit {
-				// Unreachable from a streamed chunk, because a player cannot stand
-				// outside the world. Refused rather than narrowed: the anchor is an int32
-				// on the wire, and a wrapped one is a station somewhere else entirely.
-				continue
-			}
-
-			id := worldStructureID(s.worldSeed, x, z)
-			if _, standing := s.structures[id]; standing {
-				continue
-			}
-
-			s.structures[id] = &structure{
-				structureID: id,
-				kind:        kind,
-				anchor:      [3]int32{int32(x), int32(y), int32(z)},
-				facing:      facingTowards(x, z, settled.CentreX, settled.CentreZ),
-				owner:       identity.PlayerID{},
-				chunk:       coord,
-			}
-
-			// Deliberately not marked dirty: nothing about the camp changed. A station is
-			// re-derived from the seed and filtered out on the way to disk, so setting the
-			// flag would make walking into a village rewrite structures.bin for nothing.
-			s.log.Debug("world-owned station materialised", "structure_id", id,
-				"kind", kind.String(), "anchor", s.structures[id].anchor)
 		}
 	}
+}
+
+// materialiseStationLocked puts one world-owned station in one anchor slot, if it is not
+// standing already.
+//
+// **The ground, not the floor.** A world.PlacedAnchor names the cell a station occupies,
+// which is a building's floor and therefore air; a [structure]'s anchor is the voxel it
+// *rests on*. Taking the one below is what makes a village forge draw where a placed one
+// would, and what puts it in the chunk of the ground it stands on — placement's own rule.
+// [Sim.materialiseResidentLocked] is where the other half of that distinction is argued:
+// a person stands *in* the air the drawing left them.
+//
+// The caller holds Sim.mu.
+func (s *Sim) materialiseStationLocked(coord world.Coord, settled world.Settlement, slot world.PlacedAnchor, kind vnet.StructureKind) {
+	// The block under the slot, and the chunk *that* block falls in — which is not always
+	// the slot's own, and asking about the ground is what keeps materialisation and
+	// visibility answering about one chunk.
+	x, y, z := slot.X, slot.Y-1, slot.Z
+	if world.ChunkOf(x, y, z) != coord {
+		return
+	}
+	if x < -worldLimit || x >= worldLimit || z < -worldLimit || z >= worldLimit {
+		// Unreachable from a streamed chunk, because a player cannot stand outside the
+		// world. Refused rather than narrowed: the anchor is an int32 on the wire, and a
+		// wrapped one is a station somewhere else entirely.
+		return
+	}
+
+	id := worldStructureID(s.worldSeed, x, z)
+	if _, standing := s.structures[id]; standing {
+		return
+	}
+
+	s.structures[id] = &structure{
+		structureID: id,
+		kind:        kind,
+		anchor:      [3]int32{int32(x), int32(y), int32(z)},
+		facing:      facingTowards(x, z, settled.CentreX, settled.CentreZ),
+		owner:       identity.PlayerID{},
+		chunk:       coord,
+	}
+
+	// Deliberately not marked dirty: nothing about the camp changed. A station is
+	// re-derived from the seed and filtered out on the way to disk, so setting the
+	// flag would make walking into a village rewrite structures.bin for nothing.
+	s.log.Debug("world-owned station materialised", "structure_id", id,
+		"kind", kind.String(), "anchor", s.structures[id].anchor)
 }
