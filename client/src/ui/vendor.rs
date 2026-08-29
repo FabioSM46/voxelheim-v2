@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use super::inventory::{refresh_silver_readout, spawn_silver_readout};
 use super::{FILLED_CELL, icon, stack_style};
 use crate::net::{InventoryStack, Session, VendorEntry};
-use crate::player::{InputMode, Inventory, Liveries, VendorWindow, item_label};
+use crate::player::{InputMode, Inventory, Liveries, SelfVitals, VendorWindow, item_label};
 
 const WIDTH: f32 = 620.0;
 
@@ -281,13 +281,28 @@ fn spawn_row(
         });
 }
 
+/// Shows the window only for a live session that is in the mode and has a list to draw.
+///
+/// **The life state is asked here as well as in `player::vendor`, and the repetition is
+/// deliberate.** `reconcile_vendor` takes the list down when the player dies, but nothing
+/// orders it against this chain, so on the frame the death arrives this system may run
+/// first — and it would then draw a stall over the death overlay for a frame. Two
+/// independent expressions over the same fact, which is the rule `InputGate` already
+/// states for `may_aim` and `may_act`: a term added to one is simply absent from the other
+/// unless it is written in both.
+///
+/// `SelfVitals` is optional because this plugin stands up headlessly without the player
+/// plugin that owns it, and an absent resource means nobody has said this player is dead.
 fn show_window(
     window: Res<VendorWindow>,
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
+    vitals: Option<Res<SelfVitals>>,
     mut roots: Query<&mut Visibility, With<VendorRoot>>,
 ) {
-    let shown = session.is_some() && *mode == InputMode::Vendor && window.state().is_some();
+    let dead = vitals.is_some_and(|vitals| vitals.dead());
+    let shown =
+        session.is_some() && !dead && *mode == InputMode::Vendor && window.state().is_some();
     for mut visibility in &mut roots {
         *visibility = if shown {
             Visibility::Visible
@@ -443,6 +458,33 @@ mod tests {
         assert!(
             drawn.contains(&format!("{} | 25 silver", item_label(PICKAXE))),
             "the buy column is not the player's to fill and went with it: {drawn:?}"
+        );
+    }
+
+    /// **A death hides the window in the same frame it arrives**, whichever order the two
+    /// plugins' systems happen to run in.
+    ///
+    /// The window is left open and the mode left at `Vendor` — the state this frame starts
+    /// in when the player dies with a stall up — and only the life state moves. Nothing
+    /// here orders this chain against `player::vendor`'s `reconcile_vendor`, which is
+    /// exactly the case this asserts.
+    #[test]
+    fn a_death_hides_the_window_without_waiting_for_the_player_plugin() {
+        let mut app = app();
+        app.insert_resource(SelfVitals::from_server(crate::net::PlayerVitals {
+            health: 0,
+            life_state: crate::net::LifeState::Dead,
+            ..crate::net::PlayerVitals::unharmed()
+        }));
+        app.update();
+
+        let world = app.world_mut();
+        let mut roots = world.query_filtered::<&Visibility, With<VendorRoot>>();
+        assert_eq!(roots.single(world).unwrap(), &Visibility::Hidden);
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Vendor);
+        assert!(
+            app.world().resource::<VendorWindow>().state().is_some(),
+            "this test asserts what the UI draws, not what the player plugin cleared"
         );
     }
 

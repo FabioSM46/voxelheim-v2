@@ -117,17 +117,28 @@ fn dismiss_the_stall_the_player_left(mode: Res<InputMode>, mut window: ResMut<Ve
 
 /// Takes the window down and hands the mode back, writing to neither unless it moves.
 ///
-/// **Both guards are load-bearing and neither is an optimisation.** Dereferencing a
-/// `ResMut` marks its resource changed whether or not the value moved, and `InputMode`'s
-/// change flag is exactly what `InputGate::may_act` reads to give the frame a mode changed
-/// on to the UI. This runs every frame, so an unguarded write here would mark the mode
-/// changed twenty times a second and close every gameplay input in the client — which is
-/// how it was first written, and what `player::tests`' dead-player test caught.
+/// **Three guards, and none of them is an optimisation.**
+///
+/// `**mode == InputMode::Vendor` is a correctness condition, not a shortcut: this runs on
+/// every frame a player is dead, and the pause menu and chat are deliberately *not* closed
+/// by death — `choose_input_mode` forces only `Inventory`, `Loot`, `Vendor` and `Map` down.
+/// Handing the mode back unconditionally would take a dead player out of the pause menu
+/// twenty times a second, which is a control they cannot then use. Only the mode this
+/// module owns is this module's to leave.
+///
+/// The other two are about change detection. Dereferencing a `ResMut` marks its resource
+/// changed whether or not the value moved, and `InputMode`'s change flag is exactly what
+/// `InputGate::may_act` reads to give the frame a mode changed on to the UI — so an
+/// unguarded write here would close every gameplay input in the client while the player
+/// was dead. That is how it was first written, and `player::tests`' dead-player test is
+/// what caught it.
 fn close(window: &mut ResMut<'_, VendorWindow>, mode: &mut ResMut<'_, InputMode>) {
     if window.current.is_some() {
         window.current = None;
     }
-    set_mode(mode, InputMode::Playing);
+    if **mode == InputMode::Vendor {
+        **mode = InputMode::Playing;
+    }
 }
 
 /// `ui/mod.rs`'s `set_mode` rule, which this module cannot reach across the boundary:
@@ -255,6 +266,33 @@ mod tests {
             Some(&state(SMITH, 1))
         );
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Vendor);
+    }
+
+    /// **Death takes the stall and leaves every other screen alone.**
+    ///
+    /// This system runs on every frame a dead player is dead, and the pause menu is
+    /// deliberately not one of the screens death closes — `choose_input_mode` forces only
+    /// `Inventory`, `Loot`, `Vendor` and `Map` down. Handing the mode back unconditionally
+    /// would take a dead player out of a menu they are trying to quit from, once a frame.
+    #[test]
+    fn death_does_not_take_a_dead_player_out_of_the_pause_menu() {
+        let mut app = app();
+        push(&mut app, VendorEvent::State(state(SMITH, 1)));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+
+        app.insert_resource(SelfVitals::from_server(PlayerVitals {
+            health: 0,
+            life_state: LifeState::Dead,
+            ..PlayerVitals::unharmed()
+        }));
+        for _ in 0..3 {
+            app.update();
+            assert_eq!(*app.world().resource::<InputMode>(), InputMode::Menu);
+        }
+        assert!(
+            app.world().resource::<VendorWindow>().state().is_none(),
+            "the stall survived the player dying in front of it"
+        );
     }
 
     /// Death closes the stall, and so does losing the session.
