@@ -340,7 +340,8 @@ impl ChunkStore {
         self.note_neighbours_stale(coord, dropped.as_deref(), None);
     }
 
-    /// The chunks across `coord`'s six faces, in [`Neighbours::OFFSETS`] order.
+    /// The chunks across `coord`'s six faces, plus the four above its horizontal
+    /// neighbours needed to resolve falling water.
     ///
     /// Gathered here because the store is the authority on what exists, and handed to
     /// the mesher as a **value**: neighbour data is an input to meshing, never
@@ -352,18 +353,22 @@ impl ChunkStore {
     /// over-drawn instead of leaving a hole, and [`Self::insert`] queues the remesh
     /// that removes the extra quads when the chunk finally arrives.
     pub fn neighbours(&self, coord: ChunkCoord) -> Neighbours {
-        Neighbours::new(Neighbours::OFFSETS.map(|offset| {
+        let gather = |offset| {
             shift(coord, offset).and_then(|neighbour| self.chunks.get(&neighbour).map(Arc::clone))
-        }))
+        };
+        Neighbours::with_above_horizontal(
+            Neighbours::OFFSETS.map(gather),
+            Neighbours::ABOVE_HORIZONTAL_OFFSETS.map(gather),
+        )
     }
 
     /// Logs the mesh of every neighbour that will now draw `coord`'s border layer
     /// differently from the way it has been drawing it.
     ///
-    /// A neighbour's mesh depends on exactly one thing about this chunk: which of the
-    /// voxels on the face the two share are solid. Not *which blocks* they are — a face
-    /// is drawn by the chunk that owns the solid voxel, in that voxel's own colour — and
-    /// not the other layers. So the shared layer is what is compared, and a revision
+    /// A neighbour's mesh depends on one geometry key for each voxel on the shared
+    /// face: whether it is opaque and, for water, its effective height. Not *which
+    /// blocks* they are — colour belongs to the chunk that owns the voxel — and not
+    /// the other layers. So the shared layer is what is compared, and a revision
     /// that does not exist compares as all air, which is precisely what the mesher reads
     /// a missing neighbour as. That makes three events one: a chunk arriving (`before` is
     /// `None`), a chunk being replaced, and a chunk going away (`after` is `None`).
@@ -383,6 +388,7 @@ impl ChunkStore {
         before: Option<&VoxelChunk>,
         after: Option<&VoxelChunk>,
     ) {
+        let above = shift(coord, [0, 1, 0]).and_then(|above| self.chunks.get(&above).cloned());
         for (slot, offset) in Neighbours::OFFSETS.into_iter().enumerate() {
             let Some(neighbour) = shift(coord, offset) else {
                 continue;
@@ -393,7 +399,30 @@ impl ChunkStore {
             // The slot order is `-x, +x, -y, +y, -z, +z`, so the axis is the slot halved
             // and the side is its parity. The layer the neighbour looks at is the one on
             // this chunk's face pointing at it.
-            if border_layer_differs(before, after, slot / 2, slot % 2 == 1) {
+            if border_layer_differs(before, after, slot / 2, slot % 2 == 1, above.as_deref()) {
+                self.changes.push(ChunkChange::NeighbourChanged(neighbour));
+            }
+        }
+
+        // Bottom water changes the top-water height of the chunk below.
+        let Some(below_coord) = shift(coord, [0, -1, 0]) else {
+            return;
+        };
+        let Some(below) = self.chunks.get(&below_coord) else {
+            return;
+        };
+        for (axis, positive, offset) in [
+            (0, false, [-1, 0, 0]),
+            (0, true, [1, 0, 0]),
+            (2, false, [0, 0, -1]),
+            (2, true, [0, 0, 1]),
+        ] {
+            let Some(neighbour) = shift(below_coord, offset) else {
+                continue;
+            };
+            if self.chunks.contains_key(&neighbour)
+                && falling_border_differs(below, before, after, axis, positive)
+            {
                 self.changes.push(ChunkChange::NeighbourChanged(neighbour));
             }
         }
@@ -410,9 +439,9 @@ impl ChunkStore {
     /// reachable from exactly one place: a `BlockUpdate` the server sent. A click
     /// produces a request, never a write — see `player/target.rs`.
     ///
-    /// Two chunks can go stale from one voxel, and up to four: the chunk holding it,
-    /// plus every chunk whose shared border the voxel sits on. See
-    /// [`border_neighbours`] for why that is the right set and not a larger one.
+    /// The chunk holding the voxel always goes stale. Face neighbours follow the
+    /// shared geometry key; a bottom-layer edit may additionally affect the horizontal
+    /// neighbours of the chunk below through falling-water height.
     pub fn apply_block(&mut self, pos: BlockCoord, block: BlockId, size: usize) -> BlockApplied {
         let Some((coord, local)) = locate(pos, size) else {
             return BlockApplied::Unlocatable;
@@ -424,6 +453,7 @@ impl ChunkStore {
         // choice here, because the server invalidates the chunk's cached payload on
         // every edit, so the copy this session is eventually sent already carries it.
         // Buffering would mean holding edits for chunks that may never arrive.
+        let above = shift(coord, [0, 1, 0]).and_then(|above| self.chunks.get(&above).cloned());
         let Some(held) = self.chunks.get(&coord) else {
             return BlockApplied::Unheld { coord };
         };
@@ -438,26 +468,50 @@ impl ChunkStore {
         // runs is the answer to a question this path can answer exactly, from the voxel
         // that moved. Taking both would remesh all six neighbours of every edit made in
         // the middle of a chunk.
-        // Read before the store takes the chunk: a neighbour's mesh depends on which of
-        // this chunk's boundary voxels are solid and on nothing else, so an edit that
-        // leaves solidity where it was is invisible across the seam. Stone to grass on a
-        // border would otherwise remesh up to three neighbours into byte-identical
-        // meshes. This is the same criterion `border_layer_differs` applies on the wire
-        // path — the two agree because there is one rule, not because they were written
-        // to match.
-        let solidity_moved = palette::is_solid(held.block(local)) != palette::is_solid(block);
+        // Read before the store takes the chunk. Opaque blocks still share one key,
+        // so stone becoming grass on a border does not remesh a neighbour into a
+        // byte-identical mesh. Water adds its effective height: air becoming flow, or
+        // one level becoming another, moves the top or exposed skirt across the seam.
+        // `above` makes a voxel directly below water full-height on both paths.
+        let geometry_moved = border_geometry(Some(held), local, above.as_deref())
+            != border_geometry(Some(&edited), local, above.as_deref());
+        let falling_neighbours = if local[1] == 0 {
+            shift(coord, [0, -1, 0])
+                .and_then(|below_coord| {
+                    self.chunks.get(&below_coord).map(|below| {
+                        let below_local = [local[0], size - 1, local[2]];
+                        let moved = border_geometry(Some(below), below_local, Some(held))
+                            != border_geometry(Some(below), below_local, Some(&edited));
+                        if moved {
+                            border_neighbours(below_coord, below_local, size)
+                                .into_iter()
+                                .filter(|neighbour| neighbour.cy == below_coord.cy)
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         self.store_edit(coord, edited);
 
         // The edited chunk always remeshes: colour is its own, and changes even when
         // solidity does not.
         let mut remeshed = 1;
-        if solidity_moved {
+        if geometry_moved {
             let neighbours = border_neighbours(coord, local, size);
             remeshed += neighbours.len();
             for neighbour in neighbours {
                 self.changes.push(ChunkChange::NeighbourChanged(neighbour));
             }
+        }
+        remeshed += falling_neighbours.len();
+        for neighbour in falling_neighbours {
+            self.changes.push(ChunkChange::NeighbourChanged(neighbour));
         }
 
         BlockApplied::Rewritten { coord, remeshed }
@@ -600,8 +654,47 @@ fn shift(coord: ChunkCoord, offset: [i32; 3]) -> Option<ChunkCoord> {
     })
 }
 
-/// Whether two revisions of one chunk disagree about which voxels are solid on the
-/// outer face `(axis, positive)` — the only thing the chunk across that face reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BorderGeometry {
+    opaque: bool,
+    water_level: u8,
+}
+
+fn border_geometry(
+    chunk: Option<&VoxelChunk>,
+    cell: [usize; 3],
+    above_chunk: Option<&VoxelChunk>,
+) -> BorderGeometry {
+    let Some(chunk) = chunk else {
+        return BorderGeometry {
+            opaque: false,
+            water_level: 0,
+        };
+    };
+    let block = chunk.block(cell);
+    let mut water_level = palette::water_level(block);
+    if water_level != 0 {
+        let above = if cell[1] + 1 < chunk.size() {
+            let mut above = cell;
+            above[1] += 1;
+            chunk.block(above)
+        } else {
+            let mut above = cell;
+            above[1] = 0;
+            above_chunk.map_or(palette::AIR, |chunk| chunk.block(above))
+        };
+        if palette::is_water(above) {
+            water_level = 8;
+        }
+    }
+    BorderGeometry {
+        opaque: palette::is_opaque(block),
+        water_level,
+    }
+}
+
+/// Whether two revisions of one chunk disagree about the geometry on the outer
+/// face `(axis, positive)` — the only part the chunk across that face reads.
 ///
 /// `None` is a revision that does not exist: before the chunk arrived, or after it was
 /// unloaded. It compares as all air, which is exactly what the mesher reads a neighbour
@@ -615,6 +708,7 @@ fn border_layer_differs(
     after: Option<&VoxelChunk>,
     axis: usize,
     positive: bool,
+    above: Option<&VoxelChunk>,
 ) -> bool {
     let size = match (before, after) {
         (Some(before), Some(after)) if before.size() != after.size() => return true,
@@ -625,27 +719,53 @@ fn border_layer_differs(
     let u = (axis + 1) % 3;
     let v = (axis + 2) % 3;
     let layer = if positive { size.saturating_sub(1) } else { 0 };
-    let solid = |chunk: Option<&VoxelChunk>, i: usize, j: usize| {
-        chunk.is_some_and(|chunk| {
-            let mut cell = [0usize; 3];
-            cell[axis] = layer;
-            cell[u] = i;
-            cell[v] = j;
-            palette::is_solid(chunk.block(cell))
-        })
+    let geometry = |chunk: Option<&VoxelChunk>, i: usize, j: usize| {
+        let mut cell = [0usize; 3];
+        cell[axis] = layer;
+        cell[u] = i;
+        cell[v] = j;
+        border_geometry(chunk, cell, above)
     };
 
-    (0..size).any(|j| (0..size).any(|i| solid(before, i, j) != solid(after, i, j)))
+    (0..size).any(|j| (0..size).any(|i| geometry(before, i, j) != geometry(after, i, j)))
+}
+
+fn falling_border_differs(
+    below: &VoxelChunk,
+    before_above: Option<&VoxelChunk>,
+    after_above: Option<&VoxelChunk>,
+    axis: usize,
+    positive: bool,
+) -> bool {
+    if before_above
+        .into_iter()
+        .chain(after_above)
+        .any(|above| above.size() != below.size())
+    {
+        return true;
+    }
+    let size = below.size();
+    if size == 0 {
+        return false;
+    }
+    let edge = if positive { size.saturating_sub(1) } else { 0 };
+    (0..size).any(|other| {
+        let cell = if axis == 0 {
+            [edge, size - 1, other]
+        } else {
+            [other, size - 1, edge]
+        };
+        border_geometry(Some(below), cell, before_above)
+            != border_geometry(Some(below), cell, after_above)
+    })
 }
 
 /// The chunks whose meshes an edit at `local` invalidates besides the edited chunk's
 /// own.
 ///
-/// **Face-adjacent only.** A quad exists where a solid voxel meets a non-solid one, so
-/// the only voxels outside a chunk that its mesh can depend on are the ones directly
-/// across its six faces. A voxel diagonally across an edge or a corner shares no face
-/// with anything in the neighbour, so no diagonal chunk's mesh can move. Remeshing
-/// them would be work with a guaranteed-identical result.
+/// **Face-adjacent only.** This helper answers direct shared-face geometry. The one
+/// edge-diagonal dependency introduced by falling water is derived separately from
+/// the chunk below in [`ChunkStore::apply_block`].
 ///
 /// Both bounds are tested independently rather than as an `else if`, because at
 /// `chunk_size` 1 — legal, and pinned by `the_smallest_legal_chunk_size_works` — every
@@ -1898,10 +2018,32 @@ mod tests {
     }
 
     #[test]
+    fn a_border_edit_that_adds_or_changes_water_geometry_marks_the_neighbour() {
+        let at_border = at(31, 5, 5);
+        let mut store = ChunkStore::default();
+        store.insert(coord(0, 0, 0), air());
+        store.take_changes();
+
+        for (block, remeshed) in [
+            (palette::WATER_FLOW7, 2),
+            (palette::WATER_FLOW3, 2),
+            (palette::WATER, 2),
+            (palette::WATER_CURRENT_XPOS, 1),
+        ] {
+            assert_eq!(
+                store.apply_block(at_border, block, SIZE),
+                BlockApplied::Rewritten {
+                    coord: coord(0, 0, 0),
+                    remeshed,
+                }
+            );
+            store.take_changes();
+        }
+    }
+
+    #[test]
     fn an_edit_in_a_corner_marks_the_three_chunks_that_share_a_face_with_it() {
-        // Three, not seven: the diagonal chunks share only an edge or a corner with this
-        // voxel, and a quad exists where a solid voxel meets a non-solid one *across a
-        // face*. Remeshing them would be work with a guaranteed-identical result.
+        // Three, not seven: this non-water edit changes only shared-face geometry.
         let mut store = store_with_stone_at(coord(0, 0, 0));
 
         assert_eq!(
@@ -2150,6 +2292,57 @@ mod tests {
                 ChunkChange::Loaded(coord(1, 0, 0)),
                 ChunkChange::NeighbourChanged(coord(0, 0, 0)),
             ]
+        );
+    }
+
+    #[test]
+    fn a_re_sent_water_border_compares_effective_geometry_not_ids() {
+        let mut store = store_with_stone_at(coord(0, 0, 0));
+        let mut source = air();
+        source.set(0, 5, 5, palette::WATER);
+        store.insert(coord(1, 0, 0), source);
+        store.take_changes();
+
+        let mut lower = air();
+        lower.set(0, 5, 5, palette::WATER_FLOW3);
+        store.insert(coord(1, 0, 0), lower);
+        assert!(
+            store
+                .take_changes()
+                .contains(&ChunkChange::NeighbourChanged(coord(0, 0, 0)))
+        );
+    }
+
+    #[test]
+    fn water_above_a_horizontal_neighbour_invalidates_the_diagonal_mesh() {
+        let west = coord(0, 0, 0);
+        let east = coord(1, 0, 0);
+        let above_east = coord(1, 1, 0);
+        let mut store = ChunkStore::default();
+        store.insert(west, air());
+        let mut east_chunk = air();
+        east_chunk.set(0, SIZE - 1, 5, palette::WATER_FLOW3);
+        store.insert(east, east_chunk);
+        store.take_changes();
+
+        let mut above = air();
+        above.set(0, 0, 5, palette::WATER_FLOW1);
+        store.insert(above_east, above);
+        let changes = store.take_changes();
+        assert!(changes.contains(&ChunkChange::NeighbourChanged(east)));
+        assert!(changes.contains(&ChunkChange::NeighbourChanged(west)));
+
+        assert_eq!(
+            store.apply_block(at(32, 32, 5), palette::AIR, SIZE),
+            BlockApplied::Rewritten {
+                coord: above_east,
+                remeshed: 4,
+            }
+        );
+        assert!(
+            store
+                .take_changes()
+                .contains(&ChunkChange::NeighbourChanged(west))
         );
     }
 

@@ -125,8 +125,8 @@ impl SurfaceMesh {
 pub struct ChunkMesh {
     /// Every face of every block that hides what is behind it.
     pub opaque: SurfaceMesh,
-    /// Every face where water meets air, and nothing else. Water against water and
-    /// water against a solid block are both interior surfaces nobody can see.
+    /// Water against transparent non-water voxels, plus the exposed skirt between
+    /// unequal water levels. Equal water and water against solid blocks stay hidden.
     pub water: SurfaceMesh,
 }
 
@@ -156,6 +156,7 @@ impl ChunkMesh {
 #[derive(Debug, Clone, Default)]
 pub struct Neighbours {
     across: [Option<Arc<VoxelChunk>>; 6],
+    above_horizontal: [Option<Arc<VoxelChunk>>; 4],
 }
 
 impl Neighbours {
@@ -176,10 +177,26 @@ impl Neighbours {
         [0, 0, 1],
     ];
 
+    /// Above `-x, +x, -z, +z`, for falling water at a horizontal border.
+    pub const ABOVE_HORIZONTAL_OFFSETS: [[i32; 3]; 4] =
+        [[-1, 1, 0], [1, 1, 0], [0, 1, -1], [0, 1, 1]];
+
     /// A neighbourhood from the six chunks at [`Self::OFFSETS`], in that order.
     /// `None` for a coordinate the caller does not hold.
     pub fn new(across: [Option<Arc<VoxelChunk>>; 6]) -> Self {
-        Self { across }
+        Self {
+            across,
+            above_horizontal: Default::default(),
+        }
+    }
+
+    pub fn with_above_horizontal(
+        across: [Option<Arc<VoxelChunk>>; 6],
+        above_horizontal: [Option<Arc<VoxelChunk>>; 4],
+    ) -> Self {
+        let mut neighbours = Self::new(across);
+        neighbours.above_horizontal = above_horizontal;
+        neighbours
     }
 
     /// The chunk across the face perpendicular to `axis`, on the positive or the
@@ -195,6 +212,25 @@ impl Neighbours {
             .as_deref()
             .filter(|neighbour| neighbour.size() == size)
     }
+
+    fn above_horizontal(&self, axis: usize, positive: bool, size: usize) -> Option<&VoxelChunk> {
+        let slot = match axis {
+            0 => usize::from(positive),
+            2 => 2 + usize::from(positive),
+            _ => return None,
+        };
+        self.above_horizontal[slot]
+            .as_deref()
+            .filter(|chunk| chunk.size() == size)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaceGeometry {
+    Full,
+    WaterTop { level: u8 },
+    WaterBottom { level: u8 },
+    WaterSide { bottom: u8, top: u8 },
 }
 
 /// One entry of the sweep's mask: a face of `block`, pointing along the sweep axis
@@ -209,6 +245,7 @@ struct Face {
     /// True when the normal points along +axis (the solid voxel is on the negative
     /// side of the plane).
     positive: bool,
+    geometry: FaceGeometry,
 }
 
 /// Meshes one chunk against the neighbours it was given.
@@ -280,10 +317,9 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
 ///
 /// - `opaque_mask` gets a face wherever exactly one side is opaque, so an opaque block
 ///   draws against air *and* against water — that is what makes a lake bed visible.
-/// - `water_mask` gets a face only where water meets **air**. Water against water is the
-///   interior of a body of water, and water against an opaque block is a surface that block
-///   has already drawn from the other side of the same plane; a water quad there would be a
-///   translucent sheet buried in the terrain, sorted against it every frame.
+/// - `water_mask` gets an exposed face against transparent non-water, or the higher
+///   water voxel's skirt between unequal levels. Water against an opaque block is a
+///   sheet that block has already drawn from the other side of the plane.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sweep's coordinate frame plus the two masks it fills; the frame is \
@@ -336,10 +372,12 @@ fn build_masks(
                     (true, false) if below_is_ours => Some(Face {
                         block: negative,
                         positive: true,
+                        geometry: FaceGeometry::Full,
                     }),
                     (false, true) if above_is_ours => Some(Face {
                         block: positive,
                         positive: false,
+                        geometry: FaceGeometry::Full,
                     }),
                     // See-through on both sides: nothing. Opaque on both sides: an
                     // interior face, which is what greedy meshing exists never to emit.
@@ -348,22 +386,140 @@ fn build_masks(
                     _ => None,
                 };
 
-            water_mask[j * size + i] = match (negative, positive) {
-                // The surface, from below and from above. Only against air: see this
-                // function's doc comment for why water against anything else is a
-                // sheet nobody can see and everything has to sort against.
-                (palette::WATER, palette::AIR) if below_is_ours => Some(Face {
-                    block: palette::WATER,
-                    positive: true,
-                }),
-                (palette::AIR, palette::WATER) if above_is_ours => Some(Face {
-                    block: palette::WATER,
-                    positive: false,
-                }),
-                _ => None,
-            };
+            let negative_level = effective_water_level(below, chunk, neighbours, axis, u, v, i, j);
+            let positive_level = effective_water_level(above, chunk, neighbours, axis, u, v, i, j);
+
+            water_mask[j * size + i] = water_face(
+                axis,
+                negative,
+                negative_level,
+                below_is_ours,
+                positive,
+                positive_level,
+                above_is_ours,
+            );
         }
     }
+}
+
+/// Water against air, or the higher water level's exposed skirt.
+fn water_face(
+    axis: usize,
+    negative: BlockId,
+    negative_level: u8,
+    negative_is_ours: bool,
+    positive: BlockId,
+    positive_level: u8,
+    positive_is_ours: bool,
+) -> Option<Face> {
+    let negative_water = palette::is_water(negative);
+    let positive_water = palette::is_water(positive);
+
+    match (negative_water, positive_water) {
+        (true, false) if !palette::is_opaque(positive) && negative_is_ours => Some(Face {
+            block: palette::WATER,
+            positive: true,
+            geometry: if axis == 1 {
+                FaceGeometry::WaterTop {
+                    level: negative_level,
+                }
+            } else {
+                FaceGeometry::WaterSide {
+                    bottom: 0,
+                    top: negative_level,
+                }
+            },
+        }),
+        (false, true) if !palette::is_opaque(negative) && positive_is_ours => Some(Face {
+            block: palette::WATER,
+            positive: false,
+            geometry: if axis == 1 {
+                FaceGeometry::WaterBottom {
+                    level: positive_level,
+                }
+            } else {
+                FaceGeometry::WaterSide {
+                    bottom: 0,
+                    top: positive_level,
+                }
+            },
+        }),
+        (true, true) if axis == 1 => None,
+        (true, true) if negative_level > positive_level && negative_is_ours => Some(Face {
+            block: palette::WATER,
+            positive: true,
+            geometry: FaceGeometry::WaterSide {
+                bottom: positive_level,
+                top: negative_level,
+            },
+        }),
+        (true, true) if positive_level > negative_level && positive_is_ours => Some(Face {
+            block: palette::WATER,
+            positive: false,
+            geometry: FaceGeometry::WaterSide {
+                bottom: negative_level,
+                top: positive_level,
+            },
+        }),
+        _ => None,
+    }
+}
+
+/// Encoded height, promoted to full when any water is directly above.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sweep coordinate frame is the same one `sample` takes"
+)]
+fn effective_water_level(
+    source: Option<(&VoxelChunk, usize)>,
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    axis: usize,
+    u: usize,
+    v: usize,
+    i: usize,
+    j: usize,
+) -> u8 {
+    let Some((source_chunk, layer)) = source else {
+        return 0;
+    };
+
+    let mut cell = [0usize; 3];
+    cell[axis] = layer;
+    cell[u] = i;
+    cell[v] = j;
+    let block = source_chunk.block(cell);
+    let encoded = palette::water_level(block);
+    if encoded == 0 {
+        return 0;
+    }
+
+    let above = if cell[1] + 1 < source_chunk.size() {
+        cell[1] += 1;
+        source_chunk.block(cell)
+    } else if std::ptr::eq(source_chunk, chunk) {
+        cell[1] = 0;
+        neighbours
+            .across(1, true, chunk.size())
+            .map_or(palette::AIR, |above| above.block(cell))
+    } else if neighbours
+        .across(1, false, chunk.size())
+        .is_some_and(|below| std::ptr::eq(source_chunk, below))
+    {
+        // The top layer of the chunk below this one looks directly at our floor.
+        cell[1] = 0;
+        chunk.block(cell)
+    } else {
+        let positive = neighbours
+            .across(axis, true, chunk.size())
+            .is_some_and(|across| std::ptr::eq(source_chunk, across));
+        cell[1] = 0;
+        neighbours
+            .above_horizontal(axis, positive, chunk.size())
+            .map_or(palette::AIR, |above| above.block(cell))
+    };
+
+    if palette::is_water(above) { 8 } else { encoded }
 }
 
 /// One voxel of a plane's negative or positive side.
@@ -410,16 +566,24 @@ fn merge_mask(
                 continue;
             };
 
+            // Partial strips cannot merge vertically across the gap to the next voxel.
+            let partial_vertical = matches!(
+                face.geometry,
+                FaceGeometry::WaterSide { bottom, top } if bottom != 0 || top != 8
+            );
+            let u_is_restricted = partial_vertical && u == 1;
+            let v_is_restricted = partial_vertical && v == 1;
+
             // Grow along u while the row agrees.
             let mut width = 1;
-            while i + width < size && mask[j * size + i + width] == Some(face) {
+            while !u_is_restricted && i + width < size && mask[j * size + i + width] == Some(face) {
                 width += 1;
             }
 
             // Then along v, but only by whole rows: a rectangle is the shape a quad
             // can be, so a row that matches for part of the width does not count.
             let mut height = 1;
-            while j + height < size {
+            while !v_is_restricted && j + height < size {
                 let row = (j + height) * size;
                 if (i..i + width).any(|x| mask[row + x] != Some(face)) {
                     break;
@@ -432,7 +596,7 @@ fn merge_mask(
             }
 
             mesh.push_quad(
-                quad_corners(axis, u, v, plane, i, j, width, height, face.positive),
+                quad_corners(axis, u, v, plane, i, j, width, height, face),
                 normal(axis, face.positive),
                 palette::linear_rgba(face.block),
             );
@@ -466,7 +630,7 @@ fn quad_corners(
     j: usize,
     width: usize,
     height: usize,
-    positive: bool,
+    face: Face,
 ) -> [[f32; 3]; 4] {
     let mut origin = [0.0f32; 3];
     origin[axis] = plane as f32;
@@ -479,10 +643,36 @@ fn quad_corners(
     let mut along_v = [0.0f32; 3];
     along_v[v] = height as f32;
 
+    match face.geometry {
+        FaceGeometry::Full | FaceGeometry::WaterBottom { .. } => {}
+        FaceGeometry::WaterTop { level } => {
+            debug_assert_eq!(axis, 1);
+            origin[axis] = plane.saturating_sub(1) as f32 + f32::from(level) / 8.0;
+        }
+        FaceGeometry::WaterSide { bottom, top } => {
+            debug_assert_ne!(axis, 1);
+            let vertical_origin = if u == 1 { i as f32 } else { j as f32 };
+            origin[1] = vertical_origin + f32::from(bottom) / 8.0;
+            if u == 1 {
+                along_u[1] = if bottom == 0 && top == 8 {
+                    width as f32
+                } else {
+                    f32::from(top - bottom) / 8.0
+                };
+            } else {
+                along_v[1] = if bottom == 0 && top == 8 {
+                    height as f32
+                } else {
+                    f32::from(top - bottom) / 8.0
+                };
+            }
+        }
+    }
+
     let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
     let far = add(add(origin, along_u), along_v);
 
-    if positive {
+    if face.positive {
         [origin, add(origin, along_u), far, add(origin, along_v)]
     } else {
         [origin, add(origin, along_v), far, add(origin, along_u)]
@@ -550,6 +740,24 @@ mod tests {
         Neighbours::new(slots)
     }
 
+    fn across_with_above(
+        axis: usize,
+        positive: bool,
+        chunk: VoxelChunk,
+        above: VoxelChunk,
+    ) -> Neighbours {
+        let mut sides: [Option<Arc<VoxelChunk>>; 6] = Default::default();
+        sides[axis * 2 + usize::from(positive)] = Some(Arc::new(chunk));
+        let mut diagonals: [Option<Arc<VoxelChunk>>; 4] = Default::default();
+        let slot = if axis == 0 {
+            usize::from(positive)
+        } else {
+            2 + usize::from(positive)
+        };
+        diagonals[slot] = Some(Arc::new(above));
+        Neighbours::with_above_horizontal(sides, diagonals)
+    }
+
     /// The same chunk across all six faces.
     fn surrounded_by(chunk: &VoxelChunk) -> Neighbours {
         let shared = Arc::new(chunk.clone());
@@ -585,6 +793,22 @@ mod tests {
     fn quad_area(mesh: &SurfaceMesh, quad: usize) -> f32 {
         let n = winding_normal(mesh, quad);
         (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+    }
+
+    /// The minimum and maximum coordinate of one quad along `axis`.
+    fn quad_extent(mesh: &SurfaceMesh, quad: usize, axis: usize) -> (f32, f32) {
+        let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+        corners.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(minimum, maximum), corner| (minimum.min(corner[axis]), maximum.max(corner[axis])),
+        )
+    }
+
+    /// Quad indices whose stored normal is exactly `wanted`.
+    fn quads_facing(mesh: &SurfaceMesh, wanted: [f32; 3]) -> Vec<usize> {
+        (0..mesh.quad_count())
+            .filter(|quad| mesh.normals[quad * VERTICES_PER_QUAD] == wanted)
+            .collect()
     }
 
     /// The six axis-aligned directions, as the keys [`quads_by_normal`] produces.
@@ -1178,7 +1402,7 @@ mod tests {
     #[test]
     fn water_over_stone_draws_the_lake_bed_and_one_surface() {
         // Stone at y = 0 with water directly on top of it.
-        let chunk = column(SIZE, &[palette::STONE, palette::WATER]);
+        let chunk = column(SIZE, &[palette::STONE, palette::WATER_FLOW3]);
         let mesh = super::mesh_chunk(&chunk, &alone());
 
         // The stone keeps all six faces: five meet air and the sixth meets water, which
@@ -1205,6 +1429,59 @@ mod tests {
             quads_by_normal(&mesh.water).get(&[0, 1, 0]),
             Some(&1),
             "the surface, which is the face the player looks down through"
+        );
+        let top = quads_facing(&mesh.water, [0.0, 1.0, 0.0]);
+        assert_eq!(quad_extent(&mesh.water, top[0], 1), (1.375, 1.375));
+        let side = quads_facing(&mesh.water, [1.0, 0.0, 0.0]);
+        assert_eq!(quad_extent(&mesh.water, side[0], 1), (1.0, 1.375));
+    }
+
+    #[test]
+    fn unequal_water_levels_draw_only_the_higher_cells_exposed_skirt() {
+        let mut chunk = air(SIZE);
+        let y = SIZE / 2;
+        let z = SIZE / 2;
+        let lower_x = SIZE / 2 - 1;
+        let higher_x = SIZE / 2;
+        chunk.set(lower_x, y, z, palette::WATER_FLOW3);
+        chunk.set(higher_x, y, z, palette::WATER_FLOW4);
+
+        let mesh = super::mesh_chunk(&chunk, &alone()).water;
+        assert_eq!(quads_facing(&mesh, [0.0, 1.0, 0.0]).len(), 2);
+
+        let shared_plane = higher_x as f32;
+        let skirts: Vec<usize> = quads_facing(&mesh, [-1.0, 0.0, 0.0])
+            .into_iter()
+            .filter(|quad| quad_extent(&mesh, *quad, 0) == (shared_plane, shared_plane))
+            .collect();
+        assert_eq!(skirts.len(), 1);
+        assert_eq!(
+            quad_extent(&mesh, skirts[0], 1),
+            (y as f32 + 0.375, y as f32 + 0.5)
+        );
+    }
+
+    #[test]
+    fn water_below_water_is_a_full_falling_column() {
+        let mut chunk = air(SIZE);
+        let x = SIZE / 2;
+        let z = SIZE / 2;
+        let lower_y = SIZE / 2 - 1;
+        chunk.set(x, lower_y, z, palette::WATER_FLOW3);
+        chunk.set(x, lower_y + 1, z, palette::WATER_FLOW4);
+
+        let mesh = super::mesh_chunk(&chunk, &alone()).water;
+        let lower_sides: Vec<usize> = quads_facing(&mesh, [-1.0, 0.0, 0.0])
+            .into_iter()
+            .filter(|quad| {
+                quad_extent(&mesh, *quad, 0) == (x as f32, x as f32)
+                    && quad_extent(&mesh, *quad, 1).0 == lower_y as f32
+            })
+            .collect();
+        assert_eq!(lower_sides.len(), 1);
+        assert_eq!(
+            quad_extent(&mesh, lower_sides[0], 1),
+            (lower_y as f32, lower_y as f32 + 1.0)
         );
     }
 
@@ -1291,6 +1568,74 @@ mod tests {
         // gives whenever a neighbour has not arrived.
         assert_eq!(mesh_chunk(&water, &alone()).quad_count(), 0);
         assert_eq!(super::mesh_chunk(&water, &alone()).water.quad_count(), 6);
+    }
+
+    #[test]
+    fn falling_water_across_a_horizontal_and_vertical_border_has_one_owner() {
+        let y = SIZE - 1;
+        let z = SIZE / 2;
+        let mut west = air(SIZE);
+        west.set(SIZE - 1, y, z, palette::WATER_FLOW7);
+        let mut east = air(SIZE);
+        east.set(0, y, z, palette::WATER_FLOW4);
+        let mut above_east = air(SIZE);
+        above_east.set(0, 0, z, palette::WATER_FLOW1);
+
+        let west_mesh = super::mesh_chunk(
+            &west,
+            &across_with_above(0, true, east.clone(), above_east.clone()),
+        )
+        .water;
+        assert!(
+            quads_facing(&west_mesh, [1.0, 0.0, 0.0])
+                .into_iter()
+                .all(|quad| quad_extent(&west_mesh, quad, 0) != (SIZE as f32, SIZE as f32)),
+            "the lower west cell does not own the shared skirt"
+        );
+
+        let mut east_neighbours = across(0, false, west);
+        east_neighbours.across[3] = Some(Arc::new(above_east));
+        let east_mesh = super::mesh_chunk(&east, &east_neighbours).water;
+        let skirts: Vec<_> = quads_facing(&east_mesh, [-1.0, 0.0, 0.0])
+            .into_iter()
+            .filter(|quad| quad_extent(&east_mesh, *quad, 0) == (0.0, 0.0))
+            .collect();
+        assert_eq!(skirts.len(), 1);
+        assert_eq!(
+            quad_extent(&east_mesh, skirts[0], 1),
+            (y as f32 + 0.875, SIZE as f32)
+        );
+    }
+
+    #[test]
+    fn mixed_flowing_water_keeps_the_mesher_performance_tripwire() {
+        const CEILING: Duration = Duration::from_secs(20);
+
+        let mut chunk = air(SIZE);
+        for y in 0..SIZE {
+            for z in 0..SIZE {
+                for x in 0..SIZE {
+                    if (x + y + z) % 2 == 0 {
+                        let level = ((x * 7 + y * 3 + z * 5) % 7) as BlockId;
+                        chunk.set(x, y, z, palette::WATER_FLOW1 + level);
+                    }
+                }
+            }
+        }
+
+        let started = Instant::now();
+        let mesh = super::mesh_chunk(&chunk, &alone());
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            mesh.water.quad_count(),
+            SIZE * SIZE * SIZE / 2 * 6,
+            "every isolated flowing voxel exposes all six faces"
+        );
+        assert!(
+            elapsed < CEILING,
+            "mixed flowing water took {elapsed:?}, over the {CEILING:?} tripwire"
+        );
     }
 
     #[test]
