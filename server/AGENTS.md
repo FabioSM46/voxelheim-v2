@@ -1124,6 +1124,23 @@ Everything about it lives in `internal/game/clock.go` and the three constants be
   have. Its night still arrives on time; it just does not remember which part of the day
   it was in.
 
+## The Fimbulvetr, and why a real week is not a tick count
+
+- **The persisted deadline is the state; the phase is derived.** Ten-second polls derive
+  the three warnings, the five-minute blizzard and healing from `next_storm_unix`. A
+  restart resumes Raging, while a fully missed storm first gives one minute of warning.
+  `-storm-period` defaults to 168 hours, zero disables it, and `-next-storm` is a one-run
+  RFC3339 override. Deadline changes are saved immediately.
+- **Warnings are transitions; joining is a state read.** Broadcasts happen at ten
+  minutes, one minute, ten seconds, Raging and Passed; late joiners receive the live
+  Approaching or Raging phase after `ServerWelcome`.
+- **Only listing runs outside the tick.** `Cache.RegenerationChunks` unions and sorts
+  stored, in-memory and resident chunks on the worker. The tick then generates and
+  durably deletes at most `RegenerateChunksPerTick`; Passed and the next deadline wait
+  for the queue and changed camp to become durable, so a crash cannot skip healing.
+- **A ward keeps a column, not an object.** `wardOf` preserves every vertical chunk in
+  its column. Healing removes unwarded player state; derived settlements remain pristine.
+
 ## The spawn director, and what stopped being true when it landed
 
 Everything is in `internal/game/spawn.go`, beside the state machine it populates
@@ -2579,10 +2596,9 @@ Recorded here so the next reader does not mistake them for oversights:
   an unloadable file at the next restart. If structures ever stop being allowed to overlap, the
   rule goes in `PlaceStructure` **first** — `TestARestoredCampMayOverlapExactlyAsAPlacedOneMay`
   fails when that happens, and is the place to record the new answer.
-- **An owner who never comes back leaves their camp standing.** Nothing reclaims a structure
-  whose owner has stopped playing: the identity keeps naming them, the tent keeps being theirs,
-  and no sweep runs. That is the intended shape rather than a gap to close early — the GDD's
-  Fimbulvetr storm is the reclaim, and it is its own issue.
+- **An owner who never comes back leaves a warded camp standing.** The weekly Fimbulvetr
+  reclaims every unwarded player structure through chunk regeneration; a camp inside a
+  living runestone's column is protected ground and outlives its absent owner by design.
 - **No fall damage, no health, no death.** A player who falls a hundred blocks lands and walks
   away. `TerminalFallSpeed` exists to bound the per-tick step, not to model anything.
 - **Water does not flow, and nothing drowns in it.** A voxel is `Water` because whatever wrote

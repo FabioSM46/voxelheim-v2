@@ -1,7 +1,9 @@
 package world
 
 import (
+	"cmp"
 	"maps"
+	"slices"
 	"sync"
 )
 
@@ -96,6 +98,25 @@ func (d *Deltas) Count() int {
 		total += len(edits)
 	}
 	return total
+}
+
+// Chunks returns the sorted coordinates with live in-memory edits, including unsaved ones.
+func (d *Deltas) Chunks() []Coord {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	coords := make([]Coord, 0, len(d.chunks))
+	for coord, edits := range d.chunks {
+		if len(edits) > 0 {
+			coords = append(coords, coord)
+		}
+	}
+	slices.SortFunc(coords, compareCoords)
+	return coords
+}
+
+func compareCoords(a, b Coord) int {
+	return cmp.Or(cmp.Compare(a.X, b.X), cmp.Compare(a.Y, b.Y), cmp.Compare(a.Z, b.Z))
 }
 
 // Known reports whether this layer already holds edits for coord.

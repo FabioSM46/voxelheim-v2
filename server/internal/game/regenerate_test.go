@@ -1,10 +1,12 @@
 package game
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
@@ -17,12 +19,14 @@ type regenerationFixture struct {
 	regenerated  map[world.Coord]bool
 	becomesSolid map[world.Coord]map[[3]int64]bool
 	calls        []world.Coord
+	failures     map[world.Coord]int
 }
 
 func newRegenerationFixture() *regenerationFixture {
 	return &regenerationFixture{
 		regenerated:  make(map[world.Coord]bool),
 		becomesSolid: make(map[world.Coord]map[[3]int64]bool),
+		failures:     make(map[world.Coord]int),
 	}
 }
 
@@ -30,6 +34,10 @@ func (w *regenerationFixture) Regenerate(coord world.Coord) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.calls = append(w.calls, coord)
+	if w.failures[coord] > 0 {
+		w.failures[coord]--
+		return errors.New("injected durable removal failure")
+	}
 	w.regenerated[coord] = true
 	return nil
 }
@@ -154,6 +162,82 @@ func TestRegenerationClearsPlayerStateKeepsTheWorldAndLiftsAnEnclosedPlayer(t *t
 	}
 	if len(resent) != 1 || resent[0] != target {
 		t.Errorf("session repairs = %+v, want only %+v", resent, target)
+	}
+}
+
+func TestFimbulvetrRegeneratesOnlyUnwardedChunksBeforeClearingTheBlizzard(t *testing.T) {
+	t.Parallel()
+
+	fixture := newRegenerationFixture()
+	unwarded := world.Coord{X: 1, Y: 2, Z: 3}
+	warded := world.Coord{X: 4, Y: 2, Z: 5}
+	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
+
+	sim.mu.Lock()
+	sim.wards = map[world.Column]identity.PlayerID{warded.Column(): {1}}
+	sim.mu.Unlock()
+
+	sim.BeginStorm(uint32(StormDuration / time.Second))
+	if warning, active := sim.StormWarning(); !active || warning.Phase != vnet.StormPhaseRaging {
+		t.Fatalf("raging warning = (%+v, %v)", warning, active)
+	}
+	sim.mu.Lock()
+	weather := sim.weatherAtLocked(0, [3]float64{})
+	sim.mu.Unlock()
+	if weather.Kind != vnet.WeatherKindBlizzard || weather.Intensity != 255 {
+		t.Fatalf("storm weather = %+v, want Blizzard 255", weather)
+	}
+
+	sim.StartStormRegeneration([]world.Coord{unwarded, warded})
+	if sim.StormRegenerationComplete() {
+		t.Fatal("storm regeneration completed before an authoritative tick consumed it")
+	}
+	sim.mu.Lock()
+	sim.advanceChunkRegenerationLocked()
+	weather = sim.weatherAtLocked(0, [3]float64{})
+	sim.mu.Unlock()
+	if !sim.StormRegenerationComplete() {
+		t.Fatal("storm regeneration remained pending after its only slice")
+	}
+	if weather.Kind != vnet.WeatherKindBlizzard {
+		t.Fatalf("weather cleared before regeneration completed: %+v", weather)
+	}
+	if !sim.CompleteStorm() {
+		t.Fatal("CompleteStorm refused a finished regeneration pass")
+	}
+	sim.mu.Lock()
+	weather = sim.weatherAtLocked(0, [3]float64{})
+	sim.mu.Unlock()
+
+	fixture.mu.Lock()
+	calls := append([]world.Coord(nil), fixture.calls...)
+	fixture.mu.Unlock()
+	if len(calls) != 1 || calls[0] != unwarded {
+		t.Fatalf("regenerated chunks = %+v, want only %+v", calls, unwarded)
+	}
+	if weather.Kind == vnet.WeatherKindBlizzard {
+		t.Fatalf("weather remained %+v after the storm", weather)
+	}
+	if warning, active := sim.StormWarning(); active {
+		t.Fatalf("passed storm still advertises %+v", warning)
+	}
+}
+
+func TestFimbulvetrRetriesAFailedDurableRegenerationBeforePassing(t *testing.T) {
+	t.Parallel()
+	fixture := newRegenerationFixture()
+	coord := world.Coord{X: 1, Y: 2, Z: 3}
+	fixture.failures[coord] = 1
+	sim := newRegenerationSim(t, fixture, func(world.Coord) int { return 0 })
+	sim.BeginStorm(uint32(StormDuration / time.Second))
+	sim.StartStormRegeneration([]world.Coord{coord})
+	sim.Step(1)
+	if sim.StormRegenerationComplete() || sim.CompleteStorm() {
+		t.Fatal("failed durable regeneration completed the storm")
+	}
+	sim.Step(2)
+	if !sim.StormRegenerationComplete() || !sim.CompleteStorm() || fixture.callCount() != 2 {
+		t.Fatal("storm did not complete after retry")
 	}
 }
 
