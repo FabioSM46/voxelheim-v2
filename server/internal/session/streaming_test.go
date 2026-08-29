@@ -723,3 +723,68 @@ func TestAChunkThatCouldNotBeSentIsStillReported(t *testing.T) {
 		t.Fatalf("%d chunks were reported, want the one the diff loaded", len(entered))
 	}
 }
+
+// And the chunks *behind* a failed send are reported by the pass that finally sends them,
+// which is what makes the report ahead of the send safe on a diff of more than one chunk.
+//
+// The recovery is [View.MarkLoaded]'s and it is not new: a chunk is recorded as the
+// client's only after its send returned, so a send that failed partway leaves every chunk
+// after it absent from the view, and [View.MoveTo] — which refuses to shortcut an
+// unchanged centre for exactly this reason — offers them again. Reporting the whole load
+// list up front instead would be the same set of reports in a different order, not a
+// repair; this test is what says the order does not lose one.
+func TestTheChunksBehindAFailedSendAreReportedByTheNextPass(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	// A radius of one is a 3×3×3 cube and the first diff loads all 27, one frame each.
+	const inView = 27
+	const sendsBeforeFailure = 3
+
+	sent := 0
+	failing := true
+	sendErr := errors.New("connection gone")
+
+	var entered []world.Coord
+	streamer := testStreamer(world.NewCache(5, 1, 8), 1, func([]byte) error {
+		sent++
+		if failing && sent > sendsBeforeFailure {
+			return sendErr
+		}
+		return nil
+	})
+	streamer.ReportEntering(func(coord world.Coord) { entered = append(entered, coord) })
+
+	if err := streamer.MoveTo(ctx, world.Coord{}); !errors.Is(err, sendErr) {
+		t.Fatalf("MoveTo error = %v, want the send failure", err)
+	}
+	// The report is ahead of the send, so the chunk whose send failed is reported too.
+	if len(entered) != sendsBeforeFailure+1 {
+		t.Fatalf("%d chunks were reported before the failure, want %d",
+			len(entered), sendsBeforeFailure+1)
+	}
+	if got := streamer.View().Loaded(); got != sendsBeforeFailure {
+		t.Fatalf("the view recorded %d chunks, want the %d that were actually sent",
+			got, sendsBeforeFailure)
+	}
+
+	// The same centre, because a partial send leaves the player exactly where they were.
+	failing = false
+	if err := streamer.MoveTo(ctx, world.Coord{}); err != nil {
+		t.Fatalf("MoveTo after the failure: %v", err)
+	}
+
+	reported := make(map[world.Coord]struct{}, inView)
+	for _, coord := range entered {
+		reported[coord] = struct{}{}
+	}
+	if len(reported) != inView {
+		t.Errorf("%d of the %d chunks in view were reported, want all of them",
+			len(reported), inView)
+	}
+	for coord := range reported {
+		if !streamer.View().Holds(coord) {
+			t.Errorf("chunk %+v was reported and is not in the view", coord)
+		}
+	}
+}
