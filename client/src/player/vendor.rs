@@ -1,11 +1,10 @@
 //! Client-side presentation of one server-owned stall.
 //!
 //! **The mirror of `loot.rs`, and deliberately smaller than it.** A corpse is a container
-//! whose contents this client watches empty; a stall is a price list, and a price list has
-//! nothing consumable in it. What is left after that difference is the session itself: the
-//! server decides which stall a player has open, says so with a `VendorState`, and ends it
-//! with a `VendorClosed`. This module holds the newest list it was sent and the mode that
-//! goes with it, and decides nothing else.
+//! whose contents this client watches empty; a stall is a price list, with nothing
+//! consumable in it. What is left after that difference is the session: the server decides
+//! which stall a player has open, says so with a `VendorState`, and ends it with a
+//! `VendorClosed`. This module holds the newest list and the mode that goes with it.
 
 use bevy::prelude::*;
 
@@ -57,14 +56,13 @@ impl Plugin for VendorPlugin {
 /// Applies the server's answers in order, and closes a window the newest one invalidated.
 ///
 /// **There is no staleness guard here and `loot.rs` has one, which is a difference worth
-/// stating rather than leaving to look like an omission.** Loot refuses a state whose
-/// revision it has already seen because an equal revision arriving late would restore an
-/// entry the player has already taken. A stall has no such entry: `VendorState` replaces
-/// the client's view of that vendor wholesale by contract, and the server deliberately
-/// re-sends *the revision it already has* when a player addresses the stall they already
-/// have open (`openVendorLocked` in `server/internal/game/vendor.go`). A guard written
-/// from loot's shape would swallow exactly that re-send, and pressing the interact key at
-/// a stall the player had closed with `Escape` would do nothing at all.
+/// stating rather than leaving to look like an omission.** Loot refuses a revision it has
+/// already seen, because an equal one arriving late would restore an entry the player had
+/// taken. A stall has no such entry: `VendorState` replaces this client's view wholesale by
+/// contract, and `openVendorLocked` deliberately re-sends *the revision it already has* when
+/// a player addresses the stall they already have open. A guard in loot's shape would
+/// swallow that frame, and the interact key would do nothing at a stall closed with
+/// `Escape`.
 fn reconcile_vendor(
     mut inbox: ResMut<VendorInbox>,
     session: Option<Res<Session>>,
@@ -75,10 +73,9 @@ fn reconcile_vendor(
     for event in inbox.take() {
         match event {
             VendorEvent::State(state) => {
-                // Whatever was open is replaced, without a closure being needed for it:
-                // the server closes the first stall when a second opens and queues its
-                // `VendorClosed`, but the two frames may arrive in either order and only
-                // one window exists to show either in.
+                // Whatever was open is replaced, with no closure needed for it: the server
+                // closes the first stall when a second opens, but the two frames may arrive
+                // in either order and there is one window to show either in.
                 window.current = Some(state);
                 set_mode(&mut mode, InputMode::Vendor);
             }
@@ -95,9 +92,9 @@ fn reconcile_vendor(
     }
 
     // Death ends the session at the stall from this side too, and so does losing the
-    // session. Neither is this client deciding anything — the server refuses every trade
-    // from a corpse through the same act gate that refuses mining — it is a window that
-    // must not sit over a death overlay showing prices nobody can pay.
+    // session. Neither decides anything — the server refuses every trade from a corpse
+    // through the act gate that refuses mining — it is a window that must not sit over a
+    // death overlay showing prices nobody can pay.
     if session.is_none() || vitals.dead() {
         close(&mut window, &mut mode);
     }
@@ -106,9 +103,9 @@ fn reconcile_vendor(
 /// Takes the window down when the mode has left it.
 ///
 /// The one gesture this client answers on its own: `Escape` changes the mode, and the list
-/// it was showing goes with it. Nothing is sent — there is no message for "I have stopped
-/// looking", by contract — so the server keeps the session until the player walks away or
-/// addresses somebody else, and re-addressing this stall re-sends the list it already had.
+/// goes with it. Nothing is sent — there is no message for "I have stopped looking", by
+/// contract — so the server keeps the session until the player walks away or addresses
+/// somebody else, and re-addressing this stall re-sends the list it already had.
 fn dismiss_the_stall_the_player_left(mode: Res<InputMode>, mut window: ResMut<VendorWindow>) {
     if window.current.is_some() && *mode != InputMode::Vendor {
         window.current = None;
@@ -117,21 +114,15 @@ fn dismiss_the_stall_the_player_left(mode: Res<InputMode>, mut window: ResMut<Ve
 
 /// Takes the window down and hands the mode back, writing to neither unless it moves.
 ///
-/// **Three guards, and none of them is an optimisation.**
-///
-/// `**mode == InputMode::Vendor` is a correctness condition, not a shortcut: this runs on
-/// every frame a player is dead, and the pause menu and chat are deliberately *not* closed
-/// by death — `choose_input_mode` forces only `Inventory`, `Loot`, `Vendor` and `Map` down.
-/// Handing the mode back unconditionally would take a dead player out of the pause menu
-/// twenty times a second, which is a control they cannot then use. Only the mode this
-/// module owns is this module's to leave.
-///
-/// The other two are about change detection. Dereferencing a `ResMut` marks its resource
-/// changed whether or not the value moved, and `InputMode`'s change flag is exactly what
-/// `InputGate::may_act` reads to give the frame a mode changed on to the UI — so an
-/// unguarded write here would close every gameplay input in the client while the player
-/// was dead. That is how it was first written, and `player::tests`' dead-player test is
-/// what caught it.
+/// **Three guards, and none of them is an optimisation**, because this runs on every frame
+/// a player is dead. `**mode == InputMode::Vendor` keeps the mode this module owns the only
+/// one it leaves: death deliberately does not close the pause menu or chat, and handing the
+/// mode back unconditionally would take a corpse out of the menu it is quitting from twenty
+/// times a second. The other two are change detection — dereferencing a `ResMut` marks its
+/// resource changed whether or not the value moved, and `InputMode`'s change flag is what
+/// `InputGate::may_act` reads to give a frame to the UI, so an unguarded write here closes
+/// every gameplay input in the client. That is how it was first written, and
+/// `player::tests`' dead-player test is what caught it.
 fn close(window: &mut ResMut<'_, VendorWindow>, mode: &mut ResMut<'_, InputMode>) {
     if window.current.is_some() {
         window.current = None;
@@ -206,7 +197,7 @@ mod tests {
     }
 
     /// A price list opens the window and takes the mode; the closure the server owes ends
-    /// both. The second list replaces the first wholesale rather than merging into it.
+    /// both, and a second list replaces the first wholesale.
     #[test]
     fn a_list_opens_the_stall_a_second_replaces_it_and_a_closure_ends_it() {
         let mut app = app();
@@ -244,10 +235,9 @@ mod tests {
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
     }
 
-    /// **The same revision re-opens the window**, which is what re-addressing an open
-    /// stall produces on the wire: the server keeps the session and re-sends the list it
-    /// already had. A staleness guard copied from `loot.rs` would swallow it, and the
-    /// interact key would do nothing at a stall the player had closed with `Escape`.
+    /// **The same revision re-opens the window**, which is what re-addressing an open stall
+    /// produces on the wire. A staleness guard copied from `loot.rs` would swallow it, and
+    /// the interact key would do nothing at a stall closed with `Escape`.
     #[test]
     fn the_revision_the_server_already_sent_opens_the_window_again() {
         let mut app = app();
@@ -268,12 +258,10 @@ mod tests {
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Vendor);
     }
 
-    /// **Death takes the stall and leaves every other screen alone.**
-    ///
-    /// This system runs on every frame a dead player is dead, and the pause menu is
-    /// deliberately not one of the screens death closes — `choose_input_mode` forces only
-    /// `Inventory`, `Loot`, `Vendor` and `Map` down. Handing the mode back unconditionally
-    /// would take a dead player out of a menu they are trying to quit from, once a frame.
+    /// **Death takes the stall and leaves every other screen alone**, on every one of the
+    /// frames a dead player is dead. The pause menu is deliberately not a screen death
+    /// closes, and a mode handed back unconditionally would take a corpse out of the menu
+    /// it is quitting from once a frame.
     #[test]
     fn death_does_not_take_a_dead_player_out_of_the_pause_menu() {
         let mut app = app();

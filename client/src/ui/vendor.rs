@@ -1,11 +1,10 @@
 //! Dedicated view of one complete server-owned price list.
 //!
 //! **`ui/loot.rs`'s window with two columns in it**, and it decides as little as that one
-//! does: the rows are the two vectors of the newest [`VendorState`] laid out, the prices
-//! are the server's, and nothing here computes a total or a balance. The one number this
-//! side contributes is how much of a thing the player is carrying, which comes from the
-//! last authoritative inventory the server sent and is the reason the sell column can show
-//! what a player has to offer at all.
+//! does: the rows are the two vectors of the newest [`VendorState`] laid out, the prices are
+//! the server's, and nothing here computes a total or a balance. The one number this side
+//! contributes is how much of a thing the player is carrying, taken from the last
+//! authoritative inventory the server sent.
 
 use bevy::prelude::*;
 
@@ -16,15 +15,14 @@ use crate::player::{InputMode, Inventory, Liveries, SelfVitals, VendorWindow, it
 
 const WIDTH: f32 = 620.0;
 
-/// The frame's own padding. The bottom is deeper than the other three because the purse in
-/// the corner is absolutely positioned over the content, and a row underneath it would be
-/// a price with a coin sitting on top of it.
+/// The frame's own padding. The bottom is deeper because the purse in the corner is
+/// absolutely positioned over the content, and a row underneath it would be a price with a
+/// coin sitting on top of it.
 const PADDING: f32 = 16.0;
 const BOTTOM_PADDING: f32 = 40.0;
 
 /// Smaller than a pack cell, deliberately: two columns of up to seven rows have to fit one
-/// window, and a stall row is a picture beside a sentence rather than a square a player
-/// drags things out of.
+/// window, and a stall row is a picture beside a sentence rather than a square to drag from.
 const ROW_ICON: f32 = 34.0;
 
 /// Dimmer than the rows, for the reason the loot window's hint line is: an empty-column
@@ -32,8 +30,8 @@ const ROW_ICON: f32 = 34.0;
 const HINT: Color = Color::srgb(0.62, 0.62, 0.66);
 
 /// What a column with no rows says. **Neither is a refusal**, and the wording is chosen so
-/// it cannot read as one: the vendor's own list is what has nothing in it, and the sell
-/// column is empty exactly when the pack holds none of what this vendor takes.
+/// it cannot read as one: the sell column is empty exactly when the pack holds none of what
+/// this vendor takes.
 const NOTHING_FOR_SALE: &str = "nothing for sale here";
 const NOTHING_WANTED: &str = "nothing here they will buy";
 
@@ -53,13 +51,11 @@ impl Plugin for VendorUiPlugin {
             .add_systems(Startup, spawn_window)
             // `refresh_silver_readout` belongs to `ui/inventory.rs` and is registered by
             // that plugin too. One function and two registrations rather than a second
-            // purse: it is a query and a string comparison, it writes the same label
-            // whichever pass reaches a given readout first, and the alternative is a
-            // number in this window that can disagree with the number in the pack.
+            // purse: it is a query and a string comparison, and the alternative is a number
+            // in this window that can disagree with the number in the pack.
             // Chained through `ApplyDeferred` for the reason `ui/inventory.rs`'s systems
-            // are: the readout is spawned by the rebuild's deferred commands, and a
-            // refresh scheduled before they are applied would find no readout to write
-            // and leave the purse reading zero for a frame.
+            // are: the readout is spawned by the rebuild's deferred commands, and a refresh
+            // before they are applied would leave the purse reading zero for a frame.
             .add_systems(
                 Update,
                 (
@@ -104,9 +100,9 @@ fn spawn_window(mut commands: Commands) {
 /// Rebuilds both columns from the newest list and the newest pack.
 ///
 /// **Two change signals, because the window shows two authoritative things.** A
-/// `VendorState` replaces the prices; an `InventoryState` changes which of the vendor's
-/// buy rows the player has anything to fill, and a sell column that only rebuilt with the
-/// price list would keep offering a stack that has since been spent.
+/// `VendorState` replaces the prices; an `InventoryState` changes which buy rows the player
+/// has anything to fill, and a sell column that rebuilt only with the price list would keep
+/// offering a stack that has since been spent.
 fn rebuild_window(
     window: Res<VendorWindow>,
     inventory: Option<Res<Inventory>>,
@@ -133,14 +129,13 @@ fn rebuild_window(
                 },
                 TextColor(Color::WHITE),
             ));
-            // What the player may buy is every row the vendor sells, whether or not the
-            // purse covers it: whether it does is the server's answer, and a list pruned
-            // here would be this client refusing a trade it was never asked about.
+            // Every row the vendor sells, whether or not the purse covers it: whether it
+            // does is the server's answer, and a list pruned here would be this client
+            // refusing a trade it was never asked about.
             let buy: Vec<Row> = state.sells.iter().map(|entry| (*entry, None)).collect();
-            // What the vendor buys, narrowed to what the player is actually carrying: a
-            // row for a thing nobody holds is an offer that cannot be taken, and the count
-            // beside it is the last complete state the server sent rather than a running
-            // total kept on this side.
+            // What the vendor buys, narrowed to what the player is carrying: a row for a
+            // thing nobody holds is an offer that cannot be taken, and the count beside it
+            // is the last complete state the server sent.
             let sell: Vec<Row> = state
                 .buys
                 .iter()
@@ -166,10 +161,10 @@ fn rebuild_window(
 
 /// How many of one item the last authoritative inventory holds, or `None` for none at all.
 ///
-/// **Every slot, which is the total and not a second opinion about where money may sit.**
-/// No row of the server's table names a wearable — the four buy lists are raw iron, coal,
-/// logs, meat, bone, pelts and patches — so the count the server spends from the pack and
-/// the count this readout sums are the same number for every row that can appear here.
+/// **Every slot, which is the total and not a second opinion about where things may sit.**
+/// No row of the server's four buy lists names a wearable, so the count the server spends
+/// from the pack and the count summed here are the same number for every row that can
+/// appear.
 fn held(inventory: Option<&Inventory>, item_id: u16) -> Option<u32> {
     inventory
         .map(|inventory| inventory.count(item_id))
@@ -186,8 +181,8 @@ fn spawn_column(
 ) {
     columns
         .spawn(Node {
-            // A basis of zero with equal growth, so the two columns are halves of the
-            // window rather than halves of whichever list is longer.
+            // A basis of zero with equal growth, so the columns are halves of the window
+            // rather than halves of whichever list is longer.
             flex_basis: Val::Px(0.0),
             flex_grow: 1.0,
             display: Display::Flex,
@@ -283,16 +278,11 @@ fn spawn_row(
 
 /// Shows the window only for a live session that is in the mode and has a list to draw.
 ///
-/// **The life state is asked here as well as in `player::vendor`, and the repetition is
-/// deliberate.** `reconcile_vendor` takes the list down when the player dies, but nothing
-/// orders it against this chain, so on the frame the death arrives this system may run
-/// first — and it would then draw a stall over the death overlay for a frame. Two
-/// independent expressions over the same fact, which is the rule `InputGate` already
-/// states for `may_aim` and `may_act`: a term added to one is simply absent from the other
-/// unless it is written in both.
-///
-/// `SelfVitals` is optional because this plugin stands up headlessly without the player
-/// plugin that owns it, and an absent resource means nobody has said this player is dead.
+/// **The life state is asked here as well as in `player::vendor`, deliberately.** Nothing
+/// orders `reconcile_vendor` against this chain, so on the frame a death arrives this may
+/// run first and draw a stall over the death overlay. Two independent expressions over one
+/// fact, the rule `InputGate` states for `may_aim` and `may_act`. `SelfVitals` is optional
+/// because this plugin stands up headlessly without the player plugin that owns it.
 fn show_window(
     window: Res<VendorWindow>,
     mode: Res<InputMode>,
@@ -399,8 +389,8 @@ mod tests {
         texts.iter(world).map(|text| text.0.clone()).collect()
     }
 
-    /// The window draws the vendor's prices, the player's holdings and their purse, and it
-    /// draws nothing about a row they have nothing to fill.
+    /// The window draws the vendor's prices, the player's holdings and their purse, and
+    /// nothing at all about a row they have nothing to fill.
     #[test]
     fn both_columns_are_drawn_from_the_list_and_the_pack() {
         let mut app = app();
@@ -437,9 +427,9 @@ mod tests {
         }
     }
 
-    /// **Spending the last of a stack takes its row out of the sell column**, which is the
-    /// half of "rows rebuild" that a `VendorState` alone would never have exercised: the
-    /// price list did not move, the pack did.
+    /// **Spending the last of a stack takes its row out of the sell column** — the half of
+    /// "rows rebuild" a `VendorState` alone would never exercise: the pack moved, not the
+    /// price list.
     #[test]
     fn a_pack_that_moved_rebuilds_the_sell_column() {
         let mut app = app();
@@ -462,12 +452,9 @@ mod tests {
     }
 
     /// **A death hides the window in the same frame it arrives**, whichever order the two
-    /// plugins' systems happen to run in.
-    ///
-    /// The window is left open and the mode left at `Vendor` — the state this frame starts
-    /// in when the player dies with a stall up — and only the life state moves. Nothing
-    /// here orders this chain against `player::vendor`'s `reconcile_vendor`, which is
-    /// exactly the case this asserts.
+    /// plugins' systems run in. The window is left open and the mode left at `Vendor` — the
+    /// state a frame starts in when a player dies with a stall up — and only the life state
+    /// moves, so this fails if the visibility came from anything else.
     #[test]
     fn a_death_hides_the_window_without_waiting_for_the_player_plugin() {
         let mut app = app();
