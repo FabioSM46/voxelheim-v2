@@ -20,7 +20,10 @@
 //! - Respawn protection is drawn, never counted. The server owns that timer; `invulnerable`
 //!   is its answer, and this module colours a border with it.
 //! - The vignette is opacity mapped from the same health ratio, with a transparent centre.
-//!   It changes only when a newer accepted snapshot replaces [`SelfVitals`].
+//!   It changes only when a newer accepted snapshot replaces [`SelfVitals`]. Its edge is a
+//!   colour rather than black, and [`VIGNETTE_EDGE`] says why: what a player sees of an
+//!   overlay is the difference between it and the scene, and against a Norse night there
+//!   was no difference left to have.
 //! - The eyelids become eligible from the server's countdown, after the existing camera
 //!   fall has completed. Local time draws their closure but never opens them: only the
 //!   next authoritative Alive state removes the black frame.
@@ -141,10 +144,45 @@ const HIT_PULSE_DURATION: Duration = Duration::from_millis(300);
 const HIT_PULSE_ALPHA: f32 = 0.14;
 const HIT_PULSE_LAYER: i32 = 19;
 
+/// The colour the edge resolves to at full opacity — **the lever that made the vignette
+/// visible, and the one worth explaining rather than tuning.**
+///
+/// It was pure black until #553, and black is the one colour that cannot do this job. An
+/// overlay composites as `alpha * edge + (1 - alpha) * scene`, so what a player actually
+/// sees is `alpha * (edge - scene)`: with a black edge that term is the scene's own
+/// brightness, and the effect scales with the backdrop rather than with the health. At
+/// night the backdrop is `player::sky`'s `NIGHT_SKY` and there was nothing left to take
+/// away — the re-taken measurement beside [`vignette_gradient`] has the numbers.
+///
+/// **Red, and specifically not a cool tone, because this module already spends both.**
+/// [`BAR_FILL`], [`DEATH_VEIL`] and the hit pulse are all red, and [`PROTECTED_EDGE`] is
+/// deliberately ice — "ice against the blood", as it says above, so that being protected
+/// is never a shade to compare. A cold vignette would put the harm signal in the one
+/// colour this HUD reserves for its opposite. Dark and desaturated rather than bright: on
+/// a lit surface it still reads as the edges going out, and only against a near-black
+/// scene does the tint become the whole of the signal.
+const VIGNETTE_EDGE: Color = Color::srgb(0.33, 0.02, 0.04);
+
 /// The darkest a living low-health edge becomes. The centre stays transparent at every
 /// value; this is only the opacity at the outside of the screen.
+///
+/// **Unchanged by #553, and that is a measurement rather than an oversight.** Raising it
+/// is the obvious move and it is very nearly a no-op. Measured on the same night sky at
+/// 5 health, 0.72 → 0.80 moved the corner from `(70, 5, 10)` to `(74, 5, 10)`: four
+/// levels, against the sixty-five that changing [`VIGNETTE_EDGE`] is worth on the same
+/// pixel. It buys almost nothing, and what it costs is the one thing a vignette must not
+/// do, which is veil more of the screen.
 const VIGNETTE_MAX_ALPHA: f32 = 0.72;
-const VIGNETTE_CLEAR_PERCENT: f32 = 52.0;
+
+/// Where the darkening begins, as a percentage of the distance to the farthest corner.
+///
+/// Lowered from 52 by #553. The width of the band is what makes this read as peripheral
+/// vision closing in rather than as a rim drawn round the window, and once the edge stops
+/// vanishing into the scene that distinction becomes visible: a short ramp ends in a line
+/// a player can see. The centre is untouched at either value — the crosshair sits at 0%,
+/// and the first sample with any opacity at all is past 44% of the half-width.
+const VIGNETTE_CLEAR_PERCENT: f32 = 44.0;
+
 const VIGNETTE_LAYER: i32 = 18;
 
 /// The final authoritative countdown window is one eyelid closure plus one full second
@@ -780,26 +818,49 @@ fn vignette_alpha(vitals: PlayerVitals) -> f32 {
 /// to a fixed aspect ratio. Opacity changes; the unobscured centre never does.
 ///
 /// **This is the client's only [`BackgroundGradient`], so it is the only consumer of that
-/// render path — and #536 reported that the path produces nothing.** It does. The whole
-/// of it was instrumented and measured, and what the arithmetic below turns into on a
-/// screen is recorded here because the next person to doubt it has no cheaper way to find
-/// out: `bevy_ui_render`'s `extract_gradients` matches this entity with an inherited
-/// visibility of `true`, a node the size of the viewport and a camera that maps;
-/// `queue_gradient` adds its phase item; `prepare_gradient` emits the two segments the
-/// three stops below describe; `DrawGradient` issues the draw; and the pixels change.
-/// Read off a 1280x720 window with the player at 50 of 100 health, the corner of the
-/// screen darkened from `(14, 18, 24)` to `(9, 13, 17)` and the first-person hand from
-/// `(93, 92, 92)` to `(77, 76, 76)`, two frames after the snapshot landed, with the
-/// centre untouched — debug and release alike.
+/// render path — and #536 reported that the path produces nothing.** It does.
+/// `bevy_ui_render`'s `extract_gradients` matches this entity with an inherited visibility
+/// of `true`, a node the size of the viewport and a camera that maps; `queue_gradient`
+/// adds its phase item; `prepare_gradient` emits the two segments the three stops below
+/// describe; `DrawGradient` issues the draw; and the pixels change, two frames after the
+/// snapshot lands, debug and release alike. **The shader is compiled on first use and
+/// `SetItemPipeline` silently skips the draw until it is ready, so a capture taken before
+/// roughly frame 150 comes back blank and looks exactly like a broken feature.** That
+/// near-miss is #536's, and it is written down because it is the cheapest way there is to
+/// lose a day to this code.
 ///
-/// **What that leaves is a bound rather than a bug, and it is worth knowing before
-/// reaching for [`VIGNETTE_MAX_ALPHA`].** Black at an alpha darkens in proportion to what
-/// is already there, so the same gradient that takes 16 levels off a lit surface takes 5
-/// off a night sky. A vignette read against a nearly black scene is arithmetically
-/// present and perceptually absent, and no opacity short of opaque changes that — the
-/// thing it would have to darken is the thing that is already dark.
+/// **What #536 measured was the day sky, and #553 re-took it at night.** A client whose
+/// server keeps no clock renders `Daylight::FIXED`, so every number #536 recorded was
+/// against `DAY_SKY` and the "5 levels off a night sky" beside them was arithmetic rather
+/// than a reading. The real night is darker and the real answer is worse. Read off the
+/// same 1280x720 window with the world clock anchored at tick 18 000 of a 24 000-tick day
+/// — the middle of a night running 14 400..21 600, so the sky is `player::sky`'s
+/// `NIGHT_SKY` — this is the corner of the screen at 100 / 75 / 50 / 5 health:
+///
+/// | edge colour | 100 | 75 | 50 | 5 |
+/// | --- | --- | --- | --- | --- |
+/// | black, as #536 left it | `(5, 6, 10)` | `(4, 5, 8)` | `(3, 4, 6)` | `(2, 2, 3)` |
+/// | [`VIGNETTE_EDGE`], as it is now | `(5, 6, 10)` | `(36, 6, 10)` | `(51, 6, 10)` | `(70, 5, 10)` |
+///
+/// The centre reads `(5, 6, 10)` in all eight captures. The first-person hand, as a lit
+/// surface for contrast, goes `(93, 92, 92)` to `(58, 57, 57)` under the old black edge
+/// and to `(88, 57, 58)` under this one — still darkened, and now tinted with it. In
+/// daylight the corner goes `(14, 18, 24)` to `(71, 10, 16)` at 5 health, so the daytime
+/// reading did not lose the darkening it already had.
+///
+/// **The bound #536 named is real, and one measurement settles how much of it was ever the
+/// opacity's to fix.** Black at *alpha 1.0* — the entire budget that lever has, past which
+/// there is nothing — takes the night corner from `(5, 6, 10)` to `(0, 0, 0)`: five levels,
+/// at total opacity, on an edge the player cannot see through at all. The same overlay
+/// takes 67 off the hand. What a player sees of an overlay is `alpha * (edge - scene)`, so
+/// no choice of `alpha` rescues an `edge` the `scene` has already arrived at. That is why
+/// #553 changed the colour and left [`VIGNETTE_MAX_ALPHA`] where it was.
 fn vignette_gradient(alpha: f32) -> RadialGradient {
-    let clear = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    // The clear stops carry [`VIGNETTE_EDGE`] at zero opacity rather than a transparent
+    // black. The shader mixes colour and alpha with two separate `mix`es, so a
+    // black-to-red ramp would put a muddy dark band halfway along the way out; one colour
+    // throughout, with only the opacity ramping, is the same hue everywhere it appears.
+    let clear = VIGNETTE_EDGE.with_alpha(0.0);
     RadialGradient::new(
         UiPosition::CENTER,
         RadialGradientShape::FarthestCorner,
@@ -807,7 +868,7 @@ fn vignette_gradient(alpha: f32) -> RadialGradient {
             ColorStop::percent(clear, 0.0),
             ColorStop::percent(clear, VIGNETTE_CLEAR_PERCENT),
             ColorStop::percent(
-                Color::srgba(0.0, 0.0, 0.0, alpha.clamp(0.0, VIGNETTE_MAX_ALPHA)),
+                VIGNETTE_EDGE.with_alpha(alpha.clamp(0.0, VIGNETTE_MAX_ALPHA)),
                 100.0,
             ),
         ],
@@ -878,6 +939,7 @@ mod tests {
 
     use super::*;
     use crate::net::SessionParams;
+    use crate::player::NIGHT_SKY;
     use crate::ui::experience::{
         ExperienceLabel, ExperienceRoot, ExperienceTrack, ExperienceUiPlugin,
     };
@@ -1589,6 +1651,107 @@ mod tests {
             Val::Percent(VIGNETTE_CLEAR_PERCENT)
         );
         assert_eq!(edge_alpha(&gradient), VIGNETTE_MAX_ALPHA);
+
+        // One hue the whole way out. The shader mixes colour and alpha with two separate
+        // `mix`es, so stops that disagreed on colour would resolve to some third shade
+        // halfway along the band rather than to the edge colour at half opacity.
+        let edge = VIGNETTE_EDGE.to_srgba();
+        for (index, stop) in gradient.stops.iter().enumerate() {
+            let colour = stop.color.to_srgba();
+            assert_eq!(
+                [colour.red, colour.green, colour.blue],
+                [edge.red, edge.green, edge.blue],
+                "stop {index} is not the edge colour"
+            );
+        }
+    }
+
+    /// Composites `edge` at `alpha` over a scene colour the way the GPU does — in linear
+    /// space, through Bevy's own transfer functions — and returns the 8-bit sRGB triple a
+    /// screenshot of that pixel would hold.
+    fn composited_over(edge: Color, alpha: f32, scene: [f32; 3]) -> [u8; 3] {
+        let edge = edge.to_linear();
+        let scene = Color::srgb(scene[0], scene[1], scene[2]).to_linear();
+        let mix = |over: f32, under: f32| alpha * over + (1.0 - alpha) * under;
+        let out = LinearRgba::new(
+            mix(edge.red, scene.red),
+            mix(edge.green, scene.green),
+            mix(edge.blue, scene.blue),
+            1.0,
+        );
+        let out = Color::from(out).to_srgba();
+        [out.red, out.green, out.blue].map(|channel| (channel * 255.0).round() as u8)
+    }
+
+    /// **The assertion #553 exists for: not that the edge is drawn, but that it can be
+    /// seen.** Every other vignette test here would pass with the edge set back to black,
+    /// and black is precisely the value that failed in play — #536 proved the pixels
+    /// change and the change was still invisible, because what a player sees of an overlay
+    /// is `alpha * (edge - scene)` and at night the scene had already arrived at the edge.
+    ///
+    /// So this one models the compositing rather than the components, against the darkest
+    /// backdrop the game has — `player::sky`'s `NIGHT_SKY`, read across the module line so
+    /// that a sky which got darker would fail here rather than quietly undo this issue.
+    /// The model is pinned to the real captures recorded at [`vignette_gradient`]: it is
+    /// arithmetic, and arithmetic that has not been checked against a screenshot is what
+    /// #536 was filed about.
+    #[test]
+    fn the_edge_is_a_colour_the_night_sky_has_not_already_reached() {
+        let sky = composited_over(Color::BLACK, 0.0, NIGHT_SKY);
+        assert_eq!(
+            sky,
+            [5, 6, 10],
+            "the modelled night sky is not the captured one"
+        );
+
+        // At 5 of 100 health, which is the health the captures were taken at — the
+        // opacity bound itself belongs to zero health, and at zero the node is hidden.
+        let dying = vignette_alpha(vitals(5, 100));
+        let edge = composited_over(VIGNETTE_EDGE, dying, NIGHT_SKY);
+        assert_eq!(
+            edge,
+            [70, 5, 10],
+            "the modelled edge is not the captured one"
+        );
+
+        let seen = |pixel: [u8; 3]| {
+            (0..3)
+                .map(|c| i16::from(pixel[c]) - i16::from(sky[c]))
+                .map(i16::abs)
+                .max()
+                .expect("three channels")
+        };
+
+        // The ceiling of the lever this replaced: black at *total* opacity, which is the
+        // most a black edge can ever be worth, and which the screenshots agree is
+        // `(0, 0, 0)`. Ten levels — and the player cannot see through it at all.
+        let black_at_its_limit = composited_over(Color::BLACK, 1.0, NIGHT_SKY);
+        assert_eq!(black_at_its_limit, [0, 0, 0]);
+        assert!(
+            seen(black_at_its_limit) <= 10,
+            "the counterfactual moved: black is no longer the bound this issue measured"
+        );
+
+        assert!(
+            seen(edge) >= 40,
+            "the edge is worth {} levels against the night sky, where an opaque black \
+             edge is worth {} — this vignette is back to being invisible at night",
+            seen(edge),
+            seen(black_at_its_limit)
+        );
+
+        // And it still darkens rather than merely tinting. The lit first-person hand is
+        // the contrast case: at this opacity its (93, 92, 92) loses better than a third of
+        // both neutral channels, which is the thing black was good at and this must not
+        // give up. No pinned triple, because the pixel the captures read the hand at is
+        // not on the edge — it is about 91% of the way along the band, which is why that
+        // capture says (88, 57, 58) and this arithmetic does not.
+        let hand = [93.0 / 255.0, 92.0 / 255.0, 92.0 / 255.0];
+        let over_hand = composited_over(VIGNETTE_EDGE, dying, hand);
+        assert!(
+            over_hand[1] < 92 * 2 / 3 && over_hand[2] < 92 * 2 / 3,
+            "the edge no longer darkens a lit surface: {over_hand:?}"
+        );
     }
 
     /// The assertion #536 asked for: not that the components hold the right numbers, but
