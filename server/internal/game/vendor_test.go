@@ -46,6 +46,15 @@ func (h *vitalsHarness) standAt(p *Player, pos [3]float64) {
 	p.pos = pos
 }
 
+// openStall is the vendor this player has open, read under the lock that owns the field.
+// Zero is "no stall at all", which is what [Player.closeVendorLocked] leaves behind and
+// what every refused address must leave untouched.
+func (h *vitalsHarness) openStall(p *Player) uint64 {
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	return p.openVendorID
+}
+
 // vendorStates is every complete price list this session was sent, in order.
 func (s *dropSink) vendorStates(t *testing.T) []protocol.VendorState {
 	t.Helper()
@@ -322,6 +331,42 @@ func TestDyingClosesTheStall(t *testing.T) {
 	}
 	if ended := out.vendorClosures(t); len(ended) != 1 || ended[0] != r.entityID {
 		t.Errorf("the session was told %v had ended, want exactly %d", ended, r.entityID)
+	}
+}
+
+// **And a stall a dead player never opened, which is the other half of the same gate.**
+// [TestDyingClosesTheStall] above covers the window that was already open when the player
+// died; the act gate at the top of [Player.InteractNPC] is what stops a corpse opening a
+// new one, and until this test nothing asked it to.
+//
+// The code is [vnet.RefusalReasonPlayerIsDead] rather than the `NotAVendor` the four
+// other refusals share, and the difference is deliberate: being dead is a fact the client
+// already holds, so answering it plainly tells a probe nothing, and every other request in
+// this package answers a corpse the same way. Nothing about the smith is reachable from
+// the answer — the refusal lands before the resident is even looked up.
+func TestADeadPlayerCannotOpenAStall(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+	smith := h.standResidentAt(vnet.ResidentRoleSmith, [3]float64{1.5, 64, 0.5}, 0)
+
+	h.hurt(player, PlayerMaxHealth)
+	h.step()
+
+	reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: smith.entityID, ClientTick: 1})
+	if err == nil {
+		t.Fatal("a dead player opened a stall")
+	}
+	if reason != vnet.RefusalReasonPlayerIsDead {
+		t.Errorf("a dead player addressing a smith is refused %s, want PlayerIsDead", reason)
+	}
+	if open := h.openStall(player); open != 0 {
+		t.Errorf("a dead player has stall %d open", open)
+	}
+	h.step()
+	if states := out.vendorStates(t); len(states) != 0 {
+		t.Errorf("a dead player was sent %d price lists", len(states))
 	}
 }
 

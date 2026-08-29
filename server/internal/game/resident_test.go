@@ -758,39 +758,54 @@ func TestAResidentOutsideTheViewCubeIsNeitherSentNorDescribed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // **A trade opens a stall; everything else is refused, and every refusal is the same
-// frame.** A role that keeps no stall and an id that names nothing at all are two
-// different sentences for an operator and one code for the player. The uniformity is the
-// fail-closed default: a probe must learn nothing about the world it could not see.
+// frame.** Four causes arrive at that one answer — a role that keeps no stall, a role
+// that does but stands too far away, an id that names nothing at all, and the player's
+// own — and they are four sentences for an operator and one code for the player. The
+// uniformity is the fail-closed default: a probe must learn nothing about the world it
+// could not already see.
+//
+// **The four are one table because the property is that they are indistinguishable**,
+// and a property asserted in four places is one that can drift apart in three of them.
+// [TestAddressingSomebodyOutOfReachIsRefusedTheSameWay] still owns the question of
+// whether reach is *measured* correctly — body to body against [EditReach] — and the row
+// here overlaps it deliberately, because the distance case has to be inside the
+// comparison or the comparison is not being made.
+//
+// Each case also asserts that no stall is open afterwards. Before #459 there was nothing
+// to open and the returned error was the whole of it; now a refusal that left a session
+// behind would be a window a client never asked for.
 func TestOnlyATradeOpensAndEveryOtherAddressIsRefusedTheSameWay(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	for index, role := range []vnet.ResidentRole{vnet.ResidentRoleVillager, vnet.ResidentRoleGuard} {
-		// A separate column per role, because the id is a function of the column.
-		r := h.standResidentAt(role, [3]float64{float64(index) + 0.5, 64, 1.5}, 0)
+	// A separate column per resident, because the id is a function of the column.
+	villager := h.standResidentAt(vnet.ResidentRoleVillager, [3]float64{0.5, 64, 1.5}, 0)
+	guard := h.standResidentAt(vnet.ResidentRoleGuard, [3]float64{1.5, 64, 1.5}, 0)
+	// A role that does keep a stall, stood past the reach: the one refusal here whose
+	// cause is the distance rather than the person.
+	far := h.standResidentAt(vnet.ResidentRoleSmith, [3]float64{2.5, 64, EditReach + 4.5}, 0)
 
-		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: uint32(index) + 1})
-		if err == nil {
-			t.Errorf("addressing a %s opened something", role)
-		}
-		if reason != vnet.RefusalReasonNotAVendor {
-			t.Errorf("addressing a %s is refused %s, want NotAVendor", role, reason)
-		}
-	}
-
-	// And the two that are not residents at all.
-	for name, id := range map[string]uint64{
-		"an id nobody holds": 0xDEAD_BEEF,
-		"the player's own":   player.entityID,
+	for index, one := range []struct {
+		what string
+		id   uint64
+	}{
+		{"a villager", villager.entityID},
+		{"a guard", guard.entityID},
+		{"a smith past the reach", far.entityID},
+		{"an id nobody holds", 0xDEAD_BEEF},
+		{"the player's own id", player.entityID},
 	} {
-		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: id, ClientTick: 1})
+		reason, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: one.id, ClientTick: uint32(index) + 1})
 		if err == nil {
-			t.Errorf("addressing %s opened something", name)
+			t.Errorf("addressing %s opened something", one.what)
 		}
 		if reason != vnet.RefusalReasonNotAVendor {
-			t.Errorf("addressing %s is refused %s, want NotAVendor — a probe must learn nothing", name, reason)
+			t.Errorf("addressing %s is refused %s, want NotAVendor — a probe must learn nothing", one.what, reason)
+		}
+		if open := h.openStall(player); open != 0 {
+			t.Errorf("addressing %s left stall %d open", one.what, open)
 		}
 	}
 }
