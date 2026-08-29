@@ -112,7 +112,7 @@ func (h *vitalsHarness) spawnMobAt(kind vnet.MobKind, pos [3]float32) uint64 {
 // simulate twelve minutes to reach dusk.
 func (h *vitalsHarness) keepNight() {
 	h.t.Helper()
-	if err := h.sim.RestoreClock(NightStartTicks); err != nil {
+	if err := h.sim.RestoreClock(NightStartTicks, NightStartTicks); err != nil {
 		h.t.Fatalf("RestoreClock: %v", err)
 	}
 }
