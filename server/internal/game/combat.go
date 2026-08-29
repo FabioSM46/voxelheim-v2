@@ -380,6 +380,19 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 // standing between a player and that, because a killed creature spent two and a half
 // seconds in Sim.mobs before it stopped being one.
 //
+// **A wall counts too, and an occluded candidate is skipped rather than allowed to end
+// the search.** That is the one place this is not the mirror of [mob.inReach], where the
+// question is about a single committed target and a block is simply a gate: the blow
+// lands or it does not. Here the loop is choosing among candidates, so aborting on the
+// first occluded one would let a draugr walled off a block away absorb every swing aimed
+// at the draugr standing visible behind it — the hazard the paragraph above already
+// names, arriving through terrain instead of through a corpse, and answered the same way.
+//
+// The sight line runs from the same origin the arc does, body centre to body centre, and
+// asks [clearLineOfSight] — the traversal #538 wrote for the mob's blow, and the second
+// caller it was written for. Two traversals free to disagree about what occluded means
+// would be worse than the bug this closes.
+//
 // O(mobs) per swing, on the same explicit trade the mob's own target selection records.
 // The caller holds Sim.mu.
 func (s *Sim) swingTargetLocked(p *Player) *mob {
@@ -397,6 +410,7 @@ func (s *Sim) swingTargetLocked(p *Player) *mob {
 			continue
 		}
 		body := m.species().body.boxAt(m.pos)
+		centre := boxCentre(body)
 
 		distance := boxDistance(reach, body)
 		if distance > SwordReach {
@@ -404,9 +418,9 @@ func (s *Sim) swingTargetLocked(p *Player) *mob {
 		}
 
 		toward := [3]float64{
-			boxCentre(body)[0] - origin[0],
-			boxCentre(body)[1] - origin[1],
-			boxCentre(body)[2] - origin[2],
+			centre[0] - origin[0],
+			centre[1] - origin[1],
+			centre[2] - origin[2],
 		}
 		length := math.Sqrt(toward[0]*toward[0] + toward[1]*toward[1] + toward[2]*toward[2])
 		if length > 0 {
@@ -420,6 +434,12 @@ func (s *Sim) swingTargetLocked(p *Player) *mob {
 		// A zero length means the two centres coincide, which is a mob standing inside
 		// the player. There is no direction to test and no reading of "in front of" that
 		// excludes it, so it stays a candidate.
+
+		// Last of the three, because it is the only filter that reads a voxel and the two
+		// above have already discarded most of the world.
+		if !clearLineOfSight(s.terrain, origin, centre) {
+			continue
+		}
 
 		if distance < bestDistance {
 			best, bestDistance = m, distance
