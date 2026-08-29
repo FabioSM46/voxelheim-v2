@@ -63,19 +63,34 @@ const DEER_BODY: Body = Body {
     height: 1.4,
 };
 
+/// The box a resident occupies: a person's, because a resident is a person.
+///
+/// Mirrored from `residentBody` in `server/internal/game/resident.go`, which is
+/// `{PlayerWidth, PlayerHeight}`. Read through [`super::constants`] rather than written as
+/// two more literals, because those are already this client's copy of the server's numbers
+/// — so a resident's box cannot drift from a player's without the existing mirror moving.
+///
+/// It equals [`DRAUGR_BODY`] today, and that is two rows agreeing rather than an alias. It
+/// used to *be* one: until #458 this arm returned the draugr's row, which was the honest
+/// placeholder while nothing sent a villager.
+const VILLAGER_BODY: Body = Body {
+    width: crate::player::constants::PLAYER_WIDTH,
+    height: crate::player::constants::PLAYER_HEIGHT,
+};
+
 /// The box the server collides for one kind. Total over [`MobKind`], with no wildcard
 /// arm, so a new species does not compile until it has been given a body.
+///
+/// **A villager has a row here and is drawn by nobody in this module.** The box is a fact
+/// about the world, and it belongs beside the three it has to stay in step with. What
+/// *draws* a resident is the humanoid rig in `player/mod.rs`; [`MobVisuals::of`] is where
+/// that routing is stated, and it answers `None`.
 pub(super) const fn body(kind: MobKind) -> Body {
     match kind {
         MobKind::Draugr => DRAUGR_BODY,
         MobKind::Vargr => VARGR_BODY,
         MobKind::Deer => DEER_BODY,
-        // V25 names the kind; #458 gives it a body of its own. The draugr's box is the
-        // placeholder because a villager is the same shape of thing — humanoid, upright,
-        // roughly a person tall — so nothing downstream is asked to hold a number that is
-        // wrong in kind. Nothing sends this yet: the server has no villager to spawn until
-        // #458, so this arm exists to keep the match total rather than to draw anybody.
-        MobKind::Villager => DRAUGR_BODY,
+        MobKind::Villager => VILLAGER_BODY,
     }
 }
 
@@ -238,17 +253,25 @@ pub(super) struct MobVisuals {
 }
 
 impl MobVisuals {
-    /// The pair one kind is drawn from. Total over [`MobKind`] with no wildcard arm, so a
-    /// new species does not compile until it has been given meshes and colours.
-    fn of(&self, kind: MobKind) -> &SpeciesVisuals {
+    /// The pair one kind is drawn from, or `None` for a kind this module does not draw.
+    ///
+    /// Total over [`MobKind`] with no wildcard arm, so a new species does not compile until
+    /// it has been given meshes and colours — or, like the villager, until somebody has said
+    /// in as many words that it is drawn somewhere else.
+    ///
+    /// **`None` is the routing, and it is the whole of it.** A resident travels in the same
+    /// `MobState` vector as the draugrs, so this module sees one; it is a person, so it is
+    /// drawn on the humanoid rig in `player/mod.rs` through `spawn_body` — the same path a
+    /// remote player takes — rather than as the two cuboids a draugr is. Answering `None`
+    /// keeps every loop below about creatures: no `Mob` is ever spawned for a villager, so
+    /// no aggro marker, no lootable tint and no fall pose can reach one, by construction
+    /// rather than by a condition in each of them.
+    fn of(&self, kind: MobKind) -> Option<&SpeciesVisuals> {
         match kind {
-            MobKind::Draugr => &self.draugr,
-            MobKind::Vargr => &self.vargr,
-            MobKind::Deer => &self.deer,
-            // The [`body`] placeholder's counterpart, and unreachable for the same
-            // reason: no villager reaches this module until #458 gives residents meshes
-            // and colours of their own.
-            MobKind::Villager => &self.draugr,
+            MobKind::Draugr => Some(&self.draugr),
+            MobKind::Vargr => Some(&self.vargr),
+            MobKind::Deer => Some(&self.deer),
+            MobKind::Villager => None,
         }
     }
 }
@@ -634,6 +657,18 @@ fn spawn_mob(
     visibility: Visibility,
     hunts_local: bool,
 ) {
+    // **The one place a resident is turned away**, by the same question every other kind is
+    // asked — see [`MobVisuals::of`]. `player::apply_snapshots` draws it instead, from the
+    // same snapshot on the same frame. Nothing below runs, so no `Mob` exists for a villager
+    // and nothing hanging off one can reach a resident.
+    //
+    // The species is chosen once, here, and nothing downstream re-asks: a mob whose kind
+    // *changed* is a mob the server replaced, and a replacement arrives with a fresh
+    // identity, so there is no path on which a body outlives its own shape.
+    let Some(species) = visuals.of(state.kind).cloned() else {
+        return;
+    };
+
     let owner = commands
         .spawn((
             Mob {
@@ -660,11 +695,6 @@ fn spawn_mob(
             visibility,
         ))
         .id();
-
-    // Which species is chosen once, here, and nothing downstream re-asks: a mob whose
-    // kind *changed* is a mob the server replaced, and a replacement arrives with a fresh
-    // identity, so there is no path on which a body outlives its own shape.
-    let species = visuals.of(state.kind).clone();
 
     commands.entity(owner).with_children(|parent| {
         // No offset on any child: every mesh is authored with its origin at the feet,
@@ -811,9 +841,10 @@ fn fallen(elapsed: Duration) -> f32 {
 /// creature is dying or not.
 fn collapse(kind: MobKind, fallen: f32) -> Quat {
     match kind {
-        // A villager topples the way the other humanoid does. It is placeholder in the
-        // same sense as [`body`]'s arm and unreachable in the same way: a resident is
-        // never lootable and never a corpse, so nothing sends one a `Dying` action.
+        // The villager arm keeps the match total and is unreachable twice over: nothing
+        // here spawns a `Mob` for a resident (see [`MobVisuals::of`]), and a resident has
+        // no action but `Idle` anyway. Grouped with the draugr because a person that did
+        // go over would go over like the other upright figure.
         MobKind::Draugr | MobKind::Villager => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
@@ -919,7 +950,11 @@ pub(super) fn animate(
             // with it. There is nothing left to recolour or to move.
             continue;
         };
-        let species = visuals.of(kind);
+        // Unreachable for a kind this module does not draw: no `Mob` is ever spawned for
+        // one, so no part hangs under one either.
+        let Some(species) = visuals.of(kind) else {
+            continue;
+        };
 
         let next = if flashing.contains(&part.owner) {
             visuals.flash_material.clone()
@@ -1005,6 +1040,16 @@ mod tests {
             kind: MobKind::Deer,
             max_health: 20,
             ..draugr(entity_id, x, health, action)
+        }
+    }
+
+    /// A resident exactly as the server sends one. `Idle`, full health and no target are
+    /// constants in `resident.state()` (`server/internal/game/resident.go`), not choices.
+    fn villager(entity_id: u64, x: f32) -> MobState {
+        MobState {
+            kind: MobKind::Villager,
+            max_health: 100,
+            ..draugr(entity_id, x, 100, MobAction::Idle)
         }
     }
 
@@ -1884,17 +1929,6 @@ mod tests {
                 MobKind::Deer,
                 vec![deer_body_mesh(), deer_head_mesh(), deer_legs_mesh()],
             ),
-            // The villager is drawn as a draugr on purpose until #458, and this row is
-            // what makes that a decision rather than a coincidence: it pins the aliasing
-            // the comments on `body` and `MobVisuals::of` promise, so a placeholder
-            // that drifted to the vargr's box or the vargr's meshes fails here. It is not
-            // a claim that a villager looks right — only that it looks like what this
-            // build says it borrows, and that the box still matches what the server
-            // collides.
-            (
-                MobKind::Villager,
-                vec![draugr_body_mesh(), draugr_head_mesh()],
-            ),
         ];
 
         // The list above is hand-written, for the reason every list like it in this
@@ -1903,12 +1937,15 @@ mod tests {
         // as far as a merged pull request with all four of its arms untested — a `for`
         // over an array does not stop compiling when the enum grows. So the length is
         // pinned to the contract's own count, the way `EVERY_REASON` and the codec's
-        // `CLASSIFICATION` are. `Unknown` is the one member with no row and never gets
-        // one: `MobKind::from_wire` answers `None` for it, so no body is ever drawn from
-        // it and there is no box for it to be wrong about.
+        // `CLASSIFICATION` are.
+        //
+        // **Two members have no row, for opposite reasons.** `Unknown` is never drawn at
+        // all: `MobKind::from_wire` answers `None` for it. `Villager` *is* drawn, by the
+        // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
+        // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
         assert_eq!(
             drawn.len(),
-            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 1,
+            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 2,
             "a species the contract names is drawn by nobody here, so its box is unchecked"
         );
         for (seen, (kind, _)) in drawn.iter().enumerate() {
@@ -1945,79 +1982,83 @@ mod tests {
         }
     }
 
-    /// A villager falls the way the other humanoid falls, at every point of the fall.
+    /// A villager's box is the server's, mirrored the way a player's is.
     ///
-    /// The third and fourth `Villager` arms, and the two a mesh list cannot reach.
-    /// [`collapse`] and [`leg_splay`] are pure functions of kind and progress, so the
-    /// placeholder is checkable directly: a villager is not merely *shaped* like a draugr,
-    /// it topples like one, and split out to the vargr's roll it would pitch sideways
-    /// while standing in a draugr's box.
+    /// The row [`the_drawn_body_is_the_box_the_server_collides`] cannot carry, because that
+    /// sweep measures meshes and nothing here draws a resident. What is left is the mirror
+    /// itself: `residentBody` in `server/internal/game/resident.go` is
+    /// `{PlayerWidth, PlayerHeight}`, and this side's copy has to be the client's copy of
+    /// those two rather than a second pair of literals that happen to agree today.
     ///
-    /// Swept across the fall rather than at its end, because both functions take `fallen`
-    /// and an arm that agreed only at 0.0 and 1.0 would be a different animation in
-    /// between — which is the whole of what either function is for.
+    /// **There is deliberately no comparison against the rig's own extent.** The humanoid
+    /// rig legitimately overflows the box it stands in — a topknot reaches 1.975 against a
+    /// 1.8 box, outstretched fists span 0.8 against a 0.6 one — and that latitude is the
+    /// *player's*, unchanged by this issue.
     #[test]
-    fn a_villager_falls_exactly_as_the_draugr_does() {
-        for step in 0..=10 {
-            let fallen = step as f32 / 10.0;
-            assert_eq!(
-                collapse(MobKind::Villager, fallen),
-                collapse(MobKind::Draugr, fallen),
-                "a villager collapses differently from a draugr at {fallen}"
-            );
-            assert_eq!(
-                leg_splay(MobKind::Villager, fallen),
-                leg_splay(MobKind::Draugr, fallen),
-                "a villager's legs splay differently from a draugr's at {fallen}"
-            );
-        }
-
-        // And the placeholder is the humanoid's, not just any arm's: a villager that had
-        // silently picked up the vargr's roll would satisfy every assert above only if the
-        // draugr had too, so the difference is pinned rather than assumed.
-        assert_ne!(
-            collapse(MobKind::Villager, 1.0),
-            collapse(MobKind::Vargr, 1.0),
-            "a villager topples like a vargr, which is not what a humanoid placeholder means"
+    fn a_villagers_box_is_the_one_the_server_collides_for_a_person() {
+        let villager = body(MobKind::Villager);
+        assert_eq!(villager.width, crate::player::constants::PLAYER_WIDTH);
+        assert_eq!(villager.height, crate::player::constants::PLAYER_HEIGHT);
+        assert!(
+            villager.height > villager.width,
+            "a resident stopped being an upright figure"
         );
     }
 
-    /// A villager borrows the draugr's meshes and colours, and borrows them on purpose.
+    /// This module draws no villager, and says so where a caller can read it.
     ///
-    /// [`the_drawn_body_is_the_box_the_server_collides`] pins the *box* a villager is
-    /// drawn in; this pins the *handles* it is drawn from, which is the other half of the
-    /// same placeholder and the half a mesh list written by hand cannot see. Together they
-    /// are what makes `MobKind::Villager => &self.draugr` a decision rather than a typo:
-    /// pointed at the vargr instead, the box test still passes for a hand-written draugr
-    /// mesh list while every villager on screen is a wolf.
-    ///
-    /// **Nothing sends a villager today** — the server has no villager to spawn until #458
-    /// — but `MobKind::from_wire(fb::MobKind::Villager)` already answers `Some(Villager)`,
-    /// so "unreachable" rests entirely on the server's restraint rather than on anything
-    /// this side enforces. A V25 server that spawned one would get exactly what these two
-    /// tests describe, which is the reason to describe it.
+    /// The half a box comparison cannot see: a resident could have exactly the right box
+    /// and still be spawned as two grey cuboids. It used to be — until #458 `of` answered
+    /// `&self.draugr`, the honest placeholder while no server sent a villager.
     #[test]
-    fn a_villager_is_drawn_from_the_draugrs_meshes_until_it_has_its_own() {
+    fn a_villager_is_drawn_by_the_humanoid_rig_and_not_by_this_module() {
         let mut app = headless();
         app.update();
         let world = app.world();
         let visuals = world.resource::<MobVisuals>();
 
-        // Pointer equality rather than field-by-field: the claim is that the two kinds
-        // resolve to the *same* entry, which is what a placeholder means and what a
-        // per-field comparison would keep asserting after the draugr and the villager had
-        // been given identical-but-separate visuals.
         assert!(
-            std::ptr::eq(visuals.of(MobKind::Villager), visuals.of(MobKind::Draugr)),
-            "a villager is no longer drawn from the draugr's visuals; if #458 gave it its \
-             own, delete this test rather than repointing it"
+            visuals.of(MobKind::Villager).is_none(),
+            "this module offers meshes for a resident again; residents are people and are \
+             drawn through `spawn_body` on the humanoid rig"
         );
-        for other in [MobKind::Vargr, MobKind::Deer] {
+        for creature in [MobKind::Draugr, MobKind::Vargr, MobKind::Deer] {
             assert!(
-                !std::ptr::eq(visuals.of(MobKind::Villager), visuals.of(other)),
-                "a villager is drawn from the {other:?}'s visuals"
+                visuals.of(creature).is_some(),
+                "{creature:?} has no visuals, so nothing draws it"
             );
         }
+    }
+
+    /// A villager in the snapshot leaves no creature behind in this module.
+    ///
+    /// The routing observed rather than asserted about: one `MobState` vector carries both,
+    /// and after a frame there is a `Mob` for the draugr and none for the villager. The
+    /// aggro marker, the tint and the fall need no test of their own — all three hang off
+    /// the component that was never created.
+    #[test]
+    fn a_villager_in_the_snapshot_spawns_no_mob() {
+        let mut app = headless();
+        deliver(
+            &mut app,
+            1,
+            vec![draugr(1, 2.0, 60, MobAction::Idle), villager(2, 4.0)],
+        );
+        app.update();
+
+        let kinds: Vec<(u64, MobKind)> = {
+            let world = app.world_mut();
+            let mut query = world.query::<&Mob>();
+            query
+                .iter(world)
+                .map(|drawn| (drawn.entity_id, drawn.kind))
+                .collect()
+        };
+        assert_eq!(
+            kinds,
+            vec![(1, MobKind::Draugr)],
+            "a resident was drawn as a creature by the module that draws creatures"
+        );
     }
 
     /// A vargr is unmistakable from a draugr and from a remote player's capsule.
