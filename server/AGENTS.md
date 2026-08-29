@@ -796,6 +796,33 @@ every decoder is already correct — see #456's pull request.
   a forge item would hand out one crafted station per break. Digging under a village forge
   leaves it standing on nothing.
 
+### The residents — the third entity class
+
+`internal/game/resident.go`. A **resident** is a person a settlement drawing put in a slot:
+`Sim.residents`, keyed by identity, derived from the seed and written down nowhere. It shares
+station.go's whole provenance — an anchor for a position, `world.HashLattice(seed + offset, x, z)`
+for an id, `Streamer.ReportEntering` for a birthday — and `materialiseSettlementsLocked` now
+asks both questions of one anchor, because one pass over `world.SettlementsNear` per chunk is
+the cost either of them would pay alone.
+
+- **A resident is not in `Sim.mobs`, and that is the entire safety argument.**
+  `swingTargetLocked` scans `mobs`; a projectile scans `mobs`; the director counts, spawns and
+  despawns `mobs`; `makeCorpseLocked` takes a `*mob`. Residents are invulnerable, unlootable,
+  un-aggroable and never despawned **by construction rather than by a branch in each of those**
+  — and a branch in each of them is what a fifth reader would forget to add. Do not "fix" a
+  future feature by teaching combat about residents; keep them out of the collection.
+- **`MobKind.Villager` has no `mobRegistry` row, deliberately.** That table is health, damage,
+  reach, telegraph timings, aggro radius, rank, nocturnality and a loot roll — every number in
+  it is about hunting or being hunted, so a resident's row would be zeroes and a lie.
+  `species_test.go` exempts the one member by name and still fails for any other.
+- **A resident stands *in* the slot; a station rests on the block *under* it.** A
+  `world.PlacedAnchor` names a building's floor, which is air — so a structure takes the voxel
+  below and a person's feet sit at the bottom of that cell. It is the one place the two
+  materialisers differ, and it is why they file a resident under the slot's own chunk.
+- **Nothing about one is on the wire yet.** They are created, they are named, and no session is
+  told: the `MobState` projection, the once-per-view `ResidentAppearance` and the
+  `NpcInteractRequest` refusal are #458's second half.
+
 ## Crafting, and how a transaction is made out of an array
 
 Everything here lives in `internal/game/craft.go`, beside the registry it reads.
