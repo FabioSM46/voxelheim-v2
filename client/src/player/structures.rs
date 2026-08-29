@@ -1783,6 +1783,9 @@ mod tests {
             },
             facing: Facing::North,
             owner_entity_id: owner,
+            // `lit` means something for a campfire and for nothing else; on every other
+            // kind it is the contract's default showing through.
+            lit: true,
         }
     }
 
