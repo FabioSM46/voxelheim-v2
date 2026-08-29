@@ -1,6 +1,9 @@
 package world
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // The sample seed for everything here. The same one the climate, water and surface
 // sweeps use, so a failure can be read beside the numbers those files record.
@@ -254,7 +257,7 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		{"capitalHutCount", capitalHutCount, 6},
 	} {
 		if c.got != c.want {
-			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 8 is the world it produces",
+			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 9 is the world it produces",
 				c.name, c.got, c.want)
 		}
 	}
@@ -1508,6 +1511,49 @@ func TestSettlementLookupIsPureInSeedAndCell(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestTheCapitalCastleIsByteIdenticalForTheSameSeed states #555's determinism
+// criterion against generated chunks, not merely against the literal. Every chunk the
+// footprint touches is generated twice from nothing; every voxel has to return in the
+// same order and with the same value.
+func TestTheCapitalCastleIsByteIdenticalForTheSameSeed(t *testing.T) {
+	t.Parallel()
+
+	capital := theCapital(t, settlementTestSeed)
+	var castle Building
+	found := false
+	for _, b := range capital.Buildings {
+		if b.Kind == BuildingKeep {
+			castle, found = b, true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("the capital has no castle to check")
+	}
+
+	s := SchematicFor(BuildingKeep)
+	w, d := rotatedFootprint(s, castle.Facing)
+	low := ChunkOf(castle.OriginX, castle.OriginY, castle.OriginZ)
+	high := ChunkOf(castle.OriginX+int64(w)-1, castle.OriginY+int64(s.H)-1, castle.OriginZ+int64(d)-1)
+	compared := 0
+	for cy := low.Y; cy <= high.Y; cy++ {
+		for cz := low.Z; cz <= high.Z; cz++ {
+			for cx := low.X; cx <= high.X; cx++ {
+				coord := Coord{X: cx, Y: cy, Z: cz}
+				first := Generate(settlementTestSeed, coord)
+				second := Generate(settlementTestSeed, coord)
+				if !slices.Equal(first.Blocks, second.Blocks) {
+					t.Fatalf("capital chunk %+v differs across two generations of seed %#x", coord, settlementTestSeed)
+				}
+				compared++
+			}
+		}
+	}
+	if compared == 0 {
+		t.Fatal("the castle footprint touched no chunk; the determinism check asserted nothing")
 	}
 }
 
