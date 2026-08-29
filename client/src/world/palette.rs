@@ -47,6 +47,16 @@ pub const PLANKS: BlockId = 14;
 pub const COBBLESTONE: BlockId = 15;
 /// Straw: what every roof but the keep's is thatched with.
 pub const THATCH: BlockId = 16;
+/// Palm trunks. Mirrors the server's `world.PalmLog`.
+pub const PALM_LOG: BlockId = 17;
+/// Palm crowns. Mirrors the server's `world.PalmFronds`.
+pub const PALM_FRONDS: BlockId = 18;
+/// Dry desert scrub. Mirrors the server's `world.DesertShrub`.
+pub const DESERT_SHRUB: BlockId = 19;
+/// Broadleaf crowns. Mirrors the server's `world.BroadLeaves`.
+pub const BROAD_LEAVES: BlockId = 20;
+/// Low plains cover. Mirrors the server's `world.Bush`.
+pub const BUSH: BlockId = 21;
 
 /// Whether a block stops a body and can be aimed at.
 ///
@@ -75,7 +85,7 @@ pub fn is_opaque(block: BlockId) -> bool {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 16] = [
+pub const PALETTE: [BlockId; 21] = [
     STONE,
     DIRT,
     GRASS,
@@ -92,6 +102,11 @@ pub const PALETTE: [BlockId; 16] = [
     PLANKS,
     COBBLESTONE,
     THATCH,
+    PALM_LOG,
+    PALM_FRONDS,
+    DESERT_SHRUB,
+    BROAD_LEAVES,
+    BUSH,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -166,6 +181,21 @@ const COBBLESTONE_LINEAR: [f32; 3] = [0.254_152, 0.254_152, 0.238_398];
 /// distance. `#C7A24E`.
 const THATCH_LINEAR: [f32; 3] = [0.571_125, 0.361_307, 0.076_185];
 
+/// Palm bark, paler and greyer than the conifer's dark brown. `#806B52`.
+const PALM_LOG_LINEAR: [f32; 3] = [0.215_861, 0.147_027, 0.084_376];
+
+/// Sunlit yellow-green palm fronds, distinctly lighter than conifer needles. `#829C3D`.
+const PALM_FRONDS_LINEAR: [f32; 3] = [0.223_228, 0.332_452, 0.046_665];
+
+/// Dry olive-khaki scrub against pale desert sand. `#8D8250`.
+const DESERT_SHRUB_LINEAR: [f32; 3] = [0.266_356, 0.223_228, 0.080_220];
+
+/// A brighter, warmer crown than the conifer's winter green. `#4F8D43`.
+const BROAD_LEAVES_LINEAR: [f32; 3] = [0.078_187, 0.266_356, 0.056_128];
+
+/// Low green cover between dark conifer needles and a broadleaf crown. `#396B3D`.
+const BUSH_LINEAR: [f32; 3] = [0.040_915, 0.147_027, 0.046_665];
+
 /// The colour of "this build has no colour for that id". `#C81E96`.
 ///
 /// Magenta on purpose: a server one contract ahead sends a block this client has
@@ -195,6 +225,11 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         PLANKS => PLANKS_LINEAR,
         COBBLESTONE => COBBLESTONE_LINEAR,
         THATCH => THATCH_LINEAR,
+        PALM_LOG => PALM_LOG_LINEAR,
+        PALM_FRONDS => PALM_FRONDS_LINEAR,
+        DESERT_SHRUB => DESERT_SHRUB_LINEAR,
+        BROAD_LEAVES => BROAD_LEAVES_LINEAR,
+        BUSH => BUSH_LINEAR,
         // The one early return: every other id leaves this match with an opaque
         // alpha appended below, and water is the one that must not.
         WATER => {
@@ -230,7 +265,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 17] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 22] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -247,6 +282,11 @@ mod tests {
         ("planks", [0xB0, 0x86, 0x40], PLANKS_LINEAR),
         ("cobblestone", [0x8A, 0x8A, 0x86], COBBLESTONE_LINEAR),
         ("thatch", [0xC7, 0xA2, 0x4E], THATCH_LINEAR),
+        ("palm log", [0x80, 0x6B, 0x52], PALM_LOG_LINEAR),
+        ("palm fronds", [0x82, 0x9C, 0x3D], PALM_FRONDS_LINEAR),
+        ("desert shrub", [0x8D, 0x82, 0x50], DESERT_SHRUB_LINEAR),
+        ("broad leaves", [0x4F, 0x8D, 0x43], BROAD_LEAVES_LINEAR),
+        ("bush", [0x39, 0x6B, 0x3D], BUSH_LINEAR),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
 
@@ -314,6 +354,18 @@ mod tests {
             for b in &colours[i + 1..] {
                 assert_ne!(a, b, "two palette entries share a colour");
             }
+        }
+    }
+
+    #[test]
+    fn every_declared_block_id_has_a_colour() {
+        let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
+        for block in 1..=BUSH {
+            assert_ne!(
+                linear_rgba(block),
+                unknown,
+                "block {block} falls through to the unknown colour"
+            );
         }
     }
 
