@@ -266,7 +266,7 @@ func TestGenerateIsDeterministicUnderConcurrency(t *testing.T) {
 func TestATundraConiferChunkIsDeterministicUnderConcurrency(t *testing.T) {
 	t.Parallel()
 
-	x, z, col, _ := findTundraConifer(t)
+	x, z, col, h := findTundraConifer(t)
 	coord := ChunkOf(x, int64(col.surface+1), z)
 	const goroutines = 8
 	results := make([][]Block, goroutines)
@@ -288,6 +288,32 @@ func TestATundraConiferChunkIsDeterministicUnderConcurrency(t *testing.T) {
 	}
 	if got := results[0][Index(Local(x), Local(int64(col.surface+1)), Local(z))]; got != Log {
 		t.Fatalf("selected tundra root generated %d above its surface, want Log", got)
+	}
+
+	capY := int64(col.surface + coniferTrunkHeight(h) + treeCanopyAboveCrown + 1)
+	capCoord := ChunkOf(x, capY, z)
+	cap := Generate(climateSeed, capCoord)
+	if got := cap.At(Local(x), Local(capY), Local(z)); got != Snow {
+		t.Fatalf("selected tundra crown generated cap %d, want Snow", got)
+	}
+	if terrain := col.blockAt(int(capY)); terrain != Air {
+		t.Fatalf("snow cap replaced terrain block %d rather than filling air", terrain)
+	}
+}
+
+func TestAPlantSnowVoxelOnlyFillsAir(t *testing.T) {
+	t.Parallel()
+
+	chunk := NewChunk(Coord{})
+	chunk.Set(1, 2, 3, Stone)
+	setTreeBlock(chunk, 1, 2, 3, Snow)
+	if got := chunk.At(1, 2, 3); got != Stone {
+		t.Fatalf("snow plant voxel replaced block %d, want Stone preserved", got)
+	}
+
+	setTreeBlock(chunk, 4, 5, 6, Snow)
+	if got := chunk.At(4, 5, 6); got != Snow {
+		t.Fatalf("snow plant voxel placed %d into air, want Snow", got)
 	}
 }
 

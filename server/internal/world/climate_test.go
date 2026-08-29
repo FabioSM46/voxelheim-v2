@@ -301,7 +301,7 @@ func TestNoConiferStandsOnAMountainCap(t *testing.T) {
 func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	t.Parallel()
 
-	counts := make(map[Climate]int, 3)
+	densities := make(map[Climate]float64, 3)
 	for _, tc := range []struct {
 		name        string
 		originX     int64
@@ -341,11 +341,11 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 			t.Errorf("%s square has %d roots over %d eligible columns; one in %d predicts %.0f (ratio %.2f, want within ±25%%)",
 				tc.name, roots, eligible, tc.denominator, want, ratio)
 		}
-		counts[tc.climate] = roots
+		densities[tc.climate] = float64(roots) / float64(eligible)
 	}
-	if counts[Taiga] <= counts[Tundra] || counts[Tundra] <= counts[Plains] {
-		t.Errorf("root counts taiga=%d, tundra=%d, plains=%d; want taiga > tundra > plains",
-			counts[Taiga], counts[Tundra], counts[Plains])
+	if densities[Taiga] <= densities[Tundra] || densities[Tundra] <= densities[Plains] {
+		t.Errorf("root densities taiga=%f, tundra=%f, plains=%f; want taiga > tundra > plains",
+			densities[Taiga], densities[Tundra], densities[Plains])
 	}
 
 	// Desert is a thin intersection of two climate-field tails, so its fixed
