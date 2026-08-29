@@ -333,14 +333,19 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // height, so this is by far the narrowest break of the six: it repaints stone inside
 // two depth bands and nothing else. It is a break all the same, because the voxel a
 // stored delta was recorded against can now be ore rather than the stone it was.
-// 7 → 8: the capital's castle. The keep's 15×14×15 becomes a 23×20×23 castle with a
+// 7 → 8: the capital's castle. The keep's 15×14×15 becomes a 21×20×21 castle with a
 // curtain wall, a courtyard and three floors. **The first bump that moves no ground at
 // all**: no settlement radius changed, so [HeightAt] answers exactly what it did and
 // every tree, ore band, cave mouth and map tile stays where it was — what moves is the
 // voxels of one building in one cell of the lattice. A break all the same, because a
 // world played in around its capital would resolve its deltas onto a building of
 // another shape.
-const WorldgenVersion uint32 = 8
+// 8 → 9: the castle's four corner towers, their corbelled capitals and the walkable
+// bridge between the front pair. The footprint, settlement plan and ground remain
+// byte-identical; only courses y=8..27 of the capital's centre building move. It is
+// still a break for a played-in capital, whose deltas were recorded against version 8's
+// lower silhouette.
+const WorldgenVersion uint32 = 9
 
 // Generate builds the chunk at coord for seed.
 //

@@ -131,7 +131,7 @@ func TestEverySchematicIsTheSizeItsIssueAsksFor(t *testing.T) {
 		BuildingHut:    {7, 5, 7},
 		BuildingSmithy: {9, 6, 9},
 		BuildingHall:   {13, 8, 13},
-		BuildingKeep:   {21, 20, 21},
+		BuildingKeep:   {21, 28, 21},
 	}
 	for _, drawing := range everySchematic() {
 		got := [3]int{drawing.s.W, drawing.s.H, drawing.s.D}
@@ -196,8 +196,12 @@ func TestTheDrawingsSayWhatTheirCommentsSayTheySay(t *testing.T) {
 		{BuildingKeep, 10, 12, 10, Cobblestone, "the third floor's slab"},
 		{BuildingKeep, 14, 9, 10, Cobblestone, "a tread of the second flight"},
 		{BuildingKeep, 10, 16, 5, Planks, "the string course under the eaves"},
-		{BuildingKeep, 4, 17, 4, Planks, "the eaves, oversailing the keep by one"},
+		{BuildingKeep, 10, 17, 4, Planks, "the eaves, oversailing the keep by one"},
 		{BuildingKeep, 10, 19, 10, Thatch, "the cap"},
+		{BuildingKeep, 0, 23, 0, Cobblestone, "the north-west tower shaft above the main roof"},
+		{BuildingKeep, 10, 20, 18, Planks, "the bridge deck between the front towers"},
+		{BuildingKeep, 5, 24, 5, Planks, "the north-west capital oversailing inward"},
+		{BuildingKeep, 2, 27, 2, Thatch, "the north-west tower cap"},
 	} {
 		s := SchematicFor(tc.kind)
 		if got := s.At(tc.x, tc.y, tc.z); got != tc.want {
@@ -753,11 +757,13 @@ func TestEveryRoomADrawingHasIsReachableFromItsDoorway(t *testing.T) {
 	}
 }
 
-// TestTheCastleHasThreeFloorsAndAWallWalkAndYouCanWalkToAllOfThem is the other half:
-// the test above says nothing is sealed, and a castle with no upper floors at all
-// satisfies that perfectly. So the landmarks are named — each a coordinate the drawing's
-// own comment promises, each standable and reachable on foot from outside the gate.
-func TestTheCastleHasThreeFloorsAndAWallWalkAndYouCanWalkToAllOfThem(t *testing.T) {
+// TestTheCastleHasThreeFloorsAWallWalkAndATowerBridgeAndYouCanWalkToAllOfThem is the
+// other half: the test above says nothing is sealed, and a castle with no upper floors
+// at all satisfies that perfectly. So the landmarks are named — each a coordinate the
+// drawing's own comment promises, each standable and reachable on foot from outside the
+// gate. The bridge and both rooms it joins are the second half of #555: naming all three
+// prevents a decorative span that a player can see but cannot enter.
+func TestTheCastleHasThreeFloorsAWallWalkAndATowerBridgeAndYouCanWalkToAllOfThem(t *testing.T) {
 	t.Parallel()
 
 	s := SchematicFor(BuildingKeep)
@@ -777,6 +783,11 @@ func TestTheCastleHasThreeFloorsAndAWallWalkAndYouCanWalkToAllOfThem(t *testing.
 		{19, 6, 10, "the wall walk, east side"},
 		{10, 6, 1, "the wall walk, back"},
 		{10, 6, 19, "the wall walk, front"},
+		{10, 15, 15, "the upper stair through the keep's eaves"},
+		{6, 20, 16, "the upper stair's bridge landing"},
+		{10, 21, 18, "the elevated bridge"},
+		{2, 21, 18, "the south-west tower room"},
+		{18, 21, 18, "the south-east tower room"},
 	} {
 		if !standableCell(s, tc.x, tc.y, tc.z) {
 			t.Errorf("%s at (%d, %d, %d) is not somewhere a body can stand", tc.what, tc.x, tc.y, tc.z)
@@ -784,6 +795,38 @@ func TestTheCastleHasThreeFloorsAndAWallWalkAndYouCanWalkToAllOfThem(t *testing.
 		}
 		if !reached[[3]int{tc.x, tc.y, tc.z}] {
 			t.Errorf("%s at (%d, %d, %d) cannot be walked to from outside the gate", tc.what, tc.x, tc.y, tc.z)
+		}
+	}
+}
+
+// TestTheCastleHasFourTowersWithCorbelledCapitals pins the silhouette rather than a
+// count of blocks. Each tower has a cobble shaft above the keep's y=19 cap, a plank
+// course that reaches one block inward beyond that shaft, and a thatch finial at y=27.
+// Reading the four corners separately is what makes "multiple towers" mean four
+// structures rather than four samples from one structure.
+func TestTheCastleHasFourTowersWithCorbelledCapitals(t *testing.T) {
+	t.Parallel()
+
+	s := SchematicFor(BuildingKeep)
+	for _, tower := range []struct {
+		name             string
+		shaftX, shaftZ   int
+		corbelX, corbelZ int
+		finialX, finialZ int
+	}{
+		{"north-west", 0, 0, 5, 5, 2, 2},
+		{"north-east", 20, 0, 15, 5, 18, 2},
+		{"south-west", 0, 20, 5, 15, 2, 18},
+		{"south-east", 20, 20, 15, 15, 18, 18},
+	} {
+		if got := s.At(tower.shaftX, 23, tower.shaftZ); got != Cobblestone {
+			t.Errorf("%s tower shaft is block %d above the main roof, want cobblestone", tower.name, got)
+		}
+		if got := s.At(tower.corbelX, 24, tower.corbelZ); got != Planks {
+			t.Errorf("%s tower's inward corbel is block %d, want planks", tower.name, got)
+		}
+		if got := s.At(tower.finialX, 27, tower.finialZ); got != Thatch {
+			t.Errorf("%s tower finial is block %d at the castle's top course, want thatch", tower.name, got)
 		}
 	}
 }
