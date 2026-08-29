@@ -21,9 +21,10 @@ import (
 // shape a lake will have when the generator learns to make one. iceLid puts the
 // tundra's one solid voxel on the surface at waterTop.
 type lakeWorld struct {
-	bedTop   int64
-	waterTop int64
-	iceLid   bool
+	bedTop    int64
+	waterTop  int64
+	waterKind world.Block
+	iceLid    bool
 }
 
 func (w lakeWorld) Block(_, y, _ int64) (world.Block, bool) {
@@ -33,6 +34,9 @@ func (w lakeWorld) Block(_, y, _ int64) (world.Block, bool) {
 	case w.iceLid && y == w.waterTop:
 		return world.Ice, true
 	case y <= w.waterTop:
+		if w.waterKind != world.Air {
+			return w.waterKind, true
+		}
 		return world.Water, true
 	default:
 		return world.Air, true
@@ -72,10 +76,12 @@ func TestTheLakeFixtureIsWaterOverStone(t *testing.T) {
 }
 
 // A player in water sinks at SwimSinkSpeed instead of falling at Gravity.
-func TestAPlayerInWaterSinksInsteadOfFalling(t *testing.T) {
+func TestAPlayerInFlowingWaterSinksInsteadOfFalling(t *testing.T) {
 	t.Parallel()
 
-	h := newVitalsHarness(t, DefaultTickRate, lakeWorld{bedTop: 0, waterTop: 200})
+	h := newVitalsHarness(t, DefaultTickRate, lakeWorld{
+		bedTop: 0, waterTop: 200, waterKind: world.WaterFlow3,
+	})
 	player, _ := h.join(1, [3]float32{0.5, 100, 0.5})
 
 	// Long enough for the ease to reach the terminal speed from a standing start:

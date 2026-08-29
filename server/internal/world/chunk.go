@@ -78,14 +78,13 @@ const (
 	Sandstone Block = 10
 	Gravel    Block = 11
 
-	// The two blocks water is made of. Appended for the reason every id above was,
-	// and the first pair in this palette that are not interchangeable in the way the
-	// rest are: [Water] is the one id in the world a body moves *through*, and [Ice]
-	// is ordinary ground that happens to be the lid on some of it.
+	// The two blocks water was first made of. Appended for the reason every id above
+	// was, and the first pair in this palette that are not interchangeable in the way
+	// the rest are: [Water] is the plain infinite source and [Ice] is ordinary ground
+	// that happens to be the lid on some of it.
 	//
-	// **Water is not placeable and has no item**, which is the whole of "water is
-	// static here": it appears because the generator says so, it is displaced by
-	// anything put into its voxel, and nothing a player does ever creates one.
+	// **Water is not placeable and has no item.** The generator supplies the initial
+	// sources, a placement may displace one, and no player action creates one.
 	Water Block = 12
 	Ice   Block = 13
 
@@ -118,7 +117,61 @@ const (
 	// desert ids above already cross the wire and live in world deltas.
 	BroadLeaves Block = 20
 	Bush        Block = 21
+
+	// The water family. Appended after Bush because block ids already cross the wire
+	// and live in world deltas. Flow levels describe one through seven eighths of a
+	// full voxel; the four current members are full source water whose direction is
+	// placed only by worldgen. None has an item and none is player-placeable.
+	WaterFlow1 Block = 22
+	WaterFlow2 Block = 23
+	WaterFlow3 Block = 24
+	WaterFlow4 Block = 25
+	WaterFlow5 Block = 26
+	WaterFlow6 Block = 27
+	WaterFlow7 Block = 28
+
+	WaterCurrentXPos Block = 29
+	WaterCurrentXNeg Block = 30
+	WaterCurrentZPos Block = 31
+	WaterCurrentZNeg Block = 32
 )
+
+// IsWater reports whether b is any source, flowing level or generator-authored
+// current in the water family.
+func IsWater(b Block) bool {
+	return b == Water || b >= WaterFlow1 && b <= WaterCurrentZNeg
+}
+
+// WaterLevel reports the occupied eighths of a water voxel. Plain and current
+// sources are full, flowing members carry the level in their appended order, and
+// everything outside the family has no water level.
+func WaterLevel(b Block) int {
+	switch {
+	case b == Water, b >= WaterCurrentXPos && b <= WaterCurrentZNeg:
+		return 8
+	case b >= WaterFlow1 && b <= WaterFlow7:
+		return int(b-WaterFlow1) + 1
+	default:
+		return 0
+	}
+}
+
+// CurrentOf reports the unit horizontal current encoded by b. Flowing levels and
+// the plain source carry no direction.
+func CurrentOf(b Block) (dx, dz int) {
+	switch b {
+	case WaterCurrentXPos:
+		return 1, 0
+	case WaterCurrentXNeg:
+		return -1, 0
+	case WaterCurrentZPos:
+		return 0, 1
+	case WaterCurrentZNeg:
+		return 0, -1
+	default:
+		return 0, 0
+	}
+}
 
 // Solid reports whether a block stops movement.
 //
@@ -128,7 +181,7 @@ const (
 // scan, the collision sweep) inherited the assumption without stating it. Water is
 // the first id that ends the equivalence, so the answer moved to where the ids are.
 func Solid(b Block) bool {
-	return b != Air && b != Water
+	return b != Air && !IsWater(b)
 }
 
 // Fluid reports whether a block is one a body wades and swims in rather than walks
@@ -138,7 +191,7 @@ func Solid(b Block) bool {
 // swim rule written against "not solid" would have players treading water in mid
 // air. [Ice] is absent for the opposite reason — it is the lid, and you walk on it.
 func Fluid(b Block) bool {
-	return b == Water
+	return IsWater(b)
 }
 
 // Placeable reports whether a block id names something a player may put into the
@@ -156,10 +209,9 @@ func Fluid(b Block) bool {
 //
 // **Water is not placeable either, and for a different reason.** Air is refused
 // because placing it is *breaking*; water is refused because there is no such thing
-// as a piece of water to hold. It has no item, it drops nothing, and the only thing
-// that ever writes one is the generator — which is what "water is static" means in
-// this codebase. Ice is placeable because it is ordinary ground: it is mined, it
-// drops itself, and it can be put back.
+// as a piece of water to hold. No member of the family has an item or a drop. Ice is
+// placeable because it is ordinary ground: it is mined, it drops itself, and it can
+// be put back.
 func Placeable(b Block) bool {
 	switch b {
 	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice,

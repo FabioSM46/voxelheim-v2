@@ -2,17 +2,14 @@ package world
 
 // Water: the sea line every low column fills to, the basins that dig lakes into the
 // ground below it, the rivers that run across it, the ice that lies on it where the
-// climate is cold enough, and the streams standing in the deep of the caves.
+// climate is cold enough, and the caves beneath those bodies filled to their surface.
 //
-// **Water here is static, and that is a design decision rather than a stage.** A
-// voxel is [Water] because the generator says so at that coordinate — never because
-// something flowed into it. Three consequences follow, and all three are why it is
-// worth stating: generation stays the pure integer function of (seed, x, y, z) the
-// storm needs it to be; a placed block that displaces water is one delta like any
-// other edit, because nothing has to be recomputed around it; and mining a wall
-// beside a lake leaves a dry hole, because the lake was never a volume of anything.
-// Flow, sources, buckets and freezing are all out of scope by the same token — see
-// the issue, which lists them.
+// **The generator delivers the hydrostatic initial state; runtime flow takes it from
+// there.** Generation remains the pure integer function of (seed, x, y, z) the storm
+// needs: it reads no neighbour and schedules no update. The runtime may later move
+// water after an edit, but that movement is mutable world state layered over this
+// base, never an input back into generation. This file defines neither scheduling nor
+// block updates; those belong to the flow simulation.
 //
 // Two of the three ways water appears are decided **inside [HeightAt]**, not beside
 // it: a basin lowers the land and a river channel replaces it, and both have to be
@@ -165,13 +162,12 @@ const (
 
 	// caveWaterLevel is the highest y a carved voxel may hold water at.
 	//
-	// **Water underground is a depth rule and not a fill rule**, which is what keeps
-	// it from draining every hillside: a tunnel that breaks into a lake bed from
-	// below would otherwise have to decide what happens, and nothing here flows. At
+	// **Water underground keeps a depth rule where no standing surface exists.** At
 	// 36 the streams sit eleven blocks under the sea line and well inside the carved
 	// band (caveMaxDepth is 96 below a surface that averages 64), so a walk down a
-	// tunnel reaches water before it reaches the bottom of the cave system, and never
-	// reaches water by walking sideways under a lake.
+	// dry-land tunnel reaches water before it reaches the bottom of the cave system.
+	// A sea, basin or river column instead extends its own hydrostatic surface through
+	// every carved voxel below it.
 	caveWaterLevel = 36
 
 	// spawnWaterClearance is how far from the spawn column, in blocks on each
@@ -286,35 +282,46 @@ func beachAt(surface int, climate Climate) bool {
 	return surface >= seaLevel-beachBelowSea && surface <= seaLevel+beachAboveSea
 }
 
-// fillAt is what stands in an air voxel of this column: water up to the sea line,
-// ice on the top of it where the climate is cold enough, and air above.
+// standingWaterSurface reports the hydrostatic surface a column owns. A river's
+// surface is derived from its bed rather than restating the sea line, so the bed and
+// its water remain one decision if river depth moves later.
+func standingWaterSurface(surface int, river bool) (height int, ok bool) {
+	if river {
+		return surface + riverBedDrop, true
+	}
+	if surface < seaLevel {
+		return seaLevel, true
+	}
+	return 0, false
+}
+
+// fillAt is what stands in an air voxel of this column: water up to its standing
+// surface, ice on the top of it where the climate is cold enough, and air above.
 //
 // **Ice is one voxel thick and only ever at the sea line**, which is what makes it a
 // lid rather than a frozen lake: everything under it is still water, so a hole
 // broken in the surface is a way in. It is also the only [Solid] block in this file,
 // so a tundra shore is something you walk out onto.
 //
-// The caller has already established that the terrain here is air, so the only
-// bound this needs is the sea line above.
+// The caller has already established that the terrain here is air.
 func (c column) fillAt(worldY int) Block {
-	if worldY > seaLevel {
+	if !c.standingWater || worldY > c.waterSurface {
 		return Air
 	}
-	if c.climate == Tundra && worldY == seaLevel {
+	if c.climate == Tundra && worldY == c.waterSurface {
 		return Ice
 	}
 	return Water
 }
 
-// caveFillAt is what stands in a carved voxel: the still water in the deep of the
-// cave system, and air above it.
+// caveFillAt is what stands in a carved voxel: water below the dry-world cave
+// level, water up to this column's standing surface when it has one, and air above.
 //
-// A world height rather than a depth, deliberately. A depth-based rule would put a
-// stream at the bottom of every tunnel however high the hillside it runs through,
-// which reads as water clinging to the roof of the world; a single level makes the
-// underground water one body that a walk descends *to*.
-func caveFillAt(worldY int) Block {
-	if worldY <= caveWaterLevel {
+// Both are world heights rather than depths. The fallback level makes dry-land cave
+// water one body a walk descends to; the column surface makes a carved space beneath
+// a lake part of that lake without consulting any neighbouring column.
+func (c column) caveFillAt(worldY int) Block {
+	if worldY <= caveWaterLevel || c.standingWater && worldY <= c.waterSurface {
 		return Water
 	}
 	return Air

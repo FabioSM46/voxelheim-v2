@@ -335,12 +335,13 @@ func findSubmergedColumn(climate Climate) (x, z int64, found bool) {
 	return 0, 0, false
 }
 
-// Underground water is a depth rule: it stands in carved voxels at or under
-// caveWaterLevel and nowhere else, and it never reaches a voxel the terrain filled.
+// Underground water follows two hydrostatic surfaces: caveWaterLevel under dry
+// ground, and the standing surface of a sea, basin or river column. It reaches only
+// carved terrain in either case.
 func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 	t.Parallel()
 
-	deep, shallow := 0, 0
+	deep, standing, dry := 0, 0, 0
 	chunk := Generate(waterSeed, goldenWaterCoord)
 	originX, originY, originZ := goldenWaterCoord.Origin()
 
@@ -353,31 +354,71 @@ func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 				if worldY > int64(col.surface) {
 					continue // above the ground; the sea line owns this voxel
 				}
-				carved := caveAt(waterSeed, worldX, worldY, worldZ, col.surface)
+				carved := col.carvedAt(waterSeed, worldX, worldY, worldZ)
 				got := chunk.At(x, y, z)
+				wantWater := worldY <= caveWaterLevel ||
+					col.standingWater && worldY <= int64(col.waterSurface)
 
 				switch {
 				case !carved:
 					if got == Water {
 						t.Fatalf("water at (%d, %d, %d) stands in uncarved terrain", worldX, worldY, worldZ)
 					}
-				case worldY <= caveWaterLevel:
+				case wantWater:
 					if got != Water {
-						t.Fatalf("carved voxel (%d, %d, %d) at or under %d is %d, want Water",
-							worldX, worldY, worldZ, caveWaterLevel, got)
+						t.Fatalf("carved voxel (%d, %d, %d) under its hydrostatic surface is %d, want Water",
+							worldX, worldY, worldZ, got)
 					}
-					deep++
+					if worldY <= caveWaterLevel {
+						deep++
+					} else {
+						standing++
+					}
 				default:
 					if got == Water {
-						t.Fatalf("carved voxel (%d, %d, %d) above %d holds water", worldX, worldY, worldZ, caveWaterLevel)
+						t.Fatalf("carved voxel (%d, %d, %d) above every hydrostatic surface holds water",
+							worldX, worldY, worldZ)
 					}
-					shallow++
+					dry++
 				}
 			}
 		}
 	}
-	if deep == 0 || shallow == 0 {
-		t.Fatalf("the chunk held %d flooded and %d dry carved voxels; both sides of the level must be exercised", deep, shallow)
+	if deep == 0 || standing == 0 || dry == 0 {
+		t.Fatalf("the chunk held %d deep, %d standing-water and %d dry carved voxels; every rule must be exercised",
+			deep, standing, dry)
+	}
+}
+
+func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
+	t.Parallel()
+
+	const scanSize = 256
+	wetColumns, carvedInBand := 0, 0
+	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
+		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
+			col := columnAt(waterSeed, x, z)
+			if col.surface >= seaLevel {
+				continue
+			}
+			wetColumns++
+			for y := int64(caveWaterLevel + 1); y <= seaLevel; y++ {
+				if !col.carvedAt(waterSeed, x, y, z) {
+					continue
+				}
+				carvedInBand++
+				if got := col.voxelAt(waterSeed, x, y, z); got == Air {
+					t.Fatalf("standing-water column (%d, %d), surface %d, leaves carved Air at y=%d",
+						x, z, col.waterSurface, y)
+				}
+			}
+		}
+	}
+	if wetColumns == 0 {
+		t.Fatal("the 256x256 sample contains no lowered column below seaLevel")
+	}
+	if carvedInBand == 0 {
+		t.Fatal("the 256x256 sample contains no standing-water column carved between caveWaterLevel and seaLevel")
 	}
 }
 
@@ -443,15 +484,13 @@ func TestNoConiferRootsUnderTheSeaLine(t *testing.T) {
 	}
 }
 
-// An edit into generated water is one delta over a base that did not move.
+// An edit into generated water is one delta over a deterministic base.
 //
-// **That is the invariant the whole design rests on**, and it is the reason water is
-// static: the Fimbulvetr storm regenerates an unprotected chunk to its *original
-// procedural state* by discarding deltas, which only works while the base is a pure
-// function of the seed. A block placed into water has to leave `Generate` still
-// producing water at that coordinate while the composed world reports stone — and it
-// has to cost exactly one stored edit, because a flow model would have had to write
-// the neighbours too.
+// **That is the invariant the whole design rests on**: the Fimbulvetr storm
+// regenerates an unprotected chunk to its *original procedural state* by discarding
+// deltas, which only works while the base is a pure function of the seed. Runtime
+// flow may add neighbouring deltas later; this direct placement still changes one
+// voxel and leaves `Generate` answering the original source at that coordinate.
 func TestAnEditIntoGeneratedWaterIsOneDeltaOverAnUnchangedBase(t *testing.T) {
 	t.Parallel()
 
