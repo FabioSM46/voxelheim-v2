@@ -137,6 +137,30 @@ func (d *Deltas) Restore(coord Coord, stored map[int]Block) {
 	}
 }
 
+// Forget drops every edit recorded for coord, so this layer stops knowing the chunk at
+// all.
+//
+// **The one method that removes an edit, and the Fimbulvetr is why it exists.** Record's
+// promise that an edit is never removed is about a single voxel returning to the value
+// the generator produced — detecting that would cost a generation — and not about a chunk
+// being put back wholesale, which is exactly what the storm does to everything nobody
+// warded. The type comment above calls that a one-line operation; this is the line.
+//
+// It is only half of a restoration. [Store.RemoveChunk] is the other half, and skipping it
+// would leave the file for the next hydration to read back in; skipping this one would
+// leave the edits in memory for the next save to write out again. [Cache.Regenerate] does
+// both, in an order that holds.
+//
+// Deleting the coordinate rather than emptying its map keeps the outer map bounded across
+// storms: [Deltas.Known] reads a length and would answer false either way, but a world
+// regenerated every week would otherwise accumulate one empty map per chunk anybody has
+// ever edited, for the life of the process.
+func (d *Deltas) Forget(coord Coord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.chunks, coord)
+}
+
 // Snapshot copies the edits recorded for coord, for a caller that is about to spend real
 // time with them — writing them to disk — and must not hold the lock while it does.
 //
