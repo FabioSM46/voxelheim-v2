@@ -167,6 +167,20 @@ type Sim struct {
 	// this is the struct mu guards.
 	tickOfDay uint32
 
+	// worldTick is how many ticks this world has ever run, across every restart, and it
+	// never wraps. worldTick % DayLengthTicks == tickOfDay at every instant — see
+	// clock.go, which is the only file that writes either of them.
+	//
+	// Distinct from currentTick above, which is this process's own count and restarts at
+	// zero with it: every deadline built from currentTick is a duration measured inside
+	// one run, and this is world time that outlives the run.
+	worldTick uint64
+
+	// nextStormUnix is when the next storm falls due, as a Unix second, and zero means
+	// unscheduled. A wall-clock value rather than a tick because the storm rides a real
+	// week, which includes the days this server was switched off.
+	nextStormUnix int64
+
 	// drops is every item lying in the world. Keyed by identity like players, and for
 	// the same reasons: a snapshot names entities by id, and a merge or a pickup has to
 	// find one without scanning.
