@@ -300,14 +300,22 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 		// pack slots rather than a single stack, so `heldInPack` can exceed what one slot
 		// holds and a total it covers can too; the old `uint16(total)` here was checked
 		// against the wide value and then spent as the narrow one, which is the shape of
-		// a free purchase. A 90,000 silver total was settled as `uint16(90000)` = 24,464
-		// with the goods delivered in full, and the comment that stood here argued it was
-		// safe because "forty slots of a uint16 count" fit a uint16 — which is backwards,
-		// and is why the truncation was reachable rather than why it was not.
+		// a free purchase: a 90,000 silver total was spent as `uint16(90000)` = 24,464.
+		// The comment that stood here argued that was safe because "forty slots of a
+		// uint16 count" fit a uint16 — which is backwards, and is why the truncation was
+		// reachable rather than why it was not.
 		//
-		// Reachable, not theoretical: `restoredSlots` copies a stored count straight from
-		// the record on purpose, and `validateStoredSlot` bounds it by nothing but the
-		// uint16 it is stored in, so a restored purse is not held to a stack maximum.
+		// **What kept it from actually being a free purchase was somewhere else, which is
+		// the reason to fix it here rather than to rely on that.** Delivery still has to
+		// fit, and no row of today's table can put goods worth more than 65,535 silver
+		// into a 36-slot pack — the best `price x maxStack x 36` is 1,728 — so `insert`
+		// refused and the copy was discarded. What did get through was the wrong refusal:
+		// at a total of 65,536 the low bits are zero, `consumePack` returned false on its
+		// `count == 0` guard, and a purse deep enough to pay was told it was short.
+		//
+		// And the purse is genuinely not bounded by a stack maximum: `restoredSlots`
+		// copies a stored count straight from the record on purpose, and
+		// `validateStoredSlot` bounds it by nothing but the uint16 it is stored in.
 		if next.heldInPack(ItemSilver) < total {
 			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("%d silver is more than the purse holds", total)
 		}
