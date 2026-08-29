@@ -312,6 +312,14 @@ type Sim struct {
 	// should cost no I/O at all.
 	structuresDirty bool
 
+	// chunkRegenerator and resendChunk are the two package seams the Fimbulvetr pass
+	// crosses. The cache puts terrain back; the session registry forgets the old view.
+	// Kept as interfaces/functions because game must not import session and because the
+	// bounded pass is simulation state guarded by mu, not a connection concern.
+	chunkRegenerator ChunkRegenerator
+	resendChunk      func(world.Coord) int
+	regeneration     []chunkRegenerationPass
+
 	// byIdentity is the live player behind each identity, and it exists for exactly one
 	// question: what entity id does this structure's owner hold *right now*.
 	//
@@ -1069,6 +1077,7 @@ func (s *Sim) stepWorld(tick uint64) {
 	s.currentTick = tick
 	s.advancePartyInvitesLocked(tick)
 	s.expireCorpsesLocked(tick)
+	s.advanceChunkRegenerationLocked()
 
 	players := s.sortedPlayersLocked()
 

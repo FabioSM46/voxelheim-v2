@@ -59,7 +59,7 @@ func TestBroadcastChunkReachesExactlyTheSessionsHoldingTheChunk(t *testing.T) {
 			}
 
 			var offered, taken int
-			reg.Subscribe(1, view, func([]byte) bool {
+			reg.Subscribe(1, view, func() {}, func([]byte) bool {
 				offered++
 				if !tc.accepts {
 					return false
@@ -119,7 +119,7 @@ func TestUnsubscribeStopsBroadcastsBeforeTheQueueCanBeClosed(t *testing.T) {
 		}
 	}()
 
-	reg.Subscribe(1, view, func(frame []byte) bool {
+	reg.Subscribe(1, view, func() {}, func(frame []byte) bool {
 		select {
 		case out <- frame:
 			return true

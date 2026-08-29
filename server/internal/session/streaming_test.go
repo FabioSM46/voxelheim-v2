@@ -505,6 +505,49 @@ func TestResendForgetsTheChunkAndAsksForTheDiffThatSendsIt(t *testing.T) {
 	}
 }
 
+// A storm repair is the same complete resend as a client-requested repair, but the
+// registry chooses every holder at once. The player is stationary throughout: the wake
+// is what turns View.Forget into a second ChunkData now rather than at a future border.
+func TestRegistryResendChunkSendsTheRegeneratedChunkWhole(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	coord := world.Coord{}
+	wake := &wakeCounter{}
+	var frames [][]byte
+	streamer := session.NewStreamer(world.NewCache(5, 1, 8), 0,
+		func(frame []byte) error { frames = append(frames, frame); return nil },
+		wake.wake, newFrozenClock().Now, discard(),
+	)
+	if err := streamer.MoveTo(ctx, coord); err != nil {
+		t.Fatalf("initial MoveTo: %v", err)
+	}
+
+	registry := session.NewRegistry()
+	registry.Subscribe(1, streamer.View(), wake.wake, func([]byte) bool { return true })
+	if got := registry.ResendChunk(coord); got != 1 {
+		t.Fatalf("ResendChunk scheduled %d sessions, want 1", got)
+	}
+	if streamer.View().Holds(coord) {
+		t.Fatal("the old composition is still held, so a diff would not replace it")
+	}
+	if got := wake.count(); got != 1 {
+		t.Fatalf("ResendChunk woke the stationary streamer %d times, want 1", got)
+	}
+
+	if err := streamer.MoveTo(ctx, coord); err != nil {
+		t.Fatalf("repair MoveTo: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("the initial send plus repair produced %d frames, want 2", len(frames))
+	}
+	for i, frame := range frames {
+		if kind, _ := classify(t, frame); kind != vnet.PayloadChunkData {
+			t.Errorf("frame %d is %s, want a complete ChunkData", i, kind)
+		}
+	}
+}
+
 // A refused request is silence, and it must also be *nothing else*: a client that asks for
 // a chunk it may not have must not thereby lose one it does have.
 func TestResendRefusesQuietlyAndCostsTheSessionNothing(t *testing.T) {
