@@ -117,6 +117,26 @@ pub fn is_cover(block: BlockId) -> bool {
     COVER_FAMILY.contains(&block)
 }
 
+/// Whether the mesher grows this block a shape of its own inside its voxel rather than
+/// sweeping it as a cube.
+///
+/// Exactly [`is_cover`] plus [`BUSH`], and it is a **third** question about a block
+/// rather than a synonym for either of the two above it. Cover answers what a body does
+/// with a voxel — mirrored from the server's `world.Cover` — and a bush is `world.Solid`
+/// there, so it stops a body while a flower does not. What the two share is only that
+/// neither is a cube: [`super::mesher::build_cover`] builds a stem, a corolla and leaves
+/// for one and a clump of foliage for the other, and the sweep never sees either.
+///
+/// **The consequence is [`is_opaque`], and it is the reason this predicate has to exist
+/// at all.** A shape does not fill the voxel the sweep would have culled against, so the
+/// grass under a bush keeps its top face and the dirt beside one keeps its side face —
+/// otherwise every gap between two clumps of foliage would look through the bush onto a
+/// face nobody drew. It says nothing about solidity: `is_solid` still reads [`is_cover`],
+/// so a bush stops a body exactly as it did before it was drawn as one.
+pub fn is_shaped(block: BlockId) -> bool {
+    is_cover(block) || block == BUSH
+}
+
 /// The server-authored water height in eighths. Falling is resolved by the mesher.
 pub fn water_level(block: BlockId) -> u8 {
     match block {
@@ -163,11 +183,13 @@ pub fn is_solid(block: BlockId) -> bool {
 /// An id from a newer contract is opaque, for the reason it is solid: this build draws
 /// what the server sent rather than deciding an id it never heard of is see-through.
 ///
-/// Cover is not opaque, and that is the whole of what the two masks need to learn about
-/// a flower: the grass under one keeps its top face, and the water beside one keeps its
-/// surface, because both mask arms already read "see-through" rather than "air".
+/// [`is_shaped`] is not opaque, and that is the whole of what the two masks need to learn
+/// about a plant: the grass under a flower or a bush keeps its top face, and the water
+/// beside one keeps its surface, because both mask arms already read "see-through" rather
+/// than "air". A bush is the id where that is a rendering answer and not a physical one —
+/// it still stops a body, and `is_solid` above is where that is said.
 pub fn is_opaque(block: BlockId) -> bool {
-    block != AIR && !is_water(block) && !is_cover(block)
+    block != AIR && !is_water(block) && !is_shaped(block)
 }
 
 /// The palette in the order a reader wants to see it. Test-only: production code
@@ -318,6 +340,14 @@ const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 /// [`super::mesher::build_cover`] asks for it directly, once per stem quad.
 pub const STEM_LINEAR: [f32; 3] = [0.048_172, 0.147_027, 0.027_321];
 
+/// The sunlit top of a bush's foliage. `#56945A`.
+///
+/// Lighter than [`BUSH_LINEAR`], which is what gives a clump of bushes a top and a
+/// shaded underside instead of one flat tone across the whole slab they used to be.
+/// **Not a block colour**: [`linear_rgba`] answers [`BUSH_LINEAR`] for [`BUSH`], and this
+/// is the second tone the mesher reaches for directly.
+pub const BUSH_CROWN_LINEAR: [f32; 3] = [0.093_059, 0.296_138, 0.102_242];
+
 /// The colour of "this build has no colour for that id". `#C81E96`.
 ///
 /// Magenta on purpose: a server one contract ahead sends a block this client has
@@ -391,7 +421,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 26] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 27] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -417,6 +447,7 @@ mod tests {
         ("flower yellow", [0xE8, 0xC6, 0x4A], FLOWER_YELLOW_LINEAR),
         ("flower blue", [0x5B, 0x76, 0xC8], FLOWER_BLUE_LINEAR),
         ("stem", [0x3E, 0x6B, 0x2E], STEM_LINEAR),
+        ("bush crown", [0x56, 0x94, 0x5A], BUSH_CROWN_LINEAR),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
 
@@ -453,11 +484,11 @@ mod tests {
     }
 
     #[test]
-    fn air_water_and_cover_are_also_the_ids_you_can_see_through() {
+    fn air_water_and_the_shaped_plants_are_the_ids_you_can_see_through() {
         assert!(!is_opaque(AIR));
         assert!(!is_opaque(WATER));
         for block in PALETTE {
-            if is_water(block) || is_cover(block) {
+            if is_water(block) || is_shaped(block) {
                 assert!(!is_opaque(block), "block {block} must hide nothing");
                 continue;
             }
@@ -467,6 +498,32 @@ mod tests {
             );
         }
         assert!(is_opaque(999), "an unknown id is drawn, not seen through");
+        // The bush is where opacity and solidity part company, and #634 is what parted
+        // them: it is drawn as a clump of foliage with gaps, so the ground under it has
+        // to keep the faces the sweep used to cull, and it still stops a body.
+        assert!(!is_opaque(BUSH), "a bush is foliage with gaps in it");
+        assert!(is_solid(BUSH), "and it still stops a body");
+        assert!(
+            !is_cover(BUSH),
+            "which is what keeps it out of the cover family"
+        );
+    }
+
+    #[test]
+    fn the_shaped_plants_are_the_bush_and_the_three_flowers() {
+        // The set the mesher grows geometry for, pinned the way `is_cover` is: an id
+        // that starts answering `is_shaped` without being listed here is a block that
+        // silently stopped hiding what is behind it.
+        for block in [BUSH, FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE] {
+            assert!(is_shaped(block));
+        }
+        for block in PALETTE
+            .into_iter()
+            .filter(|block| !matches!(*block, BUSH | FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE))
+            .chain([AIR, BlockId::MAX])
+        {
+            assert!(!is_shaped(block), "block {block} is swept as a cube");
+        }
     }
 
     #[test]
@@ -569,11 +626,14 @@ mod tests {
         {
             assert!(!is_cover(block), "block {block} is not cover");
         }
-        // The stem is a colour and not a block: nothing renders as it through this
-        // function, which is what keeps it out of the distinctness test above.
-        let stem = [STEM_LINEAR[0], STEM_LINEAR[1], STEM_LINEAR[2], 1.0];
-        for block in PALETTE.into_iter().chain([AIR, BlockId::MAX]) {
-            assert_ne!(linear_rgba(block), stem);
+        // The stem and the bush's sunlit crown are colours and not blocks: nothing
+        // renders as one through this function, which is what keeps both out of the
+        // distinctness test above.
+        for tone in [STEM_LINEAR, BUSH_CROWN_LINEAR] {
+            let rgba = [tone[0], tone[1], tone[2], 1.0];
+            for block in PALETTE.into_iter().chain([AIR, BlockId::MAX]) {
+                assert_ne!(linear_rgba(block), rgba);
+            }
         }
     }
 
