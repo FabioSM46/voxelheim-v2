@@ -10,13 +10,21 @@
 //! anything the server said. The day somebody wants to shoot a vulture, the bird becomes a
 //! `MobKind` on the server and this module's row for it is deleted, in that order.
 //!
-//! **This is the first half of #549, and the seam is which modules a bird touches.** Every
-//! line below reads `player/ambience.rs` and `player/camera.rs` and nothing else: a bird on
-//! its own. The second half is a bird *beside* the rest of the client — the roost on
-//! `player/sky.rs`'s night, the hide under its water, the pins that assert a bird carries no
-//! component from `mobs.rs`, `hands.rs`, `drops.rs` or `structures.rs`, and the one that
-//! aims a mining intent straight along a bird and compares the bytes with an empty sky. It
-//! is additive to every line below and it changes none of them.
+//! `player/tests.rs` pins the negative half of that: a bird carries no component from
+//! `mobs.rs`, `hands.rs`, `drops.rs` or `structures.rs`, a snapshot with no mobs leaves the
+//! flock alone, and a mining intent aimed straight along a bird produces the same bytes it
+//! would with the sky empty. `target.rs` raycasts voxels and the bodies a snapshot named, so
+//! there is no path from a bird into it at all.
+//!
+//! ## When a flock comes and goes
+//!
+//! A bird arrives and leaves over [`BIRD_FADE_SECONDS`] rather than between two frames, and
+//! a replacement for one the anchor left behind is seeded on the far side of the move, so
+//! nothing appears in the view the player is walking into. Two conditions stop the flock
+//! outright, both read from `player/sky.rs` so that "it is night" and "the eye is under
+//! water" have one answer in this client rather than two: the birds roost once
+//! [`NIGHT_ROOST`] of the night has arrived, and they are hidden — not faded — while the eye
+//! is submerged.
 //!
 //! ## Two ideas already in this crate, with a species table in front
 //!
@@ -34,11 +42,15 @@ use std::f32::consts::{PI, TAU};
 use std::ops::RangeInclusive;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::SystemParam;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
 use super::camera::WorldCamera;
+use super::sky::{self, SkyClock};
+use crate::net::Session;
+use crate::world::ChunkStore;
 
 /// How coarsely the eye is quantised before it anchors a flock, in blocks.
 ///
@@ -53,8 +65,11 @@ pub(super) const BIRD_ANCHOR_CELL: f32 = 32.0;
 /// puts a bird outside it is the anchor moving.
 pub(super) const BIRD_RANGE: f32 = 64.0;
 
-/// The most birds that may exist at once, over the whole sky rather than per flock.
+/// The most birds that may exist at once, fading ones included.
 pub(super) const BIRD_COUNT_MAX: usize = 6;
+
+/// How long a bird takes to fade in, and to fade out before it is despawned.
+pub(super) const BIRD_FADE_SECONDS: f32 = 1.5;
 
 /// The one constant every bird seed is mixed from.
 ///
@@ -65,6 +80,17 @@ const BIRD_SEED: u64 = 0xB1BD_5EED_A17E_0F73;
 
 /// How far a wing swings either side of level, in radians.
 const FLAP_AMPLITUDE_RADIANS: f32 = 0.55;
+
+/// The share of the night at which the flock roosts.
+const NIGHT_ROOST: f32 = 0.5;
+
+/// How many re-seeds are tried before a replacement is accepted wherever it fell.
+///
+/// Each try is one hash and about half land on the far side, so the expected cost is under
+/// two and the fallback is reached about once in four thousand replacements. It is a real
+/// branch rather than an unreachable one, and
+/// `a_replacement_is_seeded_on_the_far_side_of_the_move` asserts the contract including it.
+const FAR_SIDE_TRIES: u64 = 12;
 
 /// How far a bird's home sits from the anchor, in blocks, on the horizontal axes.
 ///
@@ -400,9 +426,35 @@ fn cell_seed(cell: IVec3) -> u64 {
     mix(BIRD_SEED, packed)
 }
 
-/// The seed of one bird: its flock's, and its slot in that flock.
-fn bird_seed(flock: u64, index: usize) -> u64 {
-    mix(flock, index as u64)
+/// The seed of one bird: its flock's, its slot in that flock, and a re-seed salt.
+fn bird_seed(flock: u64, index: usize, salt: u64) -> u64 {
+    mix(flock, (index as u64).wrapping_add(salt.wrapping_mul(64)))
+}
+
+/// A seed whose home lies on the far side of a move, so nothing pops in ahead of the player.
+///
+/// The bias is the anchor's own displacement. After [`FAR_SIDE_TRIES`] it accepts the first
+/// seed rather than looping: a bird that appears behind the player's shoulder is worth less
+/// than a frame spent hunting for one.
+fn seed_on_the_far_side(
+    flock: u64,
+    index: usize,
+    species: &BirdSpecies,
+    anchor: Vec3,
+    bias: Vec3,
+) -> u64 {
+    let first = bird_seed(flock, index, 0);
+    let Some(direction) = Vec3::new(bias.x, 0.0, bias.z).try_normalize() else {
+        return first;
+    };
+    for salt in 0..FAR_SIDE_TRIES {
+        let seed = bird_seed(flock, index, salt);
+        let home = home_of(species, seed, anchor) - anchor;
+        if Vec3::new(home.x, 0.0, home.z).dot(direction) > 0.0 {
+            return seed;
+        }
+    }
+    first
 }
 
 /// How many birds of this row fly over `cell`.
@@ -416,18 +468,24 @@ fn flock_size(species: &BirdSpecies, flock: u64) -> usize {
 // The entities
 // ---------------------------------------------------------------------------
 
-/// The two meshes every bird in the session is drawn from, and one material per plumage.
+/// The two meshes every bird in the session is drawn from, and one material pair per slot.
 ///
 /// The materials are built once, here, rather than at every spawn. The set is fixed and
-/// tiny — one body and one wing per plumage a row can wear — while a flock is stood up and
+/// tiny — one body and one wing per bird the sky can hold — while a flock is stood up and
 /// retired every time the eye crosses an anchor cell, so `materials.add` at spawn time
 /// minted a fresh `StandardMaterial` for a colour that already had one on every crossing.
+///
+/// **Keyed by slot rather than by plumage, and the fade is why.** A handle shared by a
+/// whole plumage cannot carry a per-bird alpha: two parrots in one pair, one arriving and
+/// one leaving, would fade as one bird. `keep_the_flock`'s second guard holds the sky to
+/// [`BIRD_COUNT_MAX`], so a pool that size never runs dry and nothing is minted after
+/// startup — which is what the per-plumage table bought.
 #[derive(Resource, Debug)]
 pub(super) struct BirdVisuals {
     body: Handle<Mesh>,
     wing: Handle<Mesh>,
-    /// Indexed by row, then by [`BirdSpecies::plumage_of`]: `(body, wing)`.
-    plumage: [Vec<(Handle<StandardMaterial>, Handle<StandardMaterial>)>; BIRDS.len()],
+    /// One `(body, wing)` pair per bird the sky can hold, claimed at spawn.
+    pool: [(Handle<StandardMaterial>, Handle<StandardMaterial>); BIRD_COUNT_MAX],
 }
 
 /// One bird. The root, and the only thing anything outside this module may see.
@@ -444,6 +502,16 @@ pub(super) struct Bird {
     index: usize,
     /// The point [`place`] draws its path around, fixed for this bird's whole life.
     pub(super) anchor: Vec3,
+    /// How much of the bird is drawn: 0 invisible, 1 whole.
+    pub(super) fade: f32,
+    /// What `fade` is moving towards. Zero means this bird is on its way out, and nothing
+    /// ever moves it back, so a look that flickers cannot make a bird flicker with it.
+    pub(super) wanted: f32,
+    /// Which pair of [`BirdVisuals::pool`] this bird draws from. Distinct from `index`: a
+    /// stray and a new bird can hold the same *flock* slot, and must not share an alpha.
+    pool: usize,
+    body_material: Handle<StandardMaterial>,
+    wing_material: Handle<StandardMaterial>,
 }
 
 /// One wing, as a child of the bird it belongs to.
@@ -456,7 +524,7 @@ pub(super) struct BirdWing {
     flap_hz: f32,
 }
 
-/// Builds the two meshes and every material a bird can ever wear.
+/// Builds the two meshes and every material any bird will ever wear.
 pub(super) fn create_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -467,17 +535,12 @@ pub(super) fn create_visuals(
         // Authored from the hinge outwards, so rotating the child about its own origin is
         // the flap and nothing has to offset it.
         wing: meshes.add(quad(Vec2::new(0.0, -0.25), Vec2::new(0.5, 0.25))),
-        plumage: std::array::from_fn(|row| {
-            let species = &BIRDS[row];
-            (0..species.plumages())
-                .map(|choice| {
-                    let (body, wing) = species.plumage_at(choice);
-                    (
-                        materials.add(plumage_material(body)),
-                        materials.add(plumage_material(wing)),
-                    )
-                })
-                .collect()
+        // Colourless and invisible until a bird claims the pair and writes its plumage in.
+        pool: std::array::from_fn(|_| {
+            (
+                materials.add(plumage_material(Color::WHITE, 0.0)),
+                materials.add(plumage_material(Color::WHITE, 0.0)),
+            )
         }),
     });
 }
@@ -508,22 +571,33 @@ fn quad(low: Vec2, high: Vec2) -> Mesh {
     .with_inserted_indices(Indices::U32(vec![0, 2, 1, 0, 3, 2]))
 }
 
-/// Lit, and drawn from both faces.
+/// Lit, blended and drawn from both faces.
 ///
 /// **Lit** is the choice worth naming: `player/sky.rs`'s bodies are unlit because they are
 /// the light source, and a bird is not — it is an object in the world, so night darkens it
 /// and the fog takes it at distance exactly as they take a mob.
 ///
 /// **`cull_mode: None`** because a flat quad is seen from below as often as from above, the
-/// same reason `mobs.rs` gives for the aggro marker. One material per *plumage* rather than
-/// one per row, because a parrot's plumage is its own — and per plumage rather than per
-/// bird, because two parrots wearing the same pair are one material, not two.
-fn plumage_material(colour: Color) -> StandardMaterial {
+/// same reason `mobs.rs` gives for the aggro marker. **`AlphaMode::Blend` and an explicit
+/// alpha** because the fade is written here, which is also why the pair a bird draws from
+/// is its own rather than its plumage's — see [`BirdVisuals`].
+fn plumage_material(colour: Color, alpha: f32) -> StandardMaterial {
     StandardMaterial {
-        base_color: colour,
+        base_color: colour.with_alpha(alpha),
+        alpha_mode: AlphaMode::Blend,
         cull_mode: None,
         ..default()
     }
+}
+
+/// Everything `keep_the_flock` reads and nothing it writes.
+#[derive(SystemParam)]
+pub(super) struct FlockInputs<'w> {
+    ambience: Res<'w, Ambience>,
+    session: Option<Res<'w, Session>>,
+    clock: Res<'w, SkyClock>,
+    time: Res<'w, Time>,
+    visuals: Option<Res<'w, BirdVisuals>>,
 }
 
 /// Decides which birds should exist, and stands the missing ones up.
@@ -532,13 +606,19 @@ fn plumage_material(colour: Color) -> StandardMaterial {
 /// this frame's eye and the look is this frame's answer. It writes nothing outside its own
 /// entities.
 pub(super) fn keep_the_flock(
-    ambience: Res<Ambience>,
-    time: Res<Time>,
-    visuals: Option<Res<BirdVisuals>>,
+    read: FlockInputs<'_>,
     mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     eyes: Query<&Transform, With<WorldCamera>>,
-    flock: Query<(Entity, &Bird)>,
+    mut flock: Query<(Entity, &mut Bird)>,
 ) {
+    let FlockInputs {
+        ambience,
+        session,
+        clock,
+        time,
+        visuals,
+    } = read;
     let (Some(visuals), Some(eye)) = (visuals, eyes.iter().next()) else {
         return;
     };
@@ -549,7 +629,18 @@ pub(super) fn keep_the_flock(
     let cell = cell_of(eye.translation);
     let anchor = anchor_of(cell);
     let elapsed = time.elapsed_secs();
-    let wanted = species_for(&ambience);
+
+    // Roosted at night, and only when the server keeps a clock: `night_now` answers `None`
+    // for a world with no time of day, which flies them all day rather than never.
+    let roosting = session
+        .as_deref()
+        .and_then(|session| sky::night_now(&clock, session))
+        .is_some_and(|night| night >= NIGHT_ROOST);
+    let wanted = if roosting {
+        None
+    } else {
+        species_for(&ambience)
+    };
     let flock_seed = cell_seed(cell);
     // Read before the retirement pass, because how many this cell wants is what decides how
     // many of the previous cell's birds may stay.
@@ -558,9 +649,18 @@ pub(super) fn keep_the_flock(
     // Retire everything that is the wrong species for this look, or that the anchor has
     // left behind. A bird outside its box is one the eye has walked away from: its path is
     // drawn around an anchor half a world back, so keeping it would be keeping a bird
-    // nobody can see.
+    // nobody can see. Retiring is one-way, so a look that flickers cannot oscillate a flock.
+    //
+    // **Two counts, because a fade makes "how many birds are there" two questions.**
+    // `staying` is every bird not on its way out, bounded by `wanted_size`, so the flying
+    // population is one row's and never two anchors' summed. `alive` is every entity, the
+    // fading ones included, bounded by `BIRD_COUNT_MAX` — which is also what guarantees the
+    // material pool has a free pair for a bird about to spawn.
+    let mut bias = Vec3::ZERO;
     let mut taken = [false; BIRD_COUNT_MAX];
+    let mut pool_taken = [false; BIRD_COUNT_MAX];
     let mut alive = 0usize;
+    let mut staying = 0usize;
     // A bird of the right row still inside the box whose anchor is a *previous* cell's.
     // It holds no slot in `taken` — its `index` numbers another anchor's flock — so it is
     // counted against `wanted_size` below instead of being invisible to it. It used to be
@@ -568,33 +668,43 @@ pub(super) fn keep_the_flock(
     // slot as free, and a second flock went up beside the first.
     let mut strays = [None; BIRD_COUNT_MAX];
     let mut stray_count = 0usize;
-    for (entity, bird) in &flock {
+    for (entity, mut bird) in &mut flock {
+        alive += 1;
+        pool_taken[bird.pool] = true;
+        // Already leaving: it holds a pool pair and counts against the sky, but nothing
+        // here may bring it back.
+        if bird.wanted == 0.0 {
+            continue;
+        }
         let position = place(&BIRDS[bird.species], bird.seed, elapsed, bird.anchor);
         let outside = (position - anchor).abs().max_element() > BIRD_RANGE;
         if wanted != Some(bird.species) || outside {
-            commands.entity(entity).despawn();
+            bird.wanted = 0.0;
+            // Only a bird the *anchor* left behind says which way the player went; one
+            // retired because the ground changed under them says nothing about direction.
+            if outside {
+                bias += anchor - bird.anchor;
+            }
             continue;
         }
         if bird.anchor == anchor && bird.index < BIRD_COUNT_MAX {
             // This cell's own flock. `index < wanted_size` holds by construction: the
             // anchor determines the cell, and the cell determines `wanted_size`.
             taken[bird.index] = true;
-            alive += 1;
+            staying += 1;
         } else if stray_count < BIRD_COUNT_MAX {
             strays[stray_count] = Some(entity);
             stray_count += 1;
-        } else {
-            commands.entity(entity).despawn();
         }
     }
 
-    // A stray flies on only while this cell's flock has room for it, and is retired the
-    // moment it does not. The visible population is one row's, never two anchors' summed.
+    // A stray flies on only while this cell's flock has room for it, and starts fading the
+    // moment it does not — it fades rather than vanishing, and the count is `wanted_size`.
     for entity in strays.into_iter().flatten() {
-        if alive < wanted_size {
-            alive += 1;
-        } else {
-            commands.entity(entity).despawn();
+        if staying < wanted_size {
+            staying += 1;
+        } else if let Ok((_, mut bird)) = flock.get_mut(entity) {
+            bird.wanted = 0.0;
         }
     }
 
@@ -604,19 +714,32 @@ pub(super) fn keep_the_flock(
     let species = &BIRDS[index];
 
     for (slot, held) in taken.iter().enumerate().take(wanted_size) {
-        // The flock is the cap. `flock_size` is already clamped to BIRD_COUNT_MAX, so the
-        // whole-sky bound holds too — including on the frame a crossing has retired one row
-        // and is standing the next one up.
-        if alive >= wanted_size {
+        // The flock is the cap, and `flock_size` is already clamped to BIRD_COUNT_MAX. The
+        // second guard is the whole sky rather than one flock: a bird still fading out holds
+        // a material pair, so a free pair exists only while `alive` is under the maximum.
+        if staying >= wanted_size || alive >= BIRD_COUNT_MAX {
             break;
         }
         if *held {
             continue;
         }
+        let Some(pool) = pool_taken.iter().position(|claimed| !claimed) else {
+            break;
+        };
+        pool_taken[pool] = true;
+        staying += 1;
         alive += 1;
-        let seed = bird_seed(flock_seed, slot);
-        let (body_material, wing_material) =
-            visuals.plumage[index][species.plumage_of(seed)].clone();
+        let seed = seed_on_the_far_side(flock_seed, slot, species, anchor, bias);
+        // Claimed, not minted: `create_visuals` built every pair, and this writes the
+        // plumage the seed chose into the two handles the slot owns.
+        let (body_colour, wing_colour) = species.plumage_at(species.plumage_of(seed));
+        let (body_material, wing_material) = visuals.pool[pool].clone();
+        if let Some(mut material) = materials.get_mut(&body_material) {
+            *material = plumage_material(body_colour, 0.0);
+        }
+        if let Some(mut material) = materials.get_mut(&wing_material) {
+            *material = plumage_material(wing_colour, 0.0);
+        }
         let bird = commands
             .spawn((
                 Bird {
@@ -624,6 +747,11 @@ pub(super) fn keep_the_flock(
                     seed,
                     index: slot,
                     anchor,
+                    fade: 0.0,
+                    wanted: 1.0,
+                    pool,
+                    body_material: body_material.clone(),
+                    wing_material: wing_material.clone(),
                 },
                 Mesh3d(visuals.body.clone()),
                 MeshMaterial3d(body_material),
@@ -648,25 +776,81 @@ pub(super) fn keep_the_flock(
     }
 }
 
-/// Moves every bird and beats its wings.
+/// The one camera, told apart from the entities this system also holds mutably.
 ///
-/// Three transforms per bird per frame and nothing else: at [`BIRD_COUNT_MAX`] that is
-/// eighteen writes, which is why a flock costs less than one mob's snapshot application.
-/// Measured on a headless client at a full flock of five, the pair of bird systems sits
-/// inside the frame-to-frame noise of the whole `Update` schedule — see the pull request.
+/// Bevy cannot prove a `WorldCamera` is neither a bird nor a wing, and refuses the system
+/// rather than risk aliasing the `Transform` — the same reason `player/sky.rs` filters its
+/// eye query `Without<Sun>`. A named type because the filter is otherwise long enough for
+/// clippy to call the query complex, and a name is better than an allow.
+type EyeOfTheFlock = (With<WorldCamera>, Without<Bird>, Without<BirdWing>);
+
+/// Everything `fly_the_flock` reads.
+#[derive(SystemParam)]
+pub(super) struct FlightInputs<'w> {
+    session: Option<Res<'w, Session>>,
+    store: Option<Res<'w, ChunkStore>>,
+    time: Res<'w, Time>,
+}
+
+/// Moves every bird, beats its wings, and fades the ones on their way out.
+///
+/// Three transforms per bird per frame and one colour write when the alpha has actually
+/// moved: at [`BIRD_COUNT_MAX`] that is eighteen transforms, which is why a flock costs less
+/// than one mob's snapshot application. Measured on a headless client at a full flock of
+/// five, the pair of bird systems sits inside the frame-to-frame noise of the whole `Update`
+/// schedule — see the pull request.
 ///
 /// The wings are a second query rather than a child lookup because the parent's `Bird` is
-/// already held here: `BirdWing` carries its own copy of the row's beat, so neither loop
-/// has to reach into the other's entity and Bevy needs no `Without` between them beyond the
-/// one that separates the two `Transform` accesses.
+/// already held here: `BirdWing` carries its own copy of the row's beat, so neither loop has
+/// to reach into the other's entity.
 pub(super) fn fly_the_flock(
-    time: Res<Time>,
-    mut flock: Query<(&Bird, &mut Transform)>,
+    read: FlightInputs<'_>,
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    eyes: Query<&Transform, EyeOfTheFlock>,
+    mut flock: Query<(Entity, &mut Bird, &mut Transform, &mut Visibility)>,
     mut wings: Query<(&BirdWing, &mut Transform), Without<Bird>>,
 ) {
+    let FlightInputs {
+        session,
+        store,
+        time,
+    } = read;
     let elapsed = time.elapsed_secs();
+    let step = time.delta_secs() / BIRD_FADE_SECONDS;
 
-    for (bird, mut transform) in &mut flock {
+    // Under water the sky above the surface is not what the eye sees, so the birds are
+    // hidden outright rather than faded: the same override `player/sky.rs` applies to the
+    // fog, read through the same answer so there are not two of them. Hidden and not
+    // retired, because surfacing must not cost a second and a half of empty sky.
+    let submerged = match (session.as_deref(), eyes.iter().next()) {
+        (Some(session), Some(eye)) => sky::submerged_at(
+            store.as_deref(),
+            eye.translation,
+            usize::from(session.0.chunk_size),
+        ),
+        _ => false,
+    };
+
+    for (entity, mut bird, mut transform, mut visibility) in &mut flock {
+        let fade = if bird.wanted > bird.fade {
+            (bird.fade + step).min(bird.wanted)
+        } else {
+            (bird.fade - step).max(bird.wanted)
+        };
+        if bird.wanted == 0.0 && fade <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if fade != bird.fade {
+            bird.fade = fade;
+            for handle in [bird.body_material.clone(), bird.wing_material.clone()] {
+                if let Some(mut material) = materials.get_mut(&handle) {
+                    material.base_color = material.base_color.with_alpha(fade);
+                }
+            }
+        }
+
         let species = &BIRDS[bird.species];
         let position = place(species, bird.seed, elapsed, bird.anchor);
         transform.translation = position;
@@ -676,6 +860,17 @@ pub(super) fn fly_the_flock(
         let ahead = place(species, bird.seed, elapsed + HEADING_STEP, bird.anchor) - position;
         if let Ok(heading) = Dir3::new(ahead) {
             transform.look_to(heading.as_vec3(), Vec3::Y);
+        }
+
+        let should = if submerged {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+        // Guarded: `Mut` marks a component changed on every `DerefMut`, and re-extracting a
+        // visibility that has not moved is a cost for nothing.
+        if *visibility != should {
+            *visibility = should;
         }
     }
 
@@ -803,7 +998,7 @@ mod tests {
                 );
                 seen_sizes[size] = true;
 
-                let seed = bird_seed(flock, 0);
+                let seed = bird_seed(flock, 0, 0);
                 let pair = species.colours(seed);
                 let allowed = std::iter::once((species.body, species.wing))
                     .chain(species.plumage.iter().copied());
@@ -817,6 +1012,52 @@ mod tests {
                 assert!(seen_sizes[size], "row {index} never answered {size}");
             }
         }
+    }
+
+    #[test]
+    fn a_replacement_is_seeded_on_the_far_side_of_the_move() {
+        // The whole point of the re-seed: a bird that appears must appear behind the
+        // player's shoulder blade, never in the middle of the view they are walking into.
+        let anchor = Vec3::new(64.0, 96.0, 64.0);
+        let flock = cell_seed(IVec3::new(2, 3, 2));
+        for species in &BIRDS {
+            for (bias, axis) in [
+                (Vec3::X, Vec3::X),
+                (Vec3::NEG_X, Vec3::NEG_X),
+                (Vec3::Z, Vec3::Z),
+                (Vec3::new(-3.0, 7.0, -3.0), Vec3::new(-1.0, 0.0, -1.0)),
+            ] {
+                for slot in 0..BIRD_COUNT_MAX {
+                    let seed = seed_on_the_far_side(flock, slot, species, anchor, bias * 32.0);
+                    let far = |seed| {
+                        let home = home_of(species, seed, anchor) - anchor;
+                        Vec3::new(home.x, 0.0, home.z).dot(axis.normalize()) > 0.0
+                    };
+                    if far(seed) {
+                        continue;
+                    }
+                    // The documented fallback, asserted rather than tolerated: it may only
+                    // be reached when every salt in range was on the near side, and it may
+                    // only ever answer the first seed.
+                    assert_eq!(
+                        seed,
+                        bird_seed(flock, slot, 0),
+                        "{:?} fell back to a seed that is not the first",
+                        species.pattern
+                    );
+                    assert!(
+                        !(0..FAR_SIDE_TRIES).any(|salt| far(bird_seed(flock, slot, salt))),
+                        "{:?} fell back past a seed that was on the far side",
+                        species.pattern
+                    );
+                }
+            }
+        }
+        // No move, no bias, and the first seed is taken as it comes.
+        assert_eq!(
+            seed_on_the_far_side(flock, 0, &BIRDS[0], anchor, Vec3::ZERO),
+            bird_seed(flock, 0, 0)
+        );
     }
 
     #[test]
