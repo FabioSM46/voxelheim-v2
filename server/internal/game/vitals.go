@@ -353,7 +353,7 @@ const respawnSettlementOffset = 3
 
 // respawnPositionLocked is where this player comes back, in three tiers: their own tent
 // if one stands, else the nearest settlement to where they fell, else the spawn their
-// join was given.
+// join was given — which is the capital's gate square.
 //
 // # Their tent
 //
@@ -381,10 +381,13 @@ const respawnSettlementOffset = 3
 // on no other. It looks three lattice cells of blocks out from the column and answers
 // false rather than spiralling outward when no cell that far out holds anything.
 //
-// # The world spawn
+// # The capital's gate square
 //
 // The fallback the two tiers above fall through to, and the answer this function gave on
-// its own before either of them existed.
+// its own before either of them existed. It is [world.SpawnAt], and since #519 that is the
+// square outside the capital's castle gate — so a death with no tent and nothing near
+// enough to wake in ends where the session began, in the one place in the world that has
+// walls, a smith and people in it.
 //
 // The caller holds sim.mu.
 func (p *Player) respawnPositionLocked() [3]float64 {
@@ -461,7 +464,7 @@ func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
 	}
 
 	if !p.sim.respawnColumnFitsLocked(bed, int64(town.Plateau)) {
-		p.sim.log.Debug("respawn fell through to the world spawn: the settlement column is not standable",
+		p.sim.log.Debug("respawn fell through to the capital gate square: the settlement column is not standable",
 			"entity_id", p.entityID, "settlement", [2]int64{town.CentreX, town.CentreZ},
 			"bed", bed)
 		return [3]float64{}, false
