@@ -802,9 +802,27 @@ with the two notches of toe the boots run past the legs.
 
 ## The sky is on the server's clock, and the sun moved here to get to it
 
-`player/sky.rs` owns the one directional light and the curve that four presentation values are
+`player/sky.rs` owns the one directional light and the curve that five presentation values are
 read from: the sun's direction and illuminance, the camera's clear colour, the camera's ambient
-term, and the `DistanceFog` on the same camera. Until legacy PR 171 all four were constants — two in
+term, and the `DistanceFog` on the same camera — plus, since #518, the **horizon**, which is the
+colour that fog fades into.
+
+**The rim is a second colour, and the fog fades into it rather than into the zenith.**
+`Daylight::horizon` equals `Daylight::sky` at midday and at midnight and blends towards
+`DUSK_HORIZON` by a bell that peaks half way through each ramp, so dusk and dawn get the same warm
+band by construction — the bell is a function of `night_fraction` and of nothing else, and that
+fraction is already its own mirror across the two boundaries the server named. The far edge of the
+streamed cube sits on the horizon, so terrain that dissolved into the zenith would dissolve into
+the wrong half of the sky the moment the rim had a colour of its own.
+
+**One dome carries the gradient, and it is geometry rather than a shader.** An inverted 325-vertex
+sphere at `SKY_BODY_DISTANCE`, unlit, `fog_enabled: false`, with the colour in a `COLOR` attribute
+that is rewritten only when the `(sky, horizon)` pair moves — the same "never on an idle frame"
+discipline the four component writes already keep, one layer down, because this write is a buffer
+upload. It is marked `SkyBody`, which means exactly two things: `follow_the_eye` puts it on the
+camera's *translation* after `AimCamera` (a colour one frame late is invisible, a horizon one frame
+late slides), and `drive_the_sky` hides it while the eye is under water. It is spawned hidden, so
+`ui/character.rs`'s flat backdrop still owns the creation screen. Until legacy PR 171 all four were constants — two in
 `player/camera.rs` and two in `world/render.rs` — and `Daylight::FIXED` is those same four
 numbers, carried over unchanged.
 
