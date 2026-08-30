@@ -59,12 +59,84 @@ use super::{BlockId, VoxelChunk, palette};
 /// an edge disagree about both the normal and the colour there.
 const VERTICES_PER_QUAD: usize = 4;
 
+/// Where the water at one voxel is going, as the renderer is told it.
+///
+/// **Quantised on purpose.** This is part of the sweep's mask key, and the greedy
+/// merge compares mask entries with `Eq` — which a `f32` cannot answer and which a
+/// float derived from a division would answer inconsistently for two cells of one
+/// straight river run. One step is 1/[`FLOW_STEPS`] of a unit vector: far finer than
+/// a ripple pattern can show, and coarse enough that a straight run still merges into
+/// one quad while a bend beside still water does not.
+///
+/// It is a *rendering hint* and nothing else. The server decides where water goes;
+/// this is the client reading the ids it was sent so the surface can be drawn moving
+/// the way the server already moves a body through it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WaterFlow {
+    /// The horizontal direction, in [`FLOW_STEPS`]ths of a unit vector.
+    x: i8,
+    z: i8,
+    /// Whether this water is falling — a non-source flowing voxel with water
+    /// directly above it.
+    falling: bool,
+}
+
+/// How many steps a unit of [`WaterFlow`] is divided into. `i8`'s positive range, so
+/// a full-strength component round-trips exactly.
+const FLOW_STEPS: f32 = 127.0;
+
+impl WaterFlow {
+    /// Water that is going nowhere: a lake, and every non-water face.
+    pub const STILL: Self = Self {
+        x: 0,
+        z: 0,
+        falling: false,
+    };
+
+    /// Quantises a horizontal direction. `x` and `z` are expected to be a unit
+    /// vector or zero; anything longer is clamped by the quantisation itself.
+    fn new(x: f32, z: f32, falling: bool) -> Self {
+        let step = |value: f32| (value.clamp(-1.0, 1.0) * FLOW_STEPS).round() as i8;
+        Self {
+            x: step(x),
+            z: step(z),
+            falling,
+        }
+    }
+
+    /// The horizontal flow as the vertex attribute carries it: `(x, z)`, each in
+    /// `[-1, 1]`, and `(0, 0)` for still water.
+    pub fn vector(self) -> [f32; 2] {
+        [
+            f32::from(self.x) / FLOW_STEPS,
+            f32::from(self.z) / FLOW_STEPS,
+        ]
+    }
+
+    /// The falling bit as the vertex attribute carries it: `(1, 0)` where the water
+    /// is falling, `(0, 0)` everywhere else.
+    ///
+    /// A `vec2` and not a scalar because the attribute it rides in is
+    /// `Mesh::ATTRIBUTE_UV_1`, which the mesh pipeline already knows how to hand a
+    /// fragment shader — see `to_bevy_mesh` in `render.rs`. The second component is
+    /// spare.
+    pub fn falling(self) -> [f32; 2] {
+        [if self.falling { 1.0 } else { 0.0 }, 0.0]
+    }
+}
+
 /// One pass's worth of surface, as the parallel attribute buffers a GPU wants.
 ///
 /// Deliberately not a `bevy::mesh::Mesh`: this type crosses a thread boundary and
 /// is compared field by field in tests, and both are easier when it is plain data.
 /// `render.rs` turns it into a `Mesh` on the main thread, which is the only place
 /// that is allowed to.
+///
+/// **The flow buffers are all-or-nothing.** They are filled for every vertex of a
+/// surface whose faces carry a [`WaterFlow`] and left empty for one whose faces do
+/// not, so a surface has either `positions.len()` of each or none at all. That is
+/// what lets the opaque half — by far the larger one — pay nothing for an attribute
+/// only water reads.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SurfaceMesh {
     /// Vertex positions in chunk-local blocks, four per quad, in winding order.
@@ -74,6 +146,12 @@ pub struct SurfaceMesh {
     pub normals: Vec<[f32; 3]>,
     /// Linear RGBA per vertex, from [`palette::linear_rgba`].
     pub colors: Vec<[f32; 4]>,
+    /// The horizontal flow per vertex, from [`WaterFlow::vector`]. Empty on a
+    /// surface whose faces carry no flow.
+    pub flow: Vec<[f32; 2]>,
+    /// The falling bit per vertex, from [`WaterFlow::falling`]. Empty exactly when
+    /// [`Self::flow`] is.
+    pub falling: Vec<[f32; 2]>,
     /// Two triangles per quad, wound counter-clockwise seen from outside.
     pub indices: Vec<u32>,
 }
@@ -96,7 +174,13 @@ impl SurfaceMesh {
     /// Vertices are never shared between quads. Sharing would need a per-position
     /// index and would fight the flat normals and per-block colours anyway — two
     /// quads meeting at an edge disagree about both.
-    fn push_quad(&mut self, corners: [[f32; 3]; 4], normal: [f32; 3], color: [f32; 4]) {
+    fn push_quad(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        normal: [f32; 3],
+        color: [f32; 4],
+        flow: Option<WaterFlow>,
+    ) {
         let base = self.positions.len() as u32;
 
         self.positions.extend_from_slice(&corners);
@@ -104,6 +188,12 @@ impl SurfaceMesh {
             .extend(std::iter::repeat_n(normal, VERTICES_PER_QUAD));
         self.colors
             .extend(std::iter::repeat_n(color, VERTICES_PER_QUAD));
+        if let Some(flow) = flow {
+            self.flow
+                .extend(std::iter::repeat_n(flow.vector(), VERTICES_PER_QUAD));
+            self.falling
+                .extend(std::iter::repeat_n(flow.falling(), VERTICES_PER_QUAD));
+        }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -245,6 +335,11 @@ struct Face {
     /// side of the plane).
     positive: bool,
     geometry: FaceGeometry,
+    /// The flow the water behind this face carries, and part of the key too: a river
+    /// bend beside still water must not merge into one quad that slides both ways.
+    /// `None` on every opaque face — the opaque surface carries no flow attribute at
+    /// all, which is what keeps [`SurfaceMesh`]'s all-or-nothing invariant true.
+    flow: Option<WaterFlow>,
 }
 
 /// Meshes one chunk against the neighbours it was given.
@@ -369,11 +464,13 @@ fn build_masks(
                         block: negative,
                         positive: true,
                         geometry: FaceGeometry::Full,
+                        flow: None,
                     }),
                     (false, true) if above_is_ours => Some(Face {
                         block: positive,
                         positive: false,
                         geometry: FaceGeometry::Full,
+                        flow: None,
                     }),
                     // See-through on both sides: nothing. Opaque on both sides: an
                     // interior face, which is what greedy meshing exists never to emit.
@@ -393,7 +490,23 @@ fn build_masks(
                 positive,
                 positive_level,
                 above_is_ours,
-            );
+            )
+            .map(|face| Face {
+                // The face belongs to the water voxel behind it: the one on the
+                // negative side when the normal points along +axis, the one on the
+                // positive side otherwise. Both are inside *this* chunk — `water_face`
+                // emits nothing whose own side is the neighbour's — so the flow is
+                // derived from a cell this sweep can address, and only for a face that
+                // is actually emitted rather than for every cell of every plane.
+                flow: Some(flow_at(chunk, neighbours, {
+                    let mut cell = [0usize; 3];
+                    cell[axis] = if face.positive { plane - 1 } else { plane };
+                    cell[u] = i;
+                    cell[v] = j;
+                    cell
+                })),
+                ..face
+            });
         }
     }
 }
@@ -414,6 +527,7 @@ fn water_face(
         (true, false) if !palette::is_opaque(positive) && negative_is_ours => Some(Face {
             block: palette::WATER,
             positive: true,
+            flow: None,
             geometry: if axis == 1 {
                 FaceGeometry::WaterTop {
                     level: negative_level,
@@ -428,6 +542,7 @@ fn water_face(
         (false, true) if !palette::is_opaque(negative) && positive_is_ours => Some(Face {
             block: palette::WATER,
             positive: false,
+            flow: None,
             geometry: if axis == 1 {
                 FaceGeometry::WaterBottom {
                     level: positive_level,
@@ -447,6 +562,7 @@ fn water_face(
                 bottom: positive_level,
                 top: negative_level,
             },
+            flow: None,
         }),
         (true, true) if positive_level > negative_level && positive_is_ours => Some(Face {
             block: palette::WATER,
@@ -455,6 +571,7 @@ fn water_face(
                 bottom: negative_level,
                 top: positive_level,
             },
+            flow: None,
         }),
         _ => None,
     }
@@ -513,6 +630,98 @@ fn effective_water_level(
     };
 
     if palette::is_water(above) { 8 } else { encoded }
+}
+
+/// The four horizontal steps a flowing voxel's gradient is summed over, as
+/// `(axis, step)`. `x` then `z`, negative before positive — a fixed order, because
+/// the sum has to be the same value every time this chunk is meshed.
+const HORIZONTAL_STEPS: [(usize, isize); 4] = [(0, -1), (0, 1), (2, -1), (2, 1)];
+
+/// Where the water at `cell` is going, as the renderer is told it.
+///
+/// **The client's mirror of the server's `FlowDirection`, and a rendering hint only.**
+/// A `WaterCurrent*` id already *is* a direction, so it is taken verbatim. A
+/// `WaterFlowN` id carries a level instead, and water runs downhill: the direction is
+/// the normalised sum, over the four horizontal neighbours, of
+/// `(level − neighbourLevel) × step`, which points away from every shallower
+/// neighbour and towards none that is deeper. Plain `Water` is a source and a source
+/// is still.
+///
+/// Two neighbours contribute nothing, for the same reason: they are not somewhere
+/// this water can go. A **solid** neighbour is a wall, and a **source** neighbour
+/// (plain water or a current, both full height) is the body this trickle came out of.
+/// Air is not skipped — it is level 0, the steepest drop there is, which is what makes
+/// water pour off a ledge rather than sit on it.
+///
+/// A neighbour chunk this session has not been sent reads as air, exactly as it does
+/// in the sweep above, and for the same reason: over-drawing the motion is the
+/// direction to be wrong in while the data is incomplete, and `render.rs` remeshes the
+/// chunk when the neighbour arrives.
+fn flow_at(chunk: &VoxelChunk, neighbours: &Neighbours, cell: [usize; 3]) -> WaterFlow {
+    let block = chunk.block(cell);
+
+    // A current is the server's own answer. It is a source, so it never falls.
+    let (current_x, current_z) = palette::current_of(block);
+    if current_x != 0 || current_z != 0 {
+        return WaterFlow::new(f32::from(current_x), f32::from(current_z), false);
+    }
+
+    let level = palette::water_level(block);
+    // Level 0 is not water at all; level 8 here is plain `Water`, the source.
+    if level == 0 || level == 8 {
+        return WaterFlow::STILL;
+    }
+
+    let mut sum = [0.0f32; 2];
+    for (axis, step) in HORIZONTAL_STEPS {
+        let neighbour = stepped_block(chunk, neighbours, cell, axis, step);
+        if palette::is_solid(neighbour) {
+            continue;
+        }
+        let neighbour_level = palette::water_level(neighbour);
+        if neighbour_level == 8 {
+            continue;
+        }
+        let drop = f32::from(level) - f32::from(neighbour_level);
+        sum[axis / 2] += drop * step as f32;
+    }
+
+    let length = sum[0].hypot(sum[1]);
+    let (x, z) = if length > 0.0 {
+        (sum[0] / length, sum[1] / length)
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Falling is the same question `effective_water_level` asks to draw the column at
+    // full height: a non-source flowing voxel with water directly above it is a
+    // waterfall rather than a puddle.
+    let falling = palette::is_water(stepped_block(chunk, neighbours, cell, 1, 1));
+    WaterFlow::new(x, z, falling)
+}
+
+/// The block one step along `axis` from `cell`, read from the chunk across that face
+/// when the step leaves this one. Air when there is no such chunk.
+fn stepped_block(
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    cell: [usize; 3],
+    axis: usize,
+    step: isize,
+) -> BlockId {
+    let size = chunk.size();
+    let target = cell[axis] as isize + step;
+    let mut probe = cell;
+    if target >= 0 && (target as usize) < size {
+        probe[axis] = target as usize;
+        return chunk.block(probe);
+    }
+    let positive = step > 0;
+    let Some(across) = neighbours.across(axis, positive, size) else {
+        return palette::AIR;
+    };
+    probe[axis] = if positive { 0 } else { size - 1 };
+    across.block(probe)
 }
 
 /// One voxel of a plane's negative or positive side.
@@ -591,6 +800,7 @@ fn merge_mask(
                 quad_corners(axis, u, v, plane, i, j, width, height, face),
                 normal(axis, face.positive),
                 palette::linear_rgba(face.block),
+                face.flow,
             );
 
             i += width;
@@ -1638,6 +1848,297 @@ mod tests {
         assert_eq!(ice.opaque.quad_count(), stone.opaque.quad_count());
         assert_eq!(ice.opaque.positions, stone.opaque.positions);
         assert!(ice.water.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Flow: what the water shader is told, and what it costs the merge
+    // -----------------------------------------------------------------------
+
+    /// The flow of one voxel with a chosen neighbourhood: `around` is
+    /// `[-x, +x, -z, +z]` and `above` sits directly on top of it.
+    ///
+    /// Every neighbour is written explicitly, because the interesting cases are all
+    /// about which of them contributes: an unset cell is air, and air is the steepest
+    /// drop there is.
+    fn flow_of(block: BlockId, around: [BlockId; 4], above: BlockId) -> WaterFlow {
+        let mut chunk = air(SIZE);
+        let (x, y, z) = (SIZE / 2, SIZE / 2, SIZE / 2);
+        chunk.set(x, y, z, block);
+        chunk.set(x - 1, y, z, around[0]);
+        chunk.set(x + 1, y, z, around[1]);
+        chunk.set(x, y, z - 1, around[2]);
+        chunk.set(x, y, z + 1, around[3]);
+        chunk.set(x, y + 1, z, above);
+        super::flow_at(&chunk, &alone(), [x, y, z])
+    }
+
+    /// Water on every side of the subject, at the same level, so nothing but the
+    /// subject's own id decides its flow.
+    const FLAT: [BlockId; 4] = [
+        palette::WATER_FLOW4,
+        palette::WATER_FLOW4,
+        palette::WATER_FLOW4,
+        palette::WATER_FLOW4,
+    ];
+
+    #[test]
+    fn a_current_flows_along_its_own_axis_and_asks_nobody() {
+        // The server already answered for these four ids, so the gradient is not
+        // consulted: a current surrounded by deeper water still points where it says.
+        for (block, wanted) in [
+            (palette::WATER_CURRENT_XPOS, [1.0, 0.0]),
+            (palette::WATER_CURRENT_XNEG, [-1.0, 0.0]),
+            (palette::WATER_CURRENT_ZPOS, [0.0, 1.0]),
+            (palette::WATER_CURRENT_ZNEG, [0.0, -1.0]),
+        ] {
+            let flow = flow_of(block, FLAT, palette::WATER);
+            assert_eq!(
+                flow.vector(),
+                wanted,
+                "current {block} points the wrong way"
+            );
+            assert_eq!(
+                flow.falling(),
+                [0.0, 0.0],
+                "a current is a source, and a source never falls"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_water_is_still_however_deep_the_water_beside_it_is() {
+        // A lake is a source. It has no gradient to run down, and the shader draws it
+        // shimmering in place rather than sliding.
+        let flow = flow_of(palette::WATER, [palette::AIR; 4], palette::AIR);
+        assert_eq!(flow.vector(), [0.0, 0.0]);
+        assert_eq!(flow.falling(), [0.0, 0.0]);
+        assert_eq!(flow, WaterFlow::STILL);
+    }
+
+    #[test]
+    fn a_flowing_voxel_runs_down_its_own_gradient() {
+        // One shallower neighbour: straight at it. Air is level 0, which is why water
+        // pours off a ledge rather than sitting on it.
+        let east = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW1,
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW4,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(east.vector(), [1.0, 0.0]);
+
+        let off_the_ledge = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW4,
+                palette::AIR,
+                palette::WATER_FLOW4,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(off_the_ledge.vector(), [0.0, -1.0]);
+
+        // Two equal drops at right angles: the diagonal between them, normalised, and
+        // the quantisation is what makes the two components compare equal.
+        let corner = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW2,
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW2,
+            ],
+            palette::AIR,
+        );
+        let [x, z] = corner.vector();
+        assert_eq!(x, z, "a symmetric corner must flow at 45 degrees");
+        assert!(
+            (x.hypot(z) - 1.0).abs() < 2.0 / super::FLOW_STEPS,
+            "the flow is not a unit vector: {:?}",
+            corner.vector()
+        );
+    }
+
+    #[test]
+    fn a_wall_and_a_source_are_not_places_the_water_can_go() {
+        // A solid neighbour is a wall; a source neighbour is the body this trickle came
+        // out of. Neither contributes, so a voxel with nothing else around it is still
+        // rather than pushed into one of them.
+        let penned = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::STONE,
+                palette::WATER,
+                palette::ICE,
+                palette::WATER_CURRENT_XPOS,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(penned.vector(), [0.0, 0.0]);
+
+        // And a wall on one side does not make the water climb the other: the open side
+        // is what it runs down.
+        let against_a_wall = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::STONE,
+                palette::WATER_FLOW1,
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW4,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(against_a_wall.vector(), [1.0, 0.0]);
+    }
+
+    #[test]
+    fn falling_is_a_non_source_with_water_directly_above_it() {
+        // The same question `effective_water_level` asks to draw the column at full
+        // height, and the bit the shader streaks downward on.
+        assert_eq!(
+            flow_of(palette::WATER_FLOW4, FLAT, palette::WATER).falling(),
+            [1.0, 0.0]
+        );
+        assert_eq!(
+            flow_of(palette::WATER_FLOW4, FLAT, palette::WATER_FLOW2).falling(),
+            [1.0, 0.0]
+        );
+        assert_eq!(
+            flow_of(palette::WATER_FLOW4, FLAT, palette::AIR).falling(),
+            [0.0, 0.0]
+        );
+        assert_eq!(
+            flow_of(palette::WATER_FLOW4, FLAT, palette::STONE).falling(),
+            [0.0, 0.0]
+        );
+        // Sources never fall, whatever is on top of them.
+        for source in [palette::WATER, palette::WATER_CURRENT_ZNEG] {
+            assert_eq!(flow_of(source, FLAT, palette::WATER).falling(), [0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn a_chunk_this_session_has_not_been_sent_reads_as_air_here_too() {
+        // The sweep's own rule, applied to the gradient: an absent neighbour is air, so
+        // the water at the border flows out of the chunk rather than standing still.
+        // `render.rs` remeshes when the neighbour arrives, which is what makes that a
+        // wait rather than a mistake.
+        let mut chunk = air(SIZE);
+        chunk.set(0, 1, 1, palette::WATER_FLOW4);
+        chunk.set(1, 1, 1, palette::WATER_FLOW4);
+        chunk.set(0, 1, 0, palette::WATER_FLOW4);
+        chunk.set(0, 1, 2, palette::WATER_FLOW4);
+        assert_eq!(
+            super::flow_at(&chunk, &alone(), [0, 1, 1]).vector(),
+            [-1.0, 0.0],
+            "the absent -x neighbour must read as air"
+        );
+
+        // And the neighbour that has arrived is read, which is the same cell answering
+        // differently once there is something across the border.
+        let mut west = air(SIZE);
+        west.set(SIZE - 1, 1, 1, palette::WATER);
+        assert_eq!(
+            super::flow_at(&chunk, &across(0, false, west), [0, 1, 1]).vector(),
+            [0.0, 0.0],
+            "a source across the border is skipped, and nothing else pushes"
+        );
+    }
+
+    #[test]
+    fn only_the_water_surface_carries_the_flow_attributes() {
+        // The invariant on `SurfaceMesh`: all-or-nothing, per surface. The opaque half
+        // is by far the larger one and pays nothing for an attribute only water reads.
+        let mut chunk = air(SIZE);
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                chunk.set(x, 0, z, palette::STONE);
+                chunk.set(x, 1, z, palette::WATER_CURRENT_XPOS);
+            }
+        }
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert!(!mesh.opaque.is_empty() && !mesh.water.is_empty());
+        assert!(mesh.opaque.flow.is_empty() && mesh.opaque.falling.is_empty());
+        assert_eq!(mesh.water.flow.len(), mesh.water.positions.len());
+        assert_eq!(mesh.water.falling.len(), mesh.water.positions.len());
+
+        // Flat per quad, exactly like the normal and the colour: four vertices, one
+        // value, because no vertex is shared between quads.
+        for quad in 0..mesh.water.quad_count() {
+            let vertices = &mesh.water.flow[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+            assert!(vertices.iter().all(|value| *value == vertices[0]));
+        }
+        assert!(
+            mesh.water.flow.contains(&[1.0, 0.0]),
+            "the whole layer is a +x current and no quad says so"
+        );
+    }
+
+    /// A chunk whose floor is one layer of still water, with `current` written across
+    /// the row at `z = 1` over the `x` range given.
+    fn water_floor_with_current(current: &[(std::ops::Range<usize>, BlockId)]) -> VoxelChunk {
+        let mut chunk = air(SIZE);
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                chunk.set(x, 0, z, palette::WATER);
+            }
+        }
+        for (range, block) in current {
+            for x in range.clone() {
+                chunk.set(x, 0, 1, *block);
+            }
+        }
+        chunk
+    }
+
+    #[test]
+    fn a_straight_run_merges_and_a_bend_beside_still_water_does_not() {
+        // The whole cost of putting the flow in the mask key, measured on the surface a
+        // player actually sees. Every cell here is full-height water, so nothing but the
+        // flow can separate two quads.
+        let up = [0.0, 1.0, 0.0];
+
+        let still = super::mesh_chunk(&water_floor_with_current(&[]), &alone()).water;
+        assert_eq!(
+            quads_facing(&still, up).len(),
+            1,
+            "a lake surface is one quad"
+        );
+
+        // One straight run of current across the whole chunk: the run is a quad of its
+        // own, and the still water on either side of it is one quad each.
+        let straight = super::mesh_chunk(
+            &water_floor_with_current(&[(0..SIZE, palette::WATER_CURRENT_XPOS)]),
+            &alone(),
+        )
+        .water;
+        assert_eq!(
+            quads_facing(&straight, up).len(),
+            3,
+            "a straight run must still merge into one quad"
+        );
+
+        // The same run, bent halfway along: the two halves push different ways and
+        // cannot share a quad.
+        let bend = super::mesh_chunk(
+            &water_floor_with_current(&[
+                (0..SIZE / 2, palette::WATER_CURRENT_XPOS),
+                (SIZE / 2..SIZE, palette::WATER_CURRENT_ZPOS),
+            ]),
+            &alone(),
+        )
+        .water;
+        assert_eq!(
+            quads_facing(&bend, up).len(),
+            4,
+            "a bend must not merge into the run it turns out of"
+        );
     }
 
     #[test]
