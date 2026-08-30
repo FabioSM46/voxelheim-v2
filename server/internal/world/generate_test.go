@@ -53,6 +53,11 @@ const (
 	// Plains trees are sparse enough that none of the three original fixtures pins
 	// one, so this fourth fixture names a plains chunk that contains a conifer. The
 	// two fixtures together make "outside tundra is byte-identical" executable.
+	//
+	// **Worldgen 17 read them in the other direction**, and it is the first bump that
+	// has: the dry taiga fixture moved and this one, the water one, the settlement
+	// one and the river one did not, which is what "the plains distribution is
+	// unchanged" looks like in bytes rather than in a claim.
 	goldenPlainsPath = "testdata/chunk_golden_plains.bin"
 
 	// The fifth fixture, added for the reason the second, third and fourth were, and
@@ -276,8 +281,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 16 {
-		t.Fatalf("WorldgenVersion = %d, want 16 after every river voxel was given the direction it runs", WorldgenVersion)
+	if WorldgenVersion != 17 {
+		t.Fatalf("WorldgenVersion = %d, want 17 after the taiga floor gained bushes and flowers", WorldgenVersion)
 	}
 }
 
