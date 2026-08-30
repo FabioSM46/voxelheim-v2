@@ -12,7 +12,7 @@ use bevy::asset::AssetPlugin;
 use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::input::mouse::MouseMotion;
+use bevy::input::mouse::{MouseButtonInput, MouseMotion};
 use bevy::mesh::VertexAttributeValues;
 use bevy::time::TimeUpdateStrategy;
 
@@ -4953,11 +4953,14 @@ fn look_at(app: &mut App, ground: GroundLook, wooded: bool) {
     app.world_mut().resource_mut::<HeldLook>().0 = Ambience { ground, wooded };
 }
 
-/// The row each bird alive belongs to.
-fn flock(app: &mut App) -> Vec<usize> {
+/// Every bird alive, as `(species, fade, wanted)`.
+fn flock(app: &mut App) -> Vec<(usize, f32, f32)> {
     let world = app.world_mut();
     let mut query = world.query::<&birds::Bird>();
-    query.iter(world).map(|bird| bird.species).collect()
+    query
+        .iter(world)
+        .map(|bird| (bird.species, bird.fade, bird.wanted))
+        .collect()
 }
 
 fn bird_entities(app: &mut App) -> Vec<Entity> {
@@ -4999,7 +5002,7 @@ fn each_look_gets_its_own_flock_and_a_bare_plain_gets_none() {
                     "{ground:?}/{wooded} flew {} of row {index}",
                     birds.len()
                 );
-                assert!(birds.iter().all(|row| *row == index));
+                assert!(birds.iter().all(|bird| bird.0 == index));
             }
         }
         assert!(birds.len() <= birds::BIRD_COUNT_MAX);
@@ -5007,28 +5010,43 @@ fn each_look_gets_its_own_flock_and_a_bare_plain_gets_none() {
 }
 
 #[test]
-fn a_crossing_replaces_the_flock_rather_than_mixing_two() {
-    // The look is the whole of the existence set: a vulture over grass is a vulture the
-    // ground stopped explaining, so it goes. *How* it goes — retired on the frame, or faded
-    // out of the sky — is the second half of this issue; that it goes is this one.
+fn a_crossing_fades_the_old_flock_out_before_the_new_one_is_whole() {
+    // A pop is the failure this whole mechanism exists to prevent, so the assertion is that
+    // the vultures are still drawn on the frame the parrots are decided on, and that they
+    // leave over `BIRD_FADE_SECONDS` rather than between two frames.
     let mut app = birdwatching(GroundLook::Sand, false);
-    watch(&mut app, 3);
-    assert!(flock(&mut app).iter().all(|row| *row == 1));
+    // `BIRD_FADE_SECONDS` at 100 ms a frame, and a few more so the assertion is about a
+    // flock that has finished arriving rather than one still on its way in.
+    watch(&mut app, 20);
+    let vultures = flock(&mut app);
+    assert!(!vultures.is_empty() && vultures.iter().all(|bird| bird.0 == 1));
+    assert!(
+        vultures.iter().all(|bird| bird.1 > 0.99),
+        "a second of flying left the flock half drawn: {vultures:?}"
+    );
 
     look_at(&mut app, GroundLook::Grass, true);
     app.update();
+    let crossing = flock(&mut app);
+    assert!(
+        crossing
+            .iter()
+            .any(|bird| bird.0 == 1 && bird.2 == 0.0 && bird.1 > 0.0),
+        "the vultures vanished instead of fading: {crossing:?}"
+    );
+    assert!(
+        crossing.len() <= birds::BIRD_COUNT_MAX,
+        "the crossing put {} birds in the sky",
+        crossing.len()
+    );
+
+    // `BIRD_FADE_SECONDS` at 100 ms a frame, and a few more for the parrots the cap could
+    // not admit until the vultures had gone.
+    watch(&mut app, 40);
     let parrots = flock(&mut app);
     assert!(
-        !parrots.is_empty() && parrots.iter().all(|row| *row == 0),
-        "the crossing left the sky as {parrots:?}"
-    );
-    assert!(parrots.len() <= birds::BIRD_COUNT_MAX);
-
-    look_at(&mut app, GroundLook::Grass, false);
-    app.update();
-    assert!(
-        flock(&mut app).is_empty(),
-        "felling the wood left the parrots in the air"
+        !parrots.is_empty() && parrots.iter().all(|bird| bird.0 == 0),
+        "the crossing did not finish: {parrots:?}"
     );
 }
 
@@ -5044,6 +5062,14 @@ fn walking_a_long_way_re_seeds_the_flock_around_the_new_anchor() {
 
     put_the_eye_at(&mut app, Vec3::new(4096.0, 64.0, -4096.0));
     app.update();
+    assert!(
+        flock(&mut app).iter().filter(|bird| bird.2 == 0.0).count() >= before.len(),
+        "a bird the anchor left behind was kept"
+    );
+
+    // `BIRD_FADE_SECONDS` at 100 ms a frame, and a few more for the birds the cap could not
+    // admit until the ones left behind had gone.
+    watch(&mut app, 40);
     let after = bird_entities(&mut app);
     assert!(
         after.iter().all(|entity| !before.contains(entity)),
@@ -5073,6 +5099,9 @@ fn a_one_cell_walk_leaves_one_flock_in_the_sky_and_not_two() {
     //
     // One cell is 32 blocks and the box is 64, so a single step is the case that keeps the
     // most strays — which is what makes it the case that overcounted worst.
+    // The fade splits that count in two. The row bounds the birds *staying* (`wanted >
+    // 0.0`) — one already fading is the previous anchor's leaving, not a second flock —
+    // while `BIRD_COUNT_MAX` bounds every entity, the guard the material pool rests on.
     let mut app = birdwatching(GroundLook::Snow, false);
     watch(&mut app, 3);
     let row = &birds::BIRDS[2];
@@ -5088,14 +5117,20 @@ fn a_one_cell_walk_leaves_one_flock_in_the_sky_and_not_two() {
         app.update();
 
         let sky = flock(&mut app);
+        let staying = sky.iter().filter(|bird| bird.2 > 0.0).count();
         assert!(
-            row.flock.contains(&(sky.len() as u8)),
-            "step {step} left {} eagles in a sky whose row allows {:?}",
-            sky.len(),
+            row.flock.contains(&(staying as u8)),
+            "step {step} left {staying} eagles flying in a sky whose row allows {:?}",
             row.flock
         );
         assert!(
-            sky.iter().all(|index| *index == 2),
+            sky.len() <= birds::BIRD_COUNT_MAX,
+            "step {step} put {} birds in a sky that holds {}",
+            sky.len(),
+            birds::BIRD_COUNT_MAX
+        );
+        assert!(
+            sky.iter().all(|bird| bird.0 == 2),
             "step {step} mixed rows: {sky:?}"
         );
     }
@@ -5473,4 +5508,277 @@ fn the_stars_wheel_as_the_day_turns() {
     put_the_eye_at(&mut app, eye);
     app.update();
     assert_eq!(body(&mut app, sky::SkyBodyKind::Stars).1.translation, eye);
+}
+
+#[test]
+fn the_flock_roosts_at_night_and_a_clockless_server_flies_it_all_day() {
+    // Night is the server's own interval and the roost reads the same curve the sky is
+    // tinted from — `sky::night_now` — rather than a second opinion about what time it is.
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+        .init_asset::<Mesh>()
+        .init_asset::<StandardMaterial>()
+        .insert_resource(session_with_a_clock())
+        .add_plugins(PlayerPlugin)
+        .insert_resource(HeldLook(Ambience {
+            ground: GroundLook::Sand,
+            wooded: false,
+        }))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )))
+        .add_systems(
+            Update,
+            hold_the_ambience
+                .before(birds::keep_the_flock)
+                .after(ambience::sample_the_ground),
+        );
+
+    // Midday: the vultures fly.
+    deliver_at_tick_of_day(&mut app, 1, 7_200, Instant::now());
+    watch(&mut app, 3);
+    assert!(
+        !flock(&mut app).is_empty(),
+        "a midday sky had no birds in it"
+    );
+
+    // Deep night: they roost, and nothing new is spawned while they leave.
+    deliver_at_tick_of_day(&mut app, 2, 18_000, Instant::now());
+    app.update();
+    assert!(
+        flock(&mut app).iter().all(|bird| bird.2 == 0.0),
+        "a roosting flock was still wanted"
+    );
+    watch(&mut app, 25);
+    assert!(
+        flock(&mut app).is_empty(),
+        "the night sky kept its vultures"
+    );
+
+    // The same look on a server that declares no day has no night to roost through.
+    let mut clockless = birdwatching(GroundLook::Sand, false);
+    watch(&mut clockless, 3);
+    assert!(
+        !flock(&mut clockless).is_empty(),
+        "a server with no clock roosted its birds anyway"
+    );
+}
+
+#[test]
+fn a_submerged_eye_hides_the_birds_without_retiring_them() {
+    // Hidden, not faded: going under water is a thing the eye does, and coming back up must
+    // not cost a second and a half of empty sky.
+    let mut app = birdwatching(GroundLook::Sand, false);
+    watch(&mut app, 20);
+    let above = bird_entities(&mut app);
+    assert!(!above.is_empty());
+
+    // The water is brought to the eye rather than the eye to the water: moving the camera
+    // would move the anchor too, and a retired flock would then prove nothing about water.
+    let eye = camera_transform(&mut app).translation;
+    app.insert_resource(a_voxel_of(
+        crate::world::palette::WATER,
+        eye.floor().as_ivec3(),
+    ));
+    app.update();
+    let world = app.world();
+    for entity in &above {
+        assert_eq!(
+            *world
+                .entity(*entity)
+                .get::<Visibility>()
+                .expect("a bird is drawn or not"),
+            Visibility::Hidden,
+            "a bird was still drawn from under water"
+        );
+    }
+    assert!(
+        flock(&mut app)
+            .iter()
+            .all(|bird| bird.1 > 0.99 && bird.2 == 1.0),
+        "water retired the flock instead of hiding it"
+    );
+}
+
+#[test]
+fn nothing_a_bird_carries_belongs_to_anything_that_decides() {
+    // The pin under the whole module. A bird is three entities and none of them may hold a
+    // component from `mobs.rs`, `hands.rs`, `drops.rs`, `structures.rs` or the body rig —
+    // and `target.rs` has no component to carry at all, because it raycasts voxels and the
+    // bodies a snapshot named.
+    let mut app = birdwatching(GroundLook::Snow, false);
+    watch(&mut app, 4);
+    let eagles = bird_entities(&mut app);
+    assert!(
+        !eagles.is_empty(),
+        "there were no birds to make assertions about"
+    );
+
+    let mut every = Vec::new();
+    for eagle in eagles {
+        every.push(eagle);
+        let world = app.world();
+        let children = world
+            .entity(eagle)
+            .get::<Children>()
+            .expect("a bird has wings");
+        assert_eq!(children.len(), 2, "a bird is a body and two wings");
+        every.extend(children.iter());
+    }
+
+    for entity in every {
+        let entity = app.world().entity(entity);
+        assert!(!entity.contains::<mobs::Mob>());
+        assert!(!entity.contains::<mobs::MobVisual>());
+        assert!(!entity.contains::<mobs::AggroMarker>());
+        assert!(!entity.contains::<hands::HeldItem>());
+        assert!(!entity.contains::<drops::DroppedItem>());
+        assert!(!entity.contains::<drops::DropVisual>());
+        assert!(!entity.contains::<structures::Structure>());
+        assert!(!entity.contains::<structures::StructureVisual>());
+        assert!(!entity.contains::<structures::FireLight>());
+        assert!(!entity.contains::<Body>());
+        assert!(!entity.contains::<NamePlate>());
+        assert!(!entity.contains::<LocalPlayer>());
+        assert!(!entity.contains::<Worn>());
+    }
+}
+
+#[test]
+fn a_snapshot_that_names_no_mobs_leaves_the_flock_alone() {
+    // A bird is not snapshot state, so the existence set that despawns every mob the server
+    // stopped naming must not reach one.
+    let mut app = birdwatching(GroundLook::Snow, false);
+    watch(&mut app, 4);
+    let before = bird_entities(&mut app);
+    assert!(!before.is_empty());
+
+    deliver(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.5, 64.0, 0.5], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+    deliver(&mut app, 2, vec![], Instant::now());
+    app.update();
+
+    let after = bird_entities(&mut app);
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "an empty snapshot took birds with it"
+    );
+    assert!(before.iter().all(|entity| after.contains(entity)));
+}
+
+/// A store holding exactly one named voxel, in whichever chunk contains it.
+fn a_voxel_of(block: crate::world::BlockId, voxel: IVec3) -> crate::world::ChunkStore {
+    let edge = 32;
+    let mut chunk = crate::world::VoxelChunk::all_air(edge as usize);
+    chunk.set(
+        voxel.x.rem_euclid(edge) as usize,
+        voxel.y.rem_euclid(edge) as usize,
+        voxel.z.rem_euclid(edge) as usize,
+        block,
+    );
+    let mut store = crate::world::ChunkStore::default();
+    store.insert(
+        crate::net::ChunkCoord {
+            cx: voxel.x.div_euclid(edge),
+            cy: voxel.y.div_euclid(edge),
+            cz: voxel.z.div_euclid(edge),
+        },
+        chunk,
+    );
+    store
+}
+
+/// The look state that points the eye along `direction`.
+fn look_along(direction: Vec3) -> LookState {
+    LookState {
+        yaw: (-direction.x).atan2(-direction.z),
+        pitch: direction.y.atan2(direction.x.hypot(direction.z)),
+    }
+}
+
+/// Every frame the client put on the wire, in order.
+fn frames(sent: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<Vec<u8>> {
+    let mut found = Vec::new();
+    while let Ok(frame) = sent.try_recv() {
+        found.push(frame);
+    }
+    found
+}
+
+#[test]
+fn a_mining_intent_along_a_bird_sends_exactly_what_an_empty_sky_would() {
+    // The strongest form of "a bird is not a thing": the player is aiming straight down the
+    // line a bird is flying on, holding the break button, and the bytes that reach the
+    // server are the same bytes an empty sky produces. Nothing occludes, nothing is
+    // targeted, and nothing about the bird changes because a click happened.
+    //
+    // The aim is taken from the flock that is actually in the sky, in the app the click
+    // lands in, so "on the aim line" is a measurement rather than a hope.
+    let sighted = |ground: GroundLook| {
+        let mut app = birdwatching(ground, false);
+        let (outbound, sent) = crate::net::Outbound::to_a_test(64);
+        app.add_plugins(InputPlugin).insert_resource(outbound);
+        deliver(
+            &mut app,
+            1,
+            vec![state(LOCAL_ID, [0.5, 64.0, 0.5], 0.0)],
+            Instant::now(),
+        );
+        watch(&mut app, 20);
+        (app, sent)
+    };
+
+    let (mut watched, _) = sighted(GroundLook::Sand);
+    let bird = bird_positions(&mut watched)[0];
+    let eye = camera_transform(&mut watched).translation;
+    let along = (bird - eye).normalize();
+    let look = look_along(along);
+    // A wall two and a half blocks along the same line: well inside reach, and with the
+    // bird still on that line far beyond it.
+    let wall = (eye + along * 2.5).floor().as_ivec3();
+
+    let click_through = |ground: GroundLook| {
+        let (mut app, sent) = sighted(ground);
+        app.insert_resource(a_voxel_of(crate::world::palette::STONE, wall));
+        *app.world_mut().resource_mut::<LookState>() = look;
+        app.update();
+        let _ = frames(&sent);
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+            window: Entity::PLACEHOLDER,
+        });
+        watch(&mut app, 4);
+        let sent = frames(&sent);
+        (app, sent)
+    };
+
+    let (mut watched, with_birds) = click_through(GroundLook::Sand);
+    let (_, empty_sky) = click_through(GroundLook::Unknown);
+
+    let aimed = watched.world().resource::<target::BlockTarget>().0;
+    assert_eq!(
+        aimed.map(|hit| hit.block),
+        Some(wall),
+        "the ray did not reach the wall, so the comparison would pass on nothing"
+    );
+    let flying = flock(&mut watched);
+    assert!(
+        !flying.is_empty() && flying.iter().all(|bird| bird.1 > 0.99 && bird.2 == 1.0),
+        "mining along a bird changed the bird: {flying:?}"
+    );
+    assert!(
+        !with_birds.is_empty(),
+        "no frames were sent, so the comparison would pass on nothing"
+    );
+    assert_eq!(
+        with_birds, empty_sky,
+        "a bird on the aim line changed what the client sent"
+    );
 }
