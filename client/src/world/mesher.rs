@@ -328,20 +328,21 @@ pub struct ChunkMesh {
     /// Water against transparent non-water voxels, plus the exposed skirt between
     /// unequal water levels. Equal water and water against solid blocks stay hidden.
     pub water: SurfaceMesh,
-    /// Every plant, grown one voxel at a time by [`build_cover`]: a flower's stem and
-    /// head, and a bush's clumps of foliage.
+    /// Every plant, grown one voxel at a time by [`build_cover`]: a flower's stem, leaves
+    /// and corolla, and a bush's clumps of foliage.
     ///
     /// **The third surface, and it is not produced by the sweep at all.** The sweep
     /// exists to merge coplanar faces of adjacent voxels, and a plant has none to merge:
-    /// a flower is a cross of blades under a small cube and a bush is three overlapping
+    /// a flower is a cross of blades under a corolla and a bush is three overlapping
     /// clumps, both inside a voxel nothing else is drawn in. Two of either side by side
     /// are two plants — which is the point for the bush, since being merged into its
     /// neighbour is exactly what made a row of them one flat slab — so there is nothing a
     /// mask could join and every reason not to pay for a third one per plane.
     ///
     /// It is its own half rather than more quads in [`Self::opaque`] because its
-    /// material differs: a stem is a plane, so it is seen from both sides and is drawn
-    /// with no back-face culling. That is a pipeline, and a pipeline is an entity.
+    /// material differs: a stem, a petal and a leaf are all single planes, so they are
+    /// seen from both sides and are drawn with no back-face culling. That is a pipeline,
+    /// and a pipeline is an entity.
     pub cover: SurfaceMesh,
 }
 
@@ -358,16 +359,51 @@ impl ChunkMesh {
     }
 }
 
-/// How wide the two crossing blades of a cover stem are, in blocks.
-const COVER_STEM_WIDTH: f32 = 0.3;
+/// How wide the two crossing blades of a flower's stem are, in blocks.
+///
+/// Narrower than the 0.3 a bare head stood on, because the stem is no longer most of
+/// what a flower is: beside a petal 0.17 across it read as a post rather than a stalk.
+const COVER_STEM_WIDTH: f32 = 0.16;
 
-/// How tall a stem stands above the bottom of its voxel, in blocks.
+/// How tall a stem stands above the bottom of its voxel, in blocks. The corolla sits on
+/// top of it, so this is also the height of a petal's inner edge.
 const COVER_STEM_HEIGHT: f32 = 0.5;
 
-/// The edge of the cube that sits on the stem, in blocks. It spans
-/// `[COVER_STEM_HEIGHT, COVER_STEM_HEIGHT + COVER_HEAD_SIZE]` vertically, so a flower
-/// occupies the lower three quarters of its voxel and never crosses into the next one.
-const COVER_HEAD_SIZE: f32 = 0.25;
+/// How many petals a corolla is built from. Five, and odd on purpose: an even count
+/// pairs every petal with one directly opposite and reads as a cross from above.
+const COVER_PETALS: usize = 5;
+
+/// How far a petal reaches from the stem's axis, in blocks.
+///
+/// The inner edge is **on** the axis rather than short of it, which is what closes the
+/// middle of the corolla: five rectangles whose inner edges all cross the centre overlap
+/// there and leave no hole, while at the outer radius they are 29° wide and clearly five
+/// separate petals.
+const COVER_PETAL_OUTER: f32 = 0.33;
+
+/// Half a petal's width across, in blocks.
+const COVER_PETAL_HALF_WIDTH: f32 = 0.085;
+
+/// How far a petal's outer edge lifts above its inner one, in blocks. The corolla is a
+/// shallow bowl and not a disc, so it is still a band of colour seen edge-on from the
+/// side, which a flat one would not be.
+const COVER_PETAL_RISE: f32 = 0.11;
+
+/// The eye at the middle of the corolla: two crossing blades this wide, rising this far
+/// above the petals' inner edge, in blocks.
+///
+/// Vertical rather than a horizontal disc because a disc would sit within a hundredth of
+/// a block of the petal surface it caps and the two would fight the depth buffer over the
+/// middle of every flower in the world. Crossing blades share no plane with a petal.
+const COVER_EYE_WIDTH: f32 = 0.09;
+const COVER_EYE_HEIGHT: f32 = 0.085;
+
+/// The pair of leaves partway up the stem: their height above the voxel floor, how far
+/// they reach from the axis, half their width and how far the tip lifts — all in blocks.
+const COVER_LEAF_HEIGHT: f32 = 0.21;
+const COVER_LEAF_OUTER: f32 = 0.3;
+const COVER_LEAF_HALF_WIDTH: f32 = 0.055;
+const COVER_LEAF_RISE: f32 = 0.09;
 
 /// How far a bush's foliage keeps back from the walls of its voxel, in blocks.
 ///
@@ -403,13 +439,14 @@ const BUSH_CROWN_SPAN: f32 = 0.56;
 const BUSH_CROWN_FLOOR: f32 = 0.52;
 const BUSH_CROWN_JITTER: f32 = 0.1;
 
-/// How many quads one flower contributes: two stem blades and the head's six faces.
+/// How many quads one flower contributes: two stem blades, two leaves,
+/// [`COVER_PETALS`] petals and the eye's two blades.
 ///
 /// Test-only for the reason [`palette::PALETTE`] is: production code emits the quads
 /// rather than counting them, and a constant nothing reads is a claim nothing checks.
 /// Here it is read by the assertions that pin the geometry.
 #[cfg(test)]
-const QUADS_PER_COVER: usize = 8;
+const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 
 /// How many quads one bush contributes: three clumps of six faces each.
 #[cfg(test)]
@@ -583,8 +620,8 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
     mesh
 }
 
-/// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a stem and a head
-/// for each of the three cover ids, a clump of foliage for a bush.
+/// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a flower for each
+/// of the three cover ids, a clump of foliage for a bush.
 ///
 /// A whole pass over the chunk rather than a third mask, because there is nothing here
 /// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a plant's
@@ -596,7 +633,6 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
 /// voxels produce byte-identical buffers every time.
 fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
     let size = chunk.size();
-    let stem = opaque(palette::STEM_LINEAR);
 
     for y in 0..size {
         for z in 0..size {
@@ -613,32 +649,14 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
                 if !palette::is_shaped(block) {
                     continue;
                 }
+
+                let floor = [x as f32, y as f32, z as f32];
+                let seed = plant_seed(x, y, z);
                 if block == palette::BUSH {
-                    push_bush(mesh, [x as f32, y as f32, z as f32], plant_seed(x, y, z));
-                    continue;
+                    push_bush(mesh, floor, seed);
+                } else {
+                    push_flower(mesh, floor, seed, palette::linear_rgba(block));
                 }
-
-                let (x, y, z) = (x as f32, y as f32, z as f32);
-                // The middle of the voxel's floor: where the stem stands.
-                let base = [x + 0.5, y, z + 0.5];
-                let half = COVER_STEM_WIDTH / 2.0;
-                let top = y + COVER_STEM_HEIGHT;
-
-                // Two blades crossing on the voxel's vertical axis, each a single quad:
-                // the material draws both sides, so a second wound the other way would
-                // be a coincident copy fighting the depth buffer for nothing.
-                push_blade(mesh, base, half, top, 0, stem);
-                push_blade(mesh, base, half, top, 2, stem);
-
-                // The head, centred over the crossing. Its colour is the block's, from
-                // the one function that owns what an id looks like.
-                let head = COVER_HEAD_SIZE / 2.0;
-                push_box(
-                    mesh,
-                    [base[0] - head, top, base[2] - head],
-                    [base[0] + head, top + COVER_HEAD_SIZE, base[2] + head],
-                    palette::linear_rgba(block),
-                );
             }
         }
     }
@@ -671,6 +689,75 @@ fn dial(seed: u32, index: u32) -> f32 {
     hash = hash.wrapping_mul(0x7FEB_352D);
     hash ^= hash >> 15;
     f32::from(((hash >> 8) & 0xFFFF) as u16) / 65536.0
+}
+
+/// One flower, standing on the floor of the voxel whose minimum corner is `floor`.
+///
+/// Four parts and eleven quads: two crossing stem blades, two leaves partway up, a
+/// corolla of [`COVER_PETALS`] petals, and the two blades of the eye they meet at. The
+/// whole plant is yawed by a fraction of a petal's spacing drawn from `seed`, which is
+/// what keeps three flowers in a row from being one flower drawn three times.
+///
+/// **Every vertex stays inside the voxel**, and that is a property rather than a
+/// coincidence: it is what lets `ChunkStore::apply_block` need no remesh rule for a
+/// flower on a border. The tallest thing here reaches
+/// `COVER_STEM_HEIGHT + COVER_PETAL_RISE + COVER_EYE_HEIGHT`, and the widest reaches
+/// `hypot(COVER_PETAL_OUTER, COVER_PETAL_HALF_WIDTH)` from the middle;
+/// `every_flower_vertex_stays_inside_its_own_voxel` is what holds the arithmetic to it.
+fn push_flower(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32, petal: [f32; 4]) {
+    let stem_color = opaque(palette::STEM_LINEAR);
+    let leaf_color = opaque(palette::LEAF_LINEAR);
+    let eye_color = opaque(palette::FLOWER_CENTRE_LINEAR);
+
+    // The middle of the voxel's floor: where the stem stands.
+    let base = [floor[0] + 0.5, floor[1], floor[2] + 0.5];
+    let top = floor[1] + COVER_STEM_HEIGHT;
+
+    // Two blades crossing on the voxel's vertical axis, each a single quad: the material
+    // draws both sides, so a second wound the other way would be a coincident copy
+    // fighting the depth buffer for nothing.
+    let half = COVER_STEM_WIDTH / 2.0;
+    push_blade(mesh, base, half, top, 0, stem_color);
+    push_blade(mesh, base, half, top, 2, stem_color);
+
+    let spacing = std::f32::consts::TAU / COVER_PETALS as f32;
+    let yaw = dial(seed, 0) * spacing;
+
+    // The leaves, opposite each other so the plant does not lean. They are the same
+    // primitive as a petal — a blade radiating from the stem and lifting at the tip —
+    // which is the only reason two more parts cost no more code than one.
+    let leaf_base = [base[0], floor[1] + COVER_LEAF_HEIGHT, base[2]];
+    for side in 0..2 {
+        push_radial_blade(
+            mesh,
+            leaf_base,
+            yaw + side as f32 * std::f32::consts::PI,
+            COVER_LEAF_OUTER,
+            COVER_LEAF_HALF_WIDTH,
+            COVER_LEAF_RISE,
+            leaf_color,
+        );
+    }
+
+    // The corolla. Every petal starts on the axis, so the five of them overlap at the
+    // middle and the flower has no hole in it seen from above.
+    let corolla = [base[0], top, base[2]];
+    for petal_index in 0..COVER_PETALS {
+        push_radial_blade(
+            mesh,
+            corolla,
+            yaw + petal_index as f32 * spacing,
+            COVER_PETAL_OUTER,
+            COVER_PETAL_HALF_WIDTH,
+            COVER_PETAL_RISE,
+            petal,
+        );
+    }
+
+    // The eye, in the one place the petals all meet.
+    let eye = COVER_EYE_WIDTH / 2.0;
+    push_blade(mesh, corolla, eye, top + COVER_EYE_HEIGHT, 0, eye_color);
+    push_blade(mesh, corolla, eye, top + COVER_EYE_HEIGHT, 2, eye_color);
 }
 
 /// One bush, filling the voxel whose minimum corner is `floor`.
@@ -747,6 +834,60 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
 /// callers: [`palette::linear_rgba`] already answers with an alpha.
 fn opaque(tone: [f32; 3]) -> [f32; 4] {
     [tone[0], tone[1], tone[2], 1.0]
+}
+
+/// A petal or a leaf: a quad radiating from `centre` at `angle`, `2 * half_width` across,
+/// reaching `outer` from the axis and lifting `rise` at its outer edge.
+///
+/// **The inner edge is on the axis rather than short of it**, so the blades of one corolla
+/// overlap at the middle and close it. Two of them at different angles are two planes
+/// through a common point: they cross along a line and share no area, which is what keeps
+/// the overlap from being a depth-buffer fight.
+///
+/// The corner order is `inner(-w), inner(+w), outer(+w), outer(-w)` and it is
+/// **load-bearing** — `hands::BladeSection::perimeter` says why, and it has been paid for
+/// twice this iteration: walking a section the other way round turns the surface inside
+/// out, which is visible only as a shape that vanishes when you look at it. Here the
+/// normal is *derived* from those corners rather than declared beside them, so the two
+/// cannot disagree however the order is later edited.
+fn push_radial_blade(
+    mesh: &mut SurfaceMesh,
+    centre: [f32; 3],
+    angle: f32,
+    outer: f32,
+    half_width: f32,
+    rise: f32,
+    color: [f32; 4],
+) {
+    let (sin, cos) = angle.sin_cos();
+    let at = |radius: f32, across: f32, lift: f32| {
+        [
+            centre[0] + cos * radius - sin * across,
+            centre[1] + lift,
+            centre[2] + sin * radius + cos * across,
+        ]
+    };
+    let corners = [
+        at(0.0, -half_width, 0.0),
+        at(0.0, half_width, 0.0),
+        at(outer, half_width, rise),
+        at(outer, -half_width, rise),
+    ];
+    mesh.push_quad(corners, face_normal(corners), color, None);
+}
+
+/// The unit normal a quad's corners imply, from the two edges leaving the first one —
+/// the same cross product the winding assertions in the tests below take.
+fn face_normal(corners: [[f32; 3]; VERTICES_PER_QUAD]) -> [f32; 3] {
+    let edge = |from: [f32; 3], to: [f32; 3]| [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let (a, b) = (edge(corners[0], corners[1]), edge(corners[0], corners[3]));
+    let cross = [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ];
+    let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    [cross[0] / length, cross[1] / length, cross[2] / length]
 }
 
 /// One vertical blade of a stem: a quad `2 * half` wide along `span`, rising from
@@ -2952,10 +3093,10 @@ mod tests {
         );
     }
 
-    /// Which colour every quad of a surface carries, counted. The census the bush tests
-    /// below read: a bush is two named tones, and how many quads each one covers is the
-    /// whole of what "a skirt, a body and a lighter crown" means to a test with no
-    /// screen.
+    /// Which colour every quad of a surface carries, counted. The census the geometry
+    /// tests below read: a flower is four named tones and a bush is two, and how many
+    /// quads each one covers is the whole of what "a stem, leaves and a corolla" means
+    /// to a test with no screen.
     fn quads_by_colour(mesh: &SurfaceMesh) -> BTreeMap<[u32; 4], usize> {
         let mut counts = BTreeMap::new();
         for quad in 0..mesh.quad_count() {
@@ -2974,7 +3115,6 @@ mod tests {
     /// The check that catches a face drawn inside-out without a screen, and the cover
     /// material's `cull_mode: None` is why it has to be made here: a reversed quad is
     /// still drawn, so the mistake would show up in the lighting and not in the picture.
-    /// `hands::BladeSection::perimeter` is where the same warning is written down.
     fn winding_agrees_with_every_normal(mesh: &SurfaceMesh) {
         for quad in 0..mesh.quad_count() {
             let winding = winding_normal(mesh, quad);
@@ -3006,8 +3146,8 @@ mod tests {
     }
 
     #[test]
-    fn one_flower_is_a_stem_and_a_head_in_the_cover_half_and_nothing_else() {
-        // #551's whole geometry, in the one chunk that isolates it. The grass keeps its
+    fn one_flower_is_a_stem_leaves_and_a_corolla_in_the_cover_half_and_nothing_else() {
+        // #634's whole geometry, in the one chunk that isolates it. The grass keeps its
         // top face because a flower is not opaque, so the opaque half is a solid chunk's
         // six walls and not five; the water half never hears about cover at all.
         let mut chunk = solid(SIZE, palette::GRASS);
@@ -3028,80 +3168,52 @@ mod tests {
         );
         assert!(!mesh.is_empty());
 
-        // Two blades and six head faces, and the head is a closed box: one quad in each
-        // of the six directions.
-        let by_normal = quads_by_normal(&mesh.cover);
+        // Four parts, four colours, and the count of each is what says which part is
+        // which: two stem blades, two leaves, five petals, two eye blades.
         assert_eq!(
-            by_normal.get(&[1, 0, 0]),
-            Some(&2),
-            "+x head face and a blade"
+            quads_by_colour(&mesh.cover),
+            BTreeMap::from([
+                (tone(palette::STEM_LINEAR), 2),
+                (tone(palette::LEAF_LINEAR), 2),
+                (tone(palette::FLOWER_CENTRE_LINEAR), 2),
+                (
+                    palette::linear_rgba(palette::FLOWER_RED).map(f32::to_bits),
+                    COVER_PETALS
+                ),
+            ]),
+            "a stem, a pair of leaves, a corolla of separate petals and an eye"
         );
-        assert_eq!(
-            by_normal.get(&[0, 0, 1]),
-            Some(&2),
-            "+z head face and a blade"
-        );
-        for direction in [[-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, -1]] {
-            assert_eq!(by_normal.get(&direction), Some(&1), "{direction:?}");
-        }
 
-        // The declared normal and the winding agree on every quad, which is how a
-        // face drawn inside-out is caught without a screen. `cull_mode: None` would
-        // hide the mistake in the picture and not in the lighting.
+        // The petals and the leaves are the parts that are neither vertical nor
+        // axis-aligned, and every one of them faces upward. A corolla wound the other way
+        // round is a bowl seen from underneath — lit from below, dark from above — which
+        // is the failure `push_radial_blade`'s corner order exists to prevent and the one
+        // a screenshot shows and a quad count does not.
+        let petal = palette::linear_rgba(palette::FLOWER_RED);
+        let leaf = opaque(palette::LEAF_LINEAR);
+        let mut upward = 0;
         for quad in 0..mesh.cover.quad_count() {
-            let winding = winding_normal(&mesh.cover, quad);
-            let declared = mesh.cover.normals[quad * VERTICES_PER_QUAD];
-            let length =
-                (winding[0] * winding[0] + winding[1] * winding[1] + winding[2] * winding[2])
-                    .sqrt();
-            let unit = [
-                winding[0] / length,
-                winding[1] / length,
-                winding[2] / length,
-            ];
-            for axis in 0..3 {
-                assert!(
-                    (unit[axis] - declared[axis]).abs() < 1e-5,
-                    "cover quad {quad} is wound against its normal: {unit:?} vs {declared:?}"
-                );
-            }
+            let normal = mesh.cover.normals[quad * VERTICES_PER_QUAD];
+            let colour = mesh.cover.colors[quad * VERTICES_PER_QUAD];
+            let radial = colour == petal || colour == leaf;
+            assert_eq!(
+                radial,
+                normal[1] > 0.5,
+                "quad {quad} faces {normal:?} with colour {colour:?}"
+            );
+            upward += usize::from(radial);
         }
+        assert_eq!(upward, COVER_PETALS + 2, "the corolla and the two leaves");
 
-        // Everything stays inside the voxel it grew in, and nothing reaches its lid —
-        // which is what makes cover a per-voxel surface with no neighbour to consult.
+        winding_agrees_with_every_normal(&mesh.cover);
+        stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
+        // And it stands on the floor of that voxel rather than hovering over it.
         assert_eq!(quad_extent(&mesh.cover, 0, 1).0, 5.0);
-        for quad in 0..mesh.cover.quad_count() {
-            for (axis, (low, high)) in [(0, (4.0, 5.0)), (1, (5.0, 5.75)), (2, (6.0, 7.0))] {
-                let (minimum, maximum) = quad_extent(&mesh.cover, quad, axis);
-                assert!(
-                    minimum >= low && maximum <= high,
-                    "cover quad {quad} leaves its voxel on axis {axis}: {minimum}..{maximum}"
-                );
-            }
-        }
 
         // The cover half carries no flow, which is what keeps `SurfaceMesh`'s
         // all-or-nothing invariant true for it and what keeps `to_bevy_mesh` from
         // inserting a UV attribute nothing reads.
         assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
-
-        // The head is the block's colour and the stem is not, which is the whole of what
-        // makes a flower read as a flower rather than as a coloured smear.
-        let stem = [
-            palette::STEM_LINEAR[0],
-            palette::STEM_LINEAR[1],
-            palette::STEM_LINEAR[2],
-            1.0,
-        ];
-        let head = palette::linear_rgba(palette::FLOWER_RED);
-        assert_ne!(stem, head);
-        let mut heads = 0;
-        for quad in 0..mesh.cover.quad_count() {
-            let colour = mesh.cover.colors[quad * VERTICES_PER_QUAD];
-            assert!(colour == stem || colour == head, "quad {quad}: {colour:?}");
-            heads += usize::from(colour == head);
-        }
-        assert_eq!(heads, 6, "the head is the six-faced part");
     }
 
     #[test]
@@ -3229,7 +3341,7 @@ mod tests {
             mesh.cover.quad_count(),
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
-        assert_eq!(mesh.cover.quad_count(), 1088);
+        assert_eq!(mesh.cover.quad_count(), 1280);
     }
 
     #[test]
@@ -3254,6 +3366,14 @@ mod tests {
             "cover is drawn by nothing but itself"
         );
         assert_eq!(mesh.cover.quad_count(), 3 * QUADS_PER_COVER);
+        // Three flowers in a row are three flowers, and no two of them are the same
+        // shape: the yaw each takes from its own voxel is what stops a meadow reading as
+        // one flower stamped across it.
+        let yaws: Vec<[f32; 3]> = (0..3)
+            .map(|plant| mesh.cover.positions[plant * QUADS_PER_COVER * VERTICES_PER_QUAD + 8])
+            .collect();
+        assert_ne!(yaws[0][2], yaws[1][2]);
+        assert_ne!(yaws[1][2], yaws[2][2]);
         for block in [
             palette::FLOWER_RED,
             palette::FLOWER_YELLOW,

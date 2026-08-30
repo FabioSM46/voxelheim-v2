@@ -340,6 +340,19 @@ const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 /// [`super::mesher::build_cover`] asks for it directly, once per stem quad.
 pub const STEM_LINEAR: [f32; 3] = [0.048_172, 0.147_027, 0.027_321];
 
+/// The pair of leaves partway up a flower's stem. `#4C8438`.
+///
+/// A fresher green than [`STEM_LINEAR`], so a leaf is a blade catching the light rather
+/// than a wider stem. **Not a block colour**, exactly as the stem is not.
+pub const LEAF_LINEAR: [f32; 3] = [0.072_272, 0.230_740, 0.039_546];
+
+/// The eye at the middle of a corolla, where the petals meet. `#7A5A1E`.
+///
+/// Dark and warm so it reads against all three petal colours — a lighter centre would
+/// vanish inside the yellow flower, which is the one the corolla has least contrast with.
+/// **Not a block colour.**
+pub const FLOWER_CENTRE_LINEAR: [f32; 3] = [0.194_618, 0.102_242, 0.012_983];
+
 /// The sunlit top of a bush's foliage. `#56945A`.
 ///
 /// Lighter than [`BUSH_LINEAR`], which is what gives a clump of bushes a top and a
@@ -421,7 +434,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 27] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 29] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -447,6 +460,8 @@ mod tests {
         ("flower yellow", [0xE8, 0xC6, 0x4A], FLOWER_YELLOW_LINEAR),
         ("flower blue", [0x5B, 0x76, 0xC8], FLOWER_BLUE_LINEAR),
         ("stem", [0x3E, 0x6B, 0x2E], STEM_LINEAR),
+        ("leaf", [0x4C, 0x84, 0x38], LEAF_LINEAR),
+        ("flower centre", [0x7A, 0x5A, 0x1E], FLOWER_CENTRE_LINEAR),
         ("bush crown", [0x56, 0x94, 0x5A], BUSH_CROWN_LINEAR),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
@@ -626,10 +641,15 @@ mod tests {
         {
             assert!(!is_cover(block), "block {block} is not cover");
         }
-        // The stem and the bush's sunlit crown are colours and not blocks: nothing
-        // renders as one through this function, which is what keeps both out of the
-        // distinctness test above.
-        for tone in [STEM_LINEAR, BUSH_CROWN_LINEAR] {
+        // The stem, the leaf, the corolla's eye and the bush's sunlit crown are colours
+        // and not blocks: nothing renders as one through this function, which is what
+        // keeps all four out of the distinctness test above.
+        for tone in [
+            STEM_LINEAR,
+            LEAF_LINEAR,
+            FLOWER_CENTRE_LINEAR,
+            BUSH_CROWN_LINEAR,
+        ] {
             let rgba = [tone[0], tone[1], tone[2], 1.0];
             for block in PALETTE.into_iter().chain([AIR, BlockId::MAX]) {
                 assert_ne!(linear_rgba(block), rgba);
