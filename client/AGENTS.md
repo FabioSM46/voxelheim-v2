@@ -90,7 +90,7 @@ keeps meaning "everything the client is".
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — and the frame-rate readout in whichever of the four corners the setting names | reach into another module's internals, grow a health bar, or call the snapshot age a round trip |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
-| `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, and when it is up | learn a server's address, open a socket, or draw an empty list for a list it could not read |
+| `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
 | `ui/settings.rs` | the settings screen behind the pause menu: the two tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints and one reset per tab | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
@@ -1197,6 +1197,16 @@ answers do is disagree.
   the protocol are all rejections, because in all three the player is looking at a status line
   and needs a reason. After a session exists, the same failures are disconnections and the detail
   belongs in the log.
+
+  **"A session exists" is not the same question as `Handshake::established`, and `peer_closed` is
+  where that cost something.** The character phase is a screen, not a status line: the server has
+  answered the hello with this account's characters, so a clean close there — which is what
+  `-character-timeout` expiring *is*, closed deliberately and without a reply — is a session
+  ending. Asking `established()` made it a refusal reading *"closed the connection before
+  answering the handshake"*, a sentence untrue of the one case that reaches it most often (#627).
+  `peer_closed` therefore matches `Handshake::phase` exhaustively: `Established` and `Choosing`
+  end, `AwaitingCharacters` and `AwaitingWelcome` refuse. A fifth phase must not compile until
+  somebody decides which it is.
 - **A protocol failure is never a panic.** The net thread reports and returns; the app keeps
   running with the reason on screen. `codec::decode` is total over arbitrary bytes, and the tests
   hold it to that over every truncation and every single-byte corruption of a valid frame.
@@ -1727,8 +1737,8 @@ is a file an attacker can talk them into editing.
 Two refusals that are *not* that one and are easy to mistake for it:
 
 - **"The login service could not be reached."** The account service did not answer, so there is no
-  list — not an empty one. The screen offers a retry and nothing else; check that
-  `--account-service` names a service that is up.
+  list — not an empty one. The screen offers a retry, and a reconnect if this client has already
+  been on a server; check that `--account-service` names a service that is up.
 - **"No server has registered with this account service yet."** The list was read and is genuinely
   empty. Nothing is wrong with this client; a server has to register before it appears.
 
@@ -2027,8 +2037,18 @@ Recorded here so the next reader does not mistake them for oversights:
   box, or it would clip the knuckles off everybody and the knot off one of them.
 - **No sign-out and no account switching.** Deleting the cached ticket is sign-out; the usage text
   says so and `--account-service` pointed somewhere else is a different file.
-- **No generic reconnect, backoff or session resumption.** A dropped connection is reported and
-  stays reported, with nothing set to try it a second time. `Rejoining` has exactly two writers,
+- **No *automatic* reconnect, backoff or session resumption — and one button.** A dropped
+  connection is reported and stays reported, with nothing set to try it a second time. What #627
+  added is not a policy but an affordance: `ui/servers.rs` draws `RECONNECT` while a session is
+  over and there is a `ServerAddress` to go back to, and a press writes one `ReconnectRequest`
+  that `net::reconnect_on_request` turns into exactly one dial on the `RejoinBy` route the session
+  was opened by. **The press is the whole of the trigger.** There is no timer, no backoff and no
+  countdown behind it, it inserts no `Rejoining`, and a client that redialled on its own would be
+  hammering a server that had just closed it. A `Row` route is answered by writing the very
+  `ConnectRequest` a click on that row writes, and an `Address` route shares
+  `dial_recorded_address` with the rejoin, so there is one dial path rather than a second one.
+
+  `Rejoining` has exactly two writers,
   both with a complete remedy on the same route: `disconnect_on_request`, after a player asks to
   leave a world, and `drain_session_events`, after `CHARACTER_NAME_TAKEN` or
   `CHARACTER_NAME_REFUSED` answered a creation. The second is request recovery rather than session

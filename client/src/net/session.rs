@@ -59,7 +59,7 @@ use super::codec::{
 };
 
 use super::frame::{self, FrameDecoder};
-use super::handshake::{Handshake, Transition};
+use super::handshake::{Handshake, Phase, Transition};
 use super::tickets;
 use super::tls;
 
@@ -1484,13 +1484,35 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
 
 /// The peer closed cleanly. Before the welcome that is a refusal the player has
 /// to read; afterwards it is how sessions normally end.
+///
+/// **`Choosing` is a third answer, and finding that it was not one is what #627 came
+/// down to.** The rule used to be `established()` and nothing else, so the ordinary
+/// end of an unanswered character screen — `-character-timeout` expiring, which the
+/// server closes on deliberately and without a reply — arrived as
+/// `Refused("… closed the connection before answering the handshake")` and put the
+/// client in [`ConnectionState::Rejected`]. Every word of that was wrong about this
+/// case: the server *had* answered the handshake, with this account's characters,
+/// which is why there was a screen up to be timed out on. A close in that phase is a
+/// session ending, so it is an `Ended` and the screen says *"That session ended"*.
+///
+/// The other two phases keep the old answer, and mean it. `AwaitingCharacters` is a
+/// server that hung up on the hello, and `AwaitingWelcome` is one that hung up on a
+/// choice it never answered — in both the player is watching a status line for a
+/// reason the game will not start, which is exactly what a refusal is for.
+///
+/// [`ConnectionState::Rejected`]: super::ConnectionState::Rejected
 fn peer_closed(handshake: &Handshake, addr: &str) -> SessionEvent {
-    if handshake.established() {
-        SessionEvent::Ended(None)
-    } else {
-        SessionEvent::Refused(format!(
+    match handshake.phase() {
+        Phase::Established => SessionEvent::Ended(None),
+        // The detail is a log line and nothing else — `drain_session_events` warns with
+        // it and the screen shows the same sentence every ending shows. A player is not
+        // told a port number to explain a timeout.
+        Phase::Choosing => SessionEvent::Ended(Some(format!(
+            "{addr} closed the connection while a character was being chosen"
+        ))),
+        Phase::AwaitingCharacters | Phase::AwaitingWelcome => SessionEvent::Refused(format!(
             "{addr} closed the connection before answering the handshake"
-        ))
+        )),
     }
 }
 

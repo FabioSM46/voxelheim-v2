@@ -920,6 +920,22 @@ pub struct ConnectRequest {
     pub name: String,
 }
 
+/// A player asking for the server the last session was on to be dialled again.
+///
+/// **It carries nothing, and that is the point.** Where to dial is [`RejoinBy`], which
+/// this module recorded when the session was opened and which `ui` cannot see: a route
+/// is a row name or an address with the certificate to expect at it, and a request that
+/// carried either would be `ui` naming a server to connect to rather than asking to go
+/// back to the one it was already on. The screen knows only that there is *an* address
+/// to return to, which is [`ServerAddress`] being present.
+///
+/// **Nothing writes one but a press.** There is no timer, no backoff and no retry
+/// policy behind this message — `client/AGENTS.md` says there is none and this does not
+/// add one. A client that redialled on its own would be hammering a server that had just
+/// closed it, which is the one thing #627 must not turn a dead screen into.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectRequest;
+
 /// When a session is opened, and against what.
 ///
 /// Three shapes rather than an address and a pair of flags, because the differences
@@ -1128,6 +1144,7 @@ impl Plugin for NetPlugin {
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
             .add_message::<ConnectRequest>()
+            .add_message::<ReconnectRequest>()
             .add_message::<ChooseCharacter>()
             // Registered whether or not a session exists yet, which is the whole
             // point: the connect system is what makes one. Each of the three reads
@@ -1141,6 +1158,10 @@ impl Plugin for NetPlugin {
                     // a frame would show the server list over the world the player had
                     // just left.
                     rejoin_for_a_character,
+                    // Ahead of `connect_on_request` for the same reason the rejoin is:
+                    // a `Row` route is answered by writing the message a click on that
+                    // row writes, and it is read in the frame it is written.
+                    reconnect_on_request,
                     connect_on_request,
                     connect_once_signed_in,
                     drain_session_events.in_set(DrainNetwork),
@@ -1375,24 +1396,122 @@ fn rejoin_for_a_character(
             // rather than a retry policy.** A rejoin that is itself refused leaves
             // `Rejected` with the reason and nothing set to try again.
             commands.remove_resource::<Rejoining>();
-            match start_session(addr, expected.clone(), &settings, ticket_path.clone()) {
-                Ok((link, outbound)) => {
-                    *state = ConnectionState::Connecting;
-                    commands.insert_resource(ServerAddress(addr.clone()));
-                    commands.insert_resource(link);
-                    commands.insert_resource(outbound);
-                }
-                Err(err) => {
-                    error!("the network thread would not start: {err}");
-                    *state = ConnectionState::Rejected { reason: err };
-                }
-            }
+            dial_recorded_address(
+                addr,
+                expected,
+                ticket_path.clone(),
+                &settings,
+                &mut state,
+                &mut commands,
+            );
         }
         None => {
             // Nothing was ever dialled, so there is nothing to go back to. Reachable only
             // if a `DisconnectRequest` arrived on a client that never opened a session.
             commands.remove_resource::<Rejoining>();
         }
+    }
+}
+
+/// Opens a session against an address this client has already dialled once.
+///
+/// The one place a [`RejoinBy::Address`] route becomes a socket, shared by both systems
+/// that go back to a recorded one — [`rejoin_for_a_character`] and
+/// [`reconnect_on_request`] — so "there is a single dial path" stays a property of the
+/// code rather than a convention two copies have to keep. [`RejoinBy::Row`] needs no
+/// equivalent: a row is dialled by writing the [`ConnectRequest`] a click on it writes,
+/// which is how the address and the fingerprint come out of the row together.
+///
+/// It does not touch [`Rejoining`]. Whether a flag was consumed is the caller's
+/// bookkeeping, and the two callers answer it differently.
+fn dial_recorded_address(
+    addr: &str,
+    expected: &tls::Expectation,
+    ticket_path: Option<PathBuf>,
+    settings: &SessionSettings,
+    state: &mut ConnectionState,
+    commands: &mut Commands<'_, '_>,
+) {
+    match start_session(addr, expected.clone(), settings, ticket_path) {
+        Ok((link, outbound)) => {
+            *state = ConnectionState::Connecting;
+            commands.insert_resource(ServerAddress(addr.to_owned()));
+            commands.insert_resource(link);
+            commands.insert_resource(outbound);
+        }
+        Err(err) => {
+            error!("the network thread would not start: {err}");
+            *state = ConnectionState::Rejected { reason: err };
+        }
+    }
+}
+
+/// Dials the server the last session was on again, because a player pressed RECONNECT.
+///
+/// **The route is the one the session was opened by, never an address off a screen.**
+/// [`RejoinBy`] carries a row's *name* where there was a list, so the address and the
+/// certificate to expect at it are read out of that row a second time rather than
+/// remembered apart from the fingerprint that verifies them — which is the whole reason
+/// that resource holds a route instead of an address. Where there was no list it carries
+/// the address together with the expectation for it.
+///
+/// **Only from a state a session has ended in, and only once the previous thread has
+/// gone.** [`NetLink`] exists until the net thread reports its end, and a second session
+/// opened over one still closing is two threads believing they own a socket — the same
+/// wait [`rejoin_for_a_character`] makes for the same reason. A press arriving in any
+/// other state is a press on a control the screen was not drawing.
+///
+/// **It inserts no [`Rejoining`].** That flag is the character screen's one internal
+/// retry, consumed by the dial it arms; a press is not one, and leaving it set here
+/// would arm a dial nobody asked for the *next* time a session ended. The line #184
+/// drew — a dropped connection dials nothing on its own — is exactly where it was.
+fn reconnect_on_request(
+    mut requests: MessageReader<ReconnectRequest>,
+    route: Option<Res<RejoinBy>>,
+    settings: Res<SessionSettings>,
+    link: Option<Res<NetLink>>,
+    mut state: ResMut<ConnectionState>,
+    mut connects: MessageWriter<ConnectRequest>,
+    mut commands: Commands,
+) {
+    // The whole batch is consumed however many arrived: several presses in one frame are
+    // one connection, not one replayed across later frames. The rule `connect_on_request`
+    // and `disconnect_on_request` already keep.
+    if requests.read().last().is_none() {
+        return;
+    }
+    if link.is_some() {
+        return;
+    }
+    if !matches!(
+        *state,
+        ConnectionState::Rejected { .. } | ConnectionState::Disconnected
+    ) {
+        return;
+    }
+
+    match route.as_deref() {
+        Some(RejoinBy::Row(name)) => {
+            connects.write(ConnectRequest { name: name.clone() });
+        }
+        Some(RejoinBy::Address {
+            addr,
+            expected,
+            ticket_path,
+        }) => {
+            dial_recorded_address(
+                addr,
+                expected,
+                ticket_path.clone(),
+                &settings,
+                &mut state,
+                &mut commands,
+            );
+        }
+        // Nothing was ever dialled, so there is nothing to come back to. The screen does
+        // not offer the control without an address, and reaching here anyway costs one
+        // ignored message rather than a guess at one.
+        None => {}
     }
 }
 
@@ -2704,6 +2823,9 @@ mod tests {
             frames: Vec<Vec<u8>>,
             remaining_ms: u32,
         },
+        /// Answer the hello with a character list, then close without waiting for a
+        /// choice — exactly what `-character-timeout` expiring does on the server.
+        ListThenClose,
         /// Close without answering.
         Close,
         /// Hold the connection open and say nothing.
@@ -2821,6 +2943,11 @@ mod tests {
         };
 
         match reply {
+            Reply::ListThenClose => {
+                let _ = send(socket, &one_character());
+                thread::sleep(Duration::from_millis(400));
+                return true;
+            }
             Reply::Close => return true,
             Reply::Hold => {}
             Reply::Frames(frames) => {
@@ -3025,6 +3152,168 @@ mod tests {
 
     fn state(app: &App) -> ConnectionState {
         app.world().resource::<ConnectionState>().clone()
+    }
+
+    /// **The measurement #627 turned on, as a test.** A server that closes on
+    /// `-character-timeout` writes nothing back — that is deliberate, there is no
+    /// message for a reply to be the answer to — so all the client has is `read`
+    /// returning zero while the handshake sits in `Choosing`.
+    ///
+    /// It used to arrive as a *refusal*, because `peer_closed` asked only whether the
+    /// handshake was `established()`: the client was left in `Rejected` reading
+    /// "closed the connection before answering the handshake", which is untrue of this
+    /// case — the server answered it with a character list, which is why there was a
+    /// screen to be timed out on. It is an ending, and the screen for an ending is the
+    /// one that says a session ended.
+    ///
+    /// The other half of the same assertion is the character screen coming down:
+    /// `character_is_up` is `CharacterChoice` being present and nothing else, so a
+    /// resource left behind here would be a character screen over a dead socket.
+    #[test]
+    fn a_character_timeout_close_ends_the_session_rather_than_refusing_it() {
+        let (addr, stub) = spawn_stub(Reply::ListThenClose);
+        let scratch = Scratch::new("net-character-timeout");
+        let identity = scratch.join("identity");
+
+        // Deliberately without `answer_the_character_phase`: this is the player who
+        // chooses nobody, which is the whole of the reproduction.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(
+            NetPlugin::as_if_listed(&addr)
+                .over_plaintext()
+                .with_identity_path(Some(identity)),
+        );
+
+        pump_until(&mut app, "the character screen", |app| {
+            app.world().contains_resource::<CharacterChoice>()
+        });
+        assert_eq!(state(&app), ConnectionState::Choosing);
+
+        pump_until(&mut app, "the timeout to close the session", |app| {
+            state(app) == ConnectionState::Disconnected
+        });
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "the character screen stayed up over a session that had ended"
+        );
+        // And there is still a server to offer a way back to, which is what the screen
+        // reads to decide whether to draw one.
+        assert_eq!(app.world().resource::<ServerAddress>().0, addr);
+
+        drop(app);
+        let _ = stub.join();
+    }
+
+    /// A client holding a route, a terminal state and no live thread — everything a
+    /// press has to act on, and nothing that would dial on its own.
+    fn ready_to_reconnect(state: ConnectionState) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(state)
+            .insert_resource(SessionSettings {
+                player_name: DEFAULT_PLAYER_NAME.to_owned(),
+                identity_path: None,
+                data_home: None,
+                transport: session::Transport::Plaintext,
+            })
+            .add_message::<ConnectRequest>()
+            .add_message::<ReconnectRequest>()
+            .add_systems(Update, reconnect_on_request);
+        app
+    }
+
+    fn dials_asked_for(app: &App) -> Vec<ConnectRequest> {
+        let messages = app.world().resource::<Messages<ConnectRequest>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
+    }
+
+    /// **A press dials the server the session was on, by the route it was opened by.**
+    /// The row's name rather than an address, so the address and the fingerprint to
+    /// expect at it come back out of that row together — which is what `RejoinBy` is
+    /// for, and why the message a press writes carries nothing at all.
+    #[test]
+    fn a_reconnect_asks_for_the_row_the_last_session_was_opened_by() {
+        let mut app = ready_to_reconnect(ConnectionState::Disconnected);
+        app.insert_resource(RejoinBy::Row("midgard".to_owned()));
+
+        app.world_mut().write_message(ReconnectRequest);
+        app.update();
+
+        assert_eq!(
+            dials_asked_for(&app),
+            vec![ConnectRequest {
+                name: "midgard".to_owned()
+            }]
+        );
+        // And it is one dial rather than one replayed: the batch is consumed, and no
+        // flag is left behind for a later frame to act on.
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(dials_asked_for(&app).len(), 1, "a press dialled twice");
+        assert!(
+            !app.world().contains_resource::<Rejoining>(),
+            "a press armed the character screen's internal retry"
+        );
+    }
+
+    /// **Nothing dials without a press**, which is the constraint the whole issue turns
+    /// on: a client that redialled on its own would be hammering a server that had just
+    /// closed it. Everything a reconnection needs is in place here except the press.
+    #[test]
+    fn nothing_dials_until_somebody_presses_something() {
+        let mut app = ready_to_reconnect(ConnectionState::Disconnected);
+        app.insert_resource(RejoinBy::Row("midgard".to_owned()));
+
+        for _ in 0..16 {
+            app.update();
+        }
+
+        assert!(
+            dials_asked_for(&app).is_empty(),
+            "the client dialled itself"
+        );
+        assert_eq!(state(&app), ConnectionState::Disconnected);
+    }
+
+    /// A press with nothing to go back to asks for nothing rather than guessing at a
+    /// server. The screen does not draw the control in `Idle`; this is the boundary
+    /// answering for itself, because a message is a thing anything can write.
+    #[test]
+    fn a_reconnect_with_no_route_dials_nothing() {
+        let mut app = ready_to_reconnect(ConnectionState::Idle);
+
+        app.world_mut().write_message(ReconnectRequest);
+        app.update();
+
+        assert!(dials_asked_for(&app).is_empty());
+        assert_eq!(state(&app), ConnectionState::Idle);
+    }
+
+    /// And a press that arrives while a session is being opened is ignored: `Idle` is
+    /// not a state a reconnection means anything in, and the route is only followed
+    /// from a session that is over.
+    #[test]
+    fn a_reconnect_from_a_state_with_no_ended_session_dials_nothing() {
+        for state in [
+            ConnectionState::Idle,
+            ConnectionState::Connecting,
+            ConnectionState::Handshaking,
+            ConnectionState::Choosing,
+            ConnectionState::Connected,
+            ConnectionState::Leaving {
+                seconds_remaining: Some(3),
+            },
+        ] {
+            let mut app = ready_to_reconnect(state.clone());
+            app.insert_resource(RejoinBy::Row("midgard".to_owned()));
+
+            app.world_mut().write_message(ReconnectRequest);
+            app.update();
+
+            assert!(dials_asked_for(&app).is_empty(), "{state:?} dialled again");
+        }
     }
 
     /// **The launch #154 exists for, end to end inside this module.** Signed out,

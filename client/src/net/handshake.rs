@@ -299,10 +299,13 @@ impl Handshake {
 
     /// How far the handshake has got.
     ///
-    /// Test-only: production code asks the narrower [`Self::established`], because
-    /// the phase is an implementation detail and every caller so far only needs to
-    /// know whether there is a session.
-    #[cfg(test)]
+    /// **It was test-only, on the reasoning that every caller only needed to know
+    /// whether there was a session.** `session::peer_closed` is the caller that is not
+    /// one: what a clean close *means* differs across three of the four phases, and
+    /// asking [`Self::established`] answered two of them the same way and got one of
+    /// those two wrong (#627). Read it where a decision genuinely turns on the phase,
+    /// and match it exhaustively — a fifth phase should stop such a caller compiling
+    /// rather than fall into whichever arm a wildcard offered it.
     pub fn phase(&self) -> Phase {
         self.phase
     }

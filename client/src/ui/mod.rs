@@ -40,7 +40,8 @@ pub use character::PlayAs;
 
 use crate::net::{
     CharacterChoice, ChooseCharacter, ConnectRequest, ConnectionState, DisconnectRequest,
-    InventoryStack, RefreshServerList, ServerList, Session, SignInRequest, SignInState,
+    InventoryStack, ReconnectRequest, RefreshServerList, ServerList, Session, SignInRequest,
+    SignInState,
 };
 
 use crate::player::{
@@ -157,10 +158,11 @@ impl Plugin for UiPlugin {
             // and this is what keeps the login screen headlessly testable on its
             // own — the same reason the four above are here.
             .add_message::<SignInRequest>()
-            // The same reasoning for the server list's two: `net::NetPlugin` registers
-            // `ConnectRequest` and `net::ServerListPlugin` registers
+            // The same reasoning for the server list's three: `net::NetPlugin` registers
+            // `ConnectRequest` and `ReconnectRequest`, `net::ServerListPlugin` registers
             // `RefreshServerList`, and neither is built in a headless UI test.
             .add_message::<ConnectRequest>()
+            .add_message::<ReconnectRequest>()
             .add_message::<RefreshServerList>()
             .add_message::<AppExit>()
             .add_message::<ChooseCharacter>()
