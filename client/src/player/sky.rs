@@ -48,7 +48,9 @@
 use std::f32::consts::{PI, TAU};
 use std::time::Instant;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::Weather;
@@ -200,9 +202,67 @@ const UNDERWATER_VISIBILITY: f32 = 10.0;
 /// tenth of the scale.
 const UNDERWATER_START: f32 = UNDERWATER_VISIBILITY * FOG_START_FRACTION;
 
+/// The colour the horizon takes at the middle of dusk and of dawn, as sRGB.
+///
+/// The band a low sun leaves along the rim while the zenith is already going out. Blended
+/// **linearly**, component by component, exactly as [`weather_tint`] blends towards a
+/// weather's colour; every colour constant here is sRGB and this one is no exception.
+const DUSK_HORIZON: [f32; 3] = [0.55, 0.22, 0.08];
+
+/// How far from the eye everything drawn on the sky sits, in blocks.
+///
+/// Past the far edge of the streamed cube at every render distance the settings offer, so
+/// the dome encloses the world rather than standing in it. The fog is total well inside
+/// this, which is why every material here carries `fog_enabled: false`.
+///
+/// A **radius**, not a position: the dome is centred on the eye and follows it, so the
+/// player can never walk to the horizon or out from under the sky.
+const SKY_BODY_DISTANCE: f32 = 400.0;
+
+/// How many rings the dome is divided into from zenith to nadir, and how many segments
+/// around: 13 x 25 = 325 vertices.
+///
+/// The colour is a function of height alone, so the rings buy how smoothly the warm band
+/// gives way to the zenith and the segments buy nothing but a rounder silhouette.
+const DOME_RINGS: usize = 12;
+const DOME_SEGMENTS: usize = 24;
+
+/// How tightly the warm rim hugs the horizon.
+///
+/// The dome's colour is `lerp(horizon, sky, t.powf(HORIZON_FALLOFF))`, `t` being the
+/// vertex's height above the rim as a unit fraction — so this decides whether dusk is a
+/// band along the edge of the world or half the sky turning orange. Below one, so the
+/// zenith wins quickly: a tenth of the way up is already nearly half way to it. At exactly
+/// one the gradient is linear in height and the sunset fills the upper hemisphere, which is
+/// not what a sunset looks like from inside one.
+const HORIZON_FALLOFF: f32 = 0.35;
+
 /// Marks the one directional light this module owns.
 #[derive(Component)]
 pub struct Sun;
+
+/// Marks an entity drawn **on** the sky rather than in the world.
+///
+/// Two rules, and they are the whole of what the marker means: it follows the eye's
+/// *translation* and never its rotation, and it is hidden while the eye is under water,
+/// because down there the sky is the water. [`follow_the_eye`] owns the first because the
+/// eye is only final after `AimCamera`; [`drive_the_sky`] owns the second because "is the
+/// eye under water" already has exactly one owner and must not grow a second.
+#[derive(Component)]
+pub struct SkyBody;
+
+/// Marks the one dome the gradient is painted on.
+#[derive(Component)]
+pub struct SkyDome;
+
+/// The one mesh the dome is drawn as, kept so its colour attribute can be rewritten.
+///
+/// A resource rather than a lookup through the entity, for the reason `precipitation.rs`
+/// keeps its own: the handle is what `Assets<Mesh>` is indexed by.
+#[derive(Resource, Debug)]
+pub(super) struct SkyVisuals {
+    dome: Handle<Mesh>,
+}
 
 /// Where the world's day is right now, as the newest **accepted** snapshot left it.
 ///
@@ -275,8 +335,16 @@ pub struct Daylight {
     pub sun_direction: Vec3,
     /// The light's illuminance, in lux.
     pub sun_illuminance: f32,
-    /// The camera's clear colour, and the colour distance fades into.
+    /// The camera's clear colour, and the colour the dome carries at its zenith.
     pub sky: Color,
+    /// The colour the rim of the sky takes, and the colour distance fades into.
+    ///
+    /// **The fog fades terrain into this and not into [`Self::sky`]**, which is the whole
+    /// point of a second colour: the far edge of the streamed cube sits on the horizon, so
+    /// terrain dissolving into the zenith would dissolve into the wrong half of the sky the
+    /// moment dusk gave the rim a colour of its own. Equal to [`Self::sky`] at midday and
+    /// at midnight, and warm in between — see [`horizon_colour`].
+    pub horizon: Color,
     /// The per-camera ambient term.
     pub ambient_brightness: f32,
 }
@@ -292,6 +360,11 @@ impl Daylight {
         sun_direction: Vec3::new(-0.4, -1.0, -0.25),
         sun_illuminance: DAY_ILLUMINANCE,
         sky: Color::srgb(DAY_SKY[0], DAY_SKY[1], DAY_SKY[2]),
+        // The same colour, written out rather than computed: a world with no clock has no
+        // dusk to be in the middle of, so its rim is its zenith and its dome is one flat
+        // colour — which is exactly the sky it rendered before this module existed.
+        // `horizon_colour` would answer this too, and a `const` cannot call it.
+        horizon: Color::srgb(DAY_SKY[0], DAY_SKY[1], DAY_SKY[2]),
         ambient_brightness: DAY_AMBIENT_BRIGHTNESS,
     };
 
@@ -306,18 +379,59 @@ impl Daylight {
         }
 
         let night = night_fraction(clock, tick_of_day, RAMP_SECONDS * f32::from(tick_rate));
+        let sky = Color::srgb(
+            lerp(DAY_SKY[0], NIGHT_SKY[0], night),
+            lerp(DAY_SKY[1], NIGHT_SKY[1], night),
+            lerp(DAY_SKY[2], NIGHT_SKY[2], night),
+        );
 
         Self {
             sun_direction: -sun_position(clock, tick_of_day),
             sun_illuminance: lerp(DAY_ILLUMINANCE, NIGHT_ILLUMINANCE, night),
-            sky: Color::srgb(
-                lerp(DAY_SKY[0], NIGHT_SKY[0], night),
-                lerp(DAY_SKY[1], NIGHT_SKY[1], night),
-                lerp(DAY_SKY[2], NIGHT_SKY[2], night),
-            ),
+            sky,
+            horizon: horizon_colour(sky, night),
             ambient_brightness: lerp(DAY_AMBIENT_BRIGHTNESS, NIGHT_AMBIENT_BRIGHTNESS, night),
         }
     }
+}
+
+/// How much of [`DUSK_HORIZON`] the rim carries at this night fraction.
+///
+/// `4n(1 - n)`: zero where the night fraction is 0 and 1, one where it is a half, and — the
+/// expression being unchanged by swapping `n` for `1 - n` — the same value at equal
+/// distances either side of the peak.
+///
+/// **A parabola rather than the obvious half-sine, and for exactness rather than shape.**
+/// The two differ by under five hundredths anywhere, but `(PI * 1.0).sin()` is `-8.7e-8`
+/// and not zero, so a sine would leave the midnight rim a hair off the midnight sky — far
+/// enough that `horizon == sky` would have to be a tolerance instead of an equality.
+///
+/// **The symmetry is inherited, not restated.** The bell is a function of
+/// [`night_fraction`] and of nothing else, and that fraction is already its own mirror
+/// across the two boundaries the server named — which is what
+/// `dusk_and_dawn_are_mirror_images_of_each_other` pins. So a change to `RAMP_SECONDS` or
+/// to either boundary moves both sides together by construction.
+///
+/// Clamped because the fraction is a colour input, and the clamp is what makes "in range"
+/// a property of this function rather than an assumption about its caller.
+fn dusk_bell(night: f32) -> f32 {
+    let night = night.clamp(0.0, 1.0);
+    4.0 * night * (1.0 - night)
+}
+
+/// The rim's colour: the sky, blended towards [`DUSK_HORIZON`] by [`dusk_bell`].
+///
+/// At the peak the rim **is** `DUSK_HORIZON` rather than a fraction of the way to it —
+/// [`HORIZON_FALLOFF`] is what keeps that from being a wall of orange, and a peak that
+/// stopped short would put a second tuning number beside the colour it scales.
+fn horizon_colour(sky: Color, night: f32) -> Color {
+    let amount = dusk_bell(night);
+    let from = Srgba::from(sky);
+    Color::srgb(
+        lerp(from.red, DUSK_HORIZON[0], amount),
+        lerp(from.green, DUSK_HORIZON[1], amount),
+        lerp(from.blue, DUSK_HORIZON[2], amount),
+    )
 }
 
 /// How much of the night has arrived at `tick_of_day`: 0 in full day, 1 in full night.
@@ -417,6 +531,163 @@ pub(super) fn spawn_sun(mut commands: Commands) {
     ));
 }
 
+/// Builds the dome and stands it up hidden, centred on wherever the eye happens to be.
+///
+/// **Hidden, and that is not a detail.** `ui/character.rs` paints its own flat backdrop
+/// while the creation screen is up by writing the camera's clear colour, and a dome in
+/// front of it would be the sky overwriting a screen that deliberately has none. Nothing
+/// here shows the dome; [`drive_the_sky`] does, and it returns before it can on every frame
+/// there is no [`Session`] — exactly the span that screen owns.
+///
+/// The mesh is built once and never rebuilt: only its colour attribute moves, which is why
+/// the handle is kept in [`SkyVisuals`].
+pub(super) fn spawn_sky(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let fixed = Daylight::FIXED;
+    let dome = meshes.add(dome_mesh(fixed.sky, fixed.horizon));
+    let material = materials.add(StandardMaterial {
+        // White is load-bearing, for the reason `world/render.rs` gives about the terrain
+        // material: the shader multiplies the base colour by the vertex colour.
+        base_color: Color::WHITE,
+        // The sky is not a surface the sun falls on. Lit, the dome would be a second and
+        // wrong day-night curve drawn over the one this module computes.
+        unlit: true,
+        // At `SKY_BODY_DISTANCE` the fog is total, so without this the dome would be
+        // painted entirely in the fog's own colour and the gradient never seen.
+        fog_enabled: false,
+        // Seen from the inside, which is the one face a sky is ever seen from. `None`
+        // rather than `Front` so a camera that somehow leaves the dome still sees a sky
+        // rather than a hole.
+        cull_mode: None,
+        ..default()
+    });
+
+    commands.spawn((
+        SkyBody,
+        SkyDome,
+        Mesh3d(dome.clone()),
+        MeshMaterial3d(material),
+        // The identity until `follow_the_eye` runs. Rotation is never written: a dome that
+        // turned with the camera would be a horizon that could not be looked away from.
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+    commands.insert_resource(SkyVisuals { dome });
+}
+
+/// The unit height and unit radius of every ring, from the zenith down to the nadir.
+///
+/// **One iterator, two consumers, and that is the point.** [`dome_mesh`] writes the
+/// positions from it and [`dome_colours`] the colours, so the two vectors share an order by
+/// construction rather than by two loops that happen to agree — a colour attribute out of
+/// step with its positions is a gradient subtly wrong everywhere and obviously wrong
+/// nowhere.
+fn dome_rings() -> impl Iterator<Item = (f32, f32)> {
+    (0..=DOME_RINGS).map(|ring| {
+        let polar = PI * ring as f32 / DOME_RINGS as f32;
+        (polar.cos(), polar.sin())
+    })
+}
+
+/// How many vertices the dome carries.
+const fn dome_vertex_count() -> usize {
+    (DOME_RINGS + 1) * (DOME_SEGMENTS + 1)
+}
+
+/// The dome as it is built: a sphere of [`SKY_BODY_DISTANCE`] turned outside in.
+///
+/// Wound and normalled **inward**, because the only camera that will ever see it is inside
+/// it. The normals are never read — the material is unlit — and are written because every
+/// `StandardMaterial` mesh in this crate carries them; the winding is what would matter if
+/// the material stopped being `cull_mode: None`. The seam is a duplicated column of
+/// vertices rather than a wrapped index: thirteen vertices, for a colour attribute that can
+/// be written as one flat run per ring.
+fn dome_mesh(sky: Color, horizon: Color) -> Mesh {
+    let mut positions = Vec::with_capacity(dome_vertex_count());
+    let mut normals = Vec::with_capacity(dome_vertex_count());
+
+    for (height, radius) in dome_rings() {
+        for segment in 0..=DOME_SEGMENTS {
+            let azimuth = TAU * segment as f32 / DOME_SEGMENTS as f32;
+            let (azimuth_sin, azimuth_cos) = azimuth.sin_cos();
+            let unit = Vec3::new(radius * azimuth_cos, height, radius * azimuth_sin);
+            positions.push((unit * SKY_BODY_DISTANCE).to_array());
+            normals.push((-unit).to_array());
+        }
+    }
+
+    let stride = DOME_SEGMENTS + 1;
+    let mut indices = Vec::with_capacity(DOME_RINGS * DOME_SEGMENTS * 6);
+    for ring in 0..DOME_RINGS {
+        for segment in 0..DOME_SEGMENTS {
+            let top = (ring * stride + segment) as u32;
+            let bottom = top + stride as u32;
+            indices.extend_from_slice(&[top, top + 1, bottom, top + 1, bottom + 1, bottom]);
+        }
+    }
+
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        // Both copies stay: the renderer consumes one while `drive_the_sky` rewrites the
+        // main-world colour attribute whenever the hour moves.
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, dome_colours(sky, horizon))
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+/// The gradient, as one colour per vertex: `sky` at the zenith and `horizon` at the rim.
+///
+/// Everything at or below the rim is the horizon colour flat. The lower half is only ever
+/// seen where terrain has not been streamed yet, and more horizon is what a player expects
+/// to find at the bottom of the sky; a zenith colour there would read as a second sky under
+/// their feet.
+fn dome_colours(sky: Color, horizon: Color) -> Vec<[f32; 4]> {
+    let sky = Srgba::from(sky);
+    let horizon = Srgba::from(horizon);
+    let mut colours = Vec::with_capacity(dome_vertex_count());
+    for (height, _) in dome_rings() {
+        let towards_the_zenith = height.max(0.0).powf(HORIZON_FALLOFF);
+        let colour = [
+            lerp(horizon.red, sky.red, towards_the_zenith),
+            lerp(horizon.green, sky.green, towards_the_zenith),
+            lerp(horizon.blue, sky.blue, towards_the_zenith),
+            1.0,
+        ];
+        colours.extend(std::iter::repeat_n(colour, DOME_SEGMENTS + 1));
+    }
+    colours
+}
+
+/// Puts everything drawn on the sky back around the eye.
+///
+/// **After [`super::camera::AimCamera`], and it is the one system here that has to be.**
+/// `drive_the_sky` deliberately reads a camera position one frame old and says why — a sky
+/// *colour* one frame late is invisible. A sky *position* one frame late is not: the dome is
+/// centred on the eye, so a frame's worth of sprinting shows as the whole horizon sliding.
+///
+/// The translation only, for the reason [`SkyBody`] gives.
+pub(super) fn follow_the_eye(
+    eyes: Query<&Transform, (With<WorldCamera>, Without<SkyBody>)>,
+    mut bodies: Query<&mut Transform, With<SkyBody>>,
+) {
+    let Some(at) = eyes.iter().next().map(|eye| eye.translation) else {
+        return;
+    };
+    for mut transform in &mut bodies {
+        // Guarded, because `Mut` marks a component changed on every `DerefMut` and a player
+        // standing still is the common case.
+        if transform.translation != at {
+            transform.translation = at;
+        }
+    }
+}
+
 /// Everything the sky is computed from, and nothing it writes.
 ///
 /// One `SystemParam` rather than four resources threaded through a signature, for the reason
@@ -434,12 +705,30 @@ pub(super) struct SkyInputs<'w> {
     settings: Option<Res<'w, Settings>>,
 }
 
-/// The three previous-frame facts needed only to avoid redundant writes.
+/// Everything the sky is *drawn* on, as one parameter: the mesh whose colour the hour
+/// rewrites, and the entities the water hides.
+///
+/// Grouped for the reason [`SkyInputs`] is, and for one more — [`drive_the_sky`] is at the
+/// argument budget `clippy::too_many_arguments` allows.
+#[derive(SystemParam)]
+pub(super) struct SkyGeometry<'w, 's> {
+    visuals: Option<Res<'w, SkyVisuals>>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    bodies: Query<'w, 's, &'static mut Visibility, With<SkyBody>>,
+}
+
+/// The previous-frame facts needed only to avoid redundant writes.
 #[derive(Default)]
 pub(super) struct SkyMemory {
     announced: bool,
     submerged: bool,
     weather: Option<WeatherState>,
+    /// The `(sky, horizon)` pair the dome's colour attribute was last written from.
+    ///
+    /// The dome's write is a **buffer upload** rather than a component assignment, so this
+    /// guard is the one that matters most: a server with no clock would otherwise
+    /// re-extract 325 vertices into the render world on every frame of the session.
+    dome: Option<(Color, Color)>,
 }
 
 /// Puts the sun, the sky, the ambient term and the fog where the server's clock says they
@@ -465,6 +754,7 @@ pub(super) struct SkyMemory {
 /// and tinted rather than re-illuminated.
 pub(super) fn drive_the_sky(
     read: SkyInputs<'_>,
+    mut geometry: SkyGeometry<'_, '_>,
     mut sun: Query<(&mut DirectionalLight, &mut Transform), With<Sun>>,
     mut cameras: Query<
         (
@@ -563,6 +853,10 @@ pub(super) fn drive_the_sky(
     let current_weather = weather.get();
     let (start, end) = weather_fog_span(base_span, current_weather);
     let weather_sky = weather_tint(light.sky, current_weather);
+    // The same tint over both, so a blizzard closes the whole sky down rather than leaving
+    // an orange band under a white one. The two colours differ by the hour, never by the
+    // weather.
+    let weather_horizon = weather_tint(light.horizon, current_weather);
     let ambient_brightness = light.ambient_brightness * brightness_scale;
 
     // **The one thing in this module that is a function of where the player is.** `AimCamera`
@@ -576,12 +870,27 @@ pub(super) fn drive_the_sky(
             usize::from(params.chunk_size),
         )
     });
-    let (sky, start, end) = if submerged {
-        (submerged_sky(), UNDERWATER_START, UNDERWATER_VISIBILITY)
+    let (sky, horizon, start, end) = if submerged {
+        // One colour for both under water: there is no rim down here, and the fog reaching
+        // ten blocks is what the eye reads as the edge of what water lets through.
+        (
+            submerged_sky(),
+            submerged_sky(),
+            UNDERWATER_START,
+            UNDERWATER_VISIBILITY,
+        )
     } else {
-        (weather_sky, start, end)
+        (weather_sky, weather_horizon, start, end)
     };
     let weather_changed = memory.weather != current_weather;
+
+    paint_the_sky(
+        &mut geometry,
+        &mut memory,
+        submerged,
+        weather_sky,
+        weather_horizon,
+    );
 
     for (entity, mut camera, mut ambient, fog) in &mut cameras {
         // Written on the frame the player goes under and on the frame they come back
@@ -606,14 +915,17 @@ pub(super) fn drive_the_sky(
             // ever moves — an unconditional write would re-extract the fog into the render
             // world on every frame of a session whose sky is a constant.
             Some(mut fog) => {
-                if weather_changed || fog.color != sky || !fades_between(&fog.falloff, start, end) {
-                    fog.color = sky;
+                if weather_changed
+                    || fog.color != horizon
+                    || !fades_between(&fog.falloff, start, end)
+                {
+                    fog.color = horizon;
                     fog.falloff = FogFalloff::Linear { start, end };
                 }
             }
             None => {
                 commands.entity(entity).insert(DistanceFog {
-                    color: sky,
+                    color: horizon,
                     falloff: FogFalloff::Linear { start, end },
                     ..default()
                 });
@@ -623,6 +935,46 @@ pub(super) fn drive_the_sky(
 
     memory.submerged = submerged;
     memory.weather = current_weather;
+}
+
+/// Shows or hides everything on the sky, and repaints the dome when its gradient has moved.
+///
+/// Called from [`drive_the_sky`] and only from there, so the eye it hides for is the same
+/// eye the fog was computed against.
+///
+/// **The dome is painted from the sky above the water, never from the water itself.** It is
+/// hidden while the eye is under, so a repaint there is an upload nobody sees — and the pair
+/// the guard remembers would then flap between the water and the hour on every crossing of
+/// the surface, which is two redundant uploads apiece rather than none.
+fn paint_the_sky(
+    geometry: &mut SkyGeometry<'_, '_>,
+    memory: &mut SkyMemory,
+    submerged: bool,
+    sky: Color,
+    horizon: Color,
+) {
+    let wanted = if submerged {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+    for mut visibility in &mut geometry.bodies {
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
+
+    if submerged || memory.dome == Some((sky, horizon)) {
+        return;
+    }
+    let Some(visuals) = geometry.visuals.as_deref() else {
+        return;
+    };
+    let Some(mut mesh) = geometry.meshes.get_mut(&visuals.dome) else {
+        return;
+    };
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, dome_colours(sky, horizon));
+    memory.dome = Some((sky, horizon));
 }
 
 /// Whether the voxel holding `eye` is water.
@@ -920,6 +1272,198 @@ mod tests {
         assert_eq!(Daylight::FIXED.sun_illuminance, 9_000.0);
         assert_eq!(Daylight::FIXED.sky, Color::srgb(0.055, 0.070, 0.094));
         assert_eq!(Daylight::FIXED.ambient_brightness, 600.0);
+        // The fifth value is new and is the same colour as the second: a world with no
+        // clock has no dusk, so its rim is its zenith and its dome is flat.
+        assert_eq!(Daylight::FIXED.horizon, Daylight::FIXED.sky);
+    }
+
+    // -----------------------------------------------------------------------
+    // The warm horizon, and the dome that carries it
+    // -----------------------------------------------------------------------
+
+    /// The bell is zero at both ends of the night fraction and peaks in the middle of it,
+    /// which is the whole of what makes the rim warm only during the ramps.
+    #[test]
+    fn the_dusk_bell_is_zero_at_both_ends_and_peaks_in_the_middle() {
+        // Exactly zero at both ends, not nearly: `horizon == sky` at midday and midnight is
+        // an equality the acceptance criterion states, and a bell that only nearly vanishes
+        // would make it a tolerance.
+        assert_eq!(dusk_bell(0.0), 0.0);
+        assert_eq!(dusk_bell(1.0), 0.0);
+        assert_eq!(dusk_bell(0.5), 1.0);
+        // And outside the range it is pinned rather than folded back down.
+        assert_eq!(dusk_bell(-0.5), 0.0);
+        assert_eq!(dusk_bell(1.5), 0.0);
+    }
+
+    /// The same curve on both sides of the peak, which is what lets the rim inherit
+    /// `dusk_and_dawn_are_mirror_images_of_each_other` instead of restating it.
+    #[test]
+    fn the_dusk_bell_is_mirror_symmetric_about_its_peak() {
+        for step in 0..=10 {
+            let night = step as f32 / 10.0;
+            let (here, mirrored) = (dusk_bell(night), dusk_bell(1.0 - night));
+            assert!(
+                (here - mirrored).abs() < 1e-6,
+                "night {night}: {here} against {mirrored}"
+            );
+        }
+    }
+
+    /// The horizon is the sky at both ends of the day and warmer in between — measured as
+    /// the red-to-blue ratio, which is what "warmer" means as a number.
+    #[test]
+    fn the_horizon_is_the_sky_at_midday_and_midnight_and_warm_between_them() {
+        let clock = clock();
+        // 21 600 -> 14 400 the long way round: midday is 4 800, midnight 18 000.
+        for tick in [4_800.0, 18_000.0] {
+            let light = Daylight::at(&clock, tick, TICK_RATE);
+            assert_eq!(
+                light.horizon, light.sky,
+                "tick {tick} gave the rim a colour of its own"
+            );
+        }
+
+        // Half a ramp before night begins is where the night fraction is exactly a half.
+        let dusk = Daylight::at(
+            &clock,
+            clock.night_start_ticks as f32 - RAMP * 0.5,
+            TICK_RATE,
+        );
+        let midday = Daylight::at(&clock, 4_800.0, TICK_RATE);
+        assert!(
+            warmth(dusk.horizon) > warmth(midday.horizon),
+            "the dusk rim is not warmer than the midday one"
+        );
+        // And at the peak it is the constant itself rather than a fraction of the way to it.
+        let peak = Srgba::from(dusk.horizon);
+        for (got, want) in [
+            (peak.red, DUSK_HORIZON[0]),
+            (peak.green, DUSK_HORIZON[1]),
+            (peak.blue, DUSK_HORIZON[2]),
+        ] {
+            assert!((got - want).abs() < 1e-5, "{got} is not {want}");
+        }
+    }
+
+    /// How warm a colour is, as the ratio the acceptance criterion names.
+    fn warmth(colour: Color) -> f32 {
+        let colour = Srgba::from(colour);
+        colour.red / colour.blue.max(f32::MIN_POSITIVE)
+    }
+
+    /// Dusk and dawn produce the same rim, tick for mirrored tick.
+    #[test]
+    fn the_rim_at_dusk_is_the_rim_at_dawn() {
+        let clock = clock();
+        for step in 0..=10 {
+            let into_ramp = RAMP * step as f32 / 10.0;
+            let dusk = Daylight::at(
+                &clock,
+                clock.night_start_ticks as f32 - into_ramp,
+                TICK_RATE,
+            );
+            let dawn = Daylight::at(&clock, clock.night_end_ticks as f32 + into_ramp, TICK_RATE);
+            let (dusk, dawn) = (Srgba::from(dusk.horizon), Srgba::from(dawn.horizon));
+            for (left, right) in [
+                (dusk.red, dawn.red),
+                (dusk.green, dawn.green),
+                (dusk.blue, dawn.blue),
+            ] {
+                assert!(
+                    (left - right).abs() < 1e-5,
+                    "{into_ramp} ticks from the boundary: {left} against {right}"
+                );
+            }
+        }
+    }
+
+    /// The dome runs from the sky at the zenith to the horizon at the rim, everything under
+    /// the rim is the rim's colour, and nothing in between doubles back.
+    #[test]
+    fn the_dome_is_the_sky_at_the_top_and_the_horizon_at_the_rim() {
+        let sky = Color::srgb(0.05, 0.07, 0.09);
+        let horizon = Color::srgb(0.55, 0.22, 0.08);
+        let colours = dome_colours(sky, horizon);
+        assert_eq!(colours.len(), dome_vertex_count());
+
+        // Red is the channel the two colours are furthest apart in, so the blend factor is
+        // readable straight off it: 0 at the rim and 1 at the zenith.
+        let ring = |index: usize| colours[index * (DOME_SEGMENTS + 1)];
+        let towards_the_sky = |colour: [f32; 4]| {
+            (colour[0] - Srgba::from(horizon).red)
+                / (Srgba::from(sky).red - Srgba::from(horizon).red)
+        };
+        assert!(
+            towards_the_sky(ring(0)).abs() > 1.0 - 1e-5,
+            "the zenith is not the sky"
+        );
+        // `DOME_RINGS` is even, so the equator is a ring rather than a gap between two.
+        let equator = DOME_RINGS / 2;
+        for ring_index in equator..=DOME_RINGS {
+            assert!(
+                towards_the_sky(ring(ring_index)).abs() < 1e-5,
+                "ring {ring_index} is at or below the rim and is not the rim's colour"
+            );
+        }
+        for ring_index in (0..equator).rev() {
+            assert!(
+                towards_the_sky(ring(ring_index)) >= towards_the_sky(ring(ring_index + 1)) - 1e-6,
+                "ring {ring_index} doubled back towards the rim"
+            );
+        }
+        // And every vertex in a ring shares that ring's colour.
+        for segment in 0..=DOME_SEGMENTS {
+            assert_eq!(colours[segment], colours[0]);
+        }
+    }
+
+    /// A clockless world paints one flat colour, which is the sky it always had.
+    #[test]
+    fn a_dome_with_no_clock_is_one_flat_colour() {
+        let fixed = Daylight::FIXED;
+        let colours = dome_colours(fixed.sky, fixed.horizon);
+        let sky = Srgba::from(fixed.sky);
+        for colour in &colours {
+            assert!(
+                (colour[0] - sky.red).abs() < 1e-6
+                    && (colour[1] - sky.green).abs() < 1e-6
+                    && (colour[2] - sky.blue).abs() < 1e-6,
+                "a clockless dome carried {colour:?}"
+            );
+        }
+    }
+
+    /// The mesh is as long as it is wide: one colour and one normal per position, and every
+    /// position exactly [`SKY_BODY_DISTANCE`] from the eye it is centred on.
+    ///
+    /// A colour attribute out of step with its positions is the one way a gradient built
+    /// from two loops can be silently wrong.
+    #[test]
+    fn the_dome_mesh_is_one_shell_with_a_colour_for_every_vertex() {
+        let fixed = Daylight::FIXED;
+        let mesh = dome_mesh(fixed.sky, fixed.horizon);
+        for attribute in [Mesh::ATTRIBUTE_COLOR, Mesh::ATTRIBUTE_NORMAL] {
+            assert_eq!(
+                mesh.attribute(attribute)
+                    .expect("the dome carries every attribute")
+                    .len(),
+                dome_vertex_count()
+            );
+        }
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the dome's positions are three floats each");
+        };
+        assert_eq!(positions.len(), dome_vertex_count());
+        for position in positions {
+            let radius = Vec3::from_array(*position).length();
+            assert!(
+                (radius - SKY_BODY_DISTANCE).abs() < 1e-2,
+                "a vertex sits {radius} from the eye"
+            );
+        }
     }
 
     /// Night is the interval the server named, all of it, with nothing of the ramps inside

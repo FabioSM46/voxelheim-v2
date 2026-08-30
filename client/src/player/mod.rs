@@ -299,6 +299,7 @@ impl Plugin for PlayerPlugin {
                     mobs::create_visuals,
                     structures::create_visuals,
                     sky::spawn_sun,
+                    sky::spawn_sky,
                     precipitation::create_visuals,
                 ),
             )
@@ -401,6 +402,11 @@ impl Plugin for PlayerPlugin {
                     // quads face it. Reading a frame early would turn fast-moving weather
                     // edge-on while the player turns.
                     precipitation::draw_precipitation,
+                    // And after it for the same reason, one scale larger: the sky dome is
+                    // centred on the eye, so a frame-old position slides the whole horizon
+                    // rather than one quad. `sky::drive_the_sky` still runs inside
+                    // `ApplySnapshots` and still takes the opposite trade for the colours.
+                    sky::follow_the_eye,
                 )
                     .after(camera::AimCamera),
             )
