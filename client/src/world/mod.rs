@@ -46,6 +46,7 @@ mod water_material;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
@@ -71,6 +72,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChunkStore>()
             .init_resource::<DecodeQueue>()
+            .init_resource::<DecodeTimeBudget>()
             // `init_resource` rather than `insert_resource`, and `NetPlugin` does
             // the same: whichever plugin is built first creates the inbox and the
             // other finds it, so neither depends on the order in `main.rs`.
@@ -866,7 +868,99 @@ fn border_neighbours(coord: ChunkCoord, local: [usize; 3], size: usize) -> Vec<C
 /// nowhere near the cap, but the server sends a `BlockUpdate` for every edit any
 /// player in view makes, and whatever moves blocks on its own later will reuse that
 /// same message — so the burst is the case to be bounded for, not the click.
+///
+/// **It is a ceiling now rather than the rule**, and [`MAX_DECODE_TIME_PER_FRAME`] is
+/// why: everything above is an argument about how much *work* is worth doing before
+/// the next stage can use it, and none of it is an argument about how long a frame
+/// takes. Both bounds are read on the same line, and whichever is reached first ends
+/// the frame's expansion.
 const MAX_DECODES_PER_FRAME: usize = 32;
+
+/// How much of a frame expanding the backlog may take.
+///
+/// **Why a count was not enough.** [`MAX_DECODES_PER_FRAME`] bounds items, and the thing
+/// it exists to prevent is a frame that visibly stalls. Those are two different
+/// quantities joined by a cost per chunk that is not a constant — it moves with the build
+/// profile, with the CPU and with what the payload holds — so a count is a bound on the
+/// stall only on the machine somebody once measured it on. Expanding and storing one
+/// chunk, averaged over the 49 a boundary crossing streams, was **0.026–0.044 ms
+/// optimized and 0.26–0.46 ms unoptimized** on one AMD Ryzen 7 3700X: a factor of ten
+/// between two builds of the same source, before any second machine is considered. A
+/// budget written to bound a frame has to be spent in the frame's own unit.
+///
+/// **What #629 measured, and where the spike was.** The harness lives in `render.rs` and
+/// is re-runnable — `cargo test --release -- --ignored --nocapture measure_`. It streams
+/// the 49 chunks one chunk-boundary crossing sends (`DefaultViewDistance` on the server
+/// is 3, so a crossing is a 7 × 7 slab) and the 343 a join sends, under each bound in
+/// turn, and stamps a clock around each of the three world systems. On the frames the
+/// shell lands on, **`ingest_world_updates` owned 88% of the frame**, `start_mesh_jobs`
+/// about 5% and `apply_finished_meshes` under 2% — which is why this constant exists and
+/// `MAX_APPLIED_PER_FRAME` did not move. With the count as the only bound, the worst
+/// frame that system spent was:
+///
+/// | burst | optimized | unoptimized |
+/// | ----- | --------- | ----------- |
+/// | one crossing, 49 chunks | 0.27–1.16 ms | 11.7–15.7 ms |
+/// | a join, 343 chunks | 1.75–2.42 ms | 15.7–21.2 ms |
+///
+/// Two frames absorb a whole crossing at 32 a frame, so the unoptimized client spent
+/// twelve to sixteen milliseconds in one system, twice, at a spacing of exactly one
+/// chunk of travel. That is the periodic hitch the issue reported, and the optimized
+/// column is why it was reported by somebody running the game rather than by a profiler.
+///
+/// **Where 2 ms comes from.** It is an eighth of a 60 Hz frame, and the numbers either
+/// side of it are the reason it is not one of them. **1 ms** would bind in the optimized
+/// build, where nothing measured needs bounding: a join's first frame was already
+/// 1.75–2.42 ms there with the count alone, so a 1 ms slice would spread a join that
+/// finishes expanding in 11 frames over roughly 25 to buy back a spike no measurement
+/// found. **4 ms** is a quarter of a 60 Hz frame handed to one system on a frame that
+/// still has to render, and it would have left the unoptimized crossing above spending
+/// 4 ms of 16.67 twice over — a quieter version of the same hitch rather than the end of
+/// it. At 2 ms the same runs measured 0.30–1.23 ms and 2.08 ms optimized (join fill
+/// unchanged at 11 frames) and 2.2–4.0 ms unoptimized.
+///
+/// **What it costs, stated rather than buried.** In the unoptimized build a join now
+/// finishes expanding after about 80 frames instead of 11. Those are frames the client
+/// is running rather than frozen — 11 frames of 16–21 ms each is not a faster join, it
+/// is the same join with the client unable to draw it — but terrain does finish arriving
+/// about a second later, and if that ever matters more than the smoothness it buys, this
+/// is the number to revisit. In the optimized build the join is unchanged, which is the
+/// case [`MAX_DECODES_PER_FRAME`] was chosen for.
+///
+/// **The slice is not a deadline, and the overshoot is deliberate.** It is checked after
+/// an update has been applied, so the last one always finishes: the drain is metered,
+/// never interrupted. The admission pass that empties the inbox into the queue is outside
+/// the clock as well — `net`'s boundary rule leaves it no choice — so a frame that admits
+/// a whole join measures about 2.08 ms here rather than 2.00. Both are why this bounds a
+/// frame's *shape* rather than promising a maximum.
+///
+/// **Unloads are inside the slice even though they are outside the count.** The count
+/// deliberately skips them, because metering a map removal would let a burst of unloads
+/// defer the loads behind it. Wall clock needs no such exemption: an unload that costs
+/// nothing spends nothing, and one that somehow costs a millisecond is a millisecond of
+/// the frame whatever its name is.
+const MAX_DECODE_TIME_PER_FRAME: Duration = Duration::from_millis(2);
+
+/// The slice of a frame [`ingest_world_updates`] may spend on the backlog.
+///
+/// A resource holding [`MAX_DECODE_TIME_PER_FRAME`], and it is one for the tests rather
+/// than for the player: **no screen sets it and nothing on the wire reaches it**. What
+/// it buys is that the suite never times the runner. The burst tests below assert an
+/// exact number of expansions per frame, which is a statement about the *count* budget;
+/// with a wall-clock bound in the same loop those assertions would pass or fail
+/// depending on who else was using the machine. So `ingest_app` and `headless_world`
+/// install [`Duration::MAX`], where the count is the only bound that can be reached,
+/// and the tests that are about this bound install [`Duration::ZERO`], where it is
+/// always the one reached. Both ends are exact; the value in between is a tuning
+/// number, and a tuning number is not what a test should be pinned to.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeTimeBudget(pub(crate) Duration);
+
+impl Default for DecodeTimeBudget {
+    fn default() -> Self {
+        Self(MAX_DECODE_TIME_PER_FRAME)
+    }
+}
 
 /// The view distance whose join the backlog is sized to hold whole.
 ///
@@ -906,6 +1000,14 @@ const BACKLOG_VIEW_DISTANCE: usize = 8;
 /// the largest burst normal play produces. The protocol's ceiling of 16 would be
 /// `33³` = 35 937 updates and 1 123 frames: nineteen seconds of backlog, which is not
 /// latency, it is a stall.
+///
+/// **Those frame counts are now a floor, and the bound is unchanged by that.** The
+/// drain stops at [`MAX_DECODES_PER_FRAME`] *or* [`MAX_DECODE_TIME_PER_FRAME`],
+/// whichever comes first, so a machine or a build on which 32 expansions do not fit in
+/// 2 ms takes more than 154 frames to drain a full backlog. What the bound promises is
+/// unaffected — it is a ceiling on memory and on divergence, not a delivery deadline —
+/// and the direction is the safe one: the extra frames are the ones that were being
+/// stolen from rendering.
 const MAX_DECODE_BACKLOG: usize = (2 * BACKLOG_VIEW_DISTANCE + 1).pow(3);
 
 /// World updates that have arrived and have not been applied yet.
@@ -1149,6 +1251,9 @@ pub(crate) fn ingest_world_updates(
     mut inbox: ResMut<WorldInbox>,
     mut queue: ResMut<DecodeQueue>,
     mut store: ResMut<ChunkStore>,
+    // How much of this frame the drain below may spend. Read rather than assumed so the
+    // suite can pin the two ends of it exactly — see [`DecodeTimeBudget`].
+    budget: Res<DecodeTimeBudget>,
     session: Option<Res<Session>>,
     // Where a resend request goes out from, and the reason this system takes a sender at
     // all. An eviction is the only moment the coordinate that was lost is known; a pass
@@ -1255,6 +1360,13 @@ pub(crate) fn ingest_world_updates(
     }
 
     let mut spent = 0usize;
+    // The clock starts here and not at the top of the system, because the admission pass
+    // above is not optional: `net`'s boundary rule is that a drain never handles one
+    // event per frame, so the inbox is emptied into the queue whatever this frame can
+    // afford to expand. Charging that to a slice the loop is stopped by would let a
+    // large arrival starve the expansion it just queued — which is the wrong way round,
+    // since queuing is the cheap half and expanding is the half being bounded.
+    let began = Instant::now();
     // This can now be reached with an empty queue, where once it could not: an
     // eviction drops every update queued for its coordinate, and a flood aimed at one
     // chunk empties the backlog it filled. The `while let` is still the right shape —
@@ -1318,7 +1430,20 @@ pub(crate) fn ingest_world_updates(
 
         // Tested after the update has been applied and never before the pop: a budget
         // enforced by popping and discarding would lose whichever chunk was unlucky.
-        if spent >= MAX_DECODES_PER_FRAME {
+        //
+        // **Both bounds are read here, and that placement is the progress guarantee.**
+        // One update is popped and applied before either can stop the loop, so a frame
+        // that is already over its slice still moves the queue forward by one — the
+        // budget slows streaming down and can never stall it, however slow the machine
+        // or however long the *rest* of the frame took. A check at the top of the body
+        // would have neither property: with the clock started before the loop it would
+        // still let one through, but the moment somebody moved the clock a line earlier
+        // it would stop reading the queue entirely.
+        //
+        // The clock is read once per update. It is a vDSO call of a few tens of
+        // nanoseconds against an expansion measured in tens of microseconds, so the
+        // meter costs about a thousandth of what it meters.
+        if spent >= MAX_DECODES_PER_FRAME || began.elapsed() >= budget.0 {
             break;
         }
     }
@@ -1632,16 +1757,35 @@ mod tests {
     }
 
     /// An app running only the ingest system, with the inbox a test can fill.
+    ///
+    /// The time budget is [`Duration::MAX`] here, so the *count* is the only bound the
+    /// drain can reach and every assertion about how much one frame expands is exact.
+    /// Anything else would be timing the runner: see [`DecodeTimeBudget`], and
+    /// [`metered_ingest_app`] for the tests that are about the other bound.
     fn ingest_app(with_session: bool) -> App {
+        let mut app = metered_app(Duration::MAX);
+        if with_session {
+            app.insert_resource(session());
+        }
+        app
+    }
+
+    /// An ingest app whose drain may spend exactly `budget` on the backlog.
+    fn metered_app(budget: Duration) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<WorldInbox>()
             .init_resource::<DecodeQueue>()
             .init_resource::<ChunkStore>()
+            .insert_resource(DecodeTimeBudget(budget))
             .add_systems(Update, ingest_world_updates);
-        if with_session {
-            app.insert_resource(session());
-        }
+        app
+    }
+
+    /// A session-carrying ingest app whose drain may spend exactly `budget`.
+    fn metered_ingest_app(budget: Duration) -> App {
+        let mut app = metered_app(budget);
+        app.insert_resource(session());
         app
     }
 
@@ -2700,9 +2844,12 @@ mod tests {
         // at view distance 4 — in as few frames as the inbox allowed, and every
         // millisecond of it landed on the frame being built.
         //
-        // The property asserted is a bounded amount of work per frame, not a duration:
-        // a wall-clock budget would measure the runner rather than the code, and would
-        // pass or fail depending on who else was using the machine.
+        // The property asserted is a bounded amount of *work* per frame, and that is why
+        // `ingest_app` hands the drain `Duration::MAX`: since #629 there is a wall-clock
+        // bound in the same loop, and an exact expansion count under it would measure the
+        // runner rather than the code — passing or failing on who else was using the
+        // machine. The reasoning did not change when the second bound arrived; it is the
+        // reason the second bound is switched off here and pinned on its own below.
         const BURST: usize = MAX_DECODES_PER_FRAME * 3 + REMAINDER;
 
         let mut app = ingest_app(true);
@@ -2765,6 +2912,149 @@ mod tests {
 
         app.update();
         assert_eq!(backlog(&app), 0);
+    }
+
+    #[test]
+    fn a_frame_with_no_time_left_still_expands_one_chunk() {
+        // The progress guarantee, at the only value where it can be asserted exactly.
+        // `Duration::ZERO` is a budget that is spent before the first update is popped,
+        // so this is the worst frame the meter can produce — and it must still be a
+        // frame that moves the queue forward, because a budget that can stall streaming
+        // is not a budget, it is a deadlock waiting for a slow machine.
+        //
+        // The placement of the check is what makes it true: both bounds are read at the
+        // *bottom* of the loop body, after an update has been popped and applied.
+        const BURST: usize = 4;
+
+        let mut app = metered_ingest_app(Duration::ZERO);
+        for cx in 0..BURST {
+            push(&mut app, payload_at(coord(cx as i32, 0, 0)));
+        }
+
+        for expanded in 1..=BURST {
+            app.update();
+            assert_eq!(
+                chunk_count(&app),
+                expanded,
+                "a frame with no time left expanded neither more nor less than one chunk"
+            );
+            assert_eq!(backlog(&app), BURST - expanded, "and the rest still waits");
+        }
+
+        assert_eq!(refused(&app), 0, "nothing was turned away");
+        assert_eq!(evicted(&app), 0, "and nothing was dropped from the store");
+    }
+
+    #[test]
+    fn an_exhausted_time_budget_still_lets_an_unload_through() {
+        // The other kind of update, at the same worst frame. An unload costs no *count*
+        // budget deliberately — metering a map removal would let a burst of them defer
+        // the loads behind it — and it is inside the *time* slice like everything else.
+        // What must not happen either way is that a frame takes nothing off the queue.
+        let mut app = metered_ingest_app(Duration::ZERO);
+        push(&mut app, payload_at(coord(0, 0, 0)));
+        push(
+            &mut app,
+            WorldUpdate::Unload {
+                coord: coord(0, 0, 0),
+            },
+        );
+
+        app.update();
+        assert_eq!(chunk_count(&app), 1, "the chunk landed on the first frame");
+        assert_eq!(backlog(&app), 1, "and the unload waited for the second");
+
+        app.update();
+        assert_eq!(
+            chunk_count(&app),
+            0,
+            "which is where it took the chunk away"
+        );
+        assert_eq!(backlog(&app), 0);
+    }
+
+    #[test]
+    fn a_burst_drained_a_chunk_a_frame_loses_nothing_and_refuses_nothing() {
+        // The conservation law under the slowest drain the meter allows. Every chunk of
+        // the burst has to arrive, in the server's order, with `decode_refused` and
+        // `decode_evicted` still at zero — a burst far under `MAX_DECODE_BACKLOG` is not
+        // something the bound may touch however few of them a frame gets through, and a
+        // slow frame turning terrain away would be this fix causing the hole it exists
+        // to prevent.
+        const BURST: usize = MAX_DECODES_PER_FRAME * 2;
+
+        let mut app = metered_ingest_app(Duration::ZERO);
+        for cx in 0..BURST {
+            push(&mut app, payload_at(coord(cx as i32, 0, 0)));
+        }
+
+        // The law is read after each frame rather than before the first: until one has
+        // run, the burst is still in the inbox and neither term of it has been reached.
+        for frame in 1..=BURST {
+            app.update();
+            assert_eq!(
+                backlog(&app) + chunk_count(&app),
+                BURST,
+                "every chunk is waiting or held after frame {frame}; none may vanish"
+            );
+        }
+
+        assert_eq!(chunk_count(&app), BURST, "every chunk arrived");
+        assert_eq!(backlog(&app), 0, "with nothing left waiting");
+        assert_eq!(refused(&app), 0);
+        assert_eq!(evicted(&app), 0);
+
+        let store = app.world().resource::<ChunkStore>();
+        for cx in 0..BURST {
+            assert!(
+                store.get(coord(cx as i32, 0, 0)).is_some(),
+                "chunk {cx} of the burst never reached the store"
+            );
+        }
+    }
+
+    #[test]
+    fn the_count_is_the_ceiling_and_the_slice_is_the_rule() {
+        // The two bounds, and which of them binds. With no time limit the count is
+        // reached exactly; with no time at all the count is never reached. Neither end
+        // is a tuning number, which is what makes both exact — the shipping value sits
+        // between them and is justified where it is declared, not here.
+        const BURST: usize = MAX_DECODES_PER_FRAME * 2;
+
+        let mut unmetered = ingest_app(true);
+        let mut metered = metered_ingest_app(Duration::ZERO);
+        for cx in 0..BURST {
+            push(&mut unmetered, payload_at(coord(cx as i32, 0, 0)));
+            push(&mut metered, payload_at(coord(cx as i32, 0, 0)));
+        }
+
+        unmetered.update();
+        metered.update();
+
+        assert_eq!(
+            chunk_count(&unmetered),
+            MAX_DECODES_PER_FRAME,
+            "the count is what stops a frame that has time"
+        );
+        assert_eq!(
+            chunk_count(&metered),
+            1,
+            "and the slice is what stops one that does not"
+        );
+    }
+
+    #[test]
+    fn the_shipping_budget_is_two_milliseconds() {
+        // The number itself, pinned where moving it has to be deliberate — the same job
+        // `the_bound_is_one_join_at_view_distance_eight` does for the backlog. What it
+        // is measured from is in the constant's own comment, and the measurements are
+        // re-derivable: `cargo test --release -- --ignored --nocapture measure_`.
+        //
+        // The `Default` is what `WorldPlugin` installs — `render.rs` pins that half,
+        // where an app carrying the whole plugin stack already exists — so a client
+        // built from this tree runs metered rather than with whatever a test left behind.
+        assert_eq!(MAX_DECODE_TIME_PER_FRAME, Duration::from_millis(2));
+        assert_eq!(DecodeTimeBudget::default().0, MAX_DECODE_TIME_PER_FRAME);
     }
 
     #[test]

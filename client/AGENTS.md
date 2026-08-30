@@ -247,12 +247,26 @@ main schedule, and become one entity each. These rules hold that pipeline togeth
   expanding faster only converts a few run-length pairs into 64 KiB of voxels earlier than
   anything can use them. **Unloads cost no budget**: a map removal is not the work being
   bounded, and metering it would let a burst of them defer the loads queued behind.
+- **Since #629 the count is the ceiling and a slice of the frame is the rule.** A count
+  bounds items; what a stall is made of is time, and the two are joined by a cost per
+  chunk that moves by a factor of ten between an optimized build and an unoptimized one
+  on the same machine. So `ingest_world_updates` also stops at `MAX_DECODE_TIME_PER_FRAME`
+  — 2 ms — whichever bound it reaches first. **Both are read at the bottom of the loop
+  body**, after an update has been applied, which is the whole of the progress guarantee:
+  a frame that is already over its slice still takes one update off the queue, so the
+  budget can slow streaming down and can never stall it. Unloads sit inside the slice
+  even though they sit outside the count — wall clock needs no exemption for work that
+  costs nothing. The number, what it was measured from and what the values either side of
+  it cost are at its declaration; the measurement is re-runnable with
+  `cargo test --release -- --ignored --nocapture measure_`, and `DecodeTimeBudget` is why
+  the suite's own burst assertions still count rather than time.
 - **The queue that metering created has a ceiling, and the ceiling is derived.**
   `MAX_DECODE_BACKLOG` is one whole join — `(2 · 8 + 1)³` = 4 913 updates — at a view
   distance the *client* chooses, never `ServerWelcome.view_distance`, because sizing the
   bound from the server's number hands the party being defended against the job of setting
-  its own ceiling. A full backlog is 154 frames of decode budget, about 2.6 s at 60 Hz, and
-  that wait is the latency the bound trades the process for. The server's default of 3 is
+  its own ceiling. A full backlog is at least 154 frames of decode budget, about 2.6 s at
+  60 Hz — a floor since #629, because the time slice can end a frame before the count
+  does — and that wait is the latency the bound trades the process for. The server's default of 3 is
   343 chunks, fourteen joins under it; the protocol ceiling of 16 would be 35 937 updates
   and nineteen seconds, which is a stall rather than a latency. Bounds are justified where
   they are declared here — `view_distance <= 16` in `schemas/handshake.fbs` is the pattern.
