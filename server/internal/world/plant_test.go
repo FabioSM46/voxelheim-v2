@@ -66,18 +66,24 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 		}
 	}
 
+	// **An absent climate is the assertion, not a gap in the table.** A missing key
+	// reads back as zero, which is the one thing every denominator switch here means
+	// by it: nothing of this species grows in that climate. Tundra and desert are
+	// named in none of the three rows below and are checked in all of them.
 	for index, tc := range []struct {
-		name        string
-		seedOffset  int64
-		denominator uint64
-		footprint   int
-		forest      bool
+		name         string
+		seedOffset   int64
+		denominators map[Climate]uint64
+		footprint    int
+		forest       bool
 	}{
-		{"broadleaf", broadleafSeedOffset, broadleafChanceDenominator, broadleafCanopyRadius, true},
-		{"bush", bushSeedOffset, bushChanceDenominator, 1, false},
+		// The broadleaf is a tree and stays the plains' alone; the two low-cover rows
+		// under it grow in the taiga too, at their own numbers rather than the plains'.
+		{"broadleaf", broadleafSeedOffset, map[Climate]uint64{Plains: broadleafChanceDenominator}, broadleafCanopyRadius, true},
+		{"bush", bushSeedOffset, map[Climate]uint64{Plains: plainsBushChanceDenominator, Taiga: taigaBushChanceDenominator}, 1, false},
 		// The flower is last, which is its priority: every other plant is asked for
 		// a column first, so a drift never thins a wood.
-		{"flower", flowerSeedOffset, flowerChanceDenominator, 0, false},
+		{"flower", flowerSeedOffset, map[Climate]uint64{Plains: plainsFlowerChanceDenominator, Taiga: taigaFlowerChanceDenominator}, 0, false},
 	} {
 		species := plantSpeciesTable[index+3]
 		if species.name != tc.name || species.seedOffset != tc.seedOffset || species.footprint != tc.footprint || species.forest != tc.forest {
@@ -88,13 +94,10 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 			t.Errorf("%s rootsOn(Grass) = %t and rootsOn(Snow) = %t, want true and false",
 				tc.name, species.rootsOn(Grass), species.rootsOn(Snow))
 		}
-		for _, climate := range []Climate{Taiga, Tundra, Desert} {
-			if got := species.denominator(climate); got != 0 {
-				t.Errorf("%s denominator in %v = %d, want 0", tc.name, climate, got)
+		for _, climate := range []Climate{Plains, Taiga, Tundra, Desert} {
+			if got := species.denominator(climate); got != tc.denominators[climate] {
+				t.Errorf("%s denominator in %v = %d, want %d", tc.name, climate, got, tc.denominators[climate])
 			}
-		}
-		if got := species.denominator(Plains); got != tc.denominator {
-			t.Errorf("%s denominator in plains = %d, want %d", tc.name, got, tc.denominator)
 		}
 	}
 
@@ -110,6 +113,10 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 		}
 	}
 
+	// **The sweep below carries more weight since the taiga gained low cover.** Two
+	// rows answering a non-zero denominator for the same climate select columns from
+	// the same candidate set, so nothing but their independent lattices keeps a taiga
+	// bush from tracking the wood it grows in.
 	offsets := map[int64]string{}
 	for i := range plantSpeciesTable {
 		species := &plantSpeciesTable[i]
@@ -574,5 +581,62 @@ func TestPlainsLowCoverIsUnchanged(t *testing.T) {
 	if digest != wantDigest || bushes != wantBushes || flowers != wantFlowers {
 		t.Errorf("plains low cover = {digest:%#016x bushes:%d flowers:%d}, want {digest:%#016x bushes:%d flowers:%d}: the plains distribution moved",
 			digest, bushes, flowers, wantDigest, wantBushes, wantFlowers)
+	}
+}
+
+// TestATaigaConiferOutranksTheLowCoverThatWantsItsColumn is the table-priority
+// half of giving the taiga a floor.
+//
+// The two low-cover rows now answer a non-zero denominator in the conifer's own
+// climate, which is new: before this, no column in the taiga could be wanted by
+// two rows at once. Table order is the whole of the answer — the conifer is row 0
+// and the bush and flower are rows 4 and 5 — so a wood must not thin by one trunk.
+//
+// **The sweep counts the contested columns and fails if it finds none**, because an
+// assertion that passes over an empty set is a sentence rather than a test. A
+// column contested by the bush is one where both density hashes land on zero; the
+// flower needs its patch as well.
+func TestATaigaConiferOutranksTheLowCoverThatWantsItsColumn(t *testing.T) {
+	t.Parallel()
+
+	const side = 512
+	contestedByBush, contestedByFlower := 0, 0
+	for x := int64(0); x < side; x++ {
+		for z := int64(0); z < side; z++ {
+			col := columnAt(climateSeed, x, z)
+			if col.climate != Taiga || col.blockAt(col.surface) != Grass {
+				continue
+			}
+			if hashLattice(climateSeed+treeSeedOffset, x, z)%taigaTreeChanceDenominator != 0 {
+				continue
+			}
+			bushWants := hashLattice(climateSeed+bushSeedOffset, x, z)%taigaBushChanceDenominator == 0
+			flowerWants := hashLattice(climateSeed+flowerSeedOffset, x, z)%taigaFlowerChanceDenominator == 0 &&
+				flowerPatchAt(climateSeed, x, z)
+			if !bushWants && !flowerWants {
+				continue
+			}
+			species, _, rooted := plantAtColumn(climateSeed, x, z, col)
+			// A column the conifer itself is refused on — settlement, standing
+			// water, a cave mouth — refuses the low cover on the same evidence, so
+			// there is nothing to arbitrate and nothing to assert.
+			if !rooted {
+				continue
+			}
+			if species != &plantSpeciesTable[0] {
+				t.Fatalf("(%d, %d) grows %s where a conifer's draw also passed; table priority is not holding",
+					x, z, species.name)
+			}
+			if bushWants {
+				contestedByBush++
+			}
+			if flowerWants {
+				contestedByFlower++
+			}
+		}
+	}
+	if contestedByBush == 0 || contestedByFlower == 0 {
+		t.Errorf("the taiga square holds %d columns contested by a bush and %d by a flower; the sweep asserted nothing",
+			contestedByBush, contestedByFlower)
 	}
 }

@@ -304,8 +304,12 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	densities := make(map[Climate]float64, 3)
 	plainsEligible, broadleaves, bushes := 0, 0, 0
 	bushSingles, bushPairs := 0, 0
-	// Flowers are measured against the columns inside a drift: one in five there.
+	// Low cover grows on grass in two climates now, so every counter it feeds is
+	// kept per climate. Flowers are measured against the columns inside a drift:
+	// one plains column in five there, one taiga column in fifteen.
 	patchEligible, flowersInPatch, flowersOutsidePatch, flowerStrays := 0, 0, 0, 0
+	taigaEligible, taigaBushes := 0, 0
+	taigaPatchEligible, taigaFlowersInPatch, taigaFlowersOutsidePatch := 0, 0, 0
 	flowerColours := map[Block]int{}
 	for _, tc := range []struct {
 		name        string
@@ -335,19 +339,40 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				inPatch := flowerPatchAt(climateSeed, x, z)
 				if candidate {
 					eligible++
-					if tc.climate == Plains {
+					switch tc.climate {
+					case Plains:
 						plainsEligible++
 						if inPatch {
 							patchEligible++
 						}
+					case Taiga:
+						taigaEligible++
+						if inPatch {
+							taigaPatchEligible++
+						}
 					}
 				}
 				species, h, rooted := plantAtColumn(climateSeed, x, z, col)
-				if tc.climate != Plains && rooted && species == &plantSpeciesTable[5] {
-					t.Fatalf("a flower is rooted in %v at (%d, %d)", tc.climate, x, z)
+				// Low cover reaches the taiga and stops there: the tundra square is
+				// the executable half of "absent from the switch is a decision".
+				if tc.climate == Tundra && rooted && (species == &plantSpeciesTable[4] || species == &plantSpeciesTable[5]) {
+					t.Fatalf("%s is rooted in tundra at (%d, %d)", species.name, x, z)
 				}
-				if tc.climate == Taiga && rooted && (species == &plantSpeciesTable[3] || species == &plantSpeciesTable[4]) {
+				// The broadleaf is a tree and stays the plains' alone.
+				if tc.climate == Taiga && rooted && species == &plantSpeciesTable[3] {
 					t.Fatalf("%s is rooted in taiga at (%d, %d)", species.name, x, z)
+				}
+				if tc.climate == Taiga && rooted {
+					switch species {
+					case &plantSpeciesTable[4]:
+						taigaBushes++
+					case &plantSpeciesTable[5]:
+						if inPatch {
+							taigaFlowersInPatch++
+						} else {
+							taigaFlowersOutsidePatch++
+						}
+					}
 				}
 				if tc.climate == Plains && rooted {
 					switch species {
@@ -399,7 +424,7 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 		denominator int
 	}{
 		{"broadleaf", broadleaves, broadleafChanceDenominator},
-		{"bush", bushes, bushChanceDenominator},
+		{"bush", bushes, plainsBushChanceDenominator},
 	} {
 		want := float64(plainsEligible) / float64(tc.denominator)
 		ratio := float64(tc.roots) / want
@@ -418,10 +443,45 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	if flowersOutsidePatch != 0 {
 		t.Errorf("%d flowers are rooted outside a patch, want none: patch is not gating", flowersOutsidePatch)
 	}
-	wantFlowers := float64(patchEligible) / float64(flowerChanceDenominator)
+	wantFlowers := float64(patchEligible) / float64(plainsFlowerChanceDenominator)
 	if ratio := float64(flowersInPatch) / wantFlowers; flowersInPatch == 0 || wantFlowers == 0 || ratio < 0.75 || ratio > 1.25 {
 		t.Errorf("plains flowers count %d over %d eligible columns inside a drift; one in %d predicts %.1f (ratio %.2f, want within +/-25%%)",
-			flowersInPatch, patchEligible, flowerChanceDenominator, wantFlowers, ratio)
+			flowersInPatch, patchEligible, plainsFlowerChanceDenominator, wantFlowers, ratio)
+	}
+
+	// **The taiga floor, measured the way the plains floor is.** Both rows are asked
+	// after the conifer, so a contested column goes to the tree and the predicted
+	// count is very slightly high — at one candidate in ninety-six that is about a
+	// percent, far inside the same ±25% band the rows above use. A footprint refuses
+	// nothing: a canopy may stand over a bush its neighbour column rooted.
+	for _, tc := range []struct {
+		name        string
+		roots       int
+		eligible    int
+		denominator int
+	}{
+		{"bush", taigaBushes, taigaEligible, taigaBushChanceDenominator},
+		{"flower", taigaFlowersInPatch, taigaPatchEligible, taigaFlowerChanceDenominator},
+	} {
+		want := float64(tc.eligible) / float64(tc.denominator)
+		ratio := float64(tc.roots) / want
+		if tc.roots == 0 || want == 0 || ratio < 0.75 || ratio > 1.25 {
+			t.Errorf("taiga %s count is %d over %d eligible columns; one in %d predicts %.1f (ratio %.2f, want within +/-25%%)",
+				tc.name, tc.roots, tc.eligible, tc.denominator, want, ratio)
+		}
+	}
+	// The patch field gates the taiga drift for the reason it gates the plains one,
+	// and the zero is again the half that says it is a drift.
+	if taigaFlowersOutsidePatch != 0 {
+		t.Errorf("%d taiga flowers are rooted outside a patch, want none: patch is not gating", taigaFlowersOutsidePatch)
+	}
+	// A taiga bush is rarer than a plains one and rarer than the conifer it grows
+	// under: the undergrowth must not read as the feature.
+	taigaBushDensity := float64(taigaBushes) / float64(taigaEligible)
+	plainsBushDensity := float64(bushes) / float64(plainsEligible)
+	if taigaBushDensity >= plainsBushDensity || taigaBushDensity >= densities[Taiga] {
+		t.Errorf("taiga bush density %f, plains bush density %f, taiga conifer density %f; want taiga bushes rarest",
+			taigaBushDensity, plainsBushDensity, densities[Taiga])
 	}
 	// All three colours appear, and a drift is *mostly* the cell's own: a stray rate
 	// near a half would be a mixture rather than a drift.
@@ -462,6 +522,8 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				palms++
 			case &plantSpeciesTable[2]:
 				shrubs++
+			case &plantSpeciesTable[4]:
+				t.Fatalf("a bush is rooted in the desert at (%d, %d)", x, z)
 			case &plantSpeciesTable[5]:
 				t.Fatalf("a flower is rooted in the desert at (%d, %d)", x, z)
 			}

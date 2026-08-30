@@ -157,12 +157,20 @@ const (
 	// Plains plants use their own lattices. A broadleaf is four times as common
 	// there as the conifer that precedes it in the table, while bushes are the
 	// ground cover a player should see from anywhere on open grass.
-	broadleafChanceDenominator       = 384
-	bushChanceDenominator            = 64
-	broadleafMinTrunkHeight          = 3
-	broadleafCanopyRadius            = 2
-	broadleafSeedOffset        int64 = 0x9B05688C
-	bushSeedOffset             int64 = 0x1F83D9AB
+	//
+	// **A taiga bush is half as common as a plains one, and rarer than the tree it
+	// grows under.** One column in 128 against the plains' 64 is undergrowth rather
+	// than a second meadow, and putting it behind taigaTreeChanceDenominator (96)
+	// keeps the wood the feature: a walk through the pines passes more trunks than
+	// bushes. Tundra and desert stay absent from bushChanceDenominator's switch,
+	// which is the same statement coniferChanceDenominator makes about the desert.
+	broadleafChanceDenominator        = 384
+	plainsBushChanceDenominator       = 64
+	taigaBushChanceDenominator        = 128
+	broadleafMinTrunkHeight           = 3
+	broadleafCanopyRadius             = 2
+	broadleafSeedOffset         int64 = 0x9B05688C
+	bushSeedOffset              int64 = 0x1F83D9AB
 
 	// gravelSeedOffset decorrelates the gravel field from every other 2D field. A
 	// patch that always sat on the same side of a climate boundary would be a
@@ -174,12 +182,22 @@ const (
 	// the top quarter of a 2D field over forty-eight blocks, this the top 28% of its
 	// own over forty, on no shared lattice. flowerStrayDenominator is how many
 	// flowers in a drift take the *next* colour instead of the cell's own.
-	flowerChanceDenominator        = 5
-	flowerStrayDenominator  uint64 = 5
-	flowerPatchScaleBlocks         = 40
-	flowerPatchThreshold           = one * 72 / 100
-	flowerSeedOffset        int64  = 0x082EFA98
-	flowerPatchSeedOffset   int64  = 0xEC4E6C89
+	//
+	// **A taiga drift is a third of a plains one: one column in fifteen.** The patch
+	// field is the row's and not the climate's, so a taiga drift falls where a plains
+	// one would and covers the same share of the world; what changes is how thickly
+	// it blooms inside. One in five is a carpet on open grass, one in fifteen is
+	// colour scattered between the trunks — still a drift, because the same field
+	// still says where, and never a sprinkle. Tundra and desert are absent for the
+	// reason a bush is: a snow-rooted or sand-rooted flower is a species nobody has
+	// decided on, not a density set to zero.
+	plainsFlowerChanceDenominator        = 5
+	taigaFlowerChanceDenominator         = 15
+	flowerStrayDenominator        uint64 = 5
+	flowerPatchScaleBlocks               = 40
+	flowerPatchThreshold                 = one * 72 / 100
+	flowerSeedOffset              int64  = 0x082EFA98
+	flowerPatchSeedOffset         int64  = 0xEC4E6C89
 )
 
 // If the band constants are ever reordered, this conversion becomes a compile
@@ -404,7 +422,16 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // surface instead of stopping at the global deep-cave level. Terrain heights and
 // every uncarved voxel stay byte-identical, but carved air below a sea, basin or river
 // may become water, so stored deltas in those caves need the new base version.
-const WorldgenVersion uint32 = 16
+// 16 → 17: bushes and flowers on taiga grass. The two low-cover rows gated on
+// plainsChanceDenominator, which answers zero for every climate but the plains, so
+// there was not one bush and not one flower in the taiga; they now carry their own
+// per-climate switches at one column in 128 and one drift column in fifteen.
+// Terrain heights, underground materials, every tree in every climate and every
+// plains column stay byte-identical — TestPlainsLowCoverIsUnchanged pins the last
+// of those against the digest measured before the change. Selected taiga grass
+// columns nevertheless gain a foliage or flower block above their surface, so a
+// stored delta there would resolve against ground version 16 left as air.
+const WorldgenVersion uint32 = 17
 
 // Generate builds the chunk at coord for seed.
 //
@@ -760,6 +787,43 @@ func plainsChanceDenominator(denominator uint64) func(Climate) uint64 {
 	}
 }
 
+// bushChanceDenominator is one candidate column in how many that becomes a bush,
+// for a climate.
+//
+// Plains and taiga share grass over dirt over stone (see blockAt), so the row's
+// rootsOn already accepts both surfaces and only this number decides where the
+// ground cover grows. **Tundra and desert are absent on purpose and reach the
+// default zero**, in the sense coniferChanceDenominator's comment gives it: not a
+// density nobody has tuned, but the statement that a bush rooted in snow or sand is
+// a species this world has not decided on. plantAtColumnIn checks the zero before
+// it reaches a modulus.
+func bushChanceDenominator(climate Climate) uint64 {
+	switch climate {
+	case Plains:
+		return plainsBushChanceDenominator
+	case Taiga:
+		return taigaBushChanceDenominator
+	default:
+		return 0
+	}
+}
+
+// flowerChanceDenominator is one candidate column in how many that carries a
+// flower, for a climate — inside a drift, because the row's patch field gates every
+// climate alike and nothing here changes that.
+//
+// Tundra and desert are absent for the reason they are absent above.
+func flowerChanceDenominator(climate Climate) uint64 {
+	switch climate {
+	case Plains:
+		return plainsFlowerChanceDenominator
+	case Taiga:
+		return taigaFlowerChanceDenominator
+	default:
+		return 0
+	}
+}
+
 // plantSpecies is one complete answer to what may grow in a column. Table order is
 // priority: the first row whose refusals all pass owns the root.
 type plantSpecies struct {
@@ -834,7 +898,7 @@ var bush = plantSpecies{
 	rootsOn: func(block Block) bool {
 		return block == Grass
 	},
-	denominator: plainsChanceDenominator(bushChanceDenominator),
+	denominator: bushChanceDenominator,
 	footprint:   1,
 	forest:      false,
 	visit:       visitBush,
@@ -848,7 +912,7 @@ var flower = plantSpecies{
 	rootsOn: func(block Block) bool {
 		return block == Grass
 	},
-	denominator: plainsChanceDenominator(flowerChanceDenominator),
+	denominator: flowerChanceDenominator,
 	footprint:   0,
 	forest:      false,
 	patch:       flowerPatchAt,
@@ -876,9 +940,10 @@ func flowerPatchCell(worldX, worldZ int64) (int64, int64) {
 // flowerStrayDenominator takes the next along.
 //
 // **The stray draw reads the high half of h, and that is not a taste question.** The
-// density draw has already established h%flowerChanceDenominator == 0 for every
-// column reaching here, so the low bits are spent and a stray test against them would
-// be true for every flower in the world. visitBush reads (h>>40) for the same reason.
+// density draw has already established h%flowerChanceDenominator(climate) == 0 for
+// every column reaching here, so the low bits are spent and a stray test against them
+// would be true for every flower in the world. visitBush reads (h>>40) for the same
+// reason.
 func flowerBlock(seed, worldX, worldZ int64, h uint64) Block {
 	cellX, cellZ := flowerPatchCell(worldX, worldZ)
 	colour := hashLattice(seed+flowerPatchSeedOffset, cellX, cellZ) % 3
