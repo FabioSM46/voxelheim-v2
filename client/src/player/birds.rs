@@ -1514,6 +1514,8 @@ pub(super) fn fly_the_flock(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use bevy::mesh::MeshVertexAttributeId;
 
@@ -2217,6 +2219,36 @@ mod tests {
         geometry(mesh).0
     }
 
+    /// One shell: a name, its mesh's positions and normals, and its own faces.
+    type Shell = (String, Vec<Vec3>, Vec<Vec3>, Vec<[usize; 3]>);
+
+    /// Every closed shell a bird draws, split out of the two meshes it draws them in.
+    ///
+    /// Split from the drawn triangles rather than re-lofted beside them, so a ring reversed
+    /// inside `body_mesh` itself is seen and a third shell is checked the day it is added.
+    /// Faces arrive shell by shell and each after a shell's first shares a corner with the
+    /// ones before it, so "shares no corner with the open shell" is where the next starts.
+    fn shells() -> Vec<Shell> {
+        let mut shells: Vec<Shell> = Vec::new();
+        for (name, mesh) in [("body", body_mesh()), ("wing", wing_mesh())] {
+            let (positions, normals, triangles) = geometry(&mesh);
+            let key = |corner: &usize| positions[*corner].to_array().map(f32::to_bits);
+            let mut open: HashSet<[u32; 3]> = HashSet::new();
+            let mut at = 0;
+            for face in triangles {
+                if !face.iter().any(|corner| open.contains(&key(corner))) {
+                    let name = format!("{name} shell {at}");
+                    shells.push((name, positions.clone(), normals.clone(), Vec::new()));
+                    open.clear();
+                    at += 1;
+                }
+                open.extend(face.iter().map(key));
+                shells.last_mut().expect("a shell is open").3.push(face);
+            }
+        }
+        shells
+    }
+
     /// How far the drawn bird reaches from its own origin on each axis, in wingspans, with
     /// its wings anywhere in the beat.
     ///
@@ -2242,6 +2274,24 @@ mod tests {
         reach
     }
 
+    /// The world-space half-extent of a `half`-sized box once a bird flying along `heading`
+    /// has turned it — the same `Transform::look_to` `fly_the_flock` aims with. A zero heading
+    /// keeps the box as authored, the frame `Dir3::new` refuses and `fly_the_flock` leaves the
+    /// previous rotation on.
+    fn turned(half: Vec3, heading: Vec3) -> Vec3 {
+        let Ok(direction) = Dir3::new(heading) else {
+            return half;
+        };
+        let mut aim = Transform::IDENTITY;
+        aim.look_to(direction.as_vec3(), Vec3::Y);
+        let mut reach = Vec3::ZERO;
+        for corner in 0..8u32 {
+            let sign = |bit: u32| if corner & bit == 0 { -1.0 } else { 1.0 };
+            reach = reach.max((aim.rotation * (half * Vec3::new(sign(1), sign(2), sign(4)))).abs());
+        }
+        reach
+    }
+
     #[test]
     fn every_face_of_a_bird_is_wound_outward() {
         // The failure `hands::BladeSection::perimeter` warns about, made a machine's problem.
@@ -2253,8 +2303,14 @@ mod tests {
         // surface and of nothing else, so no cap was forgotten), and the volume that winding
         // encloses is positive — which is the whole of what "outward" means, and the one of
         // the three a mesh built inside out fails.
-        for (name, mesh) in [("body", body_mesh()), ("wing", wing_mesh())] {
-            let (positions, normals, triangles) = geometry(&mesh);
+        //
+        // **Per shell, because two of the three are blind to a mesh's parts.** `body_mesh` is
+        // the body and the tail in one list; area vectors cancel shell by shell and reversing
+        // a ring reverses its stored normal with its winding, so only the volume sees an
+        // inverted part — and summed over both it does not either: 0.0035 against 0.00033.
+        let shells = shells();
+        assert_eq!(shells.len(), 3, "the body's two shells and the wing's one");
+        for (name, positions, normals, triangles) in shells {
             let mut area = Vec3::ZERO;
             let mut volume = 0.0f32;
             for corners in triangles {
@@ -2325,6 +2381,12 @@ mod tests {
         // `place` reads no part of `BirdSpecies::size` — so it is untouched by this issue and
         // would pass with a bird the size of a hill. This is the half raising the sizes moved:
         // the wingtip, not the origin.
+        //
+        // **And the reach is turned before it is added.** `look_to` is a whole rotation, not
+        // merely a yaw, so adding a local reach axis by axis bounds nothing: a bird lying along
+        // world `x` reaches past its half-span in `x`, and a parrot's dart is steep often
+        // enough — 0.998 of straight up at worst — that its `z` reaches into `y`. The turned
+        // box bounds it, and is worth up to 0.61 blocks: the eagle's span, swept across `z`.
         let reach = drawn_reach();
         let anchor = Vec3::new(-512.0, 64.0, 512.0);
         for species in &BIRDS {
@@ -2332,8 +2394,10 @@ mod tests {
             for seed in 0..16u64 {
                 let seed = mix(seed, 0xB0A7);
                 for sample in 0..=SAMPLES {
-                    let drawn =
-                        (place(species, seed, sample as f32 * DT, anchor) - anchor).abs() + half;
+                    let elapsed = sample as f32 * DT;
+                    let at = place(species, seed, elapsed, anchor);
+                    let ahead = place(species, seed, elapsed + HEADING_STEP, anchor) - at;
+                    let drawn = (at - anchor).abs() + turned(half, ahead);
                     assert!(
                         drawn.max_element() <= BIRD_RANGE,
                         "{:?} drew out to {drawn} from its anchor",
@@ -2345,8 +2409,10 @@ mod tests {
 
         // Sixteen seeds are not the bound, though, and the row that binds is the eagle: the
         // top of its band plus what `ARC_RISE` adds is 63 of a 64-block box whatever any
-        // sample happens to reach. Both directions are asserted, because a comfortable margin
-        // means the wingspan could have been larger and the table's argument has gone stale.
+        // sample happens to reach. `reach.y` is untuned there and right there: the rise is at
+        // its top, so the vertical rate is zero and the turn level. Both directions are
+        // asserted, because a comfortable margin means the wingspan could have been larger
+        // and the table's argument has gone stale.
         let eagle = &BIRDS[2];
         let highest = *eagle.altitude.end() + ARC_RISE + reach.y * eagle.size;
         assert!(
