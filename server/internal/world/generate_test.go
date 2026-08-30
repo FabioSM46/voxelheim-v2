@@ -54,6 +54,21 @@ const (
 	// one, so this fourth fixture names a plains chunk that contains a conifer. The
 	// two fixtures together make "outside tundra is byte-identical" executable.
 	goldenPlainsPath = "testdata/chunk_golden_plains.bin"
+
+	// The fifth fixture, added for the reason the second, third and fourth were, and
+	// this time the gap was measured before the change rather than after it.
+	//
+	// **Worldgen 15 re-cut every river in the world and left all four fixtures above
+	// byte-identical.** Rivers are a curve through a few percent of columns, so a chunk
+	// holds one or it does not, and none of those four did: the golden test would have
+	// passed a change that moved every channel in the world. Third time this file has
+	// had to record that a fixture only pins what happens to be in it.
+	//
+	// It was chosen by sweeping for the richest channel rather than the richest
+	// palette, and it is both: sixteen distinct block ids and 588 channel columns
+	// standing on three terraces four blocks apart — 48, 52 and 56, so two falls — with
+	// 2484 voxels of water between their beds and their surfaces.
+	goldenRiverPath = "testdata/chunk_golden_river.bin"
 )
 
 var (
@@ -61,6 +76,7 @@ var (
 	goldenWaterCoord      = Coord{X: 182, Y: 1, Z: -59}
 	goldenSettlementCoord = Coord{X: -280, Y: 1, Z: -272}
 	goldenPlainsCoord     = Coord{X: 3, Y: 2, Z: 64}
+	goldenRiverCoord      = Coord{X: 197, Y: 1, Z: -61}
 )
 
 // TestGenerateMatchesTheGoldenChunk is the determinism contract, and the reason
@@ -89,6 +105,7 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 		{"water", goldenWaterCoord, goldenWaterPath},
 		{"settlement", goldenSettlementCoord, goldenSettlementPath},
 		{"plains-conifer", goldenPlainsCoord, goldenPlainsPath},
+		{"river", goldenRiverCoord, goldenRiverPath},
 	} {
 		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 
@@ -221,11 +238,44 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 	}
 }
 
+// The river fixture pins the feature it was chosen for, and not merely some bytes.
+//
+// **A golden chunk is only worth what is in it**, which is the lesson three of the five
+// fixtures were added to record. This one is worth a channel: water standing in it, more
+// than one terrace under that water, and a bed of gravel it is cut into.
+func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
+	t.Parallel()
+
+	chunk := Generate(goldenSeed, goldenRiverCoord)
+	counts := map[Block]int{}
+	for _, block := range chunk.Blocks {
+		counts[block]++
+	}
+	for _, block := range []Block{Water, Gravel} {
+		if counts[block] == 0 {
+			t.Errorf("the river golden chunk holds no block %d; it no longer pins what it was chosen for", block)
+		}
+	}
+
+	originX, _, originZ := goldenRiverCoord.Origin()
+	terraces := map[int]int{}
+	for z := range ChunkSize {
+		for x := range ChunkSize {
+			if col := columnAt(goldenSeed, originX+int64(x), originZ+int64(z)); col.river {
+				terraces[col.waterSurface]++
+			}
+		}
+	}
+	if len(terraces) < 2 {
+		t.Errorf("the river golden chunk stands on %d terrace(s) %v; a fall needs two", len(terraces), terraces)
+	}
+}
+
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 14 {
-		t.Fatalf("WorldgenVersion = %d, want 14 after flowers were grown in plains grass", WorldgenVersion)
+	if WorldgenVersion != 15 {
+		t.Fatalf("WorldgenVersion = %d, want 15 after every river was re-cut to follow the land in terraces", WorldgenVersion)
 	}
 }
 

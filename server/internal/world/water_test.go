@@ -43,16 +43,17 @@ const (
 func TestWaterCoversItsShareOfTheWorld(t *testing.T) {
 	t.Parallel()
 
+	// **The count is standingWater rather than `surface < seaLevel`, and since #595
+	// those are different sets.** A river above the sea line is a column standing in
+	// water whose ground is not under the sea, which is what this statistic is about.
+	// Under the old fixed bed every channel was below the line and the two agreed.
 	columns, wet, ice, rivers, beaches := 0, 0, 0, 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+waterAreaSize; z += waterAreaStep {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+waterAreaSize; x += waterAreaStep {
 			col := columnAt(waterSeed, x, z)
 			columns++
 
-			if col.surface >= seaLevel {
-				if col.river {
-					t.Fatalf("river column at (%d, %d) has surface %d, at or above the sea line %d", x, z, col.surface, seaLevel)
-				}
+			if !col.standingWater {
 				continue
 			}
 			wet++
@@ -62,7 +63,7 @@ func TestWaterCoversItsShareOfTheWorld(t *testing.T) {
 			if col.beach {
 				beaches++
 			}
-			if col.fillAt(seaLevel) == Ice {
+			if col.fillAt(col.waterSurface) == Ice {
 				ice++
 				if col.climate != Tundra {
 					t.Fatalf("%v column at (%d, %d) wears ice; only a tundra does", col.climate, x, z)
@@ -193,70 +194,180 @@ var neighbourOffsets = [8][2]int64{
 	{1, 1}, {1, -1}, {-1, 1}, {-1, -1},
 }
 
-// A river bed is cut to one height, is gravel on top, and carries water to the sea
-// line — and it exists only where the land it crosses is low enough.
-func TestARiverBedIsCutToOneHeightUnderTheSeaLine(t *testing.T) {
+// A river surface is the land it crosses, quantised to a terrace; its bed sits
+// riverBedDrop under that and never above the ground; and the channel between them is
+// full of water that knows which way it runs.
+//
+// **The old test asserted one number for every bed in the world and is gone**, because
+// `surface == seaLevel - riverBedDrop` is exactly the property #595 removed. What
+// replaces it is the definition, recomputed per column, plus the two bounds that make a
+// terraced bed a channel rather than an embankment: the surface is a multiple of the
+// step, and the bed is never lifted above the land it is cut into.
+func TestARiverSurfaceIsTerracedAndItsBedFollowsTheLand(t *testing.T) {
 	t.Parallel()
 
-	channels := 0
+	// The old riverMaxSurface cap, kept here as a number rather than as a constant
+	// because the constant is deleted: the point of the sweep below is that channels
+	// now exist above it.
+	const removedMaxSurface = seaLevel + 24
+
+	channels, aboveOldCap, deepened, highest := 0, 0, 0, 0
+	steps, maxStep := 0, 0
+	previous := map[int64]column{}
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+waterAreaSize; z += waterAreaStep {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+waterAreaSize; x += waterAreaStep {
 			col := columnAt(waterSeed, x, z)
+			last, hadLast := previous[x]
+			previous[x] = col
 			if !col.river {
 				continue
 			}
 			channels++
 
-			if col.surface != seaLevel-riverBedDrop {
-				t.Fatalf("river bed at (%d, %d) is at %d, want %d", x, z, col.surface, seaLevel-riverBedDrop)
+			surface := riverSurfaceAt(waterSeed, x, z)
+			base := unloweredHeightAt(waterSeed, x, z)
+			switch {
+			case col.waterSurface != surface:
+				t.Fatalf("the channel at (%d, %d) stands at %d, want its terrace %d", x, z, col.waterSurface, surface)
+			case surface%riverTerraceStep != 0:
+				t.Fatalf("the channel at (%d, %d) stands at %d, which is not a multiple of the %d-block terrace",
+					x, z, surface, riverTerraceStep)
+			case surface < seaLevel:
+				t.Fatalf("the channel at (%d, %d) stands at %d, under the sea line %d, where the sea owns the column",
+					x, z, surface, seaLevel)
+			case col.surface > base:
+				t.Fatalf("the bed at (%d, %d) is at %d, above the land's own %d: the river is on an embankment",
+					x, z, col.surface, base)
+			case col.surface != min(surface-riverBedDrop, base):
+				t.Fatalf("the bed at (%d, %d) is at %d, want min(terrace-drop, land) = %d",
+					x, z, col.surface, min(surface-riverBedDrop, base))
+			case col.blockAt(col.surface) != Gravel:
+				t.Fatalf("the bed at (%d, %d) is block %d, want Gravel", x, z, col.blockAt(col.surface))
 			}
-			if !col.standingWater || col.waterSurface != seaLevel {
-				t.Fatalf("river at (%d, %d) has standing water %t at %d, want true at sea line %d",
-					x, z, col.standingWater, col.waterSurface, seaLevel)
+
+			if col.surface < surface-riverBedDrop {
+				deepened++
 			}
-			if got := col.blockAt(col.surface); got != Gravel {
-				t.Fatalf("river bed at (%d, %d) is block %d, want Gravel", x, z, got)
+			if base > removedMaxSurface {
+				aboveOldCap++
 			}
-			for y := col.surface + 1; y < seaLevel; y++ {
-				if got := col.voxelAt(waterSeed, x, int64(y), z); got != Water {
-					t.Fatalf("the channel at (%d, %d) holds %d at y=%d, want Water", x, z, got, y)
+			highest = max(highest, surface)
+
+			// Water from the bed to the terrace, and air over it.
+			for y := col.surface + 1; y <= surface; y++ {
+				want := Block(Water)
+				if col.climate == Tundra && y == surface {
+					want = Ice
+				}
+				if got := col.voxelAt(waterSeed, x, int64(y), z); got != want {
+					t.Fatalf("the channel at (%d, %d) holds %d at y=%d, want %d", x, z, got, y, want)
 				}
 			}
-			if got := col.voxelAt(waterSeed, x, seaLevel+1, z); got != Air {
-				t.Fatalf("the channel at (%d, %d) holds %d one block over the sea line", x, z, got)
+			if got := col.voxelAt(waterSeed, x, int64(surface)+1, z); got != Air {
+				t.Fatalf("the channel at (%d, %d) holds %d one block over its terrace %d", x, z, got, surface)
+			}
+
+			// A terrace step between two sampled channel columns. The samples are
+			// waterAreaStep apart, so this counts how often a river changes level
+			// rather than measuring one fall; that is the test below, at true
+			// adjacency.
+			if hadLast && last.river && last.waterSurface != col.waterSurface {
+				steps++
+				maxStep = max(maxStep, absInt(col.waterSurface-last.waterSurface))
 			}
 		}
 	}
+
 	if channels == 0 {
 		t.Fatal("no channel in the sample window, so nothing here was checked")
 	}
+	if aboveOldCap == 0 {
+		t.Fatalf("no channel in the window crosses land above %d, so removing riverMaxSurface changed nothing here",
+			removedMaxSurface)
+	}
+	if highest < seaLevel+32 {
+		t.Errorf("the highest channel in the window stands at %d; a river that reaches the highlands wants at least %d",
+			highest, seaLevel+32)
+	}
+	if steps < minimumTerraceSteps {
+		t.Errorf("%d terrace changes between sampled channel columns, want at least %d: the surface is not stepping with the land",
+			steps, minimumTerraceSteps)
+	}
+	t.Logf("measured %d channel columns, %d over the removed cap, %d with a bed deepened onto lower ground, "+
+		"highest terrace %d, %d terrace changes with a maximum of %d blocks",
+		channels, aboveOldCap, deepened, highest, steps, maxStep)
+}
 
-	// Rivers stop where the land climbs, and the limit is read from the *unlowered*
-	// height. Sweeping the field directly is the only way to see the columns the
-	// height rule rejected — a rejected column is an ordinary one afterwards, and
-	// says nothing about why.
-	rejected := 0
-	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+waterAreaSize; z++ {
-		for x := int64(waterAreaOriginX); x < waterAreaOriginX+waterAreaSize; x++ {
-			if !riverAt(waterSeed, x, z) || nearSpawnColumn(x, z) {
+// minimumTerraceSteps is how many level changes the sample window must hold before
+// "terraced" is a claim about the world rather than about the arithmetic. Twenty is the
+// acceptance criterion; the window measures hundreds.
+const minimumTerraceSteps = 20
+
+// Where two adjacent channel columns stand at different terraces the difference is a
+// whole number of steps, and the higher one's water faces air over the lower one.
+//
+// **That air is the whole of what the generator owes a waterfall.** Nothing here paints
+// falling water; what generation guarantees is that there is somewhere to pour — the
+// lower terrace's water is not raised to meet the higher one, and the higher channel's
+// wall is not extended to close the gap.
+func TestATerraceStepIsAFallOverOpenAir(t *testing.T) {
+	t.Parallel()
+
+	// A contiguous window, because this is the one claim needing true adjacency: a
+	// sample every eight blocks reports a slope as a cliff. Smaller than the statistics
+	// window for the same reason it is contiguous — 65536 columns, each resolving its
+	// neighbour.
+	const scanSize = 256
+
+	pairs, steps, maxDrop := 0, 0, 0
+	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
+		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
+			col := columnAt(waterSeed, x, z)
+			if !col.river {
 				continue
 			}
-			nx := floorDiv(x<<fracBits, terrainScaleBlocks)
-			nz := floorDiv(z<<fracBits, terrainScaleBlocks)
-			base := baseHeight + int((amplitudeAt(waterSeed, x, z)*(fbm2D(waterSeed, nx, nz)-one/2))>>fracBits)
-			if base <= riverMaxSurface {
-				continue
-			}
-			rejected++
-			if columnAt(waterSeed, x, z).river {
-				t.Fatalf("a channel was cut at (%d, %d), where the land stands at %d over the limit %d",
-					x, z, base, riverMaxSurface)
+			for _, step := range [2][2]int64{{1, 0}, {0, 1}} {
+				nextX, nextZ := x+step[0], z+step[1]
+				next := columnAt(waterSeed, nextX, nextZ)
+				if !next.river {
+					continue
+				}
+				pairs++
+				drop := col.waterSurface - next.waterSurface
+				if drop == 0 {
+					continue
+				}
+				steps++
+				maxDrop = max(maxDrop, absInt(drop))
+				if absInt(drop)%riverTerraceStep != 0 {
+					t.Fatalf("adjacent channels (%d, %d) at %d and (%d, %d) at %d differ by %d, not a whole %d-block terrace",
+						x, z, col.waterSurface, nextX, nextZ, next.waterSurface, drop, riverTerraceStep)
+				}
+
+				// The lower column, over its own water and under the higher one's, must
+				// be open air for the fall to land in.
+				lower, lowerX, lowerZ := next, nextX, nextZ
+				higher := col
+				if drop < 0 {
+					lower, lowerX, lowerZ, higher = col, x, z, next
+				}
+				for y := lower.waterSurface + 1; y <= higher.waterSurface; y++ {
+					if got := lower.voxelAt(waterSeed, lowerX, int64(y), lowerZ); got != Air {
+						t.Fatalf("the fall from %d onto (%d, %d) at %d meets %d at y=%d, not the air it needs",
+							higher.waterSurface, lowerX, lowerZ, lower.waterSurface, got, y)
+					}
+				}
 			}
 		}
 	}
-	if rejected == 0 {
-		t.Error("the field never met high ground in this window, so the climb rule was never exercised")
+
+	if pairs == 0 {
+		t.Fatal("no two adjacent channel columns in the window, so no step was checked")
 	}
+	if steps == 0 {
+		t.Error("every adjacent pair of channel columns in the window stands at one level: the river is still a canal")
+	}
+	t.Logf("measured %d adjacent channel pairs, %d of them a terrace step, tallest %d blocks", pairs, steps, maxDrop)
 }
 
 // A basin lowers the ground and nothing else, so the water in one is the same sea
@@ -402,14 +513,14 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
 			col := columnAt(waterSeed, x, z)
-			if col.surface >= seaLevel {
+			if !col.standingWater {
 				continue
 			}
 			wetColumns++
 			if col.river {
 				riverColumns++
 			}
-			for y := int64(caveWaterLevel + 1); y <= seaLevel; y++ {
+			for y := int64(caveWaterLevel + 1); y <= int64(col.waterSurface); y++ {
 				if !col.carvedAt(waterSeed, x, y, z) {
 					continue
 				}
@@ -425,7 +536,7 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 		}
 	}
 	if wetColumns == 0 {
-		t.Fatal("the 256x256 sample contains no lowered column below seaLevel")
+		t.Fatal("the 256x256 sample contains no column standing in water")
 	}
 	if carvedInBand == 0 {
 		t.Fatal("the 256x256 sample contains no standing-water column carved between caveWaterLevel and seaLevel")
@@ -448,7 +559,11 @@ func TestABeachIsSandOnEitherSideOfTheWaterLine(t *testing.T) {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+waterAreaSize; x += waterAreaStep {
 			col := columnAt(waterSeed, x, z)
 			if !col.beach {
-				if beachAt(col.surface, col.climate) {
+				// A river column in the band is the one exemption, and it is
+				// [columnAt]'s rather than [beachAt]'s: a terraced bed can land in the
+				// shore band, where sand under gravel under three blocks of water is a
+				// ditch rather than a shore. The band rule itself is unchanged.
+				if beachAt(col.surface, col.climate) && !col.river {
 					t.Fatalf("the column at (%d, %d) is in the shore band and is not a beach", x, z)
 				}
 				continue

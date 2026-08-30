@@ -810,7 +810,7 @@ func assertTheBlendIsSixteenBlocksOfSmoothstep(t *testing.T, s Settlement) {
 	for b := range len(settlementBearings) {
 		dx, dz := ringOffset(s.Radius+settlementBlendBlocks, b)
 		x, z := s.CentreX+dx, s.CentreZ+dz
-		land, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
+		land, _, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
 		if d := max(land-s.Plateau, s.Plateau-land); d > drop {
 			bearing, drop = b, d
 		}
@@ -826,7 +826,7 @@ func assertTheBlendIsSixteenBlocksOfSmoothstep(t *testing.T, s Settlement) {
 	natural := func(distance int) int {
 		dx, dz := ringOffset(distance, bearing)
 		x, z := s.CentreX+dx, s.CentreZ+dz
-		h, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
+		h, _, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
 		return h
 	}
 
@@ -903,7 +903,7 @@ func TestABlendBandMeetsTheLandItEndsOn(t *testing.T) {
 	t.Parallel()
 
 	land := func(x, z int64) int {
-		h, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
+		h, _, _ := loweredHeightAt(settlementTestSeed, x, z, unloweredHeightAt(settlementTestSeed, x, z), ClimateAt(settlementTestSeed, x, z))
 		return h
 	}
 

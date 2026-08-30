@@ -94,11 +94,16 @@ func SurfaceAt(seed int64, x, z int64) (height int, kind SurfaceKind) {
 	col := columnAt(seed, x, z)
 
 	// Standing water, and the one voxel of ice that is a lid on it. Both are read at
-	// the sea line because that is where the top of the fill is; the ground below is
-	// still what the height reports, which is what lets a client shade a shallow bay
-	// differently from a deep one.
-	if col.surface < seaLevel {
-		if col.fillAt(seaLevel) == Ice {
+	// the column's own water surface because that is where the top of the fill is; the
+	// ground below is still what the height reports, which is what lets a client shade
+	// a shallow bay differently from a deep one.
+	//
+	// **The column's water line rather than the sea's, since #595.** `surface <
+	// seaLevel` named every wet column while a river bed was cut under the sea line; a
+	// terraced channel runs at any height, so that test would draw a highland river as
+	// the gravel of its own bed and leave the map disagreeing with the chunk.
+	if col.standingWater {
+		if col.fillAt(col.waterSurface) == Ice {
 			return col.surface, SurfaceIce
 		}
 		return col.surface, SurfaceWater

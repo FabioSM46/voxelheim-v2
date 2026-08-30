@@ -853,7 +853,7 @@ func settlementShapeAt(seed int64, worldX, worldZ int64, base int, climate Clima
 				return site.plateau, true, true
 			}
 			t := ((distance - int64(site.radius)) * one) / settlementBlendBlocks
-			natural, _ := loweredHeightAt(seed, worldX, worldZ, base, climate)
+			natural, _, _ := loweredHeightAt(seed, worldX, worldZ, base, climate)
 			return int(lerp(int64(site.plateau), int64(natural), smoothstep(t))), false, true
 		}
 	}
