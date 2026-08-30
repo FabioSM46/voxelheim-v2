@@ -13,6 +13,7 @@
 //! | `mesher.rs` | greedy meshing — a pure function, no Bevy types, no world access |
 //! | `render.rs` | the meshing tasks, the mesh assets and one entity per chunk |
 //! | `palette.rs` | block id to colour, and which ids are solid |
+//! | `water_material.rs` | what water looks like: the extended material and its embedded shader |
 //!
 //! The split mirrors the server's `internal/world`: `chunk.go` + `rle.go` are this
 //! file, and the run-length invariants live here rather than in `net/codec.rs` for
@@ -40,6 +41,7 @@
 mod mesher;
 pub(crate) mod palette;
 mod render;
+mod water_material;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
