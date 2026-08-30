@@ -127,14 +127,15 @@ func TestSurfaceAtNamesWhatTheGeneratorBuilt(t *testing.T) {
 				// on top of it. The lid is one voxel at the top of the body, so both
 				// kinds are read there — at the sea line for a sea or a basin, and at
 				// its own terrace for a river, which since #595 may run well above it.
-				want := Block(Water)
-				if kind == SurfaceIce {
-					want = Ice
-				}
+				// A river's water is one of the four current sources rather than plain
+				// [Water], so the family is what is asserted and not one id.
 				top := int64(columnAt(surfaceSeed, x, z).waterSurface)
-				if got := voxel(x, top, z); got != want {
-					t.Fatalf("(%d, %d) drawn as %d, but the voxel at its water line %d is %d, not %d",
-						x, z, kind, top, got, want)
+				got := voxel(x, top, z)
+				if kind == SurfaceIce && got != Ice {
+					t.Fatalf("(%d, %d) drawn as ice, but the voxel at its water line %d is %d", x, z, top, got)
+				}
+				if kind == SurfaceWater && !IsWater(got) {
+					t.Fatalf("(%d, %d) drawn as water, but the voxel at its water line %d is %d", x, z, top, got)
 				}
 
 			case SurfaceCave:

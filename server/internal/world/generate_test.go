@@ -67,7 +67,8 @@ const (
 	// It was chosen by sweeping for the richest channel rather than the richest
 	// palette, and it is both: sixteen distinct block ids and 588 channel columns
 	// standing on three terraces four blocks apart — 48, 52 and 56, so two falls — with
-	// 2484 voxels of water between their beds and their surfaces.
+	// 2484 voxels of water between their beds and their surfaces, of which worldgen 16
+	// makes 2467 running water carrying all four current ids.
 	goldenRiverPath = "testdata/chunk_golden_river.bin"
 )
 
@@ -242,7 +243,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 //
 // **A golden chunk is only worth what is in it**, which is the lesson three of the five
 // fixtures were added to record. This one is worth a channel: water standing in it, more
-// than one terrace under that water, and a bed of gravel it is cut into.
+// than one terrace under that water, and a bed of gravel it is cut into. Since worldgen
+// 16 the water is running water, so the four current ids are pinned here too.
 func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 	t.Parallel()
 
@@ -251,7 +253,7 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 	for _, block := range chunk.Blocks {
 		counts[block]++
 	}
-	for _, block := range []Block{Water, Gravel} {
+	for _, block := range []Block{WaterCurrentXPos, WaterCurrentXNeg, WaterCurrentZPos, WaterCurrentZNeg, Gravel} {
 		if counts[block] == 0 {
 			t.Errorf("the river golden chunk holds no block %d; it no longer pins what it was chosen for", block)
 		}
@@ -274,8 +276,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 15 {
-		t.Fatalf("WorldgenVersion = %d, want 15 after every river was re-cut to follow the land in terraces", WorldgenVersion)
+	if WorldgenVersion != 16 {
+		t.Fatalf("WorldgenVersion = %d, want 16 after every river voxel was given the direction it runs", WorldgenVersion)
 	}
 }
 
