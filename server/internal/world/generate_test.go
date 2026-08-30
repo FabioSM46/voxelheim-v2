@@ -224,8 +224,8 @@ func TestTheSettlementGoldenChunkActuallyHoldsABuilding(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 13 {
-		t.Fatalf("WorldgenVersion = %d, want 13 after hydrostatic cave fill beneath standing water", WorldgenVersion)
+	if WorldgenVersion != 14 {
+		t.Fatalf("WorldgenVersion = %d, want 14 after flowers were grown in plains grass", WorldgenVersion)
 	}
 }
 
@@ -243,6 +243,11 @@ func encodedBytes(pairs []uint16) []byte {
 func TestGenerateIsDeterministicUnderConcurrency(t *testing.T) {
 	t.Parallel()
 
+	// The second coordinate holds flowers, whose colours come from a lattice nothing
+	// else in the generator reads.
+	fx, fz, fcol, _ := findFlower(t)
+	flowered := ChunkOf(fx, int64(fcol.surface+1), fz)
+
 	const goroutines = 8
 	results := make([][]Block, goroutines)
 
@@ -251,7 +256,7 @@ func TestGenerateIsDeterministicUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = Generate(goldenSeed, goldenCoord).Blocks
+			results[i] = append(Generate(goldenSeed, goldenCoord).Blocks, Generate(climateSeed, flowered).Blocks...)
 		}()
 	}
 	wg.Wait()
@@ -999,8 +1004,10 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 				t.Fatalf("seed %d has solid block %d in spawn clearance at y=%d", seed, got, worldY)
 			}
 			// Below the sea line the clearance may be water — the player swims out of
-			// it. Above it, nothing but air is a legal answer.
-			if worldY > seaLevel && got != Air {
+			// it. Above it, air and ground cover are both legal: a spawn column
+			// inside a drift puts the player's feet *in* a flower rather than on top
+			// of one, and solidity is what the clearance is about (checked above).
+			if worldY > seaLevel && got != Air && !Cover(got) {
 				t.Fatalf("seed %d has block %d in spawn clearance at y=%d, above the sea line", seed, got, worldY)
 			}
 		}

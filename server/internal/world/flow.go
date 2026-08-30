@@ -1,8 +1,19 @@
 package world
 
 // NextWater returns the self-only next block from exactly six neighbours.
+//
+// **The first arm is "this cell is not water's to decide", and ground cover joins it.**
+// It was written as source-or-solid while the only non-solid ids were water and air,
+// so "not solid and not water" meant "empty" — and a flower is neither. Without
+// [Cover] a flower beside a scheduled voxel falls through to the drain rule, whose
+// answer with no water on any side is Air: a drift next to a river would be mown.
+//
+// **It leaves the flower rather than flooding it, which is the conservative half of a
+// real choice.** game.allowPlacement lets a placement displace cover, so flooding was
+// the symmetric answer; but a placement happens once, an automaton runs for as long
+// as there is water, and nothing regrows a flower. Water goes around.
 func NextWater(here Block, above, below Block, sides [4]Block) Block {
-	if waterSource(here) || Solid(here) {
+	if waterSource(here) || Solid(here) || Cover(here) {
 		return here
 	}
 
