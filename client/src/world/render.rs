@@ -2255,6 +2255,14 @@ mod tests {
     // that follows it never happens. Everything the *main schedule* does is measured;
     // the render world's share of applying a mesh is not, and no number here may be
     // quoted as though it were.
+    //
+    // **What is measured is printed; what is conserved is asserted.** A frame time is a
+    // reading and cannot be a bound on a shared runner — but "every chunk arrived,
+    // nothing was refused or evicted, and the bound did not change the world" is exact,
+    // so `drain_burst` and `same_world` assert it rather than leaving a regression to be
+    // spotted in a printed line. Being `#[ignore]`d, those assertions bind whoever runs
+    // the measurement and not CI; for every run the same conservation is pinned by
+    // `a_burst_drained_a_chunk_a_frame_loses_nothing_and_refuses_nothing`, which is not.
 
     /// Run-length encodes a dense voxel array the way the server's `world.Encode` does.
     fn encode_runs(blocks: &[BlockId]) -> Vec<u16> {
@@ -2388,8 +2396,13 @@ mod tests {
         elapsed.as_secs_f64() * 1000.0
     }
 
-    /// Streams `burst` in one frame under `budget` and reports what every frame cost.
-    fn drain_burst(what: &str, budget: DecodeTimeBudget, burst: Vec<(ChunkCoord, Vec<u16>)>) {
+    /// Streams `burst` in one frame under `budget`, reports what every frame cost, and
+    /// returns what the drain left behind.
+    fn drain_burst(
+        what: &str,
+        budget: DecodeTimeBudget,
+        burst: Vec<(ChunkCoord, Vec<u16>)>,
+    ) -> MeshStats {
         let chunks = burst.len();
         let mut app = instrumented_world(budget);
         app.update();
@@ -2455,6 +2468,39 @@ mod tests {
             seen.decode_refused,
             seen.decode_evicted,
         );
+
+        // The acceptance criteria, checked rather than printed.
+        assert_eq!(
+            seen.chunks_held, chunks,
+            "{what}: {chunks} chunks streamed, {} held",
+            seen.chunks_held
+        );
+        assert_eq!(seen.decode_refused, 0, "{what}: updates were refused");
+        assert_eq!(seen.decode_evicted, 0, "{what}: chunks were evicted");
+        assert!(seen.total_quads > 0, "{what}: the burst meshed nothing");
+        seen
+    }
+
+    /// The bound may change how long a burst takes to drain; it may not change what the
+    /// burst leaves behind. Asserted across the runs in [`COMPARED`] rather than left to
+    /// whoever reads the printed lines.
+    fn same_world(outcomes: &[MeshStats]) {
+        // `windows(2)` over one outcome compares nothing and passes anyway.
+        assert_eq!(outcomes.len(), COMPARED.len(), "a bound went unmeasured");
+        for pair in outcomes.windows(2) {
+            assert_eq!(
+                pair[0].chunks_held, pair[1].chunks_held,
+                "chunks held differ"
+            );
+            assert_eq!(
+                pair[0].meshed_chunks, pair[1].meshed_chunks,
+                "meshed chunks differ"
+            );
+            assert_eq!(
+                pair[0].total_quads, pair[1].total_quads,
+                "quad totals differ"
+            );
+        }
     }
 
     #[test]
@@ -2513,13 +2559,15 @@ mod tests {
         // each bound in turn. Both runs are in one process on one build, which is the
         // whole point — a before and an after taken from two `cargo test` invocations
         // minutes apart compare the machine's mood as much as the code.
+        let mut outcomes = Vec::new();
         for (label, budget) in COMPARED {
-            drain_burst(
+            outcomes.push(drain_burst(
                 &format!("one boundary crossing, {label}"),
                 budget,
                 boundary_slab(),
-            );
+            ));
         }
+        same_world(&outcomes);
     }
 
     #[test]
@@ -2527,8 +2575,14 @@ mod tests {
     fn measure_the_join_burst() {
         // The case the per-frame budgets were set for, and the one the fix must not
         // make materially slower: the whole 7 x 7 x 7 view volume in one burst.
+        let mut outcomes = Vec::new();
         for (label, budget) in COMPARED {
-            drain_burst(&format!("a join, {label}"), budget, join_volume());
+            outcomes.push(drain_burst(
+                &format!("a join, {label}"),
+                budget,
+                join_volume(),
+            ));
         }
+        same_world(&outcomes);
     }
 }
