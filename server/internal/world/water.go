@@ -414,9 +414,14 @@ func riverCurrentAt(seed, worldX, worldZ int64) (dx, dz int) {
 	return 0, -1
 }
 
-// waterCurrentBlock is the source id for a unit current, and the inverse of [CurrentOf].
-// Only worldgen places one, so this is the only constructor there is;
-// TestEveryCurrentIdRoundTripsThroughItsDirection pins the pair.
+// waterCurrentBlock is the source id for a current, and the inverse of [CurrentOf] over
+// the whole of its domain rather than only over the four unit steps: the zero current
+// maps to plain [Water], which is the block [CurrentOf] answers (0, 0) for.
+//
+// Only worldgen places one, so this is the only constructor there is, and
+// [riverCurrentAt] never returns zero — the zero arm is what keeps the round trip an
+// identity for a caller that does, not a live path.
+// TestEveryCurrentIdRoundTripsThroughItsDirection pins both halves.
 func waterCurrentBlock(dx, dz int) Block {
 	switch {
 	case dx > 0:
@@ -425,8 +430,10 @@ func waterCurrentBlock(dx, dz int) Block {
 		return WaterCurrentXNeg
 	case dz > 0:
 		return WaterCurrentZPos
-	default:
+	case dz < 0:
 		return WaterCurrentZNeg
+	default:
+		return Water
 	}
 }
 

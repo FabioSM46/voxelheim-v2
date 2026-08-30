@@ -479,6 +479,17 @@ func TestEveryCurrentIdRoundTripsThroughItsDirection(t *testing.T) {
 				want[0], want[1], block, gotX, gotZ)
 		}
 	}
+
+	// The zero current is the fifth point of the mapping and it is not a fifth id:
+	// [CurrentOf] answers (0, 0) for plain [Water], so that is what the constructor
+	// owes for (0, 0) if the pair is an inverse rather than a table of four units.
+	// Nothing passes it today — [riverCurrentAt] returns a unit step on every arm —
+	// which is exactly why only a test holds the arm in place.
+	if block := waterCurrentBlock(0, 0); block != Water {
+		t.Errorf("waterCurrentBlock(0, 0) is block %d, want plain Water (%d)", block, Water)
+	} else if gotX, gotZ := CurrentOf(block); gotX != 0 || gotZ != 0 {
+		t.Errorf("waterCurrentBlock(0, 0) reads back as (%d, %d), want (0, 0)", gotX, gotZ)
+	}
 }
 
 // A basin lowers the ground and nothing else, so the water in one is the same sea

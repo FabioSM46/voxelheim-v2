@@ -474,6 +474,13 @@ type column struct {
 	// volume under it alike — says which way it runs. Resolved once per column because
 	// [riverCurrentAt] costs four field samples and two smoothed heights, and a channel
 	// column has a cave system's worth of voxels to answer for.
+	//
+	// **Its zero value is [Air], and [column.fillAt] and [column.caveFillAt] read it
+	// verbatim rather than defending against that.** [columnAt] is the only constructor
+	// and always sets it, so an unset field can only come from a hand-built literal in
+	// this package — where air standing where water belongs fails the assertion that
+	// built the column, while defaulting the zero to [Water] would let a channel column
+	// that lost its block fill with directionless water and say nothing.
 	standingWater bool
 	waterSurface  int
 	waterBlock    Block
