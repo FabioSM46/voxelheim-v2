@@ -59,9 +59,9 @@ keeps meaning "everything the client is".
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on, and the two questions about a voxel — `solid_at` for what stops a body, `targetable_at` for what the crosshair finds | mesh, or spawn anything |
-| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel stem and head `build_cover` grows for every `is_cover` block | mention a Bevy type, or read a chunk it was not given |
+| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_shaped` block, a stem and a head for each cover id and a clump of foliage for a bush | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the three materials, one entity per chunk with the water and cover halves as its children | mesh on the main schedule, or own a camera or a light |
-| `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), and which are cover — there to be seen and broken but solid to nothing (`is_cover`) | know about meshes or about the wire |
+| `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), which are cover — there to be seen and broken but solid to nothing (`is_cover`) — and which the mesher grows a shape for rather than sweeping as a cube (`is_shaped`) | know about meshes or about the wire |
 | `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/ambience.rs` | the cosmetic ground look sampled from the loaded voxels around the eye | be read by anything that decides an outcome, be sent, or be derived from anything the server said about climate or weather |
@@ -456,16 +456,47 @@ not invisible.
 is order-dependent where opacity is not, and Bevy sorts transparent meshes back to front **per
 entity** — so one mesh carrying both kinds would have one sort key and would draw the water
 either in front of the lake bed it is seen through or behind the far bank. `mesh_chunk` therefore
-returns two `SurfaceMesh`es: the chunk's entity carries the opaque one and the water one hangs
-off it as a child, which is also why unloading needed no new code, since `despawn` takes
-descendants. A chunk in the middle of a lake gets the parent with no mesh of its own, because an
-empty opaque mesh is a draw call that renders nothing.
+returns **three** `SurfaceMesh`es: the chunk's entity carries the opaque one, and the water half and
+the cover half hang off it as children, which is also why unloading needed no new code, since
+`despawn` takes descendants. A chunk in the middle of a lake gets the parent with no mesh of its
+own, because an empty opaque mesh is a draw call that renders nothing.
+
+**The third is cover, and it is split by pipeline rather than by alpha.** A stem is a single plane,
+so the cover material is `cull_mode: None` and `double_sided` — and a material is a pipeline, so it
+is an entity. It is otherwise `AlphaMode::Opaque`, which keeps it out of the back-to-front sort
+water needs.
+
+**Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
+once and grows a shape inside each one `palette::is_shaped` answers for: a stem and a head for each
+of the three flower ids, three overlapping clumps of foliage for a bush. Every vertex stays inside
+its own voxel, which is the property that lets `ChunkStore::apply_block` need no remesh rule for a
+plant on a chunk border — a neighbour's sweep can no more see one than it can see the air that
+replaces it. There is nothing for a mask to merge here, and for the bush that is the point: it used
+to be an ordinary opaque cube, so a cluster of them merged into one flat green slab. Small per-voxel
+variations are drawn from a hash of the *chunk-local* coordinate, so a row of bushes is a row of
+different bushes and the buffers are still byte-identical on every remesh.
+
+**A bush is where `is_opaque` and `is_solid` part company, and it is the first id where they do.**
+`world.Bush` is `Solid` on the server, so a body is stopped by the whole cube and the drawn clumps
+have to span it — they reach to within `BUSH_INSET` of every wall, which is close enough that there
+is no invisible wall and far enough that two neighbours never put coincident quads on the plane
+they share. But foliage has gaps, so the ground under a bush has to keep the top face the cube used
+to cull: `is_opaque` is false for it and `is_solid` is still true. Making `Bush` a `Cover` block
+would be a **server** change with three enforced consequences, and it is not this.
+
+**The quad budget is the thing to watch when either shape changes.** Cover is per voxel and
+unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 8 quads and
+a bush is 18. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 258 quads
+where it was 96, while the opaque half fell by 24 — the bush's cube left the sweep and the ground
+under it gained the faces that cube was culling.
+`a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 
 **`palette.rs` answers two questions and they are not the same question.** `is_solid` is "does
 this stop a body and can it be aimed at" — `solid_at`, the raycast, the camera boom. `is_opaque`
-is "does this hide what is behind it" — the mesher, and only the mesher. Water happens to answer
-no to both; glass is the id that will separate them from *each other*. Keep them as two
-functions.
+is "does this hide what is behind it" — the mesher, and only the mesher. Water answers no to both,
+and glass was expected to be the id that separated them from *each other*; **the bush got there
+first**, because #634 draws it as foliage with gaps in it while the server still stops a body with
+the whole cube. Keep them as two functions.
 
 **`world/render.rs` owns the one camera, and it is a `Camera3d`.** Two cameras targeting one
 window need explicit ordering and clear-colour configuration to keep one from erasing the
