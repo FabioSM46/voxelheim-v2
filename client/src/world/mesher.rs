@@ -602,11 +602,19 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
         for z in 0..size {
             for x in 0..size {
                 let block = chunk.block([x, y, z]);
-                if block == palette::BUSH {
-                    push_bush(mesh, [x as f32, y as f32, z as f32], plant_seed(x, y, z));
+                // The gate is [`palette::is_shaped`] and not the two ids read apart,
+                // because that predicate is a statement *about this loop*: it is what
+                // makes [`palette::is_opaque`] false, so the sweep emits nothing at all
+                // for a shaped voxel. An id that answers it and reaches no branch here
+                // is not drawn as a cube — it is not drawn at all. Asking it once is
+                // what keeps that from happening silently, for the reason
+                // `player::inventory`'s `KITS` is a table and not a comparison: the
+                // failure that costs something is the omission, not the extra entry.
+                if !palette::is_shaped(block) {
                     continue;
                 }
-                if !palette::is_cover(block) {
+                if block == palette::BUSH {
+                    push_bush(mesh, [x as f32, y as f32, z as f32], plant_seed(x, y, z));
                     continue;
                 }
 
@@ -3259,6 +3267,37 @@ mod tests {
         let none = super::mesh_chunk(&solid(SIZE, palette::STONE), &alone());
         assert!(none.cover.is_empty());
         assert_eq!(none.cover.quad_count(), 0);
+    }
+
+    #[test]
+    fn every_shaped_id_grows_geometry_and_no_other_id_does() {
+        // The lockstep `palette::is_shaped` claims and `palette::is_opaque` leans on.
+        // A shaped voxel is see-through to the sweep, so it emits no mask face at all;
+        // if `build_cover` skipped it too the block would be *invisible*, not a cube.
+        // Driven off the palette rather than off a list typed here, so a fifth shaped
+        // id is caught by this test instead of by somebody noticing a hole in a hill.
+        const EDGE: usize = 4;
+        for block in palette::PALETTE {
+            let mut chunk = air(EDGE);
+            chunk.set(2, 2, 2, block);
+            let mesh = super::mesh_chunk(&chunk, &alone());
+            if palette::is_shaped(block) {
+                assert!(
+                    mesh.cover.quad_count() > 0,
+                    "shaped block {block} grows no geometry anywhere"
+                );
+                assert!(
+                    mesh.opaque.is_empty() && mesh.water.is_empty(),
+                    "shaped block {block} is drawn by nothing but the cover half"
+                );
+            } else {
+                assert_eq!(
+                    mesh.cover.quad_count(),
+                    0,
+                    "block {block} is swept as a cube and grows no plant"
+                );
+            }
+        }
     }
 
     #[test]
