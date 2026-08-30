@@ -31,6 +31,7 @@ use crate::net::{
     Outbound, RepairRequest, Sent, Session, encode_consume_request, encode_drop_item_request,
     encode_inventory_move_request, encode_repair_request,
 };
+use crate::settings::{Control, Settings};
 
 /// Number keys available to the minimal hotbar.
 const HOTBAR_KEYS: [KeyCode; 9] = [
@@ -120,6 +121,23 @@ pub struct InventoryClick {
     pub kind: InventoryClickKind,
 }
 
+/// One consume request left this client from the hotbar. Cosmetic feedback reads it;
+/// nothing else does.
+///
+/// **The same shape, and the same reason, as `super::combat`'s `SwingSent`.** It is written
+/// on the frame a `ConsumeRequest` was *queued*, so the hand plays for a frame that left
+/// rather than for a press that was made: a dropped frame is not a request, and animating one
+/// would tell the player they ate when nothing was asked of the server. It is emphatically
+/// not feedback for the *outcome* — whether the server spends the stack and restores any
+/// hunger is its own answer, and it arrives as the next complete `InventoryState` and
+/// `PlayerVitals` like every other one.
+///
+/// It carries nothing. There is one eating arc for every food, so there is no id for
+/// `super::hands` to route on, and a message with no payload cannot grow into a second
+/// opinion about what was eaten.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConsumeSent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Picked {
     slot: u8,
@@ -159,12 +177,18 @@ impl Plugin for InventoryPlugin {
             .init_resource::<SelfVitals>()
             .init_resource::<ViewMode>()
             .add_message::<InventoryClick>()
+            .add_message::<ConsumeSent>()
             // NetPlugin initialises the same inbox. Whichever plugin is built first
             // creates it and the other finds it.
             .init_resource::<InventoryInbox>()
             .add_systems(
                 Update,
-                (ingest_inventory, select_hotbar, request_inventory_action)
+                (
+                    ingest_inventory,
+                    select_hotbar,
+                    consume_selected,
+                    request_inventory_action,
+                )
                     .chain()
                     .in_set(ApplyInventory)
                     .after(crate::net::DrainNetwork)
@@ -241,6 +265,96 @@ fn select_hotbar(
         (current + slots - 1) % slots
     };
     set_if_changed(&mut selected, SelectedSlot(next));
+}
+
+/// Everything the hotbar's own consume press reads, in one bundle.
+///
+/// A `SystemParam` for the reason `player/loot.rs`'s `LootIntent` is one: the question is
+/// *may this frame's consume press leave, and for which slot* — one question with one place
+/// to be asked — and spelling it as eight parameters would put the system past clippy's
+/// argument bound for no gain in clarity.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ConsumeIntent<'w> {
+    keys: Option<Res<'w, ButtonInput<KeyCode>>>,
+    settings: Option<Res<'w, Settings>>,
+    session: Option<Res<'w, Session>>,
+    inventory: Res<'w, Inventory>,
+    selected: Res<'w, SelectedSlot>,
+    gate: InputGate<'w>,
+    cadence: Res<'w, InputCadence>,
+    outbound: Option<ResMut<'w, Outbound>>,
+}
+
+/// Asks to eat what the hotbar has selected, once per press, while the world owns the input.
+///
+/// **The pack's consume press is unchanged and this is not a second copy of it.** Both
+/// spellings — a cell press in [`InputMode::Inventory`], and this key in play — end at
+/// [`consume_request`], which is still the only place a [`ConsumeRequest`] is built and the
+/// only place [`FOODS`] is read. What differs is which slot is named: the pack names the cell
+/// under the pointer, and this names [`SelectedSlot`], which the hotbar has already chosen
+/// out of the leading slots of the very same authoritative inventory.
+///
+/// **One press is one request**, which is the rule `player/loot.rs` states for the other
+/// request this client originates from a bound key: `just_pressed` is edge-triggered, and a
+/// held key or a `KeyboardInput { repeat: true }` re-arms nothing.
+///
+/// **[`InputGate::may_act`] is the whole of the mode and death question**, so a screen that
+/// owns the pointer — the pack, chat, the pause menu, the map, a stall, a corpse — closes
+/// this press with no list of modes to keep in step with the enum. The frame a mode changes
+/// on is closed too, which is what keeps the key that *left* the pack from also eating on its
+/// way out. `ui/inventory.rs` reads the same key only while the pack is open, so the two
+/// readers are mutually exclusive by mode and one press can never become two frames.
+///
+/// **Nothing here decides that anything was eaten.** The server re-reads its own
+/// `restoresHunger` column and answers with a complete `InventoryState` and `PlayerVitals`,
+/// or with silence. The stack count, the hunger bar and the pack all move then and only then;
+/// what leaves this function is a request and, when that request was queued, one cosmetic
+/// [`ConsumeSent`] for the hand to play.
+fn consume_selected(intent: ConsumeIntent<'_>, mut eaten: MessageWriter<ConsumeSent>) {
+    let ConsumeIntent {
+        keys,
+        settings,
+        session,
+        inventory,
+        selected,
+        gate,
+        cadence,
+        mut outbound,
+    } = intent;
+    if !gate.may_act() {
+        return;
+    }
+    // An absent `Settings` falls back to the default bindings, the pattern `player/loot.rs`
+    // already follows, so a headless app without the resource still routes the default key.
+    let bindings = settings
+        .as_deref()
+        .map_or_else(Default::default, |settings| *settings.bindings());
+    if !keys.is_some_and(|keys| keys.just_pressed(bindings.key(Control::Consume))) {
+        return;
+    }
+    let (Some(session), Some(outbound)) = (session, outbound.as_deref_mut()) else {
+        return;
+    };
+    let Some(request) = consume_request(
+        &inventory,
+        selected.0,
+        cadence.client_tick,
+        session.0.inventory_slots,
+    ) else {
+        return;
+    };
+    match outbound.send(encode_consume_request(&request)) {
+        // The arc plays for a frame that left, and for nothing else. See [`ConsumeSent`].
+        Sent::Queued => {
+            eaten.write(ConsumeSent);
+        }
+        Sent::Dropped => warn!(
+            "the outbound queue was full; consuming from slot {} never reached the server",
+            request.slot
+        ),
+        // The session is ending. There is nowhere to send and nothing to animate.
+        Sent::Closed => {}
+    }
 }
 
 /// Pairs a picked source with a destination and sends one intent for it.
@@ -605,13 +719,14 @@ fn repair_request(
 mod tests {
     use std::sync::mpsc::Receiver;
 
-    use bevy::input::keyboard::{Key, KeyboardInput};
+    use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
     use bevy::input::{ButtonState, InputPlugin};
 
     use super::*;
     use crate::net::{InventoryState, SessionParams};
     use crate::player::crafting::ITEM_IRON_SWORD;
     use crate::player::items::{ITEM_STONE, ITEM_VARGR_PELT, item_label};
+    use crate::settings::Bindings;
     use crate::wire::voxelheim::net as fb;
 
     fn stack(item_id: u16, count: u16) -> InventoryStack {
@@ -1677,5 +1792,276 @@ mod tests {
         press(&mut app, KeyCode::Digit3, "3");
         app.update();
         assert_eq!(*app.world().resource::<SelectedSlot>(), SelectedSlot(2));
+    }
+    // -----------------------------------------------------------------------
+    // Eating from the hotbar — the consume key with the pack closed
+    // -----------------------------------------------------------------------
+
+    fn key_event(key: KeyCode, state: ButtonState, repeat: bool) -> KeyboardInput {
+        KeyboardInput {
+            key_code: key,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat,
+            window: Entity::PLACEHOLDER,
+        }
+    }
+
+    /// The default [`Control::Consume`] key, read from the bindings rather than written down.
+    ///
+    /// The system reads a rebindable control, so a test naming `KeyCode::KeyC` by hand would
+    /// keep passing after somebody moved the default and would be pinning the wrong thing.
+    fn consume_key() -> KeyCode {
+        Bindings::default().key(Control::Consume)
+    }
+
+    /// The inventory module with the real keyboard pipeline behind it, a pack holding these
+    /// stacks, and a socket to read what left.
+    fn hotbar_app(stacks: Vec<InventoryStack>) -> (App, Receiver<Vec<u8>>) {
+        let mut app = app(true);
+        let (outbound, sent) = Outbound::to_a_test(16);
+        app.insert_resource(outbound);
+        deliver(&mut app, stacks);
+        // Two frames: the first ingests the pack, and the second leaves `InputMode` unchanged
+        // so `may_act` is not looking at a mode that changed this frame.
+        app.update();
+        app.update();
+        (app, sent)
+    }
+
+    /// Runs one frame after delivering the events winit would have delivered for it, and
+    /// reports what left the client and what the hand was told.
+    fn consume_frame(
+        app: &mut App,
+        sent: &Receiver<Vec<u8>>,
+        events: impl IntoIterator<Item = KeyboardInput>,
+    ) -> (Vec<Asked>, usize) {
+        for event in events {
+            app.world_mut().write_message(event);
+        }
+        app.update();
+        let played = app
+            .world_mut()
+            .resource_mut::<Messages<ConsumeSent>>()
+            .drain()
+            .count();
+        (asked(sent), played)
+    }
+
+    /// **The press in play names the selected slot and nothing else.**
+    ///
+    /// The hotbar is the leading slots of the same authoritative pack, so the whole of what
+    /// this path adds is *which index* — and the index is the one [`SelectedSlot`] already
+    /// carries for a place request. The pack it is read against is not touched: no count
+    /// moves here, and the server's next complete state is the only thing that can move one.
+    #[test]
+    fn the_consume_key_in_play_asks_to_eat_the_selected_hotbar_slot() {
+        let (mut app, sent) = hotbar_app(pack(&[
+            (0, stack(ITEM_STONE, 4)),
+            (1, stack(ITEM_COOKED_MEAT, 3)),
+        ]));
+        press(&mut app, KeyCode::Digit2, "2");
+        app.update();
+        assert_eq!(*app.world().resource::<SelectedSlot>(), SelectedSlot(1));
+        let before = app.world().resource::<Inventory>().clone();
+
+        let (left, played) = consume_frame(
+            &mut app,
+            &sent,
+            [key_event(consume_key(), ButtonState::Pressed, false)],
+        );
+
+        assert_eq!(left, vec![Asked::Consume { slot: 1 }]);
+        assert_eq!(played, 1, "the hand was told once per request that left");
+        assert_eq!(
+            *app.world().resource::<Inventory>(),
+            before,
+            "the press moved a count this client does not own"
+        );
+        assert_eq!(
+            app.world().resource::<PickedStack>().slot(),
+            None,
+            "eating in play picked a source for a move nobody started"
+        );
+    }
+
+    /// **A held key is one press here too**, which is the rule `player/loot.rs` states and
+    /// the property `ui/inventory.rs` already pins for the pack's own consume press.
+    ///
+    /// The same reasoning applies unchanged and so does the same risk: what makes a repeat
+    /// harmless is `bevy_input`'s `press()`, a dependency's guarantee, and this path is a
+    /// second place it now has to hold. A stack the player is standing on is exactly what a
+    /// per-frame repeat would eat.
+    #[test]
+    fn holding_the_consume_key_in_play_asks_once_and_a_later_press_asks_again() {
+        let key = consume_key();
+        let (mut app, sent) = hotbar_app(pack(&[(0, stack(ITEM_COOKED_MEAT, 9))]));
+        let mut left = Vec::new();
+
+        let (asked, played) = consume_frame(
+            &mut app,
+            &sent,
+            [key_event(key, ButtonState::Pressed, false)],
+        );
+        left.extend(asked);
+        assert_eq!(played, 1);
+        // The repeats winit sends while the key is down, then a frame carrying no event at
+        // all — the same held key on a machine with key repeat switched off.
+        for _ in 0..3 {
+            let (asked, played) = consume_frame(
+                &mut app,
+                &sent,
+                [key_event(key, ButtonState::Pressed, true)],
+            );
+            left.extend(asked);
+            assert_eq!(played, 0, "a repeat played the hand again");
+            assert!(
+                app.world().resource::<ButtonInput<KeyCode>>().pressed(key),
+                "a repeat is not a release"
+            );
+        }
+        let (asked, _) = consume_frame(&mut app, &sent, []);
+        left.extend(asked);
+        assert_eq!(
+            left,
+            vec![Asked::Consume { slot: 0 }],
+            "a held key ate the stack frame by frame"
+        );
+
+        // Release and press again, so this cannot pass by the key having stopped working.
+        let (asked, _) = consume_frame(
+            &mut app,
+            &sent,
+            [key_event(key, ButtonState::Released, false)],
+        );
+        left.extend(asked);
+        let (asked, played) = consume_frame(
+            &mut app,
+            &sent,
+            [key_event(key, ButtonState::Pressed, false)],
+        );
+        left.extend(asked);
+        assert_eq!(played, 1);
+        assert_eq!(
+            left,
+            vec![Asked::Consume { slot: 0 }, Asked::Consume { slot: 0 }],
+            "a press after a release is a second press"
+        );
+    }
+
+    /// **Every state the press must stay silent in, and the hand stays still in all of them.**
+    ///
+    /// Two families in one table because they fail the same way — a frame that should not
+    /// have left, and an arc that should not have played — and because the modes are the half
+    /// most likely to rot: `InputMode` gains a variant far more often than the courtesy
+    /// checks change. [`InputGate::may_act`] is what answers the mode question, so this sweeps
+    /// the enum rather than restating a list the system does not contain.
+    #[test]
+    fn the_consume_key_in_play_asks_for_nothing_it_should_not() {
+        let food = pack(&[(0, stack(ITEM_COOKED_MEAT, 3))]);
+        for (name, stacks, dead, mode) in [
+            ("an empty slot", pack(&[]), false, InputMode::Playing),
+            (
+                "a slot the client does not route as food",
+                pack(&[(0, stack(ITEM_STONE, 4))]),
+                false,
+                InputMode::Playing,
+            ),
+            (
+                "a stack of food the server has already emptied",
+                pack(&[(0, stack(ITEM_COOKED_MEAT, 0))]),
+                false,
+                InputMode::Playing,
+            ),
+            ("a dead player", food.clone(), true, InputMode::Playing),
+            // The pack's own press still works and is tested above; what must not happen is
+            // this second reader answering the same key while that screen owns it.
+            ("the pack", food.clone(), false, InputMode::Inventory),
+            ("chat", food.clone(), false, InputMode::Chat),
+            ("the pause menu", food.clone(), false, InputMode::Menu),
+            ("a corpse", food.clone(), false, InputMode::Loot),
+            ("a stall", food.clone(), false, InputMode::Vendor),
+            ("the map", food.clone(), false, InputMode::Map),
+        ] {
+            let (mut app, sent) = hotbar_app(stacks);
+            say_dead(&mut app, dead);
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            // A second frame, so the mode is no longer *changed* and `may_act`'s transition
+            // term is not what this row is passing on.
+            app.update();
+            app.update();
+            let _ = asked(&sent);
+            app.world_mut()
+                .resource_mut::<Messages<ConsumeSent>>()
+                .drain()
+                .for_each(drop);
+
+            let (left, played) = consume_frame(
+                &mut app,
+                &sent,
+                [key_event(consume_key(), ButtonState::Pressed, false)],
+            );
+
+            assert!(left.is_empty(), "{name} asked the server to eat: {left:?}");
+            assert_eq!(played, 0, "{name} played the eating arc");
+        }
+    }
+
+    /// **Third person closes it, exactly as it closes every other request.**
+    ///
+    /// Split from the table above because it is not a mode: [`InputGate::may_act`] carries the
+    /// view term independently, and a press that still ate with the camera behind the
+    /// character would be the one gate in this client that a view change does not close.
+    #[test]
+    fn the_consume_key_asks_for_nothing_from_behind_the_character() {
+        let (mut app, sent) = hotbar_app(pack(&[(0, stack(ITEM_COOKED_MEAT, 3))]));
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+        app.update();
+
+        let (left, played) = consume_frame(
+            &mut app,
+            &sent,
+            [key_event(consume_key(), ButtonState::Pressed, false)],
+        );
+
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(played, 0);
+    }
+
+    /// **One predicate for both spellings**, which is the point of reusing
+    /// [`consume_request`] rather than writing a second one beside the hotbar.
+    ///
+    /// Read as a routing question the two paths ask identically: whatever [`FOODS`] contains,
+    /// a cell press in the pack and this key in play agree about it, so the table cannot
+    /// acquire a second copy that drifts. A new food is one entry and both paths gain it.
+    #[test]
+    fn the_hotbar_and_the_pack_route_the_same_press_through_one_predicate() {
+        for item_id in FOODS.iter().copied().chain([ITEM_STONE, ITEM_IRON_SWORD]) {
+            let stacks = pack(&[(0, stack(item_id, 2))]);
+            let inventory = Inventory::from_stacks(stacks.clone());
+            let routed = consume_request(&inventory, 0, 0, 4).is_some();
+            assert_eq!(
+                routed,
+                item_is_food(item_id),
+                "item {item_id} is routed by the table and not by the caller"
+            );
+
+            let (mut app, sent) = hotbar_app(stacks);
+            let (left, _) = consume_frame(
+                &mut app,
+                &sent,
+                [key_event(consume_key(), ButtonState::Pressed, false)],
+            );
+            assert_eq!(
+                left,
+                if routed {
+                    vec![Asked::Consume { slot: 0 }]
+                } else {
+                    Vec::new()
+                },
+                "the hotbar press disagreed with `consume_request` about item {item_id}"
+            );
+        }
     }
 }
