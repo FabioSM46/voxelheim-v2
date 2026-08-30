@@ -551,13 +551,26 @@ The client samples the controls, sends what the player is *trying* to do at the 
   the `InventoryMoveRequest`
   it always sent.
 
-  **Consume has two spellings and one branch.** `Control::Consume` is the rebindable one,
-  read through the same `Bindings` every other control is and defaulting to `C`;
-  middle-click is the fixed shortcut it grew out of, kept so a player who learned it does
-  not have to unlearn it. `inventory_clicks` answers both from one branch, which is what
-  makes pressing the key and the button in the same frame over the same cell one press
-  rather than two — and two `ConsumeRequest` frames for one intent is exactly what a
-  branch each would have produced.
+  **Consume has three spellings and two branches, and what keeps a second branch from being
+  a second request is the input mode.** `Control::Consume` is the rebindable one, read
+  through the same `Bindings` every other control is and defaulting to `C`; middle-click is
+  the fixed shortcut it grew out of, kept so a player who learned it does not have to
+  unlearn it. Both of those are the pack's, and `inventory_clicks` answers them from one
+  branch, which is what makes pressing the key and the button in the same frame over the
+  same cell one press rather than two — and two `ConsumeRequest` frames for one intent is
+  exactly what a branch each would have produced. The third spelling is that same key with
+  the pack **closed**: `consume_selected` sends one request naming `SelectedSlot`, so food
+  on the hotbar is a keypress in play rather than a trip into the backpack (#626).
+
+  That third one is a second branch, and it is safe for a different reason than the first
+  pair's — not one branch, but two that can never run in the same frame. `inventory_clicks`
+  returns early unless the mode is `InputMode::Inventory`, and `consume_selected` is closed
+  by `InputGate::may_act`, which is `Playing` and nothing else, so the one key still has
+  exactly one reader in any frame. What the two branches share is the half that would
+  otherwise have drifted: both end at `consume_request`, still the only place a
+  `ConsumeRequest` is built and the only place `FOODS` is read. Only the slot differs — the
+  cell under the pointer, or the hotbar index `SelectedSlot` already carries for a place
+  request, out of the leading slots of the same authoritative pack.
 
   **Interact means two things, and which one it means is the input mode.** Out of the loot
   window `Control::Interact` asks to *open* the nearest accessible corpse; inside it, the
@@ -583,11 +596,14 @@ The client samples the controls, sends what the player is *trying* to do at the 
   does *not* filter `KeyboardInput { repeat: true }`, so a review on PR #403 read the code
   and concluded a held key would drain a food stack frame by frame. It does not, but the
   guarantee belongs to a dependency rather than to this tree, so a Bevy upgrade could take
-  it away silently. Three tests hold a key across frames through the real input pipeline and
+  it away silently. Four tests hold a key across frames through the real input pipeline and
   pin it: `holding_the_consume_key_reports_one_press_and_a_later_press_reports_again` in
-  `ui/inventory.rs`, and `holding_interact_asks_to_open_a_corpse_once_and_a_later_press_asks_again`
+  `ui/inventory.rs`, `holding_the_consume_key_in_play_asks_once_and_a_later_press_asks_again`
+  in `player/inventory.rs` — the hotbar's own spelling of the same key, which needs its own
+  because it is a second branch rather than a second reader of the first — and
+  `holding_interact_asks_to_open_a_corpse_once_and_a_later_press_asks_again`
   and `holding_interact_inside_the_window_asks_to_take_everything_once` in `player/loot.rs` —
-  one per thing the interact key now means. All three also press again after a release,
+  one per thing the interact key now means. All four also press again after a release,
   because a test that only proved "one" would pass just as well with the key dead.
 
   **Food routing follows the kit pattern without copying the server's capability table.**
