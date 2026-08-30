@@ -134,6 +134,17 @@ const (
 	WaterCurrentXNeg Block = 30
 	WaterCurrentZPos Block = 31
 	WaterCurrentZNeg Block = 32
+
+	// The three flowers, appended for the reason every id above was: each already
+	// crosses the wire inside chunk runs and lives in a played-in world's deltas.
+	//
+	// **Three ids rather than one, because the client colours by id and nothing
+	// else.** A patch's colour comes from the patch cell's hash, so a meadow reads as
+	// a drift of one colour with strays — see flowerBlock in generate.go. None is
+	// [Placeable]: there is no flower item and no drop. All three are [Cover].
+	FlowerRed    Block = 33
+	FlowerYellow Block = 34
+	FlowerBlue   Block = 35
 )
 
 // IsWater reports whether b is any source, flowing level or generator-authored
@@ -180,8 +191,31 @@ func CurrentOf(b Block) (dx, dz int) {
 // passable — and every rule that read it that way (the spawn director's headroom
 // scan, the collision sweep) inherited the assumption without stating it. Water is
 // the first id that ends the equivalence, so the answer moved to where the ids are.
+// **There are now two id classes that end that equivalence, not one.** Water was the
+// first: a body wades and swims through it. Ground cover is the second: a flower
+// stands in a voxel without filling it. Both are answered here rather than at each
+// rule that reads solidity, which is what keeps every one of those rules correct
+// without naming an id.
 func Solid(b Block) bool {
-	return b != Air && !IsWater(b)
+	return b != Air && !IsWater(b) && !Cover(b)
+}
+
+// Cover reports whether a block is ground cover: a thing that stands in a voxel
+// without filling it.
+//
+// **Exactly the three flowers today, and three consequences, each enforced elsewhere:**
+//
+//   - A body passes through it — [Solid] is false, so the collision sweep, the
+//     standable-floor test and a creature's step-up probe all refuse it.
+//   - A placement displaces it — game.allowPlacement accepts a voxel holding cover
+//     exactly as one holding a fluid: one delta, one item spent.
+//   - A plant may overwrite it — setTreeBlock treats a cover voxel as air, so a bush
+//     or a canopy wins whichever the generator visits first.
+//
+// Not folded into [Fluid]: a swim rule reading it would have players treading water
+// in a meadow. NextWater has a fourth arm for the same reason.
+func Cover(b Block) bool {
+	return b == FlowerRed || b == FlowerYellow || b == FlowerBlue
 }
 
 // Fluid reports whether a block is one a body wades and swims in rather than walks

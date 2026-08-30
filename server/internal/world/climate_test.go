@@ -304,6 +304,9 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	densities := make(map[Climate]float64, 3)
 	plainsEligible, broadleaves, bushes := 0, 0, 0
 	bushSingles, bushPairs := 0, 0
+	// Flowers are measured against the columns inside a drift: one in five there.
+	patchEligible, flowersInPatch, flowersOutsidePatch, flowerStrays := 0, 0, 0, 0
+	flowerColours := map[Block]int{}
 	for _, tc := range []struct {
 		name        string
 		originX     int64
@@ -329,13 +332,20 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				// treeAtColumn, which refuses it for the same reason.
 				candidate := col.blockAt(col.surface) == tc.rootBlock && col.surface >= seaLevel && !col.settlement &&
 					!col.carvedAt(climateSeed, x, int64(col.surface), z)
+				inPatch := flowerPatchAt(climateSeed, x, z)
 				if candidate {
 					eligible++
 					if tc.climate == Plains {
 						plainsEligible++
+						if inPatch {
+							patchEligible++
+						}
 					}
 				}
 				species, h, rooted := plantAtColumn(climateSeed, x, z, col)
+				if tc.climate != Plains && rooted && species == &plantSpeciesTable[5] {
+					t.Fatalf("a flower is rooted in %v at (%d, %d)", tc.climate, x, z)
+				}
 				if tc.climate == Taiga && rooted && (species == &plantSpeciesTable[3] || species == &plantSpeciesTable[4]) {
 					t.Fatalf("%s is rooted in taiga at (%d, %d)", species.name, x, z)
 				}
@@ -349,6 +359,18 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 							bushSingles++
 						} else {
 							bushPairs++
+						}
+					case &plantSpeciesTable[5]:
+						if inPatch {
+							flowersInPatch++
+						} else {
+							flowersOutsidePatch++
+						}
+						block := flowerBlock(climateSeed, x, z, h)
+						flowerColours[block]++
+						cellX, cellZ := flowerPatchCell(x, z)
+						if block != FlowerRed+Block(hashLattice(climateSeed+flowerPatchSeedOffset, cellX, cellZ)%3) {
+							flowerStrays++
 						}
 					}
 				}
@@ -390,6 +412,30 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 		t.Errorf("plains bush roots chose %d single and %d paired clumps, want both sizes", bushSingles, bushPairs)
 	}
 
+	// **The two halves of the patch rule, and the zero is the important one**: a
+	// density inside the drifts that is merely "about right" would also come out of a
+	// uniform sprinkle, and what makes it a patch is the nothing between them.
+	if flowersOutsidePatch != 0 {
+		t.Errorf("%d flowers are rooted outside a patch, want none: patch is not gating", flowersOutsidePatch)
+	}
+	wantFlowers := float64(patchEligible) / float64(flowerChanceDenominator)
+	if ratio := float64(flowersInPatch) / wantFlowers; flowersInPatch == 0 || wantFlowers == 0 || ratio < 0.75 || ratio > 1.25 {
+		t.Errorf("plains flowers count %d over %d eligible columns inside a drift; one in %d predicts %.1f (ratio %.2f, want within +/-25%%)",
+			flowersInPatch, patchEligible, flowerChanceDenominator, wantFlowers, ratio)
+	}
+	// All three colours appear, and a drift is *mostly* the cell's own: a stray rate
+	// near a half would be a mixture rather than a drift.
+	for _, block := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
+		if flowerColours[block] == 0 {
+			t.Errorf("no plains flower is block %d; the patch colour draw has collapsed", block)
+		}
+	}
+	wantStrays := float64(flowersInPatch) / float64(flowerStrayDenominator)
+	if ratio := float64(flowerStrays) / wantStrays; ratio < 0.75 || ratio > 1.25 || flowerStrays*2 >= flowersInPatch {
+		t.Errorf("%d of %d flowers are strays; one in %d predicts %.1f (ratio %.2f, want within +/-25%% and a minority)",
+			flowerStrays, flowersInPatch, flowerStrayDenominator, wantStrays, ratio)
+	}
+
 	// Desert is a thin intersection of two climate-field tails, so its fixed
 	// sample is a broad lattice rather than one contiguous walk. That yields enough
 	// eligible sand columns to measure a one-in-640 palm without averaging seeds.
@@ -416,6 +462,8 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				palms++
 			case &plantSpeciesTable[2]:
 				shrubs++
+			case &plantSpeciesTable[5]:
+				t.Fatalf("a flower is rooted in the desert at (%d, %d)", x, z)
 			}
 		}
 	}

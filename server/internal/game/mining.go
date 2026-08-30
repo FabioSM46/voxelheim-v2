@@ -108,6 +108,13 @@ var handMiningTimes = map[world.Block]time.Duration{
 	world.DesertShrub: 400 * time.Millisecond,
 	world.BroadLeaves: 400 * time.Millisecond,
 	world.Bush:        400 * time.Millisecond,
+
+	// The three flowers, and the fastest row in the table: three tenths of a second
+	// rather than the 250ms the instant-break floor allows, so a flower comes away in
+	// a moment and is still something the player did.
+	world.FlowerRed:    300 * time.Millisecond,
+	world.FlowerYellow: 300 * time.Millisecond,
+	world.FlowerBlue:   300 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -179,6 +186,13 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		world.DesertShrub: {},
 		world.BroadLeaves: {},
 		world.Bush:        {},
+
+		// The flowers join the rest of the plant matter — not because an axe is what
+		// one picks a flower with, but because every block a hand can break has
+		// exactly one implement for it, the invariant mining_test.go pins.
+		world.FlowerRed:    {},
+		world.FlowerYellow: {},
+		world.FlowerBlue:   {},
 	},
 }
 

@@ -168,6 +168,18 @@ const (
 	// patch that always sat on the same side of a climate boundary would be a
 	// shared lattice showing through, not a decision.
 	gravelSeedOffset int64 = 0x299F31D0
+
+	// Flowers. One plains grass column in five carries one, but only inside a patch,
+	// and **the patch is the gravel mechanism at a meadow's scale**: gravelAt takes
+	// the top quarter of a 2D field over forty-eight blocks, this the top 28% of its
+	// own over forty, on no shared lattice. flowerStrayDenominator is how many
+	// flowers in a drift take the *next* colour instead of the cell's own.
+	flowerChanceDenominator        = 5
+	flowerStrayDenominator  uint64 = 5
+	flowerPatchScaleBlocks         = 40
+	flowerPatchThreshold           = one * 72 / 100
+	flowerSeedOffset        int64  = 0x082EFA98
+	flowerPatchSeedOffset   int64  = 0xEC4E6C89
 )
 
 // If the band constants are ever reordered, this conversion becomes a compile
@@ -385,7 +397,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // surface instead of stopping at the global deep-cave level. Terrain heights and
 // every uncarved voxel stay byte-identical, but carved air below a sea, basin or river
 // may become water, so stored deltas in those caves need the new base version.
-const WorldgenVersion uint32 = 13
+const WorldgenVersion uint32 = 14
 
 // Generate builds the chunk at coord for seed.
 //
@@ -724,7 +736,15 @@ type plantSpecies struct {
 	denominator func(Climate) uint64
 	footprint   int
 	forest      bool
-	visit       func(seed, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block))
+
+	// patch is a region gate on top of the density draw: a row grows only where this
+	// answers true. **nil means everywhere, and every tree row is nil** — a conifer's
+	// distribution is one number per climate, and a field sample there would say
+	// "trees cluster" without anybody having decided it should. Flowers are the one
+	// row that wants it, because a drift is the feature and a sprinkle is not.
+	patch func(seed, worldX, worldZ int64) bool
+
+	visit func(seed, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block))
 }
 
 var conifer = plantSpecies{
@@ -787,15 +807,61 @@ var bush = plantSpecies{
 	visit:       visitBush,
 }
 
-var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush}
+// The flower is last, which is the whole of its priority: any plant that wants the
+// column takes it and a flower grows in what is left, so a drift never thins a wood.
+var flower = plantSpecies{
+	name:       "flower",
+	seedOffset: flowerSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Grass
+	},
+	denominator: plainsChanceDenominator(flowerChanceDenominator),
+	footprint:   0,
+	forest:      false,
+	patch:       flowerPatchAt,
+	visit:       visitFlower,
+}
+
+var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush, flower}
+
+// flowerPatchAt reports whether a column lies inside a drift of flowers.
+func flowerPatchAt(seed, worldX, worldZ int64) bool {
+	return climateField(seed+flowerPatchSeedOffset, worldX, worldZ, flowerPatchScaleBlocks) >= flowerPatchThreshold
+}
+
+// flowerPatchCell is the lattice cell of the drift a column belongs to. floorDiv for
+// the reason climateField uses it: truncation toward zero maps x = -1 and x = 0 to
+// one cell, so the drifts either side of the axis would share a colour.
+func flowerPatchCell(worldX, worldZ int64) (int64, int64) {
+	return floorDiv(worldX, flowerPatchScaleBlocks), floorDiv(worldZ, flowerPatchScaleBlocks)
+}
+
+// flowerBlock chooses which of the three flowers stands in a column.
+//
+// **The patch cell decides the colour and the column decides whether it is a stray.**
+// A whole drift shares one hash, so it is mostly one colour; one flower in
+// flowerStrayDenominator takes the next along.
+//
+// **The stray draw reads the high half of h, and that is not a taste question.** The
+// density draw has already established h%flowerChanceDenominator == 0 for every
+// column reaching here, so the low bits are spent and a stray test against them would
+// be true for every flower in the world. visitBush reads (h>>40) for the same reason.
+func flowerBlock(seed, worldX, worldZ int64, h uint64) Block {
+	cellX, cellZ := flowerPatchCell(worldX, worldZ)
+	colour := hashLattice(seed+flowerPatchSeedOffset, cellX, cellZ) % 3
+	if (h>>32)%flowerStrayDenominator == 0 {
+		colour = (colour + 1) % 3
+	}
+	return FlowerRed + Block(colour)
+}
 
 // plantAtColumn reports the first species rooted at one resolved column and the
 // hash that row uses for its shape.
 //
-// The refusals remain ordered by cost: settlement, a row's climate denominator,
-// its surface, its independent hash, the sea line, then the carve test. The last
-// question is an order of magnitude dearer than the others and is reached only by
-// a candidate whose density draw already passed.
+// The refusals remain ordered by cost: settlement, a row's climate denominator, its
+// surface, its independent hash, the sea line, the row's optional patch field, then
+// the carve test. The last two are the dear ones — one 2D field then two 3D ones —
+// and are reached only by a candidate whose density draw already passed.
 func plantAtColumn(seed, worldX, worldZ int64, col column) (species *plantSpecies, h uint64, ok bool) {
 	return plantAtColumnIn(plantSpeciesTable, seed, worldX, worldZ, col)
 }
@@ -837,6 +903,11 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 		// A submerged surface may still be valid soil, but a plant rooted there
 		// would be clipped by the standing water and appear to float above it.
 		if col.surface < seaLevel {
+			continue
+		}
+
+		// A row that names a region grows only inside it; nil is "everywhere".
+		if species.patch != nil && !species.patch(seed, worldX, worldZ) {
 			continue
 		}
 
@@ -968,6 +1039,12 @@ func visitBush(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x,
 	visit(rootX, y, rootZ+1, Bush)
 }
 
+// visitFlower yields one block at surface + 1: a flower stands in the voxel above the
+// ground rather than replacing any of it.
+func visitFlower(seed int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+	visit(rootX, int64(surface+1), rootZ, flowerBlock(seed, rootX, rootZ, h))
+}
+
 func coniferTrunkHeight(h uint64) int {
 	return treeMinTrunkHeight + int((h>>32)%treeHeightVariants)
 }
@@ -1045,6 +1122,11 @@ func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column)
 	}
 }
 
+// setTreeBlock writes one plant voxel; its condition is the whole of what a plant may
+// overwrite, and **ground cover counts as air here, which makes the result
+// independent of the order two roots are visited in.** A bush's second block and a
+// flower can want one voxel: flower-first the bush overwrites it because [Cover] is
+// true, bush-first the flower is refused because Bush is neither air nor cover.
 func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 	originX, originY, originZ := chunk.Coord.Origin()
 	localX, localY, localZ := worldX-originX, worldY-originY, worldZ-originZ
@@ -1054,7 +1136,7 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 
 	x, y, z := int(localX), int(localY), int(localZ)
 	current := chunk.At(x, y, z)
-	if current == Air || (block == Log && (current == Leaves || current == BroadLeaves)) || (block == PalmLog && current == PalmFronds) {
+	if current == Air || Cover(current) || (block == Log && (current == Leaves || current == BroadLeaves)) || (block == PalmLog && current == PalmFronds) {
 		chunk.Set(x, y, z, block)
 	}
 }
@@ -1081,7 +1163,12 @@ func generatedColumnTop(seed, worldX, worldZ int64) int {
 	footprint := int64(largestPlantFootprint())
 	for rootZ := worldZ - footprint; rootZ <= worldZ+footprint; rootZ++ {
 		for rootX := worldX - footprint; rootX <= worldX+footprint; rootX++ {
-			visitPlant(seed, rootX, rootZ, func(x, y, z int64, _ Block) {
+			visitPlant(seed, rootX, rootZ, func(x, y, z int64, block Block) {
+				// Cover is not a top: a column whose only feature is a flower keeps
+				// its ground as its highest solid. [Solid] rather than an id list.
+				if !Solid(block) {
+					return
+				}
 				if x == worldX && z == worldZ && y > int64(top) && col.blockAt(int(y)) == Air {
 					top = int(y)
 				}
