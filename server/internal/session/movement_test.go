@@ -638,7 +638,7 @@ func TestSessionWalksThePlayerAndStreamsWhereItWalks(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.ViewDistance = 0 // one chunk, so a border crossing is unambiguous
-	cfg.Spawn = world.SpawnAt(cfg.WorldSeed)
+	cfg.Spawn = openCountrySpawn(cfg.WorldSeed)
 
 	chunks := world.NewCache(cfg.WorldSeed, 4, 512)
 	peers := session.NewRegistry()

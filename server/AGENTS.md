@@ -252,10 +252,13 @@ package can avoid the import would create two truths to keep in step for no bene
   place that races a context against something else — the cache semaphore, the session's outbound
   queue, the clock's sleep — checks `ctx.Err()` first. Without it, an already-cancelled context is
   honoured about half the time, which surfaces later as a flaky test rather than as the bug it is.
-- **Anything positional is derived from the height field, never stated as a constant.** The spawn
+- **Anything positional is derived from the world, never stated as a constant.** The spawn
   point was `y = 80` while the terrain ranges 44..84: it buried the player for about one seed in 500
-  and floated them 26 blocks above the ground for the default one. `world.SpawnAt` asks `HeightAt`
-  instead. The general form of the mistake is pinning a number that a procedural system decides.
+  and floated them 26 blocks above the ground for the default one. It then asked `HeightAt` at the
+  origin column, and since #519 it asks the lattice: `world.SpawnAt` is `world.CapitalAt(seed)`'s
+  centre pushed `capitalSpawnOffset` along +Z, on the capital's plateau. The second form of the
+  mistake is deriving a number from a *drawing* and writing it down as a literal — the castle grew
+  from 15 across to 21 in #555, so that offset is computed from `largestHalfFootprint`.
 - **Validate flags before narrowing them.** `-tick-rate 1000` must fail at startup, not become a
   silent 255 Hz server, and the error must quote what the operator typed. Clamp-then-validate reads
   as safe and is not.
@@ -724,7 +727,7 @@ with time, so `Step` reads them and never advances them.
 - **The owner is an `identity.PlayerID`, and the wire carries an entity id.** An entity id
   names one session; a camp outlives every session its owner will ever open, so keyed by the
   entity id a tent stopped being its owner's the moment they reconnected — they came back
-  with a new number, respawned at the world spawn, and could not take down their own tent.
+  with a new number, respawned at the join spawn, and could not take down their own tent.
   The registry therefore keys ownership by identity and `structureStatesLocked` resolves it
   to the owner's **current** entity id once per snapshot, or to `0` while they have no live
   session (`schemas/player.fbs`, V5). Zero means *offline*, not *unowned*: no entity is ever
@@ -1031,7 +1034,11 @@ second visibility decision to keep in step with the first.
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460
 inserted the middle one: **the player's tent, else the nearest settlement to where they fell,
-else the join spawn.**
+else the join spawn — which since #519 is the capital's gate square.**
+
+**The third tier stopped being a consolation prize and nothing in it changed to make that
+true.** It reads `Player.spawn`, which is `session.Config.Spawn`, which is `world.SpawnAt` —
+the world's origin column until #519 and the capital's gate square since.
 
 - **`world.NearestSettlement` is a pure lattice query, which is the only reason this can run
   on the tick.** It is a handful of hashes over the seed and the death column — no chunk is
@@ -1058,8 +1065,8 @@ else the join spawn.**
   discovered.** The keep is the one drawing that is not hollow three blocks from its middle:
   its inner tower's wall stands exactly there on ±x and −z, and the fourth cardinal is the
   tower's doorway. So a player who dies due east of a capital wakes at the join spawn — which
-  costs them almost nothing, because a capital is placed within two hundred blocks of it by
-  construction. Villages put a hollow hall or smithy at their centre and are clear on every
+  since #519 is that same capital's gate square, so it costs them nothing at all. Villages put
+  a hollow hall or smithy at their centre and are clear on every
   bearing, and they are what this tier exists for. Widening the offset until it cleared the
   keep would move every respawn in the world to repair the one case where falling through is
   cheapest. `TestTheKeepStandsWhereThisRespawnRuleSaysItDoes` reads the drawings, so the

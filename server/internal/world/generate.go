@@ -200,7 +200,7 @@ const _ = uint8(ironMinDepth - coalMaxDepth - 1)
 // through columnAt, which samples the climate once and hands it to shapeAt, so a
 // generated column sees only the added basin and river sums; physics and edits read
 // terrain out of the chunk cache rather than from the height field at all; [SpawnAt]
-// goes through generatedColumnTop, which is columnAt again. A caller that finds
+// reads the capital's plateau off the lattice. A caller that finds
 // itself asking for a height per entity or per tick wants columnAt, not this.
 func HeightAt(seed int64, worldX, worldZ int64) int {
 	surface, _, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
@@ -235,11 +235,11 @@ func unloweredHeightAt(seed, worldX, worldZ int64) int {
 // generated column sample temperature and humidity twice. And "is this a river"
 // cannot be asked again afterwards without paying a second fbm2D for an answer this
 // function already had; worse, a second reading could disagree with the ground,
-// because a column near spawn passes the river field and has no channel.
+// because a column near the origin passes the river field and has no channel.
 func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, settled bool) {
 	base := unloweredHeightAt(seed, worldX, worldZ)
 
-	// The square around spawn keeps the terrain it would have had. See
+	// The square around the origin column keeps the terrain it would have had. See
 	// spawnWaterClearance, and spawnCaveClearance beside it: the two exemptions are
 	// the same shape and are checked the same way, before any noise is paid for.
 	if nearSpawnColumn(worldX, worldZ) {
@@ -1102,16 +1102,25 @@ func GeneratedColumnTop(seed, worldX, worldZ int64) int {
 	return generatedColumnTop(seed, worldX, worldZ)
 }
 
-// Spawn placement. The column is fixed; the height is not, because it cannot be.
+// The world's origin column, and the clearance a body is put down with.
 const (
-	// spawnColumnX and spawnColumnZ are the world column every session starts in.
+	// spawnColumnX and spawnColumnZ are the world's origin column: the anchor the
+	// settlement lattice measures the capital's offset from, and the column the water and
+	// cave clearances protect.
+	//
+	// **They no longer name a spawn, and the rename is deliberately a follow-up.**
+	// [SpawnAt] read the generated ground here until #519, which is why the two clearances
+	// beside them exist; both stay, because they shape generated blocks and removing one
+	// would move terrain and bump [WorldgenVersion] for a tidy-up.
 	spawnColumnX = 0
 	spawnColumnZ = 0
 
-	// SpawnClearance is how many blocks above the highest generated voxel in the
-	// spawn column the player starts. generatedColumnTop includes a neighbouring
-	// tree's canopy, so this remains a clearance rather than an assumption that the
-	// height field is the last solid block in the column.
+	// SpawnClearance is how many blocks above the ground a body is put down: the
+	// capital's plateau at join (see [SpawnAt]), a settlement's plateau on the middle
+	// respawn tier, and the generated column top when regeneration lifts a body out of
+	// restored terrain. A clearance rather than an assumption that the ground is the last
+	// solid block in the column — generatedColumnTop includes a neighbouring tree's
+	// canopy.
 	SpawnClearance = 2
 )
 
@@ -1122,38 +1131,31 @@ const (
 // read through the collision seam — so terrain has gone back to not knowing what walks
 // on it. A "where should a mob go" helper here would be the old model growing back.
 
-// SpawnAt returns where a session starts, for a world seed.
+// SpawnAt returns where a session starts, for a world seed: the capital's gate square,
+// [capitalSpawnOffset] blocks along +Z from its centre, on its plateau.
 //
-// Derived from the generated column, not stated beside it. Its floor begins with
-// HeightAt and then accounts for a trunk or canopy rooted nearby. A constant can
-// only be right for the terrain and tree parameters it was written against: the
-// old fixed y=80 buried the player in rock for high seeds, and HeightAt alone
-// would now let a tree occupy the spawn clearance.
+// **The game starts in the city it built for that purpose.** It used to start on the
+// origin column — open country the lattice measures from, 120 to 200 blocks from the
+// capital — so a new player's first minutes were a walk towards something they could not
+// see. The capital is a pure function of the seed and always exists ([capitalSiteAt]
+// ranks its candidate sites rather than refusing them), so this is as determinate an
+// answer as the origin column was.
 //
-// Pure, like everything else here: the same seed always yields the same spawn. That
-// matters beyond tidiness, because the Fimbulvetr storm regenerates chunks around
-// players who expect to come back to the same place.
+// **The plateau is flat by construction**, so there is no generated column to sample and
+// no canopy to clear, and it cannot be under water, because [settlementMinPlateau] is
+// three blocks of freeboard the capital's fallback keeps. The `max(top, seaLevel)` floor
+// the origin column needed is therefore gone, asserted as a test rather than kept as
+// code: a floor that can never fire is a claim nobody can read the truth of. Still pure
+// and still generating nothing, which the Fimbulvetr storm's regeneration depends on.
+//
+// **The column is not checked for headroom, and it does not need to be.** Collision
+// treats a non-resident voxel as solid, so a player whose spawn chunk has not streamed
+// yet stands still until it arrives — exactly as they did on the origin column.
 func SpawnAt(seed int64) [3]float32 {
-	top := generatedColumnTop(seed, spawnColumnX, spawnColumnZ)
-
-	// **A session never begins under water.** spawnWaterClearance keeps basins and
-	// river channels off this column, but it cannot keep the ordinary height field
-	// above the sea line — the terrain is concentrated around 64 against a sea line
-	// at 47, and a mountainAmplitude of 150 is wide enough that a sizeable minority of
-	// seeds still put the origin on a lake bed with no water feature involved at all.
-	// TestASessionNeverBeginsUnderWater is that sweep. Lifting the
-	// reference to the sea line puts the player on the surface of the water instead
-	// of inside it: they swim rather than drown, which is the fail-safe direction and
-	// the only one the swim rules make sense in.
-	//
-	// Deliberately not a lowering: a column that stands above the sea line is
-	// untouched, so this is the sea line acting as a floor under the clearance rather
-	// than a second placement rule.
-	top = max(top, seaLevel)
-
+	capital := CapitalAt(seed)
 	return [3]float32{
-		spawnColumnX + 0.5, // centred in the column rather than on its corner
-		float32(top + SpawnClearance),
-		spawnColumnZ + 0.5,
+		float32(capital.CentreX) + 0.5, // centred in the column rather than on its corner
+		float32(capital.Plateau + SpawnClearance),
+		float32(capital.CentreZ+capitalSpawnOffset) + 0.5,
 	}
 }

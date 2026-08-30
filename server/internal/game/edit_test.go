@@ -36,6 +36,17 @@ func (refusingEditor) ApplyGuarded(context.Context, int64, int64, int64, world.B
 // collision reads it through Peek and edits are applied to it directly. That is the wiring
 // main.go produces, and it is the only wiring in which "collision sees edits" means
 // anything.
+// openCountrySpawn is where a test that edits the ground stands its session, and it is
+// deliberately not [world.SpawnAt].
+//
+// **Since #519 the join spawn is the capital's gate square, and a settlement wards every
+// column of its plateau against every player**, so a mining test standing there would be
+// measuring [game.ErrWarded] rather than the path it is about. The origin column is open
+// country no settlement reaches, the capital standing at least 120 blocks away.
+func openCountrySpawn(seed int64) [3]float32 {
+	return [3]float32{0.5, float32(world.GeneratedColumnTop(seed, 0, 0) + world.SpawnClearance), 0.5}
+}
+
 func editWorld(t *testing.T) (*harness, *world.Cache) {
 	t.Helper()
 
@@ -726,15 +737,16 @@ func TestCollisionSeesAnEdit(t *testing.T) {
 	t.Parallel()
 
 	h, chunks := editWorld(t)
-	spawn := world.SpawnAt(editSeed)
+	spawn := openCountrySpawn(editSeed)
 	generateAround(t, chunks, spawn, 1)
 
 	player, _ := h.join(1, spawn)
 	resting := h.settle(player)
 
-	// The block holding the player up is the one under their feet.
+	// The block holding the player up is the one under their feet, in the spawn's own
+	// column.
 	feet := int64(resting.Pos[1])
-	under := [3]int32{0, int32(feet) - 1, 0}
+	under := [3]int32{int32(math.Floor(float64(spawn[0]))), int32(feet) - 1, int32(math.Floor(float64(spawn[2])))}
 	if got := blockAt(t, chunks, int64(under[0]), int64(under[1]), int64(under[2])); got == world.Air {
 		t.Fatalf("the player settled at y=%v with air under them", resting.Pos[1])
 	}

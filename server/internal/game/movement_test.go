@@ -989,7 +989,10 @@ func TestAPlayerOverANonResidentChunkDoesNotFallThroughTheWorld(t *testing.T) {
 	h.advance(60)
 	landed := player.State()
 
-	surface := world.HeightAt(seed, 0, 0)
+	// Read at the spawn's own column rather than at the origin: since #519 the spawn is
+	// the capital's gate square, wherever the seed put the capital, and the origin column
+	// is an unrelated patch of country.
+	surface := world.HeightAt(seed, int64(math.Floor(float64(spawn[0]))), int64(math.Floor(float64(spawn[2]))))
 	if math.Abs(float64(landed.Pos[1])-float64(surface+1)) > tolerance {
 		t.Errorf("landed at y = %v, want the surface at %d", landed.Pos[1], surface+1)
 	}
