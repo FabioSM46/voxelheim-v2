@@ -4261,22 +4261,45 @@ fn sky_and_ambient(app: &mut App) -> (Color, f32) {
     found[0]
 }
 
+/// The one entity of this kind: its mesh, where it is, and whether it is drawn.
+fn body(app: &mut App, wanted: sky::SkyBodyKind) -> (Handle<Mesh>, Transform, Visibility) {
+    let world = app.world_mut();
+    let mut query = world.query::<(&sky::SkyBodyKind, &Mesh3d, &Transform, &Visibility)>();
+    let found: Vec<(Handle<Mesh>, Transform, Visibility)> = query
+        .iter(world)
+        .filter(|(kind, ..)| **kind == wanted)
+        .map(|(_, mesh, transform, visibility)| (mesh.0.clone(), *transform, *visibility))
+        .collect();
+    assert_eq!(found.len(), 1, "exactly one {wanted:?} is drawn on the sky");
+    found[0].clone()
+}
+
+/// The alpha the whole star field is drawn at.
+fn star_alpha(app: &mut App) -> f32 {
+    let world = app.world_mut();
+    let mut query = world.query::<(&sky::SkyBodyKind, &MeshMaterial3d<StandardMaterial>)>();
+    let found: Vec<Handle<StandardMaterial>> = query
+        .iter(world)
+        .filter(|(kind, _)| **kind == sky::SkyBodyKind::Stars)
+        .map(|(_, material)| material.0.clone())
+        .collect();
+    assert_eq!(found.len(), 1, "exactly one field carries the stars");
+    app.world()
+        .resource::<Assets<StandardMaterial>>()
+        .get(&found[0])
+        .expect("the field's material exists")
+        .base_color
+        .alpha()
+}
+
 /// The dome's transform, its visibility, and its vertices as `(height, colour)` pairs.
 ///
 /// Read through the entity rather than through `SkyVisuals`, so the test asks the question
 /// the renderer does — which mesh is this entity drawing.
 fn dome(app: &mut App) -> (Transform, Visibility, Vec<(f32, [f32; 4])>) {
-    let world = app.world_mut();
-    let mut query =
-        world.query_filtered::<(&Mesh3d, &Transform, &Visibility), With<sky::SkyDome>>();
-    let found: Vec<(Handle<Mesh>, Transform, Visibility)> = query
-        .iter(world)
-        .map(|(mesh, transform, visibility)| (mesh.0.clone(), *transform, *visibility))
-        .collect();
-    assert_eq!(found.len(), 1, "exactly one dome carries the sky");
-    let (handle, transform, visibility) = found[0].clone();
+    let (handle, transform, visibility) = body(app, sky::SkyBodyKind::Dome);
 
-    let meshes = world.resource::<Assets<Mesh>>();
+    let meshes = app.world().resource::<Assets<Mesh>>();
     let mesh = meshes.get(&handle).expect("the dome's mesh exists");
     let Some(VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -4290,7 +4313,7 @@ fn dome(app: &mut App) -> (Transform, Visibility, Vec<(f32, [f32; 4])>) {
     assert_eq!(positions.len(), colours.len());
     let vertices = positions
         .iter()
-        .zip(colours)
+        .zip(colours.iter())
         .map(|(position, colour)| (position[1], *colour))
         .collect();
     (transform, visibility, vertices)
@@ -5254,10 +5277,13 @@ struct DomeEdits(usize);
 
 fn count_dome_edits(
     mut edited: MessageReader<AssetEvent<Mesh>>,
-    domes: Query<&Mesh3d, With<sky::SkyDome>>,
+    domes: Query<(&sky::SkyBodyKind, &Mesh3d)>,
     mut edits: ResMut<DomeEdits>,
 ) {
-    let Some(dome) = domes.iter().next() else {
+    let Some((_, dome)) = domes
+        .iter()
+        .find(|(kind, _)| **kind == sky::SkyBodyKind::Dome)
+    else {
         return;
     };
     for event in edited.read() {
@@ -5297,4 +5323,154 @@ fn an_idle_frame_does_not_repaint_the_dome() {
         0,
         "the dome was repainted on a frame its colours had not moved"
     );
+}
+
+/// The sun's disc stands `SKY_BODY_DISTANCE` from the eye, facing it, wherever the eye is.
+#[test]
+fn the_sun_disc_hangs_at_a_fixed_distance_from_the_eye() {
+    let mut app = headless_player_with_a_clock();
+    // Tick 6 000 is the peak of a daylight that runs 21 600 -> 14 400 the long way round.
+    deliver_at_tick_of_day(&mut app, 1, 6_000, Instant::now());
+    app.update();
+
+    let eye = Vec3::new(-88.0, 71.0, 240.0);
+    put_the_eye_at(&mut app, eye);
+    app.update();
+
+    let (_, transform, visibility) = body(&mut app, sky::SkyBodyKind::Sun);
+    assert_eq!(
+        visibility,
+        Visibility::Visible,
+        "the midday sun was not drawn"
+    );
+    let distance = transform.translation.distance(eye);
+    assert!(
+        (distance - 400.0).abs() < 1e-2,
+        "the disc hung {distance} blocks from the eye"
+    );
+    assert!(
+        transform.translation.y > eye.y,
+        "the midday sun was below the eye"
+    );
+    // Facing the eye: the quad's own forward axis points back down the line to it.
+    let towards_the_eye = (eye - transform.translation).normalize();
+    assert!(
+        transform.forward().as_vec3().dot(towards_the_eye) > 0.999,
+        "the disc did not face the eye"
+    );
+    assert_eq!(transform.scale, Vec3::ONE, "the disc was scaled, not sized");
+}
+
+/// At midnight the sun is under the horizon, the moon is up, and the stars are at full.
+#[test]
+fn midnight_hides_the_sun_and_lights_the_stars() {
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 18_000, Instant::now());
+    app.update();
+    let eye = Vec3::new(4.0, 66.0, -9.0);
+    put_the_eye_at(&mut app, eye);
+    app.update();
+
+    assert_eq!(
+        body(&mut app, sky::SkyBodyKind::Sun).2,
+        Visibility::Hidden,
+        "the sun was drawn in the middle of the night"
+    );
+    let (_, moon, visibility) = body(&mut app, sky::SkyBodyKind::Moon);
+    assert_eq!(visibility, Visibility::Visible, "the moon was not drawn");
+    assert!(moon.translation.y > eye.y, "the moon was down at midnight");
+    assert_eq!(star_alpha(&mut app), 1.0);
+}
+
+/// At midday the stars are invisible and the moon is under the horizon.
+#[test]
+fn midday_puts_the_stars_out_and_the_moon_down() {
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 6_000, Instant::now());
+    app.update();
+
+    assert_eq!(star_alpha(&mut app), 0.0);
+    assert_eq!(
+        body(&mut app, sky::SkyBodyKind::Moon).2,
+        Visibility::Hidden,
+        "the moon was drawn at midday"
+    );
+    assert_eq!(body(&mut app, sky::SkyBodyKind::Sun).2, Visibility::Visible);
+}
+
+/// A server with no clock spawns every body and shows none of them.
+#[test]
+fn a_clockless_server_spawns_the_bodies_and_draws_none() {
+    // The dome is still drawn — it is the sky itself, at `FIXED.sky` on every vertex — and
+    // the three bodies are not, because a world with no hour has no sun to be at an hour of.
+    let mut app = headless_player();
+    for tick in 1..=3 {
+        deliver_at_tick_of_day(&mut app, tick, tick * 1_000, Instant::now());
+        app.update();
+    }
+
+    assert_eq!(dome(&mut app).1, Visibility::Visible);
+    for kind in [
+        sky::SkyBodyKind::Sun,
+        sky::SkyBodyKind::Moon,
+        sky::SkyBodyKind::Stars,
+    ] {
+        assert_eq!(
+            body(&mut app, kind).2,
+            Visibility::Hidden,
+            "a clockless server drew the {kind:?}"
+        );
+    }
+    assert_eq!(star_alpha(&mut app), 0.0);
+}
+
+/// Under water there is no sky at all, whatever the hour is doing above the surface.
+#[test]
+fn the_water_hides_every_body_on_the_sky() {
+    let mut app = headless_player_with_a_clock();
+    app.insert_resource(a_puddle());
+    deliver_at_tick_of_day(&mut app, 1, 18_000, Instant::now());
+    app.update();
+    assert_eq!(
+        body(&mut app, sky::SkyBodyKind::Moon).2,
+        Visibility::Visible
+    );
+
+    // The voxel at (2, 3, 4) spans [2, 3) x [3, 4) x [4, 5).
+    put_the_eye_at(&mut app, Vec3::new(2.5, 3.5, 4.5));
+    app.update();
+    for kind in [
+        sky::SkyBodyKind::Dome,
+        sky::SkyBodyKind::Moon,
+        sky::SkyBodyKind::Stars,
+    ] {
+        assert_eq!(
+            body(&mut app, kind).2,
+            Visibility::Hidden,
+            "the {kind:?} was drawn from under the water"
+        );
+    }
+}
+
+/// The field turns with the day rather than hanging still over it.
+#[test]
+fn the_stars_wheel_as_the_day_turns() {
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 15_000, Instant::now());
+    app.update();
+    let early = body(&mut app, sky::SkyBodyKind::Stars).1.rotation;
+
+    deliver_at_tick_of_day(&mut app, 2, 20_000, Instant::now());
+    app.update();
+    let late = body(&mut app, sky::SkyBodyKind::Stars).1.rotation;
+
+    assert!(
+        early.angle_between(late) > 0.1,
+        "the field stood still across five thousand ticks of night"
+    );
+    // And it is centred on the eye, never offset from it.
+    let eye = Vec3::new(12.0, 80.0, -3.0);
+    put_the_eye_at(&mut app, eye);
+    app.update();
+    assert_eq!(body(&mut app, sky::SkyBodyKind::Stars).1.translation, eye);
 }

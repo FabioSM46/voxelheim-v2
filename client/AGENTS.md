@@ -824,7 +824,26 @@ discipline the four component writes already keep, one layer down, because this 
 upload. It is marked `SkyBody`, which means exactly two things: `follow_the_eye` puts it on the
 camera's *translation* after `AimCamera` (a colour one frame late is invisible, a horizon one frame
 late slides), and `drive_the_sky` hides it while the eye is under water. It is spawned hidden, so
-`ui/character.rs`'s flat backdrop still owns the creation screen. Until legacy PR 171 all four were constants — two in
+`ui/character.rs`'s flat backdrop still owns the creation screen.
+
+**There are two suns, and that is the point rather than an accident.** `sun_position` drives the
+`DirectionalLight`, whose altitude never drops below `HORIZON_ALTITUDE_DEGREES` because a light
+under the horizon shines *upward* — a rendering constraint, not a fact about the sky. So the disc
+gets a second curve, `apparent_sun_altitude`, which crosses zero at both of the server's boundaries
+and reaches `-MIDDAY_ALTITUDE_DEGREES` in the middle of the night. The two share **one** azimuth,
+out of the one `sun_phase`, so the disc sets in the west the light still comes from. Never widen the
+apparent curve into the light: `the_light_always_shines_downwards` is what stands there.
+
+**Four things hang on the sky and one `SkyBodyKind` says which is which.** The dome, the sun's disc,
+the moon at the antisolar direction, and every star as one mesh — a value rather than four markers,
+because every rule here is a `match` on exactly it. A disc is drawn while its altitude is above
+`-SKY_BODY_RADIUS_DEGREES`, and is a **fan, not a quad**: nothing here is textured, so a quad's
+silhouette is the quad — a square sun whose corners reach `sqrt(2)` times that radius, so its
+angular size depends on which way across it is measured. The star field is always drawn, faded by
+its material's alpha — which *is* the night fraction — seeded from the constant `STAR_SEED` and
+never from `world_seed`, its quads square-on to the field's own centre so the whole field is one
+draw that only ever turns. **A world with no clock has no apparent sun**, and that `None` is the
+whole of "the fixed sky draws no bodies". Until legacy PR 171 all four were constants — two in
 `player/camera.rs` and two in `world/render.rs` — and `Daylight::FIXED` is those same four
 numbers, carried over unchanged.
 
