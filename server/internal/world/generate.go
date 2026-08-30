@@ -253,9 +253,9 @@ func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface, riverSurface
 	base := unloweredHeightAt(seed, worldX, worldZ)
 
 	// The square around the origin column keeps the terrain it would have had. See
-	// spawnWaterClearance, and spawnCaveClearance beside it: the two exemptions are
+	// originWaterClearance, and originCaveClearance beside it: the two exemptions are
 	// the same shape and are checked the same way, before any noise is paid for.
-	if nearSpawnColumn(worldX, worldZ) {
+	if nearOriginColumn(worldX, worldZ) {
 		return base, 0, false, false
 	}
 
@@ -439,10 +439,10 @@ func Generate(seed int64, coord Coord) *Chunk {
 	// meeting.
 	//
 	// **No voxel is actually contested yet, and swapping these two lines changes
-	// nothing near spawn.** Trees are suppressed inside the radius, and a conifer rooted
-	// outside it would have to be within a canopy's reach of a building that is itself
-	// well inside — measured over the settlements within three cells of spawn, that
-	// never happens. The order is the decision this file wants to have already made
+	// nothing near the origin.** Trees are suppressed inside the radius, and a conifer
+	// rooted outside it would have to be within a canopy's reach of a building that is
+	// itself well inside — measured over the settlements within three cells of the origin
+	// column, that never happens. The order is the decision this file wants to have already made
 	// when it does, not a behaviour under test.
 	placeSettlements(seed, chunk)
 	placeTrees(seed, chunk, &columns)
@@ -1208,16 +1208,17 @@ func GeneratedColumnTop(seed, worldX, worldZ int64) int {
 
 // The world's origin column, and the clearance a body is put down with.
 const (
-	// spawnColumnX and spawnColumnZ are the world's origin column: the anchor the
-	// settlement lattice measures the capital's offset from, and the column the water and
-	// cave clearances protect.
+	// originColumnX and originColumnZ are the world's origin column: the anchor the
+	// settlement lattice measures the capital's offset from, and the column
+	// [originWaterClearance] and [originCaveClearance] protect.
 	//
-	// **They no longer name a spawn, and the rename is deliberately a follow-up.**
-	// [SpawnAt] read the generated ground here until #519, which is why the two clearances
-	// beside them exist; both stay, because they shape generated blocks and removing one
-	// would move terrain and bump [WorldgenVersion] for a tidy-up.
-	spawnColumnX = 0
-	spawnColumnZ = 0
+	// **Nothing begins a session here.** [SpawnAt] read the generated ground at this
+	// column until #519 moved the join onto the capital's gate square, which is why the
+	// two clearances beside it exist at all; both stay, because they shape generated
+	// blocks and removing one would move terrain and bump [WorldgenVersion] for a
+	// tidy-up.
+	originColumnX = 0
+	originColumnZ = 0
 
 	// SpawnClearance is how many blocks above the ground a body is put down: the
 	// capital's plateau at join (see [SpawnAt]), a settlement's plateau on the middle
