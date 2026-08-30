@@ -271,8 +271,10 @@ impl MapScreen {
     ///
     /// The rung starts over with the session rather than with the window — see
     /// [`MapScreen::reset_zoom`], called from [`follow_input_mode`] where the rest of the
-    /// per-session map state is dropped. So does the viewport, which is a measurement of
-    /// this window and survives a close for the reason [`measure_the_viewport`] gives.
+    /// per-session map state is dropped. The viewport, in contrast, starts over with
+    /// neither: it is a measurement of this window, it survives a close for the reason
+    /// [`measure_the_viewport`] gives, and the next layout pass replaces it rather than
+    /// anything resetting it.
     fn open(&mut self, centre: IVec2) {
         let clamp = |value: i32| value.clamp(-WORLD_EXTENT, WORLD_EXTENT);
         self.open = true;
