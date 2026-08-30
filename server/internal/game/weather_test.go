@@ -127,7 +127,11 @@ func TestEveryReachDecisionUsesTheWeatherAwareReach(t *testing.T) {
 
 // Snow is a walking scale, composed after hunger and skipped for swimming. A diagonal
 // intent makes the assertion independent of either horizontal axis, while the direct
-// step keeps client prediction and network timing out of an authoritative speed rule.
+// steps keep client prediction and network timing out of an authoritative speed rule.
+//
+// Stepped rather than stepped once, because since #597 the horizontal speed in water
+// is approached rather than set. On land every tick still sets it outright, so the
+// four dry rows below answer identically after one tick or after swimSettleTicks.
 func TestHeavySnowSlowsWalkingAndComposesWithStarvation(t *testing.T) {
 	t.Parallel()
 
@@ -139,7 +143,9 @@ func TestHeavySnowSlowsWalkingAndComposesWithStarvation(t *testing.T) {
 		player.weather = weather
 		player.hunger = hunger
 		player.current = intent{moveX: 0.6, moveZ: 0.8}
-		player.step(1/float64(DefaultTickRate), terrain)
+		for range swimSettleTicks {
+			player.step(1/float64(DefaultTickRate), terrain)
+		}
 		return math.Hypot(player.vel[0], player.vel[2])
 	}
 

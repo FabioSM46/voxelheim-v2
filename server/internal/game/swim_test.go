@@ -16,6 +16,10 @@ import (
 // the player was swimming; what is asserted instead is that the vertical speed
 // settles at SwimSinkSpeed, that a jump starts it at SwimRiseSpeed, that the
 // horizontal speed is capped at SwimSpeed, and that no fall into water hurts.
+//
+// Since #597 the horizontal speed in water is *approached* rather than set, so the
+// cap is read once the ease has settled rather than on the first tick — see
+// swimSettleTicks. current_test.go holds the rules that ease is there for.
 
 // lakeWorld is stone up to bedTop, water from there to waterTop, and air above — the
 // shape a lake will have when the generator learns to make one. iceLid puts the
@@ -75,13 +79,19 @@ func TestTheLakeFixtureIsWaterOverStone(t *testing.T) {
 	}
 }
 
-// A player in water sinks at SwimSinkSpeed instead of falling at Gravity.
-func TestAPlayerInFlowingWaterSinksInsteadOfFalling(t *testing.T) {
+// A player in still water sinks at SwimSinkSpeed instead of falling at Gravity.
+//
+// **Source water, deliberately.** This fixture used to be a two-hundred-block column
+// of WaterFlow3, which no automaton can produce and which #597 reads as a waterfall
+// all the way down — a flowing voxel with water directly above it is what a fall is.
+// The claim being made here is about water rather than about a fall, so the water is
+// the plain source; TestAWaterfallSinksFasterThanStillWater makes the other claim,
+// and between them they still prove a flowing level is swum in rather than fallen
+// through.
+func TestAPlayerInStillWaterSinksInsteadOfFalling(t *testing.T) {
 	t.Parallel()
 
-	h := newVitalsHarness(t, DefaultTickRate, lakeWorld{
-		bedTop: 0, waterTop: 200, waterKind: world.WaterFlow3,
-	})
+	h := newVitalsHarness(t, DefaultTickRate, lakeWorld{bedTop: 0, waterTop: 200})
 	player, _ := h.join(1, [3]float32{0.5, 100, 0.5})
 
 	// Long enough for the ease to reach the terminal speed from a standing start:
@@ -152,7 +162,7 @@ func TestSwimmingIsSlowerThanWalking(t *testing.T) {
 	if err := player.Submit(protocol.PlayerInput{ClientTick: 1, MoveZ: 1}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	h.step()
+	h.advance(swimSettleTicks)
 
 	horizontal := math.Hypot(float64(player.State().Vel[0]), float64(player.State().Vel[2]))
 	if math.Abs(horizontal-SwimSpeed) > 1e-5 {
@@ -170,7 +180,7 @@ func TestSwimmingIsSlowerThanWalking(t *testing.T) {
 	if err := player.Submit(protocol.PlayerInput{ClientTick: 2, MoveZ: 1}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	h.step()
+	h.advance(swimSettleTicks)
 
 	starving := math.Hypot(float64(player.State().Vel[0]), float64(player.State().Vel[2]))
 	if math.Abs(starving-SwimSpeed) > 1e-5 {

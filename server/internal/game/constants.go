@@ -123,6 +123,26 @@ const (
 	SwimAcceleration = 12.0
 	SwimSpeed        = WalkSpeed * 0.6
 
+	// What moving water does to a body in it. Two more numbers in the same shape as
+	// the four above: relationships against them rather than tastes of their own.
+	//
+	// **CurrentSpeed is deliberately under SwimSpeed, and that inequality is the whole
+	// rule.** A current is a target the swimmer's own target is added to, so full
+	// opposing intent settles at SwimSpeed - CurrentSpeed = 0.58 blocks a second
+	// upstream: a river carries you when you stop trying and can be fought when you do
+	// not, which is the difference between weather and a wall. Two blocks a second is
+	// also brisk enough that a channel reads as moving at a glance — a swimmer who does
+	// nothing crosses a five-block ford in two and a half seconds.
+	//
+	// **WaterfallSinkSpeed is four times SwimSinkSpeed and well under Gravity's
+	// terminal anything**, so being under a fall is a firm shove down rather than a
+	// fall: it is reached in a third of a second at SwimAcceleration, and SwimRiseSpeed
+	// still outruns it, so a swimmer who holds the rise climbs out of a waterfall
+	// instead of being pinned under it for ever. Nothing here is a force accumulated
+	// across ticks — see [FlowDirection] and Player.step, where both are read.
+	CurrentSpeed       = 2.0
+	WaterfallSinkSpeed = -4.0
+
 	// PlayerWidth is the edge of the player's square footprint, in blocks.
 	//
 	// Under one block on purpose: a body wider than the grid cannot fit through a
