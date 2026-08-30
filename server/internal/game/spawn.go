@@ -21,15 +21,20 @@ import (
 // somebody wires back up, and "the world has one draugr" would then be true again in a
 // world that had stopped being built for it.
 //
-// # The three rules, and why they do not share a cadence
+// # The four rules, and why they do not share a cadence
 //
 // Only the *spawn* is once a second. It is the expensive question — it reads a column of
 // terrain through the seam collision uses — and it is the one whose rate is a gameplay
 // decision, because it is how fast the dark refills around somebody who is clearing it.
 //
-// The two removals answer questions that change every tick and cost almost nothing, so
+// The three removals answer questions that change every tick and cost almost nothing, so
 // they are asked every tick:
 //
+//   - **The ward.** Warded ground is somewhere nothing that hunts a player may be, and a
+//     creature standing on it is taken out of the world rather than killed. Asked once a
+//     second instead, a draugr would follow somebody nineteen ticks deep into the place
+//     the barrier exists to keep it out of — which is the whole of what a player would
+//     ever see of this rule.
 //   - **Daylight.** A *nocturnal* creature with nobody to hunt does not survive the sun.
 //     Asked once a second instead, one would stand in the daylight for up to a second
 //     and the boundary would land on a different tick for every mob in the world.
@@ -104,10 +109,29 @@ func (s *Sim) directMobsLocked(tick uint64, players []*Player, mobs []*mob) bool
 // removeSpentMobsLocked takes away every mob that has stopped being worth simulating,
 // and reports whether it took any.
 //
-// Two rules and one loop, over the list the tick already sorted. Separate loops would
+// Three rules and one loop, over the list the tick already sorted. Separate loops would
 // mean a second sort, and — worse — a second loop reading a list the first had already
 // deleted entries from, which is the kind of stale iteration that works until somebody
-// makes one of the rules depend on the other.
+// makes one of the rules depend on the other. **A new rule joins the walk rather than
+// adding a pass**, which is why the barrier below costs a map hit per mob per tick and
+// not a second traversal of the population.
+//
+// # The ward
+//
+// **Warded ground is somewhere nothing that hunts a player may be**, and the barrier is
+// the same predicate the director refuses a spawn spot with — see [Sim.wardBarsLocked],
+// which is where the exemption and the ownership rule are both written down once.
+//
+// It is asked *first*, and that ordering is a statement rather than an optimisation: the
+// other two rules ask whether this creature is still worth simulating, and this one asks
+// whether it may be there at all. A draugr hunting somebody in plain sight survives the
+// dawn and is inside every streamed cube, so both of the rules below would keep it — and
+// following a player through the barrier is exactly the thing this exists to stop.
+//
+// **It is a removal and not a kill**, through the same [Sim.discardMobLocked] the other
+// two use: no corpse, no loot, no experience, and every earned claim cleared on the way
+// out. Nobody killed it, so nobody is owed anything for it — and a ward that paid out
+// would be a loot farm a player could build, which is the opposite of a safe place.
 //
 // # Daylight
 //
@@ -158,6 +182,14 @@ func (s *Sim) removeSpentMobsLocked(players []*Player, mobs []*mob) bool {
 	// before the caller of this ever assembles the slice, so there is no window left to
 	// guard.
 	for _, m := range mobs {
+		if s.wardBarsLocked(m.kind, m.pos) {
+			s.discardMobLocked(m)
+			s.log.Debug("mob crossed into a ward", "entity_id", m.entityID, "kind", m.kind,
+				"column", chunkAt(m.pos).Column())
+			removed = true
+			continue
+		}
+
 		if daylight && m.species().nocturnal && huntable(players, m.target) == nil {
 			s.discardMobLocked(m)
 			s.log.Debug("mob left with the night", "entity_id", m.entityID, "kind", m.kind,
@@ -297,10 +329,10 @@ func (s *Sim) mobsInViewLocked(p *Player) int {
 // candidateSpotLocked draws one spot near a player and answers whether a creature of
 // this species may stand there.
 //
-// The kind is a parameter because the last of the checks is about the body: how much
-// room this creature needs to keep from the ones already standing about. Everything
-// above it is a question about the *ground*, which is the same question whatever is
-// going to stand on it.
+// The kind is a parameter because the last two checks are not about the ground alone:
+// what a ward bars is the species that hunts, and how much room a spot needs is the
+// arriving body's. Everything above them is a question about the *ground*, which is the
+// same question whatever is going to stand on it.
 //
 // The caller holds Sim.mu.
 func (s *Sim) candidateSpotLocked(p *Player, kind vnet.MobKind) ([3]float64, bool) {
@@ -376,6 +408,9 @@ func (s *Sim) candidateSpotLocked(p *Player, kind vnet.MobKind) ([3]float64, boo
 		return [3]float64{}, false
 	}
 	if s.nearACampfireLocked(pos) {
+		return [3]float64{}, false
+	}
+	if s.wardBarsLocked(kind, pos) {
 		return [3]float64{}, false
 	}
 	if !s.spotIsClearLocked(pos, mobRegistry[kind].body) {
@@ -474,6 +509,58 @@ func surfaceUnderSky(t Terrain, x, z, top, bottom int64) (int64, bool) {
 // The caller holds Sim.mu.
 func (s *Sim) nearACampfireLocked(pos [3]float64) bool {
 	return s.stationWithinLocked(vnet.StructureKindCampfire, pos, CampfireSafeRadius)
+}
+
+// wardBarsLocked reports whether a creature of this species may not be on the ground at
+// pos, because somebody's ward claims the column it stands in.
+//
+// **The one question both halves of the barrier ask.** The director asks it of a spot it
+// is about to put a creature on, and [Sim.removeSpentMobsLocked] asks it of a creature
+// already standing somewhere; a suppression rule and a removal rule written separately
+// could disagree about where the boundary is, and the seam between them would be a strip
+// of ground where creatures spawn and are deleted on the same tick for ever.
+//
+// **Passive is the exemption, and it is a registry column rather than a list of kinds**
+// (see [mobDefinition]). A deer may walk into a village and live: the barrier is about
+// what hunts the player, not about what happens to be a creature. A passive species added
+// later is exempt for free, and a predator added later is barred for free — neither
+// touches this function.
+//
+// **The boolean, never the owner.** [Sim.wardOf] answers with the zero identity for a
+// settlement, because a settlement is owned by nobody — so a caller that compared owners
+// would let every hostile creature stand in exactly the place this rule most exists to
+// keep clear. There is no exemption to want in any case: a runestone bars what hunts its
+// own owner as readily as what hunts anybody else, which is the point of raising one.
+//
+// **The column is asked the way every other question about where a mob *is* asks it** —
+// [chunkAt] of the standing position, which is what [mob.chunk] itself is set from at the
+// end of the physics step. The body box decides distances in this simulation, not which
+// column something occupies: a ward is a claim over columns, and a body that overhangs a
+// boundary is standing on one side of it.
+//
+// **The position is this tick's, not the last one's**, because the director runs after
+// [Sim.advanceMobsLocked]: a creature that crosses the boundary during a tick is removed
+// on the tick it crossed, so it never reaches a snapshot standing inside the ward. The
+// narrow converse is deliberate rather than missed — one that spends a whole tick walking
+// back out is judged where the tick left it, which is outside, and a creature leaving is
+// not the thing a barrier exists to stop.
+//
+// The lookup is [Sim.wardOf]'s cache — a bounded lattice query the first time a column is
+// asked about and a map hit every time after — which is what lets this ride the removal
+// walk instead of costing a pass of its own. **It does feed that cache**, and that is
+// worth saying rather than leaving to be found: an entry now appears for every column a
+// creature stands in and not only for every column somebody edits. The set is bounded by
+// the ground connected players have streamed, since a mob is removed five seconds after
+// it leaves every cube, and an entry is a boolean and an identity. How far [Sim.wards]
+// may grow is a question about the whole cache rather than about this caller.
+//
+// The caller holds Sim.mu.
+func (s *Sim) wardBarsLocked(kind vnet.MobKind, pos [3]float64) bool {
+	if mobRegistry[kind].passive {
+		return false
+	}
+	_, warded := s.wardOf(chunkAt(pos).Column())
+	return warded
 }
 
 // spotIsClearLocked reports whether a body of this shape may appear at pos without
