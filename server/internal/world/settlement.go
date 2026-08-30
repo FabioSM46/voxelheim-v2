@@ -97,8 +97,14 @@ const (
 	// a cell.
 	settlementReach = capitalRadius + settlementBlendBlocks
 
-	// How far from spawn the capital stands. Close enough to walk to before dark and
-	// far enough that a session does not begin inside a wall.
+	// How far from the *lattice origin* the capital stands.
+	//
+	// **The band spreads the capital off the origin column; it is no longer about where a
+	// session begins.** It used to be both — the origin column was the spawn, so the lower
+	// bound doubled as "far enough that a session does not begin inside a wall". #519 moved
+	// the spawn onto the capital's own gate square, so a session now begins *inside* the
+	// capital and that wall is the one the player walks out through. What the band still
+	// does is stop every seed's capital landing on the same column. Both keep their values.
 	capitalMinSpawnDistance = 120
 	capitalMaxSpawnDistance = 200
 
@@ -136,6 +142,24 @@ const (
 	capitalPlotRadius    = 25
 	capitalHutRingRadius = 40
 	capitalHutCount      = 6
+
+	// capitalSpawnGateClearance is how far outside the castle's gate a session begins:
+	// three blocks of open square, so the player is standing on it rather than in the
+	// gateway.
+	capitalSpawnGateClearance = 3
+
+	// capitalSpawnOffset is how far along +Z from the capital's centre [SpawnAt] puts a
+	// new session, on the plateau, outside the castle's gate.
+	//
+	// **Derived from the drawing rather than stated beside it, because the drawing has
+	// already moved once.** The keep's gate is on its +Z wall (the last two rows of
+	// [keepSchematic]'s layers are the only ones with a gap in them), it stands centred on
+	// the settlement's centre, and [largestHalfFootprint] is how far its outer face
+	// reaches — so this is three blocks past that face. #555 grew the castle from 15 across
+	// to 21, and a literal written against the older drawing would put a session in the
+	// gate passage. TestTheSpawnIsOnTheCapitalsSquareOutsideTheKeep checks the column
+	// against every building's actual extent, so the guard is not this arithmetic alone.
+	capitalSpawnOffset = largestHalfFootprint + capitalSpawnGateClearance
 
 	// The village's plan: one public building in the middle and a few huts round it.
 	villageHutRingRadius = 16
@@ -362,6 +386,27 @@ func SettlementAt(seed int64, cellX, cellZ int64) (Settlement, bool) {
 		return Settlement{}, false
 	}
 	return settlementFrom(seed, cellX, cellZ, site), true
+}
+
+// CapitalAt is the world's one capital, for a seed. It is what [SpawnAt] reads, so this
+// is the function that decides where the game begins.
+//
+// **No `bool`, because there is nothing to refuse.** [capitalSiteAt] ranks its candidates
+// instead of refusing them and falls back to the first offset when none is accepted, so
+// the capital's cell always holds one; returning `(Settlement, bool)` would give every
+// caller a branch that cannot be taken and no way to test it.
+//
+// Pure in the seed, like [SettlementAt], which this is one fixed cell of.
+func CapitalAt(seed int64) Settlement {
+	cellX, cellZ := capitalCell()
+	return settlementFrom(seed, cellX, cellZ, capitalSiteAt(seed, cellX, cellZ))
+}
+
+// capitalCell is the lattice cell the capital stands in: the one holding the world's
+// origin column. A function rather than a constant because [settlementCellOf] is one —
+// it is two shifts, and nothing here is on a hot path.
+func capitalCell() (cellX, cellZ int64) {
+	return settlementCellOf(spawnColumnX), settlementCellOf(spawnColumnZ)
 }
 
 // SettlementsNear returns every settlement in the square of lattice cells `cells` out
@@ -655,9 +700,11 @@ func settlementSiteAt(seed int64, cellX, cellZ int64) (settlementSite, bool) {
 //
 // The last resort keeps the two things a settlement cannot do without: the first
 // offset, and a plateau at or above [settlementMinPlateau], so the fallback capital
-// stands on dry ground even where the land around spawn does not. That floor is
-// [SpawnAt]'s, for [SpawnAt]'s reason — lifting is the fail-safe direction and lowering
-// is not.
+// stands on dry ground even where the land around spawn does not.
+//
+// **That floor is now the only thing keeping a session out of the water**, where it used
+// to be the second of two: [SpawnAt] carried a `max(top, seaLevel)` of its own until #519
+// pointed it at this plateau. Lifting, never lowering, either way.
 //
 // **"Last resort" describes the branch and understates how often it is taken: it is the
 // modal outcome.** Chosen attempt over two thousand seeds — 0: 973, 1: 99, 2: 45, 3: 31,

@@ -934,27 +934,26 @@ func findIsolatedEastBorderPlant(t *testing.T, target *plantSpecies) (seed, root
 	return 0, 0, 0, 0
 }
 
-// The invariant is a relationship, not a number: for any seed, the block a session
-// starts in is air and the ground is under it. Asserting "y == 80" would pin today's
-// terrain; asserting this survives a retune and fails the moment one breaks it, which
-// is exactly what the constant it replaces could not do.
-func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
+// The invariant is a relationship, not a number: the generated top of a column is air
+// above solid ground, and generatedColumnTop agrees with the voxels the generator wrote.
+//
+// **It was the spawn sweep and it is now the origin column's**, because #519 moved
+// [SpawnAt] onto the capital's gate square and this body could not follow: the two things
+// it uniquely measures — a canopy over the column, and the sea line as a floor — a
+// settlement's plateau can never show. The spawn's own half of the claim moved to
+// TestTheSpawnIsOnTheCapitalsSquareOutsideTheKeep.
+func TestTheOriginColumnIsAirAboveItsGeneratedTopForEverySeed(t *testing.T) {
 	t.Parallel()
 
 	canopySeeds := 0
 	for seed := int64(1); seed <= 300; seed++ {
-		spawn := SpawnAt(seed)
 		surface := HeightAt(seed, spawnColumnX, spawnColumnZ)
 		chunks := make(map[Coord]*Chunk)
-
-		if got := int(spawn[1]); got <= surface {
-			t.Fatalf("seed %d spawns at y=%d, at or below the surface %d", seed, got, surface)
-		}
 
 		// Read the actual voxels rather than trusting the arithmetic: the height field
 		// and the generator could disagree, and that disagreement is the bug class here.
 		at := func(worldY int) Block {
-			coord := ContainingChunk(spawn[0], float32(worldY), spawn[2])
+			coord := ContainingChunk(spawnColumnX+0.5, float32(worldY), spawnColumnZ+0.5)
 			chunk := chunks[coord]
 			if chunk == nil {
 				chunk = Generate(seed, coord)
@@ -983,56 +982,100 @@ func TestSpawnIsAirAboveSolidGroundForEverySeed(t *testing.T) {
 		if actualTop > surface {
 			canopySeeds++
 		}
-		// The sea line is a floor under the reference, never a ceiling on it: a
-		// column that stands above the water is placed from its own top, and one that
-		// does not is placed from the surface of the water it stands in.
-		if got, want := int(spawn[1]), max(actualTop, seaLevel)+SpawnClearance; got != want {
-			t.Fatalf("seed %d spawns at y=%d, want %d above terrain/canopy top %d and sea line %d",
-				seed, got, want, actualTop, seaLevel)
-		}
 		if got := at(surface); got == Air {
 			t.Fatalf("seed %d has air at its own surface height %d", seed, surface)
 		}
-		for worldY := actualTop + 1; worldY <= int(spawn[1])+1; worldY++ {
+		// The sea line is a floor under a body's reference, never a ceiling: a column above
+		// the water is stood on from its own top, one below it from the water's surface.
+		reference := max(actualTop, seaLevel)
+		for worldY := actualTop + 1; worldY <= reference+SpawnClearance+1; worldY++ {
 			got := at(worldY)
 			if Solid(got) {
-				t.Fatalf("seed %d has solid block %d in spawn clearance at y=%d", seed, got, worldY)
+				t.Fatalf("seed %d has solid block %d over its generated top at y=%d", seed, got, worldY)
 			}
-			// Below the sea line the clearance may be water — the player swims out of
-			// it. Above it, nothing but air is a legal answer.
+			// Below the sea line that space may be water — a body swims out of it. Above
+			// it, nothing but air is a legal answer.
 			if worldY > seaLevel && got != Air {
-				t.Fatalf("seed %d has block %d in spawn clearance at y=%d, above the sea line", seed, got, worldY)
+				t.Fatalf("seed %d has block %d at y=%d, above the sea line", seed, got, worldY)
 			}
 		}
 	}
 	if canopySeeds == 0 {
-		t.Fatal("the spawn sweep exercised no canopy over the spawn column")
+		t.Fatal("the sweep exercised no canopy over the origin column")
 	}
 }
 
-// The named regression. These are real seeds whose surface at the spawn column reaches
-// or passes the old hardcoded y=80, so the constant put the player inside rock — 43
-// peaks at 97 and 109 at 101. The sweep above would miss them: only a few seeds in a
-// hundred are affected, so a range test is a coin flip and these names are not.
+// The spawn is the capital's gate square: three blocks outside the castle's gate, on the
+// plateau, checked against the world the generator writes rather than against the
+// arithmetic that produced it.
 //
-// **The list was recomputed for worldgen 3 and the old one is gone**, exactly as the
-// refusal below instructs: 523, 546, 1098, 1301, 2128 and 2289 were the seeds that
-// cleared 80 under a single 40-block amplitude, and a relief-driven amplitude moves
-// every column of every seed. What the test pins is the relationship, not the names —
-// the names only exist so the relationship is exercised at all.
-func TestSeedsThatUsedToBuryThePlayerNowSpawnInAir(t *testing.T) {
+// **The footprint sweep is the one that would have caught a stale constant.**
+// [capitalSpawnOffset] is derived from [largestHalfFootprint] because #555 grew the castle
+// from 15 blocks across to 21 after this placement was first specified, and a literal
+// written against the older drawing puts a session in the gate passage — inside the keep's
+// own extent, which is a building and not a square.
+func TestTheSpawnIsOnTheCapitalsSquareOutsideTheKeep(t *testing.T) {
 	t.Parallel()
 
-	for _, seed := range []int64{19, 24, 38, 43, 81, 86, 92, 109} {
-		surface := HeightAt(seed, spawnColumnX, spawnColumnZ)
-		if surface < 80 {
-			t.Fatalf("seed %d no longer reaches y=80 (surface %d): the terrain changed, so this "+
-				"regression list is stale and needs recomputing", seed, surface)
+	for seed := int64(1); seed <= 200; seed++ {
+		capital := CapitalAt(seed)
+		spawn := SpawnAt(seed)
+		x, z := int64(math.Floor(float64(spawn[0]))), int64(math.Floor(float64(spawn[2])))
+
+		if want := [3]float32{
+			float32(capital.CentreX) + 0.5,
+			float32(capital.Plateau + SpawnClearance),
+			float32(capital.CentreZ+capitalSpawnOffset) + 0.5,
+		}; spawn != want {
+			t.Fatalf("seed %d spawns at %v, want the capital's gate square %v", seed, spawn, want)
 		}
 
-		spawn := SpawnAt(seed)
-		if int(spawn[1]) <= surface {
-			t.Errorf("seed %d spawns at y=%v, still at or below its surface %d", seed, spawn[1], surface)
+		// On the plateau: inside the flat disc, and the height field agrees — which is what
+		// says the spawn is on the settlement's ground rather than on the blend band.
+		if d := isqrt(squaredDistance(x, z, capital.CentreX, capital.CentreZ)); d > int64(capital.Radius) {
+			t.Fatalf("seed %d spawns %d blocks from the capital's centre, outside its radius %d",
+				seed, d, capital.Radius)
+		}
+		if got := HeightAt(seed, x, z); got != capital.Plateau {
+			t.Fatalf("seed %d spawns over ground at %d, not the capital's plateau %d", seed, got, capital.Plateau)
+		}
+
+		// Outside every building, against each drawing's placed extent.
+		for _, b := range capital.Buildings {
+			w, d := rotatedFootprint(SchematicFor(b.Kind), b.Facing)
+			if x >= b.OriginX && x < b.OriginX+int64(w) && z >= b.OriginZ && z < b.OriginZ+int64(d) {
+				t.Fatalf("seed %d spawns at (%d, %d), inside the %v standing at (%d, %d)-(%d, %d)",
+					seed, x, z, b.Kind, b.OriginX, b.OriginZ, b.OriginX+int64(w)-1, b.OriginZ+int64(d)-1)
+			}
+		}
+
+		// **This assertion replaced a line of code.** SpawnAt floored its height at seaLevel
+		// because the origin column could be a lake bed; the capital cannot be, so the
+		// floor became unreachable and is checked here instead of carried there.
+		if int(spawn[1]) <= seaLevel {
+			t.Fatalf("seed %d spawns at y=%v, at or under the sea line %d", seed, spawn[1], seaLevel)
+		}
+
+		// And the generated voxels agree: solid plateau under the feet, air above it. The
+		// chunk is resolved per y, because the plateau and the head can straddle a border.
+		chunks := make(map[Coord]*Chunk)
+		at := func(worldY int) Block {
+			coord := ContainingChunk(spawn[0], float32(worldY), spawn[2])
+			chunk := chunks[coord]
+			if chunk == nil {
+				chunk = Generate(seed, coord)
+				chunks[coord] = chunk
+			}
+			ox, oy, oz := coord.Origin()
+			return chunk.At(int(x-ox), worldY-int(oy), int(z-oz))
+		}
+		if got := at(capital.Plateau); !Solid(got) {
+			t.Fatalf("seed %d has block %d under its spawn, want the plateau's solid ground", seed, got)
+		}
+		for worldY := capital.Plateau + 1; worldY <= int(spawn[1])+1; worldY++ {
+			if got := at(worldY); got != Air {
+				t.Fatalf("seed %d has block %d at y=%d on the gate square, want air", seed, got, worldY)
+			}
 		}
 	}
 }
@@ -1070,19 +1113,18 @@ func TestSpawnClearanceKeepsThePlayerOnTheGroundWithoutBuryingThem(t *testing.T)
 	const maximumFall = 4
 
 	for seed := int64(1); seed <= 300; seed++ {
-		// The reference the clearance is measured from, which is the generated top or
-		// the sea line above it — see SpawnAt. Measuring from the top alone would call
-		// a placement on the surface of a lake a seventeen-block fall, when what is
-		// under those seventeen blocks is water the player floats on.
-		reference := max(generatedColumnTop(seed, spawnColumnX, spawnColumnZ), seaLevel)
+		// The reference is the capital's plateau: flat by construction across the whole
+		// disc, so it *is* the surface of the spawn column. It used to be the generated top
+		// of the origin column or the sea line above it; a plateau is never submerged.
+		reference := CapitalAt(seed).Plateau
 		above := int(SpawnAt(seed)[1]) - reference
 
 		if above < minimumAir {
-			t.Fatalf("seed %d spawns %d blocks above its spawn reference %d: the player is inside terrain or canopy",
+			t.Fatalf("seed %d spawns %d blocks above the capital's plateau %d: the player is inside the ground",
 				seed, above, reference)
 		}
 		if above > maximumFall {
-			t.Fatalf("seed %d spawns %d blocks above its spawn reference %d: that is a fall, not a placement",
+			t.Fatalf("seed %d spawns %d blocks above the capital's plateau %d: that is a fall, not a placement",
 				seed, above, reference)
 		}
 	}
@@ -1090,31 +1132,32 @@ func TestSpawnClearanceKeepsThePlayerOnTheGroundWithoutBuryingThem(t *testing.T)
 
 // A session never begins under water, for any seed.
 //
-// **spawnWaterClearance cannot deliver this on its own, which is why SpawnAt has a
-// floor as well.** The exemption keeps basins and channels off the spawn column, but
-// the ordinary height field is concentrated around 64 against a sea line at 47 and a
-// mountainAmplitude of 150, so a sizeable minority of seeds put the origin under
-// water with no water feature involved at all. The sweep is what says so out loud:
-// it fails if either half — the exemption or the floor — is removed.
+// **The rule that delivers this moved.** It used to be two halves on the origin column:
+// spawnWaterClearance kept basins and channels off it, and SpawnAt floored its height at
+// the sea line for the ordinary terrain that put it on a lake bed anyway. Neither is on
+// the spawn path now — what keeps a session dry is [settlementMinPlateau], three blocks
+// of freeboard [capitalSiteAt] holds even on its fallback. The counter keeps that from
+// being a claim about nothing: it counts the seeds whose *origin* column is submerged,
+// which are exactly the worlds the old floor existed for.
 func TestASessionNeverBeginsUnderWater(t *testing.T) {
 	t.Parallel()
 
-	submergedColumns := 0
+	submergedOrigins := 0
 	for seed := int64(1); seed <= 300; seed++ {
 		spawn := SpawnAt(seed)
 		if int(spawn[1]) <= seaLevel {
 			t.Fatalf("seed %d spawns at y=%v, at or under the sea line %d", seed, spawn[1], seaLevel)
 		}
 		if generatedColumnTop(seed, spawnColumnX, spawnColumnZ) < seaLevel {
-			submergedColumns++
+			submergedOrigins++
 		}
 	}
-	if submergedColumns == 0 {
-		t.Fatal("no seed in the sweep put the spawn column under the sea line, so the floor was never exercised")
+	if submergedOrigins == 0 {
+		t.Fatal("no seed in the sweep put the origin column under the sea line, so the seeds the old floor existed for were never exercised")
 	}
 }
 
-// Neither a basin nor a channel touches the ground around spawn.
+// Neither a basin nor a channel touches the ground around the origin column.
 func TestNoWaterFeatureReachesTheSpawnSquare(t *testing.T) {
 	t.Parallel()
 
