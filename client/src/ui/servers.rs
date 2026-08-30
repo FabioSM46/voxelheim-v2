@@ -11,15 +11,26 @@
 //! that carry it: an empty list reads as *no servers exist*, which is a claim this
 //! client must not make on the strength of a network error.
 //!
+//! **And there is one control that is not a row.** A session ends for reasons that are
+//! nobody's mistake — a character screen nobody answered, an idle timeout, a server
+//! restart, a link that dropped — and every one of them used to land a player on a list
+//! of servers with no way back to the one they had been on. `RECONNECT` is that way
+//! back: it is up exactly while there is an address to return to, it dials nothing
+//! until it is pressed, and it sits beside the rows rather than over them so picking a
+//! different server stays one click away (#627).
+//!
 //! Nothing here decides anything. A row writes a [`ConnectRequest`] naming the server;
 //! the network boundary owns the socket, the address and the certificate to expect at
 //! it. This module never learns an address — see `net/servers.rs` for why the accessor
-//! does not exist.
+//! does not exist. [`ServerAddress`] is read for its *presence* and never for its
+//! contents: "there is somewhere to go back to" is the only thing this screen needs to
+//! know, and the route itself stays behind the boundary.
 
 use bevy::prelude::*;
 
 use crate::net::{
-    ConnectRequest, ConnectionState, ListedServer, RefreshServerList, ServerList, SignInState,
+    ConnectRequest, ConnectionState, ListedServer, ReconnectRequest, RefreshServerList,
+    ServerAddress, ServerList, SignInState,
 };
 
 use super::login::login_is_up;
@@ -35,7 +46,9 @@ impl Plugin for ServerListUiPlugin {
                 show_server_list,
                 rebuild_rows,
                 row_action,
+                reconnect_action,
                 retry_action,
+                show_reconnect,
                 refresh_server_list_text,
             ),
         );
@@ -57,6 +70,15 @@ struct ServerRow(String);
 #[derive(Component)]
 struct RetryButton;
 
+/// The way back into the session that just ended.
+///
+/// Up only while there is an address to return to, which is why it is a component with
+/// a visibility rule rather than a button that is always drawn: `RECONNECT` on a client
+/// that has never dialled anything names no server and would be a control that could
+/// only do nothing.
+#[derive(Component)]
+struct ReconnectButton;
+
 /// The line under the rows: why there are none, or why the last connection did not
 /// happen.
 #[derive(Component)]
@@ -75,6 +97,10 @@ const OFFLINE_LABEL: Color = Color::srgb(0.55, 0.59, 0.66);
 const ONLINE_LABEL: Color = Color::WHITE;
 
 const RETRY_LABEL: &str = "REFRESH THE LIST";
+
+/// The label the issue names, and it is deliberately a verb a player recognises rather
+/// than a description of a route they cannot see.
+const RECONNECT_LABEL: &str = "RECONNECT";
 
 /// What the line says while the account service is being asked.
 const LOADING: &str = "Reading the list of servers...";
@@ -155,6 +181,36 @@ fn spawn_server_list(mut commands: Commands) {
                             ..default()
                         },
                     ));
+                    // Between the line and the refresh, which is the order a dropped
+                    // player reads in: why the session ended, the way straight back
+                    // into it, and only then the way to look for a different one. It
+                    // is `Display::None` until there is somewhere to go back to —
+                    // `Visibility::Hidden` would leave its 44 pixels of gap in the
+                    // column, which is the trap `ui/character.rs` documents.
+                    panel
+                        .spawn((
+                            ReconnectButton,
+                            Button,
+                            Node {
+                                width: Val::Percent(100.0),
+                                height: Val::Px(44.0),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
+                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                display: Display::None,
+                                ..default()
+                            },
+                            BackgroundColor(BUTTON),
+                        ))
+                        .with_child((
+                            Text::new(RECONNECT_LABEL),
+                            TextFont {
+                                font_size: FontSize::Px(18.0),
+                                ..default()
+                            },
+                            TextColor(Color::WHITE),
+                            TextShadow::default(),
+                        ));
                     panel
                         .spawn((
                             RetryButton,
@@ -316,6 +372,72 @@ fn row_action(
     }
 }
 
+/// Whether there is a session to get back into.
+///
+/// **Two states, and both of them are a session that is over.**
+/// [`ConnectionState::Disconnected`] is the ordinary ending — the character screen that
+/// was never answered, an idle timeout, a restart, a dropped link.
+/// [`ConnectionState::Rejected`] is a server that said no, and it is here for the same
+/// reason: a refusal a player can act on (a certificate the list has since caught up
+/// with, a server that was still starting) is one more press away, and the refusal's own
+/// sentence stays on screen beside the control rather than being replaced by it.
+///
+/// **`Idle` is the state it must not be offered in**, which the address answers for: no
+/// server has been dialled, so there is nowhere to go back to and a button that named
+/// one would be this client inventing a destination. That is exactly what
+/// [`ServerAddress`] being absent means — it is inserted beside `Connecting` and left in
+/// place afterwards — and its *presence* is all this reads.
+pub(super) fn reconnect_is_offered(
+    state: Option<&ConnectionState>,
+    address: Option<&ServerAddress>,
+) -> bool {
+    address.is_some()
+        && matches!(
+            state,
+            Some(ConnectionState::Disconnected | ConnectionState::Rejected { .. })
+        )
+}
+
+fn show_reconnect(
+    state: Option<Res<ConnectionState>>,
+    address: Option<Res<ServerAddress>>,
+    mut buttons: Query<&mut Node, With<ReconnectButton>>,
+) {
+    let next = if reconnect_is_offered(state.as_deref(), address.as_deref()) {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut buttons {
+        // Written only when it moves: a `Node` touched on an idle frame marks the
+        // component changed for every consumer of it, and taffy is one of them.
+        if node.display != next {
+            node.display = next;
+        }
+    }
+}
+
+/// The reconnect asks to go back to the server the last session was on. It never learns
+/// which one that is, and it never opens a socket.
+///
+/// **A press and nothing else writes one.** There is no timer here and no retry policy
+/// behind the message: `net::reconnect_on_request` dials once per press, on the route it
+/// recorded when the session was opened.
+fn reconnect_action(
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor),
+        (ChangedButton, With<ReconnectButton>),
+    >,
+    mut requests: MessageWriter<ReconnectRequest>,
+) {
+    for (interaction, mut colour) in &mut buttons {
+        colour.0 = button_colour(interaction);
+        if *interaction == Interaction::Pressed {
+            requests.write(ReconnectRequest);
+        }
+    }
+}
+
 /// The retry asks for the list again. It never reads one.
 fn retry_action(
     mut buttons: Query<(&Interaction, &mut BackgroundColor), (ChangedButton, With<RetryButton>)>,
@@ -389,12 +511,49 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_message::<ConnectRequest>()
+            .add_message::<ReconnectRequest>()
             .add_message::<RefreshServerList>()
             .insert_resource(list)
             .insert_resource(ConnectionState::Idle)
             .add_plugins(ServerListUiPlugin);
         app.update();
         app
+    }
+
+    /// The same screen over a session that has ended on a server this client dialled.
+    fn after_a_session(state: ConnectionState) -> App {
+        let mut app = headless(ServerList::Ready(vec![ListedServer::for_a_test(
+            "midgard",
+            "server.example:7777",
+            true,
+        )]));
+        app.insert_resource(state)
+            .insert_resource(ServerAddress("server.example:7777".to_owned()));
+        app.update();
+        app
+    }
+
+    /// Whether the reconnect is laid out at all, which is what `Display::None` decides.
+    fn reconnect_is_drawn(app: &mut App) -> bool {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Node, With<ReconnectButton>>();
+        query.iter(world).any(|node| node.display != Display::None)
+    }
+
+    fn reconnects_asked_for(app: &mut App) -> usize {
+        let messages = app.world().resource::<Messages<ReconnectRequest>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).count()
+    }
+
+    fn press_the_reconnect(app: &mut App) {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<ReconnectButton>>();
+        let button = query.iter(world).next().expect("a reconnect button");
+        *world
+            .get_mut::<Interaction>(button)
+            .expect("the reconnect is a button") = Interaction::Pressed;
+        app.update();
     }
 
     /// The labels on the rows, **in the order they are drawn in**.
@@ -604,5 +763,126 @@ mod tests {
             }),
         );
         assert_eq!(line, refusal);
+    }
+    /// **The bug this issue is about, from the player's side.** A session that ended —
+    /// which is what a character screen nobody answered becomes — leaves one control
+    /// that gets them back in, and pressing it asks for exactly one reconnection.
+    #[test]
+    fn a_session_that_ended_leaves_one_control_that_gets_a_player_back_in() {
+        let mut app = after_a_session(ConnectionState::Disconnected);
+
+        assert!(
+            reconnect_is_drawn(&mut app),
+            "a dropped player was left with nothing to press"
+        );
+        press_the_reconnect(&mut app);
+        assert_eq!(reconnects_asked_for(&mut app), 1);
+    }
+
+    /// And the way to a *different* server is still on the same screen, unchanged: the
+    /// rows are there and the line says what happened.
+    #[test]
+    fn the_list_and_its_sentence_are_still_on_the_same_screen() {
+        let mut app = after_a_session(ConnectionState::Disconnected);
+
+        assert_eq!(row_labels(&mut app).len(), 1, "the rows went away");
+        let line = describe(
+            &ServerList::Ready(vec![ListedServer::for_a_test(
+                "midgard",
+                "server.example:7777",
+                true,
+            )]),
+            Some(&ConnectionState::Disconnected),
+        );
+        assert_eq!(line, "That session ended. Pick a server to play on.");
+    }
+
+    /// **A client that has dialled nothing is offered nothing.** `Idle` has no
+    /// `ServerAddress`, so there is no server for a reconnect to name and the control
+    /// is not laid out at all.
+    #[test]
+    fn a_client_that_has_never_dialled_is_offered_no_reconnect() {
+        let mut app = headless(ServerList::Ready(vec![ListedServer::for_a_test(
+            "midgard",
+            "server.example:7777",
+            true,
+        )]));
+        assert!(
+            !reconnect_is_drawn(&mut app),
+            "a client with nowhere to go back to was offered a way back"
+        );
+    }
+
+    /// A refusal keeps its own sentence, verbatim, with the reconnect beside it rather
+    /// than over it: the reason is the thing a refused player has to be able to read.
+    #[test]
+    fn a_refusal_keeps_its_reason_and_gains_a_way_to_try_again() {
+        let refusal = "refusing to connect to server.example:7777: it presented a different \
+                       certificate than the one the server list carries for it.";
+        let mut app = after_a_session(ConnectionState::Rejected {
+            reason: refusal.to_owned(),
+        });
+
+        assert!(reconnect_is_drawn(&mut app));
+        assert_eq!(
+            describe(
+                &ServerList::Ready(Vec::new()),
+                Some(&ConnectionState::Rejected {
+                    reason: refusal.to_owned()
+                }),
+            ),
+            refusal,
+            "the reconnect overwrote the server's own reason"
+        );
+    }
+
+    /// **Nothing dials without a press.** The screen is up, the control is drawn, and
+    /// no interaction has happened — so nothing has been asked for.
+    #[test]
+    fn a_drawn_reconnect_asks_for_nothing_until_it_is_pressed() {
+        let mut app = after_a_session(ConnectionState::Disconnected);
+        assert!(reconnect_is_drawn(&mut app));
+
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(
+            reconnects_asked_for(&mut app),
+            0,
+            "the screen dialled on its own"
+        );
+    }
+
+    /// Every state answered, and answered without a wildcard — the sweep
+    /// `the_list_is_up_exactly_while_there_is_no_session` keeps, for the same reason: a
+    /// state added to the enum reaches this by construction and cannot be covered by
+    /// accident.
+    #[test]
+    fn the_reconnect_is_offered_exactly_while_a_session_is_over() {
+        let address = ServerAddress("server.example:7777".to_owned());
+
+        for state in ConnectionState::every() {
+            let expected = match state {
+                // A session that is over, on a server this client dialled.
+                ConnectionState::Disconnected | ConnectionState::Rejected { .. } => true,
+                // Nothing was ever dialled, or something is live or on its way — in
+                // which case the way back in is the session already being opened.
+                ConnectionState::Idle
+                | ConnectionState::Connecting
+                | ConnectionState::Handshaking
+                | ConnectionState::Choosing
+                | ConnectionState::Connected
+                | ConnectionState::Leaving { .. } => false,
+            };
+            assert_eq!(
+                reconnect_is_offered(Some(&state), Some(&address)),
+                expected,
+                "{state:?}"
+            );
+            // And with no address there is nowhere to go back to, whatever the state
+            // says. `Idle` is the state that reaches this in practice; the sweep holds
+            // it for all of them so the two conditions cannot drift into one.
+            assert!(!reconnect_is_offered(Some(&state), None), "{state:?}");
+        }
     }
 }
