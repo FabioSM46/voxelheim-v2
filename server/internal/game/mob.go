@@ -246,7 +246,7 @@ func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
 // caller holds Sim.mu.
 func (m *mob) step(s *Sim, players []*Player) {
 	if m.species().passive {
-		m.stepPassive(players)
+		m.stepPassive(s.terrain, players)
 	} else {
 		switch m.action {
 		case vnet.MobActionWindup:
@@ -275,7 +275,7 @@ func (m *mob) step(s *Sim, players []*Player) {
 // invisibility here: it prevents a hostile attack, but a living player is still something
 // prey notices. `target` remains zero because it means prey selected for an attack in the
 // hostile branch and the spawn director reads that meaning.
-func (m *mob) stepPassive(players []*Player) {
+func (m *mob) stepPassive(t Terrain, players []*Player) {
 	threat, distance := m.nearestLivePlayer(players)
 	m.target = 0
 
@@ -294,7 +294,7 @@ func (m *mob) stepPassive(players []*Player) {
 
 	m.action = vnet.MobActionFlee
 	m.actionTicks = 0
-	m.steerAway(threat)
+	m.steerAway(t, threat)
 }
 
 // nearestLivePlayer is the nearest living threat and its body-to-body distance.
@@ -505,7 +505,7 @@ func (m *mob) stepPursuit(s *Sim, target *Player) {
 		m.beginWindup(s)
 		return
 	}
-	m.steerToward(target)
+	m.steerToward(s.terrain, target)
 }
 
 // stepWindup counts down a committed swing and lands it, or abandons it.
@@ -654,12 +654,40 @@ func (m *mob) inReach(t Terrain, target *Player) bool {
 	return clearLineOfSight(t, boxCentre(body), boxCentre(playerBox(target.pos)))
 }
 
+// speedIn is how fast this creature may travel horizontally from where it is standing.
+//
+// **The registry's speed, capped by [SwimSpeed] while the body overlaps water — a cap
+// and not a scale**, which is the same shape [Player.step] gives the same question and
+// is the reason it is worth restating here. A scale would be a second answer: written
+// as `speed *= something`, a future modifier (a wound, a mire, a hunted creature's last
+// burst) would multiply with the water instead of being bounded by it, and a creature
+// slowed twice over would end up slower in a river than the river alone allows. A cap
+// composes — whatever else has already reduced the speed, water says only "and no
+// faster than this", and a creature already slower than the water keeps its own number.
+//
+// One box query per tick, through the same [Terrain] seam the collision reads, with
+// **this species' own body** from the registry rather than a box spelled here — the
+// same box the swing, the separation and the step probe all measure. An absent chunk
+// answers "not water" (see [Terrain.Fluid]), so a creature at the edge of loaded
+// terrain runs at its land speed, which is the existing conservative direction.
+//
+// Nothing is stored: the answer is recomputed from the body's position every tick, so a
+// creature that walks out of the water is back at its full speed on the tick its box no
+// longer overlaps any, with nothing to decay and nothing left behind.
+func (m *mob) speedIn(t Terrain) float64 {
+	def := m.species()
+	if overlapsFluid(t, def.body.boxAt(m.pos)) {
+		return min(def.speed, SwimSpeed)
+	}
+	return def.speed
+}
+
 // steerToward walks straight at a target and faces it.
 //
 // Straight, and that is the whole of the navigation: it is why a creature can be walled
 // out by a corner. The hop below is the one concession, and it clears a single block —
 // the height a player steps up without thinking about it.
-func (m *mob) steerToward(target *Player) {
+func (m *mob) steerToward(t Terrain, target *Player) {
 	dx, dz := target.pos[0]-m.pos[0], target.pos[2]-m.pos[2]
 	length := math.Hypot(dx, dz)
 	if length == 0 {
@@ -667,14 +695,14 @@ func (m *mob) steerToward(target *Player) {
 		return
 	}
 
-	speed := m.species().speed
+	speed := m.speedIn(t)
 	m.vel[0] = dx / length * speed
 	m.vel[2] = dz / length * speed
 	m.faceToward(target)
 }
 
 // steerAway walks directly opposite a live player's position and faces that heading.
-func (m *mob) steerAway(threat *Player) {
+func (m *mob) steerAway(t Terrain, threat *Player) {
 	dx, dz := m.pos[0]-threat.pos[0], m.pos[2]-threat.pos[2]
 	length := math.Hypot(dx, dz)
 	if length == 0 {
@@ -682,7 +710,7 @@ func (m *mob) steerAway(threat *Player) {
 		return
 	}
 
-	speed := m.species().speed
+	speed := m.speedIn(t)
 	m.vel[0] = dx / length * speed
 	m.vel[2] = dz / length * speed
 	m.yaw = wrapAngle(math.Atan2(-dx, -dz))
@@ -703,15 +731,23 @@ func (m *mob) faceToward(target *Player) {
 
 // physics falls the mob, moves it, and hops it over a one-block step.
 //
-// **Nothing here knows about water, and that is the decision worldgen 5 made rather
-// than a gap it left.** A creature that walks into a lake sinks through it — water
-// does not stop movement — and walks along the bed until it walks out again. The
-// player integrator learned to swim because a player's *intent* is the thing the
-// swim rules answer; a mob has a path and no intent, so teaching it to swim means
-// teaching the pathing to want to be at the surface, which is a different piece of
-// work. What keeps the result from being creatures standing in ponds is upstream:
-// the spawn director refuses a spot whose floor or headroom is water or ice, so a
-// mob only ever reaches a lake by walking there.
+// **Nothing *vertical* here knows about water, and that is still the decision worldgen
+// 5 made rather than a gap it left.** A creature that walks into a lake sinks through
+// it — water does not stop movement — and walks along the bed until it walks out
+// again. The player integrator learned to float, sink and rise because a player's
+// *intent* is the thing those rules answer; a mob has a path and no intent, so
+// teaching it to swim means teaching the pathing to want to be at the surface, which
+// is a different piece of work. What keeps the result from being creatures standing in
+// ponds is upstream: the spawn director refuses a spot whose floor or headroom is
+// water or ice, so a mob only ever reaches a lake by walking there.
+//
+// **The horizontal half is no longer nothing**, and it is deliberately not here: the
+// cap is applied where the registry's speed becomes a velocity, in [mob.speedIn], so
+// that water bounds the creature's *intended* speed the way it bounds a player's
+// rather than editing a velocity after the fact. This function reads whatever the
+// steering left behind and is unchanged by it — including the step probe below, which
+// looks a tick's travel ahead and therefore looks proportionally less far ahead for a
+// creature the water has slowed.
 func (m *mob) physics(s *Sim) {
 	m.vel[1] = max(m.vel[1]-Gravity*s.dt, -TerminalFallSpeed)
 
