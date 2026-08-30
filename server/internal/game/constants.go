@@ -118,6 +118,19 @@ const (
 	// SwimSpeed is horizontal, and it is a fraction of WalkSpeed rather than a number
 	// because what is being said is "slower than walking". Six tenths is 2.58 blocks
 	// a second: still faster than nothing, and slower than the draugr on the bank.
+	//
+	// **It is every body's number, not the player's**, and since #631 the creatures
+	// read it too — as a cap on the registry's speed while their box overlaps water,
+	// in [mob.speedIn]. A second constant for creatures would have been a second
+	// answer to a question water has already answered: it is the same water, and how
+	// fast a thing gets through it is a property of the water rather than of what is
+	// wading. The consequence is worth naming, because it is the design and not a
+	// side effect. Every registered species is above it on land — the draugr's 3.2,
+	// the deer's 4.0, the vargr's 5.4 — so all three are slowed, and all three are
+	// slowed *to the swimmer's own speed*. A river therefore stops a chase closing
+	// rather than ending it: the pursuer neither gains nor loses while both are in
+	// the water, and the bank is where the difference between 2.58 and 5.4 comes
+	// back. That is what "the draugr on the bank" means now, literally.
 	SwimSinkSpeed    = -1.0
 	SwimRiseSpeed    = 3.0
 	SwimAcceleration = 12.0
