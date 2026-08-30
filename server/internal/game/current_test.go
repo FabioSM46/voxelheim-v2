@@ -155,12 +155,36 @@ func TestFlowDirectionReadsTheWaterAndNothingElse(t *testing.T) {
 			reason: "world.Solid answers for Ice, which is why FlowDirection needs no second test for it",
 		},
 		{
-			name: "a source neighbour is skipped, not flowed into",
+			name: "a source neighbour pushes away from itself",
 			table: blockTable{blocks: around(world.WaterFlow3, map[[3]int64]world.Block{
 				east: world.Water, west: world.Air, north: world.WaterFlow3, south: world.WaterFlow3,
 			}), fill: world.Air},
 			want:   [3]float64{-1, 0, 0},
-			reason: "3 against a full 8 would point into the lake, which is a body of water rather than a direction",
+			reason: "3 against a full 8 is -5 east, which is a push west; the air adds 3 more the same way",
+		},
+		{
+			name: "and it is the whole answer when it is the only gradient",
+			table: blockTable{blocks: around(world.WaterFlow3, map[[3]int64]world.Block{
+				east: world.Water, west: world.WaterFlow3, north: world.WaterFlow3, south: world.WaterFlow3,
+			}), fill: world.Air},
+			want:   [3]float64{-1, 0, 0},
+			reason: "the equal three cancel, so a spring with nothing else around it still sends its water west",
+		},
+		{
+			name: "a river current neighbour counts as the source it is",
+			table: blockTable{blocks: around(world.WaterFlow3, map[[3]int64]world.Block{
+				east: world.WaterCurrentZPos, west: world.WaterFlow3, north: world.WaterFlow3, south: world.WaterFlow3,
+			}), fill: world.Air},
+			want:   [3]float64{-1, 0, 0},
+			reason: "it is level 8 like any other full voxel; the direction in its id is its own, not the spill's",
+		},
+		{
+			name: "a source on either side leaves nowhere to go",
+			table: blockTable{blocks: around(world.WaterFlow3, map[[3]int64]world.Block{
+				east: world.Water, west: world.Water, north: world.WaterFlow3, south: world.WaterFlow3,
+			}), fill: world.Air},
+			want:   [3]float64{0, 0, 0},
+			reason: "-5 east and -5 west are equal and opposite, the way two equal levels are",
 		},
 		{
 			name: "ground cover is as empty as air",

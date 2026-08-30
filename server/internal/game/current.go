@@ -36,9 +36,12 @@ var flowNeighbours = [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
 //     water is about to go. A neighbour that is [world.Solid] is skipped rather than
 //     counted as zero — a wall is not somewhere to flow, and counting it as empty
 //     would push the swimmer into it — and [world.Ice] is skipped by that same test,
-//     being the lid rather than the water. A full source neighbour is skipped too: it
-//     is level 8, so counting it would produce a term pointing *into* the source,
-//     which is a body of standing water rather than a direction.
+//     being the lid rather than the water. A full source neighbour is counted like any
+//     other fluid, and the sign is the whole reason: level 8 against a lower level is a
+//     negative term, so a source to the east pushes *west* — away from it, which is the
+//     one direction a spring can send water. Skipping it read that sign backwards, and
+//     it cost the case the skip was written for: a flow whose only gradient is the
+//     source beside it summed to nothing and stood still, so water never left a spring.
 //   - Plain [world.Water] is a source and has no direction at all.
 //
 // The vertical is a flag rather than a magnitude, and it belongs to exactly one case:
@@ -74,11 +77,7 @@ func FlowDirection(terrain Terrain, x, y, z int64) (dx, dy, dz float64) {
 		if !ok || world.Solid(neighbour) {
 			continue
 		}
-		neighbourLevel := world.WaterLevel(neighbour)
-		if neighbourLevel == waterSourceLevel {
-			continue
-		}
-		drop := float64(level - neighbourLevel)
+		drop := float64(level - world.WaterLevel(neighbour))
 		sumX += drop * float64(step[0])
 		sumZ += drop * float64(step[1])
 	}
@@ -94,8 +93,8 @@ func FlowDirection(terrain Terrain, x, y, z int64) (dx, dy, dz float64) {
 
 // waterSourceLevel is the level [world.WaterLevel] reports for a full voxel: the
 // plain source and all four generator-authored currents. Named rather than spelled 8
-// twice above, because what the two tests mean is "this is a source", not "this is
-// eight eighths".
+// above, because what the test means is "this is a source", not "this is eight
+// eighths".
 const waterSourceLevel = 8
 
 // playerCentreVoxel is the voxel a player standing at pos has the centre of their
