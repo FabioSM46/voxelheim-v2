@@ -2646,6 +2646,21 @@ Recorded here so the next reader does not mistake them for oversights:
   walks along the bed, because a mob has a path where a player has intent, and answering the swim
   rules for a path is a change to the pathing. The spawn director keeps that from being the common
   case by refusing every water-family voxel and the ice lid above one.
+- **Moving water is a target the swimmer's own target is added to, never a force accumulated
+  across ticks.** `FlowDirection` (`internal/game/current.go`) reads one voxel and its five
+  neighbours and answers a unit horizontal direction plus a falling flag: a `WaterCurrent*` id
+  carries its direction outright, a flowing level derives one from the levels around it, and a
+  plain source has none. `Player.step` samples it at the body's centre while `inWater`, adds
+  `CurrentSpeed` along it to the input-derived swim target, and eases the velocity toward the sum
+  with `SwimAcceleration`. Nothing is stored on the `Player`, so leaving a channel leaves nothing
+  behind. `CurrentSpeed` is deliberately under `SwimSpeed`, which is what makes a river something
+  a swimmer fights rather than something that wins; a fall pulls toward `WaterfallSinkSpeed`
+  unless the rise intent is held, which always wins. **This is server-side because a current that
+  moves a body is a gameplay outcome** — a client may mirror the same derivation to animate a
+  surface, and the drift it renders is still whichever one this tick computed. Its price, paid
+  knowingly: horizontal movement *in water* now has about a fifth of a second of momentum, where
+  on land it is still set outright from the intent every tick. **Mobs are untouched** — `physics`
+  never reads it, for the reason above.
 - **No anti-cheat beyond the speed clamp and the discard rule.** A client can send input as fast as
   it likes; the server only ever applies the newest one per tick, so the ceiling is the tick rate.
   Rate limiting the *socket* is a backpressure issue, not a movement one. `ChunkResendRequest` is
