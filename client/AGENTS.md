@@ -59,7 +59,7 @@ keeps meaning "everything the client is".
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on, and the two questions about a voxel — `solid_at` for what stops a body, `targetable_at` for what the crosshair finds | mesh, or spawn anything |
-| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel stem and head `build_cover` grows for every `is_cover` block | mention a Bevy type, or read a chunk it was not given |
+| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel stem and head `build_cover` grows for every `is_cover` block | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the three materials, one entity per chunk with the water and cover halves as its children | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), and which are cover — there to be seen and broken but solid to nothing (`is_cover`) | know about meshes or about the wire |
 | `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
@@ -443,9 +443,12 @@ one of these; it can, because it is holding the socket. Here the result is a hol
 with the coordinate and the reason in the log, which beats a client that exits over one bad
 frame out of five thousand.
 
-**Colour comes from vertex colours, and there are exactly two materials.** `palette.rs` maps a
-block id to a linear RGBA; the PBR shader multiplies the material's `base_color` by it, which
-is why both of those colours are white and must stay white. An id this build has no colour for
+**Colour comes from vertex colours.** `palette.rs` maps a block id to a linear RGBA; the PBR
+shader multiplies the material's `base_color` by it, which is why every material's colour is
+white and must stay white. On the opaque half the vertex
+colour carries one thing more: the mesher multiplies its RGB by that vertex's `Occlusion`, so
+the four corners of one quad can differ and an edge is visible without a second attribute, a
+second material or a shader. Alpha is never touched by it. An id this build has no colour for
 renders magenta rather than a plausible grey — a server one contract ahead should be obvious,
 not invisible.
 
@@ -2205,17 +2208,26 @@ Recorded here so the next reader does not mistake them for oversights:
   entity no snapshot has ever mentioned; it is held for `APPEARANCE_GRACE` and then dropped, which
   stops a server that describes entities it never shows or groups with from growing a map for as
   long as the connection lasts.
-- **No cross-chunk lighting, ambient occlusion, shadows, LOD or frustum-driven requests.** One
-  directional light with shadow maps off, plus a per-camera ambient term and a per-camera distance
+- **No cross-chunk lighting, shadows, LOD or frustum-driven requests.** One directional light
+  with shadow maps off, plus a per-camera ambient term and a per-camera distance
   fog — all three on the server's clock — and one `PointLight` per campfire in view, which is on
   nobody's clock and casts no shadow either. **The fire's light is the one light in this client
   that is not the sky's**, and its reach is a presentation number that deliberately falls short of
   `game.CampfireSafeRadius`: the ground a fire keeps clear is checked in `spawn.go` and is not
   something a renderer may draw a boundary around. None of the four casts a shadow. Each of the rest is its
-  own issue. Ambient occlusion is the one that moved closer: it needs a chunk's neighbours, and
-  border culling put them in the mesher's hands. What to *do* with them is still a rendering
-  decision rather than a plumbing one, and greedy merging works against per-vertex occlusion —
-  which is exactly the design that issue owes.
+  own issue. **Ambient occlusion is no longer one of them** — #628 landed it, in the mesher, as
+  `Occlusion`: each opaque quad's four corners count the opaque voxels touching them on the
+  outward side and darken that vertex's colour. It needed a chunk's neighbours and border culling
+  had already put them in the mesher's hands, so it reads those and nothing else — a corner whose
+  sample lies in a **diagonal** chunk reads as air, because `Neighbours` carries six and the
+  mesher asks for nothing it was not handed.
+
+  What it cost is the thing to know before touching the sweep. Greedy merging does work against
+  per-vertex occlusion, exactly as this file said it would: the four corner levels are part of the
+  `Face` mask key, so two faces lit differently cannot merge, and a ridged 32³ terrain chunk went
+  from 4 642 quads to 7 637. That is the price of the seam and it is paid once — a later change
+  that multiplies it *again* has to say so in a diff, which is what
+  `the_quad_count_of_a_chunk_of_terrain_is_recorded` is for.
 - **No font asset either, and that is a constraint on what the UI may write.** Bevy's
   `default_font` is the whole font stack: `FiraMono-subset.ttf`, embedded in `bevy_text`, whose
   `cmap` holds exactly 95 glyphs — every printable ASCII codepoint and nothing else. **A codepoint
