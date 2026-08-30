@@ -404,7 +404,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // surface instead of stopping at the global deep-cave level. Terrain heights and
 // every uncarved voxel stay byte-identical, but carved air below a sea, basin or river
 // may become water, so stored deltas in those caves need the new base version.
-const WorldgenVersion uint32 = 15
+const WorldgenVersion uint32 = 16
 
 // Generate builds the chunk at coord for seed.
 //
@@ -467,8 +467,23 @@ type column struct {
 	// standingWater is true for a sea or basin column lowered below seaLevel and for
 	// every river column. waterSurface is meaningful only beside it: the sea line for
 	// sea and basins, and the channel's own terrace for a river.
+	//
+	// waterBlock is what that water is made of. Plain [Water] for a sea or a basin,
+	// which have no direction to carry, and one of the four [CurrentOf] sources for a
+	// river, so every water voxel of a channel — the fill above the bed and the carved
+	// volume under it alike — says which way it runs. Resolved once per column because
+	// [riverCurrentAt] costs four field samples and two smoothed heights, and a channel
+	// column has a cave system's worth of voxels to answer for.
+	//
+	// **Its zero value is [Air], and [column.fillAt] and [column.caveFillAt] read it
+	// verbatim rather than defending against that.** [columnAt] is the only constructor
+	// and always sets it, so an unset field can only come from a hand-built literal in
+	// this package — where air standing where water belongs fails the assertion that
+	// built the column, while defaulting the zero to [Water] would let a channel column
+	// that lost its block fill with directionless water and say nothing.
 	standingWater bool
 	waterSurface  int
+	waterBlock    Block
 
 	// settlement is whether this column stands inside a settlement's radius, where
 	// the surface is the plateau exactly.
@@ -499,6 +514,11 @@ func columnAt(seed, worldX, worldZ int64) column {
 	// land anywhere, the beach band included, and [column.blockAt] would then put
 	// gravel on top of two blocks of sand under three of water. See [beachAt], which
 	// stays the plain band rule.
+	waterBlock := Water
+	if river {
+		waterBlock = waterCurrentBlock(riverCurrentAt(seed, worldX, worldZ))
+	}
+
 	return column{
 		surface:       surface,
 		climate:       climate,
@@ -507,6 +527,7 @@ func columnAt(seed, worldX, worldZ int64) column {
 		beach:         !river && beachAt(surface, climate),
 		standingWater: standingWater,
 		waterSurface:  waterSurface,
+		waterBlock:    waterBlock,
 		settlement:    settled,
 	}
 }

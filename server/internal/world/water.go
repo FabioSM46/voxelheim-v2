@@ -172,6 +172,46 @@ const (
 	// than a patch. The cost does not change with the span.
 	riverSmoothSpan = 8
 
+	// riverGradientSpan is the distance the river field's gradient is differenced
+	// over, to find the direction the channel runs.
+	//
+	// The course is the field's midpoint level set, so the gradient points across the
+	// channel and the tangent — the way the water runs — is perpendicular to it. The
+	// span trades two things that pull opposite ways, both measured over the same
+	// 256x256 window: how often two adjacent channel columns choose *different* axes,
+	// and how evenly the two axes are chosen at all.
+	//
+	//	span  1 → 2.70% of adjacent pairs disagree, 40.0% choose X
+	//	span  4 → 2.27%, 39.5% X
+	//	span 16 → 2.06%, 44.5% X
+	//	span 32 → 1.51%, 59.8% X
+	//	span 64 → 0.84%, 79.6% X
+	//
+	// Coherence improves all the way out and the balance collapses with it: past
+	// sixteen blocks the difference stops describing the channel under the column and
+	// starts describing the field's own large-scale lean, which is why four columns in
+	// five point along X at sixty-four. Sixteen is the last span that is still local.
+	riverGradientSpan = 16
+
+	// riverSlopeSpan is how far along the tangent the land is compared to decide
+	// which of its two ends is downhill.
+	//
+	// **The tangent says which way the channel lies; only the land says which way the
+	// water goes.** Too short a baseline and the comparison reads the residue of the
+	// smoothing rather than a slope, and neighbouring columns disagree. Measured over
+	// the same window, as the share of adjacent channel pairs pointing straight at
+	// each other: 10.51% at span 2, 7.00% at 4, 4.85% at 8, 3.03% at 16 and 1.92% at
+	// 32.
+	//
+	// Sixteen is also one riverTerraceStep of fall at a 1-in-4 slope, so the two
+	// samples straddle a real step at anything steeper, and it is deliberately the
+	// same distance as riverGradientSpan: both are "one step of a walk along the
+	// river", and two numbers there would be two claims about how far that is. Thirty-two
+	// buys a third of the remaining disagreement and pays by answering about land the
+	// column is not on; the 3% left at sixteen is the hollows and ridges the water
+	// divides at, which #595 asks to be counted rather than removed.
+	riverSlopeSpan = 16
+
 	// Beaches: what a plains or taiga surface is made of when it stands at the
 	// water's edge.
 	//
@@ -240,9 +280,13 @@ const _ = uint8(seaLevel - riverBedDrop - 1)
 // riverTerraceStep = 0 would also divide by zero in riverSurfaceAt; this catches both.
 const _ = uint8(riverTerraceStep - riverBedDrop - 1)
 
-// A smoothing span of nought averages one sample five times, which is the raw height
-// the mean exists to replace. Non-zero is the whole claim.
+// Every span here is a distance in blocks along an axis, and each is useless at zero:
+// a smoothing span of nought averages one sample five times, a gradient span of nought
+// differences a field against itself and reports no direction at all, and a slope span
+// of nought compares a column's height with its own. Non-zero is the whole claim.
 const _ = uint8(riverSmoothSpan - 1)
+const _ = uint8(riverGradientSpan - 1)
+const _ = uint8(riverSlopeSpan - 1)
 
 // A basin has to deepen with the field rather than the other way about. Swap these
 // two and the rescale below divides by a negative, which is a compile error here
@@ -286,14 +330,21 @@ func basinAt(seed, worldX, worldZ int64, climate Climate) int {
 	return int((basinDepth * smoothstep(t)) >> fracBits)
 }
 
+// riverField is the one field a river's course and its direction are both read from.
+// Named rather than repeated, because riverCurrentAt differences it at four offsets and
+// a second spelling of the same sample is how a course and its current stop describing
+// the same channel.
+func riverField(seed, worldX, worldZ int64) int64 {
+	return climateField(seed+riverSeedOffset, worldX, worldZ, riverScaleBlocks)
+}
+
 // riverAt reports whether a column lies in a river channel.
 //
 // Reads nothing but the seed and the column, like every other field here: two
 // neighbouring chunks agree about a river crossing their border by each computing
 // this, not by consulting one another.
 func riverAt(seed, worldX, worldZ int64) bool {
-	n := climateField(seed+riverSeedOffset, worldX, worldZ, riverScaleBlocks)
-	return absInt64(n-one/2) < riverHalfWidth
+	return absInt64(riverField(seed, worldX, worldZ)-one/2) < riverHalfWidth
 }
 
 // riverSmoothedHeightAt is the land under a channel with its finest octave averaged
@@ -326,6 +377,64 @@ func riverSmoothedHeightAt(seed, worldX, worldZ int64) int {
 // which is what keeps the two sides of a chunk border agreeing.
 func riverSurfaceAt(seed, worldX, worldZ int64) int {
 	return int(floorDiv(int64(riverSmoothedHeightAt(seed, worldX, worldZ)), riverTerraceStep)) * riverTerraceStep
+}
+
+// riverCurrentAt is the way the water runs at one river column, as a unit step on one
+// horizontal axis.
+//
+// **The course says which way the channel lies; only the land says which way the water
+// goes.** The channel is [riverField]'s midpoint level set, so the field's gradient
+// points across it and the tangent — along it — is perpendicular to that gradient.
+// Quantising the tangent to its dominant axis is the whole of "no diagonal current
+// ids": perpendicular to (gx, gz) is (-gz, gx), so the tangent lies along X exactly
+// when |gz| >= |gx|.
+//
+// The sign is the only part that is about height rather than about the field: whichever
+// end of the tangent has the lower smoothed land is downhill, and a tie falls to +X or
+// +Z so that a perfectly flat reach still answers.
+//
+// **Adjacent columns may disagree, and that is the model rather than a defect.** Each
+// column samples its own two ends, so where a reach runs into a hollow the two sides
+// converge and where it crosses a ridge they diverge — the water pools at one and
+// divides at the other, which is what water does. water_test.go counts those pairs as a
+// diagnostic instead of rejecting them.
+func riverCurrentAt(seed, worldX, worldZ int64) (dx, dz int) {
+	gx := riverField(seed, worldX+riverGradientSpan, worldZ) - riverField(seed, worldX-riverGradientSpan, worldZ)
+	gz := riverField(seed, worldX, worldZ+riverGradientSpan) - riverField(seed, worldX, worldZ-riverGradientSpan)
+
+	if absInt64(gz) >= absInt64(gx) {
+		if riverSmoothedHeightAt(seed, worldX+riverSlopeSpan, worldZ) <= riverSmoothedHeightAt(seed, worldX-riverSlopeSpan, worldZ) {
+			return 1, 0
+		}
+		return -1, 0
+	}
+	if riverSmoothedHeightAt(seed, worldX, worldZ+riverSlopeSpan) <= riverSmoothedHeightAt(seed, worldX, worldZ-riverSlopeSpan) {
+		return 0, 1
+	}
+	return 0, -1
+}
+
+// waterCurrentBlock is the source id for a current, and the inverse of [CurrentOf] over
+// the whole of its domain rather than only over the four unit steps: the zero current
+// maps to plain [Water], which is the block [CurrentOf] answers (0, 0) for.
+//
+// Only worldgen places one, so this is the only constructor there is, and
+// [riverCurrentAt] never returns zero — the zero arm is what keeps the round trip an
+// identity for a caller that does, not a live path.
+// TestEveryCurrentIdRoundTripsThroughItsDirection pins both halves.
+func waterCurrentBlock(dx, dz int) Block {
+	switch {
+	case dx > 0:
+		return WaterCurrentXPos
+	case dx < 0:
+		return WaterCurrentXNeg
+	case dz > 0:
+		return WaterCurrentZPos
+	case dz < 0:
+		return WaterCurrentZNeg
+	default:
+		return Water
+	}
 }
 
 // riverChannelAt is the channel one column carries: the bed its ground is cut to and
@@ -419,6 +528,10 @@ func standingWaterSurface(surface, riverSurface int, river bool) (height int, ok
 // so a tundra shore is something you walk out onto. The rule is unchanged; what moved
 // is that a river's top is now its own terrace rather than the sea line.
 //
+// The water itself is the column's own — plain [Water] for a sea or a basin, and one of
+// the four current sources for a river, so every voxel of a channel says which way it
+// runs. See [column.waterBlock].
+//
 // The caller has already established that the terrain here is air.
 func (c column) fillAt(worldY int) Block {
 	if !c.standingWater || worldY > c.waterSurface {
@@ -427,7 +540,7 @@ func (c column) fillAt(worldY int) Block {
 	if c.climate == Tundra && worldY == c.waterSurface {
 		return Ice
 	}
-	return Water
+	return c.waterBlock
 }
 
 // caveFillAt is what stands in a carved voxel: water below the dry-world cave
@@ -436,8 +549,16 @@ func (c column) fillAt(worldY int) Block {
 // Both are world heights rather than depths. The fallback level makes dry-land cave
 // water one body a walk descends to; the column surface makes a carved space beneath
 // a lake part of that lake without consulting any neighbouring column.
+//
+// **The column's own surface is asked first, and the order is what carries the
+// current.** A carved voxel under a channel is that channel's water and wears its
+// direction; one under dry ground is an aquifer with no direction to have, and plain
+// [Water] is what says so. Either way both are source water, exactly as before.
 func (c column) caveFillAt(worldY int) Block {
-	if worldY <= caveWaterLevel || c.standingWater && worldY <= c.waterSurface {
+	if c.standingWater && worldY <= c.waterSurface {
+		return c.waterBlock
+	}
+	if worldY <= caveWaterLevel {
 		return Water
 	}
 	return Air

@@ -253,9 +253,12 @@ func TestARiverSurfaceIsTerracedAndItsBedFollowsTheLand(t *testing.T) {
 			}
 			highest = max(highest, surface)
 
-			// Water from the bed to the terrace, and air over it.
+			// Water from the bed to the terrace, and air over it. Every voxel of it
+			// carries the column's current — a channel is a source with a direction all
+			// the way down, which is what the flow automaton pours over a step and what
+			// #597 reads to push a swimmer.
 			for y := col.surface + 1; y <= surface; y++ {
-				want := Block(Water)
+				want := col.waterBlock
 				if col.climate == Tundra && y == surface {
 					want = Ice
 				}
@@ -370,6 +373,125 @@ func TestATerraceStepIsAFallOverOpenAir(t *testing.T) {
 	t.Logf("measured %d adjacent channel pairs, %d of them a terrace step, tallest %d blocks", pairs, steps, maxDrop)
 }
 
+// Every channel column runs the way its own field and its own slope point, and the
+// definition is recomputed here rather than read back from the generator.
+//
+// The field is spelled out from fbm2D rather than through climateField, so this is a
+// second reading of the river field and not the same call under another name. What it
+// cannot be is independent of the *rule* — the rule is what the acceptance criterion
+// names — so what it catches is the plumbing: a column resolved at the wrong
+// coordinate, an axis swapped on the way to a block id, a sign lost.
+func TestEveryRiverColumnRunsTheWayItsFieldAndSlopePoint(t *testing.T) {
+	t.Parallel()
+
+	seen := map[Block]int{}
+	channels, opposed := 0, 0
+	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+waterAreaSize; z += waterAreaStep {
+		for x := int64(waterAreaOriginX); x < waterAreaOriginX+waterAreaSize; x += waterAreaStep {
+			col := columnAt(waterSeed, x, z)
+			if !col.river {
+				continue
+			}
+			channels++
+			seen[col.waterBlock]++
+
+			dx, dz := currentByDefinition(x, z)
+			if gotX, gotZ := CurrentOf(col.waterBlock); gotX != dx || gotZ != dz {
+				t.Fatalf("the channel at (%d, %d) carries block %d, running (%d, %d), want (%d, %d)",
+					x, z, col.waterBlock, gotX, gotZ, dx, dz)
+			}
+
+			// A neighbour running the other way is permitted and counted. Each column
+			// samples its own two ends, so two reaches converge into a hollow and
+			// diverge over a ridge — water pools at one and divides at the other.
+			for _, step := range [2][2]int64{{waterAreaStep, 0}, {0, waterAreaStep}} {
+				next := columnAt(waterSeed, x+step[0], z+step[1])
+				if !next.river {
+					continue
+				}
+				nextX, nextZ := CurrentOf(next.waterBlock)
+				if dx+nextX == 0 && dz+nextZ == 0 && (dx != 0) == (nextX != 0) {
+					opposed++
+				}
+			}
+		}
+	}
+
+	if channels == 0 {
+		t.Fatal("no channel in the sample window, so no current was checked")
+	}
+	for _, block := range [4]Block{WaterCurrentXPos, WaterCurrentXNeg, WaterCurrentZPos, WaterCurrentZNeg} {
+		if seen[block] == 0 {
+			t.Errorf("no channel column in the window runs as block %d; the window sees only %v", block, seen)
+		}
+	}
+	t.Logf("measured %d channel columns running %v, with %d adjacent pairs opposed at a hollow or a ridge",
+		channels, seen, opposed)
+}
+
+// currentByDefinition is #595's own words, in code: the tangent of the river field,
+// quantised to its dominant axis, signed towards the lower of the two smoothed heights
+// a slope span away, with a tie falling to +X or +Z.
+func currentByDefinition(x, z int64) (dx, dz int) {
+	field := func(atX, atZ int64) int64 {
+		return fbm2D(waterSeed+riverSeedOffset,
+			floorDiv(atX<<fracBits, riverScaleBlocks), floorDiv(atZ<<fracBits, riverScaleBlocks))
+	}
+	smoothed := func(atX, atZ int64) int {
+		sum := 0
+		for _, offset := range [5][2]int64{{0, 0}, {-riverSmoothSpan, 0}, {riverSmoothSpan, 0}, {0, -riverSmoothSpan}, {0, riverSmoothSpan}} {
+			sum += unloweredHeightAt(waterSeed, atX+offset[0], atZ+offset[1])
+		}
+		return int(floorDiv(int64(sum), 5))
+	}
+
+	// Perpendicular to the gradient (gx, gz) is (-gz, gx), so the tangent lies along X
+	// exactly when |gz| is the larger of the two.
+	gradientX := field(x+riverGradientSpan, z) - field(x-riverGradientSpan, z)
+	gradientZ := field(x, z+riverGradientSpan) - field(x, z-riverGradientSpan)
+	if absInt64(gradientZ) >= absInt64(gradientX) {
+		if smoothed(x+riverSlopeSpan, z) <= smoothed(x-riverSlopeSpan, z) {
+			return 1, 0
+		}
+		return -1, 0
+	}
+	if smoothed(x, z+riverSlopeSpan) <= smoothed(x, z-riverSlopeSpan) {
+		return 0, 1
+	}
+	return 0, -1
+}
+
+// The four current ids and the four directions are one mapping read from both ends.
+// [waterCurrentBlock] is the only thing that writes one and [CurrentOf] the only thing
+// that reads one, so a swapped pair would be invisible to every other test in this
+// package and perfectly visible to a swimmer.
+func TestEveryCurrentIdRoundTripsThroughItsDirection(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+		block := waterCurrentBlock(want[0], want[1])
+		if !IsWater(block) || WaterLevel(block) != 8 {
+			t.Fatalf("the current for (%d, %d) is block %d, at water level %d; a current is full source water",
+				want[0], want[1], block, WaterLevel(block))
+		}
+		if gotX, gotZ := CurrentOf(block); gotX != want[0] || gotZ != want[1] {
+			t.Errorf("waterCurrentBlock(%d, %d) is %d, which reads back as (%d, %d)",
+				want[0], want[1], block, gotX, gotZ)
+		}
+	}
+
+	// The zero current is the fifth point of the mapping and it is not a fifth id:
+	// [CurrentOf] answers (0, 0) for plain [Water], so that is what the constructor
+	// owes for (0, 0) if the pair is an inverse rather than a table of four units.
+	// Nothing passes it today — [riverCurrentAt] returns a unit step on every arm —
+	// which is exactly why only a test holds the arm in place.
+	if block := waterCurrentBlock(0, 0); block != Water {
+		t.Errorf("waterCurrentBlock(0, 0) is block %d, want plain Water (%d)", block, Water)
+	} else if gotX, gotZ := CurrentOf(block); gotX != 0 || gotZ != 0 {
+		t.Errorf("waterCurrentBlock(0, 0) reads back as (%d, %d), want (0, 0)", gotX, gotZ)
+	}
+}
+
 // A basin lowers the ground and nothing else, so the water in one is the same sea
 // line filling a hole somebody dug.
 func TestABasinLowersTheGroundAndReachesItsFullDepth(t *testing.T) {
@@ -476,13 +598,20 @@ func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 
 				switch {
 				case !carved:
-					if got == Water {
+					if IsWater(got) {
 						t.Fatalf("water at (%d, %d, %d) stands in uncarved terrain", worldX, worldY, worldZ)
 					}
 				case wantWater:
-					if got != Water {
-						t.Fatalf("carved voxel (%d, %d, %d) under its hydrostatic surface is %d, want Water",
-							worldX, worldY, worldZ, got)
+					// The family rather than one id: a carved voxel under a channel is
+					// that channel's water and carries its current, one under dry ground
+					// is an aquifer with no direction, and both are source water.
+					want := Water
+					if col.standingWater && worldY <= int64(col.waterSurface) {
+						want = col.waterBlock
+					}
+					if got != want {
+						t.Fatalf("carved voxel (%d, %d, %d) under its hydrostatic surface is %d, want %d",
+							worldX, worldY, worldZ, got, want)
 					}
 					if worldY <= caveWaterLevel {
 						deep++
@@ -490,7 +619,7 @@ func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 						standing++
 					}
 				default:
-					if got == Water {
+					if IsWater(got) {
 						t.Fatalf("carved voxel (%d, %d, %d) above every hydrostatic surface holds water",
 							worldX, worldY, worldZ)
 					}
