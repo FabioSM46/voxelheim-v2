@@ -503,3 +503,76 @@ func findTundraConifer(t *testing.T) (x, z int64, col column, h uint64) {
 	t.Fatal("fixed tundra square contains no conifer")
 	return 0, 0, column{}, 0
 }
+
+// fnv64a folds signed values into an FNV-1a digest. A count alone would not pin a
+// distribution — two different sets of columns of the same size share it — so the
+// pin below folds every rooted column's coordinates, its row and, for a flower, the
+// colour it grows.
+func fnv64a(digest uint64, values ...int64) uint64 {
+	for _, value := range values {
+		u := uint64(value)
+		for shift := 0; shift < 64; shift += 8 {
+			digest ^= (u >> shift) & 0xFF
+			digest *= 1099511628211
+		}
+	}
+	return digest
+}
+
+const fnv64aOffset = uint64(14695981039346656037)
+
+// plainsLowCoverDigest folds every bush and flower the plains square grows.
+func plainsLowCoverDigest() (digest uint64, bushes, flowers int) {
+	const (
+		originX = int64(0)
+		originZ = int64(2048)
+		side    = 512
+	)
+	digest = fnv64aOffset
+	for x := originX; x < originX+side; x++ {
+		for z := originZ; z < originZ+side; z++ {
+			col := columnAt(climateSeed, x, z)
+			species, h, rooted := plantAtColumn(climateSeed, x, z, col)
+			if !rooted {
+				continue
+			}
+			switch species {
+			case &plantSpeciesTable[4]:
+				bushes++
+				digest = fnv64a(digest, x, z, 4, int64(h>>40)&1)
+			case &plantSpeciesTable[5]:
+				flowers++
+				digest = fnv64a(digest, x, z, 5, int64(flowerBlock(climateSeed, x, z, h)))
+			}
+		}
+	}
+	return digest, bushes, flowers
+}
+
+// TestPlainsLowCoverIsUnchanged pins the plains bush and flower distribution to the
+// bytes it had before taiga gained either row.
+//
+// **The three numbers were measured on the generator that had no taiga low cover at
+// all, and recorded before a line of it was written.** That is the whole of their
+// value: an assertion written afterwards would only restate whatever the new code
+// does, and the claim being made here is that adding a climate to a denominator
+// switch leaves the other climate's draw untouched — which is a claim about the past.
+//
+// A count alone would not carry it, because two different sets of 3107 columns share
+// one. The digest folds each rooted column's coordinates, its row, the bush's
+// single-or-pair bit and the flower's colour, so a moved column, a swapped row, a
+// re-shaped clump or a re-coloured drift all change it.
+func TestPlainsLowCoverIsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	const (
+		wantDigest  = uint64(0x3708fdb1cd354970)
+		wantBushes  = 3107
+		wantFlowers = 1425
+	)
+	digest, bushes, flowers := plainsLowCoverDigest()
+	if digest != wantDigest || bushes != wantBushes || flowers != wantFlowers {
+		t.Errorf("plains low cover = {digest:%#016x bushes:%d flowers:%d}, want {digest:%#016x bushes:%d flowers:%d}: the plains distribution moved",
+			digest, bushes, flowers, wantDigest, wantBushes, wantFlowers)
+	}
+}
