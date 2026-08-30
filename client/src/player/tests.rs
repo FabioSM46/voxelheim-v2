@@ -5017,12 +5017,12 @@ fn a_crossing_fades_the_old_flock_out_before_the_new_one_is_whole() {
     let mut app = birdwatching(GroundLook::Sand, false);
     // `BIRD_FADE_SECONDS` at 100 ms a frame, and a few more so the assertion is about a
     // flock that has finished arriving rather than one still on its way in.
-    watch(&mut app, 20);
+    watch(&mut app, 35);
     let vultures = flock(&mut app);
     assert!(!vultures.is_empty() && vultures.iter().all(|bird| bird.0 == 1));
     assert!(
         vultures.iter().all(|bird| bird.1 > 0.99),
-        "a second of flying left the flock half drawn: {vultures:?}"
+        "the fade did not finish: {vultures:?}"
     );
 
     look_at(&mut app, GroundLook::Grass, true);
@@ -5042,7 +5042,7 @@ fn a_crossing_fades_the_old_flock_out_before_the_new_one_is_whole() {
 
     // `BIRD_FADE_SECONDS` at 100 ms a frame, and a few more for the parrots the cap could
     // not admit until the vultures had gone.
-    watch(&mut app, 40);
+    watch(&mut app, 70);
     let parrots = flock(&mut app);
     assert!(
         !parrots.is_empty() && parrots.iter().all(|bird| bird.0 == 0),
@@ -5069,7 +5069,7 @@ fn walking_a_long_way_re_seeds_the_flock_around_the_new_anchor() {
 
     // `BIRD_FADE_SECONDS` at 100 ms a frame, and a few more for the birds the cap could not
     // admit until the ones left behind had gone.
-    watch(&mut app, 40);
+    watch(&mut app, 55);
     let after = bird_entities(&mut app);
     assert!(
         after.iter().all(|entity| !before.contains(entity)),
@@ -5163,6 +5163,55 @@ fn crossing_cell_after_cell_mints_no_new_bird_materials() {
     assert!(
         !flock(&mut app).is_empty(),
         "the parrots stopped flying, so this test would pass vacuously"
+    );
+}
+
+/// A richer model must not become a richer *scene*.
+#[test]
+fn a_bird_is_three_draws_however_detailed_it_is() {
+    // The body, the head and the tail are one mesh and one draw; each wing is a second and a
+    // third, because each has to rotate about its own hinge. So a bird is three entities that
+    // draw and a whole sky is `BIRD_COUNT_MAX * 3`, exactly what it cost when the same three
+    // entities were flat quads — and the two meshes belong to the *session*, not to the bird,
+    // which is what stops a detailed model becoming an asset per bird the way a detailed
+    // material would have.
+    let mut app = birdwatching(GroundLook::Grass, true);
+    watch(&mut app, 5);
+    let birds = bird_entities(&mut app);
+    assert!(!birds.is_empty(), "the wood got no parrots");
+
+    let mut drawn = Vec::new();
+    for bird in &birds {
+        let world = app.world();
+        let entity = world.entity(*bird);
+        drawn.push(
+            entity
+                .get::<Mesh3d>()
+                .expect("a bird's body is drawn")
+                .0
+                .id(),
+        );
+        let children = entity.get::<Children>().expect("a bird has wings");
+        assert_eq!(children.len(), 2, "a bird is a body and two wings");
+        for wing in children.iter() {
+            drawn.push(
+                world
+                    .entity(wing)
+                    .get::<Mesh3d>()
+                    .expect("a wing is drawn")
+                    .0
+                    .id(),
+            );
+        }
+    }
+    assert_eq!(drawn.len(), birds.len() * 3, "a bird is not three draws");
+    assert!(drawn.len() <= birds::BIRD_COUNT_MAX * 3);
+
+    let distinct: HashSet<_> = drawn.into_iter().collect();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "the sky holds one body mesh and one wing mesh, not a pair per bird"
     );
 }
 
@@ -5549,7 +5598,7 @@ fn the_flock_roosts_at_night_and_a_clockless_server_flies_it_all_day() {
         flock(&mut app).iter().all(|bird| bird.2 == 0.0),
         "a roosting flock was still wanted"
     );
-    watch(&mut app, 25);
+    watch(&mut app, 40);
     assert!(
         flock(&mut app).is_empty(),
         "the night sky kept its vultures"
@@ -5567,9 +5616,9 @@ fn the_flock_roosts_at_night_and_a_clockless_server_flies_it_all_day() {
 #[test]
 fn a_submerged_eye_hides_the_birds_without_retiring_them() {
     // Hidden, not faded: going under water is a thing the eye does, and coming back up must
-    // not cost a second and a half of empty sky.
+    // not cost a whole `BIRD_FADE_SECONDS` of empty sky.
     let mut app = birdwatching(GroundLook::Sand, false);
-    watch(&mut app, 20);
+    watch(&mut app, 35);
     let above = bird_entities(&mut app);
     assert!(!above.is_empty());
 
@@ -5730,7 +5779,9 @@ fn a_mining_intent_along_a_bird_sends_exactly_what_an_empty_sky_would() {
             vec![state(LOCAL_ID, [0.5, 64.0, 0.5], 0.0)],
             Instant::now(),
         );
-        watch(&mut app, 20);
+        // `BIRD_FADE_SECONDS` at 100 ms a frame, so the assertion below is about a flock that
+        // has finished arriving rather than one still fading in.
+        watch(&mut app, 35);
         (app, sent)
     };
 
