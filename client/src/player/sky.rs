@@ -1372,6 +1372,34 @@ pub(super) fn submerged_at(store: Option<&ChunkStore>, eye: Vec3, chunk_size: us
     palette::is_water(store.block_at(pos, chunk_size))
 }
 
+/// How much of the night has arrived right now, or `None` for a world with no night.
+///
+/// **Read by `player/birds.rs` and by nothing else.** The flock roosts on the same curve the
+/// sky is tinted from rather than on a second reading of the clock, so "it is night" has one
+/// answer in this client — the same reason [`submerged_at`] is shared with
+/// `player/precipitation.rs`.
+///
+/// `None` is two cases and they are deliberately one answer: a server that declares no day
+/// length has no night to roost through, and a session whose first snapshot has not landed
+/// has not been told where the day is. Both fly the birds, which is what a world with no time
+/// of day looked like before there was a clock to read.
+pub(super) fn night_now(clock: &SkyClock, session: &Session) -> Option<f32> {
+    let params = session.0;
+    if !params.clock.declared() {
+        return None;
+    }
+    let tick_of_day = clock.ticks_at(
+        Instant::now(),
+        params.tick_rate,
+        params.clock.day_length_ticks,
+    )?;
+    Some(night_fraction(
+        &params.clock,
+        tick_of_day,
+        RAMP_SECONDS * f32::from(params.tick_rate),
+    ))
+}
+
 /// The colour a submerged camera clears to and fades into.
 fn submerged_sky() -> Color {
     Color::srgb(UNDERWATER_SKY[0], UNDERWATER_SKY[1], UNDERWATER_SKY[2])
