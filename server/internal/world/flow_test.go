@@ -123,3 +123,82 @@ func TestUnstableWaterFindsOnlyAirBoundariesAndFaces(t *testing.T) {
 		t.Error("the lake interior was reported unstable")
 	}
 }
+
+// The flow automaton leaves ground cover exactly where it found it, and **the dry
+// case is the one that matters**: before [Cover] joined the first arm a flower beside
+// a scheduled voxel reached the drain rule, whose answer is Air.
+func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
+	t.Parallel()
+
+	for _, flower := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
+		for _, tc := range []struct {
+			name  string
+			above Block
+			below Block
+			sides [4]Block
+		}{
+			{"dry, on grass", Air, Grass, [4]Block{Air, Air, Air, Air}},
+			{"beside a source", Air, Grass, [4]Block{Water, Air, Air, Air}},
+			{"under water", Water, Grass, [4]Block{Air, Air, Air, Air}},
+			{"over nothing", Air, Air, [4]Block{Air, Air, Air, Air}},
+		} {
+			if got := NextWater(flower, tc.above, tc.below, tc.sides); got != flower {
+				t.Errorf("%s: NextWater(%d, ...) = %d, want the flower left alone", tc.name, flower, got)
+			}
+		}
+	}
+
+	// Air in the same neighbourhood still flows, so the arm above is about cover
+	// rather than about having stopped the automaton.
+	if got := NextWater(Air, Air, Grass, [4]Block{Air, Air, Air, Air}); got != Air {
+		t.Errorf("dry air = %d, want Air", got)
+	}
+	if got := NextWater(Air, Air, Grass, [4]Block{Water, Air, Air, Air}); got == Air {
+		t.Error("air beside a source stayed air; the automaton is no longer flowing")
+	}
+	// And cover carries no water level, so a flower beside a flow feeds it nothing.
+	if got := WaterLevel(FlowerRed); got != 0 {
+		t.Errorf("WaterLevel(FlowerRed) = %d, want 0", got)
+	}
+}
+
+// The other side of the same neighbourhood: a *water* cell with a flower beside it.
+//
+// **[NextWater] is the whole of where water may spread, and it asks a side for nothing
+// but [WaterLevel]** — its only Solid call reads `here`. A flower side is therefore
+// exactly as neutral as air, and a flower *below* is not Air, so the drain arm does not
+// fire under water standing over one.
+func TestWaterBesideGroundCoverKeepsItsLevel(t *testing.T) {
+	t.Parallel()
+
+	// An equivalence rather than a table of levels: swapping a flower onto an empty side
+	// changes nothing, for every water id and in every position.
+	for _, here := range []Block{Water, WaterFlow1, WaterFlow4, WaterFlow7, WaterCurrentXPos} {
+		for _, flower := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
+			for position := 1; position < 4; position++ {
+				sides := [4]Block{Water, Air, Air, Air}
+				want := NextWater(here, Air, Grass, sides)
+				sides[position] = flower
+				if got := NextWater(here, Air, Grass, sides); got != want {
+					t.Errorf("NextWater(%d, ...) with %d on side %d = %d, want %d as with air",
+						here, flower, position, got, want)
+				}
+			}
+		}
+	}
+
+	// And the levels, so two equally wrong answers cannot satisfy the equivalence.
+	if got := NextWater(Water, Air, Grass, [4]Block{FlowerRed, FlowerYellow, FlowerBlue, Air}); got != Water {
+		t.Errorf("a source ringed by flowers became %d, want it left alone", got)
+	}
+	if got := NextWater(WaterFlow4, Air, Grass, [4]Block{Water, FlowerRed, FlowerYellow, FlowerBlue}); got != WaterFlow7 {
+		t.Errorf("a flow beside a source and three flowers = %d, want %d", got, WaterFlow7)
+	}
+	if got := NextWater(WaterFlow7, Air, FlowerRed, [4]Block{Water, Air, Air, Air}); got != WaterFlow7 {
+		t.Errorf("water standing on a flower = %d, want it to keep level 7", got)
+	}
+	// The drain arm's negative control: it does fire with nothing below.
+	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Water, Air, Air, Air}); got != Air {
+		t.Errorf("water over nothing = %d, want it to drain", got)
+	}
+}

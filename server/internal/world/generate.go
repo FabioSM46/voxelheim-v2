@@ -168,6 +168,18 @@ const (
 	// patch that always sat on the same side of a climate boundary would be a
 	// shared lattice showing through, not a decision.
 	gravelSeedOffset int64 = 0x299F31D0
+
+	// Flowers. One plains grass column in five carries one, but only inside a patch,
+	// and **the patch is the gravel mechanism at a meadow's scale**: gravelAt takes
+	// the top quarter of a 2D field over forty-eight blocks, this the top 28% of its
+	// own over forty, on no shared lattice. flowerStrayDenominator is how many
+	// flowers in a drift take the *next* colour instead of the cell's own.
+	flowerChanceDenominator        = 5
+	flowerStrayDenominator  uint64 = 5
+	flowerPatchScaleBlocks         = 40
+	flowerPatchThreshold           = one * 72 / 100
+	flowerSeedOffset        int64  = 0x082EFA98
+	flowerPatchSeedOffset   int64  = 0xEC4E6C89
 )
 
 // If the band constants are ever reordered, this conversion becomes a compile
@@ -200,7 +212,7 @@ const _ = uint8(ironMinDepth - coalMaxDepth - 1)
 // through columnAt, which samples the climate once and hands it to shapeAt, so a
 // generated column sees only the added basin and river sums; physics and edits read
 // terrain out of the chunk cache rather than from the height field at all; [SpawnAt]
-// goes through generatedColumnTop, which is columnAt again. A caller that finds
+// reads the capital's plateau off the lattice. A caller that finds
 // itself asking for a height per entity or per tick wants columnAt, not this.
 func HeightAt(seed int64, worldX, worldZ int64) int {
 	surface, _, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
@@ -235,11 +247,11 @@ func unloweredHeightAt(seed, worldX, worldZ int64) int {
 // generated column sample temperature and humidity twice. And "is this a river"
 // cannot be asked again afterwards without paying a second fbm2D for an answer this
 // function already had; worse, a second reading could disagree with the ground,
-// because a column near spawn passes the river field and has no channel.
+// because a column near the origin passes the river field and has no channel.
 func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, settled bool) {
 	base := unloweredHeightAt(seed, worldX, worldZ)
 
-	// The square around spawn keeps the terrain it would have had. See
+	// The square around the origin column keeps the terrain it would have had. See
 	// spawnWaterClearance, and spawnCaveClearance beside it: the two exemptions are
 	// the same shape and are checked the same way, before any noise is paid for.
 	if nearSpawnColumn(worldX, worldZ) {
@@ -385,7 +397,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // surface instead of stopping at the global deep-cave level. Terrain heights and
 // every uncarved voxel stay byte-identical, but carved air below a sea, basin or river
 // may become water, so stored deltas in those caves need the new base version.
-const WorldgenVersion uint32 = 13
+const WorldgenVersion uint32 = 14
 
 // Generate builds the chunk at coord for seed.
 //
@@ -724,7 +736,15 @@ type plantSpecies struct {
 	denominator func(Climate) uint64
 	footprint   int
 	forest      bool
-	visit       func(seed, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block))
+
+	// patch is a region gate on top of the density draw: a row grows only where this
+	// answers true. **nil means everywhere, and every tree row is nil** — a conifer's
+	// distribution is one number per climate, and a field sample there would say
+	// "trees cluster" without anybody having decided it should. Flowers are the one
+	// row that wants it, because a drift is the feature and a sprinkle is not.
+	patch func(seed, worldX, worldZ int64) bool
+
+	visit func(seed, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block))
 }
 
 var conifer = plantSpecies{
@@ -787,15 +807,61 @@ var bush = plantSpecies{
 	visit:       visitBush,
 }
 
-var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush}
+// The flower is last, which is the whole of its priority: any plant that wants the
+// column takes it and a flower grows in what is left, so a drift never thins a wood.
+var flower = plantSpecies{
+	name:       "flower",
+	seedOffset: flowerSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Grass
+	},
+	denominator: plainsChanceDenominator(flowerChanceDenominator),
+	footprint:   0,
+	forest:      false,
+	patch:       flowerPatchAt,
+	visit:       visitFlower,
+}
+
+var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush, flower}
+
+// flowerPatchAt reports whether a column lies inside a drift of flowers.
+func flowerPatchAt(seed, worldX, worldZ int64) bool {
+	return climateField(seed+flowerPatchSeedOffset, worldX, worldZ, flowerPatchScaleBlocks) >= flowerPatchThreshold
+}
+
+// flowerPatchCell is the lattice cell of the drift a column belongs to. floorDiv for
+// the reason climateField uses it: truncation toward zero maps x = -1 and x = 0 to
+// one cell, so the drifts either side of the axis would share a colour.
+func flowerPatchCell(worldX, worldZ int64) (int64, int64) {
+	return floorDiv(worldX, flowerPatchScaleBlocks), floorDiv(worldZ, flowerPatchScaleBlocks)
+}
+
+// flowerBlock chooses which of the three flowers stands in a column.
+//
+// **The patch cell decides the colour and the column decides whether it is a stray.**
+// A whole drift shares one hash, so it is mostly one colour; one flower in
+// flowerStrayDenominator takes the next along.
+//
+// **The stray draw reads the high half of h, and that is not a taste question.** The
+// density draw has already established h%flowerChanceDenominator == 0 for every
+// column reaching here, so the low bits are spent and a stray test against them would
+// be true for every flower in the world. visitBush reads (h>>40) for the same reason.
+func flowerBlock(seed, worldX, worldZ int64, h uint64) Block {
+	cellX, cellZ := flowerPatchCell(worldX, worldZ)
+	colour := hashLattice(seed+flowerPatchSeedOffset, cellX, cellZ) % 3
+	if (h>>32)%flowerStrayDenominator == 0 {
+		colour = (colour + 1) % 3
+	}
+	return FlowerRed + Block(colour)
+}
 
 // plantAtColumn reports the first species rooted at one resolved column and the
 // hash that row uses for its shape.
 //
-// The refusals remain ordered by cost: settlement, a row's climate denominator,
-// its surface, its independent hash, the sea line, then the carve test. The last
-// question is an order of magnitude dearer than the others and is reached only by
-// a candidate whose density draw already passed.
+// The refusals remain ordered by cost: settlement, a row's climate denominator, its
+// surface, its independent hash, the sea line, the row's optional patch field, then
+// the carve test. The last two are the dear ones — one 2D field then two 3D ones —
+// and are reached only by a candidate whose density draw already passed.
 func plantAtColumn(seed, worldX, worldZ int64, col column) (species *plantSpecies, h uint64, ok bool) {
 	return plantAtColumnIn(plantSpeciesTable, seed, worldX, worldZ, col)
 }
@@ -837,6 +903,11 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 		// A submerged surface may still be valid soil, but a plant rooted there
 		// would be clipped by the standing water and appear to float above it.
 		if col.surface < seaLevel {
+			continue
+		}
+
+		// A row that names a region grows only inside it; nil is "everywhere".
+		if species.patch != nil && !species.patch(seed, worldX, worldZ) {
 			continue
 		}
 
@@ -968,6 +1039,12 @@ func visitBush(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x,
 	visit(rootX, y, rootZ+1, Bush)
 }
 
+// visitFlower yields one block at surface + 1: a flower stands in the voxel above the
+// ground rather than replacing any of it.
+func visitFlower(seed int64, rootX, rootZ int64, surface int, h uint64, visit func(x, y, z int64, block Block)) {
+	visit(rootX, int64(surface+1), rootZ, flowerBlock(seed, rootX, rootZ, h))
+}
+
 func coniferTrunkHeight(h uint64) int {
 	return treeMinTrunkHeight + int((h>>32)%treeHeightVariants)
 }
@@ -1045,6 +1122,11 @@ func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column)
 	}
 }
 
+// setTreeBlock writes one plant voxel; its condition is the whole of what a plant may
+// overwrite, and **ground cover counts as air here, which makes the result
+// independent of the order two roots are visited in.** A bush's second block and a
+// flower can want one voxel: flower-first the bush overwrites it because [Cover] is
+// true, bush-first the flower is refused because Bush is neither air nor cover.
 func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 	originX, originY, originZ := chunk.Coord.Origin()
 	localX, localY, localZ := worldX-originX, worldY-originY, worldZ-originZ
@@ -1054,7 +1136,7 @@ func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 
 	x, y, z := int(localX), int(localY), int(localZ)
 	current := chunk.At(x, y, z)
-	if current == Air || (block == Log && (current == Leaves || current == BroadLeaves)) || (block == PalmLog && current == PalmFronds) {
+	if current == Air || Cover(current) || (block == Log && (current == Leaves || current == BroadLeaves)) || (block == PalmLog && current == PalmFronds) {
 		chunk.Set(x, y, z, block)
 	}
 }
@@ -1081,7 +1163,12 @@ func generatedColumnTop(seed, worldX, worldZ int64) int {
 	footprint := int64(largestPlantFootprint())
 	for rootZ := worldZ - footprint; rootZ <= worldZ+footprint; rootZ++ {
 		for rootX := worldX - footprint; rootX <= worldX+footprint; rootX++ {
-			visitPlant(seed, rootX, rootZ, func(x, y, z int64, _ Block) {
+			visitPlant(seed, rootX, rootZ, func(x, y, z int64, block Block) {
+				// Cover is not a top: a column whose only feature is a flower keeps
+				// its ground as its highest solid. [Solid] rather than an id list.
+				if !Solid(block) {
+					return
+				}
 				if x == worldX && z == worldZ && y > int64(top) && col.blockAt(int(y)) == Air {
 					top = int(y)
 				}
@@ -1102,16 +1189,25 @@ func GeneratedColumnTop(seed, worldX, worldZ int64) int {
 	return generatedColumnTop(seed, worldX, worldZ)
 }
 
-// Spawn placement. The column is fixed; the height is not, because it cannot be.
+// The world's origin column, and the clearance a body is put down with.
 const (
-	// spawnColumnX and spawnColumnZ are the world column every session starts in.
+	// spawnColumnX and spawnColumnZ are the world's origin column: the anchor the
+	// settlement lattice measures the capital's offset from, and the column the water and
+	// cave clearances protect.
+	//
+	// **They no longer name a spawn, and the rename is deliberately a follow-up.**
+	// [SpawnAt] read the generated ground here until #519, which is why the two clearances
+	// beside them exist; both stay, because they shape generated blocks and removing one
+	// would move terrain and bump [WorldgenVersion] for a tidy-up.
 	spawnColumnX = 0
 	spawnColumnZ = 0
 
-	// SpawnClearance is how many blocks above the highest generated voxel in the
-	// spawn column the player starts. generatedColumnTop includes a neighbouring
-	// tree's canopy, so this remains a clearance rather than an assumption that the
-	// height field is the last solid block in the column.
+	// SpawnClearance is how many blocks above the ground a body is put down: the
+	// capital's plateau at join (see [SpawnAt]), a settlement's plateau on the middle
+	// respawn tier, and the generated column top when regeneration lifts a body out of
+	// restored terrain. A clearance rather than an assumption that the ground is the last
+	// solid block in the column — generatedColumnTop includes a neighbouring tree's
+	// canopy.
 	SpawnClearance = 2
 )
 
@@ -1122,38 +1218,31 @@ const (
 // read through the collision seam — so terrain has gone back to not knowing what walks
 // on it. A "where should a mob go" helper here would be the old model growing back.
 
-// SpawnAt returns where a session starts, for a world seed.
+// SpawnAt returns where a session starts, for a world seed: the capital's gate square,
+// [capitalSpawnOffset] blocks along +Z from its centre, on its plateau.
 //
-// Derived from the generated column, not stated beside it. Its floor begins with
-// HeightAt and then accounts for a trunk or canopy rooted nearby. A constant can
-// only be right for the terrain and tree parameters it was written against: the
-// old fixed y=80 buried the player in rock for high seeds, and HeightAt alone
-// would now let a tree occupy the spawn clearance.
+// **The game starts in the city it built for that purpose.** It used to start on the
+// origin column — open country the lattice measures from, 120 to 200 blocks from the
+// capital — so a new player's first minutes were a walk towards something they could not
+// see. The capital is a pure function of the seed and always exists ([capitalSiteAt]
+// ranks its candidate sites rather than refusing them), so this is as determinate an
+// answer as the origin column was.
 //
-// Pure, like everything else here: the same seed always yields the same spawn. That
-// matters beyond tidiness, because the Fimbulvetr storm regenerates chunks around
-// players who expect to come back to the same place.
+// **The plateau is flat by construction**, so there is no generated column to sample and
+// no canopy to clear, and it cannot be under water, because [settlementMinPlateau] is
+// three blocks of freeboard the capital's fallback keeps. The `max(top, seaLevel)` floor
+// the origin column needed is therefore gone, asserted as a test rather than kept as
+// code: a floor that can never fire is a claim nobody can read the truth of. Still pure
+// and still generating nothing, which the Fimbulvetr storm's regeneration depends on.
+//
+// **The column is not checked for headroom, and it does not need to be.** Collision
+// treats a non-resident voxel as solid, so a player whose spawn chunk has not streamed
+// yet stands still until it arrives — exactly as they did on the origin column.
 func SpawnAt(seed int64) [3]float32 {
-	top := generatedColumnTop(seed, spawnColumnX, spawnColumnZ)
-
-	// **A session never begins under water.** spawnWaterClearance keeps basins and
-	// river channels off this column, but it cannot keep the ordinary height field
-	// above the sea line — the terrain is concentrated around 64 against a sea line
-	// at 47, and a mountainAmplitude of 150 is wide enough that a sizeable minority of
-	// seeds still put the origin on a lake bed with no water feature involved at all.
-	// TestASessionNeverBeginsUnderWater is that sweep. Lifting the
-	// reference to the sea line puts the player on the surface of the water instead
-	// of inside it: they swim rather than drown, which is the fail-safe direction and
-	// the only one the swim rules make sense in.
-	//
-	// Deliberately not a lowering: a column that stands above the sea line is
-	// untouched, so this is the sea line acting as a floor under the clearance rather
-	// than a second placement rule.
-	top = max(top, seaLevel)
-
+	capital := CapitalAt(seed)
 	return [3]float32{
-		spawnColumnX + 0.5, // centred in the column rather than on its corner
-		float32(top + SpawnClearance),
-		spawnColumnZ + 0.5,
+		float32(capital.CentreX) + 0.5, // centred in the column rather than on its corner
+		float32(capital.Plateau + SpawnClearance),
+		float32(capital.CentreZ+capitalSpawnOffset) + 0.5,
 	}
 }

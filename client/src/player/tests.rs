@@ -4261,6 +4261,62 @@ fn sky_and_ambient(app: &mut App) -> (Color, f32) {
     found[0]
 }
 
+/// The dome's transform, its visibility, and its vertices as `(height, colour)` pairs.
+///
+/// Read through the entity rather than through `SkyVisuals`, so the test asks the question
+/// the renderer does — which mesh is this entity drawing.
+fn dome(app: &mut App) -> (Transform, Visibility, Vec<(f32, [f32; 4])>) {
+    let world = app.world_mut();
+    let mut query =
+        world.query_filtered::<(&Mesh3d, &Transform, &Visibility), With<sky::SkyDome>>();
+    let found: Vec<(Handle<Mesh>, Transform, Visibility)> = query
+        .iter(world)
+        .map(|(mesh, transform, visibility)| (mesh.0.clone(), *transform, *visibility))
+        .collect();
+    assert_eq!(found.len(), 1, "exactly one dome carries the sky");
+    let (handle, transform, visibility) = found[0].clone();
+
+    let meshes = world.resource::<Assets<Mesh>>();
+    let mesh = meshes.get(&handle).expect("the dome's mesh exists");
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        panic!("the dome's positions are three floats each");
+    };
+    let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+    else {
+        panic!("the dome's colours are four floats each");
+    };
+    assert_eq!(positions.len(), colours.len());
+    let vertices = positions
+        .iter()
+        .zip(colours)
+        .map(|(position, colour)| (position[1], *colour))
+        .collect();
+    (transform, visibility, vertices)
+}
+
+/// The colour of the dome vertex nearest the rim, and of the one at the zenith.
+fn rim_and_zenith(app: &mut App) -> ([f32; 4], [f32; 4]) {
+    let (_, _, vertices) = dome(app);
+    let rim = vertices
+        .iter()
+        .min_by(|left, right| left.0.abs().total_cmp(&right.0.abs()))
+        .expect("the dome has vertices")
+        .1;
+    let zenith = vertices
+        .iter()
+        .max_by(|left, right| left.0.total_cmp(&right.0))
+        .expect("the dome has vertices")
+        .1;
+    (rim, zenith)
+}
+
+/// How warm a vertex colour is: the acceptance criterion's red-to-blue ratio.
+fn warmth(colour: [f32; 4]) -> f32 {
+    colour[0] / colour[2].max(f32::MIN_POSITIVE)
+}
+
 fn fog(app: &mut App) -> DistanceFog {
     let world = app.world_mut();
     let mut query = world.query_filtered::<&DistanceFog, With<camera::WorldCamera>>();
@@ -4990,4 +5046,186 @@ fn bird_positions(app: &mut App) -> Vec<Vec3> {
         .iter(world)
         .map(|transform| transform.translation)
         .collect()
+}
+
+/// The dome sits on the eye, and it never takes the eye's rotation.
+#[test]
+fn the_sky_dome_is_centred_on_the_eye_and_does_not_turn_with_it() {
+    // Every vertex is `SKY_BODY_DISTANCE` from the dome's own origin — the pure test in
+    // `sky.rs` pins that — so putting the origin on the camera is what makes the sky the
+    // same distance away wherever the player walks.
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 4_800, Instant::now());
+    app.update();
+
+    let eye = Vec3::new(120.0, 70.0, -45.0);
+    put_the_eye_at(&mut app, eye);
+    app.update();
+
+    let (transform, visibility, vertices) = dome(&mut app);
+    assert_eq!(
+        transform.translation, eye,
+        "the dome did not follow the eye"
+    );
+    assert_eq!(
+        transform.rotation,
+        Quat::IDENTITY,
+        "the dome turned with the camera"
+    );
+    assert_eq!(visibility, Visibility::Visible);
+    // 13 rings of 25 segments: the "few hundred vertices" the gradient is carried on.
+    assert_eq!(vertices.len(), 325);
+    for (height, _) in &vertices {
+        assert!(
+            height.abs() <= 400.0 + 1e-2,
+            "a vertex stood {height} above the eye"
+        );
+    }
+}
+
+/// The fog fades terrain into the rim, and the camera still clears to the zenith.
+#[test]
+fn the_fog_fades_into_the_horizon_while_the_camera_clears_to_the_sky() {
+    // At the middle of dusk the two colours are as far apart as they ever get, and the far
+    // edge of the streamed cube is on the rim. Half a ramp before night begins:
+    // `RAMP_SECONDS` is 60 at 20 ticks a second, so 600 ticks before 14 400 is where the
+    // night fraction is exactly a half.
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 13_800, Instant::now());
+    app.update();
+
+    let (sky, _) = sky_and_ambient(&mut app);
+    let fog = fog(&mut app);
+    assert_ne!(
+        fog.color, sky,
+        "at the middle of dusk the rim and the zenith must differ"
+    );
+    let (sky, horizon) = (Srgba::from(sky), Srgba::from(fog.color));
+    assert!(
+        horizon.red / horizon.blue > sky.red / sky.blue,
+        "the fog is not warmer than the sky it hangs under"
+    );
+}
+
+/// The dome's rim is warm at dusk and is the zenith's own colour at midday.
+#[test]
+fn the_dome_rim_is_warmer_at_dusk_than_at_midday() {
+    let mut app = headless_player_with_a_clock();
+    deliver_at_tick_of_day(&mut app, 1, 4_800, Instant::now());
+    app.update();
+    let (midday_rim, midday_zenith) = rim_and_zenith(&mut app);
+    for channel in 0..3 {
+        assert!(
+            (midday_rim[channel] - midday_zenith[channel]).abs() < 1e-5,
+            "midday gave the rim a colour of its own in channel {channel}"
+        );
+    }
+
+    deliver_at_tick_of_day(&mut app, 2, 13_800, Instant::now());
+    app.update();
+    let (dusk_rim, dusk_zenith) = rim_and_zenith(&mut app);
+    assert!(
+        warmth(dusk_rim) > warmth(midday_rim),
+        "the dusk rim is not warmer than the midday one: {dusk_rim:?}"
+    );
+    assert!(
+        warmth(dusk_rim) > warmth(dusk_zenith),
+        "the dusk rim is not warmer than the sky above it"
+    );
+}
+
+/// Under water the sky is the water, and none of it is drawn.
+#[test]
+fn the_dome_is_hidden_while_the_eye_is_under_water() {
+    let mut app = headless_player_with_a_clock();
+    app.insert_resource(a_puddle());
+    deliver_at_tick_of_day(&mut app, 1, 4_800, Instant::now());
+    app.update();
+    assert_eq!(dome(&mut app).1, Visibility::Visible);
+
+    // The voxel at (2, 3, 4) spans [2, 3) x [3, 4) x [4, 5).
+    put_the_eye_at(&mut app, Vec3::new(2.5, 3.5, 4.5));
+    app.update();
+    assert_eq!(
+        dome(&mut app).1,
+        Visibility::Hidden,
+        "the sky was still drawn from under the water"
+    );
+
+    put_the_eye_at(&mut app, Vec3::new(2.5, 9.5, 4.5));
+    app.update();
+    assert_eq!(
+        dome(&mut app).1,
+        Visibility::Visible,
+        "coming back up did not put the sky back"
+    );
+}
+
+/// A server with no clock paints one flat colour — the sky this client always had.
+#[test]
+fn a_clockless_server_paints_the_dome_at_the_fixed_sky() {
+    let mut app = headless_player();
+    app.update();
+
+    let fixed = Srgba::from(sky::Daylight::FIXED.sky);
+    let (_, visibility, vertices) = dome(&mut app);
+    assert_eq!(visibility, Visibility::Visible);
+    for (height, colour) in vertices {
+        assert!(
+            (colour[0] - fixed.red).abs() < 1e-5
+                && (colour[1] - fixed.green).abs() < 1e-5
+                && (colour[2] - fixed.blue).abs() < 1e-5,
+            "the vertex {height} above the eye carried {colour:?}"
+        );
+    }
+}
+
+#[derive(Resource, Default)]
+struct DomeEdits(usize);
+
+fn count_dome_edits(
+    mut edited: MessageReader<AssetEvent<Mesh>>,
+    domes: Query<&Mesh3d, With<sky::SkyDome>>,
+    mut edits: ResMut<DomeEdits>,
+) {
+    let Some(dome) = domes.iter().next() else {
+        return;
+    };
+    for event in edited.read() {
+        if matches!(event, AssetEvent::Modified { id } if *id == dome.0.id()) {
+            edits.0 += 1;
+        }
+    }
+}
+
+/// The dome's vertex colours are a buffer upload, and an idle frame does not spend one.
+#[test]
+fn an_idle_frame_does_not_repaint_the_dome() {
+    // `an_idle_frame_does_not_touch_the_clock` one layer out: `Assets::get_mut` marks the
+    // asset modified whether or not the bytes moved, so a dome repainted unconditionally
+    // would re-extract 325 vertices every frame of a session whose sky is a constant.
+    let mut app = headless_player();
+    app.init_resource::<DomeEdits>()
+        .add_systems(Update, count_dome_edits);
+
+    // Four frames to spawn the dome, paint it once and let the event through.
+    for _ in 0..4 {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<DomeEdits>().0 >= 1,
+        "the dome was never painted, so this test would pass vacuously"
+    );
+    app.world_mut().resource_mut::<DomeEdits>().0 = 0;
+
+    // Snapshots keep arriving; with no clock the gradient cannot move.
+    for tick in 1..=4 {
+        deliver_at_tick_of_day(&mut app, tick, tick * 1_000, Instant::now());
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<DomeEdits>().0,
+        0,
+        "the dome was repainted on a frame its colours had not moved"
+    );
 }

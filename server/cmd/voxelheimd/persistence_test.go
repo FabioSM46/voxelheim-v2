@@ -24,16 +24,22 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-// livingWorldConfig is testConfig with the spawn the world actually derives.
+// livingWorldConfig is testConfig with a spawn the world really composes.
 //
-// The hardcoded y in testConfig is fine for the admission and shutdown tests, which
-// never let anybody stand anywhere. A test about *where a player is* needs the spawn
-// the server would really use: it sits world.SpawnClearance above the surface, so a
-// join settles by falling a couple of blocks rather than by falling eighty and dying
-// on arrival.
+// The hardcoded y in testConfig is fine for the admission and shutdown tests, which never
+// let anybody stand anywhere. A test about *where a player is* needs ground the generator
+// agrees is there: this sits world.SpawnClearance above the origin column's generated top.
+//
+// **Deliberately not [world.SpawnAt] since #519**: that is the capital's gate square now,
+// and a capital's buildings become structures of the simulation's own — so a test that
+// seeds a camp of two and counts them in a snapshot would count the castle's forge too.
 func livingWorldConfig() session.Config {
 	cfg := testConfig()
-	cfg.Spawn = world.SpawnAt(cfg.WorldSeed)
+	cfg.Spawn = [3]float32{
+		0.5,
+		float32(world.GeneratedColumnTop(cfg.WorldSeed, 0, 0) + world.SpawnClearance),
+		0.5,
+	}
 	// One chunk of view: this test reads frames off a connection that drops them when
 	// its queue is full, and the initial view is the only thing here big enough to
 	// fill it.

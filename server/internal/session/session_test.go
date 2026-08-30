@@ -309,6 +309,21 @@ func serveDeps(t *testing.T) (*world.Cache, *game.Sim, *session.Registry) {
 	return chunks, sim, peers
 }
 
+// openCountrySpawn is where a test that needs ordinary ground under a session stands it,
+// and it is deliberately not [world.SpawnAt].
+//
+// **Since #519 the join spawn is the capital's gate square**, a warded plateau with a
+// castle on it: a test that edits the ground there measures a ward refusal, and one that
+// walks north out of it measures a curtain wall. The origin column is open country no
+// settlement reaches, the capital standing at least 120 blocks away.
+func openCountrySpawn(seed int64) [3]float32 {
+	return [3]float32{
+		0.5,
+		float32(world.GeneratedColumnTop(seed, 0, 0) + world.SpawnClearance),
+		0.5,
+	}
+}
+
 func testConfig() session.Config {
 	return session.Config{
 		WorldSeed:    1234,

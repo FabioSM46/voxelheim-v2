@@ -32,23 +32,27 @@ func (w *generatedWorld) at(x, y, z int64) Block {
 	return chunk.At(Local(x), Local(y), Local(z))
 }
 
-// theCapital is the capital of a seed, or a fatal failure. There is always one.
+// theCapital is the capital of a seed. There is always one, so there is nothing to
+// fail: [CapitalAt] returns no `bool` and this helper keeps `t` only because every
+// caller reads as an assertion.
 func theCapital(t *testing.T, seed int64) Settlement {
 	t.Helper()
-	s, ok := SettlementAt(seed, settlementCellOf(spawnColumnX), settlementCellOf(spawnColumnZ))
-	if !ok {
-		t.Fatalf("seed %#x has no capital, which the lattice must never allow", seed)
-	}
-	return s
+	return CapitalAt(seed)
 }
 
-// TestEverySeedHasACapitalWithinAWalkOfSpawn is the one existence guarantee in this
+// TestEverySeedHasACapitalNearTheOriginColumn is the one existence guarantee in this
 // file, and the reason [capitalSiteAt] ranks candidates rather than refusing them.
+//
+// **The distance is measured from the lattice origin, which is no longer where anybody
+// starts.** The walk used to be the point: the band existed so that a new player standing
+// on the origin column had somewhere to walk to. #519 moved the spawn onto the capital's
+// own gate square, so what the band does now is spread the capital off the lattice's
+// zero — the same arithmetic and a different claim.
 //
 // The three seeds the issue names are checked by name; the sweep behind them is what
 // says the guarantee is about the lattice rather than about three lucky worlds. The
 // bound is the *hashed offset's* bound, so it holds for the fallback capital too.
-func TestEverySeedHasACapitalWithinAWalkOfSpawn(t *testing.T) {
+func TestEverySeedHasACapitalNearTheOriginColumn(t *testing.T) {
 	t.Parallel()
 
 	for _, seed := range []int64{1, 2, settlementTestSeed} {
@@ -64,12 +68,12 @@ func assertCapital(t *testing.T, seed int64) {
 
 	s := theCapital(t, seed)
 	if s.Kind != SettlementCapital {
-		t.Fatalf("seed %#x: the spawn cell holds a %v", seed, s.Kind)
+		t.Fatalf("seed %#x: the capital's cell holds a %v", seed, s.Kind)
 	}
 
 	distance := isqrt(squaredDistance(spawnColumnX, spawnColumnZ, s.CentreX, s.CentreZ))
 	if distance < capitalMinSpawnDistance || distance > capitalMaxSpawnDistance {
-		t.Errorf("seed %#x: the capital is %d blocks from spawn, outside [%d, %d]",
+		t.Errorf("seed %#x: the capital is %d blocks from the origin column, outside [%d, %d]",
 			seed, distance, capitalMinSpawnDistance, capitalMaxSpawnDistance)
 	}
 	if s.Plateau < settlementMinPlateau {

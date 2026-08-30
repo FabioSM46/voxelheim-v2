@@ -36,6 +36,17 @@ func (refusingEditor) ApplyGuarded(context.Context, int64, int64, int64, world.B
 // collision reads it through Peek and edits are applied to it directly. That is the wiring
 // main.go produces, and it is the only wiring in which "collision sees edits" means
 // anything.
+// openCountrySpawn is where a test that edits the ground stands its session, and it is
+// deliberately not [world.SpawnAt].
+//
+// **Since #519 the join spawn is the capital's gate square, and a settlement wards every
+// column of its plateau against every player**, so a mining test standing there would be
+// measuring [game.ErrWarded] rather than the path it is about. The origin column is open
+// country no settlement reaches, the capital standing at least 120 blocks away.
+func openCountrySpawn(seed int64) [3]float32 {
+	return [3]float32{0.5, float32(world.GeneratedColumnTop(seed, 0, 0) + world.SpawnClearance), 0.5}
+}
+
 func editWorld(t *testing.T) (*harness, *world.Cache) {
 	t.Helper()
 
@@ -409,6 +420,44 @@ func TestPlacingIntoFlowingWaterReplacesIt(t *testing.T) {
 	}
 }
 
+// A flower is displaced by a placement on exactly the terms water is, and sits beside
+// the water case for that reason: one rule with two id classes in it. Water schedules
+// flow after a placement; ground cover schedules nothing.
+func TestPlacingIntoAFlowerReplacesIt(t *testing.T) {
+	t.Parallel()
+
+	// One flower: allowPlacement reads world.Cover rather than an id, and world's own
+	// palette test pins the class to exactly these three.
+	const flower = world.FlowerRed
+
+	h, chunks := editWorld(t)
+	player, _ := h.join(1, [3]float32{0.5, 200, 0.5})
+	giveBlock(t, h, player, chunks, world.Stone)
+
+	target := [3]int32{3, 200, 0}
+	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), flower, nil); err != nil {
+		t.Fatalf("grow the target flower: %v", err)
+	}
+	if got := blockAt(t, chunks, 3, 200, 0); got != flower {
+		t.Fatalf("the fixture target holds block %d, want block %d", got, flower)
+	}
+
+	before := countOf(player.InventoryState(), game.ItemStone)
+	result, err := player.Edit(context.Background(), placeAt(t, player, target, world.Stone))
+	if err != nil {
+		t.Fatalf("placing Stone into a flower was refused: %v", err)
+	}
+	if got := blockAt(t, chunks, 3, 200, 0); got != world.Stone {
+		t.Errorf("the target voxel holds block %d after the placement, want Stone", got)
+	}
+	if result.Inventory == nil {
+		t.Fatal("the accepted placement reported no inventory change")
+	}
+	if got := countOf(*result.Inventory, game.ItemStone); got != before-1 {
+		t.Errorf("Stone count after placing = %d, want %d: a placement into a flower spends one block like any other", got, before-1)
+	}
+}
+
 // A block placed inside a player would leave them stuck: moveAndCollide refuses to move a
 // player who is already inside a solid rather than teleporting them out of it.
 func TestPlacingInsideAPlayersBoxIsRefused(t *testing.T) {
@@ -726,15 +775,16 @@ func TestCollisionSeesAnEdit(t *testing.T) {
 	t.Parallel()
 
 	h, chunks := editWorld(t)
-	spawn := world.SpawnAt(editSeed)
+	spawn := openCountrySpawn(editSeed)
 	generateAround(t, chunks, spawn, 1)
 
 	player, _ := h.join(1, spawn)
 	resting := h.settle(player)
 
-	// The block holding the player up is the one under their feet.
+	// The block holding the player up is the one under their feet, in the spawn's own
+	// column.
 	feet := int64(resting.Pos[1])
-	under := [3]int32{0, int32(feet) - 1, 0}
+	under := [3]int32{int32(math.Floor(float64(spawn[0]))), int32(feet) - 1, int32(math.Floor(float64(spawn[2])))}
 	if got := blockAt(t, chunks, int64(under[0]), int64(under[1]), int64(under[2])); got == world.Air {
 		t.Fatalf("the player settled at y=%v with air under them", resting.Pos[1])
 	}

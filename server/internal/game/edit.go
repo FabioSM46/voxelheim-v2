@@ -365,8 +365,13 @@ func itemToPlaceLocked(inventory *inventory, slot uint8) (ItemID, world.Block, e
 // holding — no member of the family has an item — so a block put into one replaces
 // it, and the result is one delta like any other edit. Runtime flow observes that
 // changed world separately; placement does not duplicate its scheduling rules.
+//
+// **Ground cover is displaced on exactly the same terms**, and for the same reason: a
+// flower has no item either, so there is nothing to hold and nothing to give back.
+// The two classes are named separately rather than merged because they are different
+// facts about the world; see [world.Cover].
 func allowPlacement(current world.Block) error {
-	if current != world.Air && !world.Fluid(current) {
+	if current != world.Air && !world.Fluid(current) && !world.Cover(current) {
 		return fmt.Errorf("the target voxel already holds block %d", uint16(current))
 	}
 	return nil
