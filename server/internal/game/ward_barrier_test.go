@@ -268,6 +268,21 @@ func TestAWardRemovalPaysNoLootAndNoExperience(t *testing.T) {
 }
 
 // A deer may walk into a village and live, for as long as it likes.
+//
+// The position is pinned rather than hoped for, and the numbers below are why. A passive
+// species has no roaming behaviour at all: stepPassive is its only source of horizontal
+// velocity and its three branches are "no threat" and "threat out of range", both of which
+// zero vel[0] and vel[2], and flight. The one player stands 15.91 blocks from the deer's
+// body against a deer aggroRange of 12.0, so flight is never entered and the drift over
+// these 200 ticks is exactly zero.
+//
+// It survives the counterfactual too, which is the reason this stays an assertion rather
+// than becoming a comment. Fleeing is bounded by passiveFleeReleaseRange (24.0): a deer
+// driven from a player standing beside it covers 23.8 blocks and then idles, and from
+// (12.5, 12.5) the nearest edge of the 3x3 claim on 32-block columns is 44.5 blocks away.
+// So no reachable state of this world walks the deer off warded ground — and if one ever
+// appears, `live` alone would stop distinguishing "the exemption held" from "the deer left
+// before the ward could act on it", which is exactly what this second check exists to say.
 func TestAPassiveCreatureLivesInsideAWard(t *testing.T) {
 	t.Parallel()
 
