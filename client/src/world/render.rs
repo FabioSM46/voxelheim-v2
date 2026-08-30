@@ -587,14 +587,28 @@ fn to_bevy_mesh(mesh: SurfaceMesh) -> Mesh {
     // `RenderAssetUsages::default()` keeps the vertex data in the main world as well
     // as the render world, which is what lets Bevy compute the mesh's bounding box
     // for frustum culling. `RENDER_WORLD` alone frees the data before that happens.
-    Mesh::new(
+    let mut built = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, mesh.positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, mesh.normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, mesh.colors)
-    .with_inserted_indices(Indices::U32(mesh.indices))
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, mesh.colors);
+
+    // The flow attributes, on the surfaces that carry them — which is the water half
+    // and nothing else, so the opaque half's vertices stay four floats lighter. The
+    // two ride in the pipeline's own texture-coordinate slots rather than in a custom
+    // attribute: `MeshPipeline` already forwards UV_0 and UV_1 to the fragment stage
+    // under `VERTEX_UVS_A` / `VERTEX_UVS_B`, so this needs no vertex shader and no
+    // layout specialization of ours. See `WaterFlow` in `mesher.rs` for what is in
+    // them; the shader that reads them is #598's second half.
+    if !mesh.flow.is_empty() {
+        built = built
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, mesh.flow)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, mesh.falling);
+    }
+
+    built.with_inserted_indices(Indices::U32(mesh.indices))
 }
 
 #[cfg(test)]
@@ -987,6 +1001,62 @@ mod tests {
             mesh.indices().map(|indices| indices.len()),
             Some(36),
             "two triangles per quad"
+        );
+    }
+
+    #[test]
+    fn only_the_water_mesh_asset_carries_the_flow_attributes() {
+        // The other half of `mesher.rs`'s all-or-nothing invariant, on the assets the
+        // renderer actually builds: the water child gets UV_0 and UV_1 — the flow
+        // vector and the falling bit — and the opaque mesh gets neither, so an opaque
+        // vertex is four floats lighter than a water one.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: lake_chunk(),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+
+        let world = app.world_mut();
+        let mut parents = world.query_filtered::<&Mesh3d, With<ChunkMeshEntity>>();
+        let opaque = parents
+            .iter(world)
+            .next()
+            .cloned()
+            .expect("the opaque mesh");
+        let mut children = world.query_filtered::<&Mesh3d, With<ChildOf>>();
+        let water = children
+            .iter(world)
+            .next()
+            .cloned()
+            .expect("the water mesh");
+
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let opaque = meshes.get(&opaque.0).expect("the opaque asset");
+        let water = meshes.get(&water.0).expect("the water asset");
+
+        for (name, id) in [
+            ("flow", Mesh::ATTRIBUTE_UV_0.id),
+            ("falling", Mesh::ATTRIBUTE_UV_1.id),
+        ] {
+            assert!(
+                water.attribute(id).is_some(),
+                "the water mesh is missing its {name} attribute"
+            );
+            assert!(
+                opaque.attribute(id).is_none(),
+                "the opaque mesh carries a {name} attribute it never reads"
+            );
+        }
+        assert_eq!(
+            water.attribute(Mesh::ATTRIBUTE_UV_0.id).map(|a| a.len()),
+            Some(water.count_vertices()),
+            "one flow vector per water vertex"
         );
     }
 

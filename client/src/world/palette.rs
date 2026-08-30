@@ -91,10 +91,6 @@ pub fn is_water(block: BlockId) -> bool {
 }
 
 /// The server-authored water height in eighths. Falling is resolved by the mesher.
-#[allow(
-    dead_code,
-    reason = "the flowing-water mesher consumes this in #596 part B"
-)]
 pub fn water_level(block: BlockId) -> u8 {
     match block {
         WATER | WATER_CURRENT_XPOS..=WATER_CURRENT_ZNEG => 8,
@@ -104,7 +100,9 @@ pub fn water_level(block: BlockId) -> u8 {
 }
 
 /// The horizontal current encoded by a water id, as `(x, z)`.
-#[allow(dead_code, reason = "the renderer consumes this in #598")]
+///
+/// The mesher's `flow_at` is the one caller: a current id is already
+/// a direction, so it becomes a flow vector verbatim rather than through a gradient.
 pub fn current_of(block: BlockId) -> (i8, i8) {
     match block {
         WATER_CURRENT_XPOS => (1, 0),
