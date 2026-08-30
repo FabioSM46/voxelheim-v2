@@ -145,10 +145,34 @@ pub(super) struct BirdSpecies {
 }
 
 impl BirdSpecies {
-    /// The colours one bird of this row wears: index zero is the row's own pair and the
-    /// rest come from [`BirdSpecies::plumage`], so a row with no variants has one answer.
+    /// The colours one bird of this row wears.
+    ///
+    /// **Test-only**, and for the same reason [`BirdSpecies::max_speed`] below is: nothing
+    /// draws a bird from a `Color` any more — [`BirdVisuals`] holds one material per plumage
+    /// and a spawning bird clones the handle at [`BirdSpecies::plumage_of`] — so this exists
+    /// to let `the_flock_size_and_the_plumage_stay_inside_their_rows` fail on a pair that is
+    /// not in the row's table.
+    #[cfg(test)]
     pub(super) fn colours(&self, seed: u64) -> (Color, Color) {
-        let choice = mix(seed, SALT_PLUMAGE) as usize % (self.plumage.len() + 1);
+        self.plumage_at(self.plumage_of(seed))
+    }
+
+    /// Which plumage one bird of this row wears, as an index rather than a pair of colours.
+    ///
+    /// An index because the materials are built once and held in that order: a spawning bird
+    /// needs the *slot*, so nothing has to look a `Color` up in a table to draw a bird.
+    fn plumage_of(&self, seed: u64) -> usize {
+        mix(seed, SALT_PLUMAGE) as usize % self.plumages()
+    }
+
+    /// How many plumages this row can wear — its own pair plus its variants.
+    fn plumages(&self) -> usize {
+        self.plumage.len() + 1
+    }
+
+    /// The `(body, wing)` pair at one plumage index: zero is the row's own pair and the rest
+    /// come from [`BirdSpecies::plumage`], so a row with no variants has one answer.
+    fn plumage_at(&self, choice: usize) -> (Color, Color) {
         match choice.checked_sub(1) {
             None => (self.body, self.wing),
             Some(variant) => self.plumage[variant],
@@ -392,11 +416,18 @@ fn flock_size(species: &BirdSpecies, flock: u64) -> usize {
 // The entities
 // ---------------------------------------------------------------------------
 
-/// The two meshes every bird in the session is drawn from.
+/// The two meshes every bird in the session is drawn from, and one material per plumage.
+///
+/// The materials are built once, here, rather than at every spawn. The set is fixed and
+/// tiny — one body and one wing per plumage a row can wear — while a flock is stood up and
+/// retired every time the eye crosses an anchor cell, so `materials.add` at spawn time
+/// minted a fresh `StandardMaterial` for a colour that already had one on every crossing.
 #[derive(Resource, Debug)]
 pub(super) struct BirdVisuals {
     body: Handle<Mesh>,
     wing: Handle<Mesh>,
+    /// Indexed by row, then by [`BirdSpecies::plumage_of`]: `(body, wing)`.
+    plumage: [Vec<(Handle<StandardMaterial>, Handle<StandardMaterial>)>; BIRDS.len()],
 }
 
 /// One bird. The root, and the only thing anything outside this module may see.
@@ -425,13 +456,29 @@ pub(super) struct BirdWing {
     flap_hz: f32,
 }
 
-/// Builds the two meshes. No material here: alpha is per bird, so materials are too.
-pub(super) fn create_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
+/// Builds the two meshes and every material a bird can ever wear.
+pub(super) fn create_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     commands.insert_resource(BirdVisuals {
         body: meshes.add(quad(Vec2::new(-0.15, -0.5), Vec2::new(0.15, 0.5))),
         // Authored from the hinge outwards, so rotating the child about its own origin is
         // the flap and nothing has to offset it.
         wing: meshes.add(quad(Vec2::new(0.0, -0.25), Vec2::new(0.5, 0.25))),
+        plumage: std::array::from_fn(|row| {
+            let species = &BIRDS[row];
+            (0..species.plumages())
+                .map(|choice| {
+                    let (body, wing) = species.plumage_at(choice);
+                    (
+                        materials.add(plumage_material(body)),
+                        materials.add(plumage_material(wing)),
+                    )
+                })
+                .collect()
+        }),
     });
 }
 
@@ -468,8 +515,9 @@ fn quad(low: Vec2, high: Vec2) -> Mesh {
 /// and the fog takes it at distance exactly as they take a mob.
 ///
 /// **`cull_mode: None`** because a flat quad is seen from below as often as from above, the
-/// same reason `mobs.rs` gives for the aggro marker. One material per bird rather than one
-/// per row, because a parrot's plumage is its own.
+/// same reason `mobs.rs` gives for the aggro marker. One material per *plumage* rather than
+/// one per row, because a parrot's plumage is its own — and per plumage rather than per
+/// bird, because two parrots wearing the same pair are one material, not two.
 fn plumage_material(colour: Color) -> StandardMaterial {
     StandardMaterial {
         base_color: colour,
@@ -488,7 +536,6 @@ pub(super) fn keep_the_flock(
     time: Res<Time>,
     visuals: Option<Res<BirdVisuals>>,
     mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     eyes: Query<&Transform, With<WorldCamera>>,
     flock: Query<(Entity, &Bird)>,
 ) {
@@ -503,6 +550,10 @@ pub(super) fn keep_the_flock(
     let anchor = anchor_of(cell);
     let elapsed = time.elapsed_secs();
     let wanted = species_for(&ambience);
+    let flock_seed = cell_seed(cell);
+    // Read before the retirement pass, because how many this cell wants is what decides how
+    // many of the previous cell's birds may stay.
+    let wanted_size = wanted.map_or(0, |index| flock_size(&BIRDS[index], flock_seed));
 
     // Retire everything that is the wrong species for this look, or that the anchor has
     // left behind. A bird outside its box is one the eye has walked away from: its path is
@@ -510,6 +561,13 @@ pub(super) fn keep_the_flock(
     // nobody can see.
     let mut taken = [false; BIRD_COUNT_MAX];
     let mut alive = 0usize;
+    // A bird of the right row still inside the box whose anchor is a *previous* cell's.
+    // It holds no slot in `taken` — its `index` numbers another anchor's flock — so it is
+    // counted against `wanted_size` below instead of being invisible to it. It used to be
+    // invisible: a one-cell walk left the old flock in the air, the spawn loop read every
+    // slot as free, and a second flock went up beside the first.
+    let mut strays = [None; BIRD_COUNT_MAX];
+    let mut stray_count = 0usize;
     for (entity, bird) in &flock {
         let position = place(&BIRDS[bird.species], bird.seed, elapsed, bird.anchor);
         let outside = (position - anchor).abs().max_element() > BIRD_RANGE;
@@ -517,9 +575,26 @@ pub(super) fn keep_the_flock(
             commands.entity(entity).despawn();
             continue;
         }
-        alive += 1;
         if bird.anchor == anchor && bird.index < BIRD_COUNT_MAX {
+            // This cell's own flock. `index < wanted_size` holds by construction: the
+            // anchor determines the cell, and the cell determines `wanted_size`.
             taken[bird.index] = true;
+            alive += 1;
+        } else if stray_count < BIRD_COUNT_MAX {
+            strays[stray_count] = Some(entity);
+            stray_count += 1;
+        } else {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // A stray flies on only while this cell's flock has room for it, and is retired the
+    // moment it does not. The visible population is one row's, never two anchors' summed.
+    for entity in strays.into_iter().flatten() {
+        if alive < wanted_size {
+            alive += 1;
+        } else {
+            commands.entity(entity).despawn();
         }
     }
 
@@ -527,13 +602,12 @@ pub(super) fn keep_the_flock(
         return;
     };
     let species = &BIRDS[index];
-    let flock_seed = cell_seed(cell);
-    let wanted_size = flock_size(species, flock_seed);
 
     for (slot, held) in taken.iter().enumerate().take(wanted_size) {
-        // The cap is over the whole sky rather than over one flock, so it still holds on
-        // the frame a crossing has retired one row and is standing the next one up.
-        if alive >= BIRD_COUNT_MAX {
+        // The flock is the cap. `flock_size` is already clamped to BIRD_COUNT_MAX, so the
+        // whole-sky bound holds too — including on the frame a crossing has retired one row
+        // and is standing the next one up.
+        if alive >= wanted_size {
             break;
         }
         if *held {
@@ -541,8 +615,8 @@ pub(super) fn keep_the_flock(
         }
         alive += 1;
         let seed = bird_seed(flock_seed, slot);
-        let (body, wing) = species.colours(seed);
-        let wing_material = materials.add(plumage_material(wing));
+        let (body_material, wing_material) =
+            visuals.plumage[index][species.plumage_of(seed)].clone();
         let bird = commands
             .spawn((
                 Bird {
@@ -552,7 +626,7 @@ pub(super) fn keep_the_flock(
                     anchor,
                 },
                 Mesh3d(visuals.body.clone()),
-                MeshMaterial3d(materials.add(plumage_material(body))),
+                MeshMaterial3d(body_material),
                 Transform::from_translation(place(species, seed, elapsed, anchor))
                     .with_scale(Vec3::splat(species.size)),
                 Visibility::Visible,

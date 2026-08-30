@@ -5039,6 +5039,75 @@ fn walking_a_long_way_re_seeds_the_flock_around_the_new_anchor() {
     }
 }
 
+#[test]
+fn a_one_cell_walk_leaves_one_flock_in_the_sky_and_not_two() {
+    // A bird the previous anchor stood up is kept while it is still inside the new box —
+    // that continuity is the point of the range test — but it holds no slot in the new
+    // flock's table, because its `index` belongs to another anchor's flock. Until those
+    // birds were counted against the new flock's size, the spawn loop read every slot as
+    // free and stood a second flock up beside the first: four eagles in a sky whose row
+    // allows two, and a parrot wood could reach `BIRD_COUNT_MAX` against a row max of five.
+    //
+    // One cell is 32 blocks and the box is 64, so a single step is the case that keeps the
+    // most strays — which is what makes it the case that overcounted worst.
+    let mut app = birdwatching(GroundLook::Snow, false);
+    watch(&mut app, 3);
+    let row = &birds::BIRDS[2];
+    assert!(
+        row.flock.contains(&(flock(&mut app).len() as u8)),
+        "the sky started outside its own row"
+    );
+
+    let mut eye = Vec3::ZERO;
+    for step in 1..=8 {
+        eye.x += birds::BIRD_ANCHOR_CELL;
+        put_the_eye_at(&mut app, eye);
+        app.update();
+
+        let sky = flock(&mut app);
+        assert!(
+            row.flock.contains(&(sky.len() as u8)),
+            "step {step} left {} eagles in a sky whose row allows {:?}",
+            sky.len(),
+            row.flock
+        );
+        assert!(
+            sky.iter().all(|index| *index == 2),
+            "step {step} mixed rows: {sky:?}"
+        );
+    }
+}
+
+/// The material table is the assertion because the material table is what used to grow.
+#[test]
+fn crossing_cell_after_cell_mints_no_new_bird_materials() {
+    // Every plumage a bird can wear is built once, in `create_visuals`. A flock is stood up
+    // and retired on every anchor crossing, so a `materials.add` at spawn time added two
+    // fresh handles per bird for a colour that already had one, for the whole session.
+    // The parrot is the row worth crossing with: it is the only one with variant plumages,
+    // so it is the row a per-bird `add` would have grown fastest.
+    let mut app = birdwatching(GroundLook::Grass, true);
+    watch(&mut app, 3);
+    assert!(!flock(&mut app).is_empty(), "the wood got no parrots");
+    let settled = app.world().resource::<Assets<StandardMaterial>>().len();
+
+    let mut eye = Vec3::ZERO;
+    for step in 1..=12 {
+        eye.x += birds::BIRD_ANCHOR_CELL;
+        put_the_eye_at(&mut app, eye);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            settled,
+            "crossing {step} cells minted a material a plumage already had"
+        );
+    }
+    assert!(
+        !flock(&mut app).is_empty(),
+        "the parrots stopped flying, so this test would pass vacuously"
+    );
+}
+
 fn bird_positions(app: &mut App) -> Vec<Vec3> {
     let world = app.world_mut();
     let mut query = world.query_filtered::<&Transform, With<birds::Bird>>();
