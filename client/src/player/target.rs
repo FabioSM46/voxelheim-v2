@@ -555,8 +555,13 @@ fn aim_at_a_block(
     let aimed = match (gate.may_aim(), session, store, cameras.iter().next()) {
         (true, Some(session), Some(store), Some(eye)) => {
             let size = usize::from(session.0.chunk_size);
+            // `targetable_at` and not `solid_at`, and this is the only ray that asks it.
+            // The crosshair has to find a flower, which stops no body — see #550 for the
+            // server side of the same distinction, and `ChunkStore::targetable_at` for
+            // why the other three callers of `solid_at` keep reading solidity. Water is
+            // still looked through: it is not cover.
             raycast(eye.translation, *eye.forward(), MAX_REACH, |voxel| {
-                store.solid_at(
+                store.targetable_at(
                     BlockCoord {
                         x: voxel.x,
                         y: voxel.y,
@@ -2200,6 +2205,67 @@ mod tests {
             hit.face,
             IVec3::new(-1, 0, 0),
             "and it was entered through the face the water is on"
+        );
+    }
+
+    #[test]
+    fn the_ray_stops_on_a_flower_although_nothing_else_does() {
+        // The aim's half of #551. A flower is held, is not air, stops no body — and is
+        // still what the crosshair finds, because this ray alone asks `targetable_at`.
+        // The stone behind it proves the ray really stopped rather than missing.
+        let flower = IVec3::new(2, 81, 0);
+        let behind = IVec3::new(3, 81, 0);
+        let mut app = aiming_app(store_of(&[
+            (flower, palette::FLOWER_BLUE),
+            (behind, palette::STONE),
+        ]));
+        app.update();
+
+        let hit = target(&app).0.expect("something is aimed at");
+        assert_eq!(hit.block, flower, "the flower is the target, not the stone");
+        assert_eq!(hit.face, IVec3::new(-1, 0, 0));
+
+        // And the predicate the rest of the client reads is untouched: the voxel the
+        // crosshair just found is one a body walks through and one nothing hides behind,
+        // which is what `aim_at_a_healing_target`'s occlusion probe asks.
+        let store = app.world().resource::<ChunkStore>();
+        let at = |voxel: IVec3| BlockCoord {
+            x: voxel.x,
+            y: voxel.y,
+            z: voxel.z,
+        };
+        assert!(!store.solid_at(at(flower), usize::from(SIZE)));
+        assert!(store.targetable_at(at(flower), usize::from(SIZE)));
+    }
+
+    #[test]
+    fn mining_a_flower_asks_for_the_flower_voxel_and_changes_nothing_locally() {
+        // The point of aiming at one. The request names the flower; the server decides
+        // whether it breaks, and this client's copy of the voxel does not move until a
+        // `BlockUpdate` says so.
+        let flower = IVec3::new(2, 81, 0);
+        let (mut app, sent) = clicking_app(store_of(&[(flower, palette::FLOWER_YELLOW)]));
+        tick_each_update(&mut app);
+        app.update();
+        let _ = mines(&sent);
+
+        click(&mut app, BREAK_BUTTON);
+        app.update();
+
+        let (pos, active, _tick) = one_mine(&sent);
+        assert_eq!(pos, [flower.x, flower.y, flower.z]);
+        assert!(active);
+        assert_eq!(
+            app.world().resource::<ChunkStore>().block_at(
+                BlockCoord {
+                    x: flower.x,
+                    y: flower.y,
+                    z: flower.z,
+                },
+                usize::from(SIZE)
+            ),
+            palette::FLOWER_YELLOW,
+            "a click is a request; only a BlockUpdate writes a voxel"
         );
     }
 

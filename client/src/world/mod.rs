@@ -12,7 +12,7 @@
 //! | `mod.rs` | the chunk store, the decode backlog, the RLE expansion, the block edits, applying what the net thread said, and asking for a chunk the backlog had to drop |
 //! | `mesher.rs` | greedy meshing — a pure function, no Bevy types, no world access |
 //! | `render.rs` | the meshing tasks, the mesh assets and one entity per chunk |
-//! | `palette.rs` | block id to colour, and which ids are solid |
+//! | `palette.rs` | block id to colour, and which ids are solid, opaque or cover |
 //! | `water_material.rs` | what water looks like: the extended material and its embedded shader |
 //!
 //! The split mirrors the server's `internal/world`: `chunk.go` + `rle.go` are this
@@ -562,6 +562,27 @@ impl ChunkStore {
     /// before water existed.
     pub fn solid_at(&self, pos: BlockCoord, size: usize) -> bool {
         palette::is_solid(self.block_at(pos, size))
+    }
+
+    /// Whether the voxel at this world block coordinate is something the crosshair can
+    /// find.
+    ///
+    /// **The aiming ray's question, and only the aiming ray's.** Solidity answers what
+    /// stops a body, and since #446 the ray has read it so a lake is looked *through*.
+    /// Cover (#550) needs the opposite of that: a flower stops nothing and is still a
+    /// thing a player breaks, so the ray needs a predicate that is true for it while
+    /// collision, the camera boom and the healing-target occlusion probe keep reading
+    /// [`Self::solid_at`] and keep walking through it.
+    ///
+    /// Making `is_solid` true for cover instead would have been one edit and four wrong
+    /// behaviours: a body stopped by a flower, a boom pushed in by one, a player hidden
+    /// behind one, and a mask that culls the grass face under one.
+    ///
+    /// Presentation only. Naming a voxel is not breaking it — a click still sends a
+    /// request and the server still decides.
+    pub fn targetable_at(&self, pos: BlockCoord, size: usize) -> bool {
+        let block = self.block_at(pos, size);
+        palette::is_solid(block) || palette::is_cover(block)
     }
 
     /// How many chunks the session holds. Shown in the debug overlay.
@@ -1996,6 +2017,33 @@ mod tests {
     }
 
     #[test]
+    fn breaking_a_flower_on_a_border_marks_nobody_across_it() {
+        // #551 adds no remesh rule, and this is why it needs none: a flower's whole
+        // geometry is inside its own voxel, so a neighbour's sweep can no more see one
+        // than it can see the air that replaces it. The shared border key is
+        // `(is_opaque, water_level)`, and cover and air agree on both.
+        for pos in [at(0, 5, 5), at(31, 5, 5), at(5, 5, 31), at(0, 0, 0)] {
+            let mut store = store_with_stone_at(coord(0, 0, 0));
+            store.apply_block(pos, palette::FLOWER_RED, SIZE);
+            let _ = store.take_changes();
+
+            assert_eq!(
+                store.apply_block(pos, palette::AIR, SIZE),
+                BlockApplied::Rewritten {
+                    coord: coord(0, 0, 0),
+                    remeshed: 1
+                },
+                "{pos:?}"
+            );
+            assert_eq!(
+                store.take_changes(),
+                vec![ChunkChange::Loaded(coord(0, 0, 0))],
+                "{pos:?} pulled a neighbour in with it"
+            );
+        }
+    }
+
+    #[test]
     fn an_edit_that_leaves_a_border_voxel_solid_marks_nobody() {
         // The other control, and the one the review on legacy PR 66 found missing. A neighbour's
         // mesh depends on which of this chunk's boundary voxels are *solid* and on
@@ -2587,6 +2635,36 @@ mod tests {
             store.block_at(at(0, 0, 0), 0),
             palette::AIR,
             "and an impossible chunk edge is not a panic"
+        );
+    }
+
+    #[test]
+    fn a_flower_is_targetable_without_being_solid_and_water_is_neither() {
+        // The one predicate #551 adds, and the three answers that separate it from the
+        // two it sits beside. A flower is aimed at and walked through; water is walked
+        // through and looked through; stone is both.
+        let mut store = store_with_stone_at(coord(0, 0, 0));
+        store.apply_block(at(5, 5, 5), palette::FLOWER_RED, SIZE);
+        store.apply_block(at(5, 6, 5), palette::WATER, SIZE);
+        store.apply_block(at(5, 7, 5), palette::AIR, SIZE);
+
+        assert!(!store.solid_at(at(5, 5, 5), SIZE), "a flower stops no body");
+        assert!(
+            store.targetable_at(at(5, 5, 5), SIZE),
+            "and is still a thing the crosshair finds"
+        );
+        assert!(
+            !store.targetable_at(at(5, 6, 5), SIZE),
+            "water is looked through, which is what #446 decided"
+        );
+        assert!(!store.targetable_at(at(5, 7, 5), SIZE), "air is nothing");
+        assert!(
+            store.solid_at(at(6, 5, 5), SIZE) && store.targetable_at(at(6, 5, 5), SIZE),
+            "stone is both"
+        );
+        assert!(
+            !store.targetable_at(at(-1, 0, 0), SIZE),
+            "a chunk this session does not hold offers nothing to aim at"
         );
     }
 
