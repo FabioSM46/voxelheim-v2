@@ -27,7 +27,7 @@ use super::SelfVitals;
 use super::camera::{ViewMode, WorldCamera};
 use super::combat::SwingSent;
 use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
-use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
+use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
 use super::livery;
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
@@ -531,6 +531,37 @@ const CUT_ROLL_RADIANS: f32 = 0.75;
 /// swing term [`drawn_arm_reach`] still has to answer for — the arm's length follows the
 /// composition's depth, and a cast is now the only arc that changes it.
 const CAST_REACH: f32 = 0.11;
+
+/// The eating arc: how far it tips the held item back over the fist, and how far it carries
+/// the composition toward the eye.
+///
+/// **Toward the camera on both channels, which is what makes this the one arc that reads as
+/// bringing something to the mouth rather than as reaching for something.** A positive pitch
+/// turns everything *above* the origin toward the eye — the item sits on top of the fist, so
+/// it is the item that comes back — and `+Z` is the direction [`PLACE_BUMP_DISTANCE`] already
+/// established for *toward the eye*, the opposite of [`CAST_REACH`]'s and
+/// [`MINE_PUNCH_DISTANCE`]'s reach for the thing being hit. The signs are therefore the
+/// vocabulary this file already has rather than a new convention: nothing else here moves the
+/// held item toward the face, and nothing else here needs to.
+///
+/// **Both numbers are the near plane's, and small for that reason alone.** The composition
+/// sits [`BASE_DEPTH`] from an eye whose near plane is at `0.1`, and a placement bump can
+/// already have spent [`PLACE_BUMP_DISTANCE`] of that headroom in the same frame — a right
+/// click and a consume press inside one 220 ms both play. What is left has to cover the
+/// tallest thing a fist can hold, swung toward the eye, so the pair is bounded by the block
+/// rather than by the food this arc is actually drawn for.
+/// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] sweeps the real
+/// vertices of every arrangement against it, which is why these are the values and not a
+/// paragraph of arithmetic. What that sweep answers, measured: the corner that binds is the
+/// held **block**'s upper near one, and this pair leaves it about a centimetre of camera
+/// space at the tightest frame — a pitch of `0.30` with a rise of `0.020` spends all of it
+/// and fails by 65 micrometres.
+///
+/// **The pitch is spent against the rest pose rather than from zero**, which is the thing to
+/// know before changing it: [`REST_PITCH_RADIANS`] is `-0.18`, so this is what carries the
+/// composition back *through* upright rather than the whole angle it ends at.
+const EAT_PITCH_RADIANS: f32 = 0.22;
+const EAT_RISE: f32 = 0.014;
 
 /// The whole sword, pommel to tip, in the same camera-space units as the block and
 /// material meshes.
@@ -1981,6 +2012,12 @@ struct HandVisuals {
 /// **Three variants since #421, and the two that went were blade arcs.** The shape is now a
 /// function of what is held rather than of a counter — a blade cuts, a bow draws, a sceptre
 /// casts — which is why nothing in [`HandAnimation`] remembers what played last any more.
+///
+/// **Four since #626, and the fourth is not an attack.** [`Self::Eat`] plays on the frame a
+/// `ConsumeRequest` left, so the paragraph above is now a statement about the three arcs a
+/// *swing* can draw rather than about the whole enum. The paragraph before it is unchanged
+/// and is the one that matters: which arc played still reaches nothing, and the request that
+/// started it was already sent before the shape was chosen.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SwingShape {
     /// Down and across: the one arc a blade draws, from the upper right to the lower left.
@@ -1990,6 +2027,16 @@ enum SwingShape {
     Draw,
     /// A short forward presentation thrust, never a blade arc.
     Cast,
+    /// The held item tipped back toward the eye and returned to rest: eating.
+    ///
+    /// **The one shape here that is not an attack**, which is worth saying because the field
+    /// that carries it is called `attack` and the message that starts it is not `SwingSent`.
+    /// What this enum has always been is *which arc the hand is playing*, and every argument
+    /// in the type's own doc holds unchanged: the shape reaches no request and no predicate,
+    /// `super::inventory` sends the same `ConsumeRequest` whether this plays or not, and the
+    /// server re-reads its own `restoresHunger` column either way. A picture of eating no
+    /// more feeds the player than a picture of a cut damages a draugr.
+    Eat,
 }
 
 impl SwingShape {
@@ -1997,17 +2044,17 @@ impl SwingShape {
     ///
     /// The same hand-written list, for the same reason, as `items::ItemShape::ALL`: no
     /// stable Rust enumerates variants. And as there, the list is not what makes a shape
-    /// *drawn* — [`swing_pose`] and [`Self::after`] both match with no wildcard arm, so a
-    /// fourth variant fails to build until it has been given an arc and a place in the
-    /// rotation. What the list buys is the other half: a sweep that catches an arm filled
-    /// in with a copy of its neighbour.
+    /// *drawn* — [`swing_pose`] matches with no wildcard arm, so a fifth variant fails to
+    /// build until it has been given an arc of its own. What the list buys is the other
+    /// half: a sweep that catches an arm filled in with a copy of its neighbour.
     ///
-    /// `#[cfg(test)]` because nothing in the running client enumerates the shapes — the
-    /// rotation walks them one at a time and never needs the set. That is where
+    /// `#[cfg(test)]` because nothing in the running client enumerates the shapes — each is
+    /// chosen one at a time, from what is held or from which request left, and never from
+    /// the set. That is where
     /// `ItemShape::ALL` also sat until a runtime reader turned up for it, and the day one
     /// turns up here the attribute comes off rather than the list changing.
     #[cfg(test)]
-    const ALL: [Self; 3] = [Self::Cut, Self::Draw, Self::Cast];
+    const ALL: [Self; 4] = [Self::Cut, Self::Draw, Self::Cast, Self::Eat];
 }
 
 /// One attack swing in flight: which shape is playing, and how far into it the hand is.
@@ -2029,7 +2076,7 @@ struct Swing {
 /// Every term is zero at both ends of the arc, so a swing that finishes leaves the hand
 /// exactly where it found it whichever shape played — which is the property
 /// `a_sent_swing_moves_the_view_model_and_then_settles` has held since there was one arc,
-/// and now holds three times over.
+/// and now holds four times over.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct SwingPose {
     /// About the camera's X axis. **Negative carries the blade over toward what is being
@@ -2062,7 +2109,7 @@ struct SwingPose {
 /// also what a chop with a wobble has.
 ///
 /// The match is exhaustive with no wildcard arm, which is the compiler's half of the
-/// guarantee: a fourth shape cannot be added without being given an arc of its own.
+/// guarantee: a fifth shape cannot be added without being given an arc of its own.
 fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
     let fraction = (elapsed.as_secs_f32() / ATTACK_SWING_TIME.as_secs_f32()).clamp(0.0, 1.0);
     let arc = (fraction * PI).sin();
@@ -2086,6 +2133,13 @@ fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
             reach: -arc * CAST_REACH,
             ..default()
         },
+        // Back and up toward the mouth rather than out toward anything. Two terms and no
+        // roll: turning the edge over is what a stroke does, and nothing is being struck.
+        SwingShape::Eat => SwingPose {
+            pitch: arc * EAT_PITCH_RADIANS,
+            reach: arc * EAT_RISE,
+            ..default()
+        },
     }
 }
 
@@ -2100,9 +2154,15 @@ struct HandAnimation {
     mine_elapsed: Duration,
     bump_elapsed: Option<Duration>,
 
-    /// The attack swing playing right now, if one is. Started by a `SwingSent` message and
-    /// by nothing else, so it plays exactly when a request left this client — whether that
-    /// request later hits, misses or is refused.
+    /// The arc playing right now, if one is. Started by a `SwingSent` or a [`ConsumeSent`]
+    /// message and by nothing else, so it plays exactly when a request left this client —
+    /// whether that request later hits, misses, feeds anybody or is refused.
+    ///
+    /// **Still one field for two senders, and deliberately.** The arcs are mutually
+    /// exclusive on screen — one composition, one transform — so two fields would be two
+    /// things that could disagree about what the hand is doing, which is the very thing
+    /// pairing the shape with its elapsed time in one `Option` exists to prevent. The name
+    /// is the one cost, and it is a smaller one than a second animation slot.
     attack: Option<Swing>,
 }
 
@@ -2418,6 +2478,7 @@ struct HandIntent<'w, 's> {
     target: Res<'w, BlockTarget>,
     feedback: Res<'w, MiningFeedback>,
     swings: MessageReader<'w, 's, SwingSent>,
+    consumes: MessageReader<'w, 's, ConsumeSent>,
 }
 
 impl HandIntent<'_, '_> {
@@ -2480,6 +2541,22 @@ impl HandIntent<'_, '_> {
     fn swing_sent(&mut self) -> Option<u16> {
         self.swings.read().next().map(|swing| swing.item_id)
     }
+
+    /// Whether a consume request left this client this frame.
+    ///
+    /// **The same reading as [`Self::swing_sent`], on the other request that draws an arc**:
+    /// a message that was written because a frame was *queued*, not because a key was
+    /// pressed. `super::inventory` writes it on `Sent::Queued` alone, so a press over an
+    /// empty slot, over something this client does not route as food, into a full outbound
+    /// queue or while a screen owns the input reaches here as nothing at all — which is the
+    /// whole of "the animation does not play for a press that produced no request", and it
+    /// is answered by there being no message rather than by a second copy of the predicate.
+    ///
+    /// It returns a `bool` where the swing returns an id, because there is one eating arc
+    /// and nothing to route on. See [`ConsumeSent`].
+    fn consume_sent(&mut self) -> bool {
+        self.consumes.read().next().is_some()
+    }
 }
 
 fn animate_view_model(
@@ -2513,6 +2590,16 @@ fn animate_view_model(
     // still moves the rotation on. Restarting a swing therefore takes the next shape too,
     // which is what makes two clicks inside one animation read as two swings rather than
     // as one arc that stuttered.
+    // **Read before the swing, so the swing wins a frame that carries both.** Nothing pairs
+    // them today — the left button and the consume key are two presses — but they share one
+    // `may_act` gate and one frame, so a player can make both. A blow being answered is the
+    // more urgent of the two things to show, and one composition can only draw one arc.
+    if intent.consume_sent() {
+        next_animation.attack = Some(Swing {
+            shape: SwingShape::Eat,
+            elapsed: Duration::ZERO,
+        });
+    }
     if let Some(item_id) = intent.swing_sent() {
         let shape = if item_id == ITEM_BOW {
             SwingShape::Draw
@@ -3936,6 +4023,17 @@ mod tests {
                 Some(ItemShape::Sceptre) => vec![Some(SwingShape::Cast)],
                 _ => Vec::new(),
             };
+            // **The eating arc is swept over every arrangement, not over the food it is
+            // drawn for.** The three above are paired with what draws them because
+            // `super::combat` routes the left button on the item id; this one is started by
+            // a `ConsumeSent`, and which item is in the fist while it plays is
+            // `super::inventory`'s routing table rather than anything this file can see.
+            // Both foods are drawn as [`ItemShape::Material`] today, and a bound that held
+            // only for `Material` would be a bound this file could not defend the day a
+            // third one is a block. It carries the composition *toward* the eye, so it is
+            // the near plane that has to grant it — which makes the tallest arrangement a
+            // fist can hold the one to measure it against, and this is where that happens.
+            arcs.push(Some(SwingShape::Eat));
             arcs.push(None);
             for shape in arcs {
                 for step in 0..=32u8 {
@@ -5080,6 +5178,21 @@ mod tests {
                     false,
                 ),
                 53.0,
+            ),
+            // The eating arc carries the composition toward the eye, which is the direction
+            // that makes the limb *larger* on screen — the placement bump's direction, and
+            // the one [`drawn_arm_reach`]'s floor refuses to shrink for. So this row is
+            // measured against the bump's floor rather than against the two arcs that reach
+            // away, and it is drawn with the material stub because that is what food is.
+            (
+                "through an eating arc",
+                widest(
+                    Some(SwingShape::Eat),
+                    Some(ItemShape::Material),
+                    true,
+                    false,
+                ),
+                60.0,
             ),
         ] {
             assert!(
@@ -7153,11 +7266,13 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
             // What sibling plugins provide in the game: the aimed voxel from
-            // `BlockTargetPlugin`, the swing message from `CombatPlugin`, the mouse from
-            // Bevy's input plugin, and the pack from `InventoryPlugin`.
+            // `BlockTargetPlugin`, the swing message from `CombatPlugin`, the consume
+            // message and the pack from `InventoryPlugin`, and the mouse from Bevy's input
+            // plugin.
             .init_resource::<BlockTarget>()
             .init_resource::<ButtonInput<MouseButton>>()
             .add_message::<SwingSent>()
+            .add_message::<ConsumeSent>()
             .init_resource::<Inventory>()
             .init_resource::<InputMode>()
             .insert_resource(SelectedSlot(0))
@@ -7393,6 +7508,91 @@ mod tests {
             "the cast did not thrust toward the target"
         );
         assert_eq!(pose.yaw, 0.0, "the cast became a blade arc");
+    }
+
+    /// **A consume that left plays the eating arc, and only a consume that left does.**
+    ///
+    /// The two halves of the acceptance criterion in one test, because they are one property:
+    /// the hand plays on `ConsumeSent` and on nothing else, so a press that produced no
+    /// request — an empty slot, a non-food, a screen that owns the input, a dropped frame —
+    /// arrives here as no message and draws nothing. `super::inventory` is where that
+    /// decision lives and where it is pinned; what this holds is that this module adds no
+    /// second opinion of its own on either side.
+    #[test]
+    fn a_consume_that_left_plays_the_eating_arc_and_a_frame_with_none_plays_nothing() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+
+        // A frame with no message at all. The hand is holding food and is not eating.
+        app.update();
+        assert!(
+            app.world().resource::<HandAnimation>().attack.is_none(),
+            "the hand ate without a request having left"
+        );
+
+        app.world_mut().write_message(ConsumeSent);
+        app.update();
+
+        let animation = *app.world().resource::<HandAnimation>();
+        assert_eq!(
+            animation.attack.expect("the consume played nothing").shape,
+            SwingShape::Eat
+        );
+
+        // Toward the eye on both channels, which is what tells this arc apart from every
+        // other one here: the cut and the cast carry the model away from the camera.
+        let pose = swing_pose(SwingShape::Eat, ATTACK_SWING_TIME / 2);
+        assert!(
+            pose.reach > 0.0,
+            "the eating arc reached away from the mouth"
+        );
+        assert!(
+            pose.pitch > 0.0,
+            "the eating arc tipped the item over toward what a swing hits"
+        );
+        assert_eq!(
+            (pose.yaw, pose.roll),
+            (0.0, 0.0),
+            "the eating arc became a blade stroke"
+        );
+
+        // And it is a one-shot like every other arc: it ends, and the hand is at rest.
+        let_the_swing_finish(&mut app);
+        assert!(
+            app.world().resource::<HandAnimation>().attack.is_none(),
+            "the eating arc never finished"
+        );
+    }
+
+    /// **A swing and a consume in one frame draw the swing.**
+    ///
+    /// One composition draws one arc, so the two senders have to be ordered, and the order
+    /// is written down in `animate_view_model` rather than left to whichever `MessageReader`
+    /// happens to be read first. Nothing pairs the two presses today — one is the left
+    /// button and one a bound key — but they share a gate and a frame, so a player can make
+    /// both, and a blow being answered is the more urgent of the two to show.
+    #[test]
+    fn a_swing_and_a_consume_in_one_frame_draw_the_swing() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.world_mut().write_message(ConsumeSent);
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .resource::<HandAnimation>()
+                .attack
+                .expect("neither message played")
+                .shape,
+            SwingShape::Cut
+        );
     }
 
     /// A second press inside a running arc restarts the swing.
